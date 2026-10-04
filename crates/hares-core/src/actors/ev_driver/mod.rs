@@ -355,9 +355,10 @@ pub struct EvDriverActor {
 use efficiency::temp_efficiency_multiplier;
 
 impl EvDriverActor {
-    /// Takes over the decision state (its RNG stream and position
-    /// included) and telemetry of the driver this one is rebuilt to
-    /// replace with new prices.
+    /// Takes over the decision state (its RNG stream and position, the
+    /// strategy's gate latches and the sticky estimate failure included)
+    /// and telemetry of the driver this one is rebuilt to replace with new
+    /// prices.
     pub(crate) fn take_over(&mut self, predecessor: &dyn Actor) -> Result<(), HaresError> {
         self.load_state(&predecessor.save_state()?)?;
         if let Some(telemetry) = predecessor.telemetry() {
@@ -520,14 +521,9 @@ impl EvDriverActor {
         before_out: usize,
         out: &[DispatchRequest],
     ) {
-        // Every decision ends here, so this is where the step's signals are
-        // held to the driver's declared capabilities.
+        // Every decision ends here; see `check_declared_signals`.
         debug_assert!(
-            out[before_out..]
-                .iter()
-                .all(
-                    |request| crate::actor::undeclared_capability(self, &request.signal).is_none()
-                ),
+            crate::actor::check_declared_signals(self, &out[before_out..]).is_ok(),
             "the EV driver sent a signal its declared control capabilities omit: {:?}",
             &out[before_out..]
         );
@@ -1212,6 +1208,10 @@ struct EvDriverSnapshot {
     needs_away_charge: bool,
     /// Cumulative cancelled-trip count; see `EvDriverActor::drive_cancelled`.
     drive_cancelled: u32,
+    /// The charging strategy's gate hysteresis latches, in stack order.
+    gate_latches: Vec<bool>,
+    /// The sticky health failure; see `EvDriverActor::estimate_error`.
+    estimate_error: Option<String>,
 }
 
 impl Actor for EvDriverActor {
@@ -1590,6 +1590,8 @@ impl Actor for EvDriverActor {
             rng_word_pos: self.rng.get_word_pos(),
             needs_away_charge: self.needs_away_charge,
             drive_cancelled: self.drive_cancelled,
+            gate_latches: self.composer.gate_latches(),
+            estimate_error: self.estimate_error.clone(),
         };
         postcard::to_allocvec(&snap)
             .map_err(|e| HaresError::Io(format!("EvDriverActor save_state: {e}")))
@@ -1611,6 +1613,8 @@ impl Actor for EvDriverActor {
         self.rng = rng;
         self.needs_away_charge = snap.needs_away_charge;
         self.drive_cancelled = snap.drive_cancelled;
+        self.composer.restore_gate_latches(&snap.gate_latches)?;
+        self.estimate_error = snap.estimate_error;
         Ok(())
     }
 
@@ -1620,8 +1624,11 @@ impl Actor for EvDriverActor {
     /// Blobs written by v1 builds (payload-less phases) cannot decode into
     /// the new shape — the version gate rejects them here, at the checkpoint
     /// boundary, instead of postcard failing inside `load_state`.
+    ///
+    /// v3: the snapshot carries the charging strategy's gate hysteresis
+    /// latches and the sticky estimate failure.
     fn checkpoint_version(&self) -> u32 {
-        2
+        3
     }
 
     fn rng_pair(&self) -> Option<([u8; 32], u64)> {
@@ -3377,6 +3384,65 @@ mod tests {
             actor_b.todays_event.map(|e| e.drive_kwh),
             "daily events should match with same seed"
         );
+    }
+
+    /// One decision at 01:00 (home, before the day's departure) with the
+    /// equipment reporting `soc`; returns the signals as text for
+    /// comparison.
+    fn gate_decision(actor: &mut EvDriverActor, soc: f64) -> Vec<String> {
+        let mut env = env_at_minute(60);
+        set_core_soc(actor, &mut env, "EV1", EquipmentId(1), soc);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        out.iter().map(|r| format!("{:?}", r.signal)).collect()
+    }
+
+    /// The SOC gate's hysteresis latch is decision state: a driver rebuilt
+    /// with `take_over`, or restored from the driver's checkpoint state,
+    /// holds the gate closed inside the band exactly as the driver it
+    /// replaces does, and reports the gate's real state.
+    #[test]
+    fn take_over_and_restore_carry_the_soc_gate_latch() {
+        let strategy = ChargingStrategy::QuickThenWait { partial_soc: 0.8 };
+        let mut continuous = make_actor(strategy.clone(), PlugInPolicy::Always, 42);
+        gate_decision(&mut continuous, 0.85);
+        assert!(!continuous.composer.soc_gate_charging_allowed());
+
+        let mut rebuilt = make_actor(strategy.clone(), PlugInPolicy::Always, 42);
+        rebuilt.take_over(&continuous).expect("take over");
+        let mut restored = make_actor(strategy, PlugInPolicy::Always, 42);
+        restored
+            .load_state(&continuous.save_state().expect("save"))
+            .expect("restore");
+        assert!(!rebuilt.composer.soc_gate_charging_allowed());
+        assert!(!restored.composer.soc_gate_charging_allowed());
+
+        let held = gate_decision(&mut continuous, 0.77);
+        assert!(
+            held.iter().any(|s| s.contains("PowerSetpoint")),
+            "inside the band the closed gate holds: {held:?}"
+        );
+        assert_eq!(gate_decision(&mut rebuilt, 0.77), held);
+        assert_eq!(gate_decision(&mut restored, 0.77), held);
+        assert_eq!(
+            rebuilt.telemetry.get("soc_gate_charging_allowed"),
+            Some(0.0)
+        );
+    }
+
+    /// A driver whose estimate failed stays unhealthy when it is rebuilt:
+    /// the health latch is decision state too.
+    #[test]
+    fn take_over_keeps_the_estimate_failure_latch() {
+        let strategy = ChargingStrategy::Immediate { target_soc: 1.0 };
+        let mut failed = make_actor(strategy.clone(), PlugInPolicy::Always, 42);
+        failed.estimate_error = Some("needed-hours estimate failed".to_string());
+        assert!(!failed.healthy());
+
+        let mut rebuilt = make_actor(strategy, PlugInPolicy::Always, 42);
+        rebuilt.take_over(&failed).expect("take over");
+
+        assert!(!rebuilt.healthy());
     }
 
     #[test]

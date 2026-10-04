@@ -1315,15 +1315,10 @@ impl Ev {
 
     /// Degradation-adjusted pack capacity [kWh] — `rated × SOH`, the
     /// temperature-independent rating (the EV's counterpart of the
-    /// Battery's `capacity_kwh_nominal`). Boundaries that consume a rating
-    /// — the driver's belief model (`actor_seed`) and the charging-LUT
-    /// c-rate divisor — use this, never the live usable capacity: the
-    /// usable capacity moves with the pack temperature (the reversible
-    /// derate) and with every degradation update, so seeding it into a
-    /// fixed one-shot value would freeze one step's weather into the
-    /// whole run (a −7 °C init would shrink the driver's believed pack
-    /// by roughly a third and raise every range-anxiety threshold with
-    /// it).
+    /// Battery's `capacity_kwh_nominal`). The charging-LUT c-rate divisor
+    /// uses this, never the live usable capacity, which moves with the
+    /// pack temperature (the reversible derate). The driver's seed
+    /// (`actor_seed`) uses the rated capacity: it is a build parameter.
     fn degradation_adjusted_capacity_kwh(&self) -> f64 {
         self.battery_capacity_kwh_rated * (1.0 - self.degradation.capacity_fade_fraction())
     }
@@ -1963,12 +1958,12 @@ impl Equipment for Ev {
         Some(crate::ActorSeed::Ev {
             strategy: self.charging_strategy.clone(),
             plug_in_policy: self.plug_in_policy.clone(),
-            // The degradation-adjusted rating, never the live usable
-            // capacity: the actor absorbs this once and never reassigns it,
-            // so a temperature-scaled value would freeze the init-time
-            // weather into the run's range-anxiety and needed-hours
-            // arithmetic (see `degradation_adjusted_capacity_kwh`).
-            capacity_kwh: self.degradation_adjusted_capacity_kwh(),
+            // The rated capacity, a build parameter: the seed is compared
+            // to decide whether a replacement keeps its driver, so it holds
+            // configuration, never the pack's live or aged state (a
+            // temperature-scaled value would also freeze one step's weather
+            // into the driver's range-anxiety and needed-hours arithmetic).
+            capacity_kwh: self.battery_capacity_kwh_rated,
             max_charge_kw: self.rated_power_kw,
             fuel_economy_kwh_per_mi: self.fuel_economy_kwh_per_mi,
         })

@@ -662,6 +662,25 @@ mod tests {
         assert_eq!(loaded.prior_electrical_summary, summary);
     }
 
+    /// A checkpoint file returns every float bit for bit: 14.829037328432975
+    /// is a value serde_json parses one unit in the last place off unless
+    /// its exact round-trip parsing is enabled for every crate.
+    #[test]
+    fn checkpoint_file_round_trips_floats_exactly() {
+        let state = 14.829_037_328_432_975_f64;
+        let mut cp = populated_checkpoint();
+        cp.thermal.x = vec![state];
+
+        let path = std::env::temp_dir().join(unique_temp_name(
+            "hares_core_checkpoint_float_round_trip",
+            "json",
+        ));
+        let _guard = TempFile(path.clone());
+        cp.save(&path).unwrap();
+        let loaded = DwellingCheckpoint::load(&path).unwrap();
+        assert_eq!(loaded.thermal.x[0].to_bits(), state.to_bits());
+    }
+
     #[test]
     fn save_returns_err_on_non_writable_path() {
         let cp = DwellingCheckpoint {

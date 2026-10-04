@@ -1458,26 +1458,6 @@ fn apply_to_matching(
     delivered
 }
 
-/// Holds an actor bound to one equipment to its declaration: every signal
-/// it sends must require only capabilities in
-/// [`Actor::required_control_capabilities`], the set a replacement of its
-/// target is checked against. `requests` are the requests the actor just
-/// emitted.
-fn ensure_declared_signals(actor: &dyn Actor, requests: &[DispatchRequest]) -> Result<()> {
-    match requests
-        .iter()
-        .find_map(|request| crate::actor::undeclared_capability(actor, &request.signal))
-    {
-        None => Ok(()),
-        Some(required) => Err(HaresError::Control(format!(
-            "actor '{}' sent a signal requiring {required:?}, which its declared control \
-             capabilities {:?} omit",
-            actor.name(),
-            actor.required_control_capabilities()
-        ))),
-    }
-}
-
 fn compute_equipment_execution_order(equipment: &[&dyn Equipment]) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..equipment.len()).collect();
     indices.sort_by_key(|&idx| stage_rank(equipment[idx].descriptor().stage));
@@ -4630,7 +4610,7 @@ impl Dwelling {
 
                         let emitted_from = self.actor_dispatch_buf.len();
                         self.actors[idx].decide(&self.latest_env, &mut self.actor_dispatch_buf);
-                        ensure_declared_signals(
+                        crate::actor::check_declared_signals(
                             self.actors[idx].as_ref(),
                             &self.actor_dispatch_buf[emitted_from..],
                         )?;
@@ -4932,7 +4912,7 @@ impl Dwelling {
                 for actor in &mut self.actors {
                     let emitted_from = self.actor_dispatch_buf.len();
                     actor.adjust_for_pv(pv_kw, &self.latest_env, &mut self.actor_dispatch_buf);
-                    ensure_declared_signals(
+                    crate::actor::check_declared_signals(
                         actor.as_ref(),
                         &self.actor_dispatch_buf[emitted_from..],
                     )?;
@@ -13044,10 +13024,10 @@ master_seed = 0
             .find(|s| s.name == "EvDriver:EV1")
             .expect("checkpoint must carry the EV driver's state");
         assert_eq!(
-            entry.schema_version, 2,
-            "the EV driver snapshot schema is version 2 (plan-carrying phases)"
+            entry.schema_version, 3,
+            "the EV driver snapshot schema is version 3 (gate latches and estimate failure)"
         );
-        // Tamper: pretend the blob was written by a v1 build.
+        // Tamper: pretend the blob was written by an earlier build.
         entry.schema_version = 1;
 
         let mut dwelling_b = Dwelling::from_toml_config(&toml_path).expect("build dwelling B");
@@ -13061,7 +13041,7 @@ master_seed = 0
             msg.contains("actor schema version mismatch")
                 && msg.contains("EvDriver:EV1")
                 && msg.contains("blob=1")
-                && msg.contains("expected=2"),
+                && msg.contains("expected=3"),
             "error must name the actor and both versions; got: {msg}"
         );
         assert!(
@@ -15107,6 +15087,116 @@ master_seed = 0
             actor_telemetry(&replaced, "EvDriver:EV1"),
             actor_telemetry(&re_added, "EvDriver:EV1")
         );
+    }
+
+    /// An EV replaced mid-run by an identically configured EV keeps its
+    /// driver and the driver's state: the actor seed compared on a
+    /// replacement holds build parameters, not the pack's aged state.
+    #[test]
+    fn an_identical_ev_replaced_mid_run_keeps_its_driver() {
+        let mut dwelling = bestest_dwelling();
+        add_driven_ev(&mut dwelling, "EV1");
+        net_power_kw(&mut dwelling, 30);
+        let stream = driver_stream(&dwelling, "EV1");
+        let telemetry = actor_telemetry(&dwelling, "EvDriver:EV1");
+
+        let identical = driven_ev("EV1", &dwelling.latest_env);
+        if let Err(err) = dwelling.replace_equipment("EV1", identical) {
+            panic!("replace in kind: {err}");
+        }
+
+        assert_eq!(driver_stream(&dwelling, "EV1"), stream);
+        assert_eq!(actor_telemetry(&dwelling, "EvDriver:EV1"), telemetry);
+    }
+
+    /// An actor bound to `Target` that sends a power setpoint while
+    /// declaring no capabilities, from `decide` or from `adjust_for_pv`,
+    /// to `Target` or, when `to_other` is set, to another equipment.
+    struct Undeclared {
+        from_pv: bool,
+        to_other: bool,
+    }
+
+    impl Undeclared {
+        fn send(&self, out: &mut Vec<hares_control::DispatchRequest>) {
+            let signal = ControlSignal::PowerSetpoint {
+                active_power_kw: 0.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            };
+            let target = if self.to_other { "Other" } else { "Target" };
+            out.push(hares_control::DispatchRequest {
+                target: DispatchTarget::ByName(Arc::from(target)),
+                priority: PriorityTier::from(&signal),
+                signal,
+            });
+        }
+    }
+
+    impl crate::Actor for Undeclared {
+        fn name(&self) -> &str {
+            "Undeclared"
+        }
+        fn dispatch_target_name(&self) -> Option<&str> {
+            Some("Target")
+        }
+        fn decide(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            out: &mut Vec<hares_control::DispatchRequest>,
+        ) {
+            if !self.from_pv {
+                self.send(out);
+            }
+        }
+        fn adjust_for_pv(
+            &mut self,
+            _pv_kw: f64,
+            _env: &hares_types::EnvironmentState,
+            out: &mut Vec<hares_control::DispatchRequest>,
+        ) {
+            if self.from_pv {
+                self.send(out);
+            }
+        }
+    }
+
+    fn step_with_undeclared(actor: Undeclared) -> Result<StepResult> {
+        let mut dwelling = bestest_dwelling();
+        for name in ["Target", "Other"] {
+            dwelling
+                .add_equipment(Box::new(TestEquipment::new(
+                    name,
+                    ControlCapabilities::POWER_SETPOINT,
+                )))
+                .expect("add the equipment");
+        }
+        dwelling.add_actor(Box::new(actor)).expect("add the actor");
+        dwelling.step()
+    }
+
+    /// The re-evaluation after PV output holds a bound actor to its
+    /// declaration as its decision does.
+    #[test]
+    fn an_undeclared_signal_from_the_pv_re_evaluation_fails_the_step() {
+        let err = step_with_undeclared(Undeclared {
+            from_pv: true,
+            to_other: false,
+        })
+        .expect_err("an undeclared signal fails the step");
+        assert!(err.to_string().contains("Undeclared"), "got: {err}");
+    }
+
+    /// The declaration covers what an actor sends its bound target; a
+    /// signal it sends another equipment is that equipment's to accept.
+    #[test]
+    fn a_bound_actors_declaration_covers_only_its_target() {
+        step_with_undeclared(Undeclared {
+            from_pv: false,
+            to_other: true,
+        })
+        .expect("a signal to another equipment is not held to the declaration");
     }
 
     /// An actor bound to one equipment that sends a signal its declared

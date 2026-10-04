@@ -85,6 +85,11 @@ pub trait ChargingPreference: Send + Sync {
         None
     }
 
+    /// Sets the gating state [`Self::charging_allowed`] reports, for a
+    /// driver restoring or taking over another's decision state. Called
+    /// only on preferences that report `Some`.
+    fn restore_charging_allowed(&mut self, _allowed: bool) {}
+
     /// Estimated hours needed to reach target SOC from current state.
     /// Returns `Ok(f64::INFINITY)` for preferences that don't produce a
     /// time-to-charge estimate. The composer aggregates by taking the

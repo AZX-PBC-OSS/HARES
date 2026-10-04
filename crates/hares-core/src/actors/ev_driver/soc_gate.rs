@@ -75,6 +75,10 @@ impl ChargingPreference for SocGate {
         Some(self.charging_allowed)
     }
 
+    fn restore_charging_allowed(&mut self, allowed: bool) {
+        self.charging_allowed = allowed;
+    }
+
     /// Time to charge from the current SOC to the gate's target, reported
     /// regardless of the hysteresis state: the estimate is a property of the
     /// battery gap (what the channel name promises), not the strategy's

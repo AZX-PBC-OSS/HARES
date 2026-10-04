@@ -161,15 +161,17 @@ impl BatteryManagementActor {
         // mapping where `PowerLimit` would map to `Grid` — the BMS's use of
         // `PowerLimit` is a charge-rate cap within a scheduled mode, not a
         // grid-imposed power constraint.
-        debug_assert!(
-            crate::actor::undeclared_capability(self, &signal).is_none(),
-            "the battery manager sent {signal:?}, which its declared control capabilities omit"
-        );
         out.push(DispatchRequest {
             target: self.dispatch_target.clone(),
             signal,
             priority: PriorityTier::Schedule,
         });
+        // Every signal leaves through here; see `check_declared_signals`.
+        debug_assert!(
+            crate::actor::check_declared_signals(self, &out[out.len() - 1..]).is_ok(),
+            "the battery manager sent {:?}, which its declared control capabilities omit",
+            out[out.len() - 1].signal
+        );
     }
 
     /// Clamp discharge power (negative `active_power_kw`) based on grid export rule.
@@ -1789,6 +1791,44 @@ mod tests {
 
         assert!((actor.charge_price_threshold - charge_threshold_after_first).abs() < 1e-15,);
         assert!((actor.discharge_price_threshold - discharge_threshold_after_first).abs() < 1e-15,);
+    }
+
+    /// A manager rebuilt with new prices takes over its predecessor's state
+    /// but recomputes the current day's thresholds from its own prices on
+    /// its next decision, not at the next midnight.
+    #[test]
+    fn take_over_recomputes_the_day_thresholds_from_the_new_prices() {
+        let tou = || BmsMode::TimeOfUseOptimization {
+            reserve_soc: 0.2,
+            charge_threshold_percentile: 0.25,
+            discharge_threshold_percentile: 0.75,
+            solar_only_charging: false,
+            price_deadband: 0.0,
+            min_duration_steps: None,
+        };
+        let prices: Vec<f64> = (0..48).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
+        let tripled: Vec<f64> = prices.iter().map(|p| p * 3.0).collect();
+        let manager = |prices: &[f64]| {
+            bms_priced_with(tou(), GridExportRule::Unrestricted, Some(prices.into()))
+        };
+        let mut env = TestEnvBuilder::new().hour(3).build();
+        let mut predecessor = manager(&prices);
+        set_soc(&mut predecessor, &mut env, "bat1", 0.5);
+        predecessor.decide(&env, &mut Vec::new());
+
+        let mut rebuilt = manager(&tripled);
+        rebuilt.take_over(&predecessor).expect("take over");
+        set_soc(&mut rebuilt, &mut env, "bat1", 0.5);
+        rebuilt.decide(&env, &mut Vec::new());
+
+        assert_eq!(
+            rebuilt.charge_price_threshold,
+            compute_percentile(&tripled[..24], 0.25)
+        );
+        assert_eq!(
+            rebuilt.discharge_price_threshold,
+            compute_percentile(&tripled[..24], 0.75)
+        );
     }
 
     #[test]

@@ -17,8 +17,7 @@ use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget};
 use hares_types::{
-    ControlCapabilities, ControlSignal, EnvironmentState, EquipmentId, HaresError, Telemetry,
-    ZoneId,
+    ControlCapabilities, EnvironmentState, EquipmentId, HaresError, Telemetry, ZoneId,
 };
 
 /// What state changes an actor subscribes to. Empty = polled every step.
@@ -44,18 +43,43 @@ pub enum ActorInterest {
 /// Implementations must be `Send + Sync` for thread-safe simulation.
 /// The `decide()` method receives a pre-allocated output buffer to avoid
 /// per-step allocations in the hot loop.
-/// The capability `signal` requires that `actor` does not declare in
-/// [`Actor::required_control_capabilities`], when the actor is bound to one
-/// equipment; `None` when the declaration covers it or the actor is
-/// unbound.
-pub(crate) fn undeclared_capability(
+/// Holds the requests an actor bound to one equipment just emitted to its
+/// declaration: every request addressed to the bound target must require
+/// only capabilities in [`Actor::required_control_capabilities`], the set
+/// a replacement of that target is checked against. Requests to other
+/// equipment, and every request of an unbound actor, are not its to
+/// declare.
+///
+/// The dwelling calls this after every decision and fails the step on
+/// `Err`; the built-in actors also assert it where they emit, so their own
+/// unit tests hold their declarations to every signal they send.
+///
+/// # Errors
+///
+/// `HaresError::Control` naming the actor and the undeclared capability.
+pub(crate) fn check_declared_signals(
     actor: &dyn Actor,
-    signal: &ControlSignal,
-) -> Option<ControlCapabilities> {
-    let required = signal.required_capability();
-    (actor.dispatch_target_name().is_some()
-        && !actor.required_control_capabilities().contains(required))
-    .then_some(required)
+    requests: &[DispatchRequest],
+) -> Result<(), HaresError> {
+    let Some(target) = actor.dispatch_target_name() else {
+        return Ok(());
+    };
+    let declared = actor.required_control_capabilities();
+    let undeclared = requests
+        .iter()
+        .filter(
+            |request| matches!(&request.target, DispatchTarget::ByName(name) if **name == *target),
+        )
+        .map(|request| request.signal.required_capability())
+        .find(|required| !declared.contains(*required));
+    match undeclared {
+        None => Ok(()),
+        Some(required) => Err(HaresError::Control(format!(
+            "actor '{}' sent '{target}' a signal requiring {required:?}, which its declared \
+             control capabilities {declared:?} omit",
+            actor.name()
+        ))),
+    }
 }
 
 pub trait Actor: Send + Sync + 'static {

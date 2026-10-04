@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_types::ControlSignal;
+use hares_types::{ControlSignal, HaresError};
 
 use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
 
@@ -95,6 +95,44 @@ impl ChargingComposer {
             .filter_map(|p| p.charging_allowed())
             .next()
             .unwrap_or(true)
+    }
+
+    /// The hysteresis latch of every gating preference, in stack order:
+    /// the composer's decision state.
+    pub fn gate_latches(&self) -> Vec<bool> {
+        self.preferences
+            .iter()
+            .filter_map(|p| p.charging_allowed())
+            .collect()
+    }
+
+    /// Restores latches saved by [`Self::gate_latches`].
+    ///
+    /// # Errors
+    ///
+    /// `HaresError::Io` when the count differs from this stack's gating
+    /// preferences: the latches were saved from another strategy.
+    pub fn restore_gate_latches(&mut self, latches: &[bool]) -> Result<(), HaresError> {
+        let gates = self
+            .preferences
+            .iter()
+            .filter(|p| p.charging_allowed().is_some())
+            .count();
+        if gates != latches.len() {
+            return Err(HaresError::Io(format!(
+                "EV driver gate state holds {} latches but the charging strategy has {gates} gates",
+                latches.len()
+            )));
+        }
+        for (preference, &allowed) in self
+            .preferences
+            .iter_mut()
+            .filter(|p| p.charging_allowed().is_some())
+            .zip(latches)
+        {
+            preference.restore_charging_allowed(allowed);
+        }
+        Ok(())
     }
 
     /// The most recent needed-charge-hours estimate from preferences

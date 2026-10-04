@@ -18,10 +18,7 @@ hares-tariff = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 serde = { workspace = true }
-# Exact f64 round-tripping through the golden JSON: without this feature
-# serde_json's parser is a few ULP off for long decimals, which would make
-# a reloaded golden differ from the capture that wrote it.
-serde_json = { workspace = true, features = ["float_roundtrip"] }
+serde_json = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
