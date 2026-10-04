@@ -21,6 +21,7 @@ use hares_physics::units::power_kw_to_w;
 
 use crate::config::constructor_equipment_id;
 use crate::hvac::helpers::parse_fuel_type;
+use crate::load_zone::resolve_load_zone;
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_usize,
     parse_zone_id, restore_schedule_source_state,
@@ -204,11 +205,9 @@ struct CyclePhase {
     has_water_draw: bool,
 }
 
-/// Clothes dryer type: vented (exhausts moisture to outdoors) vs
-/// unvented condenser (recovers latent heat as sensible gain in the zone).
-///
-/// HPXML 4.2 §3.8.2: ClothesDryer/Vented (boolean) + ClothesDryer/FuelType
-/// determine the physics path.
+/// Clothes dryer type, reported in telemetry: vented (exhausts to outdoors)
+/// or unvented electric. Its zone gain is the configured sensible and latent
+/// split, which the venting sets.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 enum DryerType {
     VentedElectric,
@@ -570,7 +569,7 @@ impl Equipment for EventBasedLoad {
         &self.ports
     }
 
-    fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         let (window_source, probability_source) = parse_event_schedule_sources(config)?;
         self.event_window_source = window_source;
         self.event_probability_source = probability_source;
@@ -579,50 +578,14 @@ impl Equipment for EventBasedLoad {
         self.active_duration_s = parse_positive(config, KEY_ACTIVE_DURATION_S)?.unwrap_or(900.0);
         self.cooldown_duration_s =
             parse_non_negative(config, KEY_COOLDOWN_DURATION_S)?.unwrap_or(0.0);
-        // "frac_sensible" is the HPXML-parsed alias for sensible_gain_fraction.
-        // Unlike the prior silent 0.0 default, this must be specified explicitly —
-        // a missing gain fraction at an init boundary is a configuration error.
-        self.sensible_gain_fraction = config
-            .get_f64(KEY_SENSIBLE_GAIN_FRACTION)
-            .or_else(|| config.get_f64("frac_sensible"))
-            .ok_or_else(|| {
-                HaresError::Equipment(format!(
-                    "sensible_gain_fraction missing for '{}'; must be specified explicitly",
-                    self.descriptor.name
-                ))
-            })?;
-        // "frac_latent" is the HPXML-parsed alias for latent_gain_fraction.
-        self.latent_gain_fraction = config
-            .get_f64(KEY_LATENT_GAIN_FRACTION)
-            .or_else(|| config.get_f64("frac_latent"))
-            .unwrap_or(0.0);
-
-        if self.sensible_gain_fraction < 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) must not be negative",
-                self.sensible_gain_fraction
-            )));
-        }
-        if self.sensible_gain_fraction > 1.0 + 1e-9 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) must not exceed 1.0",
-                self.sensible_gain_fraction
-            )));
-        }
-        if self.latent_gain_fraction < 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "latent_gain_fraction ({}) must not be negative",
-                self.latent_gain_fraction
-            )));
-        }
-        if self.sensible_gain_fraction + self.latent_gain_fraction > 1.0 + 1e-9 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) + latent_gain_fraction ({}) = {} exceeds 1.0",
-                self.sensible_gain_fraction,
-                self.latent_gain_fraction,
-                self.sensible_gain_fraction + self.latent_gain_fraction
-            )));
-        }
+        (self.sensible_gain_fraction, self.latent_gain_fraction) =
+            parse_gain_fractions(config, &self.descriptor.name)?;
+        self.descriptor.zone = resolve_load_zone(
+            config,
+            &self.descriptor.end_use,
+            self.sensible_gain_fraction + self.latent_gain_fraction > 0.0,
+            env,
+        )?;
 
         // Resolve the canonical ZIP model (sidecar -> class defaults ->
         // constant power) and validate the coefficient-sum invariants.
@@ -1094,19 +1057,8 @@ impl WetAppliance {
 
         let active_power_w = power_kw_to_w(electric_power_kw);
         let gain_source_w = active_power_w + fuel_consumption_w;
-        // Unvented condenser dryers reject both sensible and latent energy
-        // as sensible heat to the zone (the condenser coil recovers latent
-        // heat from moisture condensation). HPXML 4.2 §3.8.2: ClothesDryer/Vented=false
-        // -> condenser dryer -> all energy stays in conditioned space as sensible.
-        let (sensible_gain_w, latent_gain_w) =
-            if self.dryer_type == Some(DryerType::UnventedCondenser) {
-                (gain_source_w, 0.0)
-            } else {
-                (
-                    gain_source_w * self.sensible_gain_fraction,
-                    gain_source_w * self.latent_gain_fraction,
-                )
-            };
+        let sensible_gain_w = gain_source_w * self.sensible_gain_fraction;
+        let latent_gain_w = gain_source_w * self.latent_gain_fraction;
 
         if electric_power_kw != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -1244,56 +1196,20 @@ impl Equipment for WetAppliance {
         &self.ports
     }
 
-    fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         let (window_source, probability_source) = parse_event_schedule_sources(config)?;
         self.event_window_source = window_source;
         self.event_probability_source = probability_source;
         self.phases = parse_cycle_phases(config)?;
         self.n_units = parse_non_negative(config, KEY_N_UNITS)?.unwrap_or(1.0);
-        // "frac_sensible" is the HPXML-parsed alias for sensible_gain_fraction.
-        // Unlike the prior silent 0.0 default, this must be specified explicitly —
-        // a missing gain fraction at an init boundary is a configuration error.
-        self.sensible_gain_fraction = config
-            .get_f64(KEY_SENSIBLE_GAIN_FRACTION)
-            .or_else(|| config.get_f64("frac_sensible"))
-            .ok_or_else(|| {
-                HaresError::Equipment(format!(
-                    "sensible_gain_fraction missing for '{}'; must be specified explicitly",
-                    self.descriptor.name
-                ))
-            })?;
-        // "frac_latent" is the HPXML-parsed alias for latent_gain_fraction.
-        self.latent_gain_fraction = config
-            .get_f64(KEY_LATENT_GAIN_FRACTION)
-            .or_else(|| config.get_f64("frac_latent"))
-            .unwrap_or(0.0);
-
-        if self.sensible_gain_fraction < 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) must not be negative",
-                self.sensible_gain_fraction
-            )));
-        }
-        if self.sensible_gain_fraction > 1.0 + 1e-9 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) must not exceed 1.0",
-                self.sensible_gain_fraction
-            )));
-        }
-        if self.latent_gain_fraction < 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "latent_gain_fraction ({}) must not be negative",
-                self.latent_gain_fraction
-            )));
-        }
-        if self.sensible_gain_fraction + self.latent_gain_fraction > 1.0 + 1e-9 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) + latent_gain_fraction ({}) = {} exceeds 1.0",
-                self.sensible_gain_fraction,
-                self.latent_gain_fraction,
-                self.sensible_gain_fraction + self.latent_gain_fraction
-            )));
-        }
+        (self.sensible_gain_fraction, self.latent_gain_fraction) =
+            parse_gain_fractions(config, &self.descriptor.name)?;
+        self.descriptor.zone = resolve_load_zone(
+            config,
+            &self.descriptor.end_use,
+            self.sensible_gain_fraction + self.latent_gain_fraction > 0.0,
+            env,
+        )?;
 
         self.dryer_type = match config.get_str(KEY_DRYER_TYPE) {
             None => None,
@@ -1887,6 +1803,46 @@ fn parse_positive(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f
         )));
     }
     Ok(Some(value))
+}
+
+/// The sensible and latent fractions of a load's input that enter its zone.
+/// `frac_sensible` and `frac_latent` are the HPXML extension spellings. The
+/// sensible fraction is required; an absent latent fraction is no latent gain.
+fn parse_gain_fractions(config: &EquipmentConfig, name: &str) -> crate::Result<(f64, f64)> {
+    let sensible = config
+        .get_f64(KEY_SENSIBLE_GAIN_FRACTION)
+        .or_else(|| config.get_f64("frac_sensible"))
+        .ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "sensible_gain_fraction missing for '{name}'; must be specified explicitly"
+            ))
+        })?;
+    let latent = config
+        .get_f64(KEY_LATENT_GAIN_FRACTION)
+        .or_else(|| config.get_f64("frac_latent"))
+        .unwrap_or(0.0);
+    if !sensible.is_finite() || sensible < 0.0 {
+        return Err(HaresError::Equipment(format!(
+            "sensible_gain_fraction ({sensible}) must be finite and must not be negative"
+        )));
+    }
+    if sensible > 1.0 + 1e-9 {
+        return Err(HaresError::Equipment(format!(
+            "sensible_gain_fraction ({sensible}) must not exceed 1.0"
+        )));
+    }
+    if !latent.is_finite() || latent < 0.0 {
+        return Err(HaresError::Equipment(format!(
+            "latent_gain_fraction ({latent}) must be finite and must not be negative"
+        )));
+    }
+    if sensible + latent > 1.0 + 1e-9 {
+        return Err(HaresError::Equipment(format!(
+            "sensible_gain_fraction ({sensible}) + latent_gain_fraction ({latent}) = {} exceeds 1.0",
+            sensible + latent
+        )));
+    }
+    Ok((sensible, latent))
 }
 
 /// An event load's random stream and the start draws taken from it.
@@ -4393,10 +4349,19 @@ mod tests {
         raw_config(name.to_string(), "Clothes Dryer".to_string(), raw)
     }
 
+    /// An unvented dryer gives the zone its configured split: the moisture
+    /// it dries out of the clothes stays in the room as latent gain
+    /// (OpenStudio-HPXML: 0.90 sensible, 0.10 latent with nothing exhausted).
     #[test]
-    fn unvented_condenser_dryer_zero_latent_gain() {
+    fn unvented_dryer_gives_its_configured_split() {
         let mut env = base_env();
-        let config = dryer_config("unvented_dryer", Some("unvented_condenser"));
+        let mut config = dryer_config("unvented_dryer", Some("unvented_condenser"));
+        config
+            .test_extras_mut()
+            .insert("sensible_gain_fraction".to_string(), 0.9.into());
+        config
+            .test_extras_mut()
+            .insert("latent_gain_fraction".to_string(), 0.1.into());
         let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
         eq.init(&config, &env).unwrap();
         assert_eq!(eq.telemetry().get(tk::DRYER_TYPE), Some(2.0));
@@ -4410,19 +4375,78 @@ mod tests {
             total_power_w > 0.0,
             "dryer should draw power when triggered"
         );
-
         let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
-        // Unvented condenser: 100% sensible, zero latent.
-        assert!(
-            (t.sensible_gain_w - total_power_w).abs() < 1e-6,
-            "unvented condenser should route all gain as sensible, got sens={} expected={}",
-            t.sensible_gain_w,
-            total_power_w
-        );
-        assert_eq!(
-            t.latent_gain_w, 0.0,
-            "unvented condenser should have zero latent gain"
-        );
+        assert!((t.sensible_gain_w - 0.9 * total_power_w).abs() < 1e-6);
+        assert!((t.latent_gain_w - 0.1 * total_power_w).abs() < 1e-6);
+    }
+
+    fn zoneless_event_loads(sensible: f64) -> Vec<(Box<dyn Equipment>, EquipmentConfig)> {
+        let mut range = event_config("Cooking Range", "Cooking Range");
+        let mut dryer = dryer_config("Clothes Dryer", Some("vented_electric"));
+        for config in [&mut range, &mut dryer] {
+            config.test_extras_mut().remove("zone_id");
+            config
+                .test_extras_mut()
+                .insert("sensible_gain_fraction".to_string(), sensible.into());
+            config
+                .test_extras_mut()
+                .insert("latent_gain_fraction".to_string(), 0.0.into());
+        }
+        vec![
+            (
+                Box::new(EventBasedLoad::new(range.clone())) as Box<dyn Equipment>,
+                range,
+            ),
+            (
+                Box::new(WetAppliance::new(dryer.clone(), "Clothes Dryer")),
+                dryer,
+            ),
+        ]
+    }
+
+    /// An event load whose heat goes to a zone fails init, naming itself,
+    /// when it has no zone_id and no zone map to find its zone in.
+    #[test]
+    fn event_load_without_a_zone_errors_when_it_has_gains() {
+        for (mut eq, config) in zoneless_event_loads(0.5) {
+            let err = eq
+                .init(&config, &base_env())
+                .expect_err("a heat-giving event load with no zone must fail init");
+            assert!(
+                err.to_string().contains(&config.name),
+                "the error must name the load, got: {err}"
+            );
+        }
+    }
+
+    /// The dwelling's zone map gives an event load with no zone_id the
+    /// conditioned zone, and its gain reaches that zone's port.
+    #[test]
+    fn event_load_takes_the_conditioned_zone_from_the_zone_map() {
+        for (mut eq, mut config) in zoneless_event_loads(0.5) {
+            let mut zone_map = hares_types::ZoneMap::new();
+            zone_map.insert(hares_types::ZoneRole::Indoor, ZoneId(1));
+            config.zone_map = Some(zone_map);
+            eq.init(&config, &base_env()).unwrap();
+            assert_eq!(eq.descriptor().zone, Some(ZoneId(1)), "{}", config.name);
+            assert!(
+                eq.ports()
+                    .iter()
+                    .any(|p| p.port_type == hares_types::PortType::Thermal
+                        && p.zone == Some(ZoneId(1))),
+                "{}: declares a thermal port on its zone",
+                config.name
+            );
+        }
+    }
+
+    /// An event load that gives no heat to a zone needs none.
+    #[test]
+    fn event_load_without_gains_needs_no_zone() {
+        for (mut eq, config) in zoneless_event_loads(0.0) {
+            eq.init(&config, &base_env()).unwrap();
+            assert_eq!(eq.descriptor().zone, None, "{}", config.name);
+        }
     }
 
     #[test]

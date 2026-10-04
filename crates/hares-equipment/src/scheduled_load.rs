@@ -12,11 +12,12 @@ use hares_types::{
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory,
-    ZoneRole, telemetry_keys as tk,
+    telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::config::constructor_equipment_id;
+use crate::load_zone::resolve_load_zone;
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_usize,
     parse_zone_id, restore_schedule_source_state,
@@ -114,22 +115,11 @@ pub struct ScheduledLoad {
 impl ScheduledLoad {
     #[must_use]
     pub fn new(config: EquipmentConfig, end_use: EndUse, equipment_type: &'static str) -> Self {
-        // EV charging occurs outside the building envelope.
-        // "Exterior"/"Outdoor" equipment has no zone assignment — its heat gain
-        // goes to the outdoor environment. Everything else either uses an
-        // explicit zone_id from the config or is resolved by the ZoneMap at
-        // init time via name-based auto-routing.
-        let name_lower = config.name.to_ascii_lowercase();
+        // `init` resolves the zone; until then only an explicit one is known.
         let zone = if end_use == EndUse::EV {
             None
-        } else if let Some(explicit) = parse_zone_id(&config) {
-            Some(explicit)
-        } else if name_lower.contains("exterior") || name_lower.contains("outdoor") {
-            None
         } else {
-            // Defer zone resolution to init_from_config(), which has access to
-            // the ZoneMap for name-based auto-routing (garage, basement, etc.).
-            None
+            parse_zone_id(&config)
         };
 
         let descriptor = EquipmentDescriptor {
@@ -182,67 +172,11 @@ impl ScheduledLoad {
         }
     }
 
-    /// Resolve zone by name from the [`ZoneMap`] when no explicit `zone_id`
-    /// was configured and the equipment name implies a specific zone role.
-    ///
-    /// Called once during `init()` after the [`ZoneMap`] has been injected
-    /// into the config by the dwelling and the gain fractions are known. A
-    /// load whose heat goes into a zone must resolve one: a typed error
-    /// names the load and the role when the building has no such zone (or
-    /// there is no zone map), instead of dropping its heat. A load that
-    /// gives no heat to a zone needs none.
-    fn resolve_zone_from_map(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
-        if self.descriptor.zone.is_some() {
-            return Ok(());
-        }
-        let name_lower = config.name.to_ascii_lowercase();
-        // EV charging and exterior/outdoor loads release their heat outside
-        // the building envelope, matching the exclusions in new().
-        if self.descriptor.end_use == EndUse::EV
-            || name_lower.contains("exterior")
-            || name_lower.contains("outdoor")
-        {
-            return Ok(());
-        }
-        let role = if name_lower.contains("garage") {
-            ZoneRole::Garage
-        } else if name_lower.contains("basement") {
-            ZoneRole::Basement
-        } else if name_lower.contains("crawlspace") {
-            ZoneRole::Crawlspace
-        } else if name_lower.contains("attic") {
-            ZoneRole::Attic
-        } else {
-            ZoneRole::Indoor
-        };
-        self.descriptor.zone = config.zone_map.as_ref().and_then(|map| map.get(role));
-        let gives_zone_heat = self.sensible_gain_fraction + self.latent_gain_fraction > 0.0;
-        if self.descriptor.zone.is_none() && gives_zone_heat {
-            return Err(HaresError::Equipment(format!(
-                "{}: gives heat to its {role} zone, but the dwelling has no {role} zone \
-                 (no zone_id and no zone map entry)",
-                config.name
-            )));
-        }
-        Ok(())
-    }
-
     fn init_from_config(
         &mut self,
         config: &EquipmentConfig,
         env: &EnvironmentState,
     ) -> crate::Result<()> {
-        // The zone set is fixed at construction: an assigned zone that is not
-        // in the environment is a stale ZoneId from a misconfigured ZoneMap,
-        // and its heat gain would be silently dropped every step.
-        if let Some(zone) = self.descriptor.zone
-            && !env.zones.iter().any(|z| z.id == zone)
-        {
-            return Err(HaresError::Equipment(format!(
-                "ScheduledLoad '{}': assigned zone {zone:?} not found in environment state",
-                self.descriptor.name,
-            )));
-        }
         self.power_source = parse_power_schedule_source(config)?;
         let (gas_source, gas_unit) = parse_optional_gas_schedule_source(config)?;
         self.gas_source = gas_source;
@@ -368,11 +302,12 @@ impl ScheduledLoad {
             } else {
                 CoreCapabilities::empty()
             };
-        // Resolve zone from ZoneMap when zone was deferred at construction time.
-        // The ZoneMap is populated by the dwelling from HPXML zone configuration
-        // and provides stable ZoneRole → ZoneId mappings that do not assume
-        // a fixed zone sort order.
-        self.resolve_zone_from_map(config)?;
+        self.descriptor.zone = resolve_load_zone(
+            config,
+            &self.descriptor.end_use,
+            self.sensible_gain_fraction + self.latent_gain_fraction > 0.0,
+            env,
+        )?;
         self.telemetry = default_telemetry();
         self.core_output = CoreOutput::default();
         self.update_ports();
@@ -2599,7 +2534,7 @@ mod tests {
             hares_types::EndUse::LIGHTING,
             "Garage Lighting",
         );
-        eq.init(&config, &base_env()).unwrap();
+        eq.init(&config, &env_with_zone(ZoneId(3))).unwrap();
         assert_eq!(
             eq.descriptor().zone,
             Some(ZoneId(3)),
@@ -2623,7 +2558,7 @@ mod tests {
             hares_types::EndUse::LIGHTING,
             "Basement Lighting",
         );
-        eq.init(&config, &base_env()).unwrap();
+        eq.init(&config, &env_with_zone(ZoneId(4))).unwrap();
         assert_eq!(
             eq.descriptor().zone,
             Some(ZoneId(4)),
@@ -2645,12 +2580,42 @@ mod tests {
             hares_types::EndUse::REFRIGERATION,
             "Refrigerator",
         );
-        eq.init(&config, &base_env()).unwrap();
+        eq.init(&config, &env_with_zone(ZoneId(5))).unwrap();
         assert_eq!(
             eq.descriptor().zone,
             Some(ZoneId(5)),
             "Indoor equipment should resolve to ZoneMap Indoor role (ZoneId(5))"
         );
+    }
+
+    /// A zone map entry the environment does not hold would drop the load's
+    /// heat every step: init fails naming the load.
+    #[test]
+    fn zone_map_zone_missing_from_the_environment_fails_init() {
+        let mut config = base_config_for_zone_test("Refrigerator", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 1.0.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(5));
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::REFRIGERATION,
+            "Refrigerator",
+        );
+        let err = eq
+            .init(&config, &base_env())
+            .expect_err("a zone the environment lacks must fail init");
+        assert!(err.to_string().contains("Refrigerator"), "got: {err}");
+    }
+
+    fn env_with_zone(zone: ZoneId) -> EnvironmentState {
+        let mut env = base_env();
+        let mut extra = env.zones[0].clone();
+        extra.id = zone;
+        env.zones.push(extra);
+        env
     }
 
     #[test]
@@ -2676,7 +2641,7 @@ mod tests {
     }
 
     /// Regression test for Outdoor/Exterior equipment routed via ZoneMap.
-    /// Without the outdoor/exclusion guard in resolve_zone_from_map(), outdoor-named
+    /// Without the outdoor/exclusion guard in resolve_load_zone(), outdoor-named
     /// equipment would be routed to the indoor zone because it doesn't match any
     /// specific role keyword.
     #[test]

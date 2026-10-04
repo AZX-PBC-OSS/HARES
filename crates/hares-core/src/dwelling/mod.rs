@@ -12099,12 +12099,14 @@ occupancy = 1.0
 
         let env = EnvironmentState {
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
-            zones: vec![ZoneState {
-                id: ZoneId(1),
-                temperature_c: 21.0,
-                humidity_ratio: 0.008,
-                volume_m3: 200.0,
-            }],
+            zones: (1..=4)
+                .map(|id| ZoneState {
+                    id: ZoneId(id),
+                    temperature_c: 21.0,
+                    humidity_ratio: 0.008,
+                    volume_m3: 200.0,
+                })
+                .collect(),
             weather: hares_types::WeatherState::default(),
             grid: GridState {
                 voltage_pu: 1.0,

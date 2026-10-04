@@ -1730,38 +1730,13 @@ mod tests {
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
-        // frac_lost=0.85, gain_factor=0.89 → sens=0.1335, lat=0.0165
+        // OpenStudio-HPXML gives every fuel the electric split:
+        // frac_lost 0.85, 0.90 of the rest sensible.
         assert!(
-            (sens - 0.1335).abs() < 1e-9,
-            "sensible={sens}, expected 0.1335"
+            (sens - 0.135).abs() < 1e-9,
+            "sensible={sens}, expected 0.135"
         );
-        assert!((lat - 0.0165).abs() < 1e-9, "latent={lat}, expected 0.0165");
-        assert_eq!(
-            dryer.parameters["dryer_type"].as_str().unwrap(),
-            "vented_gas"
-        );
-    }
-
-    #[test]
-    fn unvented_gas_dryer_gain_fractions() {
-        let xml = minimal_appliance_xml(
-            "<ClothesDryer><FuelType>natural gas</FuelType><Vented>false</Vented></ClothesDryer>",
-        );
-        let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(
-            &building,
-            &DefaultsStore::empty(),
-            &json!({}),
-            None,
-            &mut Vec::new(),
-        )
-        .unwrap();
-        let dryer = find_spec(&specs, "Clothes Dryer");
-        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
-        let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
-        // frac_lost=0.0, gain_factor=0.89 → sens=0.89, lat=0.11
-        assert!((sens - 0.89).abs() < 1e-9, "sensible={sens}, expected 0.89");
-        assert!((lat - 0.11).abs() < 1e-9, "latent={lat}, expected 0.11");
+        assert!((lat - 0.015).abs() < 1e-9, "latent={lat}, expected 0.015");
         assert_eq!(
             dryer.parameters["dryer_type"].as_str().unwrap(),
             "vented_gas"

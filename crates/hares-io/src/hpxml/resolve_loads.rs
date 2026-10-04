@@ -22,16 +22,12 @@ use crate::defaults::DefaultsStore;
 
 /// OCHRE EV fuel economy: 1/325 * 1000 miles per kWh (for sedans).
 const EV_FUEL_ECONOMY: f64 = 1000.0 / 325.0;
-/// Fraction of dryer energy exhausted to outdoors when the dryer is vented.
-/// Source: OCHRE hpxml.py parse_clothes_dryer; ANSI/RESNET 301-2014 §4.2.2.5.2.7.
+/// Fraction of dryer energy exhausted to outdoors when the dryer is vented,
+/// and the sensible share of the rest, for every fuel and for the electric
+/// and fuel input alike: OpenStudio-HPXML v1.12.0
+/// `hotwater_appliances.rb` `calc_clothes_dryer_energy` (771-777).
 const DRYER_EXHAUST_FRACTION_VENTED: f64 = 0.85;
-/// Sensible heat gain factor for gas clothes dryers.
-/// Approximates OCHRE's BTU-weighted blend of electric parasitic (0.90) and gas combustion (0.8894).
-/// Source: OCHRE hpxml.py parse_clothes_dryer.
-const DRYER_GAS_SENSIBLE_GAIN: f64 = 0.89;
-/// Sensible heat gain factor for electric clothes dryers.
-/// Source: OCHRE hpxml.py parse_clothes_dryer.
-const DRYER_ELECTRIC_SENSIBLE_GAIN: f64 = 0.90;
+const DRYER_SENSIBLE_SHARE: f64 = 0.90;
 /// BTU per kWh conversion factor (1 kWh = 3412.141... BTU; rounded to 3412).
 /// Used to convert kWh to BTU for gas dryer therm calculation.
 /// Source: OCHRE hpxml.py parse_clothes_dryer.
@@ -325,55 +321,34 @@ pub(super) fn resolve_scheduled_loads(
                         };
                         params.insert("vented".to_string(), json!(vented));
 
-                        // Vented dryers exhaust 85% of energy; unvented keep all.
-                        // Gas combustion has a lower sensible fraction than electric.
-                        // The 0.89 gas factor approximates OCHRE's BTU-weighted blend of
-                        // 0.90 (electric parasitic) and 0.8894 (gas combustion), stable
-                        // across CEF values (~7%/93% electric/gas split).
                         let frac_lost = if vented {
                             DRYER_EXHAUST_FRACTION_VENTED
                         } else {
                             0.0
                         };
-                        let gain_factor = if fuel == FuelType::Gas {
-                            DRYER_GAS_SENSIBLE_GAIN
-                        } else {
-                            DRYER_ELECTRIC_SENSIBLE_GAIN
-                        };
-                        let frac_sens = (1.0 - frac_lost) * gain_factor;
+                        let frac_sens = (1.0 - frac_lost) * DRYER_SENSIBLE_SHARE;
                         let frac_lat = 1.0 - frac_sens - frac_lost;
                         params.insert("sensible_gain_fraction".to_string(), json!(frac_sens));
                         params.insert("latent_gain_fraction".to_string(), json!(frac_lat));
 
-                        // Set DryerType for runtime physics routing. HPXML 4.2 §3.8.2:
-                        // ClothesDryer/Vented determines exhaust vs condenser behaviour.
-                        // Unvented condenser dryers reject all energy as sensible heat
-                        // in the zone; vented dryers exhaust ~85% outdoors.
-                        //
-                        // Unvented condenser dryers are exclusively electric — the
-                        // compressor driving the condenser coil requires electric power.
-                        // HPXML permits Vented=false + FuelType=gas (the fields are
-                        // independent), but this combination is physically inconsistent:
-                        // no consumer gas dryer burns fuel internally with no exhaust
-                        // path and no condenser coil recovering combustion moisture.
-                        // When this combination appears, classify as vented-gas as a
-                        // conservative fallback (exhausts most energy, makes fewer
-                        // assumptions about zone-conditioning effects).
-                        let dryer_type = if vented {
-                            if fuel == FuelType::Gas {
-                                "vented_gas"
-                            } else {
-                                "vented_electric"
+                        // A fuel-fired dryer conveys its moisture and combustion
+                        // products outside the building (IFGC 614.1); an unvented
+                        // one is rejected, not relabelled.
+                        let dryer_type = match (vented, fuel) {
+                            (true, FuelType::Electric) => "vented_electric",
+                            (true, _) => "vented_gas",
+                            (false, FuelType::Electric) => "unvented_condenser",
+                            (false, _) => {
+                                return Err(HpxmlError::InvalidField {
+                                    path: "ClothesDryer/Vented",
+                                    system_kind: "Clothes Dryer",
+                                    system_id: element_id(node)
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    value_received: "false".to_string(),
+                                    reason: "a fuel-fired clothes dryer must be vented to \
+                                             outdoors",
+                                });
                             }
-                        } else if fuel == FuelType::Electric {
-                            "unvented_condenser"
-                        } else {
-                            tracing::warn!(
-                                "ClothesDryer: Vented=false with FuelType=gas is physically \
-                                 inconsistent — no consumer gas dryer has a condenser coil. \
-                                 Classifying as vented-gas (conservative fallback)."
-                            );
-                            "vented_gas"
                         };
                         params.insert("dryer_type".to_string(), json!(dryer_type));
 
@@ -615,28 +590,30 @@ pub(super) fn resolve_scheduled_loads(
                     params.insert(k, v);
                 }
 
-                // OCHRE hpxml.py:1397-1406: refrigerators in non-conditioned space
-                // (garage, attic, unconditioned basement, etc.) contribute zero
-                // zone gain. Location classification uses substring-keyword
-                // matching via is_conditioned_location() — same pattern as
-                // parse_zone_label / parse_duct_location. Primary refrigerators
-                // default to "conditioned space"; non-primary default to "".
-                let is_non_primary_fridge = if tag == "Refrigerator" {
-                    let is_primary = match child_text(node, "PrimaryIndicator") {
+                let is_non_primary_fridge = tag == "Refrigerator"
+                    && !match child_text(node, "PrimaryIndicator") {
                         Some(v) => parse_xsd_boolean("PrimaryIndicator", &v)?,
                         None => true,
                     };
-                    let default_loc = if is_primary { "conditioned space" } else { "" };
-                    let location =
-                        child_text(node, "Location").unwrap_or_else(|| default_loc.to_string());
-                    if !is_conditioned_location(&location) {
-                        params.insert("sensible_gain_fraction".to_string(), json!(0.0));
-                        params.insert("latent_gain_fraction".to_string(), json!(0.0));
+                if tag != "Dehumidifier" {
+                    let location = child_text(node, "Location").unwrap_or_else(|| {
+                        default_appliance_location(
+                            building,
+                            tag == "Freezer" || is_non_primary_fridge,
+                        )
+                        .to_string()
+                    });
+                    match appliance_site(building, tag, node, &location)? {
+                        ApplianceSite::ConditionedSpace => {}
+                        ApplianceSite::Zone(zone_id) => {
+                            params.insert("zone_id".to_string(), json!(zone_id));
+                        }
+                        ApplianceSite::OutsideUnit => {
+                            params.insert("sensible_gain_fraction".to_string(), json!(0.0));
+                            params.insert("latent_gain_fraction".to_string(), json!(0.0));
+                        }
                     }
-                    !is_primary
-                } else {
-                    false
-                };
+                }
 
                 let mut spec = build_spec(name.to_string(), fuel, params, defaults);
                 spec.system_id = element_id(node);
@@ -1108,62 +1085,112 @@ fn require_unique_appliance_ids(appliances: &XmlNode, tag: &str) -> Result<(), H
     Ok(())
 }
 
-/// Returns `true` when an HPXML `Location` string represents a conditioned space
-/// suitable for internal heat gains. Follows the same substring-keyword matching
-/// pattern as `parse_zone_label` and `parse_duct_location` in `building.rs`.
+/// Where an HPXML appliance gives its heat.
+#[derive(Debug, PartialEq)]
+enum ApplianceSite {
+    /// The conditioned zone, which the load finds in the dwelling's zone map.
+    ConditionedSpace,
+    /// A modelled zone outside conditioned space, by its 1-based id.
+    Zone(u16),
+    /// Outside the dwelling unit: no gain to any zone.
+    OutsideUnit,
+}
+
+/// The default location of an appliance with no `Location`, as
+/// OpenStudio-HPXML v1.12.0 `defaults.rb` sets it: conditioned space for
+/// the washer, dryer, dishwasher, range and primary refrigerator (4204,
+/// 4252, 4302, 4384, 4462); for a freezer or another refrigerator the first
+/// of garage, unconditioned basement, conditioned basement and conditioned
+/// space the building has (`get_freezer_or_extra_fridge_location`,
+/// 5683-5697).
+fn default_appliance_location(building: &Building, freezer_or_extra_fridge: bool) -> &'static str {
+    if !freezer_or_extra_fridge {
+        return "conditioned space";
+    }
+    if has_garage_zone(building) {
+        return "garage";
+    }
+    match building.foundation_name.as_deref() {
+        Some("Unfinished Basement") => "basement - unconditioned",
+        Some("Finished Basement") => "basement - conditioned",
+        _ => "conditioned space",
+    }
+}
+
+/// The site of an appliance at an HPXML `location`. OpenStudio-HPXML
+/// v1.12.0 places the conditioned locations in conditioned space and the
+/// other modelled locations in their own space, and gives an appliance
+/// outside the unit no space and no zone gain (`geometry.rb`
+/// `get_space_from_location`, 1704-1716; `hpxml.rb` `conditioned_locations`,
+/// 12311-12316; `hotwater_appliances.rb` zeroes the fractions when
+/// `is_outside`). "living space" is the pre-v4 spelling of conditioned
+/// space.
 ///
-/// HPXML 4.2 RefrigeratorLocation enumeration defines the valid location
-/// values; common non-standard field strings ("Indoor", "finished
-/// basement") are handled too. Diverges from OCHRE's `parse_zone_name`
-/// (ochre/utils/hpxml.py), which classifies `"basement - conditioned"` as
-/// `Foundation` and so zeroes refrigerator gains in conditioned basements.
-fn is_conditioned_location(location: &str) -> bool {
-    let s = location.to_ascii_lowercase();
-    let s = s.trim();
-    // Explicitly unconditioned or unvented spaces are never conditioned.
-    if s.contains("uncondition") || s.contains("unvent") {
-        return false;
-    }
-    // Bare garages (but not "garage - conditioned": the "condition" check
-    // below catches those).
-    if s.contains("garage") && !s.contains("condition") {
-        return false;
-    }
-    // Attics are unconditioned buffer zones.
-    if s.contains("attic") {
-        return false;
-    }
-    // Conditioned-space keywords. HPXML 4.2 data dictionary
-    // §RefrigeratorLocation_simple: "conditioned space", "living space",
-    // "kitchen", "other heated space", "other housing unit", "other
-    // non-freezing space", "basement - conditioned", "garage - conditioned".
-    if s.contains("condition")
-        || s == "living space"
-        || s == "kitchen"
-        || s == "indoor"
-        || s.contains("heated")
-        || s.contains("housing unit")
-        || s.contains("non-freezing")
-    {
-        return true;
-    }
-    // Finished basements, foundations, and crawlspaces: "finished" implies
-    // conditioned in residential building practice.
-    (s.contains("basement") || s.contains("foundation") || s.contains("crawl"))
-        && s.contains("finished")
-        && !s.contains("unfinished")
+/// # Errors
+///
+/// A location that is not an HPXML appliance location, or one whose zone
+/// the building does not model.
+fn appliance_site(
+    building: &Building,
+    tag: &'static str,
+    node: &XmlNode,
+    location: &str,
+) -> Result<ApplianceSite, HpxmlError> {
+    let invalid = |reason: &'static str| HpxmlError::InvalidField {
+        path: "Location",
+        system_kind: tag,
+        system_id: element_id(node).unwrap_or_else(|| "unknown".to_string()),
+        value_received: location.to_string(),
+        reason,
+    };
+    let zone_type = match location.trim().to_ascii_lowercase().as_str() {
+        "conditioned space"
+        | "living space"
+        | "basement - conditioned"
+        | "crawlspace - conditioned" => return Ok(ApplianceSite::ConditionedSpace),
+        "outside"
+        | "other housing unit"
+        | "other heated space"
+        | "other multifamily buffer space"
+        | "other non-freezing space" => return Ok(ApplianceSite::OutsideUnit),
+        "garage" => ZoneType::Garage,
+        "basement - unconditioned" | "crawlspace - vented" | "crawlspace - unvented" => {
+            ZoneType::Foundation
+        }
+        "attic - vented" | "attic - unvented" => ZoneType::Attic,
+        _ => return Err(invalid("not an HPXML appliance location")),
+    };
+    let idx = building
+        .zones
+        .iter()
+        .position(|zone| zone.zone_type == zone_type)
+        .ok_or_else(|| invalid("the building models no zone at this location"))?;
+    u16::try_from(idx + 1)
+        .map(ApplianceSite::Zone)
+        .map_err(|_| invalid("zone index exceeds the zone id range"))
 }
 
 /// Default sensible and latent gain fractions per equipment name.
 /// Returns (sensible_fraction, latent_fraction) of equipment power entering the zone.
+///
+/// Appliance, plug-load and ceiling-fan values are OpenStudio-HPXML v1.12.0's
+/// for equipment inside the dwelling unit (`HPXMLtoOpenStudio/resources/`):
+/// `hotwater_appliances.rb` gives the range `frac_lost` 0.20 with 0.90 of the
+/// rest sensible when electric and 0.80 for any other fuel (577-584), the
+/// washer `frac_lost` 0.70 and 0.90 sensible (871-874), the dishwasher
+/// `frac_lost` 0.40 and 0.50 sensible (658-661), and refrigerators and
+/// freezers all sensible (924-926); `defaults.rb` gives other plug loads
+/// `frac_lost` 0.10 and 0.95 sensible (7524-7526) and televisions all
+/// sensible (4797-4803); `hvac.rb` puts all ceiling fan power into
+/// conditioned space as sensible heat (1629-1638). A declared dryer's split
+/// depends on its venting and is set where the dryer is resolved.
 pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<(f64, f64)> {
     match name {
-        // OCHRE hpxml.py:1461-1472: gas range sensible ~0.64, electric ~0.72.
         "Cooking Range" => {
-            if fuel_type == FuelType::Gas {
-                Some((0.64, 0.16))
-            } else {
+            if fuel_type == FuelType::Electric {
                 Some((0.72, 0.08))
+            } else {
+                Some((0.64, 0.16))
             }
         }
         "Clothes Washer" => Some((0.27, 0.03)),
@@ -1174,27 +1201,20 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
         // dryer carries its vented/gas-aware fractions from the resolver and
         // never reaches this default.
         "Clothes Dryer" => Some((
-            (1.0 - DRYER_EXHAUST_FRACTION_VENTED) * DRYER_ELECTRIC_SENSIBLE_GAIN,
-            1.0 - (1.0 - DRYER_EXHAUST_FRACTION_VENTED) * DRYER_ELECTRIC_SENSIBLE_GAIN
+            (1.0 - DRYER_EXHAUST_FRACTION_VENTED) * DRYER_SENSIBLE_SHARE,
+            1.0 - (1.0 - DRYER_EXHAUST_FRACTION_VENTED) * DRYER_SENSIBLE_SHARE
                 - DRYER_EXHAUST_FRACTION_VENTED,
         )),
         "Dishwasher" => Some((0.30, 0.30)),
-        "Refrigerator" => Some((1.00, 0.00)),
-        // 0.00 matches OCHRE (freezers are typically in unconditioned space).
-        // ASHRAE would use sensible=1.0 for indoor freezers -- location-based
-        // override not yet implemented.
-        "Freezer" => Some((0.00, 0.00)),
-        // OCHRE parse_mel: "other" plug loads → (0.855, 0.045).
+        "Refrigerator" | "Freezer" => Some((1.00, 0.00)),
         "MELs" | "Plug Loads" => Some((0.855, 0.045)),
-        // OCHRE parse_mel: "TV other" → (0.0, 0.0).
-        "TV" => Some((0.00, 0.00)),
+        "TV" => Some((1.00, 0.00)),
         // OCHRE parse_lighting: Convective=1.0 for all lighting types.
         "Indoor Lighting" | "Exterior Lighting" | "Basement Lighting" | "Garage Lighting"
         | "Lighting" => Some((1.00, 0.00)),
         // OCHRE: gas lighting and outdoor equipment → 0 zone gain.
         "Gas Lighting" => Some((0.00, 0.00)),
-        // OCHRE: ceiling fan → 0 zone gain (parse_mel default for non-"other").
-        "Ceiling Fan" => Some((0.00, 0.00)),
+        "Ceiling Fan" => Some((1.00, 0.00)),
         "Ventilation Fan" => Some((1.00, 0.00)),
         // OCHRE hpxml.py:1461-1472: electric cooking range sensible ~0.72, latent ~0.08.
         // Microwave ovens have a similar fraction of input power entering the zone
@@ -1347,35 +1367,128 @@ mod tests {
         }
     }
 
+    fn garage_zone() -> Zone {
+        Zone {
+            zone_type: ZoneType::Garage,
+            ..conditioned_zone()
+        }
+    }
+
     #[test]
-    fn is_conditioned_location_classifies_hpxml_and_field_strings() {
-        // Standard HPXML RefrigeratorLocation conditioned values.
-        assert!(is_conditioned_location("conditioned space"));
-        assert!(is_conditioned_location("living space"));
-        assert!(is_conditioned_location("kitchen"));
-        assert!(is_conditioned_location("basement - conditioned"));
-        assert!(is_conditioned_location("garage - conditioned"));
-        assert!(is_conditioned_location("other heated space"));
-        assert!(is_conditioned_location("other housing unit"));
-        assert!(is_conditioned_location("other non-freezing space"));
-        // Common non-standard strings encountered in field data.
-        assert!(is_conditioned_location("Indoor"));
-        assert!(is_conditioned_location("conditioned basement"));
-        assert!(is_conditioned_location("finished basement"));
-        // Explicitly unconditioned spaces.
-        assert!(!is_conditioned_location("garage"));
-        assert!(!is_conditioned_location("basement - unconditioned"));
-        assert!(!is_conditioned_location("garage - unconditioned"));
-        assert!(!is_conditioned_location("crawlspace - vented"));
-        assert!(!is_conditioned_location("attic - vented"));
-        assert!(!is_conditioned_location("unconditioned space"));
-        assert!(!is_conditioned_location("other multifamily buffer space"));
-        assert!(!is_conditioned_location("other"));
-        assert!(!is_conditioned_location(""));
-        // Edge cases: bare "basement" is ambiguous — conservative default is
-        // not conditioned (caller should use "basement - conditioned" when
-        // the space is heated).
-        assert!(!is_conditioned_location("basement"));
+    fn appliance_sites_follow_openstudio_hpxml_locations() {
+        let building = appliance_test_building("", vec![conditioned_zone(), garage_zone()]);
+        let node = parse_xml_document("<Freezer/>").expect("parse freezer");
+        let site = |location: &str| appliance_site(&building, "Freezer", &node, location);
+        for location in [
+            "conditioned space",
+            "living space",
+            "basement - conditioned",
+            "crawlspace - conditioned",
+        ] {
+            assert_eq!(site(location).unwrap(), ApplianceSite::ConditionedSpace);
+        }
+        for location in [
+            "outside",
+            "other housing unit",
+            "other heated space",
+            "other multifamily buffer space",
+            "other non-freezing space",
+        ] {
+            assert_eq!(site(location).unwrap(), ApplianceSite::OutsideUnit);
+        }
+        assert_eq!(site("garage").unwrap(), ApplianceSite::Zone(2));
+        assert!(
+            site("basement - unconditioned").is_err(),
+            "a location whose zone the building does not model is an error"
+        );
+        assert!(site("kitchen").is_err(), "not an HPXML appliance location");
+    }
+
+    fn resolve_appliances(appliances: &str, zones: Vec<Zone>) -> Vec<EquipmentSpec> {
+        let building = appliance_test_building(appliances, zones);
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("appliances resolve");
+        specs
+    }
+
+    fn param(spec: &EquipmentSpec, key: &str) -> Option<f64> {
+        spec.parameters.get(key).and_then(Value::as_f64)
+    }
+
+    /// A garage appliance gives its heat to the garage zone; one outside the
+    /// unit gives none; a freezer with no location goes to the garage when
+    /// the building has one and to conditioned space otherwise, all sensible.
+    #[test]
+    fn appliances_give_their_heat_where_they_stand() {
+        let specs = resolve_appliances(
+            r#"<ClothesWasher><Location>garage</Location></ClothesWasher>
+               <Dishwasher><Location>other housing unit</Location></Dishwasher>
+               <Freezer/>"#,
+            vec![conditioned_zone(), garage_zone()],
+        );
+        let find = |name: &str| specs.iter().find(|s| s.name == name).expect(name);
+        let washer = find("Clothes Washer");
+        assert_eq!(param(washer, "zone_id"), Some(2.0));
+        assert_eq!(param(washer, "sensible_gain_fraction"), Some(0.27));
+        let dishwasher = find("Dishwasher");
+        assert_eq!(param(dishwasher, "sensible_gain_fraction"), Some(0.0));
+        assert_eq!(param(dishwasher, "latent_gain_fraction"), Some(0.0));
+        let freezer = find("Freezer");
+        assert_eq!(param(freezer, "zone_id"), Some(2.0));
+        assert_eq!(param(freezer, "sensible_gain_fraction"), Some(1.0));
+
+        let specs = resolve_appliances("<Freezer/>", vec![conditioned_zone()]);
+        let freezer = specs.iter().find(|s| s.name == "Freezer").expect("freezer");
+        assert_eq!(param(freezer, "zone_id"), None);
+        assert_eq!(param(freezer, "sensible_gain_fraction"), Some(1.0));
+    }
+
+    #[test]
+    fn non_electric_range_takes_the_fuel_split() {
+        for fuel in [FuelType::Gas, FuelType::Propane, FuelType::Oil] {
+            assert_eq!(
+                default_gain_fractions("Cooking Range", fuel),
+                Some((0.64, 0.16)),
+                "{fuel:?}"
+            );
+        }
+        assert_eq!(
+            default_gain_fractions("Cooking Range", FuelType::Electric),
+            Some((0.72, 0.08))
+        );
+    }
+
+    #[test]
+    fn television_and_ceiling_fan_heat_the_room() {
+        for name in ["TV", "Ceiling Fan", "Freezer"] {
+            assert_eq!(
+                default_gain_fractions(name, FuelType::Electric),
+                Some((1.0, 0.0)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unvented_fuel_fired_dryer_is_rejected() {
+        let building = appliance_test_building(
+            "<ClothesDryer><FuelType>natural gas</FuelType><Vented>false</Vented></ClothesDryer>",
+            vec![conditioned_zone()],
+        );
+        let mut specs = Vec::new();
+        let err = resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect_err("an unvented gas dryer has no flue");
+        assert!(
+            matches!(
+                err,
+                HpxmlError::InvalidField {
+                    path: "ClothesDryer/Vented",
+                    ..
+                }
+            ),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -2492,17 +2605,20 @@ mod tests {
     }
 
     fn dehumidifier_test_building(zones: Vec<Zone>) -> Building {
-        let details = parse_xml_document(
-            r#"<BuildingDetails>
-                <Appliances>
-                  <Dehumidifier>
-                    <SystemIdentifier id="Dehumidifier1"/>
-                    <Capacity>70</Capacity>
-                  </Dehumidifier>
-                </Appliances>
-            </BuildingDetails>"#,
+        appliance_test_building(
+            r#"<Dehumidifier>
+                 <SystemIdentifier id="Dehumidifier1"/>
+                 <Capacity>70</Capacity>
+               </Dehumidifier>"#,
+            zones,
         )
-        .expect("parse dehumidifier details");
+    }
+
+    fn appliance_test_building(appliances: &str, zones: Vec<Zone>) -> Building {
+        let details = parse_xml_document(&format!(
+            "<BuildingDetails><Appliances>{appliances}</Appliances></BuildingDetails>"
+        ))
+        .expect("parse appliance details");
         Building {
             site: Site {
                 elevation_m: None,

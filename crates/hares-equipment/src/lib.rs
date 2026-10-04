@@ -9,6 +9,7 @@ pub mod ev;
 pub mod event_load;
 pub mod generator;
 pub mod hvac;
+pub(crate) mod load_zone;
 pub mod ndinterp;
 pub(crate) mod pack_electrical;
 pub mod protocol_bridge;

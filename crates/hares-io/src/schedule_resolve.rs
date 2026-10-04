@@ -4221,8 +4221,11 @@ mod tests {
             hares_types::rng::dwelling_seed(0, 0),
             &spec.name,
         );
-        let cfg = EquipmentConfig::raw(spec.name.clone(), spec.name.clone(), raw_config)
+        let mut cfg = EquipmentConfig::raw(spec.name.clone(), spec.name.clone(), raw_config)
             .with_rng_stream(stream);
+        let mut zone_map = hares_types::ZoneMap::new();
+        zone_map.insert(hares_types::ZoneRole::Indoor, ZoneId(1));
+        cfg.zone_map = Some(zone_map);
 
         let env = hares_types::EnvironmentState {
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
