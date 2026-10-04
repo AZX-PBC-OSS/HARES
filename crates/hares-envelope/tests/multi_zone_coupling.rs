@@ -180,7 +180,7 @@ fn test_two_zone_coupled_wall_heat_direction() {
     let env = two_zone_env(t1_init, t2_init, outdoor);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE1,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_two_zone_solver(&env, t1_init, config);
@@ -252,7 +252,7 @@ fn initialize_steady_state_pins_only_configured_indoor_zone() {
     let env = two_zone_env(indoor_setpoint, outdoor, outdoor);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE1,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let solver = build_two_zone_solver(&env, indoor_setpoint, config);
@@ -414,7 +414,7 @@ fn radiant_port_in_non_indoor_zone_reaches_zone_surface() {
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE1,
         interior_lwr_zones: vec![zone2_lwr],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = ThermalSolver::new(model, wiring, config, dt, &env, 20.0)
@@ -556,7 +556,7 @@ fn oob_input_index_in_radiant_lwr_distribution_does_not_panic() {
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE1,
         interior_lwr_zones: vec![lwr_zone],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0)

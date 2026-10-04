@@ -207,6 +207,7 @@ impl HpCooler {
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
         cfg.zone_map = source.zone_map.clone();
+        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
         Ok(cfg)
     }
 }
@@ -475,6 +476,7 @@ impl GshpCooler {
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
         cfg.zone_map = source.zone_map.clone();
+        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
         Ok(cfg)
     }
 
@@ -897,6 +899,7 @@ impl WshpCooler {
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
         cfg.zone_map = source.zone_map.clone();
+        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
         Ok(cfg)
     }
 
@@ -1206,6 +1209,64 @@ mod tests {
                 data,
             },
         )
+    }
+
+    /// The served zone's thermal capacitance the dwelling hands a heat pump
+    /// cooler reaches the inner air conditioner, where the equivalent
+    /// battery model reads it, for every cooler wrapper.
+    #[test]
+    fn heat_pump_coolers_pass_zone_capacitance_to_the_inner_air_conditioner() {
+        let hp_common = || crate::HeatPumpCommonConfig {
+            zone_id: Some(1),
+            cooling_capacity_w: Some(8_000.0),
+            cooling_eir: Some(0.33),
+            enter_water_temp_c: Some(20.0),
+            ..Default::default()
+        };
+        let config_for = |class: &str| {
+            let mut cfg = EquipmentConfig::from_typed(
+                class.to_string(),
+                class.to_string(),
+                crate::HeatPumpCoolerConfig {
+                    common: hp_common(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            cfg.zone_capacitance_kwh_per_k = 2.5;
+            cfg
+        };
+        let env = cooling_env(21.0, 10.0);
+
+        let cfg = config_for("ASHP Cooler");
+        let mut ashp = HpCooler::ashp_cooler(cfg.clone());
+        ashp.init(&cfg, &env).unwrap();
+        let cfg = config_for("GSHP Cooler");
+        let mut gshp = GshpCooler::new(cfg.clone());
+        gshp.init(&cfg, &env).unwrap();
+        let cfg = config_for("WSHP Cooler");
+        let mut wshp = WshpCooler::new(cfg.clone());
+        wshp.init(&cfg, &env).unwrap();
+
+        for (class, capacitance) in [
+            (
+                "ASHP",
+                ashp.inner.core.hvac.config.zone_capacitance_kwh_per_k,
+            ),
+            (
+                "GSHP",
+                gshp.inner.core.hvac.config.zone_capacitance_kwh_per_k,
+            ),
+            (
+                "WSHP",
+                wshp.inner.core.hvac.config.zone_capacitance_kwh_per_k,
+            ),
+        ] {
+            assert_eq!(
+                capacitance, 2.5,
+                "{class} cooler dropped the zone capacitance"
+            );
+        }
     }
 
     /// Zone above cooling setpoint -- cooler must remove heat (negative thermal

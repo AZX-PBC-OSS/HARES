@@ -991,7 +991,7 @@ mod tests {
                 u_factor_w_m2_k: 3.0,
                 h_out_w_m2_k,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         crate::thermal_solver::ThermalSolver::new(model, wiring, window_config, 60.0, env, 22.0)
@@ -1243,7 +1243,7 @@ mod tests {
                 u_factor_w_m2_k: 0.0,
                 h_out_w_m2_k: 5.0,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, env, 20.0).unwrap()
@@ -1470,7 +1470,7 @@ mod tests {
                 u_factor_w_m2_k: 0.0,
                 h_out_w_m2_k: 1.0 / r_film,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         let mut env = window_lwr_env();
@@ -1585,7 +1585,7 @@ mod tests {
                 driving_temp: DrivingTemp::Outdoor,
                 category: BoundaryCategory::Wall,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1635,7 +1635,7 @@ mod tests {
                 surfaces: vec![],
                 scriptf: None,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1698,7 +1698,7 @@ mod tests {
                 driving_temp: DrivingTemp::Ground { depth_m: 2.0 },
                 category: BoundaryCategory::Wall,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1758,7 +1758,7 @@ mod tests {
                 driving_temp: DrivingTemp::Ground { depth_m: 8.0 },
                 category: BoundaryCategory::Wall,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1807,8 +1807,7 @@ mod tests {
             ..Default::default()
         };
         let config = ThermalSolverConfig {
-            indoor_zone_id: ZoneId(1),
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1865,7 +1864,7 @@ mod tests {
                 driving_temp: DrivingTemp::Outdoor,
                 category: BoundaryCategory::Wall,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1931,8 +1930,7 @@ mod tests {
         ];
         for (name_fragment, wiring) in cases {
             let config = ThermalSolverConfig {
-                indoor_zone_id: ZoneId(1),
-                ..Default::default()
+                ..ThermalSolverConfig::new(ZoneId(1))
             };
             let env = window_lwr_env();
             let err = crate::thermal_solver::ThermalSolver::new(
@@ -2005,7 +2003,7 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             exterior_surfaces: vec![surface(10), surface(11)],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =

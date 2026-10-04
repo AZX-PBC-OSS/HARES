@@ -137,7 +137,7 @@ fn ground_temperature_drives_zone() {
 
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let ground_temp = 12.0;
@@ -294,7 +294,7 @@ fn interior_solar_distribution_damps_peak_temp() {
 
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
     let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, init_temp).unwrap();
 
@@ -517,7 +517,7 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
         interior_lwr_zones: vec![lwr_zone],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let env = make_env(20.0, -5.0, 10.0);
@@ -638,7 +638,7 @@ fn kusuda_depth_corrected_ground_temp_used_at_2_4m_minneapolis_january() {
 
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     // ── Minneapolis January 15 environment ──────────────────────────────

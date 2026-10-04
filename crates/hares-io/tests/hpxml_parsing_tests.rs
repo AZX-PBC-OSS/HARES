@@ -2210,6 +2210,17 @@ fn wh_spec_from_vendored_sample(
     sample: &str,
     edit: impl FnOnce(String) -> String,
 ) -> hares_io::EquipmentSpec {
+    let (spec, _) = resolve_vendored_water_heater(sample, edit)
+        .unwrap_or_else(|e| panic!("{sample} equipment should resolve: {e:?}"));
+    spec
+}
+
+/// Parse a vendored OS-HPXML sample, after `edit` rewrites its XML, and
+/// return its water heater spec and the resolution warnings.
+fn resolve_vendored_water_heater(
+    sample: &str,
+    edit: impl FnOnce(String) -> String,
+) -> Result<(hares_io::EquipmentSpec, Vec<hares_types::Warning>), hares_io::hpxml::HpxmlError> {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -2221,23 +2232,103 @@ fn wh_spec_from_vendored_sample(
         .unwrap_or_else(|e| panic!("{sample} fixture should be readable: {e}"));
     // The sample lacks <Latitude>/<Longitude>, required for duct DSE in the
     // HVAC resolution path; inject them as the pool test does.
-    let xml = edit(xml.replace(
-        "<StateCode>CO</StateCode>",
-        "<StateCode>CO</StateCode><Latitude>39.7</Latitude><Longitude>-105.0</Longitude>",
+    let xml = edit(xml.replacen(
+        "</StateCode>",
+        "</StateCode><Latitude>39.7</Latitude><Longitude>-105.0</Longitude>",
+        1,
     ));
     let building = parse_building(&xml).unwrap_or_else(|e| panic!("{sample} should parse: {e:?}"));
+    let mut warnings = Vec::new();
     let specs = resolve_equipment(
         &building,
         &DefaultsStore::empty(),
         &json!({}),
         None,
-        &mut Vec::new(),
-    )
-    .unwrap_or_else(|e| panic!("{sample} equipment should resolve: {e:?}"));
-    specs
+        &mut warnings,
+    )?;
+    let spec = specs
         .into_iter()
         .find(|s| s.name.contains("Water Heater") || s.name == "Indirect Tank")
-        .unwrap_or_else(|| panic!("{sample} should resolve a water heater"))
+        .unwrap_or_else(|| panic!("{sample} should resolve a water heater"));
+    Ok((spec, warnings))
+}
+
+/// Remove the water heater's own `<Location>` from an HPXML document.
+fn without_water_heater_location(xml: String) -> String {
+    let system = xml
+        .find("<WaterHeatingSystem>")
+        .expect("the sample has a water heater");
+    let start = system
+        + xml[system..]
+            .find("<Location>")
+            .expect("the water heater has a location");
+    let end = start + xml[start..].find("</Location>").unwrap() + "</Location>".len();
+    format!("{}{}", &xml[..start], &xml[end..])
+}
+
+/// A water heater with no `<Location>` takes the OS-HPXML v1.12.0 default
+/// (defaults.rb `get_water_heater_location`): by IECC zone, the first of
+/// its location hierarchy the building has surfaces in. The defaulted
+/// location is recorded as a warning naming the unit.
+#[test]
+fn unlocated_water_heater_takes_the_os_hpxml_default_location() {
+    for (sample, climate_zone, expected) in [
+        // 4-8: unconditioned basement, conditioned basement, conditioned space.
+        (
+            "base-foundation-unconditioned-basement.xml",
+            None,
+            "basement - unconditioned",
+        ),
+        ("base.xml", None, "basement - conditioned"),
+        // 1-3: garage, conditioned space.
+        ("base-enclosure-garage.xml", Some("3A"), "garage"),
+        ("base-location-miami-fl.xml", None, "conditioned space"),
+        // No IECC zone: conditioned basement, unconditioned basement,
+        // conditioned space.
+        ("base.xml", Some(""), "basement - conditioned"),
+    ] {
+        let (spec, warnings) = resolve_vendored_water_heater(sample, |xml| {
+            let xml = without_water_heater_location(xml);
+            match climate_zone {
+                None => xml,
+                Some("") => {
+                    let start = xml.find("<ClimateZone>").unwrap();
+                    let end = start + xml[start..].find("</ClimateZone>").unwrap();
+                    format!("{}{}", &xml[..start], &xml[end + "</ClimateZone>".len()..])
+                }
+                Some(zone) => xml.replacen(
+                    "<ClimateZone>5B</ClimateZone>",
+                    &format!("<ClimateZone>{zone}</ClimateZone>"),
+                    1,
+                ),
+            }
+        })
+        .unwrap_or_else(|e| panic!("{sample}: an unlocated water heater must resolve: {e:?}"));
+        assert_eq!(
+            spec.parameters.get("zone_type").and_then(|v| v.as_str()),
+            Some(expected),
+            "{sample} (IECC {climate_zone:?}): defaulted location"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains(expected) && w.message.contains(&spec.name)),
+            "{sample}: the defaulted location must be a warning naming the unit, got {warnings:?}"
+        );
+    }
+}
+
+/// OS-HPXML fails on an IECC zone outside its table; so does HARES.
+#[test]
+fn unlocated_water_heater_rejects_an_unknown_iecc_zone() {
+    resolve_vendored_water_heater("base.xml", |xml| {
+        without_water_heater_location(xml).replacen(
+            "<ClimateZone>5B</ClimateZone>",
+            "<ClimateZone>9Z</ClimateZone>",
+            1,
+        )
+    })
+    .expect_err("an unknown IECC zone must fail the default");
 }
 
 /// The HPWH wall share is OCHRE's partition-wall split, which exists only

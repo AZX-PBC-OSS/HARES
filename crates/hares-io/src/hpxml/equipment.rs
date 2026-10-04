@@ -55,7 +55,7 @@ pub fn resolve_equipment(
     let details = &building.details_xml;
 
     resolve_hvac(building, defaults, &mut specs, warnings)?;
-    resolve_water_heaters(building, defaults, &mut specs, data_patches)?;
+    resolve_water_heaters(building, defaults, &mut specs, data_patches, warnings)?;
     resolve_pv(details, defaults, &mut specs)?;
     resolve_batteries(details, defaults, &mut specs)?;
     resolve_ev(details, defaults, &mut specs)?;

@@ -229,9 +229,8 @@ fn bench_solver(env: &EnvironmentState) -> ThermalSolver {
     };
 
     let config = ThermalSolverConfig {
-        indoor_zone_id: ZONE,
         exterior_surfaces: surfaces,
-        ..Default::default()
+        ..ThermalSolverConfig::new(ZONE)
     };
     // Light infiltration so the semi-implicit coupling path runs every step.
     // Infiltration left empty: the semi-implicit coupling path is exercised

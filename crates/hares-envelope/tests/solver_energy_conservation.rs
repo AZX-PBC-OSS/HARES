@@ -178,7 +178,7 @@ fn test_energy_balance_closure_hvac_solar_100_steps() {
     let mut env = one_zone_env(t_initial, t_outdoor);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver(&env, t_initial, config);
@@ -256,7 +256,7 @@ fn test_energy_conservation_1r1c_no_hvac() {
     let mut env = one_zone_env(t_initial, t_outdoor);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver(&env, t_initial, config);
@@ -368,7 +368,7 @@ fn thermal_balance_terms_close_with_populated_node_capacitances() {
     let env = one_zone_env(t_zone, t_outdoor);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver_with_balance_terms(&env, t_zone, config);

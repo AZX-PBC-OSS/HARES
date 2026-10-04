@@ -466,7 +466,12 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         "inject_schedule_into_specs must wire Refrigerator to a power schedule source"
     );
 
-    let config = equipment_config_from_spec(ref_spec);
+    let mut config = equipment_config_from_spec(ref_spec);
+    // The dwelling's zone map, as assembly injects it: the refrigerator
+    // heats the conditioned zone.
+    let mut zone_map = hares_types::ZoneMap::new();
+    zone_map.insert(hares_types::ZoneRole::Indoor, hares_types::ZoneId(1));
+    config.zone_map = Some(zone_map);
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::REFRIGERATION, "Refrigerator");
     let env = base_env(payload_for_row(&schedule, 0));
     eq.init(&config, &env)

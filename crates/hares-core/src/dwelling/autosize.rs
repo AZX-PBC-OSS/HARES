@@ -1078,10 +1078,7 @@ mod tests {
             node_capacitances: HashMap::new(),
             node_index: HashMap::new(),
         };
-        let config = ThermalSolverConfig {
-            indoor_zone_id: ZONE,
-            ..ThermalSolverConfig::default()
-        };
+        let config = ThermalSolverConfig::new(ZONE);
         ThermalSolver::new(model, wiring, config, DT_S, env, indoor_temp_c)
             .expect("1R1C ThermalSolver construction must succeed")
     }
@@ -1640,7 +1637,6 @@ mod tests {
             node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
-            indoor_zone_id: ZONE,
             window_zone_ids: HashMap::from([(window_surface_id, ZONE)]),
             window_properties: HashMap::from([(
                 window_surface_id,
@@ -1657,7 +1653,7 @@ mod tests {
                     azimuth_deg,
                 },
             )]),
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZONE)
         };
         let thermal = ThermalSolver::new(model, wiring, config, DT_S, env, indoor_temp_c)
             .expect("1R1C ThermalSolver with window must construct");
@@ -2003,10 +1999,7 @@ mod tests {
             node_index: HashMap::new(),
         };
 
-        let config = ThermalSolverConfig {
-            indoor_zone_id: ZONE,
-            ..ThermalSolverConfig::default()
-        };
+        let config = ThermalSolverConfig::new(ZONE);
 
         let thermal = ThermalSolver::new(model, wiring, config, DT_S, env, indoor_temp_c)
             .expect("2-node ThermalSolver must construct");
@@ -2563,10 +2556,7 @@ mod tests {
             node_capacitances: HashMap::new(),
             node_index: HashMap::new(),
         };
-        let config = ThermalSolverConfig {
-            indoor_zone_id: ZONE,
-            ..ThermalSolverConfig::default()
-        };
+        let config = ThermalSolverConfig::new(ZONE);
 
         let env = one_zone_env(20.0, 10.0);
         let thermal = match ThermalSolver::new(model, wiring, config, dt, &env, 20.0) {

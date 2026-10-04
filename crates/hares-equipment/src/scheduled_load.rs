@@ -186,65 +186,45 @@ impl ScheduledLoad {
     /// was configured and the equipment name implies a specific zone role.
     ///
     /// Called once during `init()` after the [`ZoneMap`] has been injected
-    /// into the config by the dwelling. If a matching role has no zone in
-    /// the building (e.g. the building has no garage), the zone stays `None`
-    /// and a diagnostic is emitted.
-    fn resolve_zone_from_map(&mut self, config: &EquipmentConfig) {
-        // Zone already set explicitly — nothing to resolve.
+    /// into the config by the dwelling and the gain fractions are known. A
+    /// load whose heat goes into a zone must resolve one: a typed error
+    /// names the load and the role when the building has no such zone (or
+    /// there is no zone map), instead of dropping its heat. A load that
+    /// gives no heat to a zone needs none.
+    fn resolve_zone_from_map(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
         if self.descriptor.zone.is_some() {
-            return;
+            return Ok(());
         }
-        let Some(zone_map) = &config.zone_map else {
-            return;
-        };
         let name_lower = config.name.to_ascii_lowercase();
-        // EV charging occurs outside the building envelope — no zone assignment.
-        // This mirrors the exclusion in new().
-        if self.descriptor.end_use == EndUse::EV {
-            return;
+        // EV charging and exterior/outdoor loads release their heat outside
+        // the building envelope, matching the exclusions in new().
+        if self.descriptor.end_use == EndUse::EV
+            || name_lower.contains("exterior")
+            || name_lower.contains("outdoor")
+        {
+            return Ok(());
         }
-        // Outdoor/exterior equipment has no zone assignment — its heat gain
-        // goes to the outdoor environment. This matches the exclusion in new().
-        if name_lower.contains("exterior") || name_lower.contains("outdoor") {
-            return;
-        }
-        #[cfg_attr(not(feature = "observe"), allow(unused_variables))]
-        let (resolved, role) = if name_lower.contains("garage") {
-            (zone_map.get(ZoneRole::Garage), ZoneRole::Garage)
+        let role = if name_lower.contains("garage") {
+            ZoneRole::Garage
         } else if name_lower.contains("basement") {
-            (zone_map.get(ZoneRole::Basement), ZoneRole::Basement)
+            ZoneRole::Basement
         } else if name_lower.contains("crawlspace") {
-            (zone_map.get(ZoneRole::Crawlspace), ZoneRole::Crawlspace)
+            ZoneRole::Crawlspace
         } else if name_lower.contains("attic") {
-            (zone_map.get(ZoneRole::Attic), ZoneRole::Attic)
+            ZoneRole::Attic
         } else {
-            // Indoor equipment defaults to the primary conditioned zone.
-            (zone_map.get(ZoneRole::Indoor), ZoneRole::Indoor)
+            ZoneRole::Indoor
         };
-        // Why: clippy `single_match` fires when `observe` feature is off because
-        // the None arm has only cfg-gated tracing calls. The match arms remain
-        // semantically distinct regardless of feature gates.
-        #[allow(clippy::single_match)]
-        match resolved {
-            Some(id) => {
-                self.descriptor.zone = Some(id);
-                #[cfg(feature = "observe")]
-                tracing::debug!(
-                    equipment = %config.name,
-                    zone_role = %role,
-                    zone_id = %id,
-                    "zone resolved via ZoneMap",
-                );
-            }
-            None => {
-                #[cfg(feature = "observe")]
-                tracing::warn!(
-                    equipment = %config.name,
-                    zone_role = %role,
-                    "no zone mapping found for role; equipment will not contribute thermal gains",
-                );
-            }
+        self.descriptor.zone = config.zone_map.as_ref().and_then(|map| map.get(role));
+        let gives_zone_heat = self.sensible_gain_fraction + self.latent_gain_fraction > 0.0;
+        if self.descriptor.zone.is_none() && gives_zone_heat {
+            return Err(HaresError::Equipment(format!(
+                "{}: gives heat to its {role} zone, but the dwelling has no {role} zone \
+                 (no zone_id and no zone map entry)",
+                config.name
+            )));
         }
+        Ok(())
     }
 
     fn init_from_config(
@@ -392,7 +372,7 @@ impl ScheduledLoad {
         // The ZoneMap is populated by the dwelling from HPXML zone configuration
         // and provides stable ZoneRole → ZoneId mappings that do not assume
         // a fixed zone sort order.
-        self.resolve_zone_from_map(config);
+        self.resolve_zone_from_map(config)?;
         self.telemetry = default_telemetry();
         self.core_output = CoreOutput::default();
         self.update_ports();
@@ -2539,6 +2519,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A load that gives heat to a zone must have that zone: garage
+    /// lighting in a building with no garage zone fails init naming the
+    /// load and the missing role, instead of dropping its heat.
+    #[test]
+    fn heat_giving_load_errors_when_its_zone_role_is_missing() {
+        let mut config = base_config_for_zone_test("Garage Lighting", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.5.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(1));
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::LIGHTING,
+            "Garage Lighting",
+        );
+        let err = eq
+            .init(&config, &base_env())
+            .expect_err("garage lighting with gains and no garage zone must fail init");
+        let message = err.to_string();
+        assert!(
+            message.contains("Garage Lighting") && message.contains("Garage"),
+            "the error must name the load and its zone role, got: {message}"
+        );
+    }
+
+    /// With no zone_id and no dwelling zone map a heat-giving load has no
+    /// zone to heat.
+    #[test]
+    fn heat_giving_load_errors_without_a_zone_or_zone_map() {
+        let mut config = base_config_for_zone_test("Refrigerator", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.5.into());
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::REFRIGERATION,
+            "Refrigerator",
+        );
+        eq.init(&config, &base_env())
+            .expect_err("a heat-giving load with no zone must fail init");
+    }
+
+    /// A load that gives no heat to any zone needs none.
+    #[test]
+    fn load_without_zone_gains_needs_no_zone() {
+        let mut config = base_config_for_zone_test("Garage Lighting", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(1));
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::LIGHTING,
+            "Garage Lighting",
+        );
+        eq.init(&config, &base_env()).unwrap();
+        assert_eq!(eq.descriptor().zone, None);
     }
 
     #[test]

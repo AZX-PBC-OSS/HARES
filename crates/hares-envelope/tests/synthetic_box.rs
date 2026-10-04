@@ -152,7 +152,7 @@ fn test_1r1c_exponential_decay() {
     let mut env = one_zone_env(t_initial, t_outdoor, 200.0);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver(&env, t_initial, config, UA, C);
@@ -202,7 +202,7 @@ fn test_1r1c_solar_step_response() {
     let mut env = one_zone_env(t_initial, t_outdoor, 200.0);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver(&env, t_initial, config, UA, C);
@@ -250,7 +250,7 @@ fn test_1r1c_with_moderate_infiltration() {
     let config_inf = ThermalSolverConfig {
         indoor_zone_id: ZONE,
         infiltration: vec![(ZONE, InfiltrationMethod::Ach { ach })],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
     let mut solver_inf = build_1r1c_solver(&env_inf, t_initial, config_inf, UA, C);
 
@@ -258,7 +258,7 @@ fn test_1r1c_with_moderate_infiltration() {
     let mut env_no = one_zone_env(t_initial, t_outdoor, volume_m3);
     let config_no = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
     let mut solver_no = build_1r1c_solver(&env_no, t_initial, config_no, UA, C);
 
@@ -316,7 +316,7 @@ fn test_implicit_stability_extreme_ach() {
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
         infiltration: vec![(ZONE, InfiltrationMethod::Ach { ach })],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver(&env, t_initial, config, UA, c_low);

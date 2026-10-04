@@ -78,6 +78,7 @@ fn build_dwelling_with_base_load(tag: &str) -> (PathBuf, Dwelling) {
     raw.insert("power_schedule_source".to_string(), "constant".into());
     raw.insert("power_constant_kw".to_string(), 1.5.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
+    raw.insert("zone_id".to_string(), 1.0.into());
     let config = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Lighting");
     eq.init(&config, &env).expect("init ScheduledLoad");
@@ -121,6 +122,7 @@ fn prior_electrical_summary_survives_checkpoint_restart() {
     raw.insert("power_schedule_source".to_string(), "constant".into());
     raw.insert("power_constant_kw".to_string(), 1.5.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
+    raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq_b = ScheduledLoad::new(config_b.clone(), EndUse::LIGHTING, "Lighting");
     eq_b.init(&config_b, &env_b).expect("init ScheduledLoad B");
@@ -165,6 +167,7 @@ fn equipment_core_populated_after_checkpoint_restore() {
     raw.insert("power_schedule_source".to_string(), "constant".into());
     raw.insert("power_constant_kw".to_string(), 1.5.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
+    raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq_b = ScheduledLoad::new(config_b.clone(), EndUse::LIGHTING, "Lighting");
     eq_b.init(&config_b, &env_b).expect("init ScheduledLoad B");
@@ -227,6 +230,7 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
     raw2.insert("power_schedule_source".to_string(), "constant".into());
     raw2.insert("power_constant_kw".to_string(), 0.5.into());
     raw2.insert("sensible_gain_fraction".to_string(), 0.3.into());
+    raw2.insert("zone_id".to_string(), 1.0.into());
     let config2 = EquipmentConfig::raw("Plug".to_string(), "ScheduledLoad".to_string(), raw2);
     let mut eq2 = ScheduledLoad::new(config2.clone(), EndUse::PLUG_LOADS, "Plug");
     eq2.init(&config2, &env_a).expect("init Plug");
@@ -258,6 +262,7 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
     raw.insert("power_schedule_source".to_string(), "constant".into());
     raw.insert("power_constant_kw".to_string(), 1.5.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
+    raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq_b = ScheduledLoad::new(config_b.clone(), EndUse::LIGHTING, "Lighting");
     eq_b.init(&config_b, &env_b).expect("init Lighting");
@@ -269,6 +274,7 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
     raw2_b.insert("power_schedule_source".to_string(), "constant".into());
     raw2_b.insert("power_constant_kw".to_string(), 0.5.into());
     raw2_b.insert("sensible_gain_fraction".to_string(), 0.3.into());
+    raw2_b.insert("zone_id".to_string(), 1.0.into());
     let config2_b = EquipmentConfig::raw("Plug".to_string(), "ScheduledLoad".to_string(), raw2_b);
     let mut eq2_b = ScheduledLoad::new(config2_b.clone(), EndUse::PLUG_LOADS, "Plug");
     eq2_b.init(&config2_b, &env_b).expect("init Plug");
@@ -316,6 +322,7 @@ fn first_post_restore_step_produces_valid_equipment_output() {
     raw.insert("power_schedule_source".to_string(), "constant".into());
     raw.insert("power_constant_kw".to_string(), 1.5.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
+    raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq_b = ScheduledLoad::new(config_b.clone(), EndUse::LIGHTING, "Lighting");
     eq_b.init(&config_b, &env_b).expect("init ScheduledLoad B");
@@ -445,6 +452,7 @@ fn equipment_core_restores_ev_soc_after_checkpoint() {
     raw.insert("power_schedule_source".to_string(), "constant".into());
     raw.insert("power_constant_kw".to_string(), 1.5.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
+    raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq_b = ScheduledLoad::new(config_b.clone(), EndUse::LIGHTING, "Lighting");
     eq_b.init(&config_b, &env_b).expect("init ScheduledLoad B");

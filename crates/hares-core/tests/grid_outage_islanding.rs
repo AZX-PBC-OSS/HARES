@@ -94,6 +94,7 @@ fn build_dwelling_with_base_load(tag: &str) -> Dwelling {
     raw.insert("power_schedule_source".to_string(), "constant".into());
     raw.insert("power_constant_kw".to_string(), 1.5.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
+    raw.insert("zone_id".to_string(), 1.0.into());
     let config = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Lighting");
     eq.init(&config, &env).expect("init ScheduledLoad");

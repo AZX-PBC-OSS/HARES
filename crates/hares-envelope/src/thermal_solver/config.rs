@@ -752,10 +752,13 @@ impl ThermalSolverConfig {
     }
 }
 
-impl Default for ThermalSolverConfig {
-    fn default() -> Self {
+impl ThermalSolverConfig {
+    /// A solver configuration around `indoor_zone_id`, the conditioned
+    /// zone, with no surfaces, infiltration or ventilation registered yet.
+    #[must_use]
+    pub fn new(indoor_zone_id: ZoneId) -> Self {
         Self {
-            indoor_zone_id: ZoneId(1),
+            indoor_zone_id,
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
             exterior_surfaces: Vec::new(),
@@ -1127,7 +1130,7 @@ mod tests {
                 valid_exterior_surface(1, 0, 1),
                 valid_exterior_surface(2, 2, 3),
             ],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         assert!(config.validate(4, 6).is_ok());
     }
@@ -1139,7 +1142,7 @@ mod tests {
                 valid_exterior_surface(7, 0, 1),
                 valid_exterior_surface(7, 2, 3),
             ],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let err = config.validate(4, 6).unwrap_err();
         assert!(
@@ -1160,7 +1163,7 @@ mod tests {
                 valid_exterior_surface(1, 0, 2),
                 valid_exterior_surface(2, 3, 2),
             ],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         assert!(
             dup_input.validate(6, 6).is_ok(),
@@ -1173,7 +1176,7 @@ mod tests {
                 valid_exterior_surface(1, 4, 1),
                 valid_exterior_surface(2, 4, 3),
             ],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         assert!(
             dup_state.validate(6, 6).is_ok(),
@@ -1186,7 +1189,7 @@ mod tests {
     fn validate_rejects_out_of_range_indices_with_dimensions_named() {
         let config = ThermalSolverConfig {
             exterior_surfaces: vec![valid_exterior_surface(9, 0, 5)],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let err = config.validate(4, 4).unwrap_err();
         assert!(
@@ -1201,7 +1204,7 @@ mod tests {
         surface.rad_frac = 1.5;
         let config = ThermalSolverConfig {
             exterior_surfaces: vec![surface],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         assert!(config.validate(4, 4).unwrap_err().contains("rad_frac"));
 
@@ -1209,7 +1212,7 @@ mod tests {
         surface.area_m2 = -1.0;
         let config = ThermalSolverConfig {
             exterior_surfaces: vec![surface],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         assert!(config.validate(4, 4).unwrap_err().contains("area"));
 
@@ -1217,7 +1220,7 @@ mod tests {
         surface.rad_res_k_w = f64::NAN;
         let config = ThermalSolverConfig {
             exterior_surfaces: vec![surface],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         assert!(config.validate(4, 4).unwrap_err().contains("rad_res_k_w"));
     }

@@ -7334,10 +7334,7 @@ mod tests {
             outdoor_temp_input_indices: vec![0],
             ..Default::default()
         };
-        let config = ThermalSolverConfig {
-            indoor_zone_id: ZoneId(1),
-            ..Default::default()
-        };
+        let config = ThermalSolverConfig::new(ZoneId(1));
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).expect("solver");
         solver.refresh_solar_slot_map(&env);
@@ -7391,10 +7388,7 @@ mod tests {
             outdoor_temp_input_indices: vec![0],
             ..Default::default()
         };
-        let config = ThermalSolverConfig {
-            indoor_zone_id: ZoneId(1),
-            ..Default::default()
-        };
+        let config = ThermalSolverConfig::new(ZoneId(1));
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).expect("solver");
 
@@ -7467,7 +7461,7 @@ mod tests {
                 // Non-zero ACH keeps a coupling entry alive on every step, so
                 // the coupled solve runs with the divisor this checks.
                 infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.5 })],
-                ..Default::default()
+                ..ThermalSolverConfig::new(ZoneId(1))
             };
             let env = env_for_temp(20.0, 10.0);
             ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0)
@@ -7564,7 +7558,7 @@ mod tests {
                     u_factor_w_m2_k: 0.0,
                     h_out_w_m2_k: 0.0,
                 }],
-                ..Default::default()
+                ..ThermalSolverConfig::new(ZoneId(1))
             };
             let env = env_for_temp(20.0, 10.0);
             ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0)

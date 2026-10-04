@@ -2585,7 +2585,12 @@ fn build_from_blueprint_inner(
         );
         merged_cfg.zone_map = Some(zone_map.clone());
         merged_cfg.rng_seed = Some(sub_rng.get_seed());
-        if let Some(zone_id) = merged_cfg.zone_id()
+        // The served zone as HVAC resolves it: the config's zone_id, else
+        // the conditioned zone. Only HVAC's equivalent battery model reads
+        // the capacitance.
+        if let Some(zone_id) = merged_cfg
+            .zone_id()
+            .or_else(|| zone_map.get(ZoneRole::Indoor))
             && let Some(&cap) = zone_cap_kwh_per_k.get(&zone_id)
         {
             merged_cfg.zone_capacitance_kwh_per_k = cap;
@@ -9915,6 +9920,7 @@ fn cfg_gated_helper() {
         raw.insert("power_schedule_source".to_string(), "constant".into());
         raw.insert("power_constant_kw".to_string(), 1.5.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
+        raw.insert("zone_id".to_string(), 1.0.into());
         let config = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
         let mut load = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Lighting");
         load.init(&config, &env).expect("init ScheduledLoad");

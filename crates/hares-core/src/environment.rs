@@ -79,6 +79,8 @@ pub enum EnvironmentManagerError {
     },
     #[error(transparent)]
     MultipleConditionedZones(#[from] hares_io::hpxml::MultipleConditionedZones),
+    #[error("the building has no zones to simulate")]
+    NoZones,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1148,12 +1150,7 @@ fn initial_zones(
         setpoint_deadband_c,
     );
     if building.zones.is_empty() {
-        return Ok(vec![ZoneState {
-            id: ZoneId(1),
-            temperature_c: default_temp,
-            humidity_ratio: 0.008,
-            volume_m3: DEFAULT_ZONE_VOLUME_M3,
-        }]);
+        return Err(EnvironmentManagerError::NoZones);
     }
 
     let zones: Vec<ZoneState> = building
@@ -1796,6 +1793,28 @@ mod tests {
         .expect_err("two conditioned zones must fail construction");
         assert!(
             err.to_string().contains("conditioned"),
+            "the error must say why, got: {err}"
+        );
+    }
+
+    /// A building with no zones has nothing to simulate: construction fails
+    /// instead of inventing a zone.
+    #[test]
+    fn manager_rejects_a_building_with_no_zones() {
+        let mut b = building(Some(21.0));
+        b.zones.clear();
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let err = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &b,
+            StdDuration::from_secs(3600),
+            start,
+            None,
+        )
+        .expect_err("a building with no zones must fail construction");
+        assert!(
+            err.to_string().contains("no zones"),
             "the error must say why, got: {err}"
         );
     }

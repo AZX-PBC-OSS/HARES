@@ -921,9 +921,8 @@ pub(crate) fn build_default_solvers(
     let mut wiring = StateSpaceWiring::default();
     let indoor = indoor_zone(building, env)?;
     let mut thermal_cfg = ThermalSolverConfig {
-        indoor_zone_id: indoor.id,
         interior_lwr_method,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(indoor.id)
     };
     for (zone_idx, zone) in env.zones.iter().enumerate() {
         wiring

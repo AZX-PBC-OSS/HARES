@@ -440,7 +440,7 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_env(5.0, 3.0, 21.0, volume_m3);
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
@@ -491,7 +491,7 @@ mod tests {
                     n_i,
                 },
             )],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         // wind_speed = 0.0 so wind term is zero
         let env = make_env(t_out, 0.0, t_zone, 300.0);
@@ -539,7 +539,7 @@ mod tests {
                     wind_coeff,
                 },
             )],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_env(t_out, wind_m_s, t_zone, 300.0);
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
@@ -588,7 +588,7 @@ mod tests {
                     wind_coeff,
                 },
             )],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_env(t_out, 0.0, t_zone, 300.0);
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
@@ -629,7 +629,7 @@ mod tests {
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
             supply_duct_leakage_m3_s: supply,
             return_duct_leakage_m3_s: ret,
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_env(5.0, 3.0, 21.0, volume_m3);
 
@@ -664,7 +664,7 @@ mod tests {
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
             supply_duct_leakage_m3_s: 0.02,
             return_duct_leakage_m3_s: 0.01,
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_env(5.0, 3.0, 21.0, volume_m3);
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
@@ -716,7 +716,7 @@ mod tests {
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
                 opening_azimuth_deg: NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
             }),
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         // zone=26°C > t_base=22.778°C > outdoor=15°C; w_out=0.005 < 0.0115
         let mut env = make_env(t_out, wind_m_s, t_zone, volume_m3);
@@ -764,7 +764,7 @@ mod tests {
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
                 opening_azimuth_deg: NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
             }),
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         // zone=18°C < outdoor=20°C → gating condition fails
         let env = make_env(20.0, 2.0, 18.0, 300.0);
@@ -804,7 +804,7 @@ mod tests {
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
                 opening_azimuth_deg: NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
             }),
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_two_zone_env(15.0, 2.0, 26.0, 26.0, 300.0, 250.0);
 
@@ -854,7 +854,7 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         let mut env = make_env(t_out, 0.0, t_zone, volume_m3);
@@ -912,7 +912,7 @@ mod tests {
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
             },
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         // Cold outdoor → large ΔT to produce a measurable sensible gain.
@@ -984,7 +984,7 @@ mod tests {
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
             },
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         // Cold outdoor → large ΔT for a measurable load.
@@ -1042,7 +1042,7 @@ mod tests {
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
             },
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         let env = make_env(-10.0, 0.0, 20.0, 200.0);
@@ -1106,7 +1106,7 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         // Sea-level case

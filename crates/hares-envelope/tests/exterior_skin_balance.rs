@@ -275,7 +275,7 @@ fn run_to_steady_state(
             u_factor_w_m2_k: 0.0,
             h_out_w_m2_k: 1.0 / R_FILM_EXTERIOR_M2_K_W,
         }],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver =
@@ -428,7 +428,7 @@ fn skin_solve_is_timestep_independent_across_dt() {
                 u_factor_w_m2_k: 0.0,
                 h_out_w_m2_k: 1.0 / R_FILM_EXTERIOR_M2_K_W,
             }],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         let mut solver =
@@ -690,7 +690,7 @@ fn fallback_r_exterior_wall_steady_state_matches_exact_skin_balance() {
             u_factor_w_m2_k: 0.0,
             h_out_w_m2_k: 1.0 / R_FILM_EXTERIOR_M2_K_W,
         }],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver =
