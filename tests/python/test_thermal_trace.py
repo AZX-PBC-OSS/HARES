@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
 HARES_DEFAULTS = ROOT / "defaults"
+VENDOR_OCHRE = ROOT / "vendors" / "OCHRE"
 
 HPXML = str(EXAMPLES / "BEopt_example.xml")
 SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")
@@ -228,7 +229,8 @@ def hares_48h() -> "pl.DataFrame":
 @pytest.mark.slow
 @pytest.mark.xfail(
     reason="Solar gain model diverges ~35% from OCHRE -- needs IAM/SHGC calibration",
-    strict=False,
+    raises=AssertionError,
+    strict=True,
 )
 def test_48h_thermal_trace(ochre_48h: "pd.DataFrame", hares_48h: "pl.DataFrame") -> None:
     """Per-step zone temperature and cumulative HVAC energy parity over 48 hours."""
@@ -323,7 +325,8 @@ def test_48h_thermal_trace(ochre_48h: "pd.DataFrame", hares_48h: "pl.DataFrame")
 @pytest.mark.slow
 @pytest.mark.xfail(
     reason="Zone temp diverges ~0.5-1°C overnight -- HVAC cycling and solar gain differences propagate",
-    strict=False,
+    raises=AssertionError,
+    strict=True,
 )
 def test_overnight_losses(ochre_48h: "pd.DataFrame", hares_48h: "pl.DataFrame") -> None:
     """Nighttime conduction + infiltration + LWR losses: 18:00 to 08:00 (840 steps).
@@ -374,7 +377,8 @@ def test_overnight_losses(ochre_48h: "pd.DataFrame", hares_48h: "pl.DataFrame") 
 @pytest.mark.slow
 @pytest.mark.xfail(
     reason="Window solar gain ~35% higher than OCHRE -- needs IAM/SHGC/area calibration",
-    strict=False,
+    raises=AssertionError,
+    strict=True,
 )
 def test_solar_peak(ochre_48h: "pd.DataFrame", hares_48h: "pl.DataFrame") -> None:
     """Solar peak window: 10:00–16:00 on day 1 (600–960 steps).
