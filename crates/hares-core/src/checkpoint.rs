@@ -328,7 +328,7 @@ mod tests {
 
     /// The checkpoint schema `CHECKPOINT_VERSION` 9 reads, as the SHA-256
     /// of [`type_schema`]`::<DwellingCheckpoint>()`.
-    const PINNED_VERSION: u32 = 9;
+    const PINNED_VERSION: u32 = 10;
     const PINNED_SCHEMA_SHA256: &str =
         "ca5aa5e7c6535d6c8decfedd4d5fa4822a4d6ca7c2c3238a2fbad150aedca26a";
 
