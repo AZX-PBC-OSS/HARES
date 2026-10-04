@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use hares_types::rng::RngStream;
 use serde::{Deserialize, Serialize};
 
 mod finite_walk;
@@ -273,13 +274,11 @@ pub struct EquipmentConfig {
     /// `None` for synthetic or test configs that do not have a building envelope.
     #[serde(skip, default)]
     pub zone_map: Option<hares_types::ZoneMap>,
-    /// Pre-derived RNG seed injected by the dwelling's hierarchical RNG
-    /// system at construction time.  When `Some`, stochastic equipment
-    /// uses this seed directly instead of hashing `master_seed` /
-    /// `building_id` / `name`.  Stream partitioning guarantees that sibling
-    /// equipment streams are non-overlapping and deterministic.
+    /// Random stream injected by the dwelling before `init()`. When `Some`,
+    /// stochastic equipment draws from it instead of deriving a stream from
+    /// `master_seed` / `building_id` / `name`.
     #[serde(skip, default)]
-    pub rng_seed: Option<[u8; 32]>,
+    pub rng_stream: Option<RngStream>,
     /// Zone thermal capacitance [kWh/K] for the equivalent battery model.
     /// Populated by the dwelling from envelope solver zone capacitances at
     /// construction time; 0.0 means EBM is disabled for this equipment.
@@ -299,7 +298,7 @@ impl EquipmentConfig {
             setpoints_reconciled: None,
             zip: None,
             zone_map: None,
-            rng_seed: None,
+            rng_stream: None,
             zone_capacitance_kwh_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
@@ -315,11 +314,9 @@ impl EquipmentConfig {
         self
     }
 
-    /// Attach a pre-derived RNG seed for stochastic equipment that should
-    /// use the dwelling's hierarchical RNG stream partitioning instead of
-    /// the legacy name-based hash.
-    pub fn with_rng_seed(mut self, seed: [u8; 32]) -> Self {
-        self.rng_seed = Some(seed);
+    /// Attach the random stream stochastic equipment draws from.
+    pub fn with_rng_stream(mut self, stream: RngStream) -> Self {
+        self.rng_stream = Some(stream);
         self
     }
 
@@ -503,7 +500,7 @@ impl EquipmentConfig {
             setpoints_reconciled: None,
             zip: None,
             zone_map: None,
-            rng_seed: None,
+            rng_stream: None,
             zone_capacitance_kwh_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
@@ -520,7 +517,7 @@ impl EquipmentConfig {
             setpoints_reconciled: None,
             zip: None,
             zone_map: None,
-            rng_seed: None,
+            rng_stream: None,
             zone_capacitance_kwh_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),

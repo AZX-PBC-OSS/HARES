@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use chrono::Datelike;
 
+use hares_types::rng::{RngStream, dwelling_seed};
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
@@ -12,7 +13,7 @@ use hares_types::{
     HeatTransferDirection, OperatingMode, PortContribution, PortDeclaration, PortSlots,
     ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
 };
-use rand::{RngExt, SeedableRng};
+use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,12 @@ use crate::schedule_helpers::{
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 use hares_types::zip::{ResolvedZip, ZipLoad};
+
+/// Format version of `EventBasedLoadState` and `WetApplianceState`.
+const EVENT_LOAD_CHECKPOINT_VERSION: u32 = 2;
+/// ChaCha8 words consumed by one `f64` start draw.
+const WORDS_PER_DRAW: u128 = 2;
+
 const KEY_BUILDING_ID: &str = "building_id";
 const KEY_MASTER_SEED: &str = "master_seed";
 const KEY_N_UNITS: &str = "n_units";
@@ -166,7 +173,7 @@ struct EventBasedLoadState {
     remaining_phase_s: f64,
     load_fraction: f64,
     forced_mode: Option<ForcedMode>,
-    rng_seed: [u8; 32],
+    rng_stream: RngStream,
     rng_draws: u64,
     event_window_source_state: ScheduleSourceState,
     event_probability_source_state: ScheduleSourceState,
@@ -183,7 +190,7 @@ struct WetApplianceState {
     load_fraction: f64,
     forced_mode: Option<ForcedMode>,
     hot_water_draw_rate_kg_s: f64,
-    rng_seed: [u8; 32],
+    rng_stream: RngStream,
     rng_draws: u64,
     event_window_source_state: ScheduleSourceState,
     event_probability_source_state: ScheduleSourceState,
@@ -237,7 +244,7 @@ pub struct EventBasedLoad {
     power_setpoint_override: Option<f64>,
     delay_remaining_s: f64,
 
-    rng_seed: [u8; 32],
+    rng_stream: RngStream,
     rng_draws: u64,
     rng: ChaCha8Rng,
 
@@ -285,7 +292,7 @@ pub struct WetAppliance {
 
     hot_water_draw_rate_kg_s: f64,
 
-    rng_seed: [u8; 32],
+    rng_stream: RngStream,
     rng_draws: u64,
     rng: ChaCha8Rng,
 
@@ -326,7 +333,7 @@ impl EventBasedLoad {
             zone_type: None,
         };
         let ports = ports_for_zone(descriptor.zone);
-        let rng_seed = derive_rng_seed(&config);
+        let rng_stream = derive_rng_stream(&config);
         Self {
             descriptor,
             ports,
@@ -347,9 +354,9 @@ impl EventBasedLoad {
             forced_mode: None,
             power_setpoint_override: None,
             delay_remaining_s: 0.0,
-            rng_seed,
+            rng_stream,
             rng_draws: 0,
-            rng: ChaCha8Rng::from_seed(rng_seed),
+            rng: rng_stream.rng_at(0),
             extracted_events: Vec::new(),
             event_cursor: 0,
             current_step: 0,
@@ -558,6 +565,10 @@ impl EventBasedLoad {
 }
 
 impl Equipment for EventBasedLoad {
+    fn checkpoint_version() -> u32 {
+        EVENT_LOAD_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -691,9 +702,9 @@ impl Equipment for EventBasedLoad {
             self.ports.push(PortDeclaration::fuel());
         }
 
-        self.rng_seed = derive_rng_seed(config);
+        self.rng_stream = derive_rng_stream(config);
         self.rng_draws = 0;
-        self.rng = ChaCha8Rng::from_seed(self.rng_seed);
+        self.rng = self.rng_stream.rng_at(0);
 
         // If a kW time series was provided, pre-extract events for deterministic replay.
         if let Some(kw_series) = config.get_f64_array(KEY_EVENT_POWER_KW_SERIES) {
@@ -814,7 +825,7 @@ impl Equipment for EventBasedLoad {
                 remaining_phase_s: self.remaining_phase_s,
                 load_fraction: self.load_fraction,
                 forced_mode: self.forced_mode,
-                rng_seed: self.rng_seed,
+                rng_stream: self.rng_stream,
                 rng_draws: self.rng_draws,
                 event_window_source_state: capture_schedule_source_state(&self.event_window_source),
                 event_probability_source_state: capture_schedule_source_state(
@@ -841,13 +852,14 @@ impl Equipment for EventBasedLoad {
         self.load_fraction = decoded.load_fraction;
         self.forced_mode = decoded.forced_mode;
         self.delay_remaining_s = decoded.delay_remaining_s;
-        self.rng_seed = decoded.rng_seed;
+        self.rng_stream = decoded.rng_stream;
         self.rng_draws = decoded.rng_draws;
         self.event_cursor = decoded.event_cursor;
         self.current_step = decoded.current_step;
 
-        self.rng = ChaCha8Rng::from_seed(self.rng_seed);
-        self.rng.set_word_pos((self.rng_draws as u128) * 2);
+        self.rng = self
+            .rng_stream
+            .rng_at(u128::from(self.rng_draws) * WORDS_PER_DRAW);
         restore_schedule_source_state(
             &mut self.event_window_source,
             &decoded.event_window_source_state,
@@ -963,7 +975,7 @@ impl WetAppliance {
             zone_type: None,
         };
         let ports = ports_for_zone(descriptor.zone);
-        let rng_seed = derive_rng_seed(&config);
+        let rng_stream = derive_rng_stream(&config);
         Self {
             descriptor,
             ports,
@@ -989,9 +1001,9 @@ impl WetAppliance {
             forced_mode: None,
             delay_remaining_s: 0.0,
             hot_water_draw_rate_kg_s: 0.0,
-            rng_seed,
+            rng_stream,
             rng_draws: 0,
-            rng: ChaCha8Rng::from_seed(rng_seed),
+            rng: rng_stream.rng_at(0),
             extracted_events: Vec::new(),
             event_cursor: 0,
             current_step: 0,
@@ -1240,6 +1252,10 @@ impl WetAppliance {
 }
 
 impl Equipment for WetAppliance {
+    fn checkpoint_version() -> u32 {
+        EVENT_LOAD_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -1417,9 +1433,9 @@ impl Equipment for WetAppliance {
         }
         self.core_output = CoreOutput::default();
 
-        self.rng_seed = derive_rng_seed(config);
+        self.rng_stream = derive_rng_stream(config);
         self.rng_draws = 0;
-        self.rng = ChaCha8Rng::from_seed(self.rng_seed);
+        self.rng = self.rng_stream.rng_at(0);
 
         // If a kW time series was provided, pre-extract events for deterministic replay.
         if let Some(kw_series) = config.get_f64_array(KEY_EVENT_POWER_KW_SERIES) {
@@ -1538,7 +1554,7 @@ impl Equipment for WetAppliance {
                 load_fraction: self.load_fraction,
                 forced_mode: self.forced_mode,
                 hot_water_draw_rate_kg_s: self.hot_water_draw_rate_kg_s,
-                rng_seed: self.rng_seed,
+                rng_stream: self.rng_stream,
                 rng_draws: self.rng_draws,
                 event_window_source_state: capture_schedule_source_state(&self.event_window_source),
                 event_probability_source_state: capture_schedule_source_state(
@@ -1588,11 +1604,12 @@ impl Equipment for WetAppliance {
             self.ports.push(PortDeclaration::fuel());
         }
 
-        self.rng_seed = decoded.rng_seed;
+        self.rng_stream = decoded.rng_stream;
         self.rng_draws = decoded.rng_draws;
 
-        self.rng = ChaCha8Rng::from_seed(self.rng_seed);
-        self.rng.set_word_pos((self.rng_draws as u128) * 2);
+        self.rng = self
+            .rng_stream
+            .rng_at(u128::from(self.rng_draws) * WORDS_PER_DRAW);
         restore_schedule_source_state(
             &mut self.event_window_source,
             &decoded.event_window_source_state,
@@ -1903,36 +1920,16 @@ fn parse_positive(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f
     Ok(Some(value))
 }
 
-fn derive_rng_seed(config: &EquipmentConfig) -> [u8; 32] {
-    // Pre-derived seed from the dwelling's hierarchical RNG stream
-    // partitioning — preferred path.  The dwelling injects a distinct seed
-    // per equipment via `EquipmentConfig.with_rng_seed()` before `init()`.
-    if let Some(seed) = config.rng_seed {
-        return seed;
+/// The dwelling injects each load's stream before `init()`. A load built
+/// outside a dwelling derives the same stream a dwelling with its
+/// `master_seed` and `building_id` would give it.
+fn derive_rng_stream(config: &EquipmentConfig) -> RngStream {
+    if let Some(stream) = config.rng_stream {
+        return stream;
     }
-
-    // Legacy path for callers that do not use the hierarchical RNG system
-    // (e.g. standalone tests, synthetic configs).  Derives a deterministic
-    // per-equipment seed from master_seed, building_id, and the equipment
-    // name so sibling loads in one dwelling (and identical loads across
-    // dwellings) draw distinct but reproducible event streams.
     let master_seed = config.get_f64(KEY_MASTER_SEED).unwrap_or_default() as u64;
     let building_id = config.get_f64(KEY_BUILDING_ID).unwrap_or_default() as i64;
-
-    let name_hash = {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in config.name.as_bytes() {
-            h ^= *byte as u64;
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-        h
-    };
-
-    let mut seed = [0_u8; 32];
-    seed[0..8].copy_from_slice(&master_seed.to_le_bytes());
-    seed[8..16].copy_from_slice(&building_id.to_le_bytes());
-    seed[16..24].copy_from_slice(&name_hash.to_le_bytes());
-    seed
+    RngStream::event_load(dwelling_seed(master_seed, building_id), &config.name)
 }
 
 fn mode_to_forced(mode: OperatingMode) -> ForcedMode {
@@ -2082,7 +2079,8 @@ mod tests {
     };
 
     use super::{
-        EventBasedLoad, ResolvedZip, WetAppliance, ZipLoad, map_ochre_pdf_to_cycle_schedule,
+        EventBasedLoad, KEY_BUILDING_ID, KEY_MASTER_SEED, ResolvedZip, RngStream, WetAppliance,
+        ZipLoad, dwelling_seed, map_ochre_pdf_to_cycle_schedule,
     };
 
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
@@ -2631,53 +2629,47 @@ mod tests {
         let mut eq_b = EventBasedLoad::new(config_b.clone());
         eq_b.init(&config_b, &env).unwrap();
 
-        // The seeds should differ because equipment names differ
         assert_ne!(
-            eq_a.rng_seed, eq_b.rng_seed,
-            "Different equipment names must produce different RNG seeds"
+            eq_a.rng_stream, eq_b.rng_stream,
+            "Different equipment names must produce different RNG streams"
         );
     }
 
     #[test]
-    fn derive_rng_seed_uses_injected_seed_when_present() {
+    fn derive_rng_stream_uses_injected_stream_when_present() {
         let mut cfg = event_config("Dishwasher", "EventBasedLoad");
-        let injected = [0xABu8; 32];
-        cfg.rng_seed = Some(injected);
-        let result = super::derive_rng_seed(&cfg);
+        let injected = RngStream {
+            seed: [0xAB; 32],
+            stream: 7,
+        };
+        cfg.rng_stream = Some(injected);
+        assert_eq!(super::derive_rng_stream(&cfg), injected);
+    }
+
+    #[test]
+    fn derive_rng_stream_without_injection_matches_the_dwelling_stream() {
+        let cfg = event_config("Dishwasher", "EventBasedLoad");
+        let master_seed = cfg.get_f64(KEY_MASTER_SEED).expect("master_seed") as u64;
+        let building_id = cfg.get_f64(KEY_BUILDING_ID).expect("building_id") as i64;
         assert_eq!(
-            result, injected,
-            "derive_rng_seed must return the injected seed when config.rng_seed is Some"
+            super::derive_rng_stream(&cfg),
+            RngStream::event_load(dwelling_seed(master_seed, building_id), "Dishwasher"),
         );
     }
 
     #[test]
-    fn derive_rng_seed_falls_back_to_fnv1a_when_no_injected_seed() {
-        let env = base_env();
-        let config = event_config("Dishwasher", "EventBasedLoad");
-        let mut eq_a = EventBasedLoad::new(config.clone());
-        eq_a.init(&config, &env).unwrap();
-
-        let mut eq_b = EventBasedLoad::new(config.clone());
-        eq_b.init(&config, &env).unwrap();
-
-        assert_eq!(
-            eq_a.rng_seed, eq_b.rng_seed,
-            "Same config without rng_seed should produce identical seeds via FNV-1a fallback"
-        );
-    }
-
-    #[test]
-    fn injected_seed_survives_init_and_is_used_by_equipment() {
+    fn injected_stream_survives_init_and_is_used_by_equipment() {
         let env = base_env();
         let mut cfg = event_config("Dishwasher", "EventBasedLoad");
-        let injected = [0x42u8; 32];
-        cfg.rng_seed = Some(injected);
+        let injected = RngStream {
+            seed: [0x42; 32],
+            stream: 9,
+        };
+        cfg.rng_stream = Some(injected);
         let mut eq = EventBasedLoad::new(cfg.clone());
         eq.init(&cfg, &env).unwrap();
-        assert_eq!(
-            eq.rng_seed, injected,
-            "equipment must use injected seed after init, not the legacy FNV-1a fallback"
-        );
+        assert_eq!(eq.rng_stream, injected);
+        assert_eq!(eq.rng.get_stream(), 9);
     }
 
     #[test]
@@ -2692,8 +2684,8 @@ mod tests {
         eq_b.init(&config_b, &env).unwrap();
 
         assert_eq!(
-            eq_a.rng_seed, eq_b.rng_seed,
-            "Same name + same config should produce identical seeds"
+            eq_a.rng_stream, eq_b.rng_stream,
+            "Same name + same config should produce identical streams"
         );
     }
 
@@ -2716,7 +2708,7 @@ mod tests {
             load_fraction: 1.0,
             forced_mode: None,
             hot_water_draw_rate_kg_s: 0.0,
-            rng_seed: eq.rng_seed,
+            rng_stream: eq.rng_stream,
             rng_draws: 0,
             event_window_source_state: super::ScheduleSourceState::Stateless,
             event_probability_source_state: super::ScheduleSourceState::Stateless,
@@ -2830,7 +2822,7 @@ mod tests {
             load_fraction: 1.0,
             forced_mode: None,
             hot_water_draw_rate_kg_s: 0.0,
-            rng_seed: eq.rng_seed,
+            rng_stream: eq.rng_stream,
             rng_draws: 0,
             event_window_source_state: super::ScheduleSourceState::Stateless,
             event_probability_source_state: super::ScheduleSourceState::Stateless,

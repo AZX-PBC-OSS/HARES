@@ -1855,8 +1855,8 @@ mod tests {
     use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
-        BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, ExteriorSurfaceInfo,
-        FilmCoefficientModel, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
+        BoundaryCategory, DrivingTemp, ExteriorSurfaceInfo, FilmCoefficientModel,
+        InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
         InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
         NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
         ThermalSolverError, WindowSolarProperties,
@@ -6676,7 +6676,7 @@ mod tests {
             return_duct_leakage_m3_s: 0.0,
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
-            boundary_diagnostics: vec![BoundaryDiagnosticInfo::RCNode {
+            boundary_diagnostics: vec![crate::thermal_solver::BoundaryDiagnosticInfo::RCNode {
                 inner_state_index: 1, // wall node
                 area_m2,
                 tilt_deg,

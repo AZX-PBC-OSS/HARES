@@ -17,22 +17,16 @@ pub const RNG_STREAM_DWELLING: u64 = 0;
 /// Stream range for EV driver actors.  The per-actor stream is
 /// `RNG_STREAM_EV_DRIVER_BASE + actor_index`.
 pub const RNG_STREAM_EV_DRIVER_BASE: u64 = 1;
-/// Stream range for event-based load equipment (EventBasedLoad,
-/// WetAppliance).  The per-equipment stream is
-/// `RNG_STREAM_EVENT_LOAD_BASE + equipment_index`.
-pub const RNG_STREAM_EVENT_LOAD_BASE: u64 = 1000;
+// Event-based load equipment (EventBasedLoad, WetAppliance) draws from
+// `hares_types::rng::RngStream::event_load`: a stream keyed by the load's
+// name with the top bit set, disjoint from the indexed streams above.
 
 /// Derives a deterministic per-dwelling RNG from a master seed and building ID.
 ///
-/// Seed construction: bytes 0..8 are `master_seed` (little-endian), bytes 8..16
-/// are `bldg_id` (little-endian, two's-complement for negative IDs), and
-/// remaining bytes are zero. This guarantees isolation: adding or removing
+/// The key is [`hares_types::rng::dwelling_seed`], so adding or removing
 /// buildings does not affect any other building's RNG stream.
 pub fn derive_dwelling_rng(master_seed: u64, bldg_id: i64) -> ChaCha8Rng {
-    let mut seed = [0u8; 32];
-    seed[..8].copy_from_slice(&master_seed.to_le_bytes());
-    seed[8..16].copy_from_slice(&bldg_id.to_le_bytes());
-    ChaCha8Rng::from_seed(seed)
+    ChaCha8Rng::from_seed(hares_types::rng::dwelling_seed(master_seed, bldg_id))
 }
 
 /// Derives an independent sub-RNG from a parent RNG by partitioning

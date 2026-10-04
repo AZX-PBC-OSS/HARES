@@ -66,6 +66,7 @@ use hares_physics::constants::{
 use hares_physics::pv_sizing::RoofInfo;
 use hares_physics::units::power_w_to_kw;
 use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
+use hares_types::rng::RngStream;
 use hares_types::{
     ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, CustomAccumulator, DomainSolver,
     ElectricalSummary, EndUse, EnvironmentState, EquipmentId, ExecutionStage, FluidAccumulator,
@@ -92,9 +93,7 @@ use crate::health::{ActorTiming, ActorTimings};
 use crate::health::{RunHealth, WarmupOutcome, WarmupResiduals};
 use crate::invariants::InvariantChecker;
 use crate::invariants::check_basement_lighting_foundation;
-use crate::rng::{
-    RNG_STREAM_EV_DRIVER_BASE, RNG_STREAM_EVENT_LOAD_BASE, advance_dwelling_rng, derive_sub_rng,
-};
+use crate::rng::{RNG_STREAM_EV_DRIVER_BASE, advance_dwelling_rng, derive_sub_rng};
 use crate::scheduler::{ActorSlot, ExecutionPhase, StepScheduler};
 use crate::telemetry::DwellingTelemetry;
 #[cfg_attr(not(test), allow(unused_imports))]
@@ -153,10 +152,8 @@ const PV_RE_EVAL_MIN_STEP_SECS: f64 = 300.0;
 fn create_equipment_from_spec(
     registry: &EquipmentRegistry,
     spec: &hares_io::EquipmentSpec,
-    rng_seed: Option<[u8; 32]>,
 ) -> Result<Box<dyn Equipment>> {
-    let mut base_cfg = equipment_config_from_spec(spec);
-    base_cfg.rng_seed = rng_seed;
+    let base_cfg = equipment_config_from_spec(spec);
     let name = base_cfg.name.clone();
     let ochre_class = base_cfg.ochre_class.clone();
     registry.create(&ochre_class, base_cfg).map_err(|err| {
@@ -2554,14 +2551,12 @@ fn build_from_blueprint_inner(
 
     let registry = EquipmentRegistry::new();
     let mut equipment: Vec<Box<dyn Equipment>> = Vec::new();
-    let mut rng_event_stream_idx: u64 = 0;
+    let mut equipment_by_rng_stream: HashMap<u64, String> = HashMap::new();
     for spec in &equipment_specs {
         if HANDLED_OUTSIDE_REGISTRY.contains(&spec.name.as_str()) {
             continue;
         }
-        let sub_rng = derive_sub_rng(&rng, RNG_STREAM_EVENT_LOAD_BASE + rng_event_stream_idx);
-        rng_event_stream_idx += 1;
-        let mut eq = create_equipment_from_spec(&registry, spec, Some(sub_rng.get_seed()))?;
+        let mut eq = create_equipment_from_spec(&registry, spec)?;
 
         // Entrance-1 identity validation runs before `init` — and therefore
         // before the non-critical init-failure skip below — so an unassigned
@@ -2584,7 +2579,17 @@ fn build_from_blueprint_inner(
             merged_cfg.setpoints_reconciled.clone(),
         );
         merged_cfg.zone_map = Some(zone_map.clone());
-        merged_cfg.rng_seed = Some(sub_rng.get_seed());
+        let rng_stream = RngStream::event_load(rng.get_seed(), &merged_cfg.name);
+        if let Some(other) =
+            equipment_by_rng_stream.insert(rng_stream.stream, merged_cfg.name.clone())
+        {
+            return Err(HaresError::Dwelling(format!(
+                "equipment '{other}' and '{}' map to the same random stream \
+                 {:#x}; rename one of them",
+                merged_cfg.name, rng_stream.stream
+            )));
+        }
+        merged_cfg.rng_stream = Some(rng_stream);
         // The served zone as HVAC resolves it: the config's zone_id, else
         // the conditioned zone. Only HVAC's equivalent battery model reads
         // the capacitance.
@@ -13101,7 +13106,7 @@ occupancy = 1.0
             primary_role: None,
         };
 
-        let err = match create_equipment_from_spec(&registry, &spec, None) {
+        let err = match create_equipment_from_spec(&registry, &spec) {
             Err(err) => err,
             Ok(_) => panic!("unknown equipment class must return Err"),
         };

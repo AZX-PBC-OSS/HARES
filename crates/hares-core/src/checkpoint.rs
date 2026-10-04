@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 /// records carrying the equipment's name and id, and restore validates
 /// both against the live equipment — checkpoints written by v7 builds
 /// (positionally-indexed opaque blobs) are rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 8;
+///
+/// v9: event-load equipment state records its random stream (key and
+/// stream nonce) instead of the key alone.
+pub const CHECKPOINT_VERSION: u32 = 9;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///

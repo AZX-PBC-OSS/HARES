@@ -15,6 +15,7 @@ pub mod health;
 pub(crate) mod mode_flow_guard;
 pub mod panic_hook;
 pub mod ports;
+pub mod rng;
 pub mod schedule;
 pub mod telemetry;
 pub mod telemetry_keys;
