@@ -4240,18 +4240,7 @@ impl Dwelling {
         // Now self.ports is restored, self.rollback_ports is polluted.
         let name = &self.equipment[idx].descriptor().name;
         let id = self.equipment[idx].descriptor().id;
-        let discarded_thermal_w: f64 = self
-            .rollback_ports
-            .thermal
-            .iter()
-            .map(ThermalAccumulator::total_gain_w)
-            .sum::<f64>()
-            - self
-                .ports
-                .thermal
-                .iter()
-                .map(ThermalAccumulator::total_gain_w)
-                .sum::<f64>();
+        let discarded_thermal_w = discarded_thermal_w(&self.rollback_ports, &self.ports);
         let discarded_electrical_w: f64 =
             self.rollback_ports.electrical.net_active_w() - self.ports.electrical.net_active_w();
         let discarded_electrical_kvar: f64 = self.rollback_ports.electrical.reactive_power_kvar
@@ -5263,6 +5252,7 @@ impl Dwelling {
                 internal_gain_w: gains.internal_gain_w,
                 port_convective_w: gains.port_convective_w,
                 port_radiant_w: gains.port_radiant_w,
+                port_shortwave_w: gains.port_shortwave_w,
                 air_density_kg_m3: gains.air_density_kg_m3,
                 ghi_w_m2: self.latest_env.weather.ghi_w_m2,
             };
@@ -6616,6 +6606,19 @@ impl Dwelling {
     }
 }
 
+/// The zone heat a rollback discards: every path of every zone's gain in
+/// the rolled-back ports beyond the restored ones.
+fn discarded_thermal_w(rolled_back: &PortSlots, restored: &PortSlots) -> f64 {
+    let total = |ports: &PortSlots| {
+        ports
+            .thermal
+            .iter()
+            .map(ThermalAccumulator::total_gain_w)
+            .sum::<f64>()
+    };
+    total(rolled_back) - total(restored)
+}
+
 /// Maps a ZoneId to its display name for output column labels.
 /// The configured indoor zone = "Indoor", attic zones = "Attic", others = "Zone_{id}".
 fn zone_display_name(
@@ -6907,6 +6910,28 @@ mod tests {
     use std::time::Duration;
     use syn::spanned::Spanned;
     use syn::visit::Visit;
+
+    /// A rollback reports every path of the heat it discards, short-wave
+    /// and radiant included.
+    #[test]
+    fn rollback_discards_all_of_the_zone_heat() {
+        let zone = ZoneId(1);
+        let restored = PortSlots {
+            thermal: vec![ThermalAccumulator::new(zone)],
+            ..Default::default()
+        };
+        let rolled_back = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                sensible_gain_w: 100.0,
+                radiant_gain_w: 300.0,
+                shortwave_gain_w: 100.0,
+                latent_gain_w: 20.0,
+                ..ThermalAccumulator::new(zone)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(discarded_thermal_w(&rolled_back, &restored), 520.0);
+    }
 
     fn collect_rs_files(root: &PathBuf, out: &mut Vec<PathBuf>) {
         let read_dir = fs::read_dir(root)

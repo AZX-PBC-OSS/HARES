@@ -324,14 +324,14 @@ pub struct ThermalSolver {
 /// Per-component breakdown of zone air sensible contributions.
 ///
 /// Captures both the production path stages (outdoor, solar, LWR) and the
-/// port contributions split by routing path so the convective/radiant
-/// attribution is explicit. The zone-air port total equals
-/// `convective_direct_w + radiant_to_air_residual_w`.
+/// port contributions split by routing path so the convective, radiant and
+/// short-wave attribution is explicit. The zone-air port total equals
+/// `convective_direct_w + radiant_to_air_residual_w + shortwave_to_air_w`.
 ///
 /// Energy balance invariant (within floating-point rounding):
-/// `after_int_lwr_w + convective_direct_w + radiant_to_air_residual_w`
-/// equals the total zone air input at the end of the port application
-/// sequence.
+/// `after_int_lwr_w + convective_direct_w + radiant_to_air_residual_w +
+/// shortwave_to_air_w` equals the total zone air input at the end of the
+/// port application sequence.
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneSensibleBreakdown {
     /// u[zone_air] after outdoor temperature inputs [W].
@@ -355,6 +355,11 @@ pub struct ZoneSensibleBreakdown {
     ///
     /// Radiant gain × radiation_frac for each surface.
     pub radiant_to_surfaces_w: f64,
+    /// Short-wave gain reaching zone air [W]: the part each surface passes
+    /// on to the air, plus any the surfaces do not absorb.
+    pub shortwave_to_air_w: f64,
+    /// Short-wave gain delivered to interior surface RC nodes [W].
+    pub shortwave_to_surfaces_w: f64,
 }
 
 impl ZoneSensibleBreakdown {
@@ -369,6 +374,8 @@ impl ZoneSensibleBreakdown {
             convective_direct_w: 0.0,
             radiant_to_air_residual_w: 0.0,
             radiant_to_surfaces_w: 0.0,
+            shortwave_to_air_w: 0.0,
+            shortwave_to_surfaces_w: 0.0,
         }
     }
 }
@@ -623,7 +630,11 @@ impl ThermalSolver {
 
         let total_radiant_w: f64 = ports.thermal.iter().map(|t| t.radiant_gain_w).sum();
         let radiant_to_surfaces_w = (total_radiant_w - radiant_to_air_residual_w).max(0.0);
+
         self.apply_port_shortwave_inputs(&mut u, ports);
+        let shortwave_to_air_w = u[z_idx] - after_radiant;
+        let total_shortwave_w: f64 = ports.thermal.iter().map(|t| t.shortwave_gain_w).sum();
+        let shortwave_to_surfaces_w = (total_shortwave_w - shortwave_to_air_w).max(0.0);
 
         Ok(ZoneSensibleBreakdown {
             after_outdoor_w: after_outdoor,
@@ -634,6 +645,8 @@ impl ThermalSolver {
             convective_direct_w,
             radiant_to_air_residual_w,
             radiant_to_surfaces_w,
+            shortwave_to_air_w,
+            shortwave_to_surfaces_w,
         })
     }
 
@@ -1250,18 +1263,12 @@ impl ThermalSolver {
         self.apply_port_shortwave_inputs(&mut u, ports);
 
         let indoor_zone = self.config.indoor_zone_id;
-        let port_convective_indoor_w = ports
+        let indoor_heat = ports
             .thermal
             .iter()
             .find(|t| t.zone == indoor_zone)
-            .map(|t| t.sensible_gain_w)
-            .unwrap_or(0.0);
-        let port_radiant_indoor_w = ports
-            .thermal
-            .iter()
-            .find(|t| t.zone == indoor_zone)
-            .map(|t| t.radiant_gain_w)
-            .unwrap_or(0.0);
+            .map(hares_types::ThermalAccumulator::heat)
+            .unwrap_or_default();
 
         let mut latent_by_zone = std::mem::take(&mut self.latent_buf);
         latent_by_zone.clear();
@@ -1389,8 +1396,9 @@ impl ThermalSolver {
             ventilation_w,
             natural_ventilation_w,
             combined_airflow_sensible_w,
-            port_convective_w: port_convective_indoor_w,
-            port_radiant_w: port_radiant_indoor_w,
+            port_convective_w: indoor_heat.convective_w,
+            port_radiant_w: indoor_heat.radiant_w,
+            port_shortwave_w: indoor_heat.shortwave_w,
             hvac_heating_w,
             hvac_cooling_w,
             internal_gain_w: internal_gain_cat_w,

@@ -258,6 +258,52 @@ pub struct ThermalAccumulator {
     pub latent_by_category: [f64; THERMAL_CATEGORY_COUNT],
 }
 
+/// A zone's heat from equipment, by the path it takes into the zone:
+/// convective to the air, long-wave radiant and short-wave (visible) to the
+/// surfaces, and latent to the air's moisture. Every consumer of zone gains
+/// reads them through this one view so none of the heat is left out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ZoneHeat {
+    pub convective_w: f64,
+    pub radiant_w: f64,
+    pub shortwave_w: f64,
+    pub latent_w: f64,
+}
+
+impl ZoneHeat {
+    /// The sensible part: convective, radiant and short-wave.
+    pub fn sensible_w(&self) -> f64 {
+        self.convective_w + self.radiant_w + self.shortwave_w
+    }
+
+    /// Sensible and latent together.
+    pub fn total_w(&self) -> f64 {
+        self.sensible_w() + self.latent_w
+    }
+
+    /// The heat added between `before` and `self`, path by path.
+    pub fn since(&self, before: &Self) -> Self {
+        Self {
+            convective_w: self.convective_w - before.convective_w,
+            radiant_w: self.radiant_w - before.radiant_w,
+            shortwave_w: self.shortwave_w - before.shortwave_w,
+            latent_w: self.latent_w - before.latent_w,
+        }
+    }
+
+    /// Whether any path carries more than `threshold_w` in magnitude.
+    pub fn exceeds(&self, threshold_w: f64) -> bool {
+        [
+            self.convective_w,
+            self.radiant_w,
+            self.shortwave_w,
+            self.latent_w,
+        ]
+        .iter()
+        .any(|w| w.abs() > threshold_w)
+    }
+}
+
 impl ThermalAccumulator {
     pub fn new(zone: ZoneId) -> Self {
         Self {
@@ -272,10 +318,20 @@ impl ThermalAccumulator {
         }
     }
 
+    /// The zone's heat from equipment this step, by path.
+    pub fn heat(&self) -> ZoneHeat {
+        ZoneHeat {
+            convective_w: self.sensible_gain_w,
+            radiant_w: self.radiant_gain_w,
+            shortwave_w: self.shortwave_gain_w,
+            latent_w: self.latent_gain_w,
+        }
+    }
+
     /// Every watt this step put into the zone: convective, long-wave
     /// radiant, short-wave and latent.
     pub fn total_gain_w(&self) -> f64 {
-        self.sensible_gain_w + self.radiant_gain_w + self.shortwave_gain_w + self.latent_gain_w
+        self.heat().total_w()
     }
 
     pub fn add(

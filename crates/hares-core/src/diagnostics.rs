@@ -36,7 +36,8 @@ pub struct StepDiagnostics {
     pub timestamp_s: f64,
     pub outdoor_temp_c: f64,
     pub zone_temps_c: Vec<(ZoneId, f64)>,
-    /// Total thermal port sensible gain per zone [W] (HVAC + appliances combined).
+    /// Total thermal port sensible gain per zone [W] (HVAC + appliances
+    /// combined): convective, long-wave radiant and short-wave.
     pub thermal_gains_w: Vec<(ZoneId, f64)>,
     pub thermal_latent_w: Vec<(ZoneId, f64)>,
     pub electrical_net_kw: f64,
@@ -65,6 +66,9 @@ pub struct EnvelopeDiag {
     /// EnergyPlus exposes `OtherEquipment Radiant Heating Rate [W]` as a
     /// separate output variable (I/O Ref v8.4, Internal Gains group).
     pub port_radiant_w: f64,
+    /// Total port short-wave (visible light) [W], absorbed by the surfaces
+    /// like transmitted diffuse solar.
+    pub port_shortwave_w: f64,
     /// Outdoor moist-air density used for infiltration mass-flow conversion [kg/m³].
     pub air_density_kg_m3: f64,
     /// Global horizontal irradiance [W/m²] at this timestep.
@@ -101,6 +105,7 @@ pub fn write_header(w: &mut impl Write, n_zones: usize) {
     cols.push("electrical_net_kw".to_string());
     cols.push("electrical_net_kvar".to_string());
     cols.push("port_radiant_w".to_string());
+    cols.push("port_shortwave_w".to_string());
     cols.push("port_convective_w".to_string());
     cols.push("window_solar_w".to_string());
     cols.push("opaque_solar_lwr_w".to_string());
@@ -182,6 +187,18 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
             .map(|e| {
                 if e.port_radiant_w.is_finite() {
                     format!("{:.1}", e.port_radiant_w)
+                } else {
+                    String::new()
+                }
+            })
+            .unwrap_or_default(),
+    );
+    vals.push(
+        d.envelope
+            .as_ref()
+            .map(|e| {
+                if e.port_shortwave_w.is_finite() {
+                    format!("{:.1}", e.port_shortwave_w)
                 } else {
                     String::new()
                 }
@@ -330,12 +347,12 @@ pub fn capture(
     let thermal_gains_w: Vec<(ZoneId, f64)> = ports
         .thermal
         .iter()
-        .map(|t| (t.zone, t.sensible_gain_w))
+        .map(|t| (t.zone, t.heat().sensible_w()))
         .collect();
     let thermal_latent_w: Vec<(ZoneId, f64)> = ports
         .thermal
         .iter()
-        .map(|t| (t.zone, t.latent_gain_w))
+        .map(|t| (t.zone, t.heat().latent_w))
         .collect();
     let outdoor_temp_c = env.weather.outdoor_temp_c;
     let electrical_net_kw = power_w_to_kw(ports.electrical.net_active_w());
@@ -965,6 +982,7 @@ mod tests {
             "electrical_net_kw",
             "electrical_net_kvar",
             "port_radiant_w",
+            "port_shortwave_w",
             "port_convective_w",
             "window_solar_w",
             "opaque_solar_lwr_w",
@@ -1082,7 +1100,16 @@ mod tests {
             electrical: hares_types::ElectricalSummary::default(),
         };
 
-        let mut ports = PortSlots::default();
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator {
+                sensible_gain_w: 100.0,
+                radiant_gain_w: 300.0,
+                shortwave_gain_w: 100.0,
+                latent_gain_w: 20.0,
+                ..hares_types::ThermalAccumulator::new(ZoneId(1))
+            }],
+            ..PortSlots::default()
+        };
         ports
             .accumulate(&hares_types::PortContribution::Electrical {
                 active_power_w: 1000.0,
@@ -1097,5 +1124,11 @@ mod tests {
         assert_eq!(diag.zone_temps_c[0].0, ZoneId(1));
         assert!((diag.zone_temps_c[0].1 - 18.0).abs() < 1e-9);
         assert!((diag.electrical_net_kvar - 0.5).abs() < 1e-9);
+        assert_eq!(
+            diag.thermal_gains_w,
+            vec![(ZoneId(1), 500.0)],
+            "the sensible gain carries the convective, radiant and short-wave paths"
+        );
+        assert_eq!(diag.thermal_latent_w, vec![(ZoneId(1), 20.0)]);
     }
 }

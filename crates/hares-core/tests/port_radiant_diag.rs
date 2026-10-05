@@ -191,6 +191,7 @@ master_seed = 0
 
     let env_cols = [
         "port_radiant_w",
+        "port_shortwave_w",
         "port_convective_w",
         "window_solar_w",
         "opaque_solar_lwr_w",

@@ -11,7 +11,7 @@ use hares_control::{DispatchTarget, PriorityTier};
 use hares_envelope::EnvelopeComponentGains;
 use hares_types::{
     ControlSignal, DomainId, DomainUpdate, EndUse, FluidType, FuelType, HeatTransferDirection,
-    LoopId, PortDeclaration, Telemetry, ZoneId,
+    LoopId, PortDeclaration, Telemetry, ZoneHeat, ZoneId,
 };
 
 /// Complete snapshot of a single simulation timestep, populated incrementally
@@ -128,7 +128,8 @@ pub struct EquipmentObservation {
 /// Per-equipment port contribution: the delta this equipment added to `PortSlots` during one step.
 #[derive(Debug, Clone)]
 pub struct EquipmentContribution {
-    pub thermal: Vec<(ZoneId, f64, f64)>,
+    /// The heat this equipment added to each zone, every path included.
+    pub thermal: Vec<(ZoneId, ZoneHeat)>,
     pub electrical_load_kw: f64,
     pub electrical_gen_kw: f64,
     pub electrical_reactive_kvar: f64,
@@ -150,7 +151,8 @@ pub struct FluidContributionCapture {
 /// Snapshot of all port accumulators at a phase boundary.
 #[derive(Debug, Clone)]
 pub struct PortsCapture {
-    pub thermal: Vec<(ZoneId, f64, f64)>,
+    /// Each zone's accumulated heat, every path included.
+    pub thermal: Vec<(ZoneId, ZoneHeat)>,
     pub electrical_load_kw: f64,
     pub electrical_gen_kw: f64,
     pub electrical_reactive_kvar: f64,

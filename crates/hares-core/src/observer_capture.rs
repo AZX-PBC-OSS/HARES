@@ -7,7 +7,9 @@ use hares_envelope::ThermalSolver;
 use hares_equipment::Equipment;
 #[cfg(test)]
 use hares_types::FluidNodeId;
-use hares_types::{DomainSolver, DomainUpdate, EnvironmentState, FuelType, PortSlots, ZoneId};
+use hares_types::{
+    DomainSolver, DomainUpdate, EnvironmentState, FuelType, PortSlots, ZoneHeat, ZoneId,
+};
 
 use crate::observer::{
     CustomSolverCapture, CustomSolverObservation, EnvironmentCapture, EquipmentContribution,
@@ -87,14 +89,13 @@ pub(crate) fn capture_single_equipment(
 /// Computes the per-equipment contribution by diffing port accumulators before and after a step.
 pub(crate) fn diff_ports(before: &PortSlots, after: &PortSlots) -> EquipmentContribution {
     // Match by ZoneId rather than positional index for robustness.
-    let thermal: Vec<(ZoneId, f64, f64)> = after
+    let thermal: Vec<(ZoneId, ZoneHeat)> = after
         .thermal
         .iter()
         .filter_map(|a| {
             let b = before.thermal.iter().find(|b| b.zone == a.zone)?;
-            let ds = a.sensible_gain_w - b.sensible_gain_w;
-            let dl = a.latent_gain_w - b.latent_gain_w;
-            (ds.abs() > f64::EPSILON || dl.abs() > f64::EPSILON).then_some((a.zone, ds, dl))
+            let added = a.heat().since(&b.heat());
+            added.exceeds(f64::EPSILON).then_some((a.zone, added))
         })
         .collect();
 
@@ -155,11 +156,8 @@ pub(crate) fn diff_ports(before: &PortSlots, after: &PortSlots) -> EquipmentCont
 
 /// Captures a snapshot of all port accumulators.
 pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
-    let thermal: Vec<(ZoneId, f64, f64)> = ports
-        .thermal
-        .iter()
-        .map(|t| (t.zone, t.sensible_gain_w, t.latent_gain_w))
-        .collect();
+    let thermal: Vec<(ZoneId, ZoneHeat)> =
+        ports.thermal.iter().map(|t| (t.zone, t.heat())).collect();
 
     let fuel_types = hares_types::ports::ALL_FUEL_TYPES;
 
@@ -314,10 +312,41 @@ mod tests {
         // zone_b: -50 sensible, +5 latent
         assert_eq!(contrib.thermal.len(), 2);
         assert_eq!(contrib.thermal[0].0, zone_a);
-        approx_eq(contrib.thermal[0].1, 250.0);
+        approx_eq(contrib.thermal[0].1.convective_w, 250.0);
         assert_eq!(contrib.thermal[1].0, zone_b);
-        approx_eq(contrib.thermal[1].1, -50.0);
-        approx_eq(contrib.thermal[1].2, 5.0);
+        approx_eq(contrib.thermal[1].1.convective_w, -50.0);
+        approx_eq(contrib.thermal[1].1.latent_w, 5.0);
+    }
+
+    /// A contribution that is only radiant or only short-wave is captured,
+    /// and the captured heat of every zone equals its port total.
+    #[test]
+    fn observer_sees_radiant_and_shortwave_heat() {
+        let zone = ZoneId(1);
+        let before = PortSlots {
+            thermal: vec![ThermalAccumulator::new(zone)],
+            ..Default::default()
+        };
+        let after = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                radiant_gain_w: 300.0,
+                shortwave_gain_w: 100.0,
+                ..ThermalAccumulator::new(zone)
+            }],
+            ..Default::default()
+        };
+
+        let contrib = diff_ports(&before, &after);
+        assert_eq!(contrib.thermal.len(), 1, "a radiant-only gain is captured");
+        let added = contrib.thermal[0].1;
+        approx_eq(added.radiant_w, 300.0);
+        approx_eq(added.shortwave_w, 100.0);
+
+        let captured = capture_ports(&after);
+        for ((zone, heat), port) in captured.thermal.iter().zip(&after.thermal) {
+            assert_eq!(*zone, port.zone);
+            approx_eq(heat.total_w(), port.total_gain_w());
+        }
     }
 
     #[test]

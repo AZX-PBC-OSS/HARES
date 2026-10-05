@@ -850,8 +850,8 @@ mod tests {
                         .contribution
                         .thermal
                         .iter()
-                        .filter(|(z, _, _)| *z == zone_indoor)
-                        .map(|(_, s, _)| s)
+                        .filter(|(z, _)| *z == zone_indoor)
+                        .map(|(_, heat)| heat.sensible_w())
                         .sum();
                     *equip_totals.entry(obs.name.clone()).or_default() += sensible_w;
                     *equip_counts.entry(obs.name.clone()).or_default() += 1;

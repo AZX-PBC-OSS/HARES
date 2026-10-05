@@ -2735,7 +2735,15 @@ fn snapshot_to_py(
                 ports
                     .thermal
                     .iter()
-                    .map(|(z, s, l)| (z.0, *s, *l))
+                    .map(|(z, heat)| {
+                        (
+                            z.0,
+                            heat.convective_w,
+                            heat.radiant_w,
+                            heat.shortwave_w,
+                            heat.latent_w,
+                        )
+                    })
                     .collect::<Vec<_>>(),
             )?;
             pd.set_item("electrical_load_kw", ports.electrical_load_kw)?;
@@ -2785,6 +2793,7 @@ fn snapshot_to_py(
         }
         d.set_item("port_convective_w", gains.port_convective_w)?;
         d.set_item("port_radiant_w", gains.port_radiant_w)?;
+        d.set_item("port_shortwave_w", gains.port_shortwave_w)?;
         d.set_item("internal_gain_w", gains.internal_gain_w)?;
         dict.set_item("post_solvers", d)?;
     }

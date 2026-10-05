@@ -915,13 +915,16 @@ pub struct EnvelopeComponentGains {
     /// Total radiant sensible gains from equipment ports distributed to surfaces [W].
     /// Distributed via E+ TMULT method; some reaches zone air via radiation_frac split.
     pub port_radiant_w: f64,
+    /// Total short-wave (visible light) gains from equipment ports [W],
+    /// absorbed by the surfaces as transmitted diffuse solar is.
+    pub port_shortwave_w: f64,
     /// HVAC heating contribution to the indoor zone [W].
     pub hvac_heating_w: f64,
     /// HVAC cooling contribution to the indoor zone [W].
     pub hvac_cooling_w: f64,
     /// Non-HVAC internal gains (appliances, lighting, occupancy) [W].
-    /// Equals the `InternalGain` category total for the indoor zone,
-    /// including both convective and radiant components.
+    /// Equals the `InternalGain` category total for the indoor zone:
+    /// convective, long-wave radiant and short-wave.
     pub internal_gain_w: f64,
     /// Equipment jacket/shell losses summed across all zone accumulators [W].
     /// Water heaters and boilers in unconditioned zones deposit losses into that
