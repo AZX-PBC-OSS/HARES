@@ -1,10 +1,9 @@
 """Generate HARES-vs-OCHRE parity diagnostics with metrics and charts.
 
 Usage:
-    UV_CACHE_DIR=/tmp/uvcache MPLCONFIGDIR=/tmp/mplconfig \
     uv run --no-sync --group ochre python tests/python/parity_diagnostics.py \
       --fixture tests/fixtures/parity/cz4a_ashp_hpwh \
-      --out-dir /tmp/parity_diag_ashp \
+      --out-dir <report directory> \
       --use-live-ochre
 """
 
@@ -14,7 +13,6 @@ import argparse
 import datetime as dt
 import json
 import sys
-import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,8 +151,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("/tmp/parity_diagnostics"),
-        help="Output directory for report artifacts.",
+        required=True,
+        help="Output directory for report artifacts and the HARES runs behind them.",
     )
     parser.add_argument(
         "--actual-parquet",
@@ -300,6 +298,7 @@ def run_hares(
     fixture_dir: Path,
     sim_cfg: dict,
     actual_parquet: Path | None,
+    out_dir: Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if actual_parquet is not None:
         pdf = pd.read_parquet(actual_parquet)
@@ -318,7 +317,7 @@ def run_hares(
         defaults_path=str(Path("defaults").resolve()),
         master_seed=sim_cfg["master_seed"],
         write_output=True,
-        output_path=str(Path(tempfile.gettempdir()) / "hares_parity_diagnostics.csv"),
+        output_path=str(out_dir / "hares_parity_diagnostics.csv"),
     )
     pdf = dwelling_sim.simulate().to_pandas()
     pdf = _normalize_time_index(pdf, sim_cfg["start_time"])
@@ -334,7 +333,7 @@ def run_hares(
         defaults_path=str(Path("defaults").resolve()),
         master_seed=sim_cfg["master_seed"],
         write_output=True,
-        output_path=str(Path(tempfile.gettempdir()) / "hares_parity_diagnostics_obs.csv"),
+        output_path=str(out_dir / "hares_parity_diagnostics_obs.csv"),
     )
 
     obs_rows: list[dict[str, Any]] = []
@@ -672,7 +671,7 @@ def main() -> None:
     actual_parquet = args.actual_parquet.resolve() if args.actual_parquet else None
 
     ochre_df = run_ochre(fixture_dir, sim_cfg, reference_parquet, args.use_live_ochre)
-    hares_df, obs_df = run_hares(fixture_dir, sim_cfg, actual_parquet)
+    hares_df, obs_df = run_hares(fixture_dir, sim_cfg, actual_parquet, out_dir)
 
     metrics, series = align_channels(ochre_df, hares_df)
     metrics.to_csv(out_dir / "channel_metrics.csv", index=False)

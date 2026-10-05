@@ -264,17 +264,18 @@ for hour in range(9, 17):
 
 # Now run the actual simulation and compare
 print(f"\n--- Simulation Comparison ---")
-dw = Dwelling.from_hpxml(
-    str(bldg.hpxml_path), str(bldg.schedule_path), str(bldg.weather_path),
-    defaults_path='vendor/HARES/defaults',
-    start_time='2021-07-01T12:00:00', duration_s=7200, time_res_s=900,
-    output_verbosity=4,
-    write_output=True,
-    output_path=str(Path(tempfile.gettempdir()) / 'hares_diag_pv_trace.csv'),
-)
-dw.initialize()
-dw.add_pv(PV("PV", capacity_kw=10.0, tilt=20.0, azimuth=180.0))
-df = dw.simulate()
+with tempfile.TemporaryDirectory() as output_dir:
+    dw = Dwelling.from_hpxml(
+        str(bldg.hpxml_path), str(bldg.schedule_path), str(bldg.weather_path),
+        defaults_path='vendor/HARES/defaults',
+        start_time='2021-07-01T12:00:00', duration_s=7200, time_res_s=900,
+        output_verbosity=4,
+        write_output=True,
+        output_path=str(Path(output_dir) / 'hares_diag_pv_trace.csv'),
+    )
+    dw.initialize()
+    dw.add_pv(PV("PV", capacity_kw=10.0, tilt=20.0, azimuth=180.0))
+    df = dw.simulate()
 print("Simulated PV output per timestep:")
 pv_min = df['PV Electric Power (kW)'].min()
 assert isinstance(pv_min, (int, float)), "PV power column must be numeric"

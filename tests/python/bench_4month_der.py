@@ -141,10 +141,9 @@ def _run_ochre() -> tuple[dict[str, float], float, float]:
     return kwh, init_elapsed, sim_elapsed
 
 
-def _run_hares() -> tuple[dict[str, float], float, float]:
-    """Run HARES with PV + Battery for 120 days."""
-    from ochre_next import PV, Battery
-    from ochre_next import Dwelling as HaresDwelling
+def _run_hares(output_dir: Path) -> tuple[dict[str, float], float, float]:
+    """Run HARES with PV + Battery for 120 days, writing its output into ``output_dir``."""
+    from ochre_next import Battery, Dwelling as HaresDwelling, PV
 
     t0 = time.perf_counter()
     dwelling = HaresDwelling.from_hpxml(
@@ -158,7 +157,7 @@ def _run_hares() -> tuple[dict[str, float], float, float]:
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
         write_output=True,
-        output_path=str(Path(tempfile.gettempdir()) / "hares_bench_4month_der.csv"),
+        output_path=str(output_dir / "hares_bench_4month_der.csv"),
     )
     dwelling.initialize()
 
@@ -265,7 +264,8 @@ def main() -> None:
     print(f"  done  (init={ochre_init:.1f}s  sim={ochre_sim:.1f}s)")
 
     print("\nRunning HARES ...", flush=True)
-    hares_kwh, hares_init, hares_sim = _run_hares()
+    with tempfile.TemporaryDirectory() as output_dir:
+        hares_kwh, hares_init, hares_sim = _run_hares(Path(output_dir))
     print(f"  done  (init={hares_init:.1f}s  sim={hares_sim:.1f}s)")
 
     print(f"\n{sep}")
