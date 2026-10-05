@@ -14269,6 +14269,48 @@ master_seed = 0
         assert!(reported.state.soc.is_some());
     }
 
+    /// A full checkpoint restore replaces every piece of the half-stepped
+    /// state, so it resumes an ended run; the partial building-state restore
+    /// keeps the half-stepped equipment and is refused.
+    #[test]
+    fn a_checkpoint_restore_resumes_an_ended_run() {
+        let mut dwelling = bestest_dwelling();
+        replace_equipment_for_test(
+            &mut dwelling,
+            vec![
+                Box::new(FlakyPortEquipment::new("Steady", 500.0, &[true; 10]).with_id(1003)),
+                Box::new(FlakyPortEquipment::new(
+                    "Flaky",
+                    300.0,
+                    &[true, false, false, true],
+                )),
+            ],
+        );
+        let start = dwelling.save_checkpoint().expect("checkpoint at the start");
+        dwelling.run_timestep(false).expect("both succeed");
+        dwelling
+            .run_timestep(false)
+            .expect("one failure is tolerated");
+        let ended = dwelling
+            .run_timestep(false)
+            .expect_err("the second consecutive failure ends the run")
+            .to_string();
+
+        let refused = dwelling
+            .restore_building_state(&start)
+            .expect_err("a partial restore leaves the half-stepped equipment")
+            .to_string();
+        assert!(refused.contains(&ended), "{refused}");
+
+        dwelling
+            .load_checkpoint(start)
+            .expect("a full restore resumes the run");
+        assert_eq!(dwelling.clock.current_step(), 0);
+        dwelling
+            .run_timestep(false)
+            .expect("the restored run steps, with no contribution left from the ended step");
+    }
+
     #[test]
     fn a_zero_budget_tolerates_no_failure() {
         let mut dwelling = dwelling_with(FlakyPortEquipment::new("FlakyEq", 500.0, &[]));

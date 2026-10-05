@@ -112,6 +112,11 @@ impl Dwelling {
     /// checked by decoding them, so they load first; if one fails, every
     /// equipment and actor is reloaded with the state it held before the
     /// call. On any error the dwelling is therefore left as it was.
+    ///
+    /// The restore replaces all of a run's state, so it also resumes a run
+    /// that ended part way through a step (the failure budget): the
+    /// half-stepped port contributions are dropped and stepping is allowed
+    /// again once the restore has succeeded.
     pub fn load_checkpoint(&mut self, cp: DwellingCheckpoint) -> Result<()> {
         self.validate_building_state(&cp)?;
         let equipment_states = self.matched_equipment_states(&cp)?;
@@ -164,6 +169,9 @@ impl Dwelling {
         // and connection state on the first post-restore step.
         self.snapshot_equipment_state();
         self.restored_from_checkpoint = true;
+        if self.terminal_error.take().is_some() {
+            self.ports.zero();
+        }
         Ok(())
     }
 
@@ -178,7 +186,17 @@ impl Dwelling {
     /// either (the clock resets to step 0; the segment attaches its own
     /// tariff as assembly does). The checkpoint is validated before anything
     /// changes, so on error the dwelling is left as it was.
+    ///
+    /// Refused on a run that ended part way through a step: its equipment
+    /// is half-stepped and this restore keeps it (`load_checkpoint` resumes
+    /// such a run).
     pub fn restore_building_state(&mut self, cp: &DwellingCheckpoint) -> Result<()> {
+        if let Some(ended) = &self.terminal_error {
+            return Err(HaresError::Simulation(format!(
+                "the run ended part way through a step and its equipment is half-stepped; \
+                 restore the whole checkpoint with load_checkpoint: {ended}"
+            )));
+        }
         self.validate_building_state(cp)?;
         self.apply_building_state(cp)?;
         self.prior_electrical_summary = cp.prior_electrical_summary.clone();
