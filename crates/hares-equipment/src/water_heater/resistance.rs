@@ -1422,6 +1422,42 @@ mod tests {
         );
     }
 
+    /// Under a setpoint ramp the release returns the target to the
+    /// configured setpoint at once, and the setpoint ramps back to it.
+    #[test]
+    fn a_release_ramps_the_setpoint_back_to_the_configured_one() {
+        use hares_types::ControlSignal;
+        let mut typed = typed_config();
+        typed.max_setpoint_ramp_rate_c_per_min = Some(1.0);
+        let cfg = config_from_typed(typed);
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let env = env(21.0);
+        eq.init(&cfg, &env).unwrap();
+        let configured = eq.setpoint_c;
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(configured + 5.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        for _ in 0..3 {
+            eq.update_control(&env);
+        }
+        let raised = eq.setpoint_c;
+        assert!(raised > configured && raised < configured + 5.0, "{raised}");
+
+        eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
+        assert_eq!(eq.target_setpoint_c, configured);
+        assert_eq!(
+            eq.setpoint_c, raised,
+            "the setpoint ramps, it does not jump"
+        );
+        for _ in 0..10 {
+            eq.update_control(&env);
+        }
+        assert_eq!(eq.setpoint_c, configured);
+    }
+
     #[test]
     fn state_round_trip_restores_tank_and_control_state() {
         let mut eq = ResistanceWH::new(config());
