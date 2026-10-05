@@ -35,7 +35,7 @@ fn assumed_zone_height_ft(location: &str) -> f64 {
 
 /// Every enclosure surface of `group`/`element` with its
 /// `InteriorAdjacentTo` text.
-fn surfaces<'a>(
+pub(super) fn surfaces<'a>(
     details: &'a XmlNode,
     group: &'a str,
     element: &'a str,
@@ -70,6 +70,7 @@ fn location_height_m(
         Some(height) => height,
         None => {
             let assumed_ft = assumed_zone_height_ft(location);
+            // 8 ft is OS-HPXML's model of every garage, not a substitution for a missing input.
             if parse_zone_label(location) != ZoneType::Garage {
                 warnings.push(Warning::new(
                     "hpxml",
@@ -213,7 +214,10 @@ pub(super) fn first_location(details: &XmlNode, zone_type: &ZoneType) -> Option<
 
 /// Attic geometry under a square hip roof: the roof footprint, the hip's
 /// peak height, and the footprint times a third of that height, at least
-/// 0.01 ft³ (geometry.rb:1325-1329). `None` when no roof with a pitch
+/// 0.01 ft³ (geometry.rb:1325-1329, with the height and footprint from
+/// geometry.rb:1373-1393). This is OS-HPXML's only attic rule: it applies
+/// it to vented and unvented attics alike and has no gable-roof variant,
+/// so a gable attic takes the hip volume. `None` when no roof with a pitch
 /// covers the attic.
 pub(super) fn hip_attic_geometry(
     details: &XmlNode,
@@ -233,27 +237,54 @@ pub(super) fn hip_attic_geometry(
     }))
 }
 
-/// OS-HPXML's `ConditionedBuildingVolume` for a file that gives none
-/// (defaults.rb:899-924, `apply_building_construction`): the conditioned
-/// floor area times the average ceiling height, plus the conditioned
-/// crawlspace volume, rounded to the cubic foot. The average ceiling
-/// height is the file's `AverageCeilingHeight`, or 8 ft raised over the
+fn round_to(value: f64, places: i32) -> f64 {
+    let scale = 10f64.powi(places);
+    (value * scale).round() / scale
+}
+
+/// Volume of the conditioned crawlspace, zero without one.
+fn conditioned_crawlspace_volume_ft3(
+    details: &XmlNode,
+    warnings: &mut Vec<Warning>,
+) -> Result<f64, HpxmlError> {
+    let crawl_location = "crawlspace - conditioned";
+    let crawl_area_m2 = slab_areas_m2(details, &ZoneType::Foundation)?
+        .get(crawl_location)
+        .copied()
+        .unwrap_or(0.0);
+    if crawl_area_m2 <= 0.0 {
+        return Ok(0.0);
+    }
+    Ok(conv::volume_m3_to_ft3(
+        crawl_area_m2 * location_height_m(details, crawl_location, warnings)?,
+    ))
+}
+
+/// OS-HPXML's average ceiling height (defaults.rb:904-918,
+/// `apply_building_construction`): the file's `AverageCeilingHeight`; else,
+/// with a `ConditionedBuildingVolume`, that volume less the conditioned
+/// crawlspace's over the conditioned floor area; else 8 ft raised over the
 /// share of the floor under roofs of the conditioned space (a cathedral
-/// ceiling or conditioned attic), rounded to 0.01 ft.
-pub(super) fn default_conditioned_volume_m3(
+/// ceiling or conditioned attic). Defaults are rounded to 0.01 ft.
+pub(super) fn average_ceiling_height_m(
     details: &XmlNode,
     average_ceiling_height: Option<&XmlNode>,
+    conditioned_volume_m3: Option<f64>,
     conditioned_floor_area_m2: f64,
     warnings: &mut Vec<Warning>,
 ) -> Result<f64, HpxmlError> {
-    let round_to = |value: f64, places: i32| {
-        let scale = 10f64.powi(places);
-        (value * scale).round() / scale
-    };
+    if let Some(height_m) = parse_value_with_units(average_ceiling_height, ValueKind::Length)? {
+        return Ok(height_m);
+    }
+    let cfa_ft2 = conv::area_m2_to_ft2(conditioned_floor_area_m2);
     let base_ft = 8.0;
-    let ceiling_height_ft = match parse_value_with_units(average_ceiling_height, ValueKind::Length)?
-    {
-        Some(height_m) => conv::length_m_to_ft(height_m),
+    let height_ft = match conditioned_volume_m3 {
+        Some(volume_m3) => round_to(
+            (conv::volume_m3_to_ft3(volume_m3)
+                - conditioned_crawlspace_volume_ft3(details, warnings)?)
+                / cfa_ft2,
+            2,
+        ),
         None => match roof_height_and_footprint_m(details, &ZoneType::Conditioned, warnings)? {
             Some((roof_height_m, footprint_m2)) => {
                 let roof_average_ft = conv::length_m_to_ft(roof_height_m) / 3.0;
@@ -266,20 +297,22 @@ pub(super) fn default_conditioned_volume_m3(
             None => base_ft,
         },
     };
-    let crawl_location = "crawlspace - conditioned";
-    let crawl_area_m2 = slab_areas_m2(details, &ZoneType::Foundation)?
-        .get(crawl_location)
-        .copied()
-        .unwrap_or(0.0);
-    let crawl_ft3 = if crawl_area_m2 > 0.0 {
-        conv::volume_m3_to_ft3(
-            crawl_area_m2 * location_height_m(details, crawl_location, warnings)?,
-        )
-    } else {
-        0.0
-    };
+    Ok(conv::length_ft_to_m(height_ft))
+}
+
+/// OS-HPXML's `ConditionedBuildingVolume` for a file that gives none
+/// (defaults.rb:919-924, `apply_building_construction`): the conditioned
+/// floor area times the average ceiling height, plus the conditioned
+/// crawlspace volume, rounded to the cubic foot.
+pub(super) fn default_conditioned_volume_m3(
+    details: &XmlNode,
+    average_ceiling_height_m: f64,
+    conditioned_floor_area_m2: f64,
+    warnings: &mut Vec<Warning>,
+) -> Result<f64, HpxmlError> {
     let cfa_ft2 = conv::area_m2_to_ft2(conditioned_floor_area_m2);
+    let crawl_ft3 = conditioned_crawlspace_volume_ft3(details, warnings)?;
     Ok(conv::volume_ft3_to_m3(
-        (cfa_ft2 * ceiling_height_ft + crawl_ft3).round(),
+        (cfa_ft2 * conv::length_m_to_ft(average_ceiling_height_m) + crawl_ft3).round(),
     ))
 }

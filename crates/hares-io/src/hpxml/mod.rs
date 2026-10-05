@@ -10,6 +10,7 @@ pub mod building;
 pub mod climate_zone;
 pub mod data_patches;
 pub mod equipment;
+pub mod infiltration_geometry;
 mod resolve_der;
 pub mod resolve_hvac;
 mod resolve_loads;

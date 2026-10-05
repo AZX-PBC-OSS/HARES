@@ -880,12 +880,15 @@ pub fn attic_ela_coefficients(
     Ok((stack, wind))
 }
 
-/// ELA coefficients for a garage zone at ground level.
+/// ELA coefficients for a garage zone standing on the foundation top.
 ///
-/// Uses `hor_lk_frac = 0.4` (Walker-Wilson 1998 Table 2: mixed leakage).
+/// Uses `hor_lk_frac = 0.4` (Walker-Wilson 1998 Table 2: mixed leakage),
+/// with the wind taken at the garage's height above the foundation top as
+/// OS-HPXML does (airflow.rb:2756-2762, `space_height_ag = foundation_top`).
 /// Shielding and terrain are configurable to match the building site.
 ///
 /// # Parameters
+/// - `foundation_top_m`: the foundation top above grade.
 /// - `shielding`: site shielding class from `<ShieldingOfHome>` in HPXML.
 ///   Walker & Wilson (1998) Table 3: `C' = s_g` where `s_g = raw/3`.
 /// - `terrain`: terrain class from `<SiteType>` in HPXML, driving the
@@ -895,11 +898,17 @@ pub fn attic_ela_coefficients(
 /// inputs are heights from user input, so a violation is reachable.
 pub fn garage_ela_coefficients(
     garage_height_m: f64,
+    foundation_top_m: f64,
     shielding: ShieldingClass,
     terrain: TerrainClass,
 ) -> Result<(f64, f64), HaresError> {
-    let (stack, wind) =
-        calculate_ela_coefficients(0.4, garage_height_m, 0.0, terrain, shielding.raw() / 3.0);
+    let (stack, wind) = calculate_ela_coefficients(
+        0.4,
+        garage_height_m,
+        foundation_top_m,
+        terrain,
+        shielding.raw() / 3.0,
+    );
 
     if stack <= 0.0 {
         return Err(HaresError::Physics(format!(
@@ -913,6 +922,16 @@ pub fn garage_ela_coefficients(
     }
 
     Ok((stack, wind))
+}
+
+/// Specific leakage area (leakage area at 4 Pa over floor area) from a
+/// blower-door ACH50 and the average ceiling height (ANSI/RESNET/ICC
+/// 301-2022 Addendum C, Appendix C2.2 Eq. 16; OpenStudio-HPXML v1.12.0
+/// airflow.rb:2820-2822, `get_infiltration_SLA_from_ACH50`):
+/// `ACH50 × 0.283316 × 4^n × h / (50^n × 60 × 144)` with `h` in ft.
+pub fn sla_from_ach50(ach50: f64, average_ceiling_height_m: f64, n_i: f64) -> f64 {
+    let height_ft = crate::units::length_m_to_ft(average_ceiling_height_m);
+    ach50 * 0.283316 * 4.0_f64.powf(n_i) * height_ft / (50.0_f64.powf(n_i) * 60.0 * 144.0)
 }
 
 #[cfg(test)]
@@ -988,10 +1007,15 @@ mod tests {
     #[test]
     fn garage_ela_wind_coefficient_scales_with_shielding_squared() {
         let (_, wind_exposed) =
-            garage_ela_coefficients(2.4, ShieldingClass::Exposed, TerrainClass::Suburban).unwrap();
-        let (_, wind_shielded) =
-            garage_ela_coefficients(2.4, ShieldingClass::WellShielded, TerrainClass::Suburban)
+            garage_ela_coefficients(2.4, 0.3, ShieldingClass::Exposed, TerrainClass::Suburban)
                 .unwrap();
+        let (_, wind_shielded) = garage_ela_coefficients(
+            2.4,
+            0.3,
+            ShieldingClass::WellShielded,
+            TerrainClass::Suburban,
+        )
+        .unwrap();
         let observed_ratio = wind_exposed / wind_shielded;
         let expected_ratio =
             (ShieldingClass::Exposed.raw() / ShieldingClass::WellShielded.raw()).powi(2);
@@ -1006,7 +1030,8 @@ mod tests {
             attic.is_err(),
             "a zero attic height must be a typed error in every build profile"
         );
-        let garage = garage_ela_coefficients(-1.0, ShieldingClass::Normal, TerrainClass::Suburban);
+        let garage =
+            garage_ela_coefficients(-1.0, 0.0, ShieldingClass::Normal, TerrainClass::Suburban);
         assert!(
             garage.is_err(),
             "a negative garage height must be a typed error in every build profile"
@@ -1779,9 +1804,13 @@ mod tests {
 
     #[test]
     fn ela_coefficients_garage_produces_positive_values() {
-        let (stack, wind) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban)
-                .unwrap();
+        let (stack, wind) = super::garage_ela_coefficients(
+            2.5,
+            0.0,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+        )
+        .unwrap();
         assert!(stack > 0.0, "garage stack_coeff must be positive: {stack}");
         assert!(wind > 0.0, "garage wind_coeff must be positive: {wind}");
     }
@@ -1865,20 +1894,37 @@ mod tests {
         approx_eq(w1, w2, 1e-15);
     }
 
+    /// The garage's leakage is driven at its height above the foundation
+    /// top (airflow.rb:2756-2762, `space_height_ag = foundation_top`).
     #[test]
-    fn garage_ela_convenience_matches_raw() {
-        let (s1, w1) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban)
-                .unwrap();
+    fn garage_ela_convenience_matches_raw_at_the_foundation_top() {
+        let (s1, w1) = super::garage_ela_coefficients(
+            2.5,
+            0.3,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+        )
+        .unwrap();
         let (s2, w2) = super::calculate_ela_coefficients(
             0.4,
             2.5,
-            0.0,
+            0.3,
             TerrainClass::Suburban,
             super::SHIELDING_NORMAL,
         );
         approx_eq(s1, s2, 1e-15);
         approx_eq(w1, w2, 1e-15);
+    }
+
+    /// RESNET 301 Eq. 16 at 3 ACH50 and an 8 ft average ceiling:
+    /// 3 x 0.283316 x 4^0.65 x 8 / (50^0.65 x 60 x 144).
+    #[test]
+    fn sla_from_ach50_follows_resnet_301() {
+        approx_eq(
+            super::sla_from_ach50(3.0, crate::units::length_ft_to_m(8.0), N_I_DEFAULT),
+            0.000_152_397_236_701_146_9,
+            1e-15,
+        );
     }
 
     // --- Shielding class scaling tests (Walker & Wilson 1998 Table 3) ---
@@ -1951,12 +1997,20 @@ mod tests {
 
     #[test]
     fn garage_ela_exposed_wind_is_larger_than_normal() {
-        let (_, w_normal) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban)
-                .unwrap();
-        let (_, w_exposed) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Exposed, TerrainClass::Suburban)
-                .unwrap();
+        let (_, w_normal) = super::garage_ela_coefficients(
+            2.5,
+            0.0,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+        )
+        .unwrap();
+        let (_, w_exposed) = super::garage_ela_coefficients(
+            2.5,
+            0.0,
+            ShieldingClass::Exposed,
+            TerrainClass::Suburban,
+        )
+        .unwrap();
         assert!(
             w_exposed > w_normal,
             "exposed wind_coeff must exceed normal: exposed={w_exposed}, normal={w_normal}"
@@ -1965,18 +2019,16 @@ mod tests {
 
     #[test]
     fn garage_ela_normal_is_intermediate_between_shielded_and_exposed() {
-        let (_, w_shielded) = super::garage_ela_coefficients(
-            2.5,
+        let [w_shielded, w_normal, w_exposed] = [
             ShieldingClass::WellShielded,
-            TerrainClass::Suburban,
-        )
-        .unwrap();
-        let (_, w_normal) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban)
-                .unwrap();
-        let (_, w_exposed) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Exposed, TerrainClass::Suburban)
-                .unwrap();
+            ShieldingClass::Normal,
+            ShieldingClass::Exposed,
+        ]
+        .map(|shielding| {
+            super::garage_ela_coefficients(2.5, 0.0, shielding, TerrainClass::Suburban)
+                .unwrap()
+                .1
+        });
         assert!(
             w_shielded < w_normal,
             "well-shielded wind_coeff must be less than normal: shielded={w_shielded}, normal={w_normal}"
@@ -1990,15 +2042,12 @@ mod tests {
     #[test]
     fn garage_ela_shielding_does_not_affect_stack_coefficient() {
         // Stack coefficient depends on hor_lk_frac and zone height, not on shielding.
-        let (s_shielded, _) = super::garage_ela_coefficients(
-            2.5,
-            ShieldingClass::WellShielded,
-            TerrainClass::Suburban,
-        )
-        .unwrap();
-        let (s_exposed, _) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Exposed, TerrainClass::Suburban)
-                .unwrap();
+        let [s_shielded, s_exposed] =
+            [ShieldingClass::WellShielded, ShieldingClass::Exposed].map(|shielding| {
+                super::garage_ela_coefficients(2.5, 0.0, shielding, TerrainClass::Suburban)
+                    .unwrap()
+                    .0
+            });
         approx_eq(s_shielded, s_exposed, 1e-15);
     }
 

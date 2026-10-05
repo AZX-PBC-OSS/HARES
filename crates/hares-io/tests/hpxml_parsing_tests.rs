@@ -18,6 +18,9 @@ use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::ZoneType;
 use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml::equipment::resolve_equipment;
+use hares_io::hpxml::infiltration_geometry::{
+    exterior_leakage_fraction, foundation_top_m, walls_top_m,
+};
 use hares_io::hpxml::parse_hpxml;
 use hares_io::hpxml::validation::{
     validate_building_ranges, validate_cross_inputs, validate_epw_time_gaps, validate_hpxml_schema,
@@ -2692,13 +2695,15 @@ fn crawlspace_without_walls_takes_the_assumed_three_feet() {
     );
 }
 
-/// An attic the gable geometry cannot size (base.xml without its gable
-/// wall) is a square hip under its roofs: footprint = roof area /
+/// Every attic is a square hip under its roofs, gable roofs included, as
+/// OS-HPXML has no other attic rule: footprint = roof area /
 /// sqrt(1 + slope^2), height = 0.5 sin(atan(slope)) sqrt(footprint), volume
-/// = footprint x height / 3 (geometry.rb:1325-1329, 1373-1393).
+/// = footprint x height / 3 (geometry.rb:1325-1329, 1373-1393). base.xml's
+/// attic has gable walls; without them it is sized the same.
 #[test]
-fn attic_without_gables_is_a_square_hip() {
-    let building = parse_edited_sample("base.xml", |xml| {
+fn every_attic_is_a_square_hip() {
+    let with_gables = parse_vendored_sample("base.xml");
+    let without_gables = parse_edited_sample("base.xml", |xml| {
         let start = xml
             .find("<Wall>\n            <SystemIdentifier id='Wall2'/>")
             .expect("Wall2");
@@ -2709,21 +2714,116 @@ fn attic_without_gables_is_a_square_hip() {
     let footprint_ft2 = 1509.3 / (1.0 + slope * slope).sqrt();
     let height_ft = 0.5 * slope.atan().sin() * footprint_ft2.sqrt();
     let expected = hares_physics::units::volume_ft3_to_m3(footprint_ft2 * height_ft / 3.0);
-    let attic = building
-        .zones
-        .iter()
-        .find(|z| z.zone_type == ZoneType::Attic)
-        .expect("attic zone");
-    let volume = attic.volume_m3.expect("attic volume");
-    assert!(
-        (volume - expected).abs() / expected < 1e-6,
-        "{volume} m3, expected {expected} m3"
+    for building in [with_gables, without_gables] {
+        let attic = building
+            .zones
+            .iter()
+            .find(|z| z.zone_type == ZoneType::Attic)
+            .expect("attic zone");
+        let volume = attic.volume_m3.expect("attic volume");
+        assert!(
+            (volume - expected).abs() / expected < 1e-6,
+            "{volume} m3, expected {expected} m3"
+        );
+        let height = attic.height_m.expect("attic height");
+        assert!(
+            (height - hares_physics::units::length_ft_to_m(height_ft)).abs() < 1e-9,
+            "attic height {height} m"
+        );
+    }
+}
+
+/// The foundation top above grade is the highest foundation wall top
+/// (base.xml: 8 ft high, 7 ft below grade, so 1 ft), raised to a given
+/// `UnitHeightAboveGrade` (3 ft), or 2 ft for a unit over open air with no
+/// slab (base-foundation-ambient.xml); the walls top adds the 8 ft average
+/// ceiling per conditioned floor above grade (geometry.rb:835-848,
+/// defaults.rb:933-951).
+#[test]
+fn infiltration_heights_follow_the_foundation_and_the_floors() {
+    let raised = parse_edited_sample("base.xml", |xml| {
+        xml.replace(
+            "<NumberofConditionedFloorsAboveGrade>",
+            "<UnitHeightAboveGrade>3.0</UnitHeightAboveGrade>\n          \
+             <NumberofConditionedFloorsAboveGrade>",
+        )
+    });
+    for (building, foundation_top_ft) in [
+        (parse_vendored_sample("base.xml"), 1.0),
+        (raised, 3.0),
+        (parse_vendored_sample("base-foundation-ambient.xml"), 2.0),
+    ] {
+        let foundation_top = foundation_top_m(&building).expect("foundation top");
+        let expected_m = hares_physics::units::length_ft_to_m(foundation_top_ft);
+        assert!(
+            (foundation_top - expected_m).abs() < 1e-9,
+            "foundation top {foundation_top} m, expected {expected_m} m"
+        );
+        let walls_top = walls_top_m(&building).expect("walls top");
+        let walls_m = hares_physics::units::length_ft_to_m(foundation_top_ft + 8.0);
+        assert!(
+            (walls_top - walls_m).abs() < 1e-9,
+            "walls top {walls_top} m, expected {walls_m} m"
+        );
+    }
+}
+
+/// The walls top derives from the number of conditioned floors above
+/// grade, and the foundation top from each foundation wall's height and
+/// depth: an input lacking one fails rather than taking an assumed value.
+/// The parser requires the floor count, so a file without it fails there;
+/// a foundation wall without its depth fails where the height is needed.
+#[test]
+fn infiltration_heights_without_their_inputs_error() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendors/OCHRE/test/OS-HPXML Sample Files/base.xml");
+    let no_floors = without_elements(
+        &std::fs::read_to_string(&path).expect("sample readable"),
+        "NumberofConditionedFloorsAboveGrade",
     );
-    let height = attic.height_m.expect("attic height");
+    let err = hares_io::hpxml::parse_hpxml_str(&no_floors).expect_err("no floor count must fail");
     assert!(
-        (height - hares_physics::units::length_ft_to_m(height_ft)).abs() < 1e-9,
-        "attic height {height} m"
+        format!("{err:?}").contains("NumberofConditionedFloorsAboveGrade"),
+        "the error must name the element, got {err:?}"
     );
+    let no_depth = parse_edited_sample("base.xml", |xml| without_elements(&xml, "DepthBelowGrade"));
+    foundation_top_m(&no_depth).expect_err("no wall depth must fail");
+}
+
+/// The exterior share of a unit-total leakage measurement: a given `Aext`;
+/// for an attached unit without one, OS-HPXML's compartmentalization split
+/// (test_defaults.rb `test_infiltration_compartmentalization_test_adjustment`
+/// pins 0.840, and 0.817 with the unvented attic inside the infiltration
+/// volume); 1 for a unit-exterior measurement.
+#[test]
+fn exterior_leakage_share_follows_os_hpxml() {
+    let sample = "base-bldgtype-attached-infil-compartmentalization-test.xml";
+    let with_aext = parse_edited_sample(sample, |xml| {
+        xml.replace(
+            "<InfiltrationVolume>14400.0</InfiltrationVolume>",
+            "<InfiltrationVolume>14400.0</InfiltrationVolume>\n            \
+             <extension><Aext>0.5</Aext></extension>",
+        )
+    });
+    let attic_within = parse_edited_sample(sample, |xml| {
+        xml.replace(
+            "<WithinInfiltrationVolume>false</WithinInfiltrationVolume>",
+            "<WithinInfiltrationVolume>true</WithinInfiltrationVolume>",
+        )
+    });
+    for (building, expected) in [
+        (parse_vendored_sample(sample), 0.84014),
+        (attic_within, 0.81739),
+        (with_aext, 0.5),
+        (parse_vendored_sample("base-bldgtype-attached.xml"), 1.0),
+        (parse_vendored_sample("base.xml"), 1.0),
+    ] {
+        let share = exterior_leakage_fraction(&building).expect("exterior share");
+        assert!(
+            (share - expected).abs() < 1e-12,
+            "exterior leakage share {share}, expected {expected}"
+        );
+    }
 }
 
 /// OS-HPXML's default ConditionedBuildingVolume where its own tests pin it
