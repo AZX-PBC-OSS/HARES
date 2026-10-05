@@ -17,7 +17,8 @@ use crate::defaults::{DefaultsStore, ZipLoad};
 use super::resolve_der::{resolve_batteries, resolve_ev, resolve_generators, resolve_pv};
 use super::resolve_hvac::resolve_hvac;
 use super::resolve_loads::{
-    default_gain_fractions, default_radiant_share, resolve_scheduled_loads, resolve_ventilation,
+    default_gain_fractions, default_radiant_share, default_visible_share, resolve_scheduled_loads,
+    resolve_ventilation,
 };
 use super::resolve_water_heater::resolve_water_heaters;
 
@@ -128,19 +129,21 @@ pub(crate) fn build_spec(
             parameters.insert("latent_gain_fraction".to_string(), json!(latent));
         }
     }
-    // The radiant part follows the sensible fraction the load will read,
-    // `sensible_gain_fraction` before its HPXML spelling.
-    if !parameters.contains_key("radiative_gain_fraction")
-        && let Some(share) = default_radiant_share(&name)
-        && let Some(sensible) = parameters
-            .get("sensible_gain_fraction")
-            .or_else(|| parameters.get("frac_sensible"))
-            .and_then(Value::as_f64)
-    {
-        parameters.insert(
-            "radiative_gain_fraction".to_string(),
-            json!(share * sensible),
-        );
+    // The radiant and visible parts follow the sensible fraction the load
+    // will read, `sensible_gain_fraction` before its HPXML spelling.
+    let sensible = parameters
+        .get("sensible_gain_fraction")
+        .or_else(|| parameters.get("frac_sensible"))
+        .and_then(Value::as_f64);
+    for (key, share) in [
+        ("radiative_gain_fraction", default_radiant_share(&name)),
+        ("visible_gain_fraction", default_visible_share(&name)),
+    ] {
+        if !parameters.contains_key(key)
+            && let (Some(share), Some(sensible)) = (share, sensible)
+        {
+            parameters.insert(key.to_string(), json!(share * sensible));
+        }
     }
 
     let zip_params = defaults.zip_params(&name).cloned();

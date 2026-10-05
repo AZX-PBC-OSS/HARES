@@ -323,3 +323,46 @@ fn event_replay_wraps_at_the_year_end() {
     assert_same_day("1 January after the wrap", across[1], jan_1);
     assert_ne!(across[0], jan_1, "31 December must not replay 1 January");
 }
+
+/// Indoor lighting of an HPXML building gives the conditioned zone all of
+/// its power: 0.2 convective, 0.6 long-wave radiant and 0.2 visible
+/// short-wave (OpenStudio-HPXML `model.rb` 249-250, `add_lights`).
+#[test]
+fn hpxml_lighting_splits_convective_radiant_and_visible() {
+    let fixture = project_root().join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
+    let run = Run {
+        weather: fixture.join("weather.epw"),
+        fixture,
+        hpxml: "building.xml",
+        schedule: "schedule.csv",
+        start: "2023-01-01T00:00:00-07:00",
+        days: 1,
+        bldg_id: 1,
+    };
+    let zone = conditioned_zone(&run.fixture.join(run.hpxml));
+    let mut totals = Totals::default();
+    let mut shortwave_wh = 0.0;
+    step_appliances(&run, &["Indoor Lighting"], |_, _, ports| {
+        totals.input_wh += input_wh(ports, FuelType::Electric);
+        for thermal in ports.thermal.iter().filter(|t| t.zone == zone) {
+            totals.convective_wh += thermal.sensible_gain_w * DT_H;
+            totals.radiant_wh += thermal.radiant_gain_w * DT_H;
+            shortwave_wh += thermal.shortwave_gain_w * DT_H;
+            totals.latent_wh += thermal.latent_gain_w * DT_H;
+        }
+    });
+    assert!(totals.input_wh > 0.0, "the lights run");
+    let tolerance = 1e-9 * totals.input_wh;
+    for (kind, delivered, fraction) in [
+        ("convective", totals.convective_wh, 0.2),
+        ("radiant", totals.radiant_wh, 0.6),
+        ("visible", shortwave_wh, 0.2),
+        ("latent", totals.latent_wh, 0.0),
+    ] {
+        let want = totals.input_wh * fraction;
+        assert!(
+            (delivered - want).abs() <= tolerance,
+            "{kind}: {delivered:.3} Wh, expected {want:.3} Wh"
+        );
+    }
+}

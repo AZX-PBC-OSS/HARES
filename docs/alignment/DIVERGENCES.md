@@ -136,3 +136,73 @@ justification → measured impact → pinning tests.
   the heat made all convective, the resolver test fails when the resolver
   gives no radiant share and the others fail when the load drops its radiant
   part.
+
+## D-006: Lighting heat is 0.2 convective, 0.6 radiant and 0.2 visible
+
+- **Reference behavior:** OCHRE gives every lighting load
+  `Convective Gain Fraction (-)` 1 and `Radiative Gain Fraction (-)` 0
+  (`ochre/utils/hpxml.py:1522-1527`, under "TODO: get default
+  fractions/multipliers for lighting"), so all lighting heat reaches the
+  zone air.
+- **HARES behavior:** lights in a space give 0.6 of their power as long-wave
+  radiant gain to the interior surfaces, 0.2 as visible short-wave (D-007)
+  and the remaining 0.2 to the zone air. Exterior lighting has no zone and
+  gives no zone heat.
+- **Justification:** OpenStudio-HPXML v1.12.0 `Model.add_lights` sets
+  `FractionRadiant` 0.6, `FractionVisible` 0.2 and `ReturnAirFraction` 0
+  (`HPXMLtoOpenStudio/resources/model.rb:249-251`). EnergyPlus v24.2.0
+  takes the convected part as the remainder of those fractions
+  (`InternalHeatGains.cc:1393`) and the radiant part as
+  `Q * FractionRadiant` (line 7639).
+- **Measured impact:** conditioned-zone temperature MAE, appliance split only
+  then with this lighting split: cz5a_minisplit_gas_wh 1.622 to 1.743 °C,
+  cz6b_resistance_res_wh 0.696 to 0.708, resstock_bldg0112631_24h 0.421 to
+  0.441 (all three away from OCHRE); cz2a_gas_furnace_ac_res_wh 0.677 to
+  0.676, cz2a_pv_ev 0.899 to 0.898, cz4a_ashp_hpwh 0.887 to 0.884,
+  cz4a_battery_only 0.867 to 0.863, cz4a_pv_battery 0.836 to 0.834,
+  cz4a_pv_only 0.882 to 0.880, cz5a_ev_charging 0.867 to 0.865,
+  cz5a_ev_only 0.866 to 0.862, cz6b_pv_battery_ev 0.860 to 0.858.
+  cz5a_minisplit_gas_wh short-window HVAC energy 64.25 % to 64.15 % and site
+  energy 17.15 % to 17.19 %.
+- **Pinning tests:** `appliance_zone_gains.rs`
+  (`hpxml_lighting_splits_convective_radiant_and_visible`),
+  `gain_fractions::tests::visible_part_takes_the_short_wave_path`,
+  `resolve_loads::tests::lighting_carries_a_visible_part`,
+  `resolve_loads::tests::radiant_part_follows_the_sensible_fraction`. Each
+  fails when lighting is made all convective, at the resolver or at the
+  equipment.
+
+## D-007: Visible light is absorbed like transmitted diffuse solar
+
+- **Reference behavior:** OCHRE has no short-wave internal gain; the visible
+  part of lighting is zone-air heat (D-006).
+- **HARES behavior:** the visible part travels on its own short-wave port
+  value and is spread over the zone's interior surfaces by the
+  transmitted-solar distribution, as diffuse: in proportion to area times
+  inside solar absorptance, each surface's share split between its node and
+  the zone air by its radiation fraction. A zone with no interior surface
+  list takes the gain at its air node.
+- **Justification:** EnergyPlus v24.2.0 computes the lights' visible gain
+  as `Q * FractionShortWave` and adds it to the space's `QLTSW`
+  (`InternalHeatGains.cc:7640,7649`), then adds `QLTSW` to the enclosure's
+  diffuse short-wave, `EnclSolQSWRad = EnclSolQD + sumSpaceQLTSW`
+  (`HeatBalanceSurfaceManager.cc:3687-3693`), which the inside faces absorb
+  by their solar absorptance.
+- **Beyond EnergyPlus:** EnergyPlus also counts each window's diffuse
+  transmittance and inside absorptance in the enclosure's absorption sum
+  (`SUM1`, `HeatBalanceSurfaceManager.cc:4272`; `solVMULT = 1 / SUM1` at
+  line 4315), so part of the visible light leaves through the glazing.
+  HARES gives windows no share of the distribution, so all of the visible
+  light stays in the zone, absorbed by the opaque surfaces. The window share
+  is an open item for the transmitted-solar distribution as a whole.
+- **Measured impact:** against sending the visible part to the zone air,
+  the conditioned-zone temperature MAE moves by 0.0003 to 0.011 °C:
+  cz5a_minisplit_gas_wh 1.749 to 1.743, cz6b_resistance_res_wh 0.719 to
+  0.708, cz4a_battery_only 0.864 to 0.863, cz5a_ev_only 0.863 to 0.862,
+  cz4a_ashp_hpwh 0.885 to 0.884, and the other OCHRE-paired fixtures by less
+  than 0.001 °C toward OCHRE; resstock_bldg0112631_24h 0.436 to 0.441, away
+  from OCHRE.
+- **Pinning tests:**
+  `thermal_solver::tests::shortwave_gains_are_absorbed_like_transmitted_diffuse_solar`
+  (every short-wave watt is deposited, by area times absorptance). It fails
+  when the visible part is sent to the zone air.

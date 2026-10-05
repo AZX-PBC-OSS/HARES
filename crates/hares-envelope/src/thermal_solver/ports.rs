@@ -125,6 +125,35 @@ impl ThermalSolver {
     }
 }
 
+impl ThermalSolver {
+    /// Distributes short-wave internal gains (the visible part of lighting)
+    /// over each zone's interior surfaces through the transmitted-solar
+    /// path, as diffuse: area × inside solar absorptance, normalised, the
+    /// rest to zone air. EnergyPlus v24.2.0 adds the lights' visible gain
+    /// (`QLTSW`, `InternalHeatGains.cc:7649`) to the enclosure's diffuse
+    /// short-wave (`EnclSolQSWRad = EnclSolQD + ΣQLTSW`,
+    /// `HeatBalanceSurfaceManager.cc:3687-3693`), scales it by `solVMULT`
+    /// (1 / Σ area × inside absorptance, 4314-4315) and has each opaque
+    /// surface absorb it by its inside solar absorptance (3773). A zone with
+    /// no interior surface list takes the gain at its air node.
+    pub(super) fn apply_port_shortwave_inputs(&mut self, u: &mut DVector<f64>, ports: &PortSlots) {
+        for thermal in &ports.thermal {
+            let shortwave_w = thermal.shortwave_gain_w;
+            if shortwave_w <= 0.0 {
+                continue;
+            }
+            if self
+                .distribute_transmitted_solar(u, thermal.zone, 0.0, shortwave_w, 0.0, 0.0)
+                .is_none()
+                && let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&thermal.zone)
+                && idx < u.len()
+            {
+                u[idx] += shortwave_w;
+            }
+        }
+    }
+}
+
 /// Distribute radiant gains using InteriorSurfaceInfo (ScriptF/LWR path).
 fn distribute_radiant_lwr_surfaces(
     u: &mut DVector<f64>,

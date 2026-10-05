@@ -73,7 +73,7 @@ use hares_types::{
     ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary,
     EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource,
-    ThermalCategory, Warning, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
+    ThermalAccumulator, ThermalCategory, Warning, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
     validate_core_contract,
 };
 use hares_types::{ControlCapabilities, validate_port_core_electrical_consistency};
@@ -4255,13 +4255,13 @@ impl Dwelling {
             .rollback_ports
             .thermal
             .iter()
-            .map(|t| t.sensible_gain_w + t.radiant_gain_w + t.latent_gain_w)
+            .map(ThermalAccumulator::total_gain_w)
             .sum::<f64>()
             - self
                 .ports
                 .thermal
                 .iter()
-                .map(|t| t.sensible_gain_w + t.radiant_gain_w + t.latent_gain_w)
+                .map(ThermalAccumulator::total_gain_w)
                 .sum::<f64>();
         let discarded_electrical_w: f64 =
             self.rollback_ports.electrical.net_active_w() - self.ports.electrical.net_active_w();

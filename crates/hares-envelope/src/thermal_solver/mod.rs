@@ -623,6 +623,7 @@ impl ThermalSolver {
 
         let total_radiant_w: f64 = ports.thermal.iter().map(|t| t.radiant_gain_w).sum();
         let radiant_to_surfaces_w = (total_radiant_w - radiant_to_air_residual_w).max(0.0);
+        self.apply_port_shortwave_inputs(&mut u, ports);
 
         Ok(ZoneSensibleBreakdown {
             after_outdoor_w: after_outdoor,
@@ -1246,6 +1247,7 @@ impl ThermalSolver {
 
         self.apply_port_convective_inputs(&mut u, ports);
         self.apply_port_radiant_inputs(&mut u, ports);
+        self.apply_port_shortwave_inputs(&mut u, ports);
 
         let indoor_zone = self.config.indoor_zone_id;
         let port_convective_indoor_w = ports
@@ -1302,6 +1304,7 @@ impl ThermalSolver {
             .map(|a| {
                 a.sensible_for_category(ThermalCategory::InternalGain)
                     + a.radiant_for_category(ThermalCategory::InternalGain)
+                    + a.shortwave_gain_w
             })
             .unwrap_or(0.0);
         // Jacket losses (water heater skin loss, boiler shell loss) are
@@ -5830,6 +5833,7 @@ mod tests {
                 sensible_gain_w: 0.0,
                 radiant_gain_w: radiant_w,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
                 radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
@@ -5876,6 +5880,62 @@ mod tests {
             "energy conservation: total deposited = {:.6}, expected {:.6}",
             total_deposited,
             radiant_w
+        );
+    }
+
+    /// Short-wave internal gain (the visible part of lighting) is absorbed by
+    /// the zone's interior surfaces as transmitted diffuse solar is, in
+    /// proportion to area × inside solar absorptance, and every watt reaches
+    /// a surface node or the zone air.
+    #[test]
+    fn shortwave_gains_are_absorbed_like_transmitted_diffuse_solar() {
+        let env = env_for_temp(20.0, 10.0);
+        let mut solver = interior_lwr_solver(&env);
+        for (surface, (absorptance, radiation_frac)) in solver.config.interior_lwr_zones[0]
+            .surfaces
+            .iter_mut()
+            .zip([(0.7, 0.8), (0.5, 0.9)])
+        {
+            surface.solar_absorptance = absorptance;
+            surface.radiation_frac = radiation_frac;
+        }
+        let zone = ZoneId(1);
+        let shortwave_w = 80.0;
+        let mut accumulator = hares_types::ThermalAccumulator::new(zone);
+        accumulator.shortwave_gain_w = shortwave_w;
+        let ports = PortSlots {
+            thermal: vec![accumulator],
+            ..Default::default()
+        };
+
+        let mut u = DVector::zeros(3);
+        solver.apply_port_shortwave_inputs(&mut u, &ports);
+
+        let surfaces = &solver.config.interior_lwr_zones[0].surfaces;
+        let total_weight: f64 = surfaces
+            .iter()
+            .map(|s| s.area_m2 * s.solar_absorptance)
+            .sum();
+        assert!(total_weight > 0.0);
+        let air_idx = solver.wiring.zone_sensible_input_indices[&zone];
+        let mut air_expected = 0.0;
+        for s in surfaces {
+            let q = shortwave_w * s.area_m2 * s.solar_absorptance / total_weight;
+            if s.input_index != air_idx {
+                assert!(
+                    (u[s.input_index] - q * s.radiation_frac).abs() < 1e-9,
+                    "surface input_index={} receives {}, got {}",
+                    s.input_index,
+                    q * s.radiation_frac,
+                    u[s.input_index]
+                );
+            }
+            air_expected += q * (1.0 - s.radiation_frac);
+        }
+        assert!((u[air_idx] - air_expected).abs() < 1e-9);
+        assert!(
+            (u.iter().sum::<f64>() - shortwave_w).abs() < 1e-9,
+            "every short-wave watt is deposited"
         );
     }
 
@@ -6000,6 +6060,7 @@ mod tests {
                 sensible_gain_w: 0.0,
                 radiant_gain_w: radiant_w,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
                 radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
@@ -6414,6 +6475,7 @@ mod tests {
                 sensible_gain_w: 0.0,
                 radiant_gain_w: radiant_w,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
                 radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
@@ -6612,6 +6674,7 @@ mod tests {
                 sensible_gain_w: convect,
                 radiant_gain_w: radiant,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: [0.0; hares_types::THERMAL_CATEGORY_COUNT],
                 radiant_by_category: [0.0; hares_types::THERMAL_CATEGORY_COUNT],
                 latent_by_category: [0.0; hares_types::THERMAL_CATEGORY_COUNT],
@@ -6739,6 +6802,7 @@ mod tests {
                     sensible_gain_w: indoor_jacket,
                     radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
+                    shortwave_gain_w: 0.0,
                     sensible_by_category: {
                         let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                         a[ThermalCategory::JacketLoss.index()] = indoor_jacket;
@@ -6752,6 +6816,7 @@ mod tests {
                     sensible_gain_w: garage_jacket,
                     radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
+                    shortwave_gain_w: 0.0,
                     sensible_by_category: {
                         let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                         a[ThermalCategory::JacketLoss.index()] = garage_jacket;
@@ -6784,6 +6849,7 @@ mod tests {
                 sensible_gain_w: indoor_jacket,
                 radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: {
                     let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                     a[ThermalCategory::JacketLoss.index()] = indoor_jacket;
@@ -6812,6 +6878,7 @@ mod tests {
                 sensible_gain_w: garage_jacket,
                 radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: {
                     let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                     a[ThermalCategory::JacketLoss.index()] = garage_jacket;
@@ -6931,6 +6998,7 @@ mod tests {
                     sensible_gain_w: indoor_jacket,
                     radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
+                    shortwave_gain_w: 0.0,
                     sensible_by_category: {
                         let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                         a[ThermalCategory::JacketLoss.index()] = indoor_jacket;
@@ -6944,6 +7012,7 @@ mod tests {
                     sensible_gain_w: garage_jacket,
                     radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
+                    shortwave_gain_w: 0.0,
                     sensible_by_category: {
                         let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                         a[ThermalCategory::JacketLoss.index()] = garage_jacket;

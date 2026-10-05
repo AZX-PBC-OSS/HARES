@@ -82,6 +82,11 @@ pub enum PortContribution {
         latent_gain_w: f64,
         category: ThermalCategory,
     },
+    /// Short-wave (visible) radiation into a zone, absorbed by its interior
+    /// surfaces as transmitted diffuse solar is (EnergyPlus adds the lights'
+    /// visible gain to the zone's diffuse short-wave before distributing it).
+    /// An internal gain.
+    ShortWave { zone: ZoneId, shortwave_gain_w: f64 },
     Electrical {
         active_power_w: f64,
         reactive_power_kvar: f64,
@@ -245,6 +250,9 @@ pub struct ThermalAccumulator {
     pub sensible_gain_w: f64,
     pub radiant_gain_w: f64,
     pub latent_gain_w: f64,
+    /// Short-wave (visible) internal gain [W], distributed to the zone's
+    /// interior surfaces like transmitted diffuse solar.
+    pub shortwave_gain_w: f64,
     pub sensible_by_category: [f64; THERMAL_CATEGORY_COUNT],
     pub radiant_by_category: [f64; THERMAL_CATEGORY_COUNT],
     pub latent_by_category: [f64; THERMAL_CATEGORY_COUNT],
@@ -257,10 +265,17 @@ impl ThermalAccumulator {
             sensible_gain_w: 0.0,
             radiant_gain_w: 0.0,
             latent_gain_w: 0.0,
+            shortwave_gain_w: 0.0,
             sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             radiant_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
         }
+    }
+
+    /// Every watt this step put into the zone: convective, long-wave
+    /// radiant, short-wave and latent.
+    pub fn total_gain_w(&self) -> f64 {
+        self.sensible_gain_w + self.radiant_gain_w + self.shortwave_gain_w + self.latent_gain_w
     }
 
     pub fn add(
@@ -282,6 +297,7 @@ impl ThermalAccumulator {
         self.sensible_gain_w = 0.0;
         self.radiant_gain_w = 0.0;
         self.latent_gain_w = 0.0;
+        self.shortwave_gain_w = 0.0;
         self.sensible_by_category = [0.0; THERMAL_CATEGORY_COUNT];
         self.radiant_by_category = [0.0; THERMAL_CATEGORY_COUNT];
         self.latent_by_category = [0.0; THERMAL_CATEGORY_COUNT];
@@ -693,6 +709,17 @@ impl PortSlots {
                     )));
                 }
             }
+            PortContribution::ShortWave {
+                zone,
+                shortwave_gain_w,
+            } => {
+                let Some(total) = self.thermal.iter_mut().find(|entry| entry.zone == *zone) else {
+                    return Err(HaresError::Equipment(format!(
+                        "undeclared thermal zone: {zone:?}"
+                    )));
+                };
+                total.shortwave_gain_w += *shortwave_gain_w;
+            }
             PortContribution::Electrical {
                 active_power_w,
                 reactive_power_kvar,
@@ -967,6 +994,7 @@ mod tests {
                 sensible_gain_w: 10.0,
                 radiant_gain_w: 3.0,
                 latent_gain_w: 5.0,
+                shortwave_gain_w: 2.0,
                 sensible_by_category: [1.0, 2.0, 3.0, 4.0, 0.0, 0.0],
                 radiant_by_category: [0.0, 0.0, 3.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0, 0.0, 5.0, 0.0, 0.0, 0.0],
@@ -1007,6 +1035,7 @@ mod tests {
         slots.zero();
 
         approx_eq(slots.thermal[0].sensible_gain_w, 0.0);
+        approx_eq(slots.thermal[0].shortwave_gain_w, 0.0);
         approx_eq(slots.thermal[0].radiant_gain_w, 0.0);
         approx_eq(slots.thermal[0].latent_gain_w, 0.0);
         assert_eq!(

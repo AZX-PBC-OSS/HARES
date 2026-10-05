@@ -1198,7 +1198,9 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
         "Refrigerator" | "Freezer" => Some((1.00, 0.00)),
         "MELs" | "Plug Loads" => Some((0.855, 0.045)),
         "TV" => Some((1.00, 0.00)),
-        // OCHRE parse_lighting: Convective=1.0 for all lighting types.
+        // All lighting power is sensible heat (`model.rb` `add_lights`: no
+        // latent or lost fraction); its radiant and visible parts are set
+        // from `default_radiant_share` and `default_visible_share`.
         "Indoor Lighting" | "Exterior Lighting" | "Basement Lighting" | "Garage Lighting"
         | "Lighting" => Some((1.00, 0.00)),
         // OCHRE: gas lighting and outdoor equipment → 0 zone gain.
@@ -1232,13 +1234,26 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
 /// refrigerator 220, freezer 268, range 309 and 320), plug loads
 /// (`misc_loads.rb` 89) and fuel loads (`misc_loads.rb` 186) the same, and
 /// ceiling fans, all of whose power is sensible, `frac_radiant: 0.558`
-/// (`hvac.rb` 1635).
+/// (`hvac.rb` 1635). Lights in a space are `FractionRadiant` 0.6 of their
+/// power (`model.rb` 249), all of it sensible.
 pub(super) fn default_radiant_share(name: &str) -> Option<f64> {
     match name {
         "Cooking Range" | "Clothes Washer" | "Clothes Dryer" | "Dishwasher" | "Refrigerator"
         | "Freezer" | "MELs" | "Plug Loads" | "TV" | "Gas Fireplace" | "Gas Grill"
         | "Gas Lighting" => Some(0.6),
         "Ceiling Fan" => Some(0.558),
+        "Indoor Lighting" | "Basement Lighting" | "Garage Lighting" | "Lighting" => Some(0.6),
+        _ => None,
+    }
+}
+
+/// The short-wave (visible) share of an equipment's sensible heat: lights
+/// in a space are `FractionVisible` 0.2 of their power in OpenStudio-HPXML
+/// v1.12.0 (`model.rb` 250), the rest of the 1.0 being 0.6 radiant and 0.2
+/// convective. Exterior lights have no space and give no zone heat.
+pub(super) fn default_visible_share(name: &str) -> Option<f64> {
+    match name {
+        "Indoor Lighting" | "Basement Lighting" | "Garage Lighting" | "Lighting" => Some(0.2),
         _ => None,
     }
 }
@@ -1504,7 +1519,31 @@ mod tests {
         let mut explicit = Map::new();
         explicit.insert("radiative_gain_fraction".to_string(), json!(0.1));
         assert_eq!(radiant("Dishwasher", explicit), Some(0.1));
-        assert_eq!(radiant("Indoor Lighting", Map::new()), None);
+        assert_eq!(radiant("Indoor Lighting", Map::new()), Some(0.6));
+        assert_eq!(radiant("Exterior Lighting", Map::new()), None);
+    }
+
+    /// Lights in a space give 0.2 of their power as visible short-wave
+    /// radiation; nothing else does.
+    #[test]
+    fn lighting_carries_a_visible_part() {
+        let visible = |name: &str| {
+            param(
+                &build_spec(
+                    name.to_string(),
+                    FuelType::Electric,
+                    Map::new(),
+                    &DefaultsStore::empty(),
+                ),
+                "visible_gain_fraction",
+            )
+        };
+        for name in ["Indoor Lighting", "Basement Lighting", "Garage Lighting"] {
+            assert_eq!(visible(name), Some(0.2), "{name}");
+        }
+        for name in ["Exterior Lighting", "Cooking Range", "MELs"] {
+            assert_eq!(visible(name), None, "{name}");
+        }
     }
 
     #[test]

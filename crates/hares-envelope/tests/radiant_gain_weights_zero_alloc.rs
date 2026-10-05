@@ -331,6 +331,7 @@ fn thermal_solver_step_allocation_free_after_first_step() {
                 sensible_gain_w: 50.0,
                 radiant_gain_w: 100.0,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
                 radiant_by_category: [100.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],

@@ -148,7 +148,10 @@ impl ThermalSolver {
     /// Returns `Some(total_injected_w)` — the exact watts added to `u` — when
     /// a distribution ran, `None` when the zone has no distribution surfaces
     /// (caller then injects the lump sum to zone air).
-    fn distribute_transmitted_solar(
+    ///
+    /// The angles place the beam only; a diffuse-only call (short-wave
+    /// internal gain) passes zero beam and any angles.
+    pub(super) fn distribute_transmitted_solar(
         &mut self,
         u: &mut DVector<f64>,
         zone_id: ZoneId,

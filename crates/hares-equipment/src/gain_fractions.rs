@@ -10,15 +10,17 @@ pub(crate) const KEY_CONVECTIVE: &str = "convective_gain_fraction";
 pub(crate) const KEY_RADIANT: &str = "radiative_gain_fraction";
 pub(crate) const KEY_LATENT: &str = "latent_gain_fraction";
 const KEY_LATENT_HPXML: &str = "frac_latent";
+pub(crate) const KEY_VISIBLE: &str = "visible_gain_fraction";
 const TOLERANCE: f64 = 1e-9;
 
 /// Fractions of a load's input that enter its zone: `sensible` in total,
-/// `radiant` the long-wave part of it (the rest is convective), and
-/// `latent`.
+/// of which `radiant` is long-wave radiation, `visible` short-wave
+/// radiation and the rest convective; and `latent`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct GainFractions {
     pub(crate) sensible: f64,
     pub(crate) radiant: f64,
+    pub(crate) visible: f64,
     pub(crate) latent: f64,
 }
 
@@ -27,6 +29,7 @@ pub(crate) struct GainFractions {
 pub(crate) struct ZoneGain {
     pub(crate) convective_w: f64,
     pub(crate) radiant_w: f64,
+    pub(crate) shortwave_w: f64,
     pub(crate) latent_w: f64,
 }
 
@@ -34,16 +37,17 @@ impl GainFractions {
     /// Reads the fractions from a load's config. The sensible fraction is
     /// required: `sensible_gain_fraction`, its HPXML spelling
     /// `frac_sensible`, or the sum of `convective_gain_fraction` and
-    /// `radiative_gain_fraction`. An absent radiant or latent fraction is
-    /// none.
+    /// `radiative_gain_fraction`. An absent radiant, visible
+    /// (`visible_gain_fraction`) or latent fraction is none.
     ///
     /// # Errors
     ///
     /// A missing sensible fraction; a non-finite or negative fraction; a
-    /// sensible fraction above 1, a sensible and latent sum above 1, or a
-    /// radiant fraction above the sensible one.
+    /// sensible fraction above 1, a sensible and latent sum above 1, or
+    /// radiant and visible fractions above the sensible one.
     pub(crate) fn from_config(config: &EquipmentConfig, name: &str) -> crate::Result<Self> {
         let radiant = config.get_f64(KEY_RADIANT).unwrap_or(0.0);
+        let visible = config.get_f64(KEY_VISIBLE).unwrap_or(0.0);
         let sensible = config
             .get_f64(KEY_SENSIBLE)
             .or_else(|| config.get_f64(KEY_SENSIBLE_HPXML))
@@ -63,6 +67,7 @@ impl GainFractions {
         for (key, value) in [
             ("sensible_gain_fraction", sensible),
             ("radiant_gain_fraction", radiant),
+            ("visible_gain_fraction", visible),
             ("latent_gain_fraction", latent),
         ] {
             if !value.is_finite() || value < 0.0 {
@@ -83,15 +88,16 @@ impl GainFractions {
                 sensible + latent
             )));
         }
-        if radiant > sensible + TOLERANCE {
+        if radiant + visible > sensible + TOLERANCE {
             return Err(HaresError::Equipment(format!(
-                "radiant_gain_fraction ({radiant}) must not exceed sensible_gain_fraction \
-                 ({sensible}) (convective gain would be negative)"
+                "radiant_gain_fraction ({radiant}) + visible_gain_fraction ({visible}) must not \
+                 exceed sensible_gain_fraction ({sensible}) (convective gain would be negative)"
             )));
         }
         Ok(Self {
             sensible,
             radiant,
+            visible,
             latent,
         })
     }
@@ -104,17 +110,20 @@ impl GainFractions {
     /// The zone heat from `input_w` of electric and fuel input.
     pub(crate) fn of(&self, input_w: f64) -> ZoneGain {
         let radiant_w = input_w * self.radiant;
+        let shortwave_w = input_w * self.visible;
         ZoneGain {
-            convective_w: input_w * self.sensible - radiant_w,
+            convective_w: input_w * self.sensible - radiant_w - shortwave_w,
             radiant_w,
+            shortwave_w,
             latent_w: input_w * self.latent,
         }
     }
 }
 
 /// Adds a load's zone heat to its zone's thermal port as an internal gain:
-/// the convective part as sensible, the radiant part on the radiant path.
-/// A load with no zone, or no heat this step, adds nothing.
+/// the convective part as sensible, the long-wave part on the radiant path
+/// and the short-wave part on the short-wave path. A load with no zone, or
+/// no heat this step, adds nothing.
 ///
 /// # Errors
 ///
@@ -124,15 +133,22 @@ pub(crate) fn accumulate_zone_gain(
     zone: Option<ZoneId>,
     gain: ZoneGain,
 ) -> crate::Result<()> {
-    if let Some(zone) = zone
-        && (gain.convective_w != 0.0 || gain.radiant_w != 0.0 || gain.latent_w != 0.0)
-    {
+    let Some(zone) = zone else {
+        return Ok(());
+    };
+    if gain.convective_w != 0.0 || gain.radiant_w != 0.0 || gain.latent_w != 0.0 {
         ports.accumulate(&PortContribution::Thermal {
             zone,
             sensible_gain_w: gain.convective_w,
             radiant_gain_w: gain.radiant_w,
             latent_gain_w: gain.latent_w,
             category: ThermalCategory::InternalGain,
+        })?;
+    }
+    if gain.shortwave_w != 0.0 {
+        ports.accumulate(&PortContribution::ShortWave {
+            zone,
+            shortwave_gain_w: gain.shortwave_w,
         })?;
     }
     Ok(())
@@ -170,6 +186,32 @@ mod tests {
         assert!((gain.latent_w - 80.0).abs() < 1e-9);
     }
 
+    /// OpenStudio-HPXML lighting: all of the power sensible, 0.6 long-wave,
+    /// 0.2 visible, the remaining 0.2 convective; the visible part goes on
+    /// the short-wave path of the zone's port.
+    #[test]
+    fn visible_part_takes_the_short_wave_path() {
+        let fractions = GainFractions::from_config(
+            &config(&[(KEY_SENSIBLE, 1.0), (KEY_RADIANT, 0.6), (KEY_VISIBLE, 0.2)]),
+            "Indoor Lighting",
+        )
+        .unwrap();
+        let gain = fractions.of(500.0);
+        assert!((gain.convective_w - 100.0).abs() < 1e-9);
+        assert!((gain.radiant_w - 300.0).abs() < 1e-9);
+        assert!((gain.shortwave_w - 100.0).abs() < 1e-9);
+
+        let zone = ZoneId(1);
+        let mut ports =
+            PortSlots::from_declarations(&[hares_types::PortDeclaration::thermal(zone)]);
+        accumulate_zone_gain(&mut ports, Some(zone), gain).unwrap();
+        let thermal = &ports.thermal[0];
+        assert!((thermal.sensible_gain_w - 100.0).abs() < 1e-9);
+        assert!((thermal.radiant_gain_w - 300.0).abs() < 1e-9);
+        assert!((thermal.shortwave_gain_w - 100.0).abs() < 1e-9);
+        assert!((thermal.total_gain_w() - 500.0).abs() < 1e-9);
+    }
+
     #[test]
     fn convective_and_radiant_parts_give_the_sensible_fraction() {
         let fractions = GainFractions::from_config(
@@ -189,6 +231,8 @@ mod tests {
             vec![(KEY_SENSIBLE, 1.1)],
             vec![(KEY_SENSIBLE, 0.7), (KEY_LATENT, 0.4)],
             vec![(KEY_SENSIBLE, 0.5), (KEY_RADIANT, 0.6)],
+            vec![(KEY_SENSIBLE, 0.5), (KEY_RADIANT, 0.4), (KEY_VISIBLE, 0.2)],
+            vec![(KEY_SENSIBLE, 0.5), (KEY_VISIBLE, -0.1)],
             vec![(KEY_SENSIBLE, 0.5), (KEY_LATENT, f64::NAN)],
         ] {
             assert!(
