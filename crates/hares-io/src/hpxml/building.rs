@@ -3280,36 +3280,7 @@ fn compute_garage_geometry(
     boundaries: &[Boundary],
     garage_floor_area_m2: f64,
 ) -> Option<GarageGeometry> {
-    if garage_floor_area_m2 <= 0.0 {
-        return None;
-    }
-
-    // Collect exterior garage wall areas and azimuths (Garage→Outdoor + Garage→Garage).
-    let mut wall_areas: Vec<f64> = Vec::new();
-    let mut wall_azimuths: Vec<f64> = Vec::new();
-    for b in boundaries {
-        if b.boundary_type != BoundaryType::Wall {
-            continue;
-        }
-        let is_garage_exterior = b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-            && matches!(b.exterior_zone.as_ref(), Some(&ZoneType::Outdoor) | None);
-        let is_adjacent_garage = b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-            && b.exterior_zone.as_ref() == Some(&ZoneType::Garage);
-        if (is_garage_exterior || is_adjacent_garage)
-            && let Some(az) = b.azimuth_deg
-        {
-            wall_areas.push(b.area_m2);
-            wall_azimuths.push(az % 180.0);
-        }
-    }
-
-    // Group by azimuth mod 180 and find the two perpendicular max areas.
-    let perpendicular_maxes = max_areas_by_azimuth(&wall_areas, &wall_azimuths)?;
-    let (a1, a2) = perpendicular_maxes;
-    let wall_height = (a1 * a2 / garage_floor_area_m2).sqrt();
-    if wall_height <= 0.0 {
-        return None;
-    }
+    let wall_height = garage_wall_height_m(boundaries, garage_floor_area_m2)?;
 
     // Collect attached walls (Conditioned→Garage or Garage→Conditioned walls).
     let mut attached_areas: Vec<f64> = Vec::new();
@@ -3362,6 +3333,46 @@ fn compute_garage_geometry(
     Some(GarageGeometry {
         protruded_area_m2: protruded,
     })
+}
+
+/// Garage wall height from its exterior walls (steps 1 and 2 of
+/// [`compute_garage_geometry`]): `sqrt(a1 * a2 / garage_floor_area)` over the
+/// largest wall area in each of the two perpendicular directions. `None` when
+/// the floor area is not positive, the walls do not form two directions, or
+/// the height is not positive.
+fn garage_wall_height_m(boundaries: &[Boundary], garage_floor_area_m2: f64) -> Option<f64> {
+    if garage_floor_area_m2 <= 0.0 {
+        return None;
+    }
+
+    // Collect exterior garage wall areas and azimuths (Garage→Outdoor + Garage→Garage).
+    let mut wall_areas: Vec<f64> = Vec::new();
+    let mut wall_azimuths: Vec<f64> = Vec::new();
+    for b in boundaries {
+        if b.boundary_type != BoundaryType::Wall {
+            continue;
+        }
+        let is_garage_exterior = b.interior_zone.as_ref() == Some(&ZoneType::Garage)
+            && matches!(b.exterior_zone.as_ref(), Some(&ZoneType::Outdoor) | None);
+        let is_adjacent_garage = b.interior_zone.as_ref() == Some(&ZoneType::Garage)
+            && b.exterior_zone.as_ref() == Some(&ZoneType::Garage);
+        if (is_garage_exterior || is_adjacent_garage)
+            && let Some(az) = b.azimuth_deg
+        {
+            wall_areas.push(b.area_m2);
+            wall_azimuths.push(az % 180.0);
+        }
+    }
+
+    // Group by azimuth mod 180 and find the two perpendicular max areas.
+    let perpendicular_maxes = max_areas_by_azimuth(&wall_areas, &wall_azimuths)?;
+    let (a1, a2) = perpendicular_maxes;
+    let wall_height = (a1 * a2 / garage_floor_area_m2).sqrt();
+    if wall_height <= 0.0 {
+        None
+    } else {
+        Some(wall_height)
+    }
 }
 
 /// Given parallel arrays of wall areas and azimuths (mod 180°), return
@@ -5958,7 +5969,9 @@ mod tests {
         // garage_wall_height = sqrt(6 * 8 / 12) = 2.0 m
         // Two attached walls (3m² and 4m²): garage_area_in_main = 3*4/4 = 3.0 m²
         // protruded = 12 - 3 = 9 m²
-        use super::{Boundary, BoundaryType, ZoneType, compute_garage_geometry};
+        use super::{
+            Boundary, BoundaryType, ZoneType, compute_garage_geometry, garage_wall_height_m,
+        };
         fn wall(interior: ZoneType, exterior: ZoneType, area: f64, az: f64) -> Boundary {
             Boundary {
                 id: String::new(),
@@ -5995,9 +6008,12 @@ mod tests {
         ];
         let gg = compute_garage_geometry(&boundaries, 12.0).expect("geometry should compute");
         let wall_height = (6.0 * 8.0 / 12.0_f64).sqrt();
-        // The derived protruded area encodes the computed wall height: it is
-        // garage_floor_area - a1*a2/wall_height², so an exact match here also
-        // pins the intermediate height.
+        let derived_height =
+            garage_wall_height_m(&boundaries, 12.0).expect("wall height should compute");
+        assert!(
+            (derived_height - wall_height).abs() < 1e-6,
+            "wall height: got {derived_height}, expected {wall_height}"
+        );
         let area_in_main = 3.0 * 4.0 / (wall_height * wall_height);
         let expected_protruded = 12.0 - area_in_main;
         assert!(
