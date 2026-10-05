@@ -14,6 +14,10 @@ use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_equipment::DHW_DEMAND_LOOP;
 use hares_io::OutputFormat;
 use hares_types::{LoopId, PortType};
+use tempfile::TempDir;
+
+#[path = "../../../tests/support/temp_file.rs"]
+mod temp_file;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -63,7 +67,7 @@ fn base_dhw_multiple_path() -> PathBuf {
 /// The OCHRE sample with the boiler's `HeatingCapacity` removed, so the
 /// resolver flags the boiler for autosizing and its typed config is rebuilt
 /// after sizing.
-fn autosized_boiler_hpxml_path() -> PathBuf {
+fn autosized_boiler_hpxml_path() -> (TempDir, PathBuf) {
     let xml =
         std::fs::read_to_string(base_dhw_multiple_path()).expect("base-dhw-multiple.xml reads");
     let capacity = "<HeatingCapacity>36000.0</HeatingCapacity>";
@@ -73,15 +77,15 @@ fn autosized_boiler_hpxml_path() -> PathBuf {
         "the boiler's HeatingCapacity must be present in the fixture so the \
          test can remove it"
     );
-    let path = std::env::temp_dir().join("hares-autosized-boiler-indirect-tank.xml");
+    let (dir, path) = temp_file::temp_file("autosized-boiler-indirect-tank.xml");
     std::fs::write(&path, edited).expect("the edited fixture writes");
-    path
+    (dir, path)
 }
 
 /// The OCHRE sample with the indirect tank's RelatedHVACSystem removed, so
 /// the tank is unwired: the loop allocator assigns its loop id and the
 /// WH-autosize rebuild must keep it.
-fn unwired_tank_hpxml_path() -> PathBuf {
+fn unwired_tank_hpxml_path() -> (TempDir, PathBuf) {
     let xml =
         std::fs::read_to_string(base_dhw_multiple_path()).expect("base-dhw-multiple.xml reads");
     let wired = "<RelatedHVACSystem idref='HeatingSystem1'/>";
@@ -90,9 +94,9 @@ fn unwired_tank_hpxml_path() -> PathBuf {
         edited, xml,
         "the fixture's tank carries RelatedHVACSystem so the test can remove it"
     );
-    let path = std::env::temp_dir().join("hares-unwired-indirect-tank.xml");
+    let (dir, path) = temp_file::temp_file("unwired-indirect-tank.xml");
     std::fs::write(&path, edited).expect("the edited fixture writes");
-    path
+    (dir, path)
 }
 
 /// The declared fluid loop of the named equipment: its single fluid port,
@@ -130,8 +134,9 @@ fn assert_pair_shares_one_wired_loop(config: DwellingConfig) {
 
 #[test]
 fn autosized_boiler_keeps_its_indirect_tank_loop() {
+    let (_dir, hpxml_path) = autosized_boiler_hpxml_path();
     assert_pair_shares_one_wired_loop(dwelling_config(
-        autosized_boiler_hpxml_path(),
+        hpxml_path,
         sim_config(Duration::hours(1)),
     ));
 }
@@ -151,8 +156,9 @@ fn wired_boiler_and_indirect_tank_share_the_wired_loop() {
 /// unassigned LoopId(0).
 #[test]
 fn unwired_autosized_tank_keeps_its_allocated_loop() {
+    let (_dir, hpxml_path) = unwired_tank_hpxml_path();
     let dwelling = Dwelling::from_config(dwelling_config(
-        unwired_tank_hpxml_path(),
+        hpxml_path,
         sim_config(Duration::hours(1)),
     ))
     .expect("dwelling builds from the unwired-tank fixture");
