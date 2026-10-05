@@ -3,7 +3,8 @@
 A test marked ``network`` runs with the network open; every other test, with
 the module- and session-scoped fixtures set up for it, runs refused, and fails
 if it attempted anything. Code outside any test (collection, imports) runs
-refused too, and an attempt there fails the session.
+refused too, and an attempt there fails the session; under xdist each worker
+hands its attempts to the controller, which fails the session.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import os
 from collections.abc import Generator
 from contextlib import ExitStack
+from typing import Any
 
 import offline_guard
 import pytest
@@ -18,6 +20,7 @@ import pytest
 _ATTEMPTS = pytest.StashKey[list[str]]()
 _OUTSIDE_TESTS = pytest.StashKey[list[str]]()
 _EXIT = pytest.StashKey[ExitStack]()
+_WORKER_OUTPUT_KEY = "offline_guard_attempts_outside_tests"
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -51,8 +54,21 @@ def pytest_runtest_makereport(
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    if session.config.stash[_OUTSIDE_TESTS]:
+    attempts = session.config.stash[_OUTSIDE_TESTS]
+    worker_output: dict[str, object] | None = getattr(session.config, "workeroutput", None)
+    if worker_output is not None:
+        worker_output[_WORKER_OUTPUT_KEY] = list(attempts)
+    if attempts:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: Any, error: object) -> None:
+    """On the xdist controller, take over the attempts a finished worker made outside tests."""
+    worker_output: dict[str, object] = getattr(node, "workeroutput", {})
+    attempts = worker_output.get(_WORKER_OUTPUT_KEY, [])
+    if isinstance(attempts, list):
+        node.config.stash[_OUTSIDE_TESTS].extend(str(attempt) for attempt in attempts)
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter, config: pytest.Config) -> None:

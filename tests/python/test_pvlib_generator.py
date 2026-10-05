@@ -18,8 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import offline_guard
 import pytest
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GENERATOR = _REPO_ROOT / "tests" / "python" / "generate_pvlib_solar_override.py"
 _FIXTURES = _REPO_ROOT / "tests" / "fixtures" / "freefloat"
@@ -31,6 +31,13 @@ def _fixture_digests() -> dict[Path, bytes]:
         for path in sorted(_FIXTURES.rglob("*"))
         if path.is_file()
     }
+
+
+def _child_environment(first_on_path: Path) -> dict[str, str]:
+    """This process's environment with ``first_on_path`` ahead of the offline guard's site directory."""
+    environment = {**os.environ, **offline_guard.child_environment()}
+    environment["PYTHONPATH"] = os.pathsep.join([str(first_on_path), environment["PYTHONPATH"]])
+    return environment
 
 
 def test_pvlib_generator_requires_an_output_directory(tmp_path: Path) -> None:
@@ -48,7 +55,7 @@ def test_pvlib_generator_requires_an_output_directory(tmp_path: Path) -> None:
         [sys.executable, str(_GENERATOR)],
         capture_output=True,
         text=True,
-        env={**os.environ, "PYTHONPATH": str(blocker)},
+        env=_child_environment(blocker),
         check=False,
     )
 
@@ -76,7 +83,11 @@ def test_pvlib_generator_fails_loudly_when_pvlib_call_fails(tmp_path: Path) -> N
     )
     blocker = tmp_path / "shim"
     blocker.mkdir()
+    # This shim is the child's sitecustomize, so it runs the offline guard's
+    # first, which it would otherwise shadow.
     (blocker / "sitecustomize.py").write_text(
+        "import runpy\n"
+        f"runpy.run_path({str(offline_guard.SITE_DIR / 'sitecustomize.py')!r})\n"
         "import os\n"
         "import sys\n"
         "sys.path.remove(os.path.dirname(os.path.abspath(__file__)))\n"
@@ -91,7 +102,7 @@ def test_pvlib_generator_fails_loudly_when_pvlib_call_fails(tmp_path: Path) -> N
         [sys.executable, str(_GENERATOR), "--out", str(out_dir)],
         capture_output=True,
         text=True,
-        env={**os.environ, "PYTHONPATH": str(blocker)},
+        env=_child_environment(blocker),
         check=False,
     )
 

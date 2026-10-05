@@ -54,6 +54,32 @@ def test_a_datagram_sent_without_connecting_is_refused() -> None:
     assert _refused(probe) == [f"socket.sendto({_REMOTE!r})"]
 
 
+def test_a_connect_to_a_name_is_refused_before_the_name_is_resolved() -> None:
+    def probe() -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.connect(("example.invalid", 9))
+
+    # A name that does not resolve would raise gaierror, unrecorded, if the
+    # lookup ran before the refusal.
+    assert _refused(probe) == ["socket.connect(('example.invalid', 9))"]
+
+
+def test_a_datagram_to_a_name_is_refused_before_the_name_is_resolved() -> None:
+    def probe() -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.sendto(b"x", ("example.invalid", 9))
+
+    assert _refused(probe) == ["socket.sendto(('example.invalid', 9))"]
+
+
+def test_a_datagram_socket_connected_to_a_name_is_refused() -> None:
+    def probe() -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect_ex(("example.invalid", 9))
+
+    assert _refused(probe) == ["socket.connect(('example.invalid', 9))"]
+
+
 @pytest.mark.parametrize(
     "lookup",
     [
@@ -80,9 +106,33 @@ def test_a_python_child_inherits_the_refusal() -> None:
     assert "offline test reached the network" in child.stderr
 
 
-def test_a_python_child_that_would_skip_the_refusal_is_not_started() -> None:
-    attempts = _refused(lambda: subprocess.run([sys.executable, "-I", "-c", "pass"], check=False))
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["-I", "-c", "pass"],
+        ["-S", "-c", "pass"],
+        ["-E", "-c", "pass"],
+        ["-Ec", "pass"],
+        ["-bE", "-c", "pass"],
+        ["-X", "dev", "-E", "-c", "pass"],
+        ["-Wdefault", "-sS", "-c", "pass"],
+    ],
+    ids=["isolated", "no-site", "ignore-environment", "clustered-with-c", "clustered", "after-X", "after-W"],
+)
+def test_a_python_child_that_would_skip_the_refusal_is_not_started(options: list[str]) -> None:
+    attempts = _refused(lambda: subprocess.run([sys.executable, *options], check=False))
     assert len(attempts) == 1
+
+
+@pytest.mark.parametrize(
+    "options",
+    [["-c", "pass"], ["-c", "pass", "-E"], ["-X", "E", "-c", "pass"], ["-m", "json.tool", "-E"]],
+    ids=["plain", "flag-after-code", "X-value", "flag-after-module"],
+)
+def test_a_python_child_whose_flags_keep_the_refusal_is_started(options: list[str]) -> None:
+    with offline_guard.scope(allow_network=False) as attempts:
+        subprocess.run([sys.executable, *options], check=False, capture_output=True)
+    assert attempts == []
 
 
 def test_a_python_child_given_an_environment_without_the_refusal_is_not_started() -> None:
@@ -151,6 +201,30 @@ def test_on_loopback_only():
     with socket.create_server(("127.0.0.1", 0)) as server:
         socket.create_connection(server.getsockname(), timeout=5).close()
 """
+
+
+_IMPORT_TIME_PROBE = """
+import socket
+
+try:
+    socket.getaddrinfo("example.invalid", 443)
+except OSError:
+    pass
+
+
+def test_nothing():
+    pass
+"""
+
+
+@pytest.mark.parametrize("workers", ["0", "2"])
+def test_an_attempt_outside_any_test_fails_the_session(pytester: pytest.Pytester, workers: str) -> None:
+    pytester.makeconftest('pytest_plugins = ["offline_guard_plugin"]')
+    pytester.makepyfile(test_import_time=_IMPORT_TIME_PROBE)
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-n", workers)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stdout.fnmatch_lines(["code outside any test reached the network: socket.getaddrinfo(*"])
+    assert "subprocess" not in result.stdout.str()
 
 
 def test_an_attempt_fails_the_test_that_made_it_even_when_swallowed(pytester: pytest.Pytester) -> None:
