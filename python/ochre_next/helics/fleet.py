@@ -68,12 +68,11 @@ from ochre_next import ControlSignal
 from ochre_next._hares import SteppableFleet as PySteppableFleet
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike, is_json_object
-from .broker import allocate_ephemeral_port
 from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, STALE_SUBSCRIPTION_THRESHOLD, VOLTAGE_PU_MAX, VOLTAGE_PU_MIN, handle_time_grant, set_publication_info, validate_control_signal
 from .federate import (
     DEFAULT_CONNECT_TIMEOUT_S,
     DEFAULT_GRANT_TIMEOUT_S,
-    core_init_timeout_option,
+    core_init_string,
     enter_executing_mode_with_timeout,
     request_time_with_timeout,
     validate_timeout,
@@ -93,7 +92,8 @@ class HELICSFleet:
     Args:
         fleet: Initialized ``PySteppableFleet`` instance.
         fed_name: Unique name for this federate in the HELICS federation.
-        broker_address: Broker address (host or host:port or tcp://host:port).
+        broker_address: Broker address (host or host:port or tcp://host:port);
+            the broker's name for an in-process core (``"inproc"``).
         core_type: HELICS core transport (e.g. ``"zmq"``).
         time_offset_s: HELICS time offset in seconds.  Use a positive offset
             so this federate steps after an aggregator at the same granted time.
@@ -749,20 +749,7 @@ class HELICSFleet:
         if hasattr(helics, "helicsFederateInfoSetCoreName"):
             helics.helicsFederateInfoSetCoreName(fedinfo, f"core_{self._fed_name}")
 
-        broker_address = self._normalize_broker_address(self._broker_address)
-        # Each federate's core needs its own local ZMQ listen port. Without an
-        # explicit --port, multiple auto-named cores in the same process can
-        # collide on the auto-assigned local port and silently deadlock at
-        # enterExecutingMode instead of raising a bind error (reproduced on
-        # macOS/arm64 with HELICS 3.6.1).
-        local_port = allocate_ephemeral_port()
-        # --timeout bounds broker registration: helicsCreateValueFederate
-        # against an unreachable or unresponsive broker raises within the
-        # timeout instead of stalling for the library default (~30s).
-        core_init_value = (
-            f"--broker_address={broker_address} --port={local_port} "
-            f"{core_init_timeout_option(self._connect_timeout_s)}"
-        )
+        core_init_value = core_init_string(self._core_type, self._broker_address, self._connect_timeout_s)
         if hasattr(helics, "helicsFederateInfoSetCoreInitString"):
             helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init_value)
         else:
@@ -802,12 +789,6 @@ class HELICSFleet:
             self._fed.set_flag_option(flag, enabled)
             return
         helics.helicsFederateSetFlagOption(self._fed, flag, int(enabled))
-
-    @staticmethod
-    def _normalize_broker_address(address: str) -> str:
-        if "://" in address:
-            return address
-        return f"tcp://{address}"
 
     @property
     def helics_voltage_all_valid(self) -> bool:

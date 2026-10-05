@@ -194,6 +194,23 @@ def test_core_init_timeout_option_renders_milliseconds() -> None:
     assert core_init_timeout_option(0.0004) == "--timeout=1ms"
 
 
+def test_core_init_string_names_an_in_process_broker_without_opening_a_port() -> None:
+    from ochre_next.helics.federate import core_init_string
+
+    assert core_init_string("inproc", "federation_a", 2.0) == "--broker=federation_a --timeout=2000ms"
+
+
+def test_core_init_string_gives_a_network_core_the_broker_url_and_a_local_port() -> None:
+    from ochre_next.helics.federate import core_init_string
+
+    init = core_init_string("zmq", "10.0.0.7:23404", 2.0).split()
+
+    assert init[0] == "--broker_address=tcp://10.0.0.7:23404"
+    assert init[1].startswith("--port=")
+    assert init[2] == "--timeout=2000ms"
+    assert core_init_string("zmq", "tcp://host:1", 2.0).startswith("--broker_address=tcp://host:1 ")
+
+
 @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
 def test_validate_timeout_rejects_non_positive_and_non_finite(bad: float) -> None:
     from ochre_next.helics.federate import validate_timeout

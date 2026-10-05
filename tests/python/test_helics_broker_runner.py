@@ -6,9 +6,10 @@ import builtins
 import importlib
 import json
 from pathlib import Path
+import socket
 import sys
 import tempfile
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,22 +24,19 @@ class _FakeBroker:
         self.core_type = core_type
         self.name = name
         self.init_string = init_string
-        self._connected = False
-        self._checks = 0
         self.disconnected = False
         self.address = "tcp://127.0.0.1:24007"
 
     def is_connected(self) -> bool:
-        self._checks += 1
-        if self._checks >= 2:
-            self._connected = True
-        return self._connected
+        return True
 
     def disconnect(self) -> None:
         self.disconnected = True
 
 
 class _NeverConnectedBroker(_FakeBroker):
+    """A broker whose sockets failed to bind: HELICS returns it unconnected."""
+
     def is_connected(self) -> bool:
         return False
 
@@ -57,10 +55,13 @@ class _FakeCli:
 class _FakeHelicsModule:
     def __init__(self) -> None:
         self.created_brokers: list[_FakeBroker] = []
+        self.unbindable_ports: set[int] = set()
         self.cli = _FakeCli()
 
     def helicsCreateBroker(self, core_type: str, name: str, init_string: str) -> _FakeBroker:
-        broker = _FakeBroker(core_type, name, init_string)
+        port = int(init_string.rpartition("--port=")[2])
+        broker_type = _NeverConnectedBroker if port in self.unbindable_ports else _FakeBroker
+        broker = broker_type(core_type, name, init_string)
         self.created_brokers.append(broker)
         return broker
 
@@ -146,6 +147,97 @@ def test_create_broker_ephemeral_port_path(monkeypatch: pytest.MonkeyPatch) -> N
     assert "--federates=2" in created.init_string
     assert "--port=26001" in created.init_string
     assert broker_module.get_broker_port(broker) == 26001
+
+
+def test_create_broker_raises_when_the_broker_cannot_listen(monkeypatch: pytest.MonkeyPatch) -> None:
+    broker_module, _, fake_helics = _import_broker_runner_modules(monkeypatch)
+    fake_helics.unbindable_ports.add(24567)
+
+    with pytest.raises(RuntimeError, match="could not listen on port 24567"):
+        broker_module.create_broker(n_federates=2, core_type="zmq", port=24567)
+
+    assert fake_helics.created_brokers[0].disconnected is True
+
+
+def test_create_broker_moves_past_an_ephemeral_port_it_cannot_listen_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker_module, _, fake_helics = _import_broker_runner_modules(monkeypatch)
+    fake_helics.unbindable_ports.add(26001)
+    ports = iter([26001, 26003])
+    monkeypatch.setattr(broker_module, "allocate_ephemeral_port", lambda: next(ports))
+
+    broker = broker_module.create_broker(n_federates=2, core_type="zmq", port=None)
+
+    assert [b.disconnected for b in fake_helics.created_brokers] == [True, False]
+    assert broker_module.get_broker_port(broker) == 26003
+
+
+class _PortTable:
+    """Stands in for the ``socket`` module with a fixed set of ports already bound."""
+
+    AF_INET = socket.AF_INET
+    SOCK_STREAM = socket.SOCK_STREAM
+
+    def __init__(self, bound: set[int]) -> None:
+        self.bound = bound
+
+    def socket(self, *_args: Any) -> _PortTable._Socket:
+        return _PortTable._Socket(self.bound)
+
+    class _Socket:
+        def __init__(self, bound: set[int]) -> None:
+            self._bound = bound
+
+        def __enter__(self) -> _PortTable._Socket:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def bind(self, address: tuple[str, int]) -> None:
+            if address[1] in self._bound:
+                raise OSError("address in use")
+
+
+def test_allocate_ephemeral_port_needs_the_port_and_the_next_one_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
+    monkeypatch.setattr(broker_module, "socket", _PortTable({21001, 22000}))
+    candidates = iter([21000, 22000, 23000])
+    monkeypatch.setattr(broker_module, "random", SimpleNamespace(randint=lambda _lo, _hi: next(candidates)))
+
+    assert broker_module.allocate_ephemeral_port() == 23000
+
+
+def test_allocate_ephemeral_port_draws_below_the_kernel_ephemeral_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
+    bounds: list[tuple[int, int]] = []
+
+    def _record(lo: int, hi: int) -> int:
+        bounds.append((lo, hi))
+        return lo
+
+    monkeypatch.setattr(broker_module, "socket", _PortTable(set()))
+    monkeypatch.setattr(broker_module, "random", SimpleNamespace(randint=_record))
+
+    broker_module.allocate_ephemeral_port()
+
+    (lo, hi), = bounds
+    assert lo >= 1024
+    assert hi + 1 < 32768, "the pair must stay below Linux's ephemeral range"
+
+
+def test_allocate_ephemeral_port_raises_when_no_pair_is_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
+    monkeypatch.setattr(broker_module, "socket", _PortTable({21000}))
+    monkeypatch.setattr(broker_module, "random", SimpleNamespace(randint=lambda _lo, _hi: 21000))
+
+    with pytest.raises(RuntimeError, match="No free localhost port pair"):
+        broker_module.allocate_ephemeral_port()
 
 
 def test_create_broker_rejects_non_int_federate_count(monkeypatch: pytest.MonkeyPatch) -> None:

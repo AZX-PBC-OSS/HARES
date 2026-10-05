@@ -33,7 +33,12 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
         "HELICS not installed. Install with: pip install 'ochre_next[helics]'"
     ) from exc
 
+from .broker import allocate_ephemeral_port
+
 _LOG = logging.getLogger(__name__)
+
+# Core types whose broker lives in the same process and is addressed by name.
+_IN_PROCESS_CORE_TYPES = frozenset({"inproc", "test"})
 
 # Default wall-clock budget for broker registration plus entering executing
 # mode.  Large enough for a slow federation to assemble, small enough that a
@@ -54,6 +59,7 @@ _ABORT_JOIN_TIMEOUT_S = 2.0
 __all__ = [
     "DEFAULT_CONNECT_TIMEOUT_S",
     "DEFAULT_GRANT_TIMEOUT_S",
+    "core_init_string",
     "core_init_timeout_option",
     "enter_executing_mode_with_timeout",
     "request_time_with_timeout",
@@ -112,6 +118,24 @@ def core_init_timeout_option(timeout_s: float) -> str:
     """
     timeout_s = validate_timeout(timeout_s, "timeout_s")
     return f"--timeout={max(1, round(timeout_s * 1000.0))}ms"
+
+
+def core_init_string(core_type: str, broker_address: str, connect_timeout_s: float) -> str:
+    """Render a federate core's init string for ``broker_address``.
+
+    An in-process core (``inproc``/``test``) names its broker; ``broker_address``
+    is the broker's name and no socket is opened. A network core gets the
+    broker's URL (``tcp://`` is added to a bare ``host[:port]``) and its own
+    local listen port: without an explicit ``--port`` several auto-named cores
+    in one process can collide on the auto-assigned port and deadlock at
+    ``enterExecutingMode`` instead of raising a bind error (macOS/arm64,
+    HELICS 3.6.1).
+    """
+    timeout = core_init_timeout_option(connect_timeout_s)
+    if core_type in _IN_PROCESS_CORE_TYPES:
+        return f"--broker={broker_address} {timeout}"
+    address = broker_address if "://" in broker_address else f"tcp://{broker_address}"
+    return f"--broker_address={address} --port={allocate_ephemeral_port()} {timeout}"
 
 
 def enter_executing_mode_with_timeout(
