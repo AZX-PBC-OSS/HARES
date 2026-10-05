@@ -203,14 +203,14 @@ def test_allocate_ephemeral_port_needs_the_port_and_the_next_one_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
-    monkeypatch.setattr(broker_module, "socket", _PortTable({21001, 22000}))
-    candidates = iter([21000, 22000, 23000])
+    monkeypatch.setattr(broker_module, "socket", _PortTable({25001, 26000}))
+    candidates = iter([25000, 26000, 27000])
     monkeypatch.setattr(broker_module, "random", SimpleNamespace(randint=lambda _lo, _hi: next(candidates)))
 
-    assert broker_module.allocate_ephemeral_port() == 23000
+    assert broker_module.allocate_ephemeral_port() == 27000
 
 
-def test_allocate_ephemeral_port_draws_below_the_kernel_ephemeral_ranges(
+def test_allocate_ephemeral_port_draws_clear_of_ports_with_other_owners(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
@@ -226,14 +226,17 @@ def test_allocate_ephemeral_port_draws_below_the_kernel_ephemeral_ranges(
     broker_module.allocate_ephemeral_port()
 
     (lo, hi), = bounds
+    drawable = range(lo, hi + 2)  # a pair: the port and the next one
     assert lo >= 1024
-    assert hi + 1 < 32768, "the pair must stay below Linux's ephemeral range"
+    assert hi + 1 < 30000, "the pair must stay below the Kubernetes NodePort and kernel ephemeral ranges"
+    helics_defaults = (23404, 23405, 23414, 23415, 23500, 23901, 24160)
+    assert not any(port in drawable for port in helics_defaults), "HELICS default ports"
 
 
 def test_allocate_ephemeral_port_raises_when_no_pair_is_free(monkeypatch: pytest.MonkeyPatch) -> None:
     broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
-    monkeypatch.setattr(broker_module, "socket", _PortTable({21000}))
-    monkeypatch.setattr(broker_module, "random", SimpleNamespace(randint=lambda _lo, _hi: 21000))
+    monkeypatch.setattr(broker_module, "socket", _PortTable({25000}))
+    monkeypatch.setattr(broker_module, "random", SimpleNamespace(randint=lambda _lo, _hi: 25000))
 
     with pytest.raises(RuntimeError, match="No free localhost port pair"):
         broker_module.allocate_ephemeral_port()

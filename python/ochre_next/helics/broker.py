@@ -22,8 +22,14 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
 
 _PORT_BY_BROKER: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
 
-_PORT_RANGE_START = 20000
-_PORT_RANGE_END = 32767
+# Port pairs are drawn from 24200-29999. Below it sit the HELICS default
+# ports (23404-23415 zmq, 23500, 23901 udp, 24160 tcp), which a stock broker
+# on this host may hold; above it the Kubernetes NodePort range (30000-32767)
+# and the default kernel ephemeral ranges (Linux 32768-60999, macOS and
+# Windows 49152-65535). Hosts that widen their ephemeral range are covered by
+# the bind probe and create_broker's connected check, not by the range.
+_PORT_RANGE_START = 24200
+_PORT_RANGE_END = 29999
 _PORT_PROBE_ATTEMPTS = 128
 _BROKER_PORT_ATTEMPTS = 16
 
@@ -210,12 +216,12 @@ def allocate_ephemeral_port() -> int:
     """Return a port ``p`` with ``p`` and ``p + 1`` both free on localhost.
 
     A ZMQ broker or core binds two sockets, its port and the next one, so both
-    are probed. Candidates come from below every platform's default kernel
-    ephemeral range (Linux 32768-60999, macOS and Windows 49152-65535): ports
-    there are handed to outgoing connections, including the federates' own
-    connections to a broker, so a free probe gives no protection against them.
-    The probe sockets close before the port is returned, so another process can
-    still claim it first; :func:`create_broker` detects that and moves on.
+    are probed. Candidates come from a range clear of ports with other owners
+    (see ``_PORT_RANGE_START``): kernel ephemeral ports in particular are
+    handed to outgoing connections, including the federates' own connections
+    to a broker, so a free probe gives no protection against them. The probe
+    sockets close before the port is returned, so another process can still
+    claim it first; :func:`create_broker` detects that and moves on.
     """
     for _ in range(_PORT_PROBE_ATTEMPTS):
         candidate = random.randint(_PORT_RANGE_START, _PORT_RANGE_END - 1)
