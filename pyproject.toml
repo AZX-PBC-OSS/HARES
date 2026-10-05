@@ -157,8 +157,10 @@ testpaths = ["tests/python"]
 # dependencies only.
 pythonpath = ["vendors/OCHRE"]
 addopts = "-n auto -m 'not slow and not ochre'"
-# A passing session removes its tmp_path directories; a failing test's are kept to debug.
+# A passing test's tmp_path directory is removed; a failing test's is kept to
+# debug, and only for the last three sessions.
 tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 3
 markers = [
     "slow: marks tests as slow (run with '-m slow' or '--run-slow')",
     "ochre: requires the ochre dependency group (xmltodict, pvlib, ...) (run with '-m \"slow or ochre\"')",
