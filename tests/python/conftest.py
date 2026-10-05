@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-import sys
 
 import pytest
+from _pytest.mark.expression import Expression
+from skip_gate import pytest_addoption, pytest_sessionfinish  # noqa: F401  (hooks)
 
 # Every test runs off the network unless marked ``network`` (offline_guard).
 pytest_plugins = ["offline_guard_plugin", "pytester"]
@@ -30,6 +32,37 @@ HARES_DEFAULTS = ROOT / "defaults"
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
+
+# Modules marked ochre import OCHRE (or its group's xmltodict) at module level
+# with no skip guard. Marker selection applies after collection, so they are
+# kept out of collection unless the run's -m expression can select an ochre
+# test; a run that does select them errors on a broken OCHRE install.
+OCHRE_MODULES = frozenset(
+    {"test_ochre_parity.py", "test_thermal_trace.py", "test_ashrae_reference.py"}
+)
+
+
+def selects_ochre(markexpr: str) -> bool:
+    """Whether a -m expression selects a test marked ochre (alone or also slow)."""
+    if not markexpr:
+        return True
+    expr = Expression.compile(markexpr)
+
+    def matcher(marks: frozenset[str]):
+        return lambda name, /, **_: name in marks
+
+    return any(
+        expr.evaluate(matcher(marks))
+        for marks in (frozenset({"ochre"}), frozenset({"ochre", "slow"}))
+    )
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    if collection_path.name in OCHRE_MODULES and not selects_ochre(
+        config.option.markexpr
+    ):
+        return True
+    return None
 
 
 def output_in_test_dir(config: Mapping[str, object], filename: str) -> Callable[..., None]:

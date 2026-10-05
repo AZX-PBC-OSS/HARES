@@ -15,12 +15,10 @@ from pathlib import Path
 import pytest
 
 # The generator script imports xmltodict, which ships only in the ochre
-# dependency group. The ochre marker scopes the module to the runs whose
-# env has that group; the importorskip guard keeps collection clean in
-# the plain helics env (marker filtering alone cannot, since it applies
-# after collection). The dedicated check-ashrae-reference CI job covers
-# the same fixture independently.
-pytest.importorskip("xmltodict")
+# dependency group: tests/python/conftest.py collects this module only in
+# runs that select the ochre marker, where a missing xmltodict is a
+# collection error, not a skip. The dedicated check-ashrae-reference CI job
+# covers the same fixture independently.
 pytestmark = pytest.mark.ochre
 
 # Import the reference script as a module.

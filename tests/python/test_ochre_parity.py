@@ -125,13 +125,10 @@ def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
 # Tests
 # ---------------------------------------------------------------------------
 
-# Scoped to the runs whose selector includes the ochre marker (CI's OCHRE
-# comparison job); the default "not slow and not ochre" deselects the module.
-# Environments without the ochre group still import the module during
-# collection, so the guard below reports a module-level skip there.
+# Requires the ochre dependency group: tests/python/conftest.py collects this
+# module only in runs that select the ochre marker (CI's OCHRE comparison
+# job), where a broken OCHRE import is a collection error, not a skip.
 pytestmark = pytest.mark.ochre
-
-pytest.importorskip("ochre", reason="OCHRE not installed")
 
 # OCHRE's infiltration model converts with a unit name pint 0.25 removed from
 # the default registry; re-register it before any dwelling is built.

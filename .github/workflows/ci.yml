@@ -276,7 +276,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --group dev --extra helics --group ochre
       - run: uv run maturin develop --release
-      - run: uv run pytest -m ochre -rxX --junitxml=test-results-ochre.xml
+      # --fail-on-skip (tests/python/skip_gate.py): an OCHRE install that
+      # cannot run the comparison fails the job instead of skipping it.
+      - run: uv run pytest -m ochre -rxX --fail-on-skip --junitxml=test-results-ochre.xml
       - uses: actions/upload-artifact@v4
         if: success() || failure()
         with:
