@@ -4509,7 +4509,7 @@ impl Dwelling {
         self.thermal_solver
             .prepare_inputs(&self.ports, &self.latest_env)?;
 
-        // Steps 1e–1f: phase-ordered actor execution driven by the scheduler's
+        // Steps 1e to 1f: phase-ordered actor execution driven by the scheduler's
         // plan (explicit phase registration, within-phase priority ordering),
         // rebuilt below only when a registration changed.
         #[cfg(feature = "observe")]
