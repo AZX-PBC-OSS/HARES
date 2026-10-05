@@ -1,7 +1,8 @@
-"""48-hour OCHRE thermal trace comparison per THERMAL-007.
+"""48-hour OCHRE thermal trace comparison.
 
-Requires:
-    uv run maturin develop -m crates/hares-python/Cargo.toml --features observe --release
+Requires the ochre dependency group and the extension built with
+    uv run maturin develop --release
+(the tracked columns need no extra cargo feature).
 
 `import ochre` resolves to the vendors/OCHRE submodule via pyproject's
 pytest pythonpath.
@@ -12,15 +13,14 @@ from __future__ import annotations
 import datetime as dt
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
+import polars as pl
 import pytest
 from ochre_names import hares_columns_for
 from ochre_units import register_removed_units
 
-if TYPE_CHECKING:
-    import polars as pl
+pytestmark = pytest.mark.ochre
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
@@ -39,8 +39,12 @@ TOTAL_STEPS = DURATION_H * 60  # 2880
 
 EXPECTED_OCHRE_VERSION = "0.9.2"
 
+# OCHRE seeds numpy's global RNG only when given a seed or an output path;
+# unseeded, its stochastic equipment makes the reference differ run to run.
+OCHRE_SEED = 42
+
 # ---------------------------------------------------------------------------
-# Guard: OCHRE and polars must be present
+# Guard: OCHRE must be present (the ochre dependency group)
 # ---------------------------------------------------------------------------
 
 ochre_mod = pytest.importorskip("ochre", reason="OCHRE not installed")
@@ -51,9 +55,7 @@ import ochre.utils.units  # noqa: E402
 
 register_removed_units(ochre_mod.utils.units.ureg)
 
-pl_mod = pytest.importorskip("polars", reason="polars not installed")
-# Runtime import (the isinstance checks below need the class, not just hints)
-import pandas as pd
+import pandas as pd  # noqa: E402  (ships in the ochre group, guarded above)
 
 if ochre_mod.__version__ != EXPECTED_OCHRE_VERSION:
     pytest.fail(
@@ -130,7 +132,7 @@ def _col_to_numpy_hares(df: pl.DataFrame, col: str) -> np.ndarray | None:
     """Return column as float64 array, or None if absent."""
     if col not in df.columns:
         return None
-    return df[col].cast(pl_mod.Float64).fill_null(0.0).to_numpy()
+    return df[col].cast(pl.Float64).fill_null(0.0).to_numpy()
 
 
 def _find_col(
@@ -242,6 +244,7 @@ def ochre_48h() -> pd.DataFrame:
         weather_file=WEATHER,
         verbosity=9,
         save_results=False,
+        seed=OCHRE_SEED,
     )
     result = dwelling.simulate()
     assert isinstance(result, tuple) and len(result) == 3, (
@@ -301,14 +304,52 @@ def test_output_columns_present(
 
 
 # ---------------------------------------------------------------------------
+# Measured divergences
+#
+# HARES misses each comparison's threshold below; the strict xfails declare
+# that. The values measured against the seeded OCHRE reference are recorded
+# here and checked first in each test, within RECORD_REL_MARGIN: a measured
+# value that leaves its record fails the test outright (pytest.fail is not
+# the AssertionError the marks expect), so the xfail reasons, built from these
+# records, cannot go stale.
+# ---------------------------------------------------------------------------
+
+RECORD_REL_MARGIN = 0.02
+
+TRACE_WORST_6H_C = 2.4091
+TRACE_MEAN_48H_C = 0.8217
+TRACE_HEATING_OCHRE_KWH = 47.052
+TRACE_HEATING_HARES_KWH = 39.266
+OVERNIGHT_WORST_C = 4.7194
+OVERNIGHT_MEAN_C = 0.8776
+SOLAR_MEAN_RATIO = 1.3048
+SOLAR_WORST_REL_ERR = 0.3151
+
+
+def _check_record(name: str, measured: float, recorded: float) -> None:
+    """Fail, outside the xfail, when a measured divergence leaves its record."""
+    if abs(measured - recorded) > RECORD_REL_MARGIN * abs(recorded):
+        pytest.fail(
+            f"{name}: measured {measured:.4f}, recorded {recorded:.4f} "
+            f"(margin {RECORD_REL_MARGIN:.0%}); update the record and its xfail reason",
+            pytrace=False,
+        )
+
+
+# ---------------------------------------------------------------------------
 # test_48h_thermal_trace
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.slow
 @pytest.mark.xfail(
-    reason="Zone temp worst 6h step 2.26°C vs 0.1°C threshold, 48h mean abs 0.80°C vs 0.5°C threshold; "
-    "window solar gain ~30% higher than OCHRE -- needs IAM/SHGC calibration",
+    reason=(
+        f"HARES's zone temperature diverges from OCHRE's: worst step of the first "
+        f"6 h {TRACE_WORST_6H_C:.2f} °C against the 0.1 °C threshold, 48 h mean "
+        f"{TRACE_MEAN_48H_C:.2f} °C against 0.5 °C; 48 h heating {TRACE_HEATING_HARES_KWH:.1f} "
+        f"kWh against OCHRE's {TRACE_HEATING_OCHRE_KWH:.1f} kWh. The first component "
+        "to diverge by more than 5% is the infiltration heat gain, at step 1"
+    ),
     raises=AssertionError,
     strict=True,
 )
@@ -324,6 +365,27 @@ def test_48h_thermal_trace(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> 
     assert n >= TOTAL_STEPS, (
         f"Expected >= {TOTAL_STEPS} steps, got {n} (OCHRE={len(o_temp)}, HARES={len(h_temp)})"
     )
+
+    first_6h = 6 * 60  # 360 steps
+    diff_6h = np.abs(h_temp[:first_6h] - o_temp[:first_6h])
+    worst_step_6h = int(np.argmax(diff_6h))
+    worst_val_6h = float(diff_6h[worst_step_6h])
+    mean_abs_diff = float(np.mean(np.abs(h_temp[:n] - o_temp[:n])))
+
+    time_res_h = TIME_RES_MIN / 60.0
+    o_heat, h_heat = _find_col(ochre_48h, hares_48h, COL_HVAC_HEAT_KW)
+    assert o_heat is not None, f"OCHRE output has no column '{COL_HVAC_HEAT_KW}'"
+    assert h_heat is not None, (
+        f"HARES output has no column for '{COL_HVAC_HEAT_KW}' "
+        f"(looked up as '{_hares_col(COL_HVAC_HEAT_KW)}')"
+    )
+    o_kwh = float(np.sum(o_heat[:n])) * time_res_h
+    h_kwh = float(np.sum(h_heat[:n])) * time_res_h
+
+    _check_record("worst 6 h zone temperature divergence (°C)", worst_val_6h, TRACE_WORST_6H_C)
+    _check_record("48 h mean zone temperature divergence (°C)", mean_abs_diff, TRACE_MEAN_48H_C)
+    _check_record("OCHRE 48 h heating (kWh)", o_kwh, TRACE_HEATING_OCHRE_KWH)
+    _check_record("HARES 48 h heating (kWh)", h_kwh, TRACE_HEATING_HARES_KWH)
 
     # --- Print comparison table: first 10 steps + every 60th step (hourly) ---
     print(f"\n{'=' * 72}")
@@ -348,11 +410,6 @@ def test_48h_thermal_trace(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> 
     print()
 
     # --- Assert per-step divergence < 0.1°C for first 6 hours (360 steps) ---
-    first_6h = 6 * 60  # 360 steps
-    diff_6h = np.abs(h_temp[:first_6h] - o_temp[:first_6h])
-    worst_step_6h = int(np.argmax(diff_6h))
-    worst_val_6h = float(diff_6h[worst_step_6h])
-
     try:
         assert worst_val_6h < 0.1, (
             f"Per-step zone temp divergence {worst_val_6h:.4f}°C at step {worst_step_6h} "
@@ -363,7 +420,6 @@ def test_48h_thermal_trace(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> 
         raise
 
     # --- Assert cumulative divergence < 0.5°C mean absolute diff at 48h ---
-    mean_abs_diff = float(np.mean(np.abs(h_temp[:n] - o_temp[:n])))
     try:
         assert mean_abs_diff < 0.5, (
             f"Cumulative mean absolute zone temp divergence {mean_abs_diff:.4f}°C "
@@ -377,15 +433,6 @@ def test_48h_thermal_trace(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> 
     print(f"  Zone temp -- mean abs diff 48h: {mean_abs_diff:.4f}°C")
 
     # --- Assert cumulative HVAC heating kWh within 10% at 48h ---
-    time_res_h = TIME_RES_MIN / 60.0
-    o_heat, h_heat = _find_col(ochre_48h, hares_48h, COL_HVAC_HEAT_KW)
-    assert o_heat is not None, f"OCHRE output has no column '{COL_HVAC_HEAT_KW}'"
-    assert h_heat is not None, (
-        f"HARES output has no column for '{COL_HVAC_HEAT_KW}' "
-        f"(looked up as '{_hares_col(COL_HVAC_HEAT_KW)}')"
-    )
-    o_kwh = float(np.sum(o_heat[:n])) * time_res_h
-    h_kwh = float(np.sum(h_heat[:n])) * time_res_h
     print(f"  HVAC heating -- OCHRE: {o_kwh:.3f} kWh, HARES: {h_kwh:.3f} kWh")
     if abs(o_kwh) < 1e-6:
         assert abs(h_kwh) < 0.01, (
@@ -410,14 +457,19 @@ def test_48h_thermal_trace(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> 
 
 @pytest.mark.slow
 @pytest.mark.xfail(
-    reason="Zone temp diverges up to ~4.6°C overnight (mean abs ~0.87°C) -- HVAC cycling and solar gain differences propagate",
+    reason=(
+        f"HARES's overnight zone temperature (18:00 to 08:00) diverges from OCHRE's "
+        f"by up to {OVERNIGHT_WORST_C:.2f} °C against the 0.3 °C threshold "
+        f"(mean {OVERNIGHT_MEAN_C:.2f} °C)"
+    ),
     raises=AssertionError,
     strict=True,
 )
 def test_overnight_losses(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> None:
-    """Nighttime conduction + infiltration + LWR losses: 18:00 to 08:00 (840 steps).
+    """Nighttime zone temperature: 18:00 to 08:00 (840 steps).
 
-    No solar after sunset, so only passive loss mechanisms are active.
+    No solar after sunset, so the zone temperature follows the envelope
+    losses (conduction, infiltration, longwave) and the heating system.
     """
     # step 1080 = 18:00 local (18h * 60 min/h), step 1920 = 32h = 08:00 next day
     STEP_START = 18 * 60  # 1080
@@ -447,7 +499,11 @@ def test_overnight_losses(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> N
         f"  Worst divergence: {worst_val:.4f}°C at step {worst_step} "
         f"(t={elapsed_min // 60:02d}:{elapsed_min % 60:02d})"
     )
-    print(f"  Mean abs diff: {float(np.mean(diff)):.4f}°C")
+    mean_val = float(np.mean(diff))
+    print(f"  Mean abs diff: {mean_val:.4f}°C")
+
+    _check_record("overnight worst zone temperature divergence (°C)", worst_val, OVERNIGHT_WORST_C)
+    _check_record("overnight mean zone temperature divergence (°C)", mean_val, OVERNIGHT_MEAN_C)
 
     assert worst_val < 0.3, (
         f"Overnight zone temp divergence {worst_val:.4f}°C at step {worst_step} "
@@ -462,7 +518,11 @@ def test_overnight_losses(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> N
 
 @pytest.mark.slow
 @pytest.mark.xfail(
-    reason="Window solar gain ~30% higher than OCHRE (mean ratio ~1.30, worst step 31.5%) -- needs IAM/SHGC/area calibration",
+    reason=(
+        f"HARES's window transmitted solar gain over 10:00 to 16:00 is "
+        f"{SOLAR_MEAN_RATIO:.3f} times OCHRE's on average, every sampled step "
+        f"outside the 5% band, the worst {SOLAR_WORST_REL_ERR:.1%} high"
+    ),
     raises=AssertionError,
     strict=True,
 )
@@ -495,6 +555,8 @@ def test_solar_peak(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> None:
     print("  " + "-" * 45)
 
     violations: list[tuple[int, float, float, float]] = []
+    ratios: list[float] = []
+    worst_rel_err = 0.0
     for offset in range(0, STEP_END - STEP_START, 10):
         step = STEP_START + offset
         if step >= n:
@@ -505,6 +567,8 @@ def test_solar_peak(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> None:
         time_str = f"{elapsed_min // 60:02d}:{elapsed_min % 60:02d}"
         if abs(o_val) > 10.0:
             rel_err = abs(h_val - o_val) / abs(o_val)
+            ratios.append(float(h_val / o_val))
+            worst_rel_err = max(worst_rel_err, float(rel_err))
             d_str = f"{(h_val - o_val) / o_val * 100:+.1f}%"
             print(
                 f"  {step:>5}  {time_str:>5}  {o_val:>10.1f}  {h_val:>10.1f}  {d_str:>7}"
@@ -515,6 +579,11 @@ def test_solar_peak(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> None:
             print(
                 f"  {step:>5}  {time_str:>5}  {o_val:>10.1f}  {h_val:>10.1f}  {'(skip)':>7}"
             )
+
+    if not ratios:
+        pytest.fail("No sampled step in the solar peak window carries more than 10 W")
+    _check_record("mean window solar gain ratio HARES/OCHRE", float(np.mean(ratios)), SOLAR_MEAN_RATIO)
+    _check_record("worst window solar gain relative error", worst_rel_err, SOLAR_WORST_REL_ERR)
 
     if violations:
         msgs = [
