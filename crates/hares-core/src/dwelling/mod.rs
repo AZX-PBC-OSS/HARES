@@ -12973,17 +12973,16 @@ master_seed = 0
     }
 
     #[test]
-    fn ev_driver_v1_snapshot_blob_rejected_by_named_version_gate() {
-        // `EvDriverActor`'s snapshot schema is version 2 (the
-        // `DriverPhase::{Driving, Away}` plan payload). A blob stamped v1 —
-        // as written by a pre-change build — must be rejected at the
-        // checkpoint boundary with the named mismatch error, not accepted
-        // into a postcard decode that fails (or silently misdecodes)
-        // inside `load_state`. The stub-actor gate tests above exercise
-        // the gate mechanism but would still pass if this actor's
+    fn an_ev_driver_blob_from_an_earlier_schema_is_rejected_by_name() {
+        // A driver blob stamped with an earlier snapshot schema version, as
+        // an earlier build writes it, must be rejected at the checkpoint
+        // boundary with the named mismatch error, not accepted into a
+        // postcard decode that fails (or silently misdecodes) inside
+        // `load_state`. The stub-actor gate tests above exercise the gate
+        // mechanism but would still pass if this actor's
         // `checkpoint_version()` override were dropped back to the trait
-        // default of 1 — this test pins the real actor's participation.
-        let toml_path = unique_temp_toml("ev_driver_v1_blob");
+        // default of 1; this test pins the real actor's participation.
+        let toml_path = unique_temp_toml("ev_driver_earlier_schema_blob");
         write_minimal_toml(&toml_path);
         let _guard = TempFile(toml_path.clone());
 
