@@ -7707,9 +7707,11 @@ mod tests {
                         .solve_for_scalar_input_identity_coupled(
                             &solver.x,
                             &solver.last_u,
-                            target,
-                            output_idx,
-                            input_idx,
+                            crate::state_space::ScalarSolveTarget {
+                                y_target: target,
+                                output_index: output_idx,
+                                input_index: input_idx,
+                            },
                             &solver.last_coupling,
                             &mut reference_scratch,
                         )

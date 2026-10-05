@@ -21,7 +21,7 @@ use nalgebra::DVector;
 use super::ThermalSolver;
 use super::config::{FilmCoefficientModel, StateSpaceWiring, ThermalSolverError};
 use crate::boundary_rc::depth_mm_key;
-use crate::state_space::SolveScratch;
+use crate::state_space::{ScalarSolveTarget, SolveScratch};
 
 /// Site coordinates and elevation for the solar-geometry and film-model
 /// inputs of the autosizing entry points.
@@ -468,9 +468,11 @@ impl ThermalSolver {
             self.model.solve_identity_coupled_tail(
                 &self.x,
                 &self.last_u,
-                target_c,
-                output_idx,
-                input_idx,
+                ScalarSolveTarget {
+                    y_target: target_c,
+                    output_index: output_idx,
+                    input_index: input_idx,
+                },
                 &self.last_coupling,
                 &mut self.solve_scratch,
             )

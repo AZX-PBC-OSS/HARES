@@ -113,6 +113,15 @@ impl std::fmt::Debug for StateSpaceModel {
     }
 }
 
+/// The goal of a coupled scalar ideal-input solve: drive output row
+/// `output_index` to `y_target` by varying input column `input_index`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScalarSolveTarget {
+    pub y_target: f64,
+    pub output_index: usize,
+    pub input_index: usize,
+}
+
 /// Persistent scratch for the scalar ideal-input solves
 /// ([`StateSpaceModel::solve_for_output_input`],
 /// [`StateSpaceModel::solve_for_input`],
@@ -598,32 +607,16 @@ impl StateSpaceModel {
     /// same operations in the same order as the allocating form
     /// (`&n_mat * x + &b_eff * u - b_col * u_i` with an owned gain column), so
     /// the result is bitwise equal.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the solve takes x, u, the target, the two indices, the \
-                  couplings and the scratch; bundling them would obscure \
-                  every call site"
-    )]
     pub fn solve_for_scalar_input_identity_coupled(
         &self,
         x: &DVector<f64>,
         u: &DVector<f64>,
-        y_target: f64,
-        output_index: usize,
-        input_index: usize,
+        target: ScalarSolveTarget,
         couplings: &[(usize, f64, f64)],
         scratch: &mut SolveScratch,
     ) -> Result<f64> {
         self.fill_shared_prefix(x, u, scratch);
-        self.solve_identity_coupled_tail(
-            x,
-            u,
-            y_target,
-            output_index,
-            input_index,
-            couplings,
-            scratch,
-        )
+        self.solve_identity_coupled_tail(x, u, target, couplings, scratch)
     }
 
     /// Target-dependent tail of the identity-coupled scalar solve, reading
@@ -637,22 +630,19 @@ impl StateSpaceModel {
     /// unchanged within the step. The copy is exact and the tail applies the
     /// same operations in the same order as the full solve, so the result is
     /// bitwise equal.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the tail takes x, u, the target, the two indices, the \
-                  couplings and the scratch; bundling them would obscure \
-                  every call site"
-    )]
     pub(crate) fn solve_identity_coupled_tail(
         &self,
         x: &DVector<f64>,
         u: &DVector<f64>,
-        y_target: f64,
-        output_index: usize,
-        input_index: usize,
+        target: ScalarSolveTarget,
         couplings: &[(usize, f64, f64)],
         scratch: &mut SolveScratch,
     ) -> Result<f64> {
+        let ScalarSolveTarget {
+            y_target,
+            output_index,
+            input_index,
+        } = target;
         if output_index >= self.c.nrows() {
             return Err(StateSpaceError::OutputIndexOutOfBounds {
                 output_index,
@@ -1914,9 +1904,11 @@ mod tests {
             .solve_for_scalar_input_identity_coupled(
                 &x,
                 &u,
-                y_target,
-                0,
-                1,
+                ScalarSolveTarget {
+                    y_target,
+                    output_index: 0,
+                    input_index: 1,
+                },
                 &couplings,
                 &mut scratch,
             )
@@ -2222,9 +2214,11 @@ mod tests {
                     .solve_for_scalar_input_identity_coupled(
                         &x,
                         &u,
-                        y_target,
-                        output_idx,
-                        input_idx,
+                        ScalarSolveTarget {
+                            y_target,
+                            output_index: output_idx,
+                            input_index: input_idx,
+                        },
                         &couplings,
                         &mut scratch,
                     )
@@ -2296,9 +2290,11 @@ mod tests {
                 .solve_for_scalar_input_identity_coupled(
                     &x,
                     &u,
-                    y_target,
-                    output_idx,
-                    input_idx,
+                    ScalarSolveTarget {
+                        y_target,
+                        output_index: output_idx,
+                        input_index: input_idx,
+                    },
                     &couplings,
                     &mut scratch,
                 )
@@ -2354,9 +2350,11 @@ mod tests {
             .solve_for_scalar_input_identity_coupled(
                 &x,
                 &u,
-                y_target,
-                0,
-                2,
+                ScalarSolveTarget {
+                    y_target,
+                    output_index: 0,
+                    input_index: 2,
+                },
                 &couplings,
                 &mut scratch,
             )
