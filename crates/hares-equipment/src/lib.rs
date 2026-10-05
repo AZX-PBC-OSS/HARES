@@ -7,6 +7,7 @@ pub mod battery;
 pub mod config;
 pub mod ev;
 pub mod event_load;
+pub(crate) mod gain_fractions;
 pub mod generator;
 pub mod hvac;
 pub(crate) mod load_zone;

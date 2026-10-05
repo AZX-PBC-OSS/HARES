@@ -1236,6 +1236,24 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
     }
 }
 
+/// The long-wave radiant share of an equipment's sensible heat, the rest
+/// being convective: OpenStudio-HPXML v1.12.0 (`HPXMLtoOpenStudio/resources/`)
+/// gives appliances `frac_radiant: 0.6 *` their sensible fraction
+/// (`hotwater_appliances.rb` washer 80, dryer 121 and 132, dishwasher 172,
+/// refrigerator 220, freezer 268, range 309 and 320), plug loads
+/// (`misc_loads.rb` 89) and fuel loads (`misc_loads.rb` 186) the same, and
+/// ceiling fans, all of whose power is sensible, `frac_radiant: 0.558`
+/// (`hvac.rb` 1635).
+pub(super) fn default_radiant_share(name: &str) -> Option<f64> {
+    match name {
+        "Cooking Range" | "Clothes Washer" | "Clothes Dryer" | "Dishwasher" | "Refrigerator"
+        | "Freezer" | "MELs" | "Plug Loads" | "TV" | "Gas Fireplace" | "Gas Grill"
+        | "Gas Lighting" => Some(0.6),
+        "Ceiling Fan" => Some(0.558),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct LightingFractions {
     led: f64,
@@ -1468,6 +1486,36 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// The radiant part is the OpenStudio-HPXML share of whichever sensible
+    /// fraction the load reads: a resolved default, an HPXML `FracSensible`,
+    /// or zero for an appliance outside the unit.
+    #[test]
+    fn radiant_part_follows_the_sensible_fraction() {
+        let radiant = |name: &str, params: Map<String, Value>| {
+            param(
+                &build_spec(
+                    name.to_string(),
+                    FuelType::Electric,
+                    params,
+                    &DefaultsStore::empty(),
+                ),
+                "radiative_gain_fraction",
+            )
+        };
+        assert_eq!(radiant("Clothes Washer", Map::new()), Some(0.6 * 0.27));
+        assert_eq!(radiant("Ceiling Fan", Map::new()), Some(0.558));
+        let mut tv = Map::new();
+        tv.insert("frac_sensible".to_string(), json!(0.9));
+        assert_eq!(radiant("TV", tv), Some(0.6 * 0.9));
+        let mut outside = Map::new();
+        outside.insert("sensible_gain_fraction".to_string(), json!(0.0));
+        assert_eq!(radiant("Refrigerator", outside), Some(0.0));
+        let mut explicit = Map::new();
+        explicit.insert("radiative_gain_fraction".to_string(), json!(0.1));
+        assert_eq!(radiant("Dishwasher", explicit), Some(0.1));
+        assert_eq!(radiant("Indoor Lighting", Map::new()), None);
     }
 
     #[test]

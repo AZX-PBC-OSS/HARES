@@ -7,7 +7,10 @@
 //! electric plus fuel input times the OpenStudio-HPXML v1.12.0 sensible and
 //! latent fractions (`HPXMLtoOpenStudio/resources/hotwater_appliances.rb`:
 //! `calc_range_oven_energy`, `calc_clothes_washer_energy_gpd`,
-//! `calc_clothes_dryer_energy`, `calc_dishwasher_energy_gpd`).
+//! `calc_clothes_dryer_energy`, `calc_dishwasher_energy_gpd`), with 0.6 of
+//! the sensible heat radiant and the rest convective (`frac_radiant: 0.6 *`
+//! the sensible fraction where each appliance is added, lines 80, 121, 172
+//! and 309).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
@@ -28,6 +31,9 @@ struct ExpectedSplit {
     sensible: f64,
     latent: f64,
 }
+
+/// OpenStudio-HPXML's radiant share of an appliance's sensible heat.
+const RADIANT_SHARE: f64 = 0.6;
 
 /// Electric range, washer, vented dryer and dishwasher, all in
 /// conditioned space: `frac_lost` 0.20, 0.70, 0.85 and 0.40, with 0.90,
@@ -115,7 +121,8 @@ fn conditioned_zone(hpxml: &Path) -> ZoneId {
 #[derive(Default)]
 struct Totals {
     input_wh: f64,
-    sensible_wh: f64,
+    convective_wh: f64,
+    radiant_wh: f64,
     latent_wh: f64,
 }
 
@@ -166,7 +173,8 @@ fn assert_appliance_gains_reach_conditioned_zone(
         let total = &mut totals[idx];
         total.input_wh += input_wh(ports, fuel);
         for thermal in ports.thermal.iter().filter(|t| t.zone == zone) {
-            total.sensible_wh += thermal.sensible_gain_w * DT_H;
+            total.convective_wh += thermal.sensible_gain_w * DT_H;
+            total.radiant_wh += thermal.radiant_gain_w * DT_H;
             total.latent_wh += thermal.latent_gain_w * DT_H;
         }
     });
@@ -178,8 +186,10 @@ fn assert_appliance_gains_reach_conditioned_zone(
             split.name
         );
         let tolerance = 1e-9 * total.input_wh;
+        let radiant = RADIANT_SHARE * split.sensible;
         for (kind, delivered, fraction) in [
-            ("sensible", total.sensible_wh, split.sensible),
+            ("convective", total.convective_wh, split.sensible - radiant),
+            ("radiant", total.radiant_wh, radiant),
             ("latent", total.latent_wh, split.latent),
         ] {
             let want = total.input_wh * fraction;

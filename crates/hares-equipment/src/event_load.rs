@@ -11,7 +11,7 @@ use hares_types::{
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidNodeId, FluidType, FuelPower, FuelType, HaresError,
     HeatTransferDirection, OperatingMode, PortContribution, PortDeclaration, PortSlots,
-    ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
+    ScheduleSource, Telemetry, TelemetryField, ZoneId, telemetry_keys as tk,
 };
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use hares_physics::units::power_kw_to_w;
 
 use crate::config::constructor_equipment_id;
+use crate::gain_fractions::{GainFractions, accumulate_zone_gain};
 use crate::hvac::helpers::parse_fuel_type;
 use crate::load_zone::resolve_load_zone;
 use crate::schedule_helpers::{
@@ -38,8 +39,6 @@ const KEY_N_UNITS: &str = "n_units";
 const KEY_ACTIVE_POWER_KW: &str = "active_power_kw";
 const KEY_ACTIVE_DURATION_S: &str = "active_duration_s";
 const KEY_COOLDOWN_DURATION_S: &str = "cooldown_duration_s";
-const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
-const KEY_LATENT_GAIN_FRACTION: &str = "latent_gain_fraction";
 const KEY_PHASE_LEN: &str = "phase_len";
 const KEY_EVENT_WINDOW_SOURCE: &str = "event_window_source";
 const KEY_EVENT_WINDOW_SCHEDULE_COL: &str = "event_window_schedule_col";
@@ -285,8 +284,7 @@ pub struct EventBasedLoad {
     active_power_kw: f64,
     active_duration_s: f64,
     cooldown_duration_s: f64,
-    sensible_gain_fraction: f64,
-    latent_gain_fraction: f64,
+    gains: GainFractions,
     month_multipliers: Option<[f64; 12]>,
 
     phase: EventPhase,
@@ -323,8 +321,7 @@ pub struct WetAppliance {
 
     phases: Vec<CyclePhase>,
     n_units: f64,
-    sensible_gain_fraction: f64,
-    latent_gain_fraction: f64,
+    gains: GainFractions,
     month_multipliers: Option<[f64; 12]>,
     /// None for non-dryer appliances (washer, dishwasher); `Some` for dryers.
     dryer_type: Option<DryerType>,
@@ -383,8 +380,7 @@ impl EventBasedLoad {
             active_power_kw: 0.0,
             active_duration_s: 0.0,
             cooldown_duration_s: 0.0,
-            sensible_gain_fraction: 0.0,
-            latent_gain_fraction: 0.0,
+            gains: GainFractions::default(),
             month_multipliers: None,
             phase: EventPhase::Idle,
             remaining_phase_s: 0.0,
@@ -511,8 +507,7 @@ impl EventBasedLoad {
         // kW→W conversion at the electrical↔thermal boundary.
         let active_power_w = power_kw_to_w(electric_power_kw);
         let gain_source_w = active_power_w + fuel_consumption_w;
-        let sensible_gain_w = gain_source_w * self.sensible_gain_fraction;
-        let latent_gain_w = gain_source_w * self.latent_gain_fraction;
+        let gain = self.gains.of(gain_source_w);
 
         if electric_power_kw != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -528,23 +523,14 @@ impl EventBasedLoad {
             })?;
         }
 
-        if let Some(zone) = self.descriptor.zone
-            && (sensible_gain_w != 0.0 || latent_gain_w != 0.0)
-        {
-            ports.accumulate(&PortContribution::Thermal {
-                zone,
-                sensible_gain_w,
-                radiant_gain_w: 0.0,
-                latent_gain_w,
-                category: ThermalCategory::InternalGain,
-            })?;
-        }
+        accumulate_zone_gain(ports, self.descriptor.zone, gain)?;
 
         self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
-        self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
-        self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
+        self.telemetry
+            .set(tk::SENSIBLE_GAIN_W, gain_source_w * self.gains.sensible);
+        self.telemetry.set(tk::LATENT_GAIN_W, gain.latent_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_consumption_w);
         self.telemetry.set(tk::STATE, phase_ordinal(self.phase));
         self.core_output = CoreOutput {
@@ -613,12 +599,11 @@ impl Equipment for EventBasedLoad {
         self.active_duration_s = parse_positive(config, KEY_ACTIVE_DURATION_S)?.unwrap_or(900.0);
         self.cooldown_duration_s =
             parse_non_negative(config, KEY_COOLDOWN_DURATION_S)?.unwrap_or(0.0);
-        (self.sensible_gain_fraction, self.latent_gain_fraction) =
-            parse_gain_fractions(config, &self.descriptor.name)?;
+        self.gains = GainFractions::from_config(config, &self.descriptor.name)?;
         self.descriptor.zone = resolve_load_zone(
             config,
             &self.descriptor.end_use,
-            self.sensible_gain_fraction + self.latent_gain_fraction > 0.0,
+            self.gains.gives_zone_heat(),
             env,
         )?;
 
@@ -928,8 +913,7 @@ impl WetAppliance {
                 has_water_draw: false,
             }],
             n_units: 1.0,
-            sensible_gain_fraction: 0.0,
-            latent_gain_fraction: 0.0,
+            gains: GainFractions::default(),
             month_multipliers: None,
             dryer_type: None,
             active: false,
@@ -1044,8 +1028,7 @@ impl WetAppliance {
 
         let active_power_w = power_kw_to_w(electric_power_kw);
         let gain_source_w = active_power_w + fuel_consumption_w;
-        let sensible_gain_w = gain_source_w * self.sensible_gain_fraction;
-        let latent_gain_w = gain_source_w * self.latent_gain_fraction;
+        let gain = self.gains.of(gain_source_w);
 
         if electric_power_kw != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -1061,17 +1044,7 @@ impl WetAppliance {
             })?;
         }
 
-        if let Some(zone) = self.descriptor.zone
-            && (sensible_gain_w != 0.0 || latent_gain_w != 0.0)
-        {
-            ports.accumulate(&PortContribution::Thermal {
-                zone,
-                sensible_gain_w,
-                radiant_gain_w: 0.0,
-                latent_gain_w,
-                category: ThermalCategory::InternalGain,
-            })?;
-        }
+        accumulate_zone_gain(ports, self.descriptor.zone, gain)?;
 
         let current_phase_has_water = self
             .phases
@@ -1119,8 +1092,9 @@ impl WetAppliance {
         self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
-        self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
-        self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
+        self.telemetry
+            .set(tk::SENSIBLE_GAIN_W, gain_source_w * self.gains.sensible);
+        self.telemetry.set(tk::LATENT_GAIN_W, gain.latent_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_consumption_w);
         self.telemetry.set(
             tk::CYCLE_PHASE,
@@ -1189,12 +1163,11 @@ impl Equipment for WetAppliance {
         self.event_probability_source = probability_source;
         self.phases = parse_cycle_phases(config)?;
         self.n_units = parse_non_negative(config, KEY_N_UNITS)?.unwrap_or(1.0);
-        (self.sensible_gain_fraction, self.latent_gain_fraction) =
-            parse_gain_fractions(config, &self.descriptor.name)?;
+        self.gains = GainFractions::from_config(config, &self.descriptor.name)?;
         self.descriptor.zone = resolve_load_zone(
             config,
             &self.descriptor.end_use,
-            self.sensible_gain_fraction + self.latent_gain_fraction > 0.0,
+            self.gains.gives_zone_heat(),
             env,
         )?;
 
@@ -1750,46 +1723,6 @@ fn parse_positive(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f
         )));
     }
     Ok(Some(value))
-}
-
-/// The sensible and latent fractions of a load's input that enter its zone.
-/// `frac_sensible` and `frac_latent` are the HPXML extension spellings. The
-/// sensible fraction is required; an absent latent fraction is no latent gain.
-fn parse_gain_fractions(config: &EquipmentConfig, name: &str) -> crate::Result<(f64, f64)> {
-    let sensible = config
-        .get_f64(KEY_SENSIBLE_GAIN_FRACTION)
-        .or_else(|| config.get_f64("frac_sensible"))
-        .ok_or_else(|| {
-            HaresError::Equipment(format!(
-                "sensible_gain_fraction missing for '{name}'; must be specified explicitly"
-            ))
-        })?;
-    let latent = config
-        .get_f64(KEY_LATENT_GAIN_FRACTION)
-        .or_else(|| config.get_f64("frac_latent"))
-        .unwrap_or(0.0);
-    if !sensible.is_finite() || sensible < 0.0 {
-        return Err(HaresError::Equipment(format!(
-            "sensible_gain_fraction ({sensible}) must be finite and must not be negative"
-        )));
-    }
-    if sensible > 1.0 + 1e-9 {
-        return Err(HaresError::Equipment(format!(
-            "sensible_gain_fraction ({sensible}) must not exceed 1.0"
-        )));
-    }
-    if !latent.is_finite() || latent < 0.0 {
-        return Err(HaresError::Equipment(format!(
-            "latent_gain_fraction ({latent}) must be finite and must not be negative"
-        )));
-    }
-    if sensible + latent > 1.0 + 1e-9 {
-        return Err(HaresError::Equipment(format!(
-            "sensible_gain_fraction ({sensible}) + latent_gain_fraction ({latent}) = {} exceeds 1.0",
-            sensible + latent
-        )));
-    }
-    Ok((sensible, latent))
 }
 
 /// An event load's random stream and the start draws taken from it.
@@ -3721,8 +3654,8 @@ mod tests {
         let mut eq = EventBasedLoad::new(config.clone());
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
-            err.to_string().contains("exceeds 1.0"),
-            "expected 'exceeds 1.0' error, got: {err}"
+            err.to_string().contains("+ latent_gain_fraction"),
+            "expected the sensible plus latent error, got: {err}"
         );
     }
 
@@ -3802,8 +3735,8 @@ mod tests {
         let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
-            err.to_string().contains("exceeds 1.0"),
-            "expected 'exceeds 1.0' error, got: {err}"
+            err.to_string().contains("+ latent_gain_fraction"),
+            "expected the sensible plus latent error, got: {err}"
         );
     }
 
@@ -4400,6 +4333,62 @@ mod tests {
                     .any(|p| p.port_type == hares_types::PortType::Thermal
                         && p.zone == Some(ZoneId(1))),
                 "{}: declares a thermal port on its zone",
+                config.name
+            );
+        }
+    }
+
+    /// The radiant part of an event load's sensible heat reaches its zone's
+    /// radiant accumulator and the rest the convective one, for both event
+    /// load kinds.
+    #[test]
+    fn event_load_splits_its_sensible_heat_radiant_and_convective() {
+        let mut range = event_config("Cooking Range", "Cooking Range");
+        let mut dryer = dryer_config("Clothes Dryer", Some("vented_electric"));
+        for config in [&mut range, &mut dryer] {
+            config
+                .test_extras_mut()
+                .insert("sensible_gain_fraction".to_string(), 0.4.into());
+            config
+                .test_extras_mut()
+                .insert("radiative_gain_fraction".to_string(), 0.24.into());
+            config
+                .test_extras_mut()
+                .insert("latent_gain_fraction".to_string(), 0.1.into());
+        }
+        let loads: [(Box<dyn Equipment>, EquipmentConfig); 2] = [
+            (Box::new(EventBasedLoad::new(range.clone())), range),
+            (
+                Box::new(WetAppliance::new(dryer.clone(), "Clothes Dryer")),
+                dryer,
+            ),
+        ];
+        for (mut eq, config) in loads {
+            let mut env = base_env();
+            eq.init(&config, &env).unwrap();
+            eq.apply_signal(&hares_types::ControlSignal::ModeOverride {
+                mode: hares_types::OperatingMode::On,
+            })
+            .unwrap();
+            set_schedule_payload(&mut env, vec![1.0, 1.0]);
+            let mut slots = PortSlots::from_declarations(eq.ports());
+            eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+            let input_w = slots.electrical.load_power_w;
+            assert!(input_w > 0.0, "{} runs", config.name);
+            let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
+            assert!(
+                (t.radiant_gain_w - 0.24 * input_w).abs() < 1e-9,
+                "{}",
+                config.name
+            );
+            assert!(
+                (t.sensible_gain_w - 0.16 * input_w).abs() < 1e-9,
+                "{}",
+                config.name
+            );
+            assert!(
+                (t.latent_gain_w - 0.1 * input_w).abs() < 1e-9,
+                "{}",
                 config.name
             );
         }

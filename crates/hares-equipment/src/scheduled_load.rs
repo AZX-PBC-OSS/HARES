@@ -11,22 +11,18 @@ use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory,
-    telemetry_keys as tk,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::config::constructor_equipment_id;
+use crate::gain_fractions::{GainFractions, accumulate_zone_gain};
 use crate::load_zone::resolve_load_zone;
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_usize,
     parse_zone_id, restore_schedule_source_state,
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
-const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
-const KEY_CONVECTIVE_GAIN_FRACTION: &str = "convective_gain_fraction";
-const KEY_RADIATIVE_GAIN_FRACTION: &str = "radiative_gain_fraction";
-const KEY_LATENT_GAIN_FRACTION: &str = "latent_gain_fraction";
 const KEY_GAS_SCHEDULE_IS_W: &str = "gas_schedule_is_w";
 const KEY_POWER_SCHEDULE_SOURCE: &str = "power_schedule_source";
 const KEY_POWER_SCHEDULE_COL: &str = "power_schedule_col";
@@ -91,9 +87,7 @@ pub struct ScheduledLoad {
     core_output: CoreOutput,
     gas_source: Option<ScheduleSource>,
     gas_schedule_unit: GasScheduleUnit,
-    sensible_gain_fraction: f64,
-    radiant_gain_fraction: f64,
-    latent_gain_fraction: f64,
+    gains: GainFractions,
     /// Full ZIP model (real + reactive) resolved via
     /// [`crate::config::resolve_zip`]; scheduled loads keep the full
     /// voltage-dependent real-power polynomial (OCHRE parity), so the
@@ -144,9 +138,7 @@ impl ScheduledLoad {
             core_output: CoreOutput::default(),
             gas_source: None,
             gas_schedule_unit: GasScheduleUnit::ThermsPerHour,
-            sensible_gain_fraction: 0.0,
-            radiant_gain_fraction: 0.0,
-            latent_gain_fraction: 0.0,
+            gains: GainFractions::default(),
             zip: hares_types::zip::ResolvedZip::governing(
                 hares_types::zip::zip_defaults_for_class(equipment_type)
                     .unwrap_or_else(hares_types::zip::ZipLoad::constant_power),
@@ -185,69 +177,7 @@ impl ScheduledLoad {
         } else {
             gas_unit
         };
-        // OCHRE Equipment.py:83-86: sensible gain = convective + radiative fractions.
-        // "frac_sensible" is the HPXML-parsed alias for sensible_gain_fraction.
-        let radiative_frac = config.get_f64(KEY_RADIATIVE_GAIN_FRACTION).unwrap_or(0.0);
-        self.sensible_gain_fraction = config
-            .get_f64(KEY_SENSIBLE_GAIN_FRACTION)
-            .or_else(|| config.get_f64("frac_sensible"))
-            .or_else(|| {
-                let conv = config.get_f64(KEY_CONVECTIVE_GAIN_FRACTION).unwrap_or(0.0);
-                let rad = config.get_f64(KEY_RADIATIVE_GAIN_FRACTION).unwrap_or(0.0);
-                if conv > 0.0 || rad > 0.0 {
-                    Some(conv + rad)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| {
-                HaresError::Equipment(format!(
-                    "sensible_gain_fraction missing for '{}'; must be specified explicitly",
-                    self.descriptor.name
-                ))
-            })?;
-        self.radiant_gain_fraction = radiative_frac;
-        // "frac_latent" is the HPXML-parsed alias for latent_gain_fraction.
-        self.latent_gain_fraction = config
-            .get_f64(KEY_LATENT_GAIN_FRACTION)
-            .or_else(|| config.get_f64("frac_latent"))
-            .unwrap_or(0.0);
-        if self.sensible_gain_fraction < 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) must not be negative",
-                self.sensible_gain_fraction
-            )));
-        }
-        if self.sensible_gain_fraction > 1.0 + 1e-9 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) must not exceed 1.0",
-                self.sensible_gain_fraction
-            )));
-        }
-        if self.latent_gain_fraction < 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "latent_gain_fraction ({}) must not be negative",
-                self.latent_gain_fraction
-            )));
-        }
-        if self.radiant_gain_fraction < 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "radiant_gain_fraction ({}) must not be negative",
-                self.radiant_gain_fraction
-            )));
-        }
-        if self.sensible_gain_fraction + self.latent_gain_fraction > 1.0 + 1e-9 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) + latent_gain_fraction ({}) must not exceed 1.0",
-                self.sensible_gain_fraction, self.latent_gain_fraction
-            )));
-        }
-        if self.radiant_gain_fraction > self.sensible_gain_fraction + 1e-9 {
-            return Err(HaresError::Equipment(format!(
-                "radiant_gain_fraction ({}) must not exceed sensible_gain_fraction ({}) (convective gain would be negative)",
-                self.radiant_gain_fraction, self.sensible_gain_fraction
-            )));
-        }
+        self.gains = GainFractions::from_config(config, &self.descriptor.name)?;
         self.zip = crate::config::resolve_zip(config);
         crate::config::validate_zip_sums(&self.zip, &self.descriptor.name)?;
         #[cfg(feature = "observe")]
@@ -305,7 +235,7 @@ impl ScheduledLoad {
         self.descriptor.zone = resolve_load_zone(
             config,
             &self.descriptor.end_use,
-            self.sensible_gain_fraction + self.latent_gain_fraction > 0.0,
+            self.gains.gives_zone_heat(),
             env,
         )?;
         self.telemetry = default_telemetry();
@@ -509,21 +439,10 @@ impl Equipment for ScheduledLoad {
         }
 
         let total_gain_source_w = power_kw_to_w(electric_power_kw) + gas_consumption_w;
-        let total_sensible_w = total_gain_source_w * self.sensible_gain_fraction;
-        let radiant_gain_w = total_gain_source_w * self.radiant_gain_fraction;
-        let sensible_gain_w = total_sensible_w - radiant_gain_w;
-        let latent_gain_w = total_gain_source_w * self.latent_gain_fraction;
-        if let Some(zone) = self.descriptor.zone
-            && (sensible_gain_w != 0.0 || radiant_gain_w != 0.0 || latent_gain_w != 0.0)
-        {
-            ports.accumulate(&PortContribution::Thermal {
-                zone,
-                sensible_gain_w,
-                radiant_gain_w,
-                latent_gain_w,
-                category: ThermalCategory::InternalGain,
-            })?;
-        }
+        let gain = self.gains.of(total_gain_source_w);
+        let total_sensible_w = total_gain_source_w * self.gains.sensible;
+        let latent_gain_w = gain.latent_w;
+        accumulate_zone_gain(ports, self.descriptor.zone, gain)?;
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_power_kw);
         self.telemetry
@@ -705,12 +624,10 @@ impl Equipment for ScheduledLoad {
             power_kw_to_w(self.last_non_zero_power_kw) + self.last_non_zero_gas_w;
         self.telemetry.insert(
             tk::TOTAL_SENSIBLE_GAIN_W,
-            total_gain_source_w * self.sensible_gain_fraction,
+            total_gain_source_w * self.gains.sensible,
         );
-        self.telemetry.insert(
-            tk::LATENT_GAIN_W,
-            total_gain_source_w * self.latent_gain_fraction,
-        );
+        self.telemetry
+            .insert(tk::LATENT_GAIN_W, total_gain_source_w * self.gains.latent);
         self.telemetry
             .insert(tk::FUEL_INPUT_W, self.last_non_zero_gas_w);
         self.core_output = CoreOutput {
@@ -1213,10 +1130,12 @@ mod tests {
     use hares_types::zip::{ResolvedZip, ZipLoad};
 
     use super::{
-        GAS_THERMS_PER_HOUR_TO_W, KEY_CONVECTIVE_GAIN_FRACTION, KEY_GAS_CONSTANT,
-        KEY_GAS_SCHEDULE_IS_W, KEY_GAS_SCHEDULE_SOURCE, KEY_LATENT_GAIN_FRACTION,
-        KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE,
-        KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION, ScheduledLoad,
+        GAS_THERMS_PER_HOUR_TO_W, KEY_GAS_CONSTANT, KEY_GAS_SCHEDULE_IS_W, KEY_GAS_SCHEDULE_SOURCE,
+        KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE, ScheduledLoad,
+    };
+    use crate::gain_fractions::{
+        KEY_CONVECTIVE as KEY_CONVECTIVE_GAIN_FRACTION, KEY_LATENT as KEY_LATENT_GAIN_FRACTION,
+        KEY_RADIANT as KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE as KEY_SENSIBLE_GAIN_FRACTION,
     };
 
     use crate::schedule_helpers::KEY_MONTH_MULTIPLIER_PREFIX;

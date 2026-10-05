@@ -95,3 +95,44 @@ justification → measured impact → pinning tests.
 - **Pinning tests:** `engine.rs` metric identity assertions,
   `tests/resstock_smoke.rs` energy invariants (5/5, includes the PV
   exporters).
+
+## D-005: Appliance and plug-load heat has a radiant part
+
+- **Reference behavior:** OCHRE adds an equipment's radiative gain fraction
+  to its convective fraction and puts the sum on the zone air node
+  (`ochre/Equipment/Equipment.py:80-85`, injected at line 197). Its source
+  notes the gap: "FUTURE: separate convection and radiation, move radiation
+  gains to the surfaces around the zone".
+- **HARES behavior:** appliance, plug-load and fuel-load heat is split into
+  a convective part on the zone air and a long-wave radiant part of 0.6 of
+  the sensible fraction, distributed to the zone's interior surfaces. The
+  ceiling fan, all of whose power is sensible heat, is 0.558 radiant.
+- **Justification:** OpenStudio-HPXML v1.12.0 gives appliances
+  `frac_radiant: 0.6 *` their sensible fraction
+  (`HPXMLtoOpenStudio/resources/hotwater_appliances.rb`: washer 80, dryer
+  121 and 132, dishwasher 172, refrigerator 220, freezer 268, range 309 and
+  320), plug loads and fuel loads the same (`misc_loads.rb:89`,
+  `misc_loads.rb:186`) and the ceiling fan `frac_radiant: 0.558`
+  (`hvac.rb:1635`). EnergyPlus v24.2.0 carries an equipment's radiant part
+  separately from its convected part (`InternalHeatGains.cc:7666-7667`) and
+  distributes the radiant part to the zone's surfaces, not the air. Radiant
+  heat warms the room's mass first, so air-only injection overstates how
+  fast the air temperature responds.
+- **Measured impact:** conditioned-zone temperature MAE against the OCHRE
+  1-hour fixtures, all-convective then with this split:
+  cz2a_gas_furnace_ac_res_wh 0.690 to 0.677 °C, cz2a_pv_ev 0.908 to 0.899,
+  cz4a_ashp_hpwh 0.888 to 0.887, cz4a_battery_only 0.883 to 0.867,
+  cz4a_pv_battery 0.851 to 0.836, cz4a_pv_only 0.894 to 0.882,
+  cz5a_ev_charging 0.884 to 0.867, cz5a_ev_only 0.882 to 0.866,
+  cz5a_minisplit_gas_wh 1.711 to 1.622, cz6b_pv_battery_ev 0.875 to 0.860,
+  cz6b_resistance_res_wh 0.746 to 0.696. One fixture moves away from OCHRE:
+  resstock_bldg0112631_24h zone temperature 0.408 to 0.421 °C, HVAC energy
+  20.1 % to 21.8 %, site energy 5.14 % to 5.26 %.
+- **Pinning tests:** `crates/hares-core/tests/appliance_zone_gains.rs`
+  (`hpxml_appliance_gains_reach_the_conditioned_zone`,
+  `resstock_event_load_replay_delivers_its_gains`),
+  `gain_fractions::tests::radiant_part_of_sensible_leaves_the_rest_convective`,
+  `resolve_loads::tests::radiant_part_follows_the_sensible_fraction`. With
+  the heat made all convective, the resolver test fails when the resolver
+  gives no radiant share and the others fail when the load drops its radiant
+  part.
