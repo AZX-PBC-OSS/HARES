@@ -1,29 +1,17 @@
-"""Tests for Fleet API completion (PY-009)."""
+"""Tests for the Fleet API."""
 
+import tempfile
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
-
+from ochre_next import DwellingConfig, SimulationConfig
+from ochre_next import Fleet as PyFleet
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
 HARES_DEFAULTS = ROOT / "defaults"
-
-
-def _pyfleet_class():
-    try:
-        from ochre_next import Fleet, DwellingConfig
-    except ModuleNotFoundError:
-        pytest.skip("ochre_next is not available in this environment")
-    return Fleet, DwellingConfig
-
-
-def _pyfleet_results_class():
-    try:
-        from ochre_next import FleetResults
-    except ModuleNotFoundError:
-        pytest.skip("ochre_next is not available in this environment")
-    return FleetResults
 
 
 def _create_minimal_dwelling_config(tmp_path: Path):
@@ -62,19 +50,8 @@ TestSite,2019,T Dry Bulb (C),5,6,7,8,10,15,20,19,15,10,7,5
     return str(hpxml_file), str(schedule_file), str(weather_file)
 
 
-def _ochre_fixtures_available() -> bool:
-    return (EXAMPLES / "BEopt_example.xml").exists() and (EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw").exists()
-
-
 def _build_simulatable_fleet(output_dir: Path, n: int = 1):
-    """Build a fleet from real OCHRE fixtures that can actually simulate."""
-    PyFleet, DwellingConfig = _pyfleet_class()
-
-    from ochre_next import SimulationConfig
-
-    if not _ochre_fixtures_available():
-        pytest.skip("OCHRE fixtures not available")
-
+    """Build a fleet from the committed BEopt example inputs."""
     hpxml = str(EXAMPLES / "BEopt_example.xml")
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
@@ -98,9 +75,6 @@ def _build_simulatable_fleet(output_dir: Path, n: int = 1):
 
 def test_from_buildings_constructs_fleet(tmp_path: Path) -> None:
     """Verify from_buildings([DwellingConfig(...)]) constructs a fleet with correct length."""
-    PyFleet, DwellingConfig = _pyfleet_class()
-    from ochre_next import SimulationConfig
-
     hpxml, schedule, weather = _create_minimal_dwelling_config(tmp_path)
 
     config = DwellingConfig(
@@ -114,9 +88,6 @@ def test_from_buildings_constructs_fleet(tmp_path: Path) -> None:
 
 def test_from_buildings_with_custom_weights(tmp_path: Path) -> None:
     """Verify from_buildings with custom sample_weights=[2.0, 1.0]."""
-    PyFleet, DwellingConfig = _pyfleet_class()
-    from ochre_next import SimulationConfig
-
     hpxml, schedule, weather = _create_minimal_dwelling_config(tmp_path)
 
     config1 = DwellingConfig(
@@ -135,9 +106,6 @@ def test_from_buildings_with_custom_weights(tmp_path: Path) -> None:
 
 def test_from_buildings_raises_on_weight_length_mismatch(tmp_path: Path) -> None:
     """Verify from_buildings raises if sample_weights length != configs length."""
-    PyFleet, DwellingConfig = _pyfleet_class()
-    from ochre_next import SimulationConfig
-
     hpxml, schedule, weather = _create_minimal_dwelling_config(tmp_path)
 
     config = DwellingConfig(
@@ -157,9 +125,6 @@ def test_from_buildings_rejects_invalid_weight(tmp_path: Path, bad_weight: float
     aggregation, so it must be rejected at construction rather than propagating
     into the simulation results.
     """
-    PyFleet, DwellingConfig = _pyfleet_class()
-    from ochre_next import SimulationConfig
-
     hpxml, schedule, weather = _create_minimal_dwelling_config(tmp_path)
 
     config1 = DwellingConfig(
@@ -177,17 +142,12 @@ def test_from_buildings_rejects_invalid_weight(tmp_path: Path, bad_weight: float
 
 def test_from_buildings_empty_list_raises(tmp_path: Path) -> None:
     """Verify from_buildings([]) with empty list raises ValueError."""
-    PyFleet, DwellingConfig = _pyfleet_class()
-
     with pytest.raises(ValueError, match="at least one dwelling config"):
         PyFleet.from_buildings([])
 
 
 def test_len_returns_correct_count(tmp_path: Path) -> None:
     """Verify __len__ returns correct count."""
-    PyFleet, DwellingConfig = _pyfleet_class()
-    from ochre_next import SimulationConfig
-
     hpxml, schedule, weather = _create_minimal_dwelling_config(tmp_path)
 
     config1 = DwellingConfig(
@@ -210,105 +170,89 @@ def test_len_returns_correct_count(tmp_path: Path) -> None:
 
 def test_from_resstock_accepts_enum(tmp_path: Path) -> None:
     """Verify from_resstock still works (regression)."""
-    py_fleet = _pyfleet_class()[0]
-    pa = pytest.importorskip("pyarrow")
-    pq = pytest.importorskip("pyarrow.parquet")
-
     metadata = tmp_path / "metadata.parquet"
     table = pa.table(
         {
-            "building_id": [12345],
-            "upgrade_id": [0],
-            "weight": [1.0],
-            "in.state": ["CO"],
+            "building_id": pa.array([12345]),
+            "upgrade_id": pa.array([0]),
+            "weight": pa.array([1.0]),
+            "in.state": pa.array(["CO"]),
         }
     )
     pq.write_table(table, metadata)
 
     from ochre_next import ResStockVersion
 
-    fleet = py_fleet.from_resstock(
+    fleet = PyFleet.from_resstock(
         str(metadata),
         str(tmp_path),
         str(tmp_path),
         resstock_version=ResStockVersion.V2025_1,
     )
 
-    assert isinstance(fleet, py_fleet)
+    assert isinstance(fleet, PyFleet)
 
 
 def test_from_resstock_accepts_string(tmp_path: Path) -> None:
     """Verify from_resstock accepts string fallback."""
-    py_fleet = _pyfleet_class()[0]
-    pa = pytest.importorskip("pyarrow")
-    pq = pytest.importorskip("pyarrow.parquet")
-
     metadata = tmp_path / "metadata.parquet"
     table = pa.table(
         {
-            "building_id": [12345],
-            "upgrade": [0],
-            "sample_weight": [1.0],
-            "in.state": ["CO"],
+            "building_id": pa.array([12345]),
+            "upgrade": pa.array([0]),
+            "sample_weight": pa.array([1.0]),
+            "in.state": pa.array(["CO"]),
         }
     )
     pq.write_table(table, metadata)
 
-    fleet = py_fleet.from_resstock(
+    fleet = PyFleet.from_resstock(
         str(metadata),
         str(tmp_path),
         str(tmp_path),
         resstock_version="2024.2",
     )
 
-    assert isinstance(fleet, py_fleet)
+    assert isinstance(fleet, PyFleet)
 
 
 def test_from_resstock_default_version_is_2025_1(tmp_path: Path) -> None:
     """Verify from_resstock defaults to V2025_1 when no version specified."""
-    py_fleet = _pyfleet_class()[0]
-    pa = pytest.importorskip("pyarrow")
-    pq = pytest.importorskip("pyarrow.parquet")
-
     metadata = tmp_path / "metadata.parquet"
     table = pa.table(
         {
-            "building_id": [12345],
-            "upgrade_id": [0],
-            "weight": [1.0],
-            "in.state": ["CO"],
+            "building_id": pa.array([12345]),
+            "upgrade_id": pa.array([0]),
+            "weight": pa.array([1.0]),
+            "in.state": pa.array(["CO"]),
         }
     )
     pq.write_table(table, metadata)
 
-    fleet = py_fleet.from_resstock(
+    fleet = PyFleet.from_resstock(
         str(metadata),
         str(tmp_path),
         str(tmp_path),
     )
 
-    assert isinstance(fleet, py_fleet)
+    assert isinstance(fleet, PyFleet)
     assert len(fleet) == 1
 
 
 def test_from_resstock_accepts_a_defaults_path(tmp_path: Path) -> None:
     """The binding takes the defaults_path keyword its stub declares."""
-    py_fleet = _pyfleet_class()[0]
-    pa = pytest.importorskip("pyarrow")
-    pq = pytest.importorskip("pyarrow.parquet")
-
     metadata = tmp_path / "metadata.parquet"
     table = pa.table(
         {
-            "building_id": [12345],
-            "upgrade_id": [0],
-            "weight": [1.0],
-            "in.state": ["CO"],
+            "building_id": pa.array([12345]),
+            "upgrade_id": pa.array([0]),
+            "weight": pa.array([1.0]),
+            "in.state": pa.array(["CO"]),
         }
     )
     pq.write_table(table, metadata)
 
-    fleet = py_fleet.from_resstock(
+    fleet = PyFleet.from_resstock(
         str(metadata),
         str(tmp_path),
         str(tmp_path),
@@ -320,23 +264,19 @@ def test_from_resstock_accepts_a_defaults_path(tmp_path: Path) -> None:
 
 def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
     """Verify from_resstock rejects invalid version string."""
-    py_fleet = _pyfleet_class()[0]
-    pa = pytest.importorskip("pyarrow")
-    pq = pytest.importorskip("pyarrow.parquet")
-
     metadata = tmp_path / "metadata.parquet"
     table = pa.table(
         {
-            "building_id": [12345],
-            "upgrade": [0],
-            "sample_weight": [1.0],
-            "in.state": ["CO"],
+            "building_id": pa.array([12345]),
+            "upgrade": pa.array([0]),
+            "sample_weight": pa.array([1.0]),
+            "in.state": pa.array(["CO"]),
         }
     )
     pq.write_table(table, metadata)
 
     with pytest.raises(ValueError, match="invalid ResStockVersion"):
-        py_fleet.from_resstock(
+        PyFleet.from_resstock(
             str(metadata),
             str(tmp_path),
             str(tmp_path),
@@ -417,9 +357,6 @@ def test_progress_callback_invoked(tmp_path: Path) -> None:
 @pytest.mark.slow
 def test_simulate_raise_on_failure_true_raises(tmp_path: Path) -> None:
     """Verify simulate(raise_on_failure=True) raises on any failure."""
-    PyFleet, DwellingConfig = _pyfleet_class()
-    from ochre_next import SimulationConfig
-
     # Use invalid paths to force simulation failure
     sim_config = SimulationConfig(duration_s=3600, time_res_s=60, write_output=False)
     config = DwellingConfig(
@@ -438,12 +375,6 @@ def test_simulate_raise_on_failure_true_raises(tmp_path: Path) -> None:
 @pytest.mark.slow
 def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
     """Verify default fault-tolerant mode collects failures without raising."""
-    PyFleet, DwellingConfig = _pyfleet_class()
-    from ochre_next import SimulationConfig
-
-    if not _ochre_fixtures_available():
-        pytest.skip("OCHRE fixtures not available")
-
     hpxml = str(EXAMPLES / "BEopt_example.xml")
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
@@ -483,12 +414,6 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
     condition without inspecting the DataFrame shape.
     """
     import warnings
-
-    PyFleet, DwellingConfig = _pyfleet_class()
-    from ochre_next import SimulationConfig
-
-    if not _ochre_fixtures_available():
-        pytest.skip("OCHRE fixtures not available")
 
     fixture_dir = ROOT / "tests" / "fixtures" / "hpxml" / "ochre_samples"
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")

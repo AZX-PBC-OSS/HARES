@@ -17,10 +17,8 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
+import numpy as np
 import pytest
-
-np = pytest.importorskip("numpy")
-
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER, make_dwelling
 
 import ochre_next.rl.vec_env as vec_env_module
@@ -85,8 +83,9 @@ def test_vec_fallback_surfaces_rejected_control_signal(monkeypatch: pytest.Monke
 def test_vec_rust_path_preserves_warning_count_key():
     """The Rust fast path plumbs warning_count through VecDwellingGymEnv infos,
     so downstream code sees the same contract regardless of path."""
-    if vec_env_module.rust_batch_step is None:
-        pytest.skip("Rust batch_step entrypoint unavailable")
+    assert vec_env_module.rust_batch_step is not None, (
+        "the extension registers batch_step; without it this test would exercise the Python fallback"
+    )
     env, _ = _make_vec_env(_CLEAN_ACTION_CONFIG)
 
     _, _, _, _, infos = env.step(np.full((1, 1), 21.0, dtype=np.float64))

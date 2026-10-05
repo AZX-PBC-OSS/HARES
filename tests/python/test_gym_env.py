@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("numpy")
+# gymnasium ships only in the optional rl extra.
 pytest.importorskip("gymnasium")
 
 import numpy as np

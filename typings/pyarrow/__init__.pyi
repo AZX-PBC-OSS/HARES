@@ -3,7 +3,8 @@
 The published ``pyarrow`` wheel ships no py.typed marker and the community
 ``pyarrow-stubs`` package stops at pyarrow 20 with unknowns in its parquet
 signatures, so this stub models the Arrow surface HARES uses: building
-float64 tables, attaching schema metadata, and reading float columns back.
+numeric and string tables, attaching schema metadata, and reading float
+columns back.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ class Table:
     def __repr__(self) -> str: ...
 
 
-def array(values: Sequence[float], type: DataType | None = ...) -> Array: ...
+def array(values: Sequence[float] | Sequence[str], type: DataType | None = ...) -> Array: ...
 
 
 def table(data: dict[str, Array]) -> Table: ...

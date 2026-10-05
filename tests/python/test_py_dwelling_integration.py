@@ -9,6 +9,7 @@ import math
 import threading
 from datetime import datetime
 
+import polars as pl
 import pytest
 
 from conftest import make_dwelling
@@ -18,8 +19,6 @@ def _num(value: object) -> float:
     """Narrow a polars reduction result (``PythonLiteral | None``) to float."""
     assert isinstance(value, (int, float)), f"expected numeric, got {value!r}"
     return float(value)
-
-pl = pytest.importorskip("polars")
 
 
 def _init_dwelling(**kw):

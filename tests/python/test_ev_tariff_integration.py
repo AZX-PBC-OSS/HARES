@@ -6,10 +6,9 @@ that would fail if the underlying physics or actor logic were broken.
 
 from typing import NotRequired, TypedDict
 
+import polars as pl
 import pytest
 from conftest import make_dwelling, output_in_test_dir
-
-pl = pytest.importorskip("polars")
 
 
 class _OutputKwargs(TypedDict):
@@ -232,8 +231,7 @@ class TestChargingLoadProfile:
         )
         charging = df.filter(pl.col(col) > 0.5)
 
-        if charging.height == 0:
-            pytest.skip("No charging events in this seed")
+        assert charging.height > 0, "A daily commuter must charge within a week"
 
         # Commuter departs ~08:00, arrives ~18:00. Charging should be
         # concentrated in the evening/night (after arrival), not during
@@ -303,8 +301,7 @@ class TestChargingLoadProfile:
                     violations += 1
             prev_soc = soc
 
-        if total_driving_steps == 0:
-            pytest.skip("No driving events detected")
+        assert total_driving_steps > 0, "A daily commuter must drive within three days"
 
         assert violations == 0, (
             f"EV drew residential power during {violations}/{total_driving_steps} "
@@ -328,8 +325,7 @@ class TestChargingLoadProfile:
         col = _ev_power_col(df, "Nissan Leaf S 30kWh")
         charging = df.filter(pl.col(col) > 0.1)
 
-        if charging.height == 0:
-            pytest.skip("No charging in this seed")
+        assert charging.height > 0, "A daily L1 commuter must charge within three days"
 
         median_power = charging[col].median()
         max_power = charging[col].max()
