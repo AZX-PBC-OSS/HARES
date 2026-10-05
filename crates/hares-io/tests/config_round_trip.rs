@@ -264,6 +264,7 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
         heating_shr: None,
         capacity_ratio_at_17f: None,
         defrost: DefrostConfig::default(),
+        reject_unknown_keys: hares_equipment::RejectUnknownKeys,
     }
 }
 
@@ -814,13 +815,14 @@ fn round_trip_heat_pump_config() {
 }
 
 #[test]
-fn heat_pump_config_ignores_unknown_fields() {
+fn heat_pump_config_rejects_unknown_fields() {
     let mut value = serde_json::to_value(sample_heat_pump_config()).unwrap();
     value["unknown_key"] = serde_json::json!(42.0);
     let result: Result<HeatPumpConfig, _> = serde_json::from_value(value);
+    let err = result.expect_err("the flattened catcher must reject the key no field consumed");
     assert!(
-        result.is_ok(),
-        "serde flatten + no deny_unknown_fields: unknown keys are silently ignored"
+        err.to_string().contains("unknown_key"),
+        "the error must name the unknown key, got: {err}"
     );
 }
 
@@ -830,7 +832,7 @@ fn toml_round_trip_heat_pump_config() {
 }
 
 #[test]
-fn toml_heat_pump_config_ignores_unknown_fields() {
+fn toml_heat_pump_config_rejects_unknown_fields() {
     let serialized = toml::to_string(&sample_heat_pump_config()).unwrap();
     let mut value: toml::Value = toml::from_str(&serialized).unwrap();
     if let toml::Value::Table(ref mut table) = value {
@@ -838,9 +840,11 @@ fn toml_heat_pump_config_ignores_unknown_fields() {
     }
     let modified = toml::to_string(&value).unwrap();
     let result: Result<HeatPumpConfig, _> = toml::from_str(&modified);
+    let err = result
+        .expect_err("the flattened catcher must reject the key no field consumed, in TOML too");
     assert!(
-        result.is_ok(),
-        "serde flatten + no deny_unknown_fields: unknown keys are silently ignored in TOML"
+        err.to_string().contains("unknown_key"),
+        "the error must name the unknown key, got: {err}"
     );
 }
 

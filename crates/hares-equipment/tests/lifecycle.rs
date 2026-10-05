@@ -29,7 +29,7 @@ use hares_equipment::{
     EquipmentConfig, EquipmentRegistry, EquipmentTypedConfig, EvConfig, GasBoilerConfig,
     GasFurnaceConfig, GeneratorConfig, HeatPumpCommonConfig, HeatPumpCoolerConfig,
     HeatPumpHeaterConfig, HvacSetpointConfig, IdealHvacConfig, IndirectTankConfig,
-    ProtocolBridgeConfig, PvConfig, RoomAcConfig, VentilationConfig,
+    ProtocolBridgeConfig, PvConfig, RejectUnknownKeys, RoomAcConfig, VentilationConfig,
     config::ConfigValue,
     water_heater::wh_config::{
         ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
@@ -767,6 +767,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             typed_alias_config(
                 class,
                 HeatPumpHeaterConfig {
+                    reject_unknown_keys: RejectUnknownKeys,
                     common: HeatPumpCommonConfig {
                         equipment_id: None,
                         zone_id: None,
@@ -820,6 +821,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
         "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler" | "WSHP Cooler" => typed_alias_config(
             class,
             HeatPumpCoolerConfig {
+                reject_unknown_keys: RejectUnknownKeys,
                 common: HeatPumpCommonConfig {
                     equipment_id: None,
                     zone_id: None,
@@ -1627,6 +1629,7 @@ fn pv_capacitive_reactive_output_is_negative_in_core_output() {
 fn gshp_heater_pump_power_in_telemetry_and_ports() {
     let registry = EquipmentRegistry::new();
     let typed = HeatPumpHeaterConfig {
+        reject_unknown_keys: RejectUnknownKeys,
         common: HeatPumpCommonConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(8_000.0),
@@ -1703,6 +1706,7 @@ fn gshp_heater_pump_power_in_telemetry_and_ports() {
 fn gshp_cooler_pump_power_in_telemetry_and_ports() {
     let registry = EquipmentRegistry::new();
     let typed = HeatPumpCoolerConfig {
+        reject_unknown_keys: RejectUnknownKeys,
         common: HeatPumpCommonConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(8_000.0),

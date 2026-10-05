@@ -2113,6 +2113,7 @@ mod tests {
                 "ASHP Cooler",
                 "ASHP Cooler",
                 HeatPumpCoolerConfig {
+                    reject_unknown_keys: hares_equipment::RejectUnknownKeys,
                     common: HeatPumpCommonConfig {
                         equipment_id: None,
                         zone_id: Some(1),
@@ -2847,6 +2848,7 @@ mod tests {
                 "ASHP Cooler",
                 "ASHP Cooler",
                 HeatPumpCoolerConfig {
+                    reject_unknown_keys: hares_equipment::RejectUnknownKeys,
                     common: HeatPumpCommonConfig {
                         equipment_id: None,
                         zone_id: Some(1),
@@ -3007,6 +3009,7 @@ mod tests {
                 "ASHP Cooler",
                 "ASHP Cooler",
                 HeatPumpCoolerConfig {
+                    reject_unknown_keys: hares_equipment::RejectUnknownKeys,
                     common: HeatPumpCommonConfig {
                         equipment_id: None,
                         zone_id: Some(1),

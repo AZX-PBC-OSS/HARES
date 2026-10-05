@@ -50,8 +50,9 @@ pub enum ActorSeed {
 
 pub use battery::{BatteryConfig, BatteryLutType, OcvTable, UNegTable};
 pub use config::{
-    ConfigPayload, EquipmentConfig, EquipmentTypedConfig, SetpointReconciliation,
-    constructor_equipment_id, equipment_id_from_config, resolve_zip,
+    ConfigPayload, EquipmentConfig, EquipmentTypedConfig, RejectUnknownKeys,
+    SetpointReconciliation, TypedPayloadError, constructor_equipment_id, equipment_id_from_config,
+    normalize_enum_text, resolve_zip, validate_typed_payload, validate_typed_payload_detailed,
 };
 pub use ev::ChargingCurveLut;
 pub use ev::EvConfig;

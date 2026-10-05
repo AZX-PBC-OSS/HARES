@@ -137,10 +137,12 @@ pub fn parse_fuel_type(raw: Option<&str>) -> Option<FuelType> {
         "oil" | "fuel_oil" | "fuel oil" | "fuel oil 1" | "fuel oil 2" | "fuel oil 4"
         | "fuel oil 5/6" | "kerosene" | "diesel" => Some(FuelType::Oil),
         "wood" => Some(FuelType::Wood),
-        "wood pellets" | "wood_pellets" => Some(FuelType::WoodPellet),
+        "wood pellets" | "wood_pellets" | "wood pellet" | "woodpellet" | "wood_pellet" => {
+            Some(FuelType::WoodPellet)
+        }
         "coal" | "anthracite coal" | "anthracite_coal" | "bituminous coal" | "bituminous_coal"
         | "coke" => Some(FuelType::Coal),
-        "none" | "no_fuel" | "no fuel" => Some(FuelType::None),
+        "none" | "no_fuel" | "no fuel" | "nofuel" => Some(FuelType::None),
         _ => None,
     }
 }
@@ -582,9 +584,13 @@ mod tests {
             ("coke", FuelType::Coal),
             ("wood pellets", FuelType::WoodPellet),
             ("wood_pellets", FuelType::WoodPellet),
+            ("wood pellet", FuelType::WoodPellet),
+            ("woodpellet", FuelType::WoodPellet),
+            ("wood_pellet", FuelType::WoodPellet),
             ("none", FuelType::None),
             ("no_fuel", FuelType::None),
             ("no fuel", FuelType::None),
+            ("nofuel", FuelType::None),
         ];
 
         for &(input, expected) in cases {

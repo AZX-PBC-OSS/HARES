@@ -251,11 +251,11 @@ impl Default for HeatPumpCommonConfig {
 /// For mini-splits, `number_of_speeds` is forced to 4 in the equipment init path,
 /// not in this struct -- the struct records user intent; the equipment enforces the rule.
 ///
-/// `deny_unknown_fields` is intentionally omitted: serde `flatten` is
-/// incompatible with `deny_unknown_fields` on both the inner and outer struct.
-/// See <https://serde.rs/attr-flatten.html> and <https://github.com/serde-rs/serde/issues/2384>.
-/// The `heater_ignores_cooler_only_field_stage_shrs` and
-/// `cooler_ignores_heater_only_field_hp_lockout` tests guard against key leakage
+/// `deny_unknown_fields` cannot sit on a flattened struct, so the trailing
+/// flattened `reject_unknown_keys` catcher rejects the keys no real field
+/// consumed instead (an unknown key is a deserialization error naming it).
+/// The `heater_rejects_cooler_only_field_stage_shrs` and
+/// `cooler_rejects_heater_only_field_hp_lockout` tests guard against key leakage
 /// between heater and cooler structs.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HeatPumpHeaterConfig {
@@ -296,6 +296,10 @@ pub struct HeatPumpHeaterConfig {
     /// the previous `DefrostConfig::on_demand(1.0, 0.0)` hardcoded path.
     #[serde(flatten)]
     pub defrost: DefrostConfig,
+    /// Rejects the keys no field above consumed: an unknown key is a
+    /// deserialization error naming it, never a silent no-op.
+    #[serde(flatten)]
+    pub reject_unknown_keys: crate::RejectUnknownKeys,
 }
 
 impl EquipmentTypedConfig for HeatPumpHeaterConfig {
@@ -473,11 +477,11 @@ impl HeatPumpHeaterConfig {
 /// Contains the same fields as `HeatPumpHeaterConfig` but registers under the
 /// "ASHP Cooler" equipment type name so that typed configs round-trip correctly.
 ///
-/// `deny_unknown_fields` is intentionally omitted: serde `flatten` is
-/// incompatible with `deny_unknown_fields` on both the inner and outer struct.
-/// See <https://serde.rs/attr-flatten.html> and <https://github.com/serde-rs/serde/issues/2384>.
-/// The `cooler_ignores_heater_only_field_hp_lockout` and
-/// `heater_ignores_cooler_only_field_stage_shrs` tests guard against key leakage.
+/// `deny_unknown_fields` cannot sit on a flattened struct, so the trailing
+/// flattened `reject_unknown_keys` catcher rejects the keys no real field
+/// consumed instead (an unknown key is a deserialization error naming it).
+/// The `cooler_rejects_heater_only_field_hp_lockout` and
+/// `heater_rejects_cooler_only_field_stage_shrs` tests guard against key leakage.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HeatPumpCoolerConfig {
     #[serde(flatten)]
@@ -504,6 +508,10 @@ pub struct HeatPumpCoolerConfig {
     /// `OutsideDryBulbTemp > m_MinOATCompressorCooling`.
     #[serde(default = "default_min_oat_cooling_c")]
     pub min_oat_cooling_c: f64,
+    /// Rejects the keys no field above consumed: an unknown key is a
+    /// deserialization error naming it, never a silent no-op.
+    #[serde(flatten)]
+    pub reject_unknown_keys: crate::RejectUnknownKeys,
 }
 
 fn default_min_oat_cooling_c() -> f64 {
@@ -526,6 +534,7 @@ impl Default for HeatPumpCoolerConfig {
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
             min_oat_cooling_c: default_min_oat_cooling_c(),
+            reject_unknown_keys: crate::RejectUnknownKeys,
         }
     }
 }
@@ -715,6 +724,7 @@ mod tests {
     #[test]
     fn heat_pump_heater_config_round_trips() {
         let cfg = HeatPumpHeaterConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: Some(1),
                 zone_id: Some(1),
@@ -813,6 +823,7 @@ mod tests {
     #[test]
     fn heat_pump_cooler_config_round_trips() {
         let cfg = HeatPumpCoolerConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: Some(2),
                 zone_id: Some(1),
@@ -866,6 +877,7 @@ mod tests {
     #[test]
     fn heat_pump_mini_split_effective_speeds() {
         let cfg = HeatPumpHeaterConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 cooling_capacity_w: Some(12_000.0),
                 cooling_eir: Some(16.0),
@@ -887,11 +899,10 @@ mod tests {
         assert_eq!(cfg.common.number_of_speeds, 1);
     }
 
-    /// serde flatten is incompatible with `deny_unknown_fields`, so truly
-    /// unknown keys are silently ignored rather than rejected. This test
-    /// documents that behavior — unknown keys do not cause an error.
+    /// Unknown keys are rejected: the trailing flattened catcher turns any
+    /// key no field consumed into a deserialization error naming it.
     #[test]
-    fn heat_pump_heater_ignores_unknown_fields() {
+    fn heat_pump_heater_rejects_unknown_fields() {
         let data = serde_json::json!({
             "cooling_capacity_w": 12000.0,
             "cooling_eir": 16.0,
@@ -906,13 +917,20 @@ mod tests {
                 data,
             },
         );
-        let cfg: HeatPumpHeaterConfig = ec.typed().unwrap();
-        assert_eq!(cfg.common.cooling_eir.unwrap(), 16.0);
+        let err = ec
+            .typed::<HeatPumpHeaterConfig>()
+            .expect_err("unknown keys must fail deserialization");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown_key"),
+            "the error must name the unknown key, got: {msg}"
+        );
     }
 
     #[test]
     fn heat_pump_heater_validate_rejects_negative_capacity() {
         let cfg = HeatPumpHeaterConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 heating_capacity_w: Some(-1.0),
                 ..HeatPumpCommonConfig::default()
@@ -925,6 +943,7 @@ mod tests {
     #[test]
     fn heat_pump_heater_config_serde_json_round_trip() {
         let cfg = HeatPumpHeaterConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: Some(1),
                 zone_id: Some(1),
@@ -986,6 +1005,7 @@ mod tests {
     #[test]
     fn heat_pump_cooler_config_serde_json_round_trip() {
         let cfg = HeatPumpCoolerConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: Some(2),
                 zone_id: Some(1),
@@ -1053,37 +1073,39 @@ mod tests {
         );
     }
 
-    /// serde flatten is incompatible with `deny_unknown_fields` on the outer struct,
-    /// so cross-type fields like `stage_shrs` are silently ignored by
-    /// `HeatPumpHeaterConfig` deserialization rather than rejected.
-    /// See <https://serde.rs/attr-flatten.html>.
+    /// Cross-key leakage: the cooler-only field `stage_shrs` is an unknown
+    /// key to the heater's schema and is a deserialization error naming it,
+    /// never a silent drop.
     #[test]
-    fn heater_ignores_cooler_only_field_stage_shrs() {
+    fn heater_rejects_cooler_only_field_stage_shrs() {
         let json = serde_json::json!({
             "cooling_capacity_w": 10_000.0,
             "cooling_eir": 16.0,
             "stage_shrs": [0.75, 0.72],
         });
-        let cfg: HeatPumpHeaterConfig = serde_json::from_value(json).unwrap();
+        let err = serde_json::from_value::<HeatPumpHeaterConfig>(json)
+            .expect_err("a cooler-only key must fail the heater's deserialization");
         assert!(
-            cfg.hp_lockout_temp_c.is_none(),
-            "stage_shrs is silently dropped; heater-only fields remain None"
+            err.to_string().contains("stage_shrs"),
+            "the error must name the foreign key, got: {err}"
         );
     }
 
-    /// Same constraint as above: heater-only field `hp_lockout_temp_c` is
-    /// silently ignored by `HeatPumpCoolerConfig` deserialization.
+    /// Same constraint as above: heater-only field `hp_lockout_temp_c` is an
+    /// unknown key to the cooler's schema and is a deserialization error
+    /// naming it, never a silent drop.
     #[test]
-    fn cooler_ignores_heater_only_field_hp_lockout() {
+    fn cooler_rejects_heater_only_field_hp_lockout() {
         let json = serde_json::json!({
             "cooling_capacity_w": 10_000.0,
             "cooling_eir": 16.0,
             "hp_lockout_temp_c": -17.8,
         });
-        let cfg: HeatPumpCoolerConfig = serde_json::from_value(json).unwrap();
+        let err = serde_json::from_value::<HeatPumpCoolerConfig>(json)
+            .expect_err("a heater-only key must fail the cooler's deserialization");
         assert!(
-            cfg.stage_shrs.is_none(),
-            "hp_lockout_temp_c is silently dropped; cooler-only fields remain None"
+            err.to_string().contains("hp_lockout_temp_c"),
+            "the error must name the foreign key, got: {err}"
         );
     }
 
@@ -1096,6 +1118,7 @@ mod tests {
     #[test]
     fn heat_pump_cooler_validate_rejects_min_compressor_fraction_out_of_range() {
         let mut cfg_below = HeatPumpCoolerConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 cooling_capacity_w: Some(12_000.0),
                 cooling_eir: Some(0.25),
@@ -1155,6 +1178,7 @@ mod tests {
     #[test]
     fn three_speed_cooler_maps_to_multi_speed_interpolated() {
         let cfg = HeatPumpCoolerConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 cooling_capacity_w: Some(12_000.0),
                 cooling_eir: Some(0.25),
@@ -1174,6 +1198,7 @@ mod tests {
     #[test]
     fn two_speed_cooler_still_maps_to_two_speed_setpoint() {
         let cfg = HeatPumpCoolerConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 cooling_capacity_w: Some(12_000.0),
                 cooling_eir: Some(0.25),
@@ -1193,6 +1218,7 @@ mod tests {
     #[test]
     fn mini_split_cooler_still_maps_to_variable_speed_ideal() {
         let cfg = HeatPumpCoolerConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 cooling_capacity_w: Some(12_000.0),
                 cooling_eir: Some(0.25),
@@ -1212,6 +1238,7 @@ mod tests {
     #[test]
     fn three_speed_mini_split_cooler_forces_variable_speed_ideal() {
         let cfg = HeatPumpCoolerConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 cooling_capacity_w: Some(12_000.0),
                 cooling_eir: Some(0.25),

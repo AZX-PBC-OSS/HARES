@@ -1395,6 +1395,7 @@ fn try_build_heat_pump_heater_config(
 
     let zone_id = zone_id_from_params(params);
     let cfg = HeatPumpHeaterConfig {
+        reject_unknown_keys: hares_equipment::RejectUnknownKeys,
         common: HeatPumpCommonConfig {
             equipment_id: None,
             zone_id,
@@ -1602,6 +1603,7 @@ fn try_build_heat_pump_cooler_config(
 
     let zone_id = zone_id_from_params(params);
     let cfg = HeatPumpCoolerConfig {
+        reject_unknown_keys: hares_equipment::RejectUnknownKeys,
         common: HeatPumpCommonConfig {
             equipment_id: None,
             zone_id,

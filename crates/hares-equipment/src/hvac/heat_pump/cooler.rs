@@ -1151,6 +1151,7 @@ mod tests {
             "HP Cooler".to_string(),
             "ASHP Cooler".to_string(),
             crate::HeatPumpCoolerConfig {
+                reject_unknown_keys: crate::RejectUnknownKeys,
                 common: crate::HeatPumpCommonConfig {
                     equipment_id: None,
                     zone_id: Some(1),
@@ -1627,6 +1628,7 @@ mod tests {
                     "gshp_cooler".to_string(),
                     "GSHP Cooler".to_string(),
                     crate::HeatPumpCoolerConfig {
+                        reject_unknown_keys: crate::RejectUnknownKeys,
                         common: crate::HeatPumpCommonConfig {
                             zone_id: Some(1),
                             cooling_capacity_w: Some(8_000.0),

@@ -2787,6 +2787,7 @@ mod tests {
 
     fn heater_typed_config() -> HeatPumpHeaterConfig {
         HeatPumpHeaterConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2849,6 +2850,7 @@ mod tests {
 
     fn mshp_typed_config(rated_w: f64) -> HeatPumpHeaterConfig {
         HeatPumpHeaterConfig {
+            reject_unknown_keys: crate::RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -7607,6 +7609,7 @@ mod tests {
             "HP Heater".to_string(),
             "ASHP Heater".to_string(),
             HeatPumpHeaterConfig {
+                reject_unknown_keys: crate::RejectUnknownKeys,
                 common: HeatPumpCommonConfig {
                     charge_defect_ratio,
                     equipment_id: None,
@@ -7941,6 +7944,7 @@ mod ideal_capacity_tests {
             "HP Heater".to_string(),
             "ASHP Heater".to_string(),
             crate::HeatPumpHeaterConfig {
+                reject_unknown_keys: crate::RejectUnknownKeys,
                 common: crate::HeatPumpCommonConfig {
                     equipment_id: None,
                     zone_id: Some(1),
@@ -8149,6 +8153,7 @@ mod ideal_capacity_tests {
             "HP Heater ER".to_string(),
             "ASHP Heater".to_string(),
             crate::HeatPumpHeaterConfig {
+                reject_unknown_keys: crate::RejectUnknownKeys,
                 common: crate::HeatPumpCommonConfig {
                     equipment_id: None,
                     zone_id: Some(1),
@@ -8314,6 +8319,7 @@ mod ideal_capacity_tests {
             "HP Heater BB".to_string(),
             "ASHP Heater".to_string(),
             crate::HeatPumpHeaterConfig {
+                reject_unknown_keys: crate::RejectUnknownKeys,
                 common: crate::HeatPumpCommonConfig {
                     equipment_id: None,
                     zone_id: Some(1),
@@ -8419,6 +8425,7 @@ mod ideal_capacity_tests {
             "VS HP ER".to_string(),
             "ASHP Heater".to_string(),
             crate::HeatPumpHeaterConfig {
+                reject_unknown_keys: crate::RejectUnknownKeys,
                 common: crate::HeatPumpCommonConfig {
                     equipment_id: None,
                     zone_id: Some(1),

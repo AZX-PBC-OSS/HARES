@@ -38,8 +38,8 @@ use hares_envelope::{
     ElectricalSolver, FluidSolver, FluidSolverConfig, HumiditySolver, ThermalSolver,
 };
 use hares_equipment::{
-    ActorSeed, BatteryLutType, Equipment, EquipmentRegistry, OcvTable, RegularGridInterpolator,
-    SetpointReconciliation, UNegTable,
+    ActorSeed, BatteryLutType, Equipment, EquipmentConfig, EquipmentRegistry, OcvTable,
+    RegularGridInterpolator, SetpointReconciliation, UNegTable,
 };
 use hares_io::{
     Building, CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
@@ -110,9 +110,9 @@ use crate::observer::{
 use crate::observer_capture;
 use conversions::{
     apply_humidity_update_to_zones, apply_thermal_update_to_zones, build_output_column_index,
-    chrono_to_std_duration, default_output_path, duration_to_u32_secs, equipment_config_from_spec,
-    merged_equipment_config, required_datetime, required_duration, required_path,
-    validate_equipment_override_keys, validate_sim_config,
+    chrono_to_std_duration, default_output_path, duration_to_u32_secs, merged_equipment_config,
+    required_datetime, required_duration, required_path, validate_equipment_override_keys,
+    validate_sim_config,
 };
 #[cfg(feature = "profiling")]
 use hares_types::alloc_count::thread_allocations;
@@ -161,14 +161,13 @@ fn rng_identity(spec: &hares_io::EquipmentSpec) -> String {
         .clone()
 }
 
-fn create_equipment_from_spec(
+fn create_equipment_from_config(
     registry: &EquipmentRegistry,
-    spec: &hares_io::EquipmentSpec,
+    config: EquipmentConfig,
 ) -> Result<Box<dyn Equipment>> {
-    let base_cfg = equipment_config_from_spec(spec);
-    let name = base_cfg.name.clone();
-    let ochre_class = base_cfg.ochre_class.clone();
-    registry.create(&ochre_class, base_cfg).map_err(|err| {
+    let name = config.name.clone();
+    let ochre_class = config.ochre_class.clone();
+    registry.create(&ochre_class, config).map_err(|err| {
         HaresError::Equipment(format!(
             "equipment '{}' (class '{}') create failed: {err}",
             name, ochre_class,
@@ -2571,7 +2570,14 @@ fn build_from_blueprint_inner(
         if HANDLED_OUTSIDE_REGISTRY.contains(&spec.name.as_str()) {
             continue;
         }
-        let mut eq = create_equipment_from_spec(&registry, spec)?;
+        // One config generation per equipment: the merged config (the
+        // spec's typed payload with the dwelling-level overrides applied
+        // and validated against the typed struct; a blueprint-added spec's
+        // own parameters landed in its payload at add time) is what the
+        // constructor and `init` both read, so every constructor-time
+        // decision sees the same config the step's flows follow.
+        let merged_cfg = merged_equipment_config(spec, &override_root)?;
+        let mut eq = create_equipment_from_config(&registry, merged_cfg)?;
 
         // Entrance-1 identity validation runs before `init` — and therefore
         // before the non-critical init-failure skip below — so an unassigned
@@ -7943,7 +7949,7 @@ mod tests {
     use super::*;
     use crate::checkpoint::DwellingCheckpoint;
     use crate::derive_dwelling_rng;
-    use conversions::json_value_to_config_value;
+    use conversions::{equipment_config_from_spec, json_value_to_config_value};
     use hares_control::PriorityTier;
     use hares_equipment::config::ConfigValue;
     use hares_equipment::{Equipment, EquipmentConfig};
@@ -12816,7 +12822,8 @@ occupancy = 1.0
             primary_role: None,
         };
 
-        let err = match create_equipment_from_spec(&registry, &spec) {
+        let base_cfg = equipment_config_from_spec(&spec).expect("raw spec conversion must succeed");
+        let err = match create_equipment_from_config(&registry, base_cfg) {
             Err(err) => err,
             Ok(_) => panic!("unknown equipment class must return Err"),
         };

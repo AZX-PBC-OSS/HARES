@@ -6,7 +6,7 @@ use hares_equipment::{
     CentralAirConditionerConfig, DefrostConfig, DefrostControl, DefrostStrategy, DuctConfig,
     ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig, EquipmentConfig,
     EquipmentRegistry, GasFurnaceConfig, HeatPumpCommonConfig, HeatPumpHeaterConfig,
-    HvacSetpointConfig, IdealHvacConfig,
+    HvacSetpointConfig, IdealHvacConfig, RejectUnknownKeys,
 };
 use hares_types::{
     ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType,
@@ -260,6 +260,7 @@ fn discrete_defrost_no_phantom_draw_when_compressor_off() {
         "ashp_defrost_phantom_draw".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -467,6 +468,7 @@ fn ashp_heating_cop_above_unity() {
         "ashp".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1092,6 +1094,7 @@ fn ashp_sub_consumption_telemetry() {
         "ashp_sub".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1239,6 +1242,7 @@ fn ashp_defaults_match_reference() {
         "ashp_lockout".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1334,6 +1338,7 @@ fn ashp_defaults_match_reference() {
         "ashp_er_lockout".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1434,6 +1439,7 @@ fn mshp_defaults_match_reference() {
         "mshp_defaults".to_string(),
         "MSHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1567,6 +1573,7 @@ fn bang_bang_single_speed_cycles_within_deadband() {
         "ashp_bb".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1996,6 +2003,7 @@ fn defrost_discrete_cycle_starts_in_accumulating() {
         "ashp_defrost_discrete".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2099,6 +2107,7 @@ fn defrost_discrete_cycle_transitions_to_defrosting() {
         "ashp_defrost_fsm_transition".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2200,6 +2209,7 @@ fn defrost_discrete_cycle_returns_to_accumulating() {
         "ashp_defrost_fsm_return".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2297,6 +2307,7 @@ fn defrost_discrete_peak_power_exceeds_continuous_average() {
         "ashp_defrost_peak_power".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2403,6 +2414,7 @@ fn defrost_no_spurious_defrost_after_warm_hiatus() {
         "ashp_defrost_hiatus".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2540,6 +2552,7 @@ fn heating_latent_always_zero_during_normal_heating() {
         "ashp_normal_heat".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2631,6 +2644,7 @@ fn heating_latent_nonzero_during_defrost_with_sub1_shr() {
         "ashp_defrost_latent".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2724,6 +2738,7 @@ fn heating_latent_zero_with_default_shr_during_defrost() {
         "ashp_defrost_shr1".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2801,6 +2816,7 @@ fn heating_latent_telemetry_key_present() {
         "ashp_latent_telemetry".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2879,6 +2895,7 @@ fn heating_sensible_plus_latent_equals_total_thermal_output() {
         "ashp_energy_balance".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2986,6 +3003,7 @@ fn defrost_accumulating_applies_continuous_multiplier() {
         "ashp_defrost_continuous".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -3112,6 +3130,7 @@ fn mshp_load_above_stage1_runs_continuously() {
         "mshp_stage1_above".to_string(),
         "MSHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -3298,6 +3317,7 @@ fn defrost_typed_config_propagates_to_heater_init() {
         "ashp_defrost_typed_timed".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -3447,6 +3467,7 @@ fn defrost_time_fraction_validation_rejects_out_of_range() {
 #[test]
 fn defrost_config_serde_round_trip() {
     let cfg = HeatPumpHeaterConfig {
+        reject_unknown_keys: RejectUnknownKeys,
         common: HeatPumpCommonConfig {
             equipment_id: Some(1),
             zone_id: Some(1),
@@ -4552,6 +4573,7 @@ fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
         "mshp_er_cross".to_string(),
         "MSHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),

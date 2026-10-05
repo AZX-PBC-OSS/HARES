@@ -217,7 +217,12 @@ impl DwellingBlueprint {
     /// Add an equipment spec.  Returns an error if an equipment with the same
     /// instance name (or canonical name, when instance name is absent) already
     /// exists in the blueprint.
-    pub fn add_equipment_spec(&mut self, spec: EquipmentSpec) -> Result<(), HaresError> {
+    pub fn add_equipment_spec(&mut self, mut spec: EquipmentSpec) -> Result<(), HaresError> {
+        // The caller's spec-level parameter overrides land in the typed
+        // payload here, so the one config generation the assembly builds
+        // from carries them; a bag key the payload does not carry is
+        // machinery state and passes through.
+        super::conversions::apply_spec_bag_to_typed_config(&mut spec)?;
         let name = spec.instance_name.as_deref().unwrap_or(&spec.name);
         if self
             .equipment_specs

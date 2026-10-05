@@ -96,6 +96,47 @@ pub fn constructor_equipment_id(config: &EquipmentConfig) -> u32 {
 /// Typed configs carry this as a struct field instead.
 pub const KEY_ZONE_ID: &str = "zone_id";
 
+/// Catches the config keys no other field of a `#[serde(flatten)]`-ed struct
+/// consumed, failing deserialization and naming them.
+///
+/// `deny_unknown_fields` cannot sit on a flattened struct (serde's flatten
+/// machinery hands every flattened member the full remaining map, so a
+/// member cannot tell its own keys from its siblings'), which is why the
+/// heat-pump heater and cooler configs, whose `common` and `defrost` parts
+/// are flattened, were permissive about unknown keys. This field closes
+/// that hole: as the LAST flattened member it receives exactly the keys
+/// every other field left over, and any leftover is a deserialization error
+/// listing the key. It serializes as an empty map, so a payload built from
+/// the struct never carries it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RejectUnknownKeys;
+
+impl Serialize for RejectUnknownKeys {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        serializer.serialize_map(Some(0))?.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RejectUnknownKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let leftover = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        if leftover.is_empty() {
+            return Ok(Self);
+        }
+        let mut keys: Vec<&str> = leftover.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        Err(serde::de::Error::custom(format!(
+            "unknown field{} {}",
+            if keys.len() == 1 { "" } else { "s" },
+            keys.iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
+    }
+}
+
 /// Flexible config value supporting numeric, string, and boolean parameters.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -523,6 +564,169 @@ impl EquipmentConfig {
             test_extras: HashMap::new(),
         }
     }
+}
+
+/// Validate a typed payload's data against the concrete config struct its
+/// `type_name` names.
+///
+/// This is the type-directed check the spec→config conversion paths run
+/// before a (possibly override-merged) payload reaches equipment
+/// construction or init: an unknown field is a deserialization error naming
+/// it (the flattened heat-pump configs reject theirs through the trailing
+/// [`RejectUnknownKeys`] catcher, every other config through
+/// `deny_unknown_fields`), and a value the struct's schema cannot read
+/// errors naming the field path and the type problem, at the merge that
+/// applied the override, not at an `init` that non-critical equipment
+/// survives by being skipped.
+///
+/// The error's field path is present only when serde's path tracking can
+/// see the failing field: the flattened heat-pump configs' members are
+/// invisible to it (flattening hands each member the whole remaining map),
+/// so their failures report the bare deserialization message and a caller
+/// with merge context names the field itself. See
+/// [`validate_typed_payload_detailed`].
+///
+/// Every production `EquipmentTypedConfig` implementor has an arm here; a
+/// `type_name` with no arm is itself an error, so a newly registered config
+/// struct missing from this match fails loudly the first time its payload
+/// crosses an override merge.
+pub fn validate_typed_payload(type_name: &str, data: &serde_json::Value) -> Result<(), String> {
+    validate_typed_payload_detailed(type_name, data).map_err(|err| err.to_string())
+}
+
+/// A typed payload's schema failure: the serde field path when serde's path
+/// tracking can see the failing field, and the deserialization problem
+/// itself.
+///
+/// The flattened heat-pump configs' members are invisible to serde's path
+/// tracking (flattening hands each member the whole remaining map), so
+/// their failures carry no path and `message` is the bare deserialization
+/// error; a caller with merge context (the bag key just landed) names the
+/// field itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypedPayloadError {
+    pub path: Option<String>,
+    pub message: String,
+}
+
+impl std::fmt::Display for TypedPayloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.path {
+            Some(path) => write!(f, "'{}': {}", path.trim_start_matches('.'), self.message),
+            None => write!(f, "{}", self.message),
+        }
+    }
+}
+
+/// [`validate_typed_payload`] with the failure kept structured: the serde
+/// field path apart from the deserialization message, so a caller with
+/// merge context can name the field itself when the path is absent (the
+/// flattened heat-pump configs, whose members serde's path tracking cannot
+/// see through).
+pub fn validate_typed_payload_detailed(
+    type_name: &str,
+    data: &serde_json::Value,
+) -> Result<(), TypedPayloadError> {
+    use crate::hvac::cooling_config::{
+        CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig,
+    };
+    use crate::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+    use crate::hvac::heating_config::{
+        ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig, GasBoilerConfig,
+        GasFurnaceConfig, IdealHvacConfig,
+    };
+    use crate::water_heater::wh_config::{
+        ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
+        IndirectTankConfig, TanklessWaterHeaterConfig,
+    };
+
+    /// Deserialize the payload through the path-carrying error wrapper so a
+    /// malformed value's field path reaches the caller. The JSON value
+    /// itself is the deserializer.
+    fn check<T: serde::de::DeserializeOwned>(
+        data: &serde_json::Value,
+    ) -> Result<(), TypedPayloadError> {
+        serde_path_to_error::deserialize::<serde_json::Value, T>(data.clone())
+            .map(|_: T| ())
+            .map_err(|err| {
+                // A flattened member's failure reports the bare root path
+                // (empty, or the lone dot the root renders as): no field
+                // for the caller to be told.
+                let trimmed = err.path().to_string();
+                let trimmed = trimmed.trim_start_matches('.');
+                let message = err.inner().to_string();
+                if trimmed.is_empty() {
+                    TypedPayloadError {
+                        path: None,
+                        message,
+                    }
+                } else {
+                    TypedPayloadError {
+                        path: Some(trimmed.to_string()),
+                        message,
+                    }
+                }
+            })
+    }
+
+    match type_name {
+        "Gas Furnace" => check::<GasFurnaceConfig>(data),
+        "Electric Furnace" => check::<ElectricFurnaceConfig>(data),
+        "Gas Boiler" => check::<GasBoilerConfig>(data),
+        "Electric Boiler" => check::<ElectricBoilerConfig>(data),
+        "Electric Baseboard" => check::<ElectricBaseboardConfig>(data),
+        "Ideal HVAC" => check::<IdealHvacConfig>(data),
+        "Central AC" => check::<CentralAirConditionerConfig>(data),
+        "Room AC" => check::<RoomAcConfig>(data),
+        "Dehumidifier" => check::<DehumidifierConfig>(data),
+        "ASHP Heater" | "MSHP Heater" | "GSHP Heater" | "WSHP Heater" => {
+            check::<HeatPumpHeaterConfig>(data)
+        }
+        "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler" | "WSHP Cooler" => {
+            check::<HeatPumpCoolerConfig>(data)
+        }
+        "Gas Water Heater" => check::<GasWaterHeaterConfig>(data),
+        "Electric Resistance Water Heater" => check::<ElectricResistanceWaterHeaterConfig>(data),
+        "Tankless Water Heater" | "Gas Tankless Water Heater" => {
+            check::<TanklessWaterHeaterConfig>(data)
+        }
+        "Indirect Tank" => check::<IndirectTankConfig>(data),
+        "Heat Pump Water Heater" | "HPWH" => check::<HeatPumpWaterHeaterConfig>(data),
+        "Battery" => check::<crate::BatteryConfig>(data),
+        "PV" => check::<crate::PvConfig>(data),
+        "EV" | "Electric Vehicle" | "Scheduled EV" => check::<crate::EvConfig>(data),
+        "Generator" | "Gas Generator" | "Gas Fuel Cell" => check::<crate::GeneratorConfig>(data),
+        "Ventilation" | "HRV" | "ERV" | "Ventilation Fan" => {
+            check::<crate::VentilationConfig>(data)
+        }
+        "Protocol Bridge" | "ProtocolBridge" => {
+            check::<crate::protocol_bridge::ProtocolBridgeConfig>(data)
+        }
+        unknown => Err(TypedPayloadError {
+            path: None,
+            message: format!(
+                "no typed config struct is registered under the type name '{unknown}', \
+                 so its payload cannot be validated against a schema"
+            ),
+        }),
+    }
+}
+
+/// Parse a spec bag's raw-text enum value into the canonical JSON form the
+/// typed payload field's serde deserializer accepts.
+///
+/// The spec bags write the human/HPXML fuel vocabulary ("natural gas",
+/// "Gas", "electricity"): the same text the raw-channel resolvers parse and
+/// the Python builders accept. The typed payloads carry the canonical serde
+/// spellings ("Gas", "Electric"). This is the builders' parse expressed
+/// against the shared fuel parser, kept beside [`validate_typed_payload`]
+/// because the deserializer is the parser: the canonical target is exactly
+/// what it accepts. The landing site's revalidation against the payload's
+/// own schema gates every use, so a normalization is only ever kept when
+/// the field's type accepts its result.
+pub fn normalize_enum_text(raw: &str) -> Option<serde_json::Value> {
+    let fuel = crate::hvac::helpers::parse_fuel_type(Some(raw))?;
+    serde_json::to_value(fuel).ok()
 }
 
 /// Resolve the effective ZIP load model for one equipment instance.

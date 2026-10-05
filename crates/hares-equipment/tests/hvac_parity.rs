@@ -14,6 +14,7 @@ use hares_equipment::{
     CentralAirConditionerConfig, DefrostConfig, DuctConfig, ElectricBaseboardConfig,
     EquipmentConfig, EquipmentRegistry, GasFurnaceConfig, HeatPumpCommonConfig,
     HeatPumpCoolerConfig, HeatPumpHeaterConfig, HvacSetpointConfig, IdealHvacConfig,
+    RejectUnknownKeys,
 };
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, HumidityAccumulator, OperatingMode,
@@ -162,6 +163,7 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
             name.to_string(),
             class.to_string(),
             HeatPumpHeaterConfig {
+                reject_unknown_keys: RejectUnknownKeys,
                 common: HeatPumpCommonConfig {
                     equipment_id: None,
                     zone_id: get("zone_id").map(|v| v as u16),
@@ -263,6 +265,7 @@ fn hp_cooler_cfg(
             "ASHP Cooler".to_string()
         },
         HeatPumpCoolerConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1936,6 +1939,7 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
         "ashp".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
