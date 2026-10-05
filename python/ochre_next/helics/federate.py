@@ -20,25 +20,38 @@ via the core init-string ``--timeout`` option; see
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import logging
 import math
+import socket
 import threading
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 try:
-    import helics  # noqa: F401  (imported for API parity with sibling modules)
+    import helics
 except ImportError as exc:  # pragma: no cover - exercised via import test
     raise ImportError(
         "HELICS not installed. Install with: pip install 'ochre_next[helics]'"
     ) from exc
 
+from ._types import HelicsFederateInfoLike, HelicsFederateLike
 from .broker import allocate_ephemeral_port
 
 _LOG = logging.getLogger(__name__)
 
 # Core types whose broker lives in the same process and is addressed by name.
 _IN_PROCESS_CORE_TYPES = frozenset({"inproc", "test"})
+
+# Cores a network federate tries before its registration failure is raised:
+# each failure costs up to the connect timeout, and a fresh draw from the
+# port range collides with a racing process only rarely.
+_CORE_PORT_ATTEMPTS = 4
+
+# The HELICS zmq broker port a bare host in ``broker_address`` means.
+_DEFAULT_BROKER_PORT = 23404
+_BROKER_PROBE_TIMEOUT_S = 2.0
 
 # Default wall-clock budget for broker registration plus entering executing
 # mode.  Large enough for a slow federation to assemble, small enough that a
@@ -61,6 +74,7 @@ __all__ = [
     "DEFAULT_GRANT_TIMEOUT_S",
     "core_init_string",
     "core_init_timeout_option",
+    "create_value_federate",
     "enter_executing_mode_with_timeout",
     "request_time_with_timeout",
     "validate_timeout",
@@ -136,6 +150,78 @@ def core_init_string(core_type: str, broker_address: str, connect_timeout_s: flo
         return f"--broker={broker_address} {timeout}"
     address = broker_address if "://" in broker_address else f"tcp://{broker_address}"
     return f"--broker_address={address} --port={allocate_ephemeral_port()} {timeout}"
+
+
+def create_value_federate(
+    fed_name: str,
+    core_type: str,
+    broker_address: str,
+    connect_timeout_s: float,
+    federate_info: Callable[[str, str], HelicsFederateInfoLike],
+) -> HelicsFederateLike:
+    """Create a value federate on a core of its own for ``broker_address``.
+
+    ``federate_info(core_name, core_init)`` builds the federate info for one
+    attempt. A network core listens on a port :func:`core_init_string` draws
+    and probes, but another process can take the port before HELICS binds
+    it, and HELICS then fails registration with the error an unreachable
+    broker gives. So a failure while the broker accepts connections is taken
+    to be the core's own port: the federate is created again on a fresh port,
+    under a fresh core name because the failed core keeps its own, up to
+    ``_CORE_PORT_ATTEMPTS`` times. A failure while the broker does not accept
+    connections is raised at once.
+
+    Raises:
+        HelicsException: Registration failed with the broker unreachable, or
+            on every attempt; then its notes name each core init string tried.
+    """
+    core_name = f"core_{fed_name}"
+
+    def register(attempt: int) -> HelicsFederateLike:
+        core_init = core_init_string(core_type, broker_address, connect_timeout_s)
+        tried.append(core_init)
+        attempt_core_name = core_name if attempt == 0 else f"{core_name}_{attempt}"
+        return helics.helicsCreateValueFederate(fed_name, federate_info(attempt_core_name, core_init))
+
+    tried: list[str] = []
+    if core_type in _IN_PROCESS_CORE_TYPES:
+        return register(0)
+    for attempt in range(_CORE_PORT_ATTEMPTS - 1):
+        try:
+            return register(attempt)
+        except helics.HelicsException:
+            if not _accepts_connections(broker_address):
+                raise
+            _LOG.warning(
+                "HELICS federate %s could not register with %s; retrying on a fresh core port",
+                fed_name,
+                tried[-1],
+            )
+    try:
+        return register(_CORE_PORT_ATTEMPTS - 1)
+    except helics.HelicsException as exc:
+        exc.add_note(
+            f"HELICS federate '{fed_name}' failed to register on each of {len(tried)} core "
+            f"ports while the broker at {broker_address} accepted connections, so a core "
+            f"that could not bind its port is the likely cause: {'; '.join(tried)}"
+        )
+        raise
+
+
+def _accepts_connections(broker_address: str) -> bool:
+    """Whether a TCP connection to the broker at ``broker_address`` succeeds."""
+    url = urlsplit(broker_address if "://" in broker_address else f"tcp://{broker_address}")
+    try:
+        port = url.port or _DEFAULT_BROKER_PORT
+    except ValueError:
+        return False
+    if url.hostname is None:
+        return False
+    try:
+        with socket.create_connection((url.hostname, port), timeout=_BROKER_PROBE_TIMEOUT_S):
+            return True
+    except OSError:
+        return False
 
 
 def enter_executing_mode_with_timeout(

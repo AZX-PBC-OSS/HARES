@@ -66,7 +66,7 @@ from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscri
 from .federate import (
     DEFAULT_CONNECT_TIMEOUT_S,
     DEFAULT_GRANT_TIMEOUT_S,
-    core_init_string,
+    create_value_federate,
     enter_executing_mode_with_timeout,
     request_time_with_timeout,
     validate_timeout,
@@ -335,9 +335,9 @@ class HELICSDwelling:
         self._start_time, self._period_s = self._peek_timing(dwelling)
         _LOG.info("HELICS federate %s period %.1fs derived from dwelling timesteps", fed_name, self._period_s)
 
-        fedinfo = self._create_federate_info()
-        self._configure_federate_info(fedinfo)
-        self._fed = helics.helicsCreateValueFederate(fed_name, fedinfo)
+        self._fed = create_value_federate(
+            fed_name, core_type, broker_address, self._connect_timeout_s, self._federate_info
+        )
 
         self._set_flag(helics.HELICS_FLAG_TERMINATE_ON_ERROR, True)
 
@@ -950,16 +950,22 @@ class HELICSDwelling:
                 "HELICS Python module does not expose federate info creation API"
             ) from exc
 
-    def _configure_federate_info(self, fedinfo: HelicsFederateInfoLike) -> None:
+    def _federate_info(self, core_name: str, core_init_value: str) -> HelicsFederateInfoLike:
+        fedinfo = self._create_federate_info()
+        self._configure_federate_info(fedinfo, core_name, core_init_value)
+        return fedinfo
+
+    def _configure_federate_info(
+        self, fedinfo: HelicsFederateInfoLike, core_name: str, core_init_value: str
+    ) -> None:
         if hasattr(helics, "helicsFederateInfoSetCoreTypeFromString"):
             helics.helicsFederateInfoSetCoreTypeFromString(fedinfo, self._core_type)
         else:
             fedinfo.core_type = self._core_type
 
         if hasattr(helics, "helicsFederateInfoSetCoreName"):
-            helics.helicsFederateInfoSetCoreName(fedinfo, f"core_{self._fed_name}")
+            helics.helicsFederateInfoSetCoreName(fedinfo, core_name)
 
-        core_init_value = core_init_string(self._core_type, self._broker_address, self._connect_timeout_s)
         if hasattr(helics, "helicsFederateInfoSetCoreInitString"):
             helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init_value)
         else:

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 import importlib
 import importlib.util
 import itertools
 import json
 import os
+import socket
 import sys
 import threading
 from typing import Any, Self, TYPE_CHECKING
@@ -37,7 +39,9 @@ from ochre_next.helics import (
     request_time_with_timeout,
     wait_for_pending_aborts,
 )
-from ochre_next.helics.federate import core_init_string
+from ochre_next.helics import federate as federate_module
+from ochre_next.helics.broker import allocate_ephemeral_port
+from ochre_next.helics.federate import create_value_federate
 
 # Last-resort backstop: raw HELICS calls block inside the C library where
 # SIGALRM cannot interrupt them, so use pytest-timeout's thread method.
@@ -56,6 +60,15 @@ _GRANT_TIMEOUT_S = 30.0
 # In-process isolates each test; zmq is the transport users run, including the
 # per-core local port that core_init_string adds.
 _CORE_TYPES = ("inproc", "zmq")
+
+
+def _federate_info(core_type: str, core_name: str, core_init: str, time_res_s: float = _TIME_RES_S) -> Any:
+    fedinfo = helics.helicsCreateFederateInfo()
+    helics.helicsFederateInfoSetCoreTypeFromString(fedinfo, core_type)
+    helics.helicsFederateInfoSetCoreName(fedinfo, core_name)
+    helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init)
+    helics.helicsFederateInfoSetTimeProperty(fedinfo, helics.HELICS_PROPERTY_TIME_PERIOD, time_res_s)
+    return fedinfo
 
 class _FederateThread:
     """A federate driven on a thread of its own.
@@ -169,19 +182,21 @@ class _Federation:
         if disconnect_errors and exc_type is None:
             raise disconnect_errors[0]
 
-    def federate_info(self, core_name: str, time_res_s: float = _TIME_RES_S) -> Any:
-        fedinfo = helics.helicsCreateFederateInfo()
-        helics.helicsFederateInfoSetCoreTypeFromString(fedinfo, self.core_type)
-        helics.helicsFederateInfoSetCoreName(fedinfo, f"core_{core_name}")
-        helics.helicsFederateInfoSetCoreInitString(
-            fedinfo, core_init_string(self.core_type, self.address, _CONNECT_TIMEOUT_S)
+    def create_federate(
+        self, name: str, time_res_s: float = _TIME_RES_S, connect_timeout_s: float = _CONNECT_TIMEOUT_S
+    ) -> Any:
+        """A value federate on its own core, created on (and bound to) the calling thread."""
+        return create_value_federate(
+            name,
+            self.core_type,
+            self.address,
+            connect_timeout_s,
+            lambda core_name, core_init: _federate_info(self.core_type, core_name, core_init, time_res_s),
         )
-        helics.helicsFederateInfoSetTimeProperty(fedinfo, helics.HELICS_PROPERTY_TIME_PERIOD, time_res_s)
-        return fedinfo
 
     def value_federate(self, name: str, time_res_s: float = _TIME_RES_S) -> Any:
         """A federate the test drives from its own thread, disconnected at teardown."""
-        fed = helics.helicsCreateValueFederate(name, self.federate_info(name, time_res_s))
+        fed = self.create_federate(name, time_res_s)
         self._federates.append(fed)
         return fed
 
@@ -358,8 +373,7 @@ class _FaultyAggregator:
         self.granted_times: list[float] = []
 
     def run(self, ready: Callable[[], None]) -> None:
-        fedinfo = self._federation.federate_info(self._fed_name)
-        self._fed = helics.helicsCreateValueFederate(self._fed_name, fedinfo)
+        self._fed = self._federation.create_federate(self._fed_name)
         helics.helicsFederateSetFlagOption(
             self._fed, helics.HELICS_FLAG_TERMINATE_ON_ERROR, 1
         )
@@ -1462,3 +1476,82 @@ def test_multi_federate_fault_propagation_broker_cleanup() -> None:
         helics_dwelling2 = federation.helics_dwelling(dwelling2, "house_2")
         helics_dwelling2.register_publications()
         helics_dwelling2.run()
+
+
+@contextmanager
+def _held_port_pair() -> Iterator[int]:
+    """A port pair held by this process, as another process's sockets would hold it."""
+    port = allocate_ephemeral_port()
+    with socket.create_server(("127.0.0.1", port)), socket.create_server(("127.0.0.1", port + 1)):
+        yield port
+
+
+def _drawn_ports(monkeypatch: pytest.MonkeyPatch, first: list[int]) -> list[int]:
+    """Make the core port draws return ``first`` before fresh ports; return every draw."""
+    draws: list[int] = []
+    queued = iter(first)
+
+    def draw() -> int:
+        port = next(queued, None) or allocate_ephemeral_port()
+        draws.append(port)
+        return port
+
+    monkeypatch.setattr(federate_module, "allocate_ephemeral_port", draw)
+    return draws
+
+
+def test_a_federate_whose_core_port_is_taken_registers_on_a_fresh_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _Federation(n_federates=1, core_type="zmq") as federation, _held_port_pair() as taken:
+        draws = _drawn_ports(monkeypatch, [taken])
+        fed = federation.value_federate("house_1")
+        _enter_exec(fed)
+
+    assert draws[0] == taken
+    assert len(draws) == 2
+
+
+def test_a_federate_whose_every_core_port_is_taken_surfaces_the_bind_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _Federation(n_federates=1, core_type="zmq") as federation, _held_port_pair() as taken:
+        draws = _drawn_ports(monkeypatch, [taken] * federate_module._CORE_PORT_ATTEMPTS)
+        with pytest.raises(helics.HelicsException) as raised:
+            federation.create_federate("house_1", connect_timeout_s=2.0)
+
+    assert draws == [taken] * federate_module._CORE_PORT_ATTEMPTS
+    (note,) = raised.value.__notes__
+    assert "a core that could not bind its port" in note
+    assert note.count(f"--port={taken}") == federate_module._CORE_PORT_ATTEMPTS
+
+
+@pytest.mark.parametrize(
+    ("family", "host", "address"),
+    [
+        (socket.AF_INET, "127.0.0.1", "127.0.0.1:{port}"),
+        (socket.AF_INET, "127.0.0.1", "tcp://127.0.0.1:{port}"),
+        (socket.AF_INET6, "::1", "[::1]:{port}"),
+        (socket.AF_INET6, "::1", "tcp://[::1]:{port}"),
+    ],
+    ids=["host-port", "url", "ipv6", "ipv6-url"],
+)
+def test_a_broker_address_is_probed_where_it_points(family: socket.AddressFamily, host: str, address: str) -> None:
+    with socket.create_server((host, 0), family=family) as listener:
+        port = listener.getsockname()[1]
+        assert federate_module._accepts_connections(address.format(port=port))
+    assert not federate_module._accepts_connections(address.format(port=port))
+
+
+def test_a_federate_whose_broker_is_unreachable_fails_without_retrying(monkeypatch: pytest.MonkeyPatch) -> None:
+    draws = _drawn_ports(monkeypatch, [])
+    unreachable = allocate_ephemeral_port()
+
+    with pytest.raises(helics.HelicsException):
+        create_value_federate(
+            "house_1",
+            "zmq",
+            f"127.0.0.1:{unreachable}",
+            2.0,
+            lambda core_name, core_init: _federate_info("zmq", core_name, core_init),
+        )
+
+    assert len(draws) == 1
