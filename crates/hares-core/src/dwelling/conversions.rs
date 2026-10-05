@@ -53,7 +53,7 @@ pub fn building_to_boundary_inputs(
 ) -> Result<Vec<BoundaryInput>> {
     use hares_envelope::PrecomputedRCLayer;
     use hares_io::hpxml::{BoundaryType, ZoneType};
-    use hares_physics::film_coefficients::{film_resistances, outside_surface_roughness};
+    use hares_physics::film_coefficients::film_resistances;
     use hares_physics::ground::f2_coefficient;
     use hares_physics::solar::window_u_factor_decomposition;
 
@@ -77,9 +77,7 @@ pub fn building_to_boundary_inputs(
                 avg_wind_m_s,
                 avg_ground_c,
                 avg_ambient_c,
-                outside_surface_roughness(exterior_label, bd.finish_type.as_deref()).map_err(
-                    |e| HaresError::Physics(format!("boundary '{}': {e}", bd.id)),
-                )?,
+                boundary_outside_roughness(bd, exterior_label)?,
             );
 
             // fallback_r is material-only R (no film). HPXML AssemblyEffectiveRValue
@@ -1429,6 +1427,38 @@ pub(crate) fn site_type_to_terrain(
     }
 }
 
+/// The convective roughness class of a boundary's outside face. Only an
+/// outdoor face reads it. A boundary whose HPXML element has a material
+/// (`Siding` on walls, foundation walls and rim joists, `RoofType` on
+/// roofs) takes that material's class. Glazing is glass, the Engineering
+/// Reference's Very Smooth example (its films come from the U-factor
+/// decomposition in any case). Doors, floors and slabs have no material
+/// element in HPXML and take OS-HPXML v1.12.0's `Rough` (model.rb:49, :95)
+/// without a warning, since no input is missing.
+fn boundary_outside_roughness(
+    bd: &hares_io::hpxml::Boundary,
+    exterior: hares_physics::film_coefficients::ZoneLabel,
+) -> Result<hares_physics::film_coefficients::SurfaceRoughness> {
+    use hares_io::hpxml::BoundaryType;
+    use hares_physics::film_coefficients::{
+        SurfaceRoughness, ZoneLabel, outside_surface_roughness,
+    };
+    if exterior != ZoneLabel::Outdoor {
+        return Ok(SurfaceRoughness::Rough);
+    }
+    Ok(match bd.boundary_type {
+        BoundaryType::Wall
+        | BoundaryType::Roof
+        | BoundaryType::FoundationWall
+        | BoundaryType::RimJoist => outside_surface_roughness(exterior, bd.finish_type.as_deref())
+            .map_err(|e| HaresError::Physics(format!("boundary '{}': {e}", bd.id)))?,
+        BoundaryType::Window | BoundaryType::Skylight => SurfaceRoughness::VerySmooth,
+        BoundaryType::Door | BoundaryType::Floor | BoundaryType::Slab | BoundaryType::Other(_) => {
+            SurfaceRoughness::Rough
+        }
+    })
+}
+
 /// Map HPXML `<ShieldingOfHome>` to [`ShieldingClass`].
 ///
 /// Walker & Wilson (1998) Table 3; ResStock `airflow.get_aim2_shelter_coefficient`.
@@ -2540,6 +2570,52 @@ mod tests {
             perimeter_insulation_r_m2_k_w: insulation_r,
             foundation_depth_m: None,
         }
+    }
+
+    /// Only boundaries whose HPXML element carries a material read it: an
+    /// outdoor door, floor or window has none to read and takes OS-HPXML's
+    /// Rough or glass's Very Smooth, while an outdoor wall's unknown
+    /// material is an error naming the wall.
+    #[test]
+    fn only_material_bearing_boundaries_read_their_material() {
+        use hares_physics::film_coefficients::{SurfaceRoughness, ZoneLabel};
+        let outdoor = |boundary_type: BoundaryType, finish: Option<&str>| Boundary {
+            id: "b-1".to_string(),
+            boundary_type,
+            exterior_zone: Some(ZoneType::Outdoor),
+            finish_type: finish.map(str::to_string),
+            ..slab_boundary(None, None)
+        };
+        for (boundary_type, class) in [
+            (BoundaryType::Door, SurfaceRoughness::Rough),
+            (BoundaryType::Floor, SurfaceRoughness::Rough),
+            (BoundaryType::Window, SurfaceRoughness::VerySmooth),
+            (BoundaryType::Skylight, SurfaceRoughness::VerySmooth),
+        ] {
+            assert_eq!(
+                super::boundary_outside_roughness(
+                    &outdoor(boundary_type.clone(), Some("diamond plate")),
+                    ZoneLabel::Outdoor
+                )
+                .unwrap(),
+                class,
+                "{boundary_type:?}"
+            );
+        }
+        assert_eq!(
+            super::boundary_outside_roughness(
+                &outdoor(BoundaryType::Roof, Some("asphalt or fiberglass shingles")),
+                ZoneLabel::Outdoor
+            )
+            .unwrap(),
+            SurfaceRoughness::VeryRough
+        );
+        let err = super::boundary_outside_roughness(
+            &outdoor(BoundaryType::Wall, Some("diamond plate")),
+            ZoneLabel::Outdoor,
+        )
+        .expect_err("an unknown wall material must fail");
+        assert!(err.to_string().contains("b-1"), "{err}");
     }
 
     /// A slab boundary without perimeter derives P ≈ 4 × √(area)

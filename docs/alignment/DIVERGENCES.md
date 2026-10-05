@@ -331,8 +331,11 @@ justification → measured impact → pinning tests.
   Reference's Walton table where it names the material, else the
   material's record in EnergyPlus v24.2.0's
   `datasets/ASHRAE_2005_HOF_Materials.idf` or a named analogue, each
-  stated in the function's documentation. A surface naming no material
-  takes OS-HPXML's `Rough`, with a warning. An unknown value is an error.
+  stated in the function's documentation. Walls, foundation walls, rim
+  joists and roofs read their material; a wall or roof naming none takes
+  OS-HPXML's `Rough`, with a warning, and an unknown value is an error.
+  Doors, floors and slabs, which have no material element in HPXML, take
+  `Rough` without one; glazing takes glass's Very Smooth.
 - **Justification:** EnergyPlus's DOE-2 and TARP outside convection scale
   forced convection by the roughness of the outside material layer.
   OS-HPXML builds that layer without passing the roughness its material
@@ -356,4 +359,6 @@ justification → measured impact → pinning tests.
   and `conversions::tests::finish_type_roughness_changes_exterior_film_resistance`.
   All three fail when every surface takes OS-HPXML's `Rough`.
   `film_coefficients::tests::a_surface_without_a_material_is_os_hpxml_rough`
-  pins the fallback.
+  pins the fallback, and
+  `conversions::tests::only_material_bearing_boundaries_read_their_material`
+  pins which boundaries read a material.
