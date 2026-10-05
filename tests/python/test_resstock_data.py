@@ -601,6 +601,67 @@ class TestFallbackToUrllib:
         assert dest.exists()
         assert dest.stat().st_size > 0
 
+    def test_urllib_fallback_bounds_a_stalled_download(self, tmp_path: Path):
+        """The urllib fallback gets the same timeout as the httpx client."""
+        from ochre_next.data import resstock
+
+        with (
+            mock.patch.dict(sys.modules, {"httpx": None, "boto3": None}),
+            mock.patch("urllib.request.urlopen", return_value=io.BytesIO(b"")) as urlopen,
+        ):
+            resstock._try_download("https://example.com/test.zip", tmp_path / "out.zip")
+
+        assert urlopen.call_args.kwargs["timeout"] == resstock._DOWNLOAD_TIMEOUT_S
+
+
+class TestSharedHttpClient:
+    def test_downloads_share_one_client_with_the_long_timeout(self, tmp_path: Path):
+        """Every download reuses one thread-safe client with the 120 s timeout."""
+        import types
+
+        from ochre_next.data import resstock
+
+        clients: list[dict[str, object]] = []
+        streamed: list[str] = []
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_bytes(self, chunk_size: int):
+                return iter([b"zip"])
+
+        class _Client:
+            def __init__(self, **kwargs) -> None:
+                clients.append(kwargs)
+
+            def stream(self, method: str, url: str) -> _Response:
+                streamed.append(url)
+                return _Response()
+
+            def close(self) -> None:
+                return None
+
+        fake_httpx = types.ModuleType("httpx")
+        fake_httpx.Client = _Client  # type: ignore[attr-defined]
+
+        resstock._http_client.cache_clear()
+        try:
+            with mock.patch.dict(sys.modules, {"httpx": fake_httpx}):
+                resstock._try_download("https://example.com/a.zip", tmp_path / "a.zip")
+                resstock._try_download("https://example.com/b.zip", tmp_path / "b.zip")
+        finally:
+            resstock._http_client.cache_clear()
+
+        assert clients == [{"follow_redirects": True, "timeout": 120.0}]
+        assert streamed == ["https://example.com/a.zip", "https://example.com/b.zip"]
+
 
 # ---------------------------------------------------------------------------
 # 6. HPXML weather station parsing
@@ -978,32 +1039,111 @@ class TestFleetResilience:
 
         assert [r.bldg_id for r in results] == [1, 3]
 
-    @pytest.mark.parametrize("httpx_installed", [True, False])
-    def test_fleet_fetches_every_building_through_fetch_resstock_building(
-        self, tmp_path: Path, httpx_installed: bool
-    ):
-        """The fleet has one download path, with or without the optional httpx."""
-        import types
+    def test_fleet_returns_request_order_when_buildings_finish_out_of_order(self, tmp_path: Path):
+        """Building 1 finishes only after building 2; the result still starts with 1."""
+        import threading
 
         from ochre_next.data import resstock
 
         meta = self._metadata_file(tmp_path, [1, 2, 3])
-        fetched: list[int] = []
         good = _fake_fleet_building(tmp_path)
+        second_done = threading.Event()
+        finished: list[int] = []
 
-        def recording(bldg_id: int, **kwargs):
-            fetched.append(bldg_id)
-            return good(bldg_id, **kwargs)
+        def out_of_order(bldg_id: int, **kwargs):
+            if bldg_id == 1:
+                second_done.wait()
+            building = good(bldg_id, **kwargs)
+            finished.append(bldg_id)
+            if bldg_id == 2:
+                second_done.set()
+            return building
 
-        httpx_module = types.ModuleType("httpx") if httpx_installed else None
-        with (
-            mock.patch.dict(sys.modules, {"httpx": httpx_module}),
-            mock.patch.object(resstock, "fetch_resstock_building", side_effect=recording),
-        ):
+        with mock.patch.object(resstock, "fetch_resstock_building", side_effect=out_of_order):
             results = resstock.fetch_resstock_fleet(meta, bldg_ids=[1, 2, 3], cache_dir=tmp_path)
 
-        assert sorted(fetched) == [1, 2, 3]
+        assert finished.index(2) < finished.index(1)
         assert [r.bldg_id for r in results] == [1, 2, 3]
+
+    def test_fleet_logs_what_failed_for_a_skipped_building(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        """A failure after the download is reported as itself, not as a download failure."""
+        from ochre_next.data import resstock
+
+        meta = self._metadata_file(tmp_path, [1, 2])
+        good = _fake_fleet_building(tmp_path)
+
+        def weather_fails(bldg_id: int, **kwargs):
+            if bldg_id == 2:
+                raise ValueError("climate zone 2A does not occur in CO")
+            return good(bldg_id, **kwargs)
+
+        with (
+            mock.patch.object(resstock, "fetch_resstock_building", side_effect=weather_fails),
+            caplog.at_level("ERROR", logger="ochre_next.data.resstock"),
+        ):
+            resstock.fetch_resstock_fleet(meta, bldg_ids=[1, 2], cache_dir=tmp_path)
+
+        (message,) = [r.getMessage() for r in caplog.records]
+        assert message == (
+            "ResStock building 2 skipped: ValueError: climate zone 2A does not occur in CO"
+        )
+
+    # Backstop only: a fleet that waited for its queue on Ctrl-C would hang
+    # here, because building 2 is held until the fetch has returned.
+    @pytest.mark.timeout(60, method="thread")
+    def test_interrupting_a_fleet_fetch_cancels_the_queued_buildings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Ctrl-C returns at once, without waiting for or starting queued buildings."""
+        import threading
+
+        from ochre_next.data import resstock
+
+        monkeypatch.setattr(resstock, "_FLEET_DOWNLOAD_WORKERS", 1)
+        meta = self._metadata_file(tmp_path, [1, 2, 3])
+        release = threading.Event()
+        fetched: list[int] = []
+
+        def interrupted_at_first(bldg_id: int, **kwargs):
+            # A building still in flight after the fetch returned touches no
+            # files, so it cannot outlive the test's directory.
+            fetched.append(bldg_id)
+            if bldg_id == 1:
+                raise KeyboardInterrupt
+            release.wait()
+            return resstock.ResStockBuilding(bldg_id, 1.0, Path(), Path(), Path())
+
+        try:
+            with (
+                mock.patch.object(resstock, "fetch_resstock_building", side_effect=interrupted_at_first),
+                pytest.raises(KeyboardInterrupt),
+            ):
+                resstock.fetch_resstock_fleet(meta, bldg_ids=[1, 2, 3], cache_dir=tmp_path)
+        finally:
+            release.set()
+
+        assert 3 not in fetched
+
+
+class TestWeatherLock:
+    def test_weather_cache_work_runs_under_the_fleet_weather_lock(self, tmp_path: Path):
+        """Concurrent buildings share weather caches, so their cache work is serialised."""
+        from ochre_next.data import resstock
+
+        hpxml = tmp_path / "home.xml"
+        hpxml.write_text(_minimal_hpxml("G0800130"))
+        held: list[bool] = []
+
+        def record_lock(*args, **kwargs):
+            held.append(resstock._WEATHER_LOCK.locked())
+            return tmp_path / "w.epw"
+
+        with mock.patch.object(resstock, "_fetch_weather_for_station", side_effect=record_lock):
+            resstock._fetch_weather(resstock._version_config("2024.2"), hpxml, tmp_path, "2024.2")
+
+        assert held == [True]
 
 
 # ---------------------------------------------------------------------------

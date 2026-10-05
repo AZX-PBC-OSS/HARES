@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import atexit
 from concurrent.futures import ThreadPoolExecutor
 import dataclasses
 import enum
+import functools
 import logging
 import os
 import random
@@ -27,6 +29,7 @@ from ochre_next.data._checksum import (
 )
 
 if TYPE_CHECKING:
+    import httpx
     import polars as pl
 
 log = logging.getLogger(__name__)
@@ -37,6 +40,11 @@ _WEATHER_LOCK = threading.Lock()
 # threads overlap them; the bound keeps a large fleet from opening thousands
 # of connections at the same time.
 _FLEET_DOWNLOAD_WORKERS = 16
+
+# Connect, read, write and pool timeout for every download, in seconds: long
+# enough for a slow S3 stream to keep going between chunks, finite so a
+# stalled connection fails and is retried instead of holding a worker.
+_DOWNLOAD_TIMEOUT_S = 120.0
 
 _OEDI_BASE = (
     "https://oedi-data-lake.s3.amazonaws.com/"
@@ -377,19 +385,33 @@ def _download_with_retry(
             time.sleep(_next_retry_delay(exc, attempt, max_attempts, url))
 
 
+@functools.cache
+def _http_client() -> httpx.Client:
+    """The process-wide httpx client every download shares.
+
+    One thread-safe client serves single-building and fleet fetches alike,
+    so a fleet's concurrent downloads reuse connections instead of paying a
+    TLS handshake each; it is closed at interpreter exit.
+    """
+    import httpx
+
+    client = httpx.Client(follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_S)
+    atexit.register(client.close)
+    return client
+
+
 def _try_download(url: str, dest: Path) -> None:
     try:
-        import httpx
-
-        with httpx.Client(follow_redirects=True) as client:
-            with client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                with dest.open("wb") as fh:
-                    for chunk in resp.iter_bytes(chunk_size=65536):
-                        fh.write(chunk)
-        return
+        client = _http_client()
     except ImportError:
         pass
+    else:
+        with client.stream("GET", url) as resp:
+            resp.raise_for_status()
+            with dest.open("wb") as fh:
+                for chunk in resp.iter_bytes(chunk_size=65536):
+                    fh.write(chunk)
+        return
 
     try:
         import boto3
@@ -407,7 +429,10 @@ def _try_download(url: str, dest: Path) -> None:
     except ImportError:
         pass
 
-    with urllib.request.urlopen(url) as resp, dest.open("wb") as fh:  # noqa: S310
+    with (
+        urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT_S) as resp,  # noqa: S310
+        dest.open("wb") as fh,
+    ):
         while chunk := resp.read(65536):
             fh.write(chunk)
 
@@ -940,11 +965,14 @@ def _fetch_fleet(
     fetch fails is logged and skipped; the rest of the fleet is returned in
     request order.
     """
-    cfg = _version_config(version)
     checksum_failures = {bid: [0] for bid in bldg_ids}
 
+    # Resolved once, so every building of this fleet uses the same fetcher even
+    # if the module attribute is rebound while downloads are still queued.
+    fetch_building = fetch_resstock_building
+
     def fetch(bid: int) -> ResStockBuilding:
-        return fetch_resstock_building(
+        return fetch_building(
             bid,
             version=version,
             upgrade_id=upgrade_id,
@@ -956,18 +984,20 @@ def _fetch_fleet(
 
     results: list[ResStockBuilding] = []
     workers = max(1, min(_FLEET_DOWNLOAD_WORKERS, len(bldg_ids)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
         futures = [pool.submit(fetch, bid) for bid in bldg_ids]
         for bid, future in zip(bldg_ids, futures):
             try:
                 results.append(future.result())
             except Exception as exc:
-                log.error(
-                    "ResStock building %d download failed, skipping: url=%s error=%s",
-                    bid,
-                    _zip_url(cfg, bid, upgrade_id),
-                    exc,
-                )
+                log.error("ResStock building %d skipped: %s: %s", bid, type(exc).__name__, exc)
+    except BaseException:
+        # Ctrl-C (or any abort) stops the fleet now: queued buildings are
+        # cancelled and the ones in flight are left to finish on their own.
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown()
 
     log.info(
         "ResStock fleet download complete: %d succeeded, %d failed, "
