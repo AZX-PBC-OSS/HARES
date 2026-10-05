@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import atexit
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+import contextlib
+import contextvars
 import dataclasses
 import enum
-import functools
 import logging
 import os
 import random
+import socket
 import tempfile
 import threading
-import time
 import urllib.request
 import warnings
+import weakref
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -40,6 +42,10 @@ _WEATHER_LOCK = threading.Lock()
 # threads overlap them; the bound keeps a large fleet from opening thousands
 # of connections at the same time.
 _FLEET_DOWNLOAD_WORKERS = 16
+
+# How often a fleet fetch waiting on its downloads returns to the interpreter
+# to act on a Ctrl-C (see _result_interruptibly).
+_INTERRUPT_CHECK_S = 0.1
 
 # Connect, read, write and pool timeout for every download, in seconds: long
 # enough for a slow S3 stream to keep going between chunks, finite so a
@@ -341,7 +347,7 @@ def _download_and_extract_zip(url: str, dest_dir: Path) -> None:
                         delay,
                         exc,
                     )
-                    time.sleep(delay)
+                    _wait_before_retry(delay)
                     continue
                 raise
             _extract_zip(zip_dest, dest_dir)
@@ -378,35 +384,127 @@ def _download_with_retry(
 ) -> None:
     """Call ``_try_download`` with exponential-backoff retries on transient errors."""
     for attempt in range(max_attempts):
+        _raise_if_cancelled()
         try:
             _try_download(url, dest)
             return
         except Exception as exc:
-            time.sleep(_next_retry_delay(exc, attempt, max_attempts, url))
+            _raise_if_cancelled()
+            _wait_before_retry(_next_retry_delay(exc, attempt, max_attempts, url))
 
 
-@functools.cache
-def _http_client() -> httpx.Client:
-    """The process-wide httpx client every download shares.
+class _DownloadCancelled(Exception):
+    """The fetch this download belongs to was interrupted."""
 
-    One thread-safe client serves single-building and fleet fetches alike,
-    so a fleet's concurrent downloads reuse connections instead of paying a
-    TLS handshake each; it is closed at interpreter exit.
+
+# The signal a download outside any fleet sees; nothing sets it.
+_NEVER_CANCELLED = threading.Event()
+
+# The cancellation signal of the fleet fetch a worker thread downloads for.
+_cancellation: contextvars.ContextVar[threading.Event] = contextvars.ContextVar(
+    "resstock_download_cancellation", default=_NEVER_CANCELLED
+)
+
+
+def _raise_if_cancelled() -> None:
+    if _cancellation.get().is_set():
+        raise _DownloadCancelled
+
+
+def _wait_before_retry(delay_s: float) -> None:
+    """Wait out a retry delay, ending it at once if the fetch is cancelled."""
+    if _cancellation.get().wait(delay_s):
+        raise _DownloadCancelled
+
+
+def _shut(sock: socket.socket) -> None:
+    with contextlib.suppress(OSError):
+        sock.shutdown(socket.SHUT_RDWR)
+
+
+class _Connections:
+    """The sockets one httpx client connects; cutting them ends every read on them.
+
+    Closing an httpx client does not wake a thread blocked reading from one
+    of its connections; shutting the connection's socket down does. A
+    connection that completes after the cut is shut as soon as it is
+    reported, so none outlives it.
     """
-    import httpx
 
-    client = httpx.Client(follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_S)
-    atexit.register(client.close)
-    return client
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sockets: weakref.WeakSet[socket.socket] = weakref.WeakSet()
+        self._cut = False
+
+    def trace(self, event: str, info: dict[str, Any]) -> None:
+        """httpcore's ``trace`` request extension: record each socket a connection opens."""
+        if event not in ("connection.connect_tcp.complete", "connection.start_tls.complete"):
+            return
+        sock: socket.socket | None = info["return_value"].get_extra_info("socket")
+        if sock is None:
+            return
+        with self._lock:
+            if not self._cut:
+                self._sockets.add(sock)
+                return
+        _shut(sock)
+
+    def cut(self) -> None:
+        with self._lock:
+            self._cut = True
+            sockets = list(self._sockets)
+        for sock in sockets:
+            _shut(sock)
+
+
+class _SharedClient:
+    """The httpx client every download shares, built once and abortable.
+
+    One thread-safe client serves single-building and fleet fetches alike, so
+    a fleet's concurrent downloads reuse connections instead of paying a TLS
+    handshake each; it is closed at interpreter exit.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._current: tuple[httpx.Client, _Connections] | None = None
+
+    def get(self) -> tuple[httpx.Client, _Connections]:
+        """The client, and the connections to report its requests' sockets to."""
+        with self._lock:
+            if self._current is None:
+                import httpx
+
+                client = httpx.Client(follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_S)
+                atexit.register(client.close)
+                self._current = (client, _Connections())
+            return self._current
+
+    def abort(self) -> None:
+        """Close the client and end every request in flight on it.
+
+        Every download in the process that is using it fails; the next
+        ``get`` builds a new client, so one that is not cancelled retries on
+        that.
+        """
+        with self._lock:
+            current, self._current = self._current, None
+        if current is not None:
+            client, connections = current
+            connections.cut()
+            client.close()
+
+
+_shared_client = _SharedClient()
 
 
 def _try_download(url: str, dest: Path) -> None:
     try:
-        client = _http_client()
+        client, connections = _shared_client.get()
     except ImportError:
         pass
     else:
-        with client.stream("GET", url) as resp:
+        with client.stream("GET", url, extensions={"trace": connections.trace}) as resp:
             resp.raise_for_status()
             with dest.open("wb") as fh:
                 for chunk in resp.iter_bytes(chunk_size=65536):
@@ -950,6 +1048,20 @@ def fetch_resstock_building(
     )
 
 
+def _result_interruptibly(future: Future[ResStockBuilding]) -> ResStockBuilding:
+    """``future.result()``, waited for in slices so that Ctrl-C can interrupt it.
+
+    Importing polars, which every fleet fetch does, installs a SIGINT handler
+    with ``SA_RESTART``: the kernel then restarts a main thread's untimed lock
+    wait after the signal, and the interpreter never gets the chance to raise
+    ``KeyboardInterrupt``. A timed wait returns to the interpreter, which
+    raises the pending interrupt.
+    """
+    while not future.done():
+        wait([future], timeout=_INTERRUPT_CHECK_S)
+    return future.result()
+
+
 def _fetch_fleet(
     bldg_ids: list[int],
     version: str,
@@ -963,16 +1075,20 @@ def _fetch_fleet(
     ``fetch_resstock_building`` is the one download path for a single building
     and for a fleet alike, so a stand-in for it covers both. A building whose
     fetch fails is logged and skipped; the rest of the fleet is returned in
-    request order.
-    """
-    checksum_failures = {bid: [0] for bid in bldg_ids}
+    request order. An unknown ``version`` fails the whole fetch up front.
 
-    # Resolved once, so every building of this fleet uses the same fetcher even
-    # if the module attribute is rebound while downloads are still queued.
-    fetch_building = fetch_resstock_building
+    An interrupt (Ctrl-C) stops the fleet at once: queued buildings never
+    start, retries stop, and with httpx installed the downloads in flight are
+    cut. Without httpx, a download in flight on the urllib fallback ends at
+    its read timeout.
+    """
+    _parse_version(version)
+    checksum_failures = {bid: [0] for bid in bldg_ids}
+    cancelled = threading.Event()
 
     def fetch(bid: int) -> ResStockBuilding:
-        return fetch_building(
+        _cancellation.set(cancelled)
+        return fetch_resstock_building(
             bid,
             version=version,
             upgrade_id=upgrade_id,
@@ -989,13 +1105,13 @@ def _fetch_fleet(
         futures = [pool.submit(fetch, bid) for bid in bldg_ids]
         for bid, future in zip(bldg_ids, futures):
             try:
-                results.append(future.result())
+                results.append(_result_interruptibly(future))
             except Exception as exc:
                 log.error("ResStock building %d skipped: %s: %s", bid, type(exc).__name__, exc)
     except BaseException:
-        # Ctrl-C (or any abort) stops the fleet now: queued buildings are
-        # cancelled and the ones in flight are left to finish on their own.
-        pool.shutdown(wait=False, cancel_futures=True)
+        cancelled.set()
+        _shared_client.abort()
+        pool.shutdown(cancel_futures=True)
         raise
     pool.shutdown()
 

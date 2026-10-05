@@ -615,7 +615,9 @@ class TestFallbackToUrllib:
 
 
 class TestSharedHttpClient:
-    def test_downloads_share_one_client_with_the_long_timeout(self, tmp_path: Path):
+    def test_downloads_share_one_client_with_the_long_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         """Every download reuses one thread-safe client with the 120 s timeout."""
         import types
 
@@ -641,7 +643,7 @@ class TestSharedHttpClient:
             def __init__(self, **kwargs) -> None:
                 clients.append(kwargs)
 
-            def stream(self, method: str, url: str) -> _Response:
+            def stream(self, method: str, url: str, **_kwargs: object) -> _Response:
                 streamed.append(url)
                 return _Response()
 
@@ -651,16 +653,92 @@ class TestSharedHttpClient:
         fake_httpx = types.ModuleType("httpx")
         fake_httpx.Client = _Client  # type: ignore[attr-defined]
 
-        resstock._http_client.cache_clear()
-        try:
-            with mock.patch.dict(sys.modules, {"httpx": fake_httpx}):
-                resstock._try_download("https://example.com/a.zip", tmp_path / "a.zip")
-                resstock._try_download("https://example.com/b.zip", tmp_path / "b.zip")
-        finally:
-            resstock._http_client.cache_clear()
+        monkeypatch.setattr(resstock, "_shared_client", resstock._SharedClient())
+        with mock.patch.dict(sys.modules, {"httpx": fake_httpx}):
+            resstock._try_download("https://example.com/a.zip", tmp_path / "a.zip")
+            resstock._try_download("https://example.com/b.zip", tmp_path / "b.zip")
 
         assert clients == [{"follow_redirects": True, "timeout": 120.0}]
         assert streamed == ["https://example.com/a.zip", "https://example.com/b.zip"]
+
+    def test_the_first_burst_of_downloads_builds_one_client(self, monkeypatch: pytest.MonkeyPatch):
+        """Sixteen fleet workers asking at once get one client, closed once at exit."""
+        import atexit
+        import contextlib
+        import threading
+        import types
+
+        from ochre_next.data import resstock
+
+        built: list[object] = []
+        registered: list[object] = []
+        second_construction = threading.Barrier(2)
+
+        class _Client:
+            def __init__(self, **_kwargs: object) -> None:
+                built.append(self)
+                # Holds the first construction open so that a second one, if
+                # construction were not serialised, would start meanwhile.
+                with contextlib.suppress(threading.BrokenBarrierError):
+                    second_construction.wait(timeout=0.5)
+
+            def close(self) -> None:
+                return None
+
+        fake_httpx = types.ModuleType("httpx")
+        fake_httpx.Client = _Client  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+        monkeypatch.setattr(atexit, "register", registered.append)
+
+        shared = resstock._SharedClient()
+        start = threading.Barrier(16)
+        received: list[object] = []
+
+        def first_download() -> None:
+            start.wait()
+            client, _ = shared.get()
+            received.append(client)
+
+        workers = [threading.Thread(target=first_download) for _ in range(16)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+
+        assert len(built) == 1
+        assert received == built * 16
+        assert len(registered) == 1
+
+    def test_aborting_the_client_ends_a_download_blocked_reading(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A read stalled mid-body ends as soon as the shared client is aborted."""
+        import threading
+
+        pytest.importorskip("httpx")
+        from ochre_next.data import resstock
+
+        shared = resstock._SharedClient()
+        monkeypatch.setattr(resstock, "_shared_client", shared)
+        failures: list[BaseException] = []
+
+        def download() -> None:
+            try:
+                resstock._try_download(f"http://127.0.0.1:{server.port}/bldg1.zip", tmp_path / "bldg1.zip")
+            except BaseException as exc:
+                failures.append(exc)
+
+        with _StallingServer() as server:
+            reader = threading.Thread(target=download)
+            reader.start()
+            assert server.wait_for_requests(1)
+            shared.abort()
+            # The bound only turns a hang into a failure: without the abort
+            # cutting the connection the read waits for the 120 s timeout.
+            reader.join(timeout=30)
+            assert not reader.is_alive(), "the stalled read outlived the abort"
+
+        assert len(failures) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -774,6 +852,81 @@ def _fake_fleet_building(tmp_path: Path):
         )
 
     return _inner
+
+
+class _StallingServer:
+    """A loopback HTTP server that starts every response body and then stalls.
+
+    A download from it blocks reading until its connection is cut, which is
+    the state an interrupted fetch has to end. Every request's path is
+    recorded.
+    """
+
+    def __init__(self) -> None:
+        import socket
+        import threading
+
+        self._listener = socket.create_server(("127.0.0.1", 0))
+        self.port: int = self._listener.getsockname()[1]
+        self.paths: list[str] = []
+        self._requests = threading.Condition()
+        self._closed = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        import threading
+
+        while True:
+            try:
+                conn, _ = self._listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._answer, args=(conn,), daemon=True).start()
+
+    def _answer(self, conn) -> None:
+        with conn:
+            request = b""
+            while b"\r\n\r\n" not in request:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                request += chunk
+            with self._requests:
+                self.paths.append(request.split()[1].decode())
+                self._requests.notify_all()
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\nPK")
+            self._closed.wait()
+
+    def wait_for_requests(self, count: int) -> bool:
+        """Wait until ``count`` requests have arrived (a bound against a hang only)."""
+        with self._requests:
+            return self._requests.wait_for(lambda: len(self.paths) >= count, timeout=60)
+
+    def __enter__(self) -> _StallingServer:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        import contextlib
+        import socket
+
+        self._closed.set()
+        with contextlib.suppress(OSError):
+            self._listener.shutdown(socket.SHUT_RDWR)
+        self._listener.close()
+
+
+# A fleet of four buildings on two download workers, every download from the
+# stalling server given as argv[1]; argv[2] is the metadata, argv[3] the cache.
+_FLEET_OF_FOUR_ON_TWO_WORKERS = """
+import sys
+from pathlib import Path
+
+from ochre_next.data import resstock
+
+resstock._OEDI_BASE = f"http://127.0.0.1:{sys.argv[1]}/"
+resstock._FLEET_DOWNLOAD_WORKERS = 2
+resstock.fetch_resstock_fleet(Path(sys.argv[2]), bldg_ids=[1, 2, 3, 4], cache_dir=Path(sys.argv[3]))
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -958,13 +1111,13 @@ class TestDownloadRetry:
 
         with (
             mock.patch.object(resstock, "_try_download", side_effect=flaky),
-            mock.patch("time.sleep") as sleep,
+            mock.patch.object(resstock, "_wait_before_retry") as pause,
         ):
             resstock._download_file("https://oedi/out.zip", dest)
 
         assert dest.read_bytes() == zip_bytes
         assert len(attempts) == 3
-        assert sleep.call_count == 2  # slept before each of the two retries
+        assert pause.call_count == 2  # paused before each of the two retries
 
     def test_download_exhausts_retries(self, tmp_path: Path):
         """Persistent transient failure raises after exactly 3 attempts."""
@@ -979,7 +1132,7 @@ class TestDownloadRetry:
 
         with (
             mock.patch.object(resstock, "_try_download", side_effect=always_503),
-            mock.patch("time.sleep"),
+            mock.patch.object(resstock, "_wait_before_retry"),
             pytest.raises(_FakeHTTPStatusError),
         ):
             resstock._download_file("https://oedi/out.zip", dest)
@@ -1002,13 +1155,13 @@ class TestDownloadRetry:
 
         with (
             mock.patch.object(resstock, "_try_download", side_effect=always_404),
-            mock.patch("time.sleep") as sleep,
+            mock.patch.object(resstock, "_wait_before_retry") as pause,
             pytest.raises(_FakeHTTPStatusError),
         ):
             resstock._download_file("https://oedi/out.zip", dest)
 
         assert len(attempts) == 1  # 404 is permanent — no retry
-        assert sleep.call_count == 0
+        assert pause.call_count == 0
         assert not dest.exists()
 
 class TestFleetResilience:
@@ -1090,41 +1243,46 @@ class TestFleetResilience:
             "ResStock building 2 skipped: ValueError: climate zone 2A does not occur in CO"
         )
 
-    # Backstop only: a fleet that waited for its queue on Ctrl-C would hang
-    # here, because building 2 is held until the fetch has returned.
-    @pytest.mark.timeout(60, method="thread")
-    def test_interrupting_a_fleet_fetch_cancels_the_queued_buildings(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """Ctrl-C returns at once, without waiting for or starting queued buildings."""
-        import threading
-
+    def test_an_unknown_version_is_refused_before_any_building_is_fetched(self, tmp_path: Path):
+        """A mistyped dataset version fails the fetch instead of skipping every building."""
         from ochre_next.data import resstock
 
-        monkeypatch.setattr(resstock, "_FLEET_DOWNLOAD_WORKERS", 1)
         meta = self._metadata_file(tmp_path, [1, 2, 3])
-        release = threading.Event()
-        fetched: list[int] = []
 
-        def interrupted_at_first(bldg_id: int, **kwargs):
-            # A building still in flight after the fetch returned touches no
-            # files, so it cannot outlive the test's directory.
-            fetched.append(bldg_id)
-            if bldg_id == 1:
-                raise KeyboardInterrupt
-            release.wait()
-            return resstock.ResStockBuilding(bldg_id, 1.0, Path(), Path(), Path())
+        with (
+            mock.patch.object(resstock, "fetch_resstock_building") as fetch,
+            pytest.raises(ValueError, match="Unknown ResStock version '2024.99'"),
+        ):
+            resstock.fetch_resstock_fleet(meta, bldg_ids=[1, 2, 3], version="2024.99", cache_dir=tmp_path)
 
-        try:
-            with (
-                mock.patch.object(resstock, "fetch_resstock_building", side_effect=interrupted_at_first),
-                pytest.raises(KeyboardInterrupt),
-            ):
-                resstock.fetch_resstock_fleet(meta, bldg_ids=[1, 2, 3], cache_dir=tmp_path)
-        finally:
-            release.set()
+        fetch.assert_not_called()
 
-        assert 3 not in fetched
+    def test_ctrl_c_stops_a_fleet_with_downloads_in_flight(self, tmp_path: Path):
+        """SIGINT ends the fetch at once: in-flight downloads are cut, queued ones never start."""
+        import signal
+        import subprocess
+
+        meta = self._metadata_file(tmp_path, [1, 2, 3, 4])
+        with _StallingServer() as server:
+            child = subprocess.Popen(
+                [sys.executable, "-c", _FLEET_OF_FOUR_ON_TWO_WORKERS, str(server.port), str(meta), str(tmp_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert server.wait_for_requests(2), "both workers should be downloading"
+                child.send_signal(signal.SIGINT)
+                # The bound only turns a hang into a failure: a fleet that
+                # waited for its stalled downloads would never exit.
+                _, stderr = child.communicate(timeout=60)
+            finally:
+                child.kill()
+                child.wait()
+
+        assert child.returncode == -signal.SIGINT, stderr
+        assert "KeyboardInterrupt" in stderr
+        assert len(server.paths) == 2, f"queued or retried downloads were started: {server.paths}"
 
 
 class TestWeatherLock:
@@ -1220,7 +1378,7 @@ class TestZipIntegrity:
             mock.patch(
                 "ochre_next.data.resstock._download_file", side_effect=flaky_download
             ),
-            mock.patch("ochre_next.data.resstock.time.sleep"),
+            mock.patch("ochre_next.data.resstock._wait_before_retry"),
         ):
             from ochre_next.data.resstock import _download_and_extract_zip
 
