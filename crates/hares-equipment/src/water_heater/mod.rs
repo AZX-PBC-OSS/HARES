@@ -386,6 +386,7 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
+            schedule_row: None,
             custom_domains,
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
@@ -637,6 +638,7 @@ mod dhw_integration_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
+            schedule_row: None,
             custom_domains: vec![DomainUpdate {
                 domain_id: SCHEDULE_DOMAIN_ID,
                 zone_temperatures_c: Vec::new(),

@@ -531,6 +531,12 @@ pub struct EnvironmentState {
     pub weather: WeatherState,
     pub grid: GridState,
     pub custom_domains: Vec<DomainUpdate>,
+    /// The schedule row this step reads: the row of the step's calendar
+    /// date and time, with the 365-day schedule's leap-day skip and year
+    /// wrap applied. The environment manager always sets it; it is `None`
+    /// only in a state built without one.
+    #[serde(default)]
+    pub schedule_row: Option<usize>,
     /// Air states for the scheduled-space placements in use, computed once
     /// per step; equipment in an "other ..." HPXML location reads these
     /// instead of a zone's state.
@@ -751,6 +757,7 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
+            schedule_row: None,
             custom_domains: vec![DomainUpdate {
                 domain_id: crate::DomainId(9),
                 zone_temperatures_c: vec![(ZoneId(1), 21.0)],
@@ -790,6 +797,7 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
+            schedule_row: None,
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

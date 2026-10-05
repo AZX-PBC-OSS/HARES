@@ -115,7 +115,11 @@ impl EventReplay {
     /// Finds the event under way at this step's schedule row; returns
     /// whether one is.
     fn locate(&mut self, env: &EnvironmentState) -> crate::Result<bool> {
-        let row = hares_types::schedule_row(env)?;
+        let row = env.schedule_row.ok_or_else(|| {
+            HaresError::Equipment(
+                "event replay needs the schedule row, but the environment has none".into(),
+            )
+        })?;
         if row >= self.schedule_len {
             return Err(HaresError::Equipment(format!(
                 "schedule row {row} is past the {}-row event series",
@@ -1905,6 +1909,7 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
+            schedule_row: None,
             custom_domains: vec![DomainUpdate {
                 domain_id: SCHEDULE_DOMAIN_ID,
                 zone_temperatures_c: Vec::new(),
@@ -1969,14 +1974,6 @@ mod tests {
             .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
             .expect("schedule domain must exist");
         slot.custom_payload = Some(values);
-    }
-
-    fn set_schedule_row(env: &mut EnvironmentState, row: usize) {
-        env.upsert_domain(DomainUpdate {
-            domain_id: hares_types::SCHEDULE_ROW_DOMAIN_ID,
-            zone_temperatures_c: Vec::new(),
-            custom_payload: Some(vec![row as f64]),
-        });
     }
 
     #[test]
@@ -3262,7 +3259,7 @@ mod tests {
         for row in [5, 1, 7, 2, 0, 6, 3, 4] {
             let expected = expected_w[row];
             let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
-            set_schedule_row(&mut env, row);
+            env.schedule_row = Some(row);
             eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
             let actual = slots.electrical.load_power_w;
             assert!(
@@ -3271,19 +3268,16 @@ mod tests {
             );
         }
 
-        set_schedule_row(&mut env, expected_w.len());
+        env.schedule_row = Some(expected_w.len());
         let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
         let err = eq
             .step(&env, Duration::from_secs(60), &mut slots)
             .expect_err("a row past the series is an error");
         assert!(err.to_string().contains("past the"), "got: {err}");
 
-        let mut no_row = base_env();
-        no_row
-            .custom_domains
-            .retain(|d| d.domain_id != hares_types::SCHEDULE_ROW_DOMAIN_ID);
-        eq.step(&no_row, Duration::from_secs(60), &mut slots)
-            .expect_err("replay without a published schedule row is an error");
+        env.schedule_row = None;
+        eq.step(&env, Duration::from_secs(60), &mut slots)
+            .expect_err("replay without a schedule row is an error");
     }
 
     // -------------------------------------------------------------------------
@@ -3483,7 +3477,7 @@ mod tests {
 
         for row in 0..4 {
             let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
-            set_schedule_row(&mut env, row);
+            env.schedule_row = Some(row);
             eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         }
 

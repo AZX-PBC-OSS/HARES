@@ -71,6 +71,7 @@ fn env_with_zone(zone_temp_c: f64, outdoor_temp_c: f64, humidity_ratio: f64) -> 
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
+        schedule_row: None,
         custom_domains: vec![],
         equipment_telemetry: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)

@@ -118,6 +118,7 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
+        schedule_row: None,
         custom_domains: vec![],
         equipment_telemetry: HashMap::new(),
         equipment_core: HashMap::new(),

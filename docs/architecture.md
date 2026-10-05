@@ -136,6 +136,7 @@ pub struct EnvironmentState {
     pub grid: GridState,                    // utility voltage, frequency, island bus voltage
                                             // (outage/islanding: see outage-behavior.md)
     pub custom_domains: Vec<DomainUpdate>,  // solver outputs from previous step
+    pub schedule_row: Option<usize>,        // calendar row of the schedule this step
     pub current_time: DateTime<FixedOffset>,
     pub time_res: Duration,
 }

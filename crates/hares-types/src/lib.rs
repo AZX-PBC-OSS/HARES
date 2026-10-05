@@ -105,6 +105,7 @@ pub mod test_utils {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
+            schedule_row: None,
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

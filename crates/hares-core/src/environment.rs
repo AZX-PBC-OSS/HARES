@@ -21,7 +21,7 @@ use hares_physics::{
 use hares_physics::water_mains::water_mains_raw_fahrenheit;
 use hares_types::{
     AmbientLocation, AmbientOtherSpaceTemps, DomainId, EnvironmentState, GridState, HaresError,
-    SCHEDULE_DOMAIN_ID, SCHEDULE_ROW_DOMAIN_ID, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+    SCHEDULE_DOMAIN_ID, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
 };
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
@@ -156,7 +156,6 @@ pub struct EnvironmentManager {
     mains_payload_buf: Vec<f64>,
     schedule_payload_swap: Vec<f64>,
     mains_payload_swap: Vec<f64>,
-    schedule_row_payload_swap: Vec<f64>,
 }
 
 impl EnvironmentManager {
@@ -336,7 +335,6 @@ impl EnvironmentManager {
             mains_payload_buf: vec![0.0],
             schedule_payload_swap: Vec::with_capacity(num_schedule_cols),
             mains_payload_swap: Vec::with_capacity(1),
-            schedule_row_payload_swap: Vec::with_capacity(1),
         })
     }
 
@@ -650,11 +648,7 @@ impl EnvironmentManager {
         } else {
             (step + self.weather_start_offset) % weather_len
         };
-        let schedule_idx = if self.schedule.is_empty() {
-            0
-        } else {
-            self.compute_schedule_idx(clock)
-        };
+        let schedule_idx = self.compute_schedule_idx(clock);
 
         // Step 1: weather lookup and psychrometric derivations
         let outdoor_temp_c = self.weather.get(WeatherField::DryBulbC, weather_idx);
@@ -834,10 +828,6 @@ impl EnvironmentManager {
                 && let Some(v) = du.custom_payload
             {
                 self.mains_payload_swap = v;
-            } else if du.domain_id == SCHEDULE_ROW_DOMAIN_ID
-                && let Some(v) = du.custom_payload
-            {
-                self.schedule_row_payload_swap = v;
             }
         }
 
@@ -862,15 +852,7 @@ impl EnvironmentManager {
             zone_temperatures_c: Vec::new(),
             custom_payload: Some(mains_payload),
         });
-        if !self.schedule.is_empty() {
-            self.schedule_row_payload_swap.clear();
-            self.schedule_row_payload_swap.push(schedule_idx as f64);
-            state.custom_domains.push(hares_types::DomainUpdate {
-                domain_id: SCHEDULE_ROW_DOMAIN_ID,
-                zone_temperatures_c: Vec::new(),
-                custom_payload: Some(std::mem::take(&mut self.schedule_row_payload_swap)),
-            });
-        }
+        state.schedule_row = Some(schedule_idx);
 
         // Step 7: weather scalar fields
         state.weather.outdoor_temp_c = outdoor_temp_c;
@@ -933,6 +915,7 @@ impl EnvironmentManager {
                 island_bus_voltage_pu: None,
             },
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
+            schedule_row: None,
             custom_domains: Vec::new(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1983,6 +1966,29 @@ mod tests {
             .clone()
             .expect("schedule payload");
         assert!((payload[0] - 1.23).abs() < 1.0e-6);
+    }
+
+    /// The environment publishes the schedule row of the step's calendar
+    /// time, with the 365-day schedule skipping a leap year's Feb 29.
+    #[test]
+    fn environment_publishes_the_calendar_schedule_row() {
+        let row_at = |start: &str| {
+            let mut manager = EnvironmentManager::new(
+                weather_series(),
+                hourly_schedule(8760),
+                &building(Some(21.0)),
+                StdDuration::from_secs(3600),
+                utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap(),
+                None,
+            )
+            .expect("manager");
+            let start = DateTime::parse_from_rfc3339(start).expect("parse");
+            let clock = SimClock::new(start, Duration::hours(1), Duration::hours(2));
+            manager.update(&clock, &[]).expect("update").schedule_row
+        };
+        let march_2_05h = 60 * 24 + 5;
+        assert_eq!(row_at("2023-03-02T05:00:00+00:00"), Some(march_2_05h));
+        assert_eq!(row_at("2024-03-02T05:00:00+00:00"), Some(march_2_05h));
     }
 
     #[test]
