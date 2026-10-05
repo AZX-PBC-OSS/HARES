@@ -2,9 +2,9 @@
   "kind": "dwelling",
   "features": [],
   "defaults_dir": "defaults",
-  "defaults_digest": "3656b87b8991fb8710fbb2148c1b0ec042a8ccb2fe07c9f6d3f0646c2f5a42ab",
-  "git_head": "ede151dae3758181ae6604edc15fd7b21c4a6f9d",
-  "git_dirty": false,
+  "defaults_digest": "4baeb1bae2cfeb6e082acc5d1c37a43d82be7ada39791b513b5b8bbcd9e20dda",
+  "git_head": "81818880b4bf524b6e4c3619f289f6c6a47c2508",
+  "git_dirty": true,
   "metrics": [
     {
       "comfort_hours": {

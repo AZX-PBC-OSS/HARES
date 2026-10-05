@@ -2100,8 +2100,8 @@ fn check_water_heating_invariants(wh: &WaterHeatingDefaults) -> Vec<String> {
 #[cfg(test)]
 fn check_csv_header_invariants(defaults_dir: &Path) -> Vec<String> {
     // Battery-specific parameters that should never appear in non-battery
-    // equipment parameter files. Derived from defaults/battery/default_parameters.csv
-    // and battery/ directory files.
+    // equipment parameter files. Derived from the battery defaults the
+    // loader reads (the defaults/battery/*.toml tree via load_toml_dir).
     const BATTERY_ONLY_PARAMS: &[&str] = &[
         "capacity_kwh",
         "soc_init",
@@ -3071,6 +3071,36 @@ max_Tdb,{tdb_max}\n",
         assert!(
             findings.is_empty(),
             "shipped defaults tree has misplaced battery parameters: {findings:?}"
+        );
+    }
+
+    /// Every shipped entry of `defaults/battery/` is a TOML file. The
+    /// battery defaults load from this directory's `.toml` entries only
+    /// ([`load_toml_dir`]); a non-TOML file shipped beside them is an
+    /// unread parallel source a future reader could mistake for
+    /// configuration. The `.gitkeep` placeholder keeps the otherwise
+    /// empty directory in git and carries no data.
+    #[test]
+    fn battery_defaults_directory_holds_only_toml() {
+        let battery_dir = shipped_defaults_dir().join("battery");
+        let offenders: Vec<String> = std::fs::read_dir(&battery_dir)
+            .expect("the shipped battery defaults directory exists")
+            .filter_map(|entry| {
+                let entry = entry.expect("a readable battery defaults entry");
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name == ".gitkeep" {
+                    return None;
+                }
+                let is_toml = entry.path().extension().is_some_and(|ext| ext == "toml");
+                (!is_toml).then_some(name)
+            })
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "defaults/battery/ holds non-TOML entries {offenders:?}: the \
+             battery defaults loader reads only .toml from this directory, \
+             so the file is an unread parallel source; delete it or move its \
+             data into the TOML tree"
         );
     }
 
