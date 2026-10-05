@@ -61,7 +61,7 @@ pub fn resolve_equipment(
 
     resolve_hvac(building, defaults, &mut specs, warnings)?;
     resolve_water_heaters(building, defaults, &mut specs, data_patches, warnings)?;
-    resolve_pv(details, defaults, &mut specs)?;
+    resolve_pv(details, defaults, &mut specs, warnings)?;
     resolve_batteries(details, defaults, &mut specs)?;
     resolve_ev(details, defaults, &mut specs)?;
     resolve_generators(details, defaults, &mut specs)?;
@@ -600,9 +600,10 @@ mod tests {
     use hares_physics::units as conv;
     use hares_types::{FuelType, ScheduleSourceConfig};
 
-    use super::{HpxmlError, nested_update, override_layers, resolve_equipment};
+    use super::{EquipmentSpec, HpxmlError, nested_update, override_layers, resolve_equipment};
     use crate::defaults::DefaultsStore;
     use crate::hpxml::building::parse_building;
+    use hares_types::Warning;
 
     /// The layers reaching one equipment are the wildcard, under either
     /// spelling, and its own entry; both spellings, or a layer that is not
@@ -1229,6 +1230,86 @@ mod tests {
         assert_eq!(typed.azimuth_deg, Some(180.0));
         assert_eq!(typed.module_type.as_deref(), Some("standard"));
         assert_eq!(typed.system_losses_fraction, Some(0.14));
+    }
+
+    fn resolve_pv_xml(orientation: &str) -> (Result<Vec<EquipmentSpec>, HpxmlError>, Vec<Warning>) {
+        let xml = minimal_wh_xml(&format!(
+            r#"<Photovoltaics>
+          <PVSystem>
+            <SystemIdentifier id="PVSystem1"/>
+            <MaxPowerOutput>5000</MaxPowerOutput>
+            {orientation}
+          </PVSystem>
+        </Photovoltaics>"#
+        ));
+        let building = parse_building(&xml).expect("should parse");
+        let mut warnings = Vec::new();
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut warnings);
+        (specs, warnings)
+    }
+
+    fn pv_orientation(specs: &[EquipmentSpec]) -> (Option<f64>, Option<f64>) {
+        let typed: hares_equipment::PvConfig = specs
+            .iter()
+            .find(|s| s.name == "PV")
+            .and_then(|s| s.typed_config.as_ref())
+            .expect("PV spec with typed config")
+            .typed()
+            .expect("PV typed config");
+        (typed.tilt_deg, typed.azimuth_deg)
+    }
+
+    #[test]
+    fn hpxml_pv_without_array_tilt_is_a_missing_field() {
+        let (specs, _) = resolve_pv_xml("<ArrayAzimuth>180</ArrayAzimuth>");
+        assert!(matches!(
+            specs.expect_err("ArrayTilt has no OS-HPXML default"),
+            HpxmlError::MissingField { path: "PVSystem/ArrayTilt", ref system_id, .. }
+                if system_id == "PVSystem1"
+        ));
+    }
+
+    #[test]
+    fn hpxml_pv_without_azimuth_or_orientation_is_a_missing_field() {
+        let (specs, _) = resolve_pv_xml("<ArrayTilt>30</ArrayTilt>");
+        assert!(matches!(
+            specs.expect_err("an azimuth needs ArrayAzimuth or ArrayOrientation"),
+            HpxmlError::MissingField {
+                path: "PVSystem/ArrayAzimuth",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn hpxml_pv_azimuth_comes_from_its_orientation_with_a_warning() {
+        let (specs, warnings) = resolve_pv_xml(
+            "<ArrayOrientation>southwest</ArrayOrientation><ArrayTilt>30</ArrayTilt>",
+        );
+        assert_eq!(
+            pv_orientation(&specs.expect("resolves")),
+            (Some(30.0), Some(225.0))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("PVSystem1") && w.message.contains("225")),
+            "{warnings:?}"
+        );
+        let (specs, warnings) =
+            resolve_pv_xml("<ArrayAzimuth>200</ArrayAzimuth><ArrayTilt>30</ArrayTilt>");
+        assert_eq!(
+            pv_orientation(&specs.expect("resolves")),
+            (Some(30.0), Some(200.0))
+        );
+        assert!(warnings.iter().all(|w| !w.message.contains("PVSystem1")));
+    }
+
+    #[test]
+    fn hpxml_pv_unknown_orientation_is_rejected() {
+        let (specs, _) =
+            resolve_pv_xml("<ArrayOrientation>up</ArrayOrientation><ArrayTilt>30</ArrayTilt>");
+        assert!(specs.is_err());
     }
 
     #[test]

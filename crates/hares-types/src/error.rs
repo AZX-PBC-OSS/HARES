@@ -45,6 +45,10 @@ pub enum HaresError {
         value_c: f64,
         class: crate::ThermostatBandClass,
     },
+    /// A required input that has no default, missing from `owner`'s
+    /// configuration.
+    #[error("{owner}: required input '{field}' is missing and has no default")]
+    MissingInput { owner: String, field: String },
     /// A solar override timestep without an entry for a PV array's
     /// orientation surface, which the PV needs to step.
     #[error(

@@ -1524,23 +1524,12 @@ fn register_pv_surfaces(
     specs: &[hares_io::EquipmentSpec],
     env: &mut EnvironmentManager,
 ) -> Result<()> {
-    use hares_equipment::pv::surface_id_for_orientation;
     for spec in specs.iter().filter(|s| s.name == "PV") {
-        let tilt = spec
-            .parameters
-            .get("tilt_deg")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(20.0);
-        let az = spec
-            .parameters
-            .get("azimuth_deg")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(180.0);
-        if let Ok(sid) = surface_id_for_orientation(tilt, az, 5.0) {
+        for orientation in pv_orientations(spec)? {
             env.register_pv_surface(crate::environment::SurfaceGeometry {
-                surface_id: sid,
-                azimuth_deg: az,
-                tilt_deg: tilt,
+                surface_id: orientation.surface_id,
+                azimuth_deg: orientation.azimuth_deg,
+                tilt_deg: orientation.tilt_deg,
                 area_m2: 1.0, // area irrelevant for Perez -- only orientation matters
                 omni_directional: false,
             })?;
@@ -1549,10 +1538,19 @@ fn register_pv_surfaces(
     Ok(())
 }
 
+/// A PV spec's array orientations, read from the same typed config the PV
+/// equipment initialises from.
+fn pv_orientations(spec: &hares_io::EquipmentSpec) -> Result<Vec<hares_equipment::PvOrientation>> {
+    let owner = spec.instance_name.as_deref().unwrap_or(&spec.name);
+    conversions::equipment_config_from_spec(spec)?
+        .require_typed::<hares_equipment::PvConfig>("PV")?
+        .array_orientations(owner)
+}
+
 /// Auto-attach PV arrays to the closest matching roof boundary by orientation.
 /// Sets `attached_boundary_id` on matching specs so the thermal model can
 /// account for PV shading.
-fn attach_pv_to_roofs(specs: &mut [hares_io::EquipmentSpec], building: &Building) {
+fn attach_pv_to_roofs(specs: &mut [hares_io::EquipmentSpec], building: &Building) -> Result<()> {
     use hares_io::hpxml::building::BoundaryType;
 
     let roofs: Vec<(u32, f64, f64, f64)> = building
@@ -1574,16 +1572,11 @@ fn attach_pv_to_roofs(specs: &mut [hares_io::EquipmentSpec], building: &Building
         if spec.parameters.contains_key("attached_boundary_id") {
             continue;
         }
-        let pv_az = spec
-            .parameters
-            .get("azimuth_deg")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(180.0);
-        let pv_tilt = spec
-            .parameters
-            .get("tilt_deg")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(20.0);
+        // A multi-array PV attaches each array through its own spec.
+        let [orientation] = pv_orientations(spec)?[..] else {
+            continue;
+        };
+        let (pv_az, pv_tilt) = (orientation.azimuth_deg, orientation.tilt_deg);
 
         // Find the closest roof within tolerance (15° azimuth, 10° tilt).
         let best = roofs
@@ -1605,6 +1598,7 @@ fn attach_pv_to_roofs(specs: &mut [hares_io::EquipmentSpec], building: &Building
                 .insert("attached_boundary_id".into(), serde_json::json!(roof_id));
         }
     }
+    Ok(())
 }
 
 /// Compute PV panel coverage on attached roofs and register shading with the
@@ -2293,7 +2287,7 @@ fn build_from_blueprint_inner(
 
     // Auto-attach PV arrays to the closest matching roof surface and
     // register shading coverage on attached roofs.
-    attach_pv_to_roofs(&mut equipment_specs, &bp.building);
+    attach_pv_to_roofs(&mut equipment_specs, &bp.building)?;
     register_pv_roof_shading(&equipment_specs, &bp.building, &mut environment);
 
     let initial_env = environment.update(&clock, &[])?;
@@ -14145,6 +14139,65 @@ master_seed = 0
                 .replace_equipment(&existing, Box::new(replacement))
                 .is_err(),
             "replacement is held to the same rule"
+        );
+    }
+
+    fn pv_spec(tilt_deg: Option<f64>, resolution_deg: Option<f64>) -> hares_io::EquipmentSpec {
+        let config = hares_equipment::PvConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kw: 5.0,
+            tilt_deg,
+            azimuth_deg: Some(200.0),
+            module_type: None,
+            noct_c: None,
+            array_type: None,
+            system_losses_fraction: None,
+            inverter_efficiency: None,
+            inverter_capacity_kw: None,
+            power_factor: None,
+            surface_resolution_deg: resolution_deg,
+            sam_lut_path: None,
+            soiling: None,
+            arrays: None,
+        };
+        hares_io::hpxml::build_typed_spec(
+            "PV".to_string(),
+            FuelType::Electric,
+            config,
+            &hares_io::DefaultsStore::empty(),
+        )
+        .expect("PV spec")
+    }
+
+    /// A PV without a tilt has none to register: before, it silently became
+    /// 20°, which matched neither the input nor the PV's own fallback.
+    #[test]
+    fn a_pv_surface_without_a_tilt_is_a_missing_input() {
+        let mut dwelling = bestest_dwelling();
+        let err = register_pv_surfaces(&[pv_spec(None, None)], &mut dwelling.environment)
+            .expect_err("no tilt, no surface");
+        assert!(
+            matches!(err, HaresError::MissingInput { ref field, .. } if field == "tilt_deg"),
+            "{err}"
+        );
+    }
+
+    /// The registered surface is the one the PV reads: its configured
+    /// resolution, not a fixed 5°.
+    #[test]
+    fn a_pv_surface_follows_the_configured_resolution() {
+        let mut dwelling = bestest_dwelling();
+        register_pv_surfaces(&[pv_spec(Some(27.0), Some(1.0))], &mut dwelling.environment)
+            .expect("registers");
+        let expected =
+            hares_equipment::pv::surface_id_for_orientation(27.0, 200.0, 1.0).expect("valid");
+        assert!(
+            dwelling
+                .environment
+                .surface_geometry()
+                .iter()
+                .any(|s| s.surface_id == expected)
         );
     }
 

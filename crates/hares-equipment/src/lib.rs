@@ -86,7 +86,7 @@ pub use ndinterp::RegularGridInterpolator;
 pub use protocol_bridge::{
     JsonHandler, ProtocolBridgeConfig, config::HandlerConfig, handler::EquipmentCommand,
 };
-pub use pv::PvConfig;
+pub use pv::{PvConfig, PvOrientation};
 pub use raw_params::{IndexCount, ParamForm, ParamKind, RawParam, RawParams, raw_params_for_class};
 pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistry};
 pub use ventilation::VentilationConfig;

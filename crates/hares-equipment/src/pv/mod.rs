@@ -17,9 +17,8 @@ mod lut;
 pub mod shading;
 pub mod soiling;
 
-use array_config::normalize_azimuth;
 pub use array_config::{ArrayType, ModuleType, PvArray, PvArraySpec, surface_id_for_orientation};
-pub use config::PvConfig;
+pub use config::{PvConfig, PvOrientation};
 use lut::{InterpolationMethod, PvLut};
 
 use std::borrow::Cow;
@@ -643,87 +642,62 @@ impl PV {
         let c = config.require_typed::<PvConfig>("PV")?;
         c.validate()?;
 
-        // Determine which path to use: multi-array or single-array.
-        if let Some(ref array_specs) = c.arrays {
-            // Multi-array path: create one PvArray per PvArraySpec.
-            let base = PvArray::default();
-            self.arrays = array_specs
-                .iter()
-                .map(|spec| {
-                    let tilt_deg = spec.tilt_deg.unwrap_or(base.tilt_deg);
-                    let azimuth_deg =
-                        normalize_azimuth(spec.azimuth_deg.unwrap_or(base.azimuth_deg));
-                    let module_type = spec
-                        .module_type
-                        .as_deref()
-                        .map(ModuleType::from_str)
-                        .transpose()?
-                        .unwrap_or(base.module_type);
-                    let array_type = spec
-                        .array_type
-                        .as_deref()
-                        .map(ArrayType::from_str)
-                        .transpose()?
-                        .unwrap_or(base.array_type);
-                    let noct_c = spec.noct_c.unwrap_or(array_type.noct_c());
-                    let array = PvArray {
-                        tilt_deg,
-                        azimuth_deg,
-                        capacity_kw: spec.capacity_kw,
-                        noct_c,
-                        module_type,
-                        array_type,
-                        surface_id: None,
-                        sam_lut_path: spec.sam_lut_path.clone(),
-                        attached_boundary_id: spec.attached_boundary_id,
-                    };
-                    array.validate()?;
-                    Ok(array)
-                })
-                .collect::<crate::Result<Vec<_>>>()?;
-        } else {
-            // Single-array path: existing behaviour, backward-compatible.
-            let base = PvArray::default();
-            let tilt_deg = c.tilt_deg.unwrap_or(base.tilt_deg);
-            let azimuth_deg = normalize_azimuth(c.azimuth_deg.unwrap_or(base.azimuth_deg));
-            let module_type = c
-                .module_type
-                .as_deref()
-                .map(ModuleType::from_str)
-                .transpose()?
-                .unwrap_or(base.module_type);
-            let array_type = c
-                .array_type
-                .as_deref()
-                .map(ArrayType::from_str)
-                .transpose()?
-                .unwrap_or(base.array_type);
-            let noct_c = c.noct_c.unwrap_or(array_type.noct_c());
-
-            let array = PvArray {
-                tilt_deg,
-                azimuth_deg,
-                capacity_kw: c.capacity_kw,
-                noct_c,
-                module_type,
-                array_type,
-                surface_id: None,
-                sam_lut_path: c.sam_lut_path.clone(),
-                attached_boundary_id: None,
-            };
-            array.validate()?;
-
-            self.arrays = vec![array];
-        }
-
-        self.surface_resolution_deg = c
-            .surface_resolution_deg
-            .unwrap_or(DEFAULT_SURFACE_RESOLUTION_DEG);
+        self.surface_resolution_deg = c.surface_resolution_deg();
         if !self.surface_resolution_deg.is_finite() || self.surface_resolution_deg <= 0.0 {
             return Err(HaresError::Equipment(
                 "PV surface_resolution_deg must be finite and > 0".to_string(),
             ));
         }
+        let orientations = c.array_orientations(&self.descriptor.name)?;
+        let single_array;
+        let array_specs = match &c.arrays {
+            Some(specs) => specs.as_slice(),
+            None => {
+                single_array = [PvArraySpec {
+                    capacity_kw: c.capacity_kw,
+                    tilt_deg: c.tilt_deg,
+                    azimuth_deg: c.azimuth_deg,
+                    module_type: c.module_type.clone(),
+                    noct_c: c.noct_c,
+                    array_type: c.array_type.clone(),
+                    sam_lut_path: c.sam_lut_path.clone(),
+                    attached_boundary_id: None,
+                }];
+                &single_array[..]
+            }
+        };
+        self.arrays = array_specs
+            .iter()
+            .zip(&orientations)
+            .map(|(spec, orientation)| {
+                // OS-HPXML defaults.rb apply_pv_systems: module type Standard.
+                let module_type = spec
+                    .module_type
+                    .as_deref()
+                    .map(ModuleType::from_str)
+                    .transpose()?
+                    .unwrap_or(ModuleType::Standard);
+                let array_type = spec
+                    .array_type
+                    .as_deref()
+                    .map(ArrayType::from_str)
+                    .transpose()?
+                    .unwrap_or(ArrayType::OpenRack);
+                let array = PvArray {
+                    tilt_deg: orientation.tilt_deg,
+                    azimuth_deg: orientation.azimuth_deg,
+                    capacity_kw: spec.capacity_kw,
+                    noct_c: spec.noct_c.unwrap_or(array_type.noct_c()),
+                    module_type,
+                    array_type,
+                    surface_id: Some(orientation.surface_id),
+                    sam_lut_path: spec.sam_lut_path.clone(),
+                    attached_boundary_id: spec.attached_boundary_id,
+                };
+                array.validate()?;
+                Ok(array)
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
 
         self.inverter_efficiency = c
             .inverter_efficiency
@@ -762,13 +736,8 @@ impl PV {
         }
 
         self.luts_by_surface.clear();
-        for array in &mut self.arrays {
-            let surface_id = surface_id_for_orientation(
-                array.tilt_deg,
-                array.azimuth_deg,
-                self.surface_resolution_deg,
-            )?;
-            array.surface_id = Some(surface_id);
+        for (array, orientation) in self.arrays.iter().zip(&orientations) {
+            let surface_id = orientation.surface_id;
             let Some(_entry) = env
                 .weather
                 .solar_irradiance
@@ -1838,6 +1807,31 @@ mod tests {
         let env = env_with_surfaces(vec![], 25.0);
         let err = pv.init(&config_single(), &env).unwrap_err();
         assert!(err.to_string().contains("no matching SurfaceIrradiance"));
+    }
+
+    /// Before, a missing tilt silently became 30°.
+    #[test]
+    fn init_without_a_tilt_is_a_missing_input() {
+        let mut cfg = base_pv_typed_config();
+        cfg.tilt_deg = None;
+        let config =
+            EquipmentConfig::from_typed("PV South".to_string(), "PV".to_string(), cfg).unwrap();
+        let mut pv = PV::new(config.clone());
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        assert!(matches!(
+            pv.init(&config, &env).unwrap_err(),
+            hares_types::HaresError::MissingInput { ref field, .. } if field == "tilt_deg"
+        ));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use hares_equipment::{BatteryConfig, EvConfig, GeneratorConfig, PvConfig};
-use hares_types::FuelType;
+use hares_types::{FuelType, Warning};
 
 use super::HpxmlError;
 use super::building::XmlNode;
@@ -15,10 +15,58 @@ use crate::defaults::DefaultsStore;
 /// kBtu → kWh: 1 kBtu(IT) = 0.293_071_07 kWh exactly.
 const KBTU_TO_KWH: f64 = 0.293_071_07;
 
+/// The array azimuth: `ArrayAzimuth`, or else the azimuth OS-HPXML derives
+/// from `ArrayOrientation` (`defaults.rb` `apply_pv_systems` through
+/// `get_azimuth_from_orientation`), recorded as a warning naming the array.
+/// OS-HPXML requires one of the two (EPvalidator.sch).
+fn pv_array_azimuth_deg(
+    pv: &XmlNode,
+    pv_id: &str,
+    warnings: &mut Vec<Warning>,
+) -> std::result::Result<f64, HpxmlError> {
+    if let Some(azimuth_deg) = child_f64(pv, "ArrayAzimuth") {
+        return Ok(azimuth_deg);
+    }
+    let Some(orientation) = child_text(pv, "ArrayOrientation") else {
+        return Err(HpxmlError::MissingField {
+            path: "PVSystem/ArrayAzimuth",
+            system_kind: "PV",
+            system_id: pv_id.to_string(),
+            reason: "OS-HPXML requires ArrayAzimuth or ArrayOrientation (EPvalidator.sch); \
+                     neither is given",
+        });
+    };
+    let orientation = orientation.trim().to_ascii_lowercase();
+    let azimuth_deg = match orientation.as_str() {
+        "north" => 0.0,
+        "northeast" => 45.0,
+        "east" => 90.0,
+        "southeast" => 135.0,
+        "south" => 180.0,
+        "southwest" => 225.0,
+        "west" => 270.0,
+        "northwest" => 315.0,
+        _ => {
+            return Err(HpxmlError::Parse(
+                format!("PV system `{pv_id}` has unknown ArrayOrientation `{orientation}`").into(),
+            ));
+        }
+    };
+    warnings.push(Warning::new(
+        "hpxml",
+        format!(
+            "PV system '{pv_id}' has no ArrayAzimuth; using {azimuth_deg}° from its \
+             ArrayOrientation '{orientation}' (OS-HPXML defaults.rb)"
+        ),
+    ));
+    Ok(azimuth_deg)
+}
+
 pub(super) fn resolve_pv(
     details: &XmlNode,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
+    warnings: &mut Vec<Warning>,
 ) -> std::result::Result<(), HpxmlError> {
     let Some(photovoltaics) = details.path(&["Systems", "Photovoltaics"]) else {
         return Ok(());
@@ -70,12 +118,20 @@ pub(super) fn resolve_pv(
                     "DC nameplate power (W) is required to size the array; no silent default permitted",
             })?;
 
+        let tilt_deg = child_f64(pv, "ArrayTilt").ok_or_else(|| HpxmlError::MissingField {
+            path: "PVSystem/ArrayTilt",
+            system_kind: "PV",
+            system_id: pv_id.clone(),
+            reason: "array tilt (deg) is required by OS-HPXML (EPvalidator.sch) and has no default",
+        })?;
+        let azimuth_deg = pv_array_azimuth_deg(pv, &pv_id, warnings)?;
+
         let cfg = PvConfig {
             equipment_id: None,
             zone_id: None,
             capacity_kw,
-            tilt_deg: child_f64(pv, "ArrayTilt"),
-            azimuth_deg: child_f64(pv, "ArrayAzimuth"),
+            tilt_deg: Some(tilt_deg),
+            azimuth_deg: Some(azimuth_deg),
             module_type: child_text(pv, "ModuleType"),
             noct_c: None,
             array_type: None,

@@ -1180,46 +1180,52 @@ impl PyDwelling {
             .create("PV", config.clone())
             .map_err(to_py_err)?;
         let mut dwelling = self.acquire()?;
-        let surface_id = hares_equipment::pv::surface_id_for_orientation(pv.tilt, pv.azimuth, 5.0)
+        let orientations = config
+            .require_typed::<hares_equipment::PvConfig>("PV")
+            .and_then(|typed| typed.array_orientations(&pv.name))
             .map_err(to_py_err)?;
 
         // PV init() validates that a SurfaceIrradiance entry exists for each
         // array. The environment computes real irradiance during simulation;
         // inject a placeholder so init() succeeds.
         let mut init_env = dwelling.latest_env().clone();
-        if !init_env
-            .weather
-            .solar_irradiance
-            .iter()
-            .any(|s| s.surface_id == surface_id)
-        {
-            init_env.weather.solar_irradiance.push(SurfaceIrradiance {
-                surface_id,
-                direct_w_m2: 0.0,
-                diffuse_w_m2: 0.0,
-                reflected_w_m2: 0.0,
-                angle_of_incidence_rad: 0.0,
-            });
+        for orientation in &orientations {
+            dwelling
+                .environment
+                .check_pv_surface(orientation.surface_id)
+                .map_err(to_py_err)?;
+            if !init_env
+                .weather
+                .solar_irradiance
+                .iter()
+                .any(|s| s.surface_id == orientation.surface_id)
+            {
+                init_env.weather.solar_irradiance.push(SurfaceIrradiance {
+                    surface_id: orientation.surface_id,
+                    direct_w_m2: 0.0,
+                    diffuse_w_m2: 0.0,
+                    reflected_w_m2: 0.0,
+                    angle_of_incidence_rad: 0.0,
+                });
+            }
         }
         eq.init(&config, &init_env).map_err(to_py_err)?;
-        dwelling
-            .environment
-            .check_pv_surface(surface_id)
-            .map_err(to_py_err)?;
 
         dwelling.add_equipment(eq).map_err(to_py_err)?;
-        // Only an accepted panel registers its orientation, so that Perez
-        // irradiance is computed for it during simulation.
-        dwelling
-            .environment
-            .register_pv_surface(SurfaceGeometry {
-                surface_id,
-                azimuth_deg: pv.azimuth,
-                tilt_deg: pv.tilt,
-                area_m2: 1.0,
-                omni_directional: false,
-            })
-            .map_err(to_py_err)?;
+        // Only an accepted panel registers its orientations, so that Perez
+        // irradiance is computed for them during simulation.
+        for orientation in orientations {
+            dwelling
+                .environment
+                .register_pv_surface(SurfaceGeometry {
+                    surface_id: orientation.surface_id,
+                    azimuth_deg: orientation.azimuth_deg,
+                    tilt_deg: orientation.tilt_deg,
+                    area_m2: 1.0,
+                    omni_directional: false,
+                })
+                .map_err(to_py_err)?;
+        }
         Ok(())
     }
 
@@ -2669,7 +2675,9 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         | HaresError::Dwelling(_)
         | HaresError::Envelope(_)
         | HaresError::ThermostatBand { .. }
-        | HaresError::SolarOverrideMissingSurface { .. } => HaresConfigError::new_err(msg),
+        | HaresError::ThermostatBand { .. }
+        | HaresError::SolarOverrideMissingSurface { .. }
+        | HaresError::MissingInput { .. } => HaresConfigError::new_err(msg),
         HaresError::Equipment(_) | HaresError::InvalidEquipmentParameter { .. } => {
             HaresEquipmentError::new_err(msg)
         }
