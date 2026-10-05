@@ -45,6 +45,16 @@ pub enum HaresError {
         value_c: f64,
         class: crate::ThermostatBandClass,
     },
+    /// A demand-response pre-conditioning event whose target has no single
+    /// thermostat axis for it: a unit serving both setpoints with no
+    /// direction named, a direction the unit does not serve, or a target
+    /// without a thermostat.
+    #[error("DR actor '{actor}' cannot pre-condition '{target}': {reason}")]
+    PreconditioningAxis {
+        actor: String,
+        target: String,
+        reason: String,
+    },
     /// A required input that has no default, missing from `owner`'s
     /// configuration.
     #[error("{owner}: required input '{field}' is missing and has no default")]

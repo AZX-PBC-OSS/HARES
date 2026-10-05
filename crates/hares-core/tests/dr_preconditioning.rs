@@ -10,7 +10,7 @@ use hares_control::DispatchTarget;
 use hares_core::actors::{AlwaysComply, DrAction, DrCompliance};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_types::telemetry_keys as tk;
-use hares_types::{DRLevel, EndUse, OperatingMode};
+use hares_types::{DRLevel, EndUse, HaresError, OperatingMode, ThermostatAxes};
 
 const PRECONDITION_DELTA_C: f64 = 2.0;
 
@@ -182,6 +182,93 @@ fn a_preconditioning_event_on_an_air_conditioner_precools() {
             .any(|&(_, _, mode)| mode == OperatingMode::Cooling.as_code()),
         "the AC must run: {trace:?}"
     );
+}
+
+fn bestest_600() -> Dwelling {
+    let path = project_root().join("tests/fixtures/bestest/600.toml");
+    Dwelling::from_toml_config_with_write_output(&path, Some(false)).expect("build BESTEST 600")
+}
+
+fn ideal_unit(dwelling: &Dwelling) -> String {
+    dwelling
+        .equipment()
+        .iter()
+        .find(|eq| eq.thermostat_axes() == Some(ThermostatAxes::Both))
+        .expect("BESTEST 600 runs an ideal unit")
+        .descriptor()
+        .name
+        .clone()
+}
+
+/// BESTEST 600's ideal unit (heating and cooling) under a year-long
+/// pre-cool event in Denver weather: its mode flips between heating and
+/// cooling all year, and on every step only the cooling setpoint is
+/// displaced, never the heating one, so the band is never squeezed.
+#[test]
+fn a_dual_mode_unit_displaces_only_the_named_axis_for_a_year() {
+    let mut dwelling = bestest_600();
+    let unit = ideal_unit(&dwelling);
+    let mut actor = DrCompliance::new("DR")
+        .with_compliance_model(AlwaysComply)
+        .with_hvac_target(DispatchTarget::ByName(unit.as_str().into()))
+        .with_hvac_action(DrAction::precool(PRECONDITION_DELTA_C));
+    actor.set_dr_level(DRLevel::Moderate);
+    dwelling
+        .add_actor(Box::new(actor))
+        .expect("register the DR actor");
+
+    let (mut heating_steps, mut cooling_steps) = (0_u32, 0_u32);
+    dwelling.step().expect("first step");
+    for step in 1..8760 {
+        dwelling.step().expect("step");
+        let eq = dwelling
+            .equipment()
+            .iter()
+            .find(|eq| eq.descriptor().name == unit)
+            .expect("the unit");
+        let t = eq.telemetry();
+        let get = |key| t.get(key).expect("setpoint telemetry");
+        let heating_moved = get(tk::HEATING_SETPOINT_C) != get(tk::SCHEDULE_HEATING_SETPOINT_C);
+        let cooling_c = get(tk::COOLING_SETPOINT_C);
+        let precooled_c = get(tk::SCHEDULE_COOLING_SETPOINT_C) - PRECONDITION_DELTA_C;
+        assert!(
+            !heating_moved,
+            "step {step}: the heating setpoint left its schedule"
+        );
+        assert!(
+            (cooling_c - precooled_c).abs() < 1e-9,
+            "step {step}: cooling {cooling_c} C, pre-cooled {precooled_c} C"
+        );
+        match get(tk::OPERATING_MODE) {
+            m if m == OperatingMode::Heating.as_code() => heating_steps += 1,
+            m if m == OperatingMode::Cooling.as_code() => cooling_steps += 1,
+            _ => {}
+        }
+    }
+    assert!(
+        heating_steps > 1000 && cooling_steps > 1000,
+        "the unit must flip modes: {heating_steps} heating, {cooling_steps} cooling steps"
+    );
+    assert_eq!(dwelling.health().rejected_control_signals, 0);
+}
+
+/// An event that names no direction for a unit serving both setpoints is
+/// refused when the actor is registered.
+#[test]
+fn an_event_without_a_direction_on_a_dual_mode_unit_is_refused() {
+    let mut dwelling = bestest_600();
+    let unit = ideal_unit(&dwelling);
+    let actor = DrCompliance::new("DR")
+        .with_hvac_target(DispatchTarget::ByName(unit.as_str().into()))
+        .with_hvac_action(DrAction::setpoint_delta(PRECONDITION_DELTA_C));
+    let err = dwelling
+        .add_actor(Box::new(actor))
+        .expect_err("no axis for the ideal unit");
+    assert!(
+        matches!(err, HaresError::PreconditioningAxis { .. }),
+        "{err}"
+    );
+    assert_eq!(dwelling.actor_count(), 0);
 }
 
 /// Massachusetts gas-furnace home at a constant 70/76 °F in January: the

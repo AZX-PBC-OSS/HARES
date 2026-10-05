@@ -439,6 +439,12 @@ impl Equipment for HeatPumpHeaterCore {
         Some(self.hvac.thermostat_fsm.thermostat.band_class)
     }
 
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Heating,
+        ))
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the heat-pump compressor (class default pf 0.84,
         // or a user "zip" override). Fan/loop-pump component ZIPs are

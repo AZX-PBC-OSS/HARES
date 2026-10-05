@@ -20,6 +20,7 @@ pub mod schedule;
 pub mod telemetry;
 pub mod telemetry_keys;
 pub mod text;
+pub mod thermostat_axis;
 pub mod thermostat_band;
 pub mod warning;
 pub mod zip;
@@ -47,6 +48,7 @@ pub use ports::*;
 pub use schedule::*;
 pub use telemetry::*;
 pub use text::{normalize_ascii, parse_trimmed_f64};
+pub use thermostat_axis::{ThermostatAxes, ThermostatAxis};
 pub use thermostat_band::{
     MAX_HVAC_THERMOSTAT_BAND_C, MAX_TANK_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C,
     ThermostatBandClass, thermal_setpoint_band_c, validate_thermal_setpoint_deadband,

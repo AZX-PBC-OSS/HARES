@@ -105,6 +105,10 @@ macro_rules! delegate_equipment {
             fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
                 self.$inner.thermostat_band_class()
             }
+
+            fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+                self.$inner.thermostat_axes()
+            }
         }
     };
 }

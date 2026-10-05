@@ -31,12 +31,12 @@ use crate::scheduler::{ActorSlot, ExecutionPhase};
 use super::conversions::build_output_column_index;
 use super::{
     ActorPricing, ActorSeedState, Dwelling, EquipmentColumns, Result, ZoneColumnCaches,
-    build_actor_column_map, build_actors_from_seeds, build_end_use_aggregate_indices,
-    build_equipment_column_map, build_hvac_thermal_consistency, build_zone_column_caches,
-    compute_equipment_dispatch_targets, compute_equipment_execution_order,
-    enrich_schema_with_telemetry_units, equipment_descriptor_specs,
-    extend_schema_with_actor_columns, validate_equipment_stage, validate_equipment_zones,
-    zone_display_name,
+    actor_equipment, build_actor_column_map, build_actors_from_seeds,
+    build_end_use_aggregate_indices, build_equipment_column_map, build_hvac_thermal_consistency,
+    build_zone_column_caches, compute_equipment_dispatch_targets,
+    compute_equipment_execution_order, enrich_schema_with_telemetry_units,
+    equipment_descriptor_specs, extend_schema_with_actor_columns, validate_equipment_stage,
+    validate_equipment_zones, zone_display_name,
 };
 
 /// The values the per-step path reads that derive from the equipment and
@@ -202,10 +202,13 @@ impl Dwelling {
     /// # Errors
     ///
     /// `HaresError::Control` when an actor with the same name is already
-    /// registered; the roster plan's error otherwise. On `Err` the actor
-    /// roster and schedule are exactly as before the call.
+    /// registered; the actor's own error when it cannot act on its targets
+    /// ([`Actor::validate_equipment`]); the roster plan's error otherwise.
+    /// On `Err` the actor roster and schedule are exactly as before the
+    /// call.
     pub fn add_actor(&mut self, actor: Box<dyn Actor>) -> Result<()> {
         self.ensure_actor_names_free(std::slice::from_ref(&actor))?;
+        actor.validate_equipment(&actor_equipment(&self.equipment_refs()))?;
         let mut change = self.actor_change(vec![true; self.actors.len()]);
         change.supplied.push(actor);
         let plan =
@@ -1229,11 +1232,12 @@ impl Dwelling {
         // registered before its equipment existed had no binding), and a
         // stale binding silently reads the old id's core output.
         let id_by_name = &self.equipment_id_by_name;
-        let descriptors: Vec<&hares_types::EquipmentDescriptor> =
-            self.equipment.iter().map(|eq| eq.descriptor()).collect();
+        let equipment_refs: Vec<&dyn Equipment> =
+            self.equipment.iter().map(|eq| eq.as_ref()).collect();
+        let equipment = actor_equipment(&equipment_refs);
         for actor in &mut self.actors {
             actor.resolve_equipment_id(id_by_name);
-            actor.resolve_equipment_descriptors(&descriptors);
+            actor.resolve_equipment(&equipment);
         }
         // One timing slot per registered actor, in the live actor order the
         // scheduler's slots index into; totals restart with the roster.

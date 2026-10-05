@@ -1519,6 +1519,17 @@ fn build_hvac_thermal_consistency(
         .collect()
 }
 
+/// What actors read about each equipment when their bindings resolve.
+fn actor_equipment<'a>(equipment: &[&'a dyn Equipment]) -> Vec<crate::ActorEquipment<'a>> {
+    equipment
+        .iter()
+        .map(|eq| crate::ActorEquipment {
+            descriptor: eq.descriptor(),
+            thermostat_axes: eq.thermostat_axes(),
+        })
+        .collect()
+}
+
 /// Register PV array orientations as environment surfaces so Perez irradiance
 /// is computed for them. PV orientations use quantised surface IDs that differ
 /// from the sequential envelope boundary IDs.

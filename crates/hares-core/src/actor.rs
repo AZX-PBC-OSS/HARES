@@ -18,8 +18,16 @@ use std::sync::Arc;
 use hares_control::{DispatchRequest, DispatchTarget};
 use hares_types::{
     ControlCapabilities, EnvironmentState, EquipmentDescriptor, EquipmentId, HaresError, Telemetry,
-    ZoneId,
+    ThermostatAxes, ZoneId,
 };
+
+/// What an actor reads about one equipment when its bindings resolve.
+#[derive(Clone, Copy, Debug)]
+pub struct ActorEquipment<'a> {
+    pub descriptor: &'a EquipmentDescriptor,
+    /// The setpoints its thermostat serves, as the equipment declares them.
+    pub thermostat_axes: Option<ThermostatAxes>,
+}
 
 /// What state changes an actor subscribes to. Empty = polled every step.
 ///
@@ -131,12 +139,21 @@ pub trait Actor: Send + Sync + 'static {
     /// by name have nothing to resolve.
     fn resolve_equipment_id(&mut self, _equipment_id_by_name: &HashMap<String, EquipmentId>) {}
 
-    /// Re-read the dwelling's equipment descriptors (end use, capabilities),
-    /// on the same identity refreshes as [`Self::resolve_equipment_id`].
+    /// Checks the actor's targets against the dwelling's equipment when the
+    /// actor is registered, so a target it cannot act on is refused there.
+    ///
+    /// Default: accepts. Actors that do not depend on what their targets
+    /// are have nothing to check.
+    fn validate_equipment(&self, _equipment: &[ActorEquipment<'_>]) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    /// Re-read what the dwelling's equipment is, on the same identity
+    /// refreshes as [`Self::resolve_equipment_id`].
     ///
     /// Default: no-op. Actors that do not depend on what their targets are
     /// have nothing to read.
-    fn resolve_equipment_descriptors(&mut self, _equipment: &[&EquipmentDescriptor]) {}
+    fn resolve_equipment(&mut self, _equipment: &[ActorEquipment<'_>]) {}
 
     /// Declares what state changes this actor cares about.
     ///

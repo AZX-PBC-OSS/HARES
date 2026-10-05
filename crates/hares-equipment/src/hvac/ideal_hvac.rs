@@ -879,6 +879,10 @@ impl Equipment for IdealHvac {
         Some(self.thermostat_fsm.thermostat.band_class)
     }
 
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::Both)
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }

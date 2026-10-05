@@ -329,6 +329,12 @@ impl Equipment for AirConditioner {
         Some(self.core.hvac.thermostat_fsm.thermostat.band_class)
     }
 
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Cooling,
+        ))
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor (class default pf 0.96, or a user
         // "zip" override). The fan component ZIP is secondary.
@@ -406,6 +412,12 @@ impl Equipment for RoomAC {
 
     fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
         Some(self.core.hvac.thermostat_fsm.thermostat.band_class)
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Cooling,
+        ))
     }
 
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {

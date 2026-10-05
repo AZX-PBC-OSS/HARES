@@ -412,6 +412,12 @@ pub trait Equipment: Send + Sync {
         None
     }
 
+    /// The setpoints this equipment's thermostat serves, or `None` when it
+    /// has no thermostat setpoint a demand-response event can move.
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        None
+    }
+
     /// How this equipment's expected mean real power [kW] over the loaded
     /// schedule horizon can be determined, for premise-level ZIP
     /// aggregation ([`hares_types::zip::ResolvedZip`] mixes weighted by

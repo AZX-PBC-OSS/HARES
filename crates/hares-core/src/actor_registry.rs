@@ -154,14 +154,22 @@ fn parse_dr_action(raw: &str) -> Result<DrAction, HaresError> {
             Ok(DrAction::demand_response(level, duration_s))
         }
         s if s.starts_with("SetpointAdjust:") => {
-            let val: f64 = s
-                .strip_prefix("SetpointAdjust:")
-                .unwrap()
-                .parse()
-                .map_err(|_| {
-                    HaresError::Control(format!("invalid delta_c for SetpointAdjust in '{raw}'"))
-                })?;
-            Ok(DrAction::setpoint_delta(val))
+            let rest = s.strip_prefix("SetpointAdjust:").unwrap();
+            let (delta, direction) = match rest.split_once(':') {
+                Some((delta, direction)) => (delta, Some(direction)),
+                None => (rest, None),
+            };
+            let val: f64 = delta.parse().map_err(|_| {
+                HaresError::Control(format!("invalid delta_c for SetpointAdjust in '{raw}'"))
+            })?;
+            match direction {
+                None => Ok(DrAction::setpoint_delta(val)),
+                Some("PreHeat") => Ok(DrAction::preheat(val)),
+                Some("PreCool") => Ok(DrAction::precool(val)),
+                Some(other) => Err(HaresError::Control(format!(
+                    "unknown SetpointAdjust direction '{other}' in '{raw}': expected PreHeat or PreCool"
+                ))),
+            }
         }
         s if s.starts_with("LoadCurtailment:") => {
             let val: f64 = s
@@ -200,7 +208,8 @@ fn parse_dr_action(raw: &str) -> Result<DrAction, HaresError> {
             Ok(DrAction::absolute_setpoint(heat, cool))
         }
         _ => Err(HaresError::Control(format!(
-            "unknown DrAction '{raw}': valid actions are TurnOff, SetpointAdjust:<delta_c>, \
+            "unknown DrAction '{raw}': valid actions are TurnOff, \
+             SetpointAdjust:<delta_c>[:PreHeat|:PreCool], \
              LoadCurtailment:<fraction>, PowerLimit:<max_kw>, \
              AbsoluteSetpoint:<heating_c>:<cooling_c>, \
              DemandResponse:<level>[:<duration_s>], None"
@@ -647,6 +656,23 @@ impl ActorRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_setpoint_adjust_names_its_direction() {
+        assert_eq!(
+            parse_dr_action("SetpointAdjust:2.0").unwrap(),
+            DrAction::setpoint_delta(2.0)
+        );
+        assert_eq!(
+            parse_dr_action("SetpointAdjust:2.0:PreHeat").unwrap(),
+            DrAction::preheat(2.0)
+        );
+        assert_eq!(
+            parse_dr_action("SetpointAdjust:2.0:PreCool").unwrap(),
+            DrAction::precool(2.0)
+        );
+        assert!(parse_dr_action("SetpointAdjust:2.0:Sideways").is_err());
+    }
 
     #[test]
     fn actor_config_new_creates_empty_params() {

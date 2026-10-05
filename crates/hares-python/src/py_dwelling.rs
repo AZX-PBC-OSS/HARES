@@ -2696,9 +2696,9 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         | HaresError::Dwelling(_)
         | HaresError::Envelope(_)
         | HaresError::ThermostatBand { .. }
-        | HaresError::ThermostatBand { .. }
         | HaresError::SolarOverrideMissingSurface { .. }
-        | HaresError::MissingInput { .. } => HaresConfigError::new_err(msg),
+        | HaresError::MissingInput { .. }
+        | HaresError::PreconditioningAxis { .. } => HaresConfigError::new_err(msg),
         HaresError::Equipment(_) | HaresError::InvalidEquipmentParameter { .. } => {
             HaresEquipmentError::new_err(msg)
         }

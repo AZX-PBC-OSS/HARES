@@ -396,6 +396,12 @@ impl Equipment for ElectricFurnace {
         Some(self.hvac.thermostat_fsm.thermostat.band_class)
     }
 
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Heating,
+        ))
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
@@ -820,6 +826,12 @@ impl Equipment for GasFurnace {
 
     fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
         Some(self.hvac.thermostat_fsm.thermostat.band_class)
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Heating,
+        ))
     }
 
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
