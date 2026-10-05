@@ -72,7 +72,9 @@ pub struct PvConfig {
     /// The top-level `capacity_kw` must equal the sum of per-array
     /// capacities; other top-level singular fields (`tilt_deg`,
     /// `azimuth_deg`, `module_type`, `noct_c`, `sam_lut_path`) are
-    /// ignored in favour of the per-array specs.
+    /// ignored in favour of the per-array specs. A multi-array PV is not
+    /// attached to a roof automatically: each array's
+    /// `attached_boundary_id` attaches it.
     #[serde(default)]
     pub arrays: Option<Vec<PvArraySpec>>,
 }
