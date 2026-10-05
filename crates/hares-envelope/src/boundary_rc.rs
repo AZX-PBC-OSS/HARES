@@ -299,10 +299,10 @@ pub struct BoundaryInput {
 pub struct ZoneInput {
     pub floor_area_m2: Option<f64>,
     pub volume_m3: Option<f64>,
-    /// Effective thermal mass multiplier applied to zone air capacitance.
-    /// Accounts for furniture and interior mass. Typical values:
-    /// - Conditioned: 7.0 (standard furnished living space)
-    /// - Foundation / Attic / Garage: 1.0 (air capacitance only)
+    /// Multiplier on the zone air node's capacitance, EnergyPlus's
+    /// `ZoneVolCapMultpSens`: the building's one temperature capacitance
+    /// multiplier (OS-HPXML default 7.0) for every zone. Furniture and
+    /// partition mass are separate nodes and do not take it.
     pub mass_multiplier: f64,
 }
 
