@@ -77,7 +77,7 @@ pub struct TemperedDrawConfig {
     pub setpoint_temp_c: f64,
 }
 
-/// Flows and ambient temperatures for [`Tank::step_tempered`], grouped so
+/// Flows and ambient temperatures for [`StratifiedTank::step_tempered`], grouped so
 /// the call site reads as one coherent draw state.
 #[derive(Debug, Clone, Copy)]
 pub struct TemperedDrawInputs {
@@ -320,7 +320,7 @@ impl StratifiedTank {
     /// **pre-heating** node temperatures over the drawn volume
     /// (OCHRE Water.py:335-347).
     ///
-    /// Use [`step_tempered`] when the draw comes from a mixing-valve schedule
+    /// Use [`Self::step_tempered`] when the draw comes from a mixing-valve schedule
     /// that specifies a fixture delivery temperature.
     pub fn step(
         &mut self,

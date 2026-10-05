@@ -299,6 +299,7 @@ impl PartialEq for StochasticState {
 /// A lazily-evaluated source for schedule values.
 #[non_exhaustive]
 #[derive(Clone, Debug)]
+// value_at reads the profile arrays every step; boxing them would add a pointer chase to each read.
 #[allow(clippy::large_enum_variant)]
 pub enum ScheduleSource {
     /// Fixed scalar value.
@@ -379,6 +380,7 @@ pub enum ScheduleSource {
 /// emit exact variant fields; there is no type-level guard available here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// Mirrors ScheduleSource variant for variant, so into_runtime moves the arrays without allocating.
 #[allow(clippy::large_enum_variant)]
 pub enum ScheduleSourceConfig {
     Constant(f64),

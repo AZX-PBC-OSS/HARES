@@ -456,10 +456,8 @@ mod tests {
         let _guard = PanicHookGuard::new();
 
         let result = panic::catch_unwind(AssertUnwindSafe(
+            // The literal None is unwrapped on purpose: the hook must report this site.
             #[allow(clippy::unnecessary_literal_unwrap)]
-            // Why: clippy sees `None` → `unwrap()` in the same scope; the test
-            // intentionally triggers `unwrap()` panic on `None` to verify the hook
-            // captures PanicHookInfo::location() from the actual unwrap site.
             || {
                 let x: Option<i32> = None;
                 x.unwrap();
@@ -484,10 +482,8 @@ mod tests {
         let _guard = PanicHookGuard::new();
 
         let result = panic::catch_unwind(AssertUnwindSafe(
+            // The literal Err is expected on purpose: the hook must report this site.
             #[allow(clippy::unnecessary_literal_unwrap)]
-            // Why: clippy sees `Err` → `expect()` in the same scope; the test
-            // intentionally triggers `expect()` panic on `Err` to verify the hook
-            // captures PanicHookInfo::location() from the actual expect site.
             || {
                 let r: Result<i32, &str> = Err("expect test error");
                 r.expect("custom expect message");

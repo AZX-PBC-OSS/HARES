@@ -1,6 +1,4 @@
-// Each benchmark binary (single_building, fleet, rl_step) uses a different
-// subset of these helpers; unused-per-binary items are not dead code —
-// they are used by sibling binaries that share this module.
+// Each bench binary compiles this module and uses a different subset of it.
 #![allow(dead_code)]
 
 use std::fs;

@@ -1,10 +1,7 @@
 //! Shared test helpers: small hand-built RecordBatches and golden
 //! documents for the digest and compare unit tests.
-//!
-//! Each integration-test binary compiles this module separately, so not
-//! every helper is used by every binary; the unused ones are not dead code
-//! in the module itself.
 
+// Each test binary compiles this module and uses a different subset of it.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;

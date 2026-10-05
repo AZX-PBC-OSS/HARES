@@ -1787,8 +1787,7 @@ impl PyDwelling {
         panel_watts=None, panel_area_m2=None, system_losses=None,
         inverter_kw_ac=None, max_dc_ac_ratio=None, main_panel_ampacity=None,
         main_breaker_ampacity=None, roof_shape=None))]
-    // Why: PyO3 signature mirrors the full Rust API surface;
-    // a builder type adds indirection at the binding layer.
+    // PyO3 maps this keyword signature 1:1 to the Python API.
     #[allow(clippy::too_many_arguments)]
     pub fn estimate_pv_capacity(
         &self,

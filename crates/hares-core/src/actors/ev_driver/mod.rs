@@ -372,10 +372,8 @@ impl EvDriverActor {
     /// `rng` is required for deterministic behavior. All stochastic draws
     /// derive from this RNG. Callers using the dwelling RNG hierarchy should
     /// pass a pre-configured `ChaCha8Rng` from `derive_sub_rng` so the stream
-    /// nonce is preserved.
-    // The parameters are independent behavioral inputs with no sensible
-    // defaults; the actor's stochastic behavior depends on each being
-    // explicitly set by the caller; they travel in `EvDriverParams`.
+    /// nonce is preserved. `params` carries the behavioral inputs, none of
+    /// which has a default.
     pub fn new(name: &str, target: &str, params: EvDriverParams, rng: ChaCha8Rng) -> Self {
         let EvDriverParams {
             strategy,

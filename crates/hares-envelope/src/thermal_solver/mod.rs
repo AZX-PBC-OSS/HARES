@@ -2325,10 +2325,9 @@ mod tests {
         // Envelope UA values (W/K)
         let ua_windows = 3.0 * 12.0; // 36 W/K
         let ua_walls = 0.514 * 68.0; // 34.95 W/K
+        // 0.318 W/m²K is the BESTEST roof U-value, not an approximation of 1/π.
         #[allow(clippy::approx_constant)]
-        // Physical U-value for the BESTEST roof [W/m²K]; coincidentally close
-        // to 1/π but not equal, and the model must keep the exact value.
-        let ua_roof = 0.318 * 48.0; // 15.26 W/K -- U-value, not 1/π
+        let ua_roof = 0.318 * 48.0; // 15.26 W/K
         let ua_envelope = ua_windows + ua_walls + ua_roof; // ~86.2 W/K (walls+roof+windows to outdoor)
         let ua_floor = 0.039 * 48.0; // 1.872 W/K (floor to ground)
 

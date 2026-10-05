@@ -321,8 +321,8 @@ impl Actor for IdealThermostat {
                 // The override violates the deadband: the actor is marked
                 // unhealthy (the step fails at the post-decide health check
                 // with a typed error) and the emission is rejected with the
-                // observable counter/telemetry flag so the rejection is
-                // auditable.
+                // `setpoint_inversion_rejected` telemetry flag so the
+                // rejection is auditable.
                 self.telemetry.set("setpoint_inversion_rejected", 1.0);
                 self.override_violation = Some(format!(
                     "setpoint deadband violation in IdealThermostat '{}': \

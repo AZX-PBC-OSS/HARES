@@ -475,9 +475,7 @@ pub fn infer_roof_shape(
 #[pyfunction]
 #[pyo3(signature = (roof_planes, roof_shape, *, wall_azimuths=None, latitude=None,
     panel_watts=None, panel_area_m2=None, diffuse_fraction=None, roof_shape_user_override=false))]
-// Why: the parameter count reflects the complete set of tunable PV sizing
-// inputs; constructing a builder/params type would add indirection for no
-// benefit at this binding layer.
+// PyO3 maps this keyword signature 1:1 to the Python API.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_usable_area(
     roof_planes: Vec<PyRoofPlane>,
@@ -529,9 +527,7 @@ pub fn compute_usable_area(
 #[pyfunction]
 #[pyo3(signature = (roof_planes, roof_shape, *, wall_azimuths=None, latitude=None,
     panel_watts=None, panel_area_m2=None, diffuse_fraction=None, roof_shape_user_override=false))]
-// Why: the parameter count reflects the complete set of tunable PV sizing
-// inputs; constructing a builder/params type would add indirection for no
-// benefit at this binding layer.
+// PyO3 maps this keyword signature 1:1 to the Python API.
 #[allow(clippy::too_many_arguments)]
 pub fn enumerate_pv_candidates(
     roof_planes: Vec<PyRoofPlane>,
@@ -600,9 +596,7 @@ pub fn enumerate_pv_candidates(
     system_losses=None, panel_watts=None, panel_area_m2=None,
     inverter_kw_ac=None, max_dc_ac_ratio=None, main_panel_ampacity=None,
     main_breaker_ampacity=None))]
-// Why: the parameter count reflects the complete set of tunable PV sizing
-// inputs; constructing a builder/params type would add indirection for no
-// benefit at this binding layer.
+// PyO3 maps this keyword signature 1:1 to the Python API.
 #[allow(clippy::too_many_arguments)]
 pub fn size_pv_system(
     usable: &PyUsableRoofArea,
