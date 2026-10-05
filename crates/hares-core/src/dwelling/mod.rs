@@ -485,9 +485,20 @@ struct EquipmentColumns {
     runtime_fraction: Option<usize>,
     latent_gains: Option<usize>,
     duct_losses: Option<usize>,
-    /// V8 per-equipment telemetry diagnostic columns. Each entry is
-    /// (telemetry_key, column_index). Populated from telemetry in record_step.
-    v8_columns: Vec<(&'static str, usize)>,
+    /// Verbosity-8 per-equipment telemetry columns, as
+    /// (telemetry_key, column_index), split by what the value is: a state
+    /// is recorded even for a failed step (it keeps the committed value), a
+    /// flow is not (the failed step delivered nothing).
+    v8_state_columns: Vec<(&'static str, usize)>,
+    v8_flow_columns: Vec<(&'static str, usize)>,
+}
+
+/// What a frame column's value is, which decides what a failed step
+/// records in it.
+#[derive(Clone, Copy)]
+enum RecordedValue {
+    State,
+    Flow,
 }
 
 /// Enriches the output schema's Arrow field metadata with unit declarations
@@ -732,18 +743,17 @@ fn build_equipment_column_map(
                 resolve_col(HVAC_DUCT_LOSSES_COL, column_index, &name, verbosity >= 5)?;
 
             // V8 per-equipment telemetry diagnostic columns.
-            let v8_columns = if verbosity >= 8 {
+            let (v8_state_columns, v8_flow_columns) = if verbosity >= 8 {
                 resolve_v8_columns(
                     &name,
                     column_index,
                     is_hvac,
                     is_hp_heater,
-                    &desc.name,
                     is_pv(&desc.name),
                     is_ev(&desc.name),
                 )
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
 
             Ok(EquipmentColumns {
@@ -767,7 +777,8 @@ fn build_equipment_column_map(
                 runtime_fraction,
                 latent_gains,
                 duct_losses,
-                v8_columns,
+                v8_state_columns,
+                v8_flow_columns,
             })
         })
         .collect()
@@ -882,78 +893,67 @@ fn resolve_col(
     }
 }
 
+type V8Columns = Vec<(&'static str, usize)>;
+
 /// Resolves v8 per-equipment telemetry diagnostic columns for the given
-/// equipment instance. Each entry is a (telemetry_key, column_index) pair
-/// populated directly from equipment telemetry in record_step.
+/// equipment instance, as (state columns, flow columns) of
+/// (telemetry_key, column_index) pairs populated directly from equipment
+/// telemetry in record_step.
 fn resolve_v8_columns(
     instance_name: &str,
     column_index: &HashMap<String, usize>,
     is_hvac: bool,
     is_hp_heater: bool,
-    _equipment_name: &str,
     is_pv: bool,
     is_ev: bool,
-) -> Vec<(&'static str, usize)> {
-    let mut columns = Vec::new();
+) -> (V8Columns, V8Columns) {
+    use RecordedValue::{Flow, State};
+    const HVAC: &[(&str, &str, RecordedValue)] = &[
+        (tk::SUPPLY_TEMP_C, SUPPLY_TEMP_SUFFIX, State),
+        (tk::RETURN_TEMP_C, RETURN_TEMP_SUFFIX, State),
+        (tk::COMPRESSOR_POWER_W, COMPRESSOR_POWER_W_SUFFIX, Flow),
+        (tk::COMPRESSOR_KW, COMPRESSOR_POWER_KW_SUFFIX, Flow),
+        (tk::FAN_ELECTRIC_W, FAN_ELECTRIC_POWER_SUFFIX, Flow),
+        (tk::FAN_POWER_W, FAN_POWER_W_SUFFIX, Flow),
+        (tk::MIN_ON_TIME_S, MIN_ON_TIME_SUFFIX, State),
+        (tk::MIN_OFF_TIME_S, MIN_OFF_TIME_SUFFIX, State),
+    ];
+    const HP_HEATER: &[(&str, &str, RecordedValue)] = &[
+        (tk::SUPPLY_AIR_TEMP_C, SUPPLY_AIR_TEMP_SUFFIX, State),
+        (tk::PAN_HEATER_KW, PAN_HEATER_POWER_SUFFIX, Flow),
+        (tk::HP_CAPACITY_W, HP_CAPACITY_SUFFIX, Flow),
+        (tk::ER_CAPACITY_W, ER_CAPACITY_SUFFIX, Flow),
+    ];
+    const PV: &[(&str, &str, RecordedValue)] = &[
+        (tk::DC_POWER_KW, PV_DC_POWER_SUFFIX, Flow),
+        (tk::IRRADIANCE_W_M2, PV_IRRADIANCE_SUFFIX, State),
+    ];
+    const EV: &[(&str, &str, RecordedValue)] = &[
+        (tk::CONNECTION_STATE, EV_CONNECTION_STATE_SUFFIX, State),
+        (tk::CHARGING_LEVEL, EV_CHARGING_LEVEL_SUFFIX, State),
+    ];
 
-    if is_hvac {
-        let hvac_defs: &[(&str, &str)] = &[
-            (tk::SUPPLY_TEMP_C, SUPPLY_TEMP_SUFFIX),
-            (tk::RETURN_TEMP_C, RETURN_TEMP_SUFFIX),
-            (tk::COMPRESSOR_POWER_W, COMPRESSOR_POWER_W_SUFFIX),
-            (tk::COMPRESSOR_KW, COMPRESSOR_POWER_KW_SUFFIX),
-            (tk::FAN_ELECTRIC_W, FAN_ELECTRIC_POWER_SUFFIX),
-            (tk::FAN_POWER_W, FAN_POWER_W_SUFFIX),
-            (tk::MIN_ON_TIME_S, MIN_ON_TIME_SUFFIX),
-            (tk::MIN_OFF_TIME_S, MIN_OFF_TIME_SUFFIX),
-        ];
-        for &(key, suffix) in hvac_defs {
-            let col_name = format!("{instance_name} {suffix}");
-            if let Some(&idx) = column_index.get(&col_name) {
-                columns.push((key, idx));
+    let mut state = Vec::new();
+    let mut flow = Vec::new();
+    for (applies, defs) in [
+        (is_hvac, HVAC),
+        (is_hp_heater, HP_HEATER),
+        (is_pv, PV),
+        (is_ev, EV),
+    ] {
+        if !applies {
+            continue;
+        }
+        for &(key, suffix, value) in defs {
+            if let Some(&idx) = column_index.get(&format!("{instance_name} {suffix}")) {
+                match value {
+                    State => state.push((key, idx)),
+                    Flow => flow.push((key, idx)),
+                }
             }
         }
     }
-    if is_hp_heater {
-        let hp_defs: &[(&str, &str)] = &[
-            (tk::SUPPLY_AIR_TEMP_C, SUPPLY_AIR_TEMP_SUFFIX),
-            (tk::PAN_HEATER_KW, PAN_HEATER_POWER_SUFFIX),
-            (tk::HP_CAPACITY_W, HP_CAPACITY_SUFFIX),
-            (tk::ER_CAPACITY_W, ER_CAPACITY_SUFFIX),
-        ];
-        for &(key, suffix) in hp_defs {
-            let col_name = format!("{instance_name} {suffix}");
-            if let Some(&idx) = column_index.get(&col_name) {
-                columns.push((key, idx));
-            }
-        }
-    }
-    if is_pv {
-        let pv_defs: &[(&str, &str)] = &[
-            (tk::DC_POWER_KW, PV_DC_POWER_SUFFIX),
-            (tk::IRRADIANCE_W_M2, PV_IRRADIANCE_SUFFIX),
-        ];
-        for &(key, suffix) in pv_defs {
-            let col_name = format!("{instance_name} {suffix}");
-            if let Some(&idx) = column_index.get(&col_name) {
-                columns.push((key, idx));
-            }
-        }
-    }
-    if is_ev {
-        let ev_defs: &[(&str, &str)] = &[
-            (tk::CONNECTION_STATE, EV_CONNECTION_STATE_SUFFIX),
-            (tk::CHARGING_LEVEL, EV_CHARGING_LEVEL_SUFFIX),
-        ];
-        for &(key, suffix) in ev_defs {
-            let col_name = format!("{instance_name} {suffix}");
-            if let Some(&idx) = column_index.get(&col_name) {
-                columns.push((key, idx));
-            }
-        }
-    }
-
-    columns
+    (state, flow)
 }
 
 fn extend_schema_with_actor_columns(
@@ -5928,6 +5928,15 @@ impl Dwelling {
                     .is_some_and(|m| m != hares_types::OperatingMode::Off);
                 row[idx] = if is_active { 1.0 } else { 0.0 };
             }
+            if let Some(idx) = cols.speed {
+                row[idx] = co.state.speed_index.map_or(0.0, |s| s as f64);
+            }
+            if let Some(idx) = cols.defrost_state {
+                row[idx] = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0); // allowed: defrost cycle state remains telemetry-only until CoreOutput gains a defrost_state field.
+            }
+            for &(key, idx) in &cols.v8_state_columns {
+                row[idx] = eq.telemetry().get(key).unwrap_or(0.0); // allowed: v8 telemetry pass-through uses pre-resolved tk:: constants bound to `key`.
+            }
             if self.step_failed[eq_idx] {
                 continue;
             }
@@ -5967,9 +5976,6 @@ impl Dwelling {
                 let electric_kw = co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
                 row[idx] = electric_kw * dt_hours;
             }
-            if let Some(idx) = cols.defrost_state {
-                row[idx] = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0); // allowed: defrost cycle state remains telemetry-only until CoreOutput gains a defrost_state field.
-            }
             if let Some(idx) = cols.er_power {
                 // OCHRE HVAC.py:1464-1467: ER Power = er_capacity * er_eir_rated * space_fraction / 1000.
                 // Maps to BACKUP_ER_KW (already space-fraction-adjusted in heater step).
@@ -5980,9 +5986,6 @@ impl Dwelling {
             // the rest remain telemetry-only until their fields are promoted.
             if let Some(idx) = cols.shr {
                 row[idx] = eq.telemetry().get(tk::SHR).unwrap_or(0.0); // allowed: SHR remains telemetry-only until CoreOutput gains an SHR field.
-            }
-            if let Some(idx) = cols.speed {
-                row[idx] = co.state.speed_index.map_or(0.0, |s| s as f64);
             }
             if let Some(idx) = cols.fan_power {
                 row[idx] = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0); // allowed: fan power remains telemetry-only until CoreOutput gains a fan power field.
@@ -6003,9 +6006,7 @@ impl Dwelling {
                 // are accumulated into the same row slot.
                 row[idx] += eq.telemetry().get(tk::DUCT_LOSS_W).unwrap_or(0.0); // allowed: duct loss remains telemetry-only until CoreOutput gains a duct loss field.
             }
-            // V8 per-equipment telemetry diagnostic columns: each (key, idx) pair
-            // reads directly from equipment telemetry.
-            for &(key, idx) in &cols.v8_columns {
+            for &(key, idx) in &cols.v8_flow_columns {
                 row[idx] = eq.telemetry().get(key).unwrap_or(0.0); // allowed: v8 telemetry pass-through uses pre-resolved tk:: constants bound to `key`.
             }
         }
@@ -13801,8 +13802,18 @@ master_seed = 0
         /// zone 1 and reports it as `thermal_output_w`.
         fn heating_zone(mut self) -> Self {
             self.descriptor.end_use = EndUse::HVAC_HEATING;
-            self.descriptor.core_capabilities =
-                CoreCapabilities::ELECTRIC | CoreCapabilities::THERMAL;
+            self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC
+                | CoreCapabilities::THERMAL
+                | CoreCapabilities::HAS_SPEED;
+            self.core_output.state.speed_index = Some(0);
+            for key in [
+                tk::DEFROST_CYCLE_STATE,
+                tk::SUPPLY_TEMP_C,
+                tk::MIN_ON_TIME_S,
+                tk::COMPRESSOR_KW,
+            ] {
+                self.telemetry.insert(key, 0.0);
+            }
             self.ports.push(PortDeclaration::thermal(ZoneId(1)));
             self.heats_zone = true;
             self
@@ -13885,6 +13896,11 @@ master_seed = 0
             )?);
             if self.heats_zone {
                 self.core_output.flows.thermal_output_w = Some(self.power_w);
+                self.core_output.state.speed_index = Some(2);
+                self.telemetry.set(tk::DEFROST_CYCLE_STATE, 1.0);
+                self.telemetry.set(tk::SUPPLY_TEMP_C, 35.0);
+                self.telemetry.set(tk::MIN_ON_TIME_S, 300.0);
+                self.telemetry.set(tk::COMPRESSOR_KW, self.power_w / 1000.0);
             }
             Ok(())
         }
@@ -13983,8 +13999,11 @@ master_seed = 0
         assert_eq!(dwelling.health.port_rollbacks, 2);
     }
 
+    /// A failed step's row reports no flow for the failed heater (its own
+    /// power and compressor columns, and its share of the end-use
+    /// aggregate), while its state columns keep the committed state.
     #[test]
-    fn a_failed_step_records_no_flow_for_the_failed_equipment() {
+    fn a_failed_step_records_no_flow_and_keeps_the_committed_state() {
         let (_dir, toml_path) = temp_toml("failed_step_row");
         let output_path = toml_path.with_extension("csv");
         fs::write(
@@ -14017,7 +14036,7 @@ pressure_kpa = 101.325
 occupancy = 0.0
 
 [output]
-output_verbosity = 1
+output_verbosity = 8
 output_format = "csv"
 output_chunk_size = 1
 write_output = true
@@ -14030,29 +14049,49 @@ master_seed = 0
         )
         .expect("write TOML");
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        let heater = "Heat Pump Heater";
         dwelling
-            .add_equipment(Box::new(FlakyPortEquipment::new("FlakyEq", 500.0, &[true])))
+            .add_equipment(Box::new(
+                FlakyPortEquipment::new(heater, 500.0, &[true]).heating_zone(),
+            ))
             .expect("register the equipment");
         dwelling.step().expect("the equipment succeeds");
         dwelling
             .step()
             .expect("one failure is within the default budget");
 
-        let recorded: Vec<f64> = dwelling
-            .flushed_batches()
-            .iter()
-            .flat_map(|batch| {
-                let column = batch
-                    .column_by_name("FlakyEq Electric Power (kW)")
-                    .expect("the equipment has an electric power column")
-                    .as_any()
-                    .downcast_ref::<arrow::array::Float64Array>()
-                    .expect("power columns are f64")
-                    .clone();
-                column.values().to_vec()
-            })
-            .collect();
-        assert_eq!(recorded, vec![0.5, 0.0]);
+        let recorded = |column: &str| -> Vec<f64> {
+            dwelling
+                .flushed_batches()
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column_by_name(column)
+                        .unwrap_or_else(|| panic!("the frame has a {column} column"))
+                        .as_any()
+                        .downcast_ref::<arrow::array::Float64Array>()
+                        .expect("numeric columns are f64")
+                        .values()
+                        .to_vec()
+                })
+                .collect()
+        };
+        for flow in [
+            format!("{heater} {ELECTRIC_POWER_SUFFIX}"),
+            format!("{heater} {COMPRESSOR_POWER_KW_SUFFIX}"),
+            end_use_electric_power_column(&EndUse::HVAC_HEATING),
+        ] {
+            assert_eq!(recorded(&flow), vec![0.5, 0.0], "{flow}");
+        }
+        for (state, committed) in [
+            (SPEED_SUFFIX, 2.0),
+            (DEFROST_STATE_SUFFIX, 1.0),
+            (SUPPLY_TEMP_SUFFIX, 35.0),
+            (MIN_ON_TIME_SUFFIX, 300.0),
+        ] {
+            let column = format!("{heater} {state}");
+            assert_eq!(recorded(&column), vec![committed; 2], "{column}");
+        }
     }
 
     /// The envelope-resolution stage belongs to the domain solvers: no

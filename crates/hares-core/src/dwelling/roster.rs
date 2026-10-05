@@ -1338,7 +1338,7 @@ impl Dwelling {
     fn log_output_keys_without_columns(&self) {
         let mut covered: HashSet<&str> = HashSet::new();
         for cols in &self.roster.equipment_column_map {
-            for &(key, _idx) in &cols.v8_columns {
+            for &(key, _idx) in cols.v8_state_columns.iter().chain(&cols.v8_flow_columns) {
                 covered.insert(key);
             }
             let named = [

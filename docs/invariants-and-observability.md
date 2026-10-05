@@ -132,7 +132,8 @@ without it. For that step the equipment delivered nothing: the consistency
 checks skip it, and the recorded flows (per-equipment and end-use power,
 the frame's flow and telemetry columns, `DwellingTelemetry` power, the next
 step's electrical summary) report zero for it, while its state columns
-(mode, setpoint, SOC) keep its committed state.
+(mode, setpoint, SOC, speed, defrost state, and the verbosity-8 temperature,
+timer, irradiance and EV connection columns) keep its committed state.
 
 A failure that repeats on the next step comes from the equipment's state or
 configuration, not from one step's inputs, so the run errors
