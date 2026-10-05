@@ -306,9 +306,12 @@ pub struct Building {
     /// Residential facility type from `<BuildingConstruction>/<ResidentialFacilityType>`.
     /// Used for adjusted bedroom count in water heater draw profiles.
     pub residential_facility_type: Option<String>,
-    /// Override the zone mass multiplier for all zones.
-    /// When set, replaces the default zone-type-based multiplier.
-    pub mass_multiplier_override: Option<f64>,
+    /// The zone air temperature capacitance multiplier, one for every zone,
+    /// as OS-HPXML's `ZoneCapacitanceMultiplier:ResearchSpecial`
+    /// (simcontrols.rb:27-28): `SoftwareInfo/extension/SimulationControl/
+    /// AdvancedResearchFeatures/TemperatureCapacitanceMultiplier`, else 7
+    /// (defaults.rb:219-221).
+    pub temperature_capacitance_multiplier: f64,
     /// HVAC thermostat deadband/hysteresis in °C.
     /// When set, overrides the default 1.0°C hysteresis for IdealHVAC.
     /// BESTEST/ASHRAE 140 requires 0.0 (ideal setpoint tracking).
@@ -1224,7 +1227,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         has_flue_or_chimney,
         foundation_name,
         residential_facility_type,
-        mass_multiplier_override: None,
+        temperature_capacitance_multiplier: temperature_capacitance_multiplier(
+            root,
+            &mut parse_warnings,
+        )?,
         hvac_deadband_c: None,
         climate_zone_iecc: details
             .path(&["ClimateandRiskZones", "ClimateZoneIECC"])
@@ -2704,6 +2710,44 @@ fn parse_nominal_r_layers(node: &XmlNode) -> Result<Vec<f64>, HpxmlError> {
         }
     }
     Ok(values)
+}
+
+/// OS-HPXML v1.12's zone temperature capacitance multiplier (hpxml.rb:1051):
+/// `AdvancedResearchFeatures/TemperatureCapacitanceMultiplier`, a positive
+/// number, else 7 (defaults.rb:219-221). The pre-v1.11 element directly under
+/// `SimulationControl`, which v1.12 no longer reads, is ignored with a
+/// warning.
+fn temperature_capacitance_multiplier(
+    root: &XmlNode,
+    parse_warnings: &mut Vec<Warning>,
+) -> Result<f64, HpxmlError> {
+    const ELEMENT: &str = "TemperatureCapacitanceMultiplier";
+    let Some(control) = root.path(&["SoftwareInfo", "extension", "SimulationControl"]) else {
+        return Ok(hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER);
+    };
+    if let Some(legacy) = control.child(ELEMENT) {
+        parse_warnings.push(Warning::new(
+            "hpxml",
+            format!(
+                "SimulationControl/{ELEMENT} ({}) is ignored, as OS-HPXML v1.12 reads it only \
+                 under AdvancedResearchFeatures",
+                legacy.text.trim()
+            ),
+        ));
+    }
+    let Some(node) = control.path(&["AdvancedResearchFeatures", ELEMENT]) else {
+        return Ok(hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER);
+    };
+    match node.text_as_f64() {
+        Some(value) if value.is_finite() && value > 0.0 => Ok(value),
+        _ => Err(HpxmlError::Parse(
+            format!(
+                "AdvancedResearchFeatures/{ELEMENT} must be a positive number, got '{}'",
+                node.text.trim()
+            )
+            .into(),
+        )),
+    }
 }
 
 fn find_descendant_f64(

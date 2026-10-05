@@ -22,7 +22,10 @@ use crate::rc_network::{RCNetwork, parallel_resistance};
 /// Re-exported from hares_physics::constants::CP_DRY_AIR_J_KG_K for convenience.
 /// ASHRAE HOF 2021 Ch.1, Table 2 footnote, valid 0–60°C range.
 pub const AIR_CP_J_KG_K: f64 = hares_physics::constants::CP_DRY_AIR_J_KG_K;
-/// Interior mass multiplier applied to zone air capacitance.
+/// Multiplier on every zone's air capacitance: OS-HPXML's default
+/// `TemperatureCapacitanceMultiplier` (defaults.rb:219-221), applied to all
+/// zones through `ZoneCapacitanceMultiplier:ResearchSpecial`
+/// (simcontrols.rb:27-28).
 pub const INTERIOR_MASS_MULTIPLIER: f64 = 7.0;
 /// Floor capacitance for any RC node [J/K].
 pub const MIN_CAPACITANCE_J_K: f64 = 1_000.0;

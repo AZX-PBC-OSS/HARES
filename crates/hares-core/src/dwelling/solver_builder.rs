@@ -1896,7 +1896,7 @@ mod tests {
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
@@ -3187,7 +3187,7 @@ mod tests {
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
@@ -3399,7 +3399,7 @@ mod tests {
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
@@ -3639,7 +3639,7 @@ mod tests {
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
@@ -3880,7 +3880,7 @@ mod tests {
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
@@ -4173,7 +4173,7 @@ mod tests {
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
@@ -4444,7 +4444,7 @@ mod tests {
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
@@ -4705,7 +4705,7 @@ mod tests {
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {

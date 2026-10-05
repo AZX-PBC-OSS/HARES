@@ -1523,7 +1523,10 @@ pub(crate) fn build_synthetic_building(
         has_flue_or_chimney: None,
         foundation_name: None,
         residential_facility_type: None,
-        mass_multiplier_override: config.geometry.mass_multiplier,
+        temperature_capacitance_multiplier: config
+            .geometry
+            .mass_multiplier
+            .unwrap_or(hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER),
         hvac_deadband_c: config.hvac.deadband_c,
         climate_zone_iecc: None,
         details_xml,

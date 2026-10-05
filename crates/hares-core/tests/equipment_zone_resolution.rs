@@ -287,7 +287,11 @@ fn hvac_ebm_max_energy(clear_zone_ids: bool) -> Vec<(String, Vec<f64>)> {
         .expect("UTC-5 offset is valid")
         .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
         .unwrap();
-    config.sim_config.duration = Duration::hours(12);
+    // One-minute steps run the thermostat's on/off cycling rather than the
+    // ideal-capacity hold of coarse steps, so the boiler enters its heating
+    // mode, where the equivalent battery reports the zone's energy bounds.
+    config.sim_config.duration = Duration::hours(2);
+    config.sim_config.time_res = Duration::seconds(60);
     let mut blueprint =
         hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
     let mut cleared = 0;
@@ -334,7 +338,7 @@ fn hvac_ebm_max_energy(clear_zone_ids: bool) -> Vec<(String, Vec<f64>)> {
         .iter()
         .map(|name| (name.clone(), Vec::new()))
         .collect();
-    for _ in 0..48 {
+    for _ in 0..120 {
         dwelling.step().expect("fixture steps");
         for (name, values) in &mut series {
             let eq = dwelling

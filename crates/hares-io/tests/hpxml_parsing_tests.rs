@@ -2695,6 +2695,69 @@ fn crawlspace_without_walls_takes_the_assumed_three_feet() {
     );
 }
 
+/// The zone air temperature capacitance multiplier OS-HPXML v1.12 applies to
+/// every zone is `AdvancedResearchFeatures/TemperatureCapacitanceMultiplier`,
+/// 7 when absent (hpxml.rb:1051, defaults.rb:219-221).
+#[test]
+fn temperature_capacitance_multiplier_is_read_and_defaults_to_seven() {
+    assert_eq!(
+        parse_vendored_sample("base.xml").temperature_capacitance_multiplier,
+        7.0
+    );
+    let given = parse_edited_sample("base.xml", |xml| {
+        xml.replacen(
+            "</SimulationControl>",
+            "<AdvancedResearchFeatures><TemperatureCapacitanceMultiplier>3.5\
+             </TemperatureCapacitanceMultiplier></AdvancedResearchFeatures></SimulationControl>",
+            1,
+        )
+    });
+    assert_eq!(given.temperature_capacitance_multiplier, 3.5);
+}
+
+/// The pre-v1.11 `SimulationControl/TemperatureCapacitanceMultiplier`, which
+/// OS-HPXML v1.12 no longer reads, is ignored with a warning naming it.
+#[test]
+fn legacy_temperature_capacitance_multiplier_is_ignored_with_a_warning() {
+    let building = parse_edited_sample(
+        "base-simcontrol-temperature-capacitance-multiplier.xml",
+        |xml| {
+            xml.replace(
+                ">7.0</TemperatureCapacitanceMultiplier>",
+                ">2.0</TemperatureCapacitanceMultiplier>",
+            )
+        },
+    );
+    assert_eq!(building.temperature_capacitance_multiplier, 7.0);
+    assert!(
+        building.parse_warnings.iter().any(|w| w
+            .message
+            .contains("SimulationControl/TemperatureCapacitanceMultiplier")),
+        "the ignored element must be a warning, got {:?}",
+        building.parse_warnings
+    );
+}
+
+/// A multiplier that is not a positive number is an error.
+#[test]
+fn non_positive_temperature_capacitance_multiplier_is_an_error() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendors/OCHRE/test/OS-HPXML Sample Files/base.xml");
+    let xml = std::fs::read_to_string(path)
+        .expect("sample readable")
+        .replacen(
+            "</SimulationControl>",
+            "<AdvancedResearchFeatures><TemperatureCapacitanceMultiplier>0\
+             </TemperatureCapacitanceMultiplier></AdvancedResearchFeatures></SimulationControl>",
+            1,
+        );
+    let err = hares_io::hpxml::parse_hpxml_str(&xml).expect_err("zero multiplier");
+    assert!(
+        format!("{err}").contains("TemperatureCapacitanceMultiplier"),
+        "{err}"
+    );
+}
+
 /// Every attic is a square hip under its roofs, gable roofs included, as
 /// OS-HPXML has no other attic rule: footprint = roof area /
 /// sqrt(1 + slope^2), height = 0.5 sin(atan(slope)) sqrt(footprint), volume

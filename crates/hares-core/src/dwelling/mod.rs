@@ -16,9 +16,7 @@ pub use warnings::WarningLog;
 pub use premise_zip::PremiseZip;
 
 pub use blueprint::DwellingBlueprint;
-pub use conversions::{
-    building_to_boundary_inputs, building_to_zone_inputs, mass_multiplier_for_zone, stage_rank,
-};
+pub use conversions::{building_to_boundary_inputs, building_to_zone_inputs, stage_rank};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -12061,7 +12059,7 @@ occupancy = 1.0
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             details_xml: XmlNode {
