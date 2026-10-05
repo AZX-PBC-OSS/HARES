@@ -283,3 +283,53 @@ fn fleet_manifest_weights_reach_the_weights_product() {
     assert_eq!(sample_weights.value(0), 1.0, "the first home's weight");
     assert_eq!(sample_weights.value(1), 3.0, "the second home's weight");
 }
+
+/// Runs git in the fixture repository `dir` with an empty configuration of
+/// its own: the host's global and system configuration (a commit signer, a
+/// hooks path) never reach the fixture, so its setup cannot fail on them.
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let empty_config = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", empty_config)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git {args:?}");
+}
+
+/// A capture's provenance describes the engine inputs: golden documents
+/// another capture in the same session rewrote do not make the tree dirty,
+/// while any other change does.
+#[test]
+fn golden_documents_do_not_dirty_the_capture_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    let golden_dir = root.join("tests/fixtures/golden");
+    std::fs::create_dir_all(&golden_dir).unwrap();
+    std::fs::write(golden_dir.join("a.golden.json"), "{}\n").unwrap();
+    std::fs::write(golden_dir.join("a.toml"), "kind = \"dwelling\"\n").unwrap();
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+    );
+
+    std::fs::write(golden_dir.join("a.golden.json"), "{\"recaptured\": true}\n").unwrap();
+    assert_eq!(frame_golden::golden::git_info(root).1, Some(false));
+
+    std::fs::write(golden_dir.join("a.toml"), "kind = \"fleet\"\n").unwrap();
+    assert_eq!(frame_golden::golden::git_info(root).1, Some(true));
+}

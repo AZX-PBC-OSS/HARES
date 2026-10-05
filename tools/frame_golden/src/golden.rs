@@ -296,6 +296,10 @@ fn render(value: &MetricValue) -> String {
 /// `git rev-parse HEAD` and the tree's dirty flag for provenance. When git
 /// is unavailable the head reads `unavailable` and the dirty flag is null,
 /// both visible in the committed file.
+///
+/// The flag describes what a run reads, so the golden documents, which
+/// captures write, do not count: re-capturing several fixtures from one
+/// committed tree records each as clean.
 pub fn git_info(root: &Path) -> (String, Option<bool>) {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -312,6 +316,9 @@ pub fn git_info(root: &Path) -> (String, Option<bool>) {
         .arg(root)
         .arg("status")
         .arg("--porcelain")
+        .arg("--")
+        .arg(".")
+        .arg(":(exclude)tests/fixtures/golden/*.golden.json")
         .output()
         .ok()
         .filter(|out| out.status.success())
