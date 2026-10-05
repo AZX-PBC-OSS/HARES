@@ -3739,7 +3739,7 @@ mod profiling_summary_tests {
             let mut dwelling = PyDwelling::from_hpxml(
                 &py.get_type::<PyDwelling>(),
                 fixture.join("building.xml").to_string_lossy().into_owned(),
-                fixture.join("schedule.csv").to_string_lossy().into_owned(),
+                Some(fixture.join("schedule.csv").to_string_lossy().into_owned()),
                 fixture.join("weather.epw").to_string_lossy().into_owned(),
                 Some(&kwargs),
             )
