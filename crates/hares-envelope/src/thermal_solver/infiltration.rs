@@ -119,10 +119,10 @@ pub(crate) fn apply_infiltration_and_ventilation(
         // Both AshraeWindStack and Ela branches pass raw met-station wind speed
         // (env.weather.wind_speed_m_s) directly. Terrain/height correction is already
         // embedded in the pre-computed coefficients:
-        //   - AshraeWindStack: shelter_coeff via terrain_wind_speed(1.0, ...) →
-        //     aim2_coefficients_from_ach50 (hares-physics/infiltration.rs:527–532)
-        //   - Ela: wind_coeff via f_t (terrain correction factor) →
-        //     calculate_ela_coefficients (hares-physics/infiltration.rs:622–623)
+        //   - AshraeWindStack: shelter_coeff via terrain_wind_speed(1.0, ...) in
+        //     aim2_coefficients_from_ach50
+        //   - Ela: wind_coeff via OS-HPXML's sherman_grimsrud_terrain_factor in
+        //     calculate_ela_coefficients
         // Applying a second terrain correction at runtime would double-correct.
         // Per ASHRAE HoF 2021 Ch.16, AIM-2 embeds the terrain correction in shelter
         // coefficients during setup; EnergyPlus similarly corrects globally upstream

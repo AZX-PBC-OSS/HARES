@@ -217,7 +217,7 @@ justification → measured impact → pinning tests.
   `production_step_injects_shortwave_gain` fails when the production step
   leaves the short-wave gain out.
 
-## D-008: A load's month multipliers scale its schedule
+## D-013: A load's month multipliers scale its schedule
 
 - **Reference behavior:** OCHRE reads a scheduled load's
   `month_multipliers` only to zero the schedule in the months whose
@@ -242,3 +242,28 @@ justification → measured impact → pinning tests.
   `event_load::tests::month_multiplier_scales_event_output`,
   `event_load::tests::month_multiplier_zero_suppresses_event_output`,
   `schedule_helpers::tests::negative_and_non_finite_month_multipliers_are_parameter_errors`.
+
+## D-008: Wind terrain from the site, not an assumed rural one
+
+- **Reference behavior:** OCHRE drives attic and garage leakage with
+  rural terrain, multiplier 0.85 and exponent 0.20, whatever the site
+  ("assumed rural for now", `ochre/utils/envelope.py:648-649`). OS-HPXML
+  v1.12.0 takes the terrain from the HPXML `SiteType`: (0.85, 0.20) rural,
+  (0.67, 0.25) suburban, (0.47, 0.35) urban (`airflow.rb:200-221`), in
+  its Sherman-Grimsrud factor `f_t_SG` (`airflow.rb:2766`).
+- **HARES behavior:** the site's `SiteType` sets the terrain, and attic
+  and garage leakage use OS-HPXML's `f_t_SG`
+  (`sherman_grimsrud_terrain_factor`, `hares-physics/src/infiltration.rs`).
+  This follows OS-HPXML and departs from OCHRE.
+- **Justification:** the input states the terrain. A suburban house does
+  not see open-country wind.
+- **Measured impact:** `data/examples/BEopt_example.xml` is suburban. At
+  its attic (2.36 m of hip above a 2.44 m walls top), f_t falls from 0.610
+  (the ASHRAE power law HARES used before) to 0.558, against OCHRE's 0.741,
+  and the wind coefficient by 16 %. Summer attic MAE against the OCHRE
+  conditioned oracle rose from 2.14 to 2.16 °C. The move is away from
+  OCHRE by design.
+- **Pinning tests:** `infiltration::tests::ela_wind_terrain_factor_is_os_hpxml_sherman_grimsrud`
+  and `conversions::tests::the_site_type_sets_the_terrain`. Both fail when
+  suburban terrain takes OCHRE's rural (0.85, 0.20) or the site type is
+  ignored for rural.

@@ -143,7 +143,7 @@ pub struct ScheduledLoad {
     /// resolved regime is governing.
     zip: hares_types::zip::ResolvedZip,
     /// Per-month scale factors [0..11] applied after load_fraction, e.g. a
-    /// ceiling fan off in winter (divergence D-008).
+    /// ceiling fan off in winter (divergence D-013).
     month_multipliers: Option<[f64; 12]>,
     last_non_zero_power_kw: f64,
     last_non_zero_gas_w: f64,
@@ -244,7 +244,7 @@ impl ScheduledLoad {
         // A daily profile's own month factors are its shape; the load's month
         // multipliers scale whatever schedule it has on top, the profile
         // included. OCHRE only zeroes a month whose multiplier is 0
-        // (divergence D-008).
+        // (divergence D-013).
         self.month_multipliers = parse_month_multipliers(config)?;
         let usage_multiplier = config
             .get_f64(crate::config::KEY_USAGE_MULTIPLIER)
@@ -419,7 +419,7 @@ impl Equipment for ScheduledLoad {
             if let Some(override_kw) = self.power_setpoint_override.take() {
                 (override_kw, 0.0, 0.0)
             } else {
-                // Apply the month multiplier (D-008). Negative schedule
+                // Apply the month multiplier (D-013). Negative schedule
                 // values are silently clamped to zero -- OCHRE treats them as "no load" rather
                 // than generation; this is intentional for e.g. CSV schedules with placeholder
                 // fill values.

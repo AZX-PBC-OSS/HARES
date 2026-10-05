@@ -749,10 +749,35 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
 // ASHRAE Handbook of Fundamentals 2021, Chapter 16.
 // ---------------------------------------------------------------------------
 
+/// OS-HPXML's Sherman-Grimsrud terrain factor `f_t_SG` (airflow.rb:200-221,
+/// 2766): the wind speed at `height_m` above grade on the site's terrain
+/// over that of the 32.8 ft (10 m) weather station in open terrain,
+/// `A_site (h / 32.8 ft)^γ_site / (1.0 (32.8 / 32.8)^0.15)`, with
+/// (A, γ) = (0.85, 0.20) rural, (0.67, 0.25) suburban and (0.47, 0.35)
+/// urban.
+pub fn sherman_grimsrud_terrain_factor(terrain: TerrainClass, height_m: f64) -> f64 {
+    /// The height the power laws are normalised to.
+    const REFERENCE_HEIGHT_FT: f64 = 32.8;
+    /// The weather station's anemometer height and open-terrain law.
+    const STATION_HEIGHT_FT: f64 = 32.8;
+    const STATION_MULTIPLIER: f64 = 1.0;
+    const STATION_EXPONENT: f64 = 0.15;
+    let (multiplier, exponent) = match terrain {
+        TerrainClass::Rural => (0.85, 0.20),
+        TerrainClass::Suburban => (0.67, 0.25),
+        TerrainClass::Urban => (0.47, 0.35),
+    };
+    let station =
+        STATION_MULTIPLIER * (STATION_HEIGHT_FT / REFERENCE_HEIGHT_FT).powf(STATION_EXPONENT);
+    multiplier * (crate::units::length_m_to_ft(height_m) / REFERENCE_HEIGHT_FT).powf(exponent)
+        / station
+}
+
 /// Calculates ELA stack and wind coefficients for a zone, entirely in SI.
 ///
 /// Derives `Cs` and `Cw` from the Walker-Wilson (1998) stack and wind shape
-/// factors using the full ASHRAE two-parameter terrain power law.
+/// factors, with OS-HPXML's Sherman-Grimsrud terrain factor
+/// (`calc_wind_stack_coeffs`, airflow.rb:2749-2771).
 ///
 /// # Parameters
 /// - `hor_lk_frac`: horizontal leakage fraction (fraction of total leakage in
@@ -786,7 +811,7 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
 /// **Wind coefficient:**
 /// `Cw = f_w² / 100`
 /// where `f_w = s_g × (1-R)^(1/3) × f_t` is the wind shape factor,
-/// `f_t` is the ASHRAE terrain correction from `terrain_wind_speed()`,
+/// `f_t` is OS-HPXML's terrain factor ([`sherman_grimsrud_terrain_factor`]),
 /// and `/100` converts dimensionless f_w² to (L/s)²/(cm⁴·(m/s)²) units
 /// (proven from the ELA geometry: `Q = ELA_m² × f_w × v` must equal
 /// `(ELA_cm²/1000) × √(Cw × v²)`, requiring `Cw = f_w²/100`).
@@ -814,12 +839,7 @@ pub fn calculate_ela_coefficients(
     let cs_m2 = f_s * f_s * G_M_S2 * zone_height_m / T_IN_K;
     let stack_coeff = cs_m2 * 1e-2;
 
-    // Terrain wind speed correction f_t using the full ASHRAE HOF Chapter 16
-    // two-parameter power law -- the same model as terrain_wind_speed().
-    // f_t = (δ_met / h_met)^α_met × (H_total / δ_site)^α_site
-    let h_total = (zone_height_m + zone_height_above_ground_m).max(0.1);
-    let f_t = (MET_STATION_DELTA_M / MET_STATION_HEIGHT_M).powf(MET_STATION_ALPHA)
-        * (h_total / terrain.delta_m()).powf(terrain.alpha());
+    let f_t = sherman_grimsrud_terrain_factor(terrain, zone_height_m + zone_height_above_ground_m);
 
     // Wind shape factor f_w (Walker-Wilson 1998, Eq. 13).
     let f_w = shielding * (1.0 - hor_lk_frac).powf(1.0 / 3.0) * f_t;
@@ -829,7 +849,7 @@ pub fn calculate_ela_coefficients(
 
     // The returned coefficients are calibrated for raw EPW/met-station wind speed
     // input (10 m, open-country terrain). Terrain/height correction is embedded in
-    // wind_coeff via f_t (the ASHRAE power-law terrain correction at lines 622–623).
+    // wind_coeff via f_t.
     // The caller must pass the raw met-station wind speed — applying a second
     // terrain correction at runtime would double-correct.
     (stack_coeff, wind_coeff)
@@ -847,8 +867,8 @@ pub const SHIELDING_NORMAL: f64 = 0.5 / 3.0;
 /// # Parameters
 /// - `shielding`: site shielding class from `<ShieldingOfHome>` in HPXML.
 ///   Walker & Wilson (1998) Table 3: `C' = s_g` where `s_g = raw/3`.
-/// - `terrain`: terrain class from `<SiteType>` in HPXML, driving the
-///   ASHRAE HoF 2021 Ch.16 two-parameter power-law wind correction.
+/// - `terrain`: terrain class from `<SiteType>` in HPXML, driving OS-HPXML's
+///   Sherman-Grimsrud terrain factor ([`sherman_grimsrud_terrain_factor`]).
 ///
 /// Non-positive coefficients are a typed error in every build profile: the
 /// inputs are heights from user input, so a violation is reachable.
@@ -891,8 +911,8 @@ pub fn attic_ela_coefficients(
 /// - `foundation_top_m`: the foundation top above grade.
 /// - `shielding`: site shielding class from `<ShieldingOfHome>` in HPXML.
 ///   Walker & Wilson (1998) Table 3: `C' = s_g` where `s_g = raw/3`.
-/// - `terrain`: terrain class from `<SiteType>` in HPXML, driving the
-///   ASHRAE HoF 2021 Ch.16 two-parameter power-law wind correction.
+/// - `terrain`: terrain class from `<SiteType>` in HPXML, driving OS-HPXML's
+///   Sherman-Grimsrud terrain factor ([`sherman_grimsrud_terrain_factor`]).
 ///
 /// Non-positive coefficients are a typed error in every build profile: the
 /// inputs are heights from user input, so a violation is reachable.
@@ -2051,30 +2071,49 @@ mod tests {
         approx_eq(s_shielded, s_exposed, 1e-15);
     }
 
+    /// The wind coefficient's terrain factor is OS-HPXML's Sherman-Grimsrud
+    /// `f_t_SG` (airflow.rb:200-221, 2766): the site multiplier and exponent
+    /// at the zone's top over the 32.8 ft weather station's 1.0 and 0.15,
+    /// `A ((H + H_ag) / 32.8 ft)^γ`. On BEopt_example's attic, 2.361 m of
+    /// hip above a 2.438 m walls top in suburban terrain, f_t is 0.558.
+    #[test]
+    fn ela_wind_terrain_factor_is_os_hpxml_sherman_grimsrud() {
+        let (attic_m, walls_top_m) = (2.360_970_659_726_556_5, 2.4384);
+        let height_ft = (attic_m + walls_top_m) / 0.3048;
+        for (terrain, multiplier, exponent) in [
+            (TerrainClass::Rural, 0.85, 0.20),
+            (TerrainClass::Suburban, 0.67, 0.25),
+            (TerrainClass::Urban, 0.47, 0.35),
+        ] {
+            let f_t: f64 = multiplier * (height_ft / 32.8_f64).powf(exponent);
+            let f_w = (0.5 / 3.0) * (1.0_f64 - 0.75).powf(1.0 / 3.0) * f_t;
+            let (_, wind) = super::attic_ela_coefficients(
+                attic_m,
+                walls_top_m,
+                ShieldingClass::Normal,
+                terrain,
+            )
+            .unwrap();
+            approx_eq(wind, f_w * f_w / 100.0, 1e-15);
+            if terrain == TerrainClass::Suburban {
+                assert!((f_t - 0.558).abs() < 5e-4, "suburban f_t {f_t}");
+            }
+        }
+    }
+
     // --- Regression: exposed rural attic produces correct wind coefficient ---
 
     #[test]
     fn attic_ela_exposed_rural_wind_coeff_matches_reference_value() {
-        // Exposed rural attic must produce the wind coefficient derived from the
-        // ASHRAE terrain power-law, not the hardcoded suburban-normal default.
-        //
-        // Attic: hor_lk_frac = 0.75, attic_height = 1.5 m, building_height = 5.0 m.
-        // h_total = 1.5 + 5.0 = 6.5 m.
-        // ShieldingClass::Exposed: raw = 0.9, shielding = 0.9/3 = 0.3.
-        // TerrainClass::Rural: alpha = 0.14, delta_m = 270.0.
-        //
-        // f_t = (δ_met/h_met)^α_met × (h_total/δ_site)^α_site
-        //     = (270.0/10.0)^0.14 × (6.5/270.0)^0.14
-        //     = (6.5/10.0)^0.14              [α_met = α_rural, δ_met = δ_rural]
-        // f_w = 0.3 × (1 − 0.75)^(1/3) × f_t
-        // wind_coeff = f_w² / 100
-
+        // Attic: hor_lk_frac = 0.75, 1.5 m above a 5.0 m walls top, exposed
+        // (s_g = 0.9 / 3) in rural terrain (OS-HPXML 0.85, 0.20):
+        // f_t = 0.85 (6.5 m / 32.8 ft)^0.20, f_w = 0.3 (1 - 0.75)^(1/3) f_t,
+        // wind_coeff = f_w^2 / 100.
         let (_, w) =
             super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Exposed, TerrainClass::Rural)
                 .unwrap();
 
-        let f_t = (MET_STATION_DELTA_M / MET_STATION_HEIGHT_M).powf(MET_STATION_ALPHA)
-            * (6.5_f64 / RURAL_DELTA_M).powf(RURAL_ALPHA);
+        let f_t = 0.85 * (6.5_f64 / 0.3048 / 32.8).powf(0.20);
         let f_w = (ShieldingClass::Exposed.raw() / 3.0) * (1.0_f64 - 0.75).powf(1.0 / 3.0) * f_t;
         let expected = f_w * f_w / 100.0;
 

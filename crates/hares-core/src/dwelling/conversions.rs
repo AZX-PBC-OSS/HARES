@@ -2831,6 +2831,22 @@ mod tests {
         );
     }
 
+    /// The site's HPXML terrain drives the wind on every leakage path, as in
+    /// OS-HPXML (airflow.rb:200-221); OCHRE assumes rural terrain whatever
+    /// the site (utils/envelope.py:648-649).
+    #[test]
+    fn the_site_type_sets_the_terrain() {
+        use hares_io::hpxml::SiteType;
+        use hares_physics::infiltration::TerrainClass;
+        for (site, terrain) in [
+            (SiteType::Rural, TerrainClass::Rural),
+            (SiteType::Suburban, TerrainClass::Suburban),
+            (SiteType::Urban, TerrainClass::Urban),
+        ] {
+            assert_eq!(super::site_type_to_terrain(Some(site).as_ref()), terrain);
+        }
+    }
+
     /// Exterior film resistance varies with finish_type: stucco (VeryRough)
     /// must produce lower R_ext than vinyl siding (Smooth) at the same wind speed.
     /// This is the regression test for the hardcoded `SurfaceRoughness::Rough` bug.
