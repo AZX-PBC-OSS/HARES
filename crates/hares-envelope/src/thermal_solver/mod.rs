@@ -5898,22 +5898,15 @@ mod tests {
         );
     }
 
-    /// Short-wave internal gain (the visible part of lighting) is absorbed by
-    /// the zone's interior surfaces as transmitted diffuse solar is, in
-    /// proportion to area × inside solar absorptance, and every watt reaches
-    /// a surface node or the zone air.
-    #[test]
-    fn shortwave_gains_are_absorbed_like_transmitted_diffuse_solar() {
-        let env = env_for_temp(20.0, 10.0);
-        let mut solver = interior_lwr_solver(&env);
-        for (surface, (absorptance, radiation_frac)) in solver.config.interior_lwr_zones[0]
-            .surfaces
-            .iter_mut()
-            .zip([(0.7, 0.8), (0.5, 0.9)])
-        {
-            surface.solar_absorptance = absorptance;
-            surface.radiation_frac = radiation_frac;
-        }
+    /// Deposits 80 W of short-wave internal gain on zone 1 of `solver` and
+    /// checks it against `surfaces` (input index, area, inside solar
+    /// absorptance, radiation fraction): each surface takes its share of area
+    /// × absorptance, passes its radiation fraction to its node and the rest
+    /// to the zone air, and every watt is deposited.
+    fn assert_shortwave_absorbed_like_diffuse_solar(
+        solver: &mut ThermalSolver,
+        surfaces: &[(usize, f64, f64, f64)],
+    ) {
         let zone = ZoneId(1);
         let shortwave_w = 80.0;
         let mut accumulator = hares_types::ThermalAccumulator::new(zone);
@@ -5926,32 +5919,101 @@ mod tests {
         let mut u = DVector::zeros(3);
         solver.apply_port_shortwave_inputs(&mut u, &ports);
 
-        let surfaces = &solver.config.interior_lwr_zones[0].surfaces;
-        let total_weight: f64 = surfaces
-            .iter()
-            .map(|s| s.area_m2 * s.solar_absorptance)
-            .sum();
+        let total_weight: f64 = surfaces.iter().map(|&(_, a, abs, _)| a * abs).sum();
         assert!(total_weight > 0.0);
         let air_idx = solver.wiring.zone_sensible_input_indices[&zone];
         let mut air_expected = 0.0;
-        for s in surfaces {
-            let q = shortwave_w * s.area_m2 * s.solar_absorptance / total_weight;
-            if s.input_index != air_idx {
-                assert!(
-                    (u[s.input_index] - q * s.radiation_frac).abs() < 1e-9,
-                    "surface input_index={} receives {}, got {}",
-                    s.input_index,
-                    q * s.radiation_frac,
-                    u[s.input_index]
-                );
-            }
-            air_expected += q * (1.0 - s.radiation_frac);
+        for &(input_index, area, absorptance, radiation_frac) in surfaces {
+            let q = shortwave_w * area * absorptance / total_weight;
+            assert_ne!(input_index, air_idx);
+            assert!(
+                (u[input_index] - q * radiation_frac).abs() < 1e-9,
+                "surface input_index={input_index} receives {}, got {}",
+                q * radiation_frac,
+                u[input_index]
+            );
+            air_expected += q * (1.0 - radiation_frac);
         }
         assert!((u[air_idx] - air_expected).abs() < 1e-9);
         assert!(
             (u.iter().sum::<f64>() - shortwave_w).abs() < 1e-9,
             "every short-wave watt is deposited"
         );
+    }
+
+    const SHORTWAVE_TEST_SURFACES: [(f64, f64); 2] = [(0.7, 0.8), (0.5, 0.9)];
+
+    /// Short-wave internal gain (the visible part of lighting) is absorbed by
+    /// the zone's interior surfaces as transmitted diffuse solar is, in
+    /// proportion to area × inside solar absorptance, and every watt reaches
+    /// a surface node or the zone air (ScriptF interior exchange).
+    #[test]
+    fn shortwave_gains_are_absorbed_like_transmitted_diffuse_solar() {
+        let env = env_for_temp(20.0, 10.0);
+        let mut solver = interior_lwr_solver(&env);
+        for (surface, (absorptance, radiation_frac)) in solver.config.interior_lwr_zones[0]
+            .surfaces
+            .iter_mut()
+            .zip(SHORTWAVE_TEST_SURFACES)
+        {
+            surface.solar_absorptance = absorptance;
+            surface.radiation_frac = radiation_frac;
+        }
+        let surfaces: Vec<_> = solver.config.interior_lwr_zones[0]
+            .surfaces
+            .iter()
+            .map(|s| {
+                (
+                    s.input_index,
+                    s.area_m2,
+                    s.solar_absorptance,
+                    s.radiation_frac,
+                )
+            })
+            .collect();
+        assert_shortwave_absorbed_like_diffuse_solar(&mut solver, &surfaces);
+    }
+
+    /// The same deposit in the default StarMesh mode, where the zone's
+    /// surfaces reach the distribution through `interior_solar_zones` and
+    /// `interior_lwr_zones` is empty.
+    #[test]
+    fn shortwave_gains_are_absorbed_like_transmitted_diffuse_solar_in_star_mesh_mode() {
+        let env = env_for_temp(20.0, 10.0);
+        let mut solver = interior_lwr_solver(&env);
+        let lwr_zone = solver.config.interior_lwr_zones.remove(0);
+        let surfaces: Vec<InteriorSolarSurfaceInfo> = lwr_zone
+            .surfaces
+            .iter()
+            .zip(SHORTWAVE_TEST_SURFACES)
+            .map(
+                |(s, (solar_absorptance, radiation_frac))| InteriorSolarSurfaceInfo {
+                    input_index: Some(s.input_index),
+                    area_m2: s.area_m2,
+                    solar_absorptance,
+                    radiation_frac,
+                    is_floor: s.is_floor,
+                    tilt_deg: s.tilt_deg,
+                    azimuth_deg: s.azimuth_deg,
+                },
+            )
+            .collect();
+        let expected: Vec<_> = surfaces
+            .iter()
+            .map(|s| {
+                (
+                    s.input_index.expect("surface input"),
+                    s.area_m2,
+                    s.solar_absorptance,
+                    s.radiation_frac,
+                )
+            })
+            .collect();
+        solver.config.interior_solar_zones = vec![InteriorSolarZoneConfig {
+            zone_id: lwr_zone.zone_id,
+            surfaces,
+        }];
+        assert_shortwave_absorbed_like_diffuse_solar(&mut solver, &expected);
     }
 
     #[test]

@@ -208,9 +208,11 @@ justification → measured impact → pinning tests.
   from OCHRE.
 - **Pinning tests:**
   `thermal_solver::tests::shortwave_gains_are_absorbed_like_transmitted_diffuse_solar`
-  (every short-wave watt is deposited, by area times absorptance),
+  (every short-wave watt is deposited, by area times absorptance) and its
+  `_in_star_mesh_mode` twin for the default interior mode,
   `crates/hares-envelope/tests/thermal_pathway_physics.rs`
-  (`zone_sensible_breakdown_debug_must_include_radiant_air_residual`). Both
-  fail when the visible part is sent to the zone air.
+  (`zone_sensible_breakdown_debug_must_include_radiant_air_residual`,
+  `star_mesh_breakdown_splits_shortwave_between_surface_and_air`). Each
+  fails when the visible part is sent to the zone air in its mode.
   `production_step_injects_shortwave_gain` fails when the production step
   leaves the short-wave gain out.

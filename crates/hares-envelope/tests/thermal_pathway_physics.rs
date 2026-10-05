@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_envelope::{
-    InteriorLwrZoneConfig, InteriorSurfaceInfo, OutputMapping, StateSpaceModel, StateSpaceWiring,
-    ThermalSolver, ThermalSolverConfig,
+    InteriorLwrZoneConfig, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
+    OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
 };
 use hares_types::{
     DomainSolver, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
@@ -458,10 +458,21 @@ fn rc_network_exposes_ground_column() {
 /// inputs, matching the production path in `build_input_vector`. The breakdown
 /// attributes convective direct, radiant-to-air residual, and radiant-to-surfaces
 /// components separately.
+/// How the one interior surface reaches the solver: through the ScriptF
+/// exchange (`interior_lwr_zones`) or, as in the default StarMesh mode,
+/// through the solar distribution alone (`interior_solar_zones`).
+#[derive(Clone, Copy, Debug)]
+enum InteriorMode {
+    ScriptF,
+    StarMesh,
+}
+
 /// A one-zone solver with one opaque interior surface (10 m², emissivity
 /// 0.9, inside solar absorptance 0.6, radiation_frac 0.5) on input 1 and
 /// zone air on input 2.
-fn one_surface_solver() -> (
+fn one_surface_solver(
+    mode: InteriorMode,
+) -> (
     ThermalSolver,
     hares_types::EnvironmentState,
     InteriorSurfaceInfo,
@@ -516,16 +527,32 @@ fn one_surface_solver() -> (
         driving_temp: None,
     };
 
-    let lwr_zone = InteriorLwrZoneConfig {
-        zone_id: ZONE,
-        surfaces: vec![surface],
-        scriptf: None,
-    };
-
-    let config = ThermalSolverConfig {
-        indoor_zone_id: ZONE,
-        interior_lwr_zones: vec![lwr_zone],
-        ..ThermalSolverConfig::new(ZoneId(1))
+    let config = match mode {
+        InteriorMode::ScriptF => ThermalSolverConfig {
+            indoor_zone_id: ZONE,
+            interior_lwr_zones: vec![InteriorLwrZoneConfig {
+                zone_id: ZONE,
+                surfaces: vec![surface],
+                scriptf: None,
+            }],
+            ..ThermalSolverConfig::new(ZoneId(1))
+        },
+        InteriorMode::StarMesh => ThermalSolverConfig {
+            indoor_zone_id: ZONE,
+            interior_solar_zones: vec![InteriorSolarZoneConfig {
+                zone_id: ZONE,
+                surfaces: vec![InteriorSolarSurfaceInfo {
+                    input_index: Some(surface.input_index),
+                    area_m2: surface.area_m2,
+                    solar_absorptance: surface.solar_absorptance,
+                    radiation_frac: surface.radiation_frac,
+                    is_floor: surface.is_floor,
+                    tilt_deg: surface.tilt_deg,
+                    azimuth_deg: surface.azimuth_deg,
+                }],
+            }],
+            ..ThermalSolverConfig::new(ZoneId(1))
+        },
     };
 
     let env = make_env(20.0, -5.0, 10.0);
@@ -535,7 +562,7 @@ fn one_surface_solver() -> (
 
 #[test]
 fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
-    let (mut solver, env, surface, _) = one_surface_solver();
+    let (mut solver, env, surface, _) = one_surface_solver(InteriorMode::ScriptF);
 
     // Port: 700 W convective + 300 W radiant (30/70 split, BESTEST 900/600)
     // + 100 W short-wave.
@@ -617,11 +644,40 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
 
 /// The production step injects short-wave gain into the zone (a zone given
 /// 400 W of short-wave ends warmer than one given none), and the component
-/// gains report it as an indoor internal gain on the short-wave path.
+/// gains report it as an indoor internal gain on the short-wave path, in
+/// both interior modes.
 #[test]
 fn production_step_injects_shortwave_gain() {
-    let (mut lit, env, _, dt) = one_surface_solver();
-    let (mut dark, _, _, _) = one_surface_solver();
+    for mode in [InteriorMode::ScriptF, InteriorMode::StarMesh] {
+        assert_production_step_injects_shortwave_gain(mode);
+    }
+}
+
+/// In the default StarMesh mode the short-wave gain is split at its one
+/// absorbing surface as in ScriptF mode: the radiation fraction to the
+/// surface node, the rest to the zone air.
+#[test]
+fn star_mesh_breakdown_splits_shortwave_between_surface_and_air() {
+    let (mut solver, env, surface, _) = one_surface_solver(InteriorMode::StarMesh);
+    let shortwave_w = 100.0_f64;
+    let mut acc = ThermalAccumulator::new(ZONE);
+    acc.shortwave_gain_w = shortwave_w;
+    let ports = PortSlots {
+        thermal: vec![acc],
+        ..Default::default()
+    };
+    let breakdown = solver.zone_sensible_breakdown_debug(&ports, &env).unwrap();
+    assert!(
+        (breakdown.shortwave_to_air_w - shortwave_w * (1.0 - surface.radiation_frac)).abs() < 1e-6
+    );
+    assert!(
+        (breakdown.shortwave_to_surfaces_w - shortwave_w * surface.radiation_frac).abs() < 1e-6
+    );
+}
+
+fn assert_production_step_injects_shortwave_gain(mode: InteriorMode) {
+    let (mut lit, env, _, dt) = one_surface_solver(mode);
+    let (mut dark, _, _, _) = one_surface_solver(mode);
     let mut acc = ThermalAccumulator::new(ZONE);
     acc.shortwave_gain_w = 400.0;
     let lit_ports = PortSlots {
