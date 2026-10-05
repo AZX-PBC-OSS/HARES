@@ -917,9 +917,14 @@ class _StallingServer:
 
 # A fleet of four buildings on two download workers, every download from the
 # stalling server given as argv[1]; argv[2] is the metadata, argv[3] the cache.
+# A runner that starts the suite with SIGINT ignored passes that on to the
+# child, so the child takes Ctrl-C the way a terminal session does.
 _FLEET_OF_FOUR_ON_TWO_WORKERS = """
+import signal
 import sys
 from pathlib import Path
+
+signal.signal(signal.SIGINT, signal.default_int_handler)
 
 from ochre_next.data import resstock
 
