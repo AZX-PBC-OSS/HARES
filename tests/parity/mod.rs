@@ -64,21 +64,31 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // that the current residuals are physically correct. Root causes:
         // zone-temp residuals → T-0075 envelope conformance; HVAC-energy
         // residuals → step-0 ideal-capacity back-solve noted above.
-        ("cz2a_gas_furnace_ac_res_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.70),
+        //
+        // Internal-gain split (2026-10-05): appliance, plug-load and lighting
+        // heat now enters the zone as OS-HPXML's convective, radiant and
+        // visible parts. The nine zone-temperature bands that improved, and
+        // the cz5a_minisplit_gas_wh HVAC-energy band, are re-sized to the
+        // observed residual plus 0.0086 to 0.0168, rounded up to the next
+        // 0.01. With every gain made convective again, seven of the nine
+        // zone-temperature bands fail; cz2a_gas_furnace_ac_res_wh (0.6895),
+        // cz4a_ashp_hpwh (0.8880) and the mini-split HVAC-energy band
+        // (64.19 %) stay inside theirs.
+        ("cz2a_gas_furnace_ac_res_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.69),
         ("cz2a_gas_furnace_ac_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(45.5),
         // cz2a_pv_ev: step-0 ideal-capacity back-solve justification above;
         // values re-sized to observed residual + ~1% on the first real run.
         ("cz2a_pv_ev", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.91),
         ("cz2a_pv_ev", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(208.0),
         ("cz2a_pv_ev", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(48.2),
-        ("cz4a_ashp_hpwh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.93),
+        ("cz4a_ashp_hpwh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.90),
         ("cz4a_ashp_hpwh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(168.5),
         ("cz4a_ashp_hpwh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(30.7),
-        ("cz4a_battery_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.89),
+        ("cz4a_battery_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.88),
         ("cz4a_battery_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(111.2),
-        ("cz4a_pv_battery", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.86),
+        ("cz4a_pv_battery", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.85),
         ("cz4a_pv_battery", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(102.1),
-        ("cz4a_pv_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.90),
+        ("cz4a_pv_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.89),
         ("cz4a_pv_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(157.5),
         // Lighting-parity correction (2026-09-13): garage lighting is no
         // longer created for garage-less buildings (OCHRE hpxml.py:1703-1709)
@@ -86,7 +96,7 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // (OCHRE add_simple_schedule_params). Residuals re-measured and bands
         // re-sized to observed + ~1%.
         ("cz4a_pv_only", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(26.0),
-        ("cz5a_ev_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.89),
+        ("cz5a_ev_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.88),
         ("cz5a_ev_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(111.2),
         // cz5a_ev_charging: the charging-EV fixture — same building as
         // cz5a_ev_only, so the same inherited drift (zone-temp → T-0075
@@ -96,15 +106,15 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // site energy, now dominated by the EV's 11.5 kW charge — passes at
         // the 25% DEFAULT band (measured 1.36%): the EV charging power
         // cross-check against OCHRE's event-driven charge needs no override.
-        ("cz5a_ev_charging", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.90),
+        ("cz5a_ev_charging", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.88),
         ("cz5a_ev_charging", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(112.0),
         // Lighting-parity correction (2026-09-13), see cz4a_pv_only note.
         ("cz5a_minisplit_gas_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(1.75),
-        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(64.9),
+        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(64.8),
         ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(92.5),
-        ("cz6b_pv_battery_ev", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.88),
+        ("cz6b_pv_battery_ev", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.87),
         ("cz6b_pv_battery_ev", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(102.1),
-        ("cz6b_resistance_res_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.75),
+        ("cz6b_resistance_res_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.72),
         // Lighting-parity correction (2026-09-13), see cz4a_pv_only note:
         // removing phantom garage lighting shifts this January midnight
         // window's small HVAC integral (step-0 back-solve dominated).
