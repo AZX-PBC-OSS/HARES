@@ -1739,6 +1739,11 @@ pub struct Dwelling {
     /// steps through the latest timestep, held against
     /// `SimulationConfig::max_consecutive_step_failures`.
     consecutive_step_failures: Vec<u32>,
+    /// The error that ended the run in the middle of a step (the failure
+    /// budget exceeded). Equipment earlier in that step already stepped, so
+    /// the step cannot be retried: every later step returns this error
+    /// without stepping anything.
+    terminal_error: Option<HaresError>,
     pub recorder: Option<StreamingRecorder>,
     pub rng: ChaCha8Rng,
     /// Bounded warning buffer (first [`WarningLog::CAPACITY`] messages kept,
@@ -2796,6 +2801,7 @@ fn build_from_blueprint_inner(
         rollback_ports: PortSlots::default(),
         step_failed: Vec::new(),
         consecutive_step_failures: Vec::new(),
+        terminal_error: None,
         recorder: None,
         roster: RosterCaches::default(),
         rng,
@@ -4291,11 +4297,13 @@ impl Dwelling {
         *streak = streak.saturating_add(1);
         let budget = self.sim_config.max_consecutive_step_failures;
         if *streak > budget {
-            return Err(HaresError::Simulation(format!(
+            let ended = HaresError::Simulation(format!(
                 "equipment '{}' failed {streak} consecutive steps, more than \
                  max_consecutive_step_failures = {budget}; last failure: {err}",
                 self.equipment[idx].descriptor().name
-            )));
+            ));
+            self.terminal_error = Some(ended.clone());
+            return Err(ended);
         }
         Ok(())
     }
@@ -4344,6 +4352,11 @@ impl Dwelling {
     }
 
     fn run_timestep(&mut self, record_output: bool) -> Result<()> {
+        if let Some(ended) = &self.terminal_error {
+            return Err(HaresError::Simulation(format!(
+                "the run ended at an earlier step and cannot continue: {ended}"
+            )));
+        }
         if self.failed {
             return Err(HaresError::Simulation(
                 "dwelling permanently failed after prior panic, cannot step".to_string(),
@@ -13766,13 +13779,22 @@ master_seed = 0
                     telemetry_fields: vec![],
                     zone_type: None,
                 },
-                telemetry: Telemetry::default(),
+                telemetry: {
+                    let mut telemetry = Telemetry::default();
+                    telemetry.insert("steps_taken", 0.0);
+                    telemetry
+                },
                 core_output: CoreOutput::default(),
                 power_w,
                 outcomes: outcomes.iter().copied().collect(),
                 ports: vec![PortDeclaration::electrical()],
                 heats_zone: false,
             }
+        }
+
+        fn with_id(mut self, id: u32) -> Self {
+            self.descriptor.id = EquipmentId(id);
+            self
         }
 
         /// An electric heater: it also delivers `power_w` of HVAC heating to
@@ -13852,6 +13874,8 @@ master_seed = 0
             _dt: Duration,
             ports: &mut PortSlots,
         ) -> std::result::Result<(), hares_types::HaresError> {
+            let steps_taken = self.telemetry.get("steps_taken").unwrap_or(0.0);
+            self.telemetry.set("steps_taken", steps_taken + 1.0);
             self.book(ports)?;
             if !self.outcomes.pop_front().unwrap_or(false) {
                 return Err(HaresError::Equipment("simulated step failure".to_string()));
@@ -14061,6 +14085,48 @@ master_seed = 0
                 .is_err(),
             "replacement is held to the same rule"
         );
+    }
+
+    /// The budget error ends the run: every later step returns it without
+    /// stepping any equipment again, so nothing is stepped twice for one
+    /// timestep.
+    #[test]
+    fn the_run_stays_ended_after_the_failure_budget_error() {
+        let mut dwelling = bestest_dwelling();
+        replace_equipment_for_test(
+            &mut dwelling,
+            vec![
+                Box::new(FlakyPortEquipment::new("Steady", 500.0, &[true; 10]).with_id(1003)),
+                Box::new(FlakyPortEquipment::new(
+                    "Flaky",
+                    300.0,
+                    &[true, false, false, true],
+                )),
+            ],
+        );
+        dwelling.run_timestep(false).expect("both succeed");
+        dwelling
+            .run_timestep(false)
+            .expect("one failure is tolerated");
+        let ended = dwelling
+            .run_timestep(false)
+            .expect_err("the second consecutive failure ends the run")
+            .to_string();
+        let steady_steps = |d: &Dwelling| d.equipment[0].telemetry().get("steps_taken");
+        assert_eq!(steady_steps(&dwelling), Some(3.0));
+        for _ in 0..2 {
+            let again = dwelling
+                .run_timestep(false)
+                .expect_err("the run has ended")
+                .to_string();
+            assert!(again.contains(&ended), "{again}");
+            assert_eq!(steady_steps(&dwelling), Some(3.0));
+        }
+        let refused = dwelling
+            .save_checkpoint()
+            .expect_err("a half-stepped dwelling is not a resumable state")
+            .to_string();
+        assert!(refused.contains(&ended), "{refused}");
     }
 
     #[test]

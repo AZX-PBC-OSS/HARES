@@ -20,6 +20,12 @@ type Result<T> = std::result::Result<T, HaresError>;
 impl Dwelling {
     /// Snapshot current simulation state to an in-memory checkpoint struct.
     pub fn save_checkpoint(&self) -> Result<DwellingCheckpoint> {
+        if let Some(ended) = &self.terminal_error {
+            return Err(HaresError::Simulation(format!(
+                "the run ended part way through a step, so its state is not a \
+                 resumable checkpoint: {ended}"
+            )));
+        }
         // humidity_ratios is a HashMap; sort by zone so serialized checkpoints
         // of identical state are byte-identical (restore is order-insensitive).
         let mut humidity_states: Vec<(ZoneId, f64)> = self

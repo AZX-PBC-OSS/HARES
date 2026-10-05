@@ -140,7 +140,9 @@ configuration, not from one step's inputs, so the run errors
 one equipment fails more than `SimulationConfig::max_consecutive_step_failures`
 consecutive steps. The default, 1, tolerates an isolated failure; 0
 tolerates none. The streak is reset by a successful step and is part of the
-checkpoint.
+checkpoint. The error arrives part way through a step, after earlier
+equipment has already stepped, so the run is over: every later step and
+`save_checkpoint` return it again without stepping or snapshotting anything.
 
 `ExecutionStage::EnvelopeResolution` is reserved for the domain solvers:
 equipment declaring it is rejected at registration, since no step loop runs
