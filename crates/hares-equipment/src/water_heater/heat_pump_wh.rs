@@ -32,7 +32,10 @@ use super::hpwh_compressor::{
 use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::wh_config::HeatPumpWaterHeaterConfig;
-use super::{hysteresis_call, parse_usize, tank_thermostat_update, weighted_average_tank_temp};
+use super::{
+    hysteresis_call, parse_usize, restored_tank_deadband_c, tank_thermostat_update,
+    weighted_average_tank_temp,
+};
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 use crate::hvac::helpers::loop_id_from_config;
 
@@ -101,6 +104,8 @@ pub struct HeatPumpWH {
     target_setpoint_c: f64,
     setpoint_ramp_rate_c_per_s: Option<f64>,
     deadband_c: f64,
+    /// The configured deadband, which the release form restores.
+    configured_deadband_c: f64,
     duty_cycle: f64,
     /// Per-component duty cycle override for compressor (1.0 = full, 0.0 = off).
     hp_duty_cycle: f64,
@@ -277,6 +282,7 @@ impl HeatPumpWH {
             target_setpoint_c: DEFAULT_SETPOINT_C,
             setpoint_ramp_rate_c_per_s: None,
             deadband_c: DEFAULT_DEADBAND_C,
+            configured_deadband_c: DEFAULT_DEADBAND_C,
             duty_cycle: 1.0,
             hp_duty_cycle: 1.0,
             er_duty_cycle: 1.0,
@@ -403,6 +409,7 @@ impl HeatPumpWH {
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
         self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
+        self.configured_deadband_c = self.deadband_c;
         self.setpoint_ramp_rate_c_per_s = None;
         self.target_setpoint_c = self.setpoint_c;
 
@@ -1247,7 +1254,7 @@ impl Equipment for HeatPumpWH {
         )?;
         self.setpoint_c = decoded.setpoint_c;
         self.target_setpoint_c = decoded.target_setpoint_c;
-        self.deadband_c = decoded.deadband_c;
+        self.deadband_c = restored_tank_deadband_c(decoded.deadband_c)?;
         self.compressor_on = decoded.compressor_on;
         self.backup_on = decoded.backup_on;
         self.duty_cycle = decoded.duty_cycle;
@@ -1353,9 +1360,7 @@ impl Equipment for HeatPumpWH {
                         self.setpoint_c = sp;
                     }
                 }
-                if let Some(band_c) = update.band_c {
-                    self.deadband_c = band_c;
-                }
+                self.deadband_c = update.deadband_c(self.deadband_c, self.configured_deadband_c);
             }
             ControlSignal::DutyCycle {
                 on_fraction,
@@ -1721,6 +1726,19 @@ mod tests {
         })
         .unwrap();
         assert_eq!(eq.deadband_c, 3.0);
+        eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
+        assert_eq!(
+            eq.deadband_c, configured,
+            "the release restores the configured deadband"
+        );
+        let setpoint = eq.setpoint_c;
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: Some(50.0),
+            deadband_c: None,
+        })
+        .expect_err("a water heater has no cooling setpoint");
+        assert_eq!(eq.setpoint_c, setpoint);
     }
 
     #[test]

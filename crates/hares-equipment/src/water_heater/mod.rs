@@ -71,7 +71,8 @@ pub(crate) const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
 #[cfg(test)]
 use hares_types::BoundaryPolicy;
 use hares_types::{
-    EnvironmentState, HaresError, LoopId, PortSlots, ScheduleSource, thermal_setpoint_band_c,
+    EnvironmentState, HaresError, LoopId, PortSlots, ScheduleSource, ThermostatBandClass,
+    thermal_setpoint_band_c, validate_thermostat_band_c,
 };
 
 use crate::EquipmentRegistry;
@@ -234,13 +235,35 @@ pub(super) struct TankThermostatUpdate {
     pub setpoint_c: Option<f64>,
     /// The tank deadband, from `deadband_c` (see `hares_types::thermostat_band`).
     pub band_c: Option<f64>,
+    /// The release form: the deadband returns to its configured value.
+    pub release: bool,
+}
+
+impl TankThermostatUpdate {
+    /// The deadband after the update: the signalled band, the configured
+    /// one on release, otherwise the current one.
+    pub fn deadband_c(&self, current_c: f64, configured_c: f64) -> f64 {
+        match (self.band_c, self.release) {
+            (Some(band_c), _) => band_c,
+            (None, true) => configured_c,
+            (None, false) => current_c,
+        }
+    }
+}
+
+/// A checkpointed tank deadband, held to the tank class like any other
+/// source of it.
+pub(super) fn restored_tank_deadband_c(deadband_c: f64) -> crate::Result<f64> {
+    validate_thermostat_band_c(ThermostatBandClass::Tank, "deadband_c", deadband_c)?;
+    Ok(deadband_c)
 }
 
 /// Reads a `ThermalSetpoint` under the contract every water heater shares
 /// with HVAC: a named setpoint overrides it, `deadband_c` is the switching
-/// band and comes only with a named setpoint, and the release form sets
-/// nothing. A water heater has no cooling setpoint, so naming one is an
-/// error rather than a value substituted for the tank setpoint.
+/// band, held to the tank class, and comes only with a named setpoint, and
+/// the release form returns the deadband to its configured value. A water
+/// heater has no cooling setpoint, so naming one is an error rather than a
+/// value substituted for the tank setpoint.
 pub(super) fn tank_thermostat_update(
     heating_setpoint_c: Option<f64>,
     cooling_setpoint_c: Option<f64>,
@@ -260,7 +283,13 @@ pub(super) fn tank_thermostat_update(
     }
     Ok(TankThermostatUpdate {
         setpoint_c: heating_setpoint_c,
-        band_c: thermal_setpoint_band_c(heating_setpoint_c, cooling_setpoint_c, deadband_c)?,
+        band_c: thermal_setpoint_band_c(
+            ThermostatBandClass::Tank,
+            heating_setpoint_c,
+            cooling_setpoint_c,
+            deadband_c,
+        )?,
+        release: heating_setpoint_c.is_none(),
     })
 }
 

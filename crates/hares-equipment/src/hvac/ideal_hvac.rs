@@ -11,7 +11,8 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, IdealCapacityMode, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory,
+    ThermostatBandClass, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -113,6 +114,9 @@ pub struct IdealHvac {
     /// independently of the FSM hysteresis, so Deadband does not block
     /// solver back-calculation in ideal capacity mode.
     cached_ideal_target: Option<(ZoneId, f64)>,
+    /// An error `update_control()` met and cannot return (the equipment's
+    /// zone missing from the environment); the next step returns it.
+    control_error: Option<HaresError>,
     /// Cooling sensible heat ratio (fraction of capacity that is sensible).
     /// Used to split ideal cooling capacity into sensible and latent components.
     /// Defaults to 1.0 (no latent); set from config "shr" key.
@@ -201,6 +205,7 @@ impl IdealHvac {
             load_fraction: 1.0,
             last_sim_time: None,
             cached_ideal_target: None,
+            control_error: None,
             shr: 1.0,
             rated_fan_power_w: 0.0,
             rated_eir: 1.0,
@@ -500,10 +505,11 @@ impl Equipment for IdealHvac {
             0.0
         };
 
+        self.thermostat_fsm.thermostat.band_class = ThermostatBandClass::Ideal;
+        self.thermostat_fsm.validate_configuration(env)?;
         self.thermostat_fsm.static_setpoints = self
             .effective_setpoints()
             .reconcile_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c);
-        self.thermostat_fsm.thermostat.validate(env)?;
         // End-use routing reads the descriptor before the first step: label
         // the unit by the comfort bound its zone starts beyond.
         if let Ok(zone_temp_c) = lookup_zone_temp(env, zone) {
@@ -538,7 +544,16 @@ impl Equipment for IdealHvac {
             return OperatingMode::Off;
         }
 
-        let mode = self.update_mode(env).unwrap_or(ThermostatMode::Deadband);
+        // A missing zone cannot be reported from here: it fails the step that
+        // follows, before the step changes any state.
+        let mode = match self.update_mode(env) {
+            Ok(mode) => mode,
+            Err(err) => {
+                self.control_error = Some(err);
+                self.cached_ideal_target = None;
+                return OperatingMode::Off;
+            }
+        };
         self.route_end_use_by_mode(mode);
 
         // Compute the ideal solver target independently of FSM hysteresis.
@@ -595,6 +610,9 @@ impl Equipment for IdealHvac {
             );
         }
 
+        if let Some(err) = self.control_error.take() {
+            return Err(err);
+        }
         let zone = self.served_zone()?;
         let (t_indoor_c, t_outdoor_c) = if !self.use_ideal_cached {
             (lookup_zone_temp(env, zone)?, env.weather.outdoor_temp_c)
@@ -893,7 +911,8 @@ impl Equipment for IdealHvac {
         self.thermostat_fsm.mode_start_at = decoded.mode_start_at;
         self.load_fraction = decoded.load_fraction;
         self.last_sim_time = decoded.last_sim_time;
-        self.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
+        self.thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         // Rebuild the restore-instant output from the persisted values —
         // mirroring the step's own literal. `ideal_capacity_w` (the
         // persisted thermal output) and `current_target_c` (the
@@ -3239,20 +3258,82 @@ mod tests {
     }
 
     #[test]
-    fn signal_arm_rejects_a_band_below_a_thermostat_band_without_state_change() {
+    fn signal_arm_rejects_an_invalid_band_without_state_change() {
         use hares_types::ControlSignal;
 
         let mut eq = init_ideal("IH-band", 20.0, 26.0, 18.0);
         let before = eq.thermostat_fsm.clone();
-        for db in [f64::NAN, 0.0, 5e-324, 1e-17] {
+        for db in [f64::NAN, -0.1, 10.5] {
             eq.apply_signal(&ControlSignal::ThermalSetpoint {
                 heating_setpoint_c: Some(21.0),
                 cooling_setpoint_c: None,
                 deadband_c: Some(db),
             })
-            .expect_err("a band below a thermostat band must be rejected");
+            .expect_err("a band outside the ideal range must be rejected");
             assert_eq!(eq.thermostat_fsm, before, "{db}: no state may change");
         }
+    }
+
+    /// ASHRAE 140's ideal thermostat (and EnergyPlus ideal loads) has no
+    /// switching band, and an ideal unit builds no equivalent battery for a
+    /// zero band to collapse: a zero band is valid, configured or signalled.
+    #[test]
+    fn an_ideal_thermostat_accepts_a_zero_band() {
+        use hares_types::ControlSignal;
+
+        let mut cfg = ideal_config("IH-zero", 20.0, 27.0);
+        cfg.test_extras_mut()
+            .insert("deadband_c".into(), 0.0.into());
+        let env = env(18.0, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env).expect("a zero ideal band is valid");
+        assert_eq!(eq.thermostat_fsm.thermostat.hysteresis_c, 0.0);
+
+        let mut eq = init_ideal("IH-zero-signal", 20.0, 27.0, 18.0);
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: None,
+            deadband_c: Some(0.0),
+        })
+        .expect("a zero band signalled to an ideal unit is valid");
+        assert_eq!(eq.thermostat_fsm.thermostat.hysteresis_c, 0.0);
+    }
+
+    /// A missing zone is an error at the step, not an assumed 21 C.
+    #[test]
+    fn a_step_without_its_zone_errors_instead_of_assuming_a_temperature() {
+        for mode in ["on", "off"] {
+            let mut cfg = ideal_config("IH-no-zone", 20.0, 27.0);
+            cfg.test_extras_mut()
+                .insert("ideal_capacity_mode".into(), mode.into());
+            let mut eq = IdealHvac::new(cfg.clone());
+            eq.init(&cfg, &env(18.0, 300, 0)).unwrap();
+            let mut no_zone = env(18.0, 300, 0);
+            no_zone.zones.clear();
+            eq.update_control(&no_zone);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            let err = eq
+                .step(&no_zone, Duration::from_secs(300), &mut ports)
+                .expect_err("the zone temperature is required");
+            assert!(err.to_string().contains("not found"), "{mode}: {err}");
+        }
+    }
+
+    /// The configured field is named in the error and the reason fits the
+    /// bound that was crossed.
+    #[test]
+    fn an_ideal_band_error_names_the_configured_field_and_the_bound() {
+        let mut cfg = ideal_config("IH-neg", 20.0, 27.0);
+        cfg.test_extras_mut()
+            .insert("deadband_c".into(), (-1.0).into());
+        let mut eq = IdealHvac::new(cfg.clone());
+        let msg = eq.init(&cfg, &env(18.0, 300, 0)).unwrap_err().to_string();
+        assert!(msg.contains("deadband_c"), "{msg}");
+        assert!(msg.contains("negative"), "{msg}");
     }
 
     #[test]

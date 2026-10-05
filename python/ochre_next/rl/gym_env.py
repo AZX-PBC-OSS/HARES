@@ -13,7 +13,7 @@ import warnings
 import numpy as np
 
 from ochre_next._hares import (
-    MAX_THERMOSTAT_BAND_C,
+    MAX_TANK_THERMOSTAT_BAND_C,
     MIN_THERMOSTAT_BAND_C,
     ControlSignal as PyControlSignal,
     Dwelling as PyDwelling,
@@ -200,7 +200,9 @@ def field_bounds(field: str) -> tuple[float, float]:
     if name in {"setpoint_c", "heat_c", "cool_c", "heating_setpoint_c", "cooling_setpoint_c"}:
         return (-50.0, 80.0)
     if name in {"deadband_c"}:
-        return (MIN_THERMOSTAT_BAND_C, MAX_THERMOSTAT_BAND_C)
+        # From the sensor-resolution floor to the widest tank thermostat; the
+        # target equipment holds the band to its own thermostat class.
+        return (MIN_THERMOSTAT_BAND_C, MAX_TANK_THERMOSTAT_BAND_C)
     return (_BROAD_LOW, _BROAD_HIGH)
 
 

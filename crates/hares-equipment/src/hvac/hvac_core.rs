@@ -580,8 +580,9 @@ impl HvacEquipment {
                 .unwrap_or(DEFAULT_MIN_CYCLE_TIME_S),
             use_ideal_capacity: extract_bool(config, "use_ideal_capacity").unwrap_or(false),
             deadband_offset: extract_numeric(config, "deadband_offset").unwrap_or(0.2),
+            band_class: hares_types::ThermostatBandClass::Cycling,
         };
-        self.thermostat_fsm.thermostat.validate(env)?;
+        self.thermostat_fsm.validate_configuration(env)?;
 
         if let Some(value) = extract_numeric(config, "heating_setpoint_c") {
             self.thermostat_fsm.static_setpoints.heating_c = value;

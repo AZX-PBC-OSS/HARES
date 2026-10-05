@@ -76,9 +76,12 @@ fn field_bounds(field: &str) -> (f64, f64) {
         "setpoint_c" | "heat_c" | "cool_c" | "heating_setpoint_c" | "cooling_setpoint_c" => {
             (-50.0, 80.0)
         }
+        // The band a real thermostat can hold, from the sensor-resolution
+        // floor to the widest tank thermostat; the target holds it to its
+        // own class.
         "deadband_c" => (
             hares_types::MIN_THERMOSTAT_BAND_C,
-            hares_types::MAX_THERMOSTAT_BAND_C,
+            hares_types::MAX_TANK_THERMOSTAT_BAND_C,
         ),
         _ => (-1.0e6, 1.0e6),
     }
@@ -106,7 +109,7 @@ fn build_control_signal(
                 .or(lower.get("cool_c"))
                 .copied();
             let deadband_c = lower.get("deadband_c").copied();
-            hares_types::thermal_setpoint_band_c(heat_c, cool_c, deadband_c)
+            hares_types::validate_thermal_setpoint_deadband(heat_c, cool_c, deadband_c)
                 .map_err(|err| err.to_string())?;
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c: heat_c,
@@ -598,7 +601,7 @@ mod tests {
             field_bounds("deadband_c"),
             (
                 hares_types::MIN_THERMOSTAT_BAND_C,
-                hares_types::MAX_THERMOSTAT_BAND_C
+                hares_types::MAX_TANK_THERMOSTAT_BAND_C
             )
         );
     }

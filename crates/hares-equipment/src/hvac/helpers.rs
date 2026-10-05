@@ -504,7 +504,7 @@ pub fn register_ebm_telemetry_keys(telemetry: &mut Telemetry) {
 ///
 /// The window's own errors, and an error when the equipment's zone is not
 /// in `env`.
-pub fn step_equivalent_battery(
+pub(crate) fn step_equivalent_battery(
     hvac: &HvacEquipment,
     env: &EnvironmentState,
 ) -> crate::Result<Option<EquivalentBatteryWindow>> {
@@ -532,7 +532,7 @@ pub fn step_equivalent_battery(
 /// # Errors
 ///
 /// [`EquivalentBatteryWindow::with_load`]'s error for a negative load.
-pub fn write_ebm_telemetry(
+pub(crate) fn write_ebm_telemetry(
     window: Option<EquivalentBatteryWindow>,
     capacity_ideal_w: f64,
     telemetry: &mut Telemetry,

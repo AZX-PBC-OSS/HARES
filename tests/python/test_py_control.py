@@ -215,7 +215,7 @@ class TestControlSignalConstructors:
 
     @pytest.mark.parametrize(
         ("heat_c", "deadband_c"),
-        [(None, 1.0), (None, 0.0), (20.0, 0.0), (20.0, 1e-17), (20.0, 30.0)],
+        [(None, 1.0), (None, 0.0), (20.0, -0.1), (20.0, 45.0), (20.0, float("nan"))],
     )
     def test_thermal_setpoint_rejects_a_deadband_outside_the_contract(self, heat_c, deadband_c):
         with pytest.raises(ValueError):
@@ -232,6 +232,8 @@ class TestControlSignalConstructors:
     def test_thermal_setpoint_release_form_carries_nothing(self):
         d = ControlSignal.thermal_setpoint().to_dict()
         assert d == {"type": "ThermalSetpoint"}
+        assert ControlSignal.thermal_setpoint_release().to_dict() == d
+        assert "ThermalSetpoint" in repr(Signal.thermal_setpoint_release())
 
     def test_thermal_setpoint_delta(self):
         sig = ControlSignal.thermal_setpoint_delta(

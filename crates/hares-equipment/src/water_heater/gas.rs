@@ -21,8 +21,8 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
-    hysteresis_call, parse_usize, resolve_storage_step_inputs, tank_thermostat_update,
-    weighted_average_tank_temp,
+    hysteresis_call, parse_usize, resolve_storage_step_inputs, restored_tank_deadband_c,
+    tank_thermostat_update, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 use crate::hvac::helpers::loop_id_from_config;
@@ -107,6 +107,8 @@ pub struct GasWH {
     fan_power_w: f64,
     setpoint_c: f64,
     deadband_c: f64,
+    /// The configured deadband, which the release form restores.
+    configured_deadband_c: f64,
     duty_cycle: f64,
     mode_override: Option<OperatingMode>,
     burner_on: bool,
@@ -213,6 +215,7 @@ impl GasWH {
             fan_power_w: 0.0,
             setpoint_c: DEFAULT_SETPOINT_C,
             deadband_c: DEFAULT_DEADBAND_C,
+            configured_deadband_c: DEFAULT_DEADBAND_C,
             duty_cycle: 1.0,
             mode_override: None,
             burner_on: false,
@@ -344,6 +347,7 @@ impl GasWH {
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
         self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
+        self.configured_deadband_c = self.deadband_c;
         self.duty_cycle = 1.0;
         self.mode_override = None;
         self.burner_on = false;
@@ -796,7 +800,7 @@ impl Equipment for GasWH {
             self.descriptor().id,
         )?;
         self.setpoint_c = decoded.setpoint_c;
-        self.deadband_c = decoded.deadband_c;
+        self.deadband_c = restored_tank_deadband_c(decoded.deadband_c)?;
         self.burner_on = decoded.burner_on;
         self.duty_cycle = decoded.duty_cycle;
         self.mode_override = decoded.mode_override;
@@ -886,9 +890,7 @@ impl Equipment for GasWH {
                 if let Some(sp) = update.setpoint_c {
                     self.setpoint_c = sp;
                 }
-                if let Some(band_c) = update.band_c {
-                    self.deadband_c = band_c;
-                }
+                self.deadband_c = update.deadband_c(self.deadband_c, self.configured_deadband_c);
             }
             ControlSignal::DutyCycle { on_fraction, .. } => {
                 if !on_fraction.is_finite() || !(0.0..=1.0).contains(on_fraction) {
@@ -1296,6 +1298,19 @@ mod tests {
         })
         .unwrap();
         assert_eq!(eq.deadband_c, 3.0);
+        eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
+        assert_eq!(
+            eq.deadband_c, configured,
+            "the release restores the configured deadband"
+        );
+        let setpoint = eq.setpoint_c;
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: Some(50.0),
+            deadband_c: None,
+        })
+        .expect_err("a water heater has no cooling setpoint");
+        assert_eq!(eq.setpoint_c, setpoint);
     }
 
     /// Reactive-power contract for the gas WH draft-inducer fan: the class

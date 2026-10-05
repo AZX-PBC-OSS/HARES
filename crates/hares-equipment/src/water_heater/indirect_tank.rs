@@ -28,8 +28,8 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
-    hysteresis_call, parse_usize, resolve_storage_step_inputs, tank_thermostat_update,
-    weighted_average_tank_temp,
+    hysteresis_call, parse_usize, resolve_storage_step_inputs, restored_tank_deadband_c,
+    tank_thermostat_update, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 
@@ -81,6 +81,8 @@ pub struct IndirectTank {
     hx_ua_w_per_k: f64,
     setpoint_c: f64,
     deadband_c: f64,
+    /// The configured deadband, which the release form restores.
+    configured_deadband_c: f64,
     max_tank_temp_c: f64,
     heating_on: bool,
     duty_cycle: f64,
@@ -159,6 +161,7 @@ impl IndirectTank {
             hx_ua_w_per_k: DEFAULT_HX_UA_W_PER_K,
             setpoint_c: DEFAULT_SETPOINT_C,
             deadband_c: DEFAULT_DEADBAND_C,
+            configured_deadband_c: DEFAULT_DEADBAND_C,
             max_tank_temp_c: DEFAULT_MAX_TANK_TEMP_C,
             heating_on: false,
             duty_cycle: 1.0,
@@ -258,6 +261,7 @@ impl IndirectTank {
         self.hx_ua_w_per_k = c.hx_ua_w_per_k.unwrap_or(DEFAULT_HX_UA_W_PER_K).max(0.0);
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
         self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
+        self.configured_deadband_c = self.deadband_c;
         self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
         self.duty_cycle = 1.0;
         self.mode_override = None;
@@ -600,7 +604,7 @@ impl Equipment for IndirectTank {
         )?;
         self.setpoint_c = decoded.setpoint_c;
         self.target_setpoint_c = decoded.target_setpoint_c;
-        self.deadband_c = decoded.deadband_c;
+        self.deadband_c = restored_tank_deadband_c(decoded.deadband_c)?;
         self.boiler_loop_id = decoded.boiler_loop_id;
         self.hx_ua_w_per_k = decoded.hx_ua_w_per_k;
         self.boiler_loop_flow_rate_kg_s = decoded.boiler_loop_flow_rate_kg_s;
@@ -665,9 +669,7 @@ impl Equipment for IndirectTank {
                     self.target_setpoint_c = sp;
                     self.setpoint_c = sp;
                 }
-                if let Some(band_c) = update.band_c {
-                    self.deadband_c = band_c;
-                }
+                self.deadband_c = update.deadband_c(self.deadband_c, self.configured_deadband_c);
             }
             ControlSignal::DutyCycle { on_fraction, .. } => {
                 if !on_fraction.is_finite() || !(0.0..=1.0).contains(on_fraction) {
@@ -877,6 +879,19 @@ mod control_domain_tests {
         })
         .unwrap();
         assert_eq!(eq.deadband_c, 3.0);
+        eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
+        assert_eq!(
+            eq.deadband_c, configured,
+            "the release restores the configured deadband"
+        );
+        let setpoint = eq.setpoint_c;
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: Some(50.0),
+            deadband_c: None,
+        })
+        .expect_err("a water heater has no cooling setpoint");
+        assert_eq!(eq.setpoint_c, setpoint);
     }
 
     /// The central validator rejects out-of-domain setpoints and load

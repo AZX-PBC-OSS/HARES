@@ -104,10 +104,10 @@ def test_dwelling_gym_spaces_and_mapping():
 
 
 def test_deadband_action_bounds_are_the_thermostat_band_range():
-    from ochre_next._hares import MAX_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+    from ochre_next._hares import MAX_TANK_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
     from ochre_next.rl.gym_env import _field_bounds
 
-    assert _field_bounds("deadband_c") == (MIN_THERMOSTAT_BAND_C, MAX_THERMOSTAT_BAND_C)
+    assert _field_bounds("deadband_c") == (MIN_THERMOSTAT_BAND_C, MAX_TANK_THERMOSTAT_BAND_C)
     assert MIN_THERMOSTAT_BAND_C > 0.0
 
 

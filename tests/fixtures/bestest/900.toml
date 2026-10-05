@@ -27,10 +27,7 @@ wall_r_value_m2_k_w = 2.0
 equipment_name = "IdealHVAC"
 fuel = "electricity"
 heating_capacity_kbtu_h = 30.0
-# ASHRAE 140's ideal thermostat has no switching band; the narrowest band a
-# thermostat model accepts stands in for it. The ideal-capacity target is the
-# setpoint itself, so the band only gates the reported thermostat mode.
-deadband_c = 0.1
+deadband_c = 0.0
 
 [weather]
 epw_path = "../../../data/examples/USA_CO_Denver.epw"

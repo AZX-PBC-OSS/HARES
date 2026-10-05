@@ -88,6 +88,15 @@ impl PyControlSignal {
         })
     }
 
+    /// The release form of `thermal_setpoint`: hands both setpoints back to
+    /// the schedule and the band back to its configured value.
+    #[staticmethod]
+    pub fn thermal_setpoint_release() -> Self {
+        Self {
+            signal: ControlSignal::thermal_release(),
+        }
+    }
+
     #[staticmethod]
     #[pyo3(signature = (heating_delta_c=None, cooling_delta_c=None))]
     pub fn thermal_setpoint_delta(

@@ -48,7 +48,8 @@ pub use schedule::*;
 pub use telemetry::*;
 pub use text::{normalize_ascii, parse_trimmed_f64};
 pub use thermostat_band::{
-    MAX_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C, thermal_setpoint_band_c,
+    MAX_HVAC_THERMOSTAT_BAND_C, MAX_TANK_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C,
+    ThermostatBandClass, thermal_setpoint_band_c, validate_thermal_setpoint_deadband,
     validate_thermostat_band_c,
 };
 pub use zone_map::{ZoneMap, ZoneRole};

@@ -1886,7 +1886,9 @@ impl CoolingCore {
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
         self.last_adp_c = decoded.last_adp_c;
         self.last_bypass_factor = decoded.last_bypass_factor;
-        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
+        self.hvac
+            .thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         self.hvac.runtime.time_at_current_speed_s = decoded.time_at_current_speed_s;
         self.hvac.thermostat_fsm.min_on_time_s = decoded.min_on_time_s;
         self.hvac.thermostat_fsm.min_off_time_s = decoded.min_off_time_s;

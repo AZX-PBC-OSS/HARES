@@ -4906,8 +4906,9 @@ fn configured_hysteresis_below_a_thermostat_band_is_rejected() {
     }
 }
 
-/// A band set by a named signal and kept through the release survives a
-/// checkpoint: the restored unit's EBM window equals the continuous one.
+/// A band a named signal set for an event survives a checkpoint taken
+/// during the event: the restored unit's EBM window equals the continuous
+/// one.
 #[test]
 fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
     const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
@@ -4931,13 +4932,6 @@ fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
                 heating_setpoint_c: Some(21.0),
                 cooling_setpoint_c: None,
                 deadband_c: Some(BAND_C),
-            })
-            .unwrap();
-        continuous
-            .apply_control(&ControlSignal::ThermalSetpoint {
-                heating_setpoint_c: None,
-                cooling_setpoint_c: None,
-                deadband_c: None,
             })
             .unwrap();
         continuous.update_control(&env_warm);

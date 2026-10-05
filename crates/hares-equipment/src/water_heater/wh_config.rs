@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::EquipmentTypedConfig;
-use hares_types::{FuelType, HaresError, ScheduleSourceConfig, validate_thermostat_band_c};
+use hares_types::{
+    FuelType, HaresError, ScheduleSourceConfig, ThermostatBandClass, validate_thermostat_band_c,
+};
 
 fn check_finite(name: &str, value: Option<f64>, min: f64, strict: bool) -> crate::Result<()> {
     if let Some(v) = value {
@@ -19,7 +21,9 @@ fn check_finite(name: &str, value: Option<f64>, min: f64, strict: bool) -> crate
 }
 
 fn check_band(name: &str, value: Option<f64>) -> crate::Result<()> {
-    value.map_or(Ok(()), |band_c| validate_thermostat_band_c(name, band_c))
+    value.map_or(Ok(()), |band_c| {
+        validate_thermostat_band_c(ThermostatBandClass::Tank, name, band_c)
+    })
 }
 
 fn check_range(name: &str, value: Option<f64>, min: f64, max: f64) -> crate::Result<()> {
@@ -1293,6 +1297,22 @@ mod tests {
             assert!(resistance_wh_with_deadband(Some(db)).validate().is_err());
             assert!(hpwh_with_deadband(Some(db)).validate().is_err());
             assert!(indirect_tank_with_deadband(Some(db)).validate().is_err());
+        }
+    }
+
+    /// Tank thermostats switch far wider than HVAC ones: HPWHsim's product
+    /// presets turn heat sources on 20 to 80 F (11 to 44 C) below setpoint.
+    #[test]
+    fn a_tank_deadband_spans_the_widest_tank_thermostat() {
+        for (db, ok) in [(11.1, true), (44.4, true), (45.0, false)] {
+            for validated in [
+                gas_wh_with_deadband(Some(db)).validate(),
+                resistance_wh_with_deadband(Some(db)).validate(),
+                hpwh_with_deadband(Some(db)).validate(),
+                indirect_tank_with_deadband(Some(db)).validate(),
+            ] {
+                assert_eq!(validated.is_ok(), ok, "{db}");
+            }
         }
     }
 

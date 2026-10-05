@@ -104,7 +104,7 @@ impl HvacEquipment {
     /// Returns a typed error when `rated_eir <= 0.0` (a non-positive energy
     /// input ratio implies infinite or negative COP, physically impossible)
     /// or when the energy window is not above f64 resolution.
-    pub fn equivalent_battery_window(
+    pub(crate) fn equivalent_battery_window(
         &self,
         zone_temp_c: f64,
         zone_capacitance_kwh_per_k: f64,
@@ -243,7 +243,7 @@ impl HvacEquipment {
 /// The load-independent part of an [`EquivalentBatteryModel`], from
 /// [`HvacEquipment::equivalent_battery_window`].
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EquivalentBatteryWindow {
+pub(crate) struct EquivalentBatteryWindow {
     energy_kwh: Option<f64>,
     min_energy_kwh: f64,
     max_energy_kwh: Option<f64>,
@@ -262,7 +262,7 @@ impl EquivalentBatteryWindow {
     ///
     /// Returns a typed error when `capacity_ideal_w` is negative or
     /// non-finite (the baseline power would be).
-    pub fn with_load(self, capacity_ideal_w: f64) -> crate::Result<EquivalentBatteryModel> {
+    pub(crate) fn with_load(self, capacity_ideal_w: f64) -> crate::Result<EquivalentBatteryModel> {
         let baseline_power_kw = power_w_to_kw(capacity_ideal_w * self.rated_eir);
         if baseline_power_kw.is_nan() || baseline_power_kw < 0.0 {
             return Err(HaresError::Equipment(format!(

@@ -34,16 +34,17 @@ pub enum HaresError {
     #[error("invalid state: {0}")]
     InvalidState(String),
     /// A thermostat switching band (an HVAC hysteresis or a water-heater
-    /// tank deadband, configured or signalled) outside the range a
-    /// thermostat can realize; see [`crate::thermostat_band`].
+    /// tank deadband, configured, signalled or restored) outside the range
+    /// of its thermostat class; see [`crate::thermostat_band`].
     #[error(
-        "{field} = {value_c} °C is not a thermostat switching band: it must be finite and \
-         within [{min}, {max}] °C (a thermostat cannot switch on a difference finer than its \
-         sensor resolves)",
-        min = crate::MIN_THERMOSTAT_BAND_C,
-        max = crate::MAX_THERMOSTAT_BAND_C
+        "{field} = {value_c} °C is not a {class:?} thermostat band: {reason}",
+        reason = class.violation(*value_c)
     )]
-    ThermostatBand { field: String, value_c: f64 },
+    ThermostatBand {
+        field: String,
+        value_c: f64,
+        class: crate::ThermostatBandClass,
+    },
     #[error("invariant violation in '{check_name}': value={value:.6e}, tolerance={tolerance:.6e}")]
     InvariantViolation {
         check_name: String,
@@ -162,6 +163,7 @@ mod tests {
             HaresError::ThermostatBand {
                 field: "hysteresis_c".to_string(),
                 value_c: 0.0,
+                class: crate::ThermostatBandClass::Cycling,
             },
         ];
         for err in errors {

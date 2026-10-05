@@ -284,19 +284,19 @@ pub fn ok_f64_seconds(v: f64) -> PyResult<i64> {
 // validators are unified here so a future extraction site grabs a
 // finite-checking or dict helper from one reviewed place.
 
-/// Reject non-finite f64 values at the boundary, naming the field.
 /// The `ThermalSetpoint` deadband contract at construction: a deadband only
-/// with a named setpoint, and within a thermostat's switching-band range.
+/// with a named setpoint, and within the range of some thermostat class
+/// (the receiving device holds it to its own class).
 pub(crate) fn validate_thermal_setpoint_band(
     heating_c: Option<f64>,
     cooling_c: Option<f64>,
     deadband_c: Option<f64>,
 ) -> PyResult<()> {
-    hares_types::thermal_setpoint_band_c(heating_c, cooling_c, deadband_c)
-        .map(|_| ())
+    hares_types::validate_thermal_setpoint_deadband(heating_c, cooling_c, deadband_c)
         .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
+/// Reject non-finite f64 values at the boundary, naming the field.
 pub(crate) fn validate_finite(value: f64, name: &str) -> PyResult<()> {
     if !value.is_finite() {
         return Err(PyValueError::new_err(format!(

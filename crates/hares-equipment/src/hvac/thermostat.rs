@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlSignal, EnvironmentState, HaresError, ScheduleSource, ZoneId, thermal_setpoint_band_c,
-    validate_thermostat_band_c,
+    ControlSignal, EnvironmentState, HaresError, ScheduleSource, ThermostatBandClass, ZoneId,
+    thermal_setpoint_band_c, validate_thermostat_band_c,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,9 @@ pub struct ThermostatConfig {
     ///
     /// Valid range: [0.0, 1.0]. Clamped on use; validated on init.
     pub deadband_offset: f64,
+    /// The thermostat class `hysteresis_c` is held to: a cycling unit's
+    /// thermostat, or an ideal controller with no band of its own.
+    pub band_class: ThermostatBandClass,
 }
 
 impl Default for ThermostatConfig {
@@ -41,11 +44,26 @@ impl Default for ThermostatConfig {
             min_cycle_time_s: 0.0,
             use_ideal_capacity: false,
             deadband_offset: 0.2,
+            band_class: ThermostatBandClass::Cycling,
         }
     }
 }
 
 impl ThermostatConfig {
+    /// The configured input the band comes from: an ideal unit's
+    /// `deadband_c`, a cycling unit's `hysteresis_c`.
+    fn band_field(&self) -> &'static str {
+        match self.band_class {
+            ThermostatBandClass::Ideal => "deadband_c",
+            ThermostatBandClass::Cycling | ThermostatBandClass::Tank => "hysteresis_c",
+        }
+    }
+
+    /// Checks a band for this thermostat's class.
+    fn validate_band(&self, band_c: f64) -> crate::Result<()> {
+        validate_thermostat_band_c(self.band_class, self.band_field(), band_c)
+    }
+
     pub fn validate(&mut self, env: &EnvironmentState) -> crate::Result<()> {
         if !(0.0..=1.0).contains(&self.cutout_ratio) {
             return Err(HaresError::Equipment(format!(
@@ -53,7 +71,7 @@ impl ThermostatConfig {
                 self.cutout_ratio
             )));
         }
-        validate_thermostat_band_c("hysteresis_c", self.hysteresis_c)?;
+        self.validate_band(self.hysteresis_c)?;
         if !self.min_cycle_time_s.is_finite() || self.min_cycle_time_s < 0.0 {
             return Err(HaresError::Equipment(format!(
                 "min_cycle_time_s must be finite and >= 0.0, got {}",
@@ -237,6 +255,9 @@ pub struct ThermostatFsm {
     /// Count of setpoint overrides whose unnamed axis was moved to keep the
     /// required deadband from the named one.
     pub setpoint_violation_count: u64,
+    /// The configured band, which the release form restores after a named
+    /// signal set the band for an event.
+    configured_hysteresis_c: f64,
     /// Count of deadband collisions where `heat_turn_on >= cool_turn_on`
     /// in `update_mode()`. Gated on `observe` for diagnostic CSV output.
     #[cfg(feature = "observe")]
@@ -245,11 +266,13 @@ pub struct ThermostatFsm {
 
 impl ThermostatFsm {
     pub fn new(static_setpoints: ThermalSetpoints) -> Self {
+        let thermostat = ThermostatConfig::default();
         Self {
             mode: ThermostatMode::Deadband,
             mode_start_at: None,
             last_mode_switch_at: None,
-            thermostat: ThermostatConfig::default(),
+            configured_hysteresis_c: thermostat.hysteresis_c,
+            thermostat,
             static_setpoints,
             schedule_setpoints: None,
             runtime_setpoints: None,
@@ -261,6 +284,23 @@ impl ThermostatFsm {
             #[cfg(feature = "observe")]
             deadband_collision_count: 0,
         }
+    }
+
+    /// Validates the configured thermostat and records its band as the one
+    /// the release form restores. Owners call it at init, after setting
+    /// `thermostat` from their configuration.
+    pub fn validate_configuration(&mut self, env: &EnvironmentState) -> crate::Result<()> {
+        self.thermostat.validate(env)?;
+        self.configured_hysteresis_c = self.thermostat.hysteresis_c;
+        Ok(())
+    }
+
+    /// Restores a checkpointed band, held to the thermostat's class like
+    /// any other source of it.
+    pub fn restore_hysteresis(&mut self, hysteresis_c: f64) -> crate::Result<()> {
+        self.thermostat.validate_band(hysteresis_c)?;
+        self.thermostat.hysteresis_c = hysteresis_c;
+        Ok(())
     }
 
     pub fn effective_setpoints(&self) -> ThermalSetpoints {
@@ -506,15 +546,16 @@ impl ThermostatFsm {
     /// a rejected signal leaves the thermostat as it was.
     ///
     /// A signal that names no axis (the `ThermalSetpoint` release form, or a
-    /// delta carrying neither delta) is stored as is: the release hands both
-    /// axes back to the schedule. Otherwise the effective cooling-heating gap
-    /// must be at least the required deadband: the signal's `deadband_c`
-    /// when it carries one, else `2 × hysteresis_c`. A named axis is never
-    /// moved. When one axis is named, a gap violation moves the other one
-    /// away from it, as a thermostat in auto mode pushes the opposite
-    /// setpoint, and is logged; when both are named, it is rejected. A
-    /// `ThermalSetpoint` deadband becomes the thermostat hysteresis and stays
-    /// until another one replaces it.
+    /// delta carrying neither delta) is stored as is, with no gap check: the
+    /// release hands both axes back to the schedule and the band back to its
+    /// configured value. Otherwise the effective cooling-heating gap must be
+    /// at least the required deadband: the signal's `deadband_c` when it
+    /// carries one, else `2 × hysteresis_c`. A named axis is never moved.
+    /// When one axis is named, a gap violation moves the other one away from
+    /// it, as a thermostat in auto mode pushes the opposite setpoint, and is
+    /// logged; when both are named, it is rejected. A `ThermalSetpoint`
+    /// deadband, held to the thermostat's class, becomes the hysteresis for
+    /// the event, until another named band or the release replaces it.
     pub fn apply_thermal_setpoint_signal(&mut self, signal: &ControlSignal) -> crate::Result<bool> {
         let base = self
             .static_setpoints
@@ -531,7 +572,12 @@ impl ThermostatFsm {
                     heating_c: *heating_setpoint_c,
                     cooling_c: *cooling_setpoint_c,
                 },
-                thermal_setpoint_band_c(*heating_setpoint_c, *cooling_setpoint_c, *deadband_c)?,
+                thermal_setpoint_band_c(
+                    self.thermostat.band_class,
+                    *heating_setpoint_c,
+                    *cooling_setpoint_c,
+                    *deadband_c,
+                )?,
                 heating_setpoint_c.is_some(),
                 cooling_setpoint_c.is_some(),
             ),
@@ -587,8 +633,13 @@ impl ThermostatFsm {
             }
         }
 
+        let is_release = matches!(signal, ControlSignal::ThermalSetpoint { .. })
+            && !heating_named
+            && !cooling_named;
         if let Some(band_c) = band_c {
             self.thermostat.hysteresis_c = band_c;
+        } else if is_release {
+            self.thermostat.hysteresis_c = self.configured_hysteresis_c;
         }
         self.runtime_setpoints = Some(candidate);
         Ok(true)
@@ -834,15 +885,38 @@ pub(super) mod tests {
         assert_eq!(fsm.setpoint_violation_count, 0);
     }
 
+    /// The band a named signal sets is part of the event, so the release
+    /// hands back the configured band with the schedule.
     #[test]
-    fn a_band_set_by_a_named_signal_outlives_the_release() {
+    fn the_release_restores_the_configured_band() {
         let mut fsm = fsm_20_24();
+        let configured = fsm.thermostat.hysteresis_c;
         fsm.apply_thermal_setpoint_signal(&thermal_setpoint(Some(18.0), None, Some(0.25)))
             .unwrap();
-        fsm.apply_thermal_setpoint_signal(&thermal_setpoint(None, None, None))
+        assert_eq!(fsm.thermostat.hysteresis_c, 0.25);
+        fsm.apply_thermal_setpoint_signal(&hares_types::ControlSignal::thermal_release())
             .unwrap();
         assert_eq!(fsm.effective_setpoints().heating_c, 20.0);
-        assert_eq!(fsm.thermostat.hysteresis_c, 0.25);
+        assert_eq!(fsm.thermostat.hysteresis_c, configured);
+    }
+
+    /// Under a schedule narrower than the required gap, the release installs
+    /// no override: it is never pushed like a one-axis signal.
+    #[test]
+    fn a_release_under_a_narrow_schedule_installs_nothing() {
+        let mut fsm = fsm_20_24();
+        fsm.schedule_setpoints = Some(ScheduleSetpoints {
+            heating_c: Some(22.0),
+            cooling_c: Some(23.0),
+            ..ScheduleSetpoints::default()
+        });
+        fsm.apply_thermal_setpoint_signal(&hares_types::ControlSignal::thermal_release())
+            .unwrap();
+        assert_eq!(
+            fsm.runtime_setpoints,
+            Some(RuntimeSetpointOverride::default())
+        );
+        assert_eq!(fsm.setpoint_violation_count, 0);
     }
 
     #[test]

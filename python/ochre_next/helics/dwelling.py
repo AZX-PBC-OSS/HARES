@@ -60,7 +60,7 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
     ) from exc
 
 from ochre_next import ControlSignal
-from ochre_next._hares import MAX_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+from ochre_next._hares import MAX_TANK_THERMOSTAT_BAND_C
 from ochre_next._hares import Dwelling as PyDwelling
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike, is_json_object
@@ -100,8 +100,10 @@ class HELICSDiagnostics(TypedDict):
 # per Python, rejected per Rust with no boundary warning).
 #   ThermalSetpoint.heating_setpoint_c: [-50, 100] °C  (Rust: [-50, 100])
 #   ThermalSetpoint.cooling_setpoint_c: [0, 60] °C      (Rust: [0, 60])
-#   ThermalSetpoint.deadband_c: [MIN_THERMOSTAT_BAND_C, MAX_THERMOSTAT_BAND_C]
-#     °C, and only with a named setpoint (the Rust constants themselves)
+#   ThermalSetpoint.deadband_c: [0, MAX_TANK_THERMOSTAT_BAND_C] °C, the range
+#     of some thermostat class, and only with a named setpoint (Rust:
+#     validate_thermal_setpoint_deadband; the device then holds it to its
+#     own class)
 #   DutyCycle.on_fraction: [0, 1]
 #   PowerSetpoint.active_power_kw: finite only (Rust: finite only)
 THERMAL_SETPOINT_HEAT_MIN_C = -50.0
@@ -137,14 +139,13 @@ def _validate_thermal_setpoint_band(
             val,
         )
         return 1
-    if not math.isfinite(v) or v < MIN_THERMOSTAT_BAND_C or v > MAX_THERMOSTAT_BAND_C:
+    if not math.isfinite(v) or v < 0.0 or v > MAX_TANK_THERMOSTAT_BAND_C:
         logger.warning(
             "Control signal 'ThermalSetpoint' deadband_c for equipment '%s' = %r outside range "
-            "[%g, %g] °C",
+            "[0, %g] °C",
             equipment,
             v,
-            MIN_THERMOSTAT_BAND_C,
-            MAX_THERMOSTAT_BAND_C,
+            MAX_TANK_THERMOSTAT_BAND_C,
         )
         return 1
     if signal_body.get("heating_setpoint_c") is None and signal_body.get("cooling_setpoint_c") is None:

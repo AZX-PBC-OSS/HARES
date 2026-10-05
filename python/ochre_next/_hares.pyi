@@ -18,10 +18,11 @@ from ._hares_types import (
     SteppableStepResult as SteppableStepResult,
 )
 
-# Range of a thermostat switching band [°C]: an HVAC hysteresis, a tank
-# deadband, or the deadband_c of a ThermalSetpoint that names a setpoint.
+# Thermostat switching band bounds [°C]: the sensor-resolution floor of a
+# cycling or tank thermostat, and the widest HVAC and tank bands.
 MIN_THERMOSTAT_BAND_C: float
-MAX_THERMOSTAT_BAND_C: float
+MAX_HVAC_THERMOSTAT_BAND_C: float
+MAX_TANK_THERMOSTAT_BAND_C: float
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -630,6 +631,8 @@ class ControlSignal:
         deadband_c: float | None = ...,
     ) -> ControlSignal: ...
     @staticmethod
+    def thermal_setpoint_release() -> ControlSignal: ...
+    @staticmethod
     def thermal_setpoint_delta(
         heating_delta_c: float | None = ...,
         cooling_delta_c: float | None = ...,
@@ -740,6 +743,8 @@ class Signal:
         cooling_c: float | None = ...,
         deadband_c: float | None = ...,
     ) -> Signal: ...
+    @staticmethod
+    def thermal_setpoint_release() -> Signal: ...
     @staticmethod
     def thermal_setpoint_delta(
         heating_delta_c: float | None = ...,

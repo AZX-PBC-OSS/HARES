@@ -1,7 +1,7 @@
 //! The thermostat band a `ThermalSetpoint` carries, at dwelling level: a
 //! band below a thermostat's resolution never reaches the equipment, and a
-//! band set by a named signal and kept through the release is part of the
-//! resumable state.
+//! band set by a named signal for an event is part of the resumable state
+//! until the release restores the configured one.
 
 use std::path::PathBuf;
 
@@ -67,29 +67,24 @@ fn a_sub_band_deadband_is_rejected_and_the_furnace_keeps_heating() {
 }
 
 #[test]
-fn restored_run_after_a_named_band_and_release_matches_the_continuous_run() {
+fn restored_run_during_a_named_band_event_matches_the_continuous_run() {
     let mut continuous = s54_dwelling();
     let heater = heating_equipment_name(&continuous);
     for _ in 0..STEPS_BEFORE_CHECKPOINT {
         continuous.step().expect("step before the event");
     }
-    for signal in [
-        ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: Some(21.0),
-            cooling_setpoint_c: None,
-            deadband_c: Some(0.25),
-        },
-        ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            deadband_c: None,
-        },
-    ] {
-        continuous
-            .apply_control_validated(&heater, signal, None)
-            .expect("the named event and the release are valid");
-        continuous.step().expect("step with the signal");
-    }
+    continuous
+        .apply_control_validated(
+            &heater,
+            ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: None,
+                deadband_c: Some(0.25),
+            },
+            None,
+        )
+        .expect("the named event is valid");
+    continuous.step().expect("step with the event");
     let checkpoint = continuous.save_checkpoint().expect("save checkpoint");
 
     let mut restored = s54_dwelling();
@@ -98,6 +93,13 @@ fn restored_run_after_a_named_band_and_release_matches_the_continuous_run() {
         .expect("restore checkpoint");
 
     for i in 0..STEPS_AFTER_CHECKPOINT {
+        if i == STEPS_AFTER_CHECKPOINT / 2 {
+            for dwelling in [&mut continuous, &mut restored] {
+                dwelling
+                    .apply_control_validated(&heater, ControlSignal::thermal_release(), None)
+                    .expect("the release is valid");
+            }
+        }
         let a = continuous.step().expect("continuous step");
         let b = restored.step().expect("restored step");
         assert_eq!(

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EvConnectionState, HaresError, IdealCapacityMode, OperatingMode, ProtocolId,
-    thermal_setpoint_band_c,
+    validate_thermal_setpoint_deadband,
 };
 
 /// Target component for split duty cycle control (HPWH compressor vs backup element).
@@ -43,11 +43,13 @@ pub enum ControlSignal {
     ///
     /// A named setpoint overrides that axis; an unnamed one follows the
     /// equipment's schedule. `deadband_c`, allowed only with a named
-    /// setpoint, is the thermostat switching band the equipment adopts (see
-    /// [`crate::thermostat_band`]) and, on HVAC, the minimum cooling-heating
-    /// gap. A signal that names no setpoint (and so no deadband) is the
-    /// release form: it hands both axes back to the schedule and changes
-    /// nothing else.
+    /// setpoint, is the thermostat switching band the equipment adopts for
+    /// the event, held to the range of its thermostat class (see
+    /// [`crate::thermostat_band`]), and, on HVAC, the minimum
+    /// cooling-heating gap. A signal that names no setpoint (and so no
+    /// deadband), built by [`ControlSignal::thermal_release`], is the release
+    /// form: it hands both axes back to the schedule and the band back to
+    /// its configured value.
     ThermalSetpoint {
         heating_setpoint_c: Option<f64>,
         cooling_setpoint_c: Option<f64>,
@@ -260,11 +262,14 @@ impl ControlSignal {
                         "ThermalSetpoint cooling_setpoint_c invalid: {c}, expected [0, 60] °C"
                     )));
                 }
-                if let (Some(h), Some(c), Some(db)) = (
-                    heating_setpoint_c,
-                    cooling_setpoint_c,
-                    thermal_setpoint_band_c(*heating_setpoint_c, *cooling_setpoint_c, *deadband_c)?,
-                ) && c - h < db
+                validate_thermal_setpoint_deadband(
+                    *heating_setpoint_c,
+                    *cooling_setpoint_c,
+                    *deadband_c,
+                )?;
+                if let (Some(h), Some(c), Some(db)) =
+                    (heating_setpoint_c, cooling_setpoint_c, deadband_c)
+                    && c - h < *db
                 {
                     return Err(HaresError::Control(format!(
                         "ThermalSetpoint: the cooling-heating gap {} °C (heating {h}, cooling {c}) \
@@ -856,7 +861,7 @@ mod tests {
 
     #[test]
     fn thermal_setpoint_deadband_out_of_range() {
-        for db in [-0.1, 10.5, f64::INFINITY] {
+        for db in [-0.1, -1e-17, 44.5, f64::INFINITY] {
             assert_err(&ControlSignal::ThermalSetpoint {
                 heating_setpoint_c: Some(20.0),
                 cooling_setpoint_c: None,
@@ -874,29 +879,32 @@ mod tests {
         });
     }
 
+    /// The validator cannot know the receiving device, so it holds a named
+    /// deadband to the union of the class ranges: a band below a cycling
+    /// thermostat's floor passes here (an ideal unit may hold it) and the
+    /// cycling device rejects it on application.
     #[test]
-    fn thermal_setpoint_named_deadband_below_a_thermostat_band_rejected() {
-        for db in [
-            0.0,
-            -0.0,
-            5e-324,
-            f64::MIN_POSITIVE,
-            1e-17,
-            1e-16,
-            1e-15,
-            0.05,
-        ] {
-            assert_err(&ControlSignal::ThermalSetpoint {
+    fn thermal_setpoint_named_deadband_is_held_to_some_thermostat_class() {
+        for db in [0.0, 5e-324, 1e-17, 0.05, 30.0, 44.4] {
+            assert_ok(&ControlSignal::ThermalSetpoint {
                 heating_setpoint_c: Some(21.0),
                 cooling_setpoint_c: None,
                 deadband_c: Some(db),
             });
-            assert_err(&ControlSignal::ThermalSetpoint {
-                heating_setpoint_c: None,
-                cooling_setpoint_c: Some(24.0),
-                deadband_c: Some(db),
-            });
         }
+    }
+
+    #[test]
+    fn thermal_release_is_the_release_form() {
+        assert_eq!(
+            ControlSignal::thermal_release(),
+            ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                deadband_c: None,
+            }
+        );
+        assert_ok(&ControlSignal::thermal_release());
     }
 
     #[test]

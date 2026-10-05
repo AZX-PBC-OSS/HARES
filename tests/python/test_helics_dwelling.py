@@ -995,8 +995,8 @@ def test_control_signal_thermal_setpoint_heat_out_of_range_warns(
 @pytest.mark.parametrize(
     "body",
     [
-        {"type": "ThermalSetpoint", "heating_setpoint_c": 21.0, "deadband_c": 0.0},
-        {"type": "ThermalSetpoint", "heating_setpoint_c": 21.0, "deadband_c": 30.0},
+        {"type": "ThermalSetpoint", "heating_setpoint_c": 21.0, "deadband_c": -1.0},
+        {"type": "ThermalSetpoint", "heating_setpoint_c": 21.0, "deadband_c": 50.0},
         {"type": "ThermalSetpoint", "deadband_c": 1.0},
     ],
 )

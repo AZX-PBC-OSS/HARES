@@ -466,7 +466,9 @@ impl Equipment for ElectricBoiler {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
-        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
+        self.hvac
+            .thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -909,7 +911,9 @@ impl Equipment for GasBoiler {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
-        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
+        self.hvac
+            .thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;

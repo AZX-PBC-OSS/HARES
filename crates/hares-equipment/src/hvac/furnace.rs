@@ -432,7 +432,9 @@ impl Equipment for ElectricFurnace {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
-        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
+        self.hvac
+            .thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -852,7 +854,9 @@ impl Equipment for GasFurnace {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
-        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
+        self.hvac
+            .thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -1378,6 +1382,25 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_checkpoint_carrying_an_invalid_band_is_rejected_on_restore() {
+        let cfg = ef_config(10_000.0, 1.0);
+        let mut saved = ElectricFurnace::new(cfg.clone());
+        saved.init(&cfg, &env(20.0)).unwrap();
+        saved.hvac.thermostat_fsm.thermostat.hysteresis_c = 0.0;
+        let state = saved.save_state().unwrap();
+
+        let mut restored = ElectricFurnace::new(cfg.clone());
+        restored.init(&cfg, &env(20.0)).unwrap();
+        let err = restored
+            .load_state(&state)
+            .expect_err("a zero cycling band is not a valid checkpointed band");
+        assert!(
+            matches!(err, hares_types::HaresError::ThermostatBand { .. }),
+            "{err}"
+        );
     }
 
     #[test]
