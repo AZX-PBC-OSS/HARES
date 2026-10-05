@@ -428,9 +428,11 @@ Populated by tracking u-vector sums before/after each application phase:
 | `ventilation_w`        | Forced ventilation sensible                   |
 | `natural_ventilation_w`| Natural ventilation sensible                  |
 | `port_convective_w`     | Sum of equipment port convective contributions |
+| `port_radiant_w`       | Sum of equipment port long-wave radiant contributions |
+| `port_shortwave_w`     | Sum of equipment port short-wave contributions |
 | `hvac_heating_w`       | HvacHeating category from thermal accumulator |
 | `hvac_cooling_w`       | HvacCooling category from thermal accumulator |
-| `internal_gain_w`      | InternalGain category from thermal accumulator|
+| `internal_gain_w`      | InternalGain category from thermal accumulator: convective, radiant and short-wave |
 | `jacket_loss_w`        | JacketLoss category from thermal accumulator  |
 | `duct_loss_w`          | DuctLoss category from thermal accumulator    |
 | `infiltration_by_zone` | Per-zone infiltration from return map         |

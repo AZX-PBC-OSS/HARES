@@ -2678,7 +2678,19 @@ class Dwelling:
     def setpoints_reconciled(self) -> dict[str, Any]: ...
     # Available only when compiled with the "observe" feature.
     def enable_observer(self, capacity: int) -> None: ...
-    def drain_observations(self) -> list[dict[str, Any]]: ...
+    def drain_observations(self) -> list[dict[str, Any]]:
+        """The buffered step snapshots, oldest first, emptying the buffer.
+
+        Each snapshot holds ``step_index``, ``timestamp`` and, per phase it
+        observed, ``post_environment``, ``post_nonthermal_equipment``,
+        ``post_thermal_equipment`` and ``post_solvers``. An equipment
+        phase's ``ports["thermal"]`` lists one tuple per zone,
+        ``(zone_id, convective_w, radiant_w, shortwave_w, latent_w)``: the
+        heat on that zone's port by path, convective to the air, long-wave
+        radiant and short-wave (visible) to the surfaces, and latent.
+        ``post_solvers`` carries the envelope's component gains, among them
+        ``port_convective_w``, ``port_radiant_w`` and ``port_shortwave_w``.
+        """
     # Available only when compiled with the "profiling" feature.
     def profiling_summary(self) -> ProfilingSummary:
         """Per-phase wall-clock split of the work done so far.

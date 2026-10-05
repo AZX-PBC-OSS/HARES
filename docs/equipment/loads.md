@@ -26,15 +26,27 @@ Deterministic power consumption driven by time-indexed schedules (CSV columns or
 
 ### Zone Thermal Routing
 
-Zone assignment by equipment name convention:
-- Contains "Exterior"/"Outdoor" -> no zone (outdoor loss)
-- Contains "Garage" -> ZoneId(2)
-- Contains "Basement" -> ZoneId(3)
-- Otherwise -> ZoneId(1) (primary conditioned)
+Zone assignment (`load_zone.rs`):
+- An explicit `zone_id` names the zone (the HPXML resolver sets it from the
+  appliance's `Location`)
+- EV charging, and a load named "Exterior"/"Outdoor" without a `zone_id`, gives
+  no zone heat
+- Otherwise the zone of the role the name implies (garage, basement,
+  crawlspace or attic, else the conditioned zone) from the dwelling's zone map
+- A load that gives zone heat with no zone to give it to, or a zone the
+  environment does not have, fails the build
 
-Heat distribution:
-- `sensible_gain = (electric_kw * 1000 + gas_w) * sensible_gain_fraction`
-- `latent_gain = same * latent_gain_fraction`
+Heat distribution (`gain_fractions.rs`), per watt of electric plus fuel input:
+- `sensible_gain_fraction` of it is sensible heat, `latent_gain_fraction` latent
+- Of the sensible heat, `radiant_share_of_sensible` is long-wave radiant (to the
+  interior surfaces), `visible_share_of_sensible` short-wave (absorbed by the
+  interior surfaces as transmitted diffuse solar), the rest convective (to the
+  zone air); an absolute `radiative_gain_fraction` replaces the radiant share
+- OpenStudio-HPXML v1.12.0 defaults: appliances and plug loads 0.6 radiant
+  share; lights 0.6 radiant and 0.2 visible; ceiling fans 0.558 radiant (see
+  `docs/alignment/DIVERGENCES.md`, D-005 to D-007)
+- The HPXML extension's `FracSensible` and `FracLatent` set the sensible and
+  latent fractions; an override may give either spelling, never both
 - Category: `ThermalCategory::InternalGain`
 
 ### Control Signals

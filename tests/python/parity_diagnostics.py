@@ -123,6 +123,7 @@ ENVELOPE_GAIN_KEYS: tuple[str, ...] = (
     "natural_ventilation_w",
     "port_convective_w",
     "port_radiant_w",
+    "port_shortwave_w",
     "internal_gain_w",
 )
 

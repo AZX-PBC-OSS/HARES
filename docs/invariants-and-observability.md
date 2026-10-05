@@ -221,9 +221,11 @@ envelope solver:
 | `ventilation_w`          | W    | Forced mechanical ventilation sensible       |
 | `natural_ventilation_w`  | W    | Natural ventilation sensible                 |
 | `port_convective_w`      | W    | Total equipment port convective (HVAC + loads) |
+| `port_radiant_w`         | W    | Total equipment port long-wave radiant, distributed to the interior surfaces |
+| `port_shortwave_w`       | W    | Total equipment port short-wave (visible light), absorbed by the interior surfaces as transmitted diffuse solar |
 | `hvac_heating_w`         | W    | HVAC heating contribution                    |
 | `hvac_cooling_w`         | W    | HVAC cooling contribution                    |
-| `internal_gain_w`        | W    | Appliances, lighting, occupancy              |
+| `internal_gain_w`        | W    | Appliances, lighting, occupancy: convective, radiant and short-wave |
 | `jacket_loss_w`          | W    | Equipment shell losses (water heater, etc.)  |
 | `duct_loss_w`            | W    | Duct distribution losses                     |
 | `infiltration_by_zone`   | W    | Per-zone infiltration breakdown              |
