@@ -159,6 +159,36 @@ impl TimeWindow {
 /// Canonical custom-domain id used for schedule payloads in `EnvironmentState.custom_domains`.
 pub const SCHEDULE_DOMAIN_ID: DomainId = DomainId(u16::MAX);
 
+/// Custom-domain id whose one-value payload is the schedule row the
+/// environment reads this step: the row of the step's calendar date and
+/// time, with the 365-day schedule's leap-day skip and year wrap applied.
+pub const SCHEDULE_ROW_DOMAIN_ID: DomainId = DomainId(u16::MAX - 2);
+
+/// The schedule row the environment reads this step.
+///
+/// # Errors
+///
+/// The environment carries no schedule row (no schedule is loaded), or the
+/// row is not a non-negative integer.
+pub fn schedule_row(env: &EnvironmentState) -> Result<usize, HaresError> {
+    let row = env
+        .custom_domains
+        .iter()
+        .find(|d| d.domain_id == SCHEDULE_ROW_DOMAIN_ID)
+        .and_then(|d| d.custom_payload.as_deref())
+        .and_then(<[f64]>::first)
+        .copied()
+        .ok_or_else(|| {
+            HaresError::Equipment("schedule row not found in environment custom domains".into())
+        })?;
+    if !row.is_finite() || row < 0.0 || row.fract() != 0.0 {
+        return Err(HaresError::Equipment(format!(
+            "schedule row {row} is not a non-negative integer"
+        )));
+    }
+    Ok(row as usize)
+}
+
 /// Out-of-range index behavior for schedule-backed sources.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoundaryPolicy {

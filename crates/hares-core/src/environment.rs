@@ -21,7 +21,7 @@ use hares_physics::{
 use hares_physics::water_mains::water_mains_raw_fahrenheit;
 use hares_types::{
     AmbientLocation, AmbientOtherSpaceTemps, DomainId, EnvironmentState, GridState, HaresError,
-    SCHEDULE_DOMAIN_ID, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+    SCHEDULE_DOMAIN_ID, SCHEDULE_ROW_DOMAIN_ID, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
 };
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
@@ -156,6 +156,7 @@ pub struct EnvironmentManager {
     mains_payload_buf: Vec<f64>,
     schedule_payload_swap: Vec<f64>,
     mains_payload_swap: Vec<f64>,
+    schedule_row_payload_swap: Vec<f64>,
 }
 
 impl EnvironmentManager {
@@ -335,6 +336,7 @@ impl EnvironmentManager {
             mains_payload_buf: vec![0.0],
             schedule_payload_swap: Vec::with_capacity(num_schedule_cols),
             mains_payload_swap: Vec::with_capacity(1),
+            schedule_row_payload_swap: Vec::with_capacity(1),
         })
     }
 
@@ -832,6 +834,10 @@ impl EnvironmentManager {
                 && let Some(v) = du.custom_payload
             {
                 self.mains_payload_swap = v;
+            } else if du.domain_id == SCHEDULE_ROW_DOMAIN_ID
+                && let Some(v) = du.custom_payload
+            {
+                self.schedule_row_payload_swap = v;
             }
         }
 
@@ -856,6 +862,15 @@ impl EnvironmentManager {
             zone_temperatures_c: Vec::new(),
             custom_payload: Some(mains_payload),
         });
+        if !self.schedule.is_empty() {
+            self.schedule_row_payload_swap.clear();
+            self.schedule_row_payload_swap.push(schedule_idx as f64);
+            state.custom_domains.push(hares_types::DomainUpdate {
+                domain_id: SCHEDULE_ROW_DOMAIN_ID,
+                zone_temperatures_c: Vec::new(),
+                custom_payload: Some(std::mem::take(&mut self.schedule_row_payload_swap)),
+            });
+        }
 
         // Step 7: weather scalar fields
         state.weather.outdoor_temp_c = outdoor_temp_c;

@@ -30,7 +30,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 use hares_types::zip::{ResolvedZip, ZipLoad};
 
 /// Format version of `EventBasedLoadState` and `WetApplianceState`.
-const EVENT_LOAD_CHECKPOINT_VERSION: u32 = 2;
+const EVENT_LOAD_CHECKPOINT_VERSION: u32 = 3;
 /// ChaCha8 words consumed by one `f64` start draw.
 const WORDS_PER_DRAW: u128 = 2;
 
@@ -84,6 +84,66 @@ fn extract_events_from_kw_series(kw_series: &[f64]) -> Vec<ExtractedEvent> {
         }
     }
     events
+}
+
+/// Deterministic replay of the events extracted from a schedule kW series,
+/// read at the schedule row the environment publishes for the step, so a
+/// run replays the events of its own calendar dates.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct EventReplay {
+    events: Vec<ExtractedEvent>,
+    /// Rows of the kW series, which is the environment's schedule.
+    schedule_len: usize,
+    /// The event under way this step, by index into `events`.
+    current: Option<usize>,
+}
+
+impl EventReplay {
+    fn from_config(config: &EquipmentConfig) -> Self {
+        config
+            .get_f64_array(KEY_EVENT_POWER_KW_SERIES)
+            .map(|kw_series| Self {
+                events: extract_events_from_kw_series(kw_series),
+                schedule_len: kw_series.len(),
+                current: None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn is_active(&self) -> bool {
+        !self.events.is_empty()
+    }
+
+    /// Finds the event under way at this step's schedule row; returns
+    /// whether one is.
+    fn locate(&mut self, env: &EnvironmentState) -> crate::Result<bool> {
+        let row = hares_types::schedule_row(env)?;
+        if row >= self.schedule_len {
+            return Err(HaresError::Equipment(format!(
+                "schedule row {row} is past the {}-row event series",
+                self.schedule_len
+            )));
+        }
+        let idx = self.events.partition_point(|e| e.end_step <= row);
+        self.current = self
+            .events
+            .get(idx)
+            .is_some_and(|e| e.start_step <= row)
+            .then_some(idx);
+        Ok(self.current.is_some())
+    }
+
+    /// The power of the event under way, if one is.
+    fn power_kw(&self) -> Option<f64> {
+        self.current.map(|idx| self.events[idx].power_kw)
+    }
+
+    fn expected_mean_power_kw(
+        &self,
+        month_multipliers: Option<[f64; 12]>,
+    ) -> Option<crate::ExpectedMeanPower> {
+        expected_event_mean_power_kw(&self.events, self.schedule_len, month_multipliers)
+    }
 }
 
 /// Expected mean power [kW] of a deterministic event-replay load: total
@@ -177,8 +237,6 @@ struct EventBasedLoadState {
     event_window_source_state: ScheduleSourceState,
     event_probability_source_state: ScheduleSourceState,
     delay_remaining_s: f64,
-    event_cursor: usize,
-    current_step: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -194,8 +252,6 @@ struct WetApplianceState {
     event_window_source_state: ScheduleSourceState,
     event_probability_source_state: ScheduleSourceState,
     delay_remaining_s: f64,
-    event_cursor: usize,
-    current_step: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -244,14 +300,8 @@ pub struct EventBasedLoad {
     /// `None` until `init` (or a checkpoint restore) supplies the stream.
     start_draws: Option<StartDraws>,
 
-    /// Pre-extracted deterministic events from schedule kW series.
-    extracted_events: Vec<ExtractedEvent>,
-    /// Index of the next event to check.
-    event_cursor: usize,
-    /// Current simulation step counter.
-    current_step: usize,
-    /// Length of the schedule for wrapping.
-    schedule_len: usize,
+    /// Events replayed from a schedule kW series; empty for stochastic starts.
+    replay: EventReplay,
 
     /// Full ZIP model (real + reactive) resolved via
     /// [`crate::config::resolve_zip`] (governing: the real-power polynomial
@@ -291,14 +341,8 @@ pub struct WetAppliance {
     /// `None` until `init` (or a checkpoint restore) supplies the stream.
     start_draws: Option<StartDraws>,
 
-    /// Pre-extracted deterministic events from schedule kW series.
-    extracted_events: Vec<ExtractedEvent>,
-    /// Index of the next event to check.
-    event_cursor: usize,
-    /// Current simulation step counter.
-    current_step: usize,
-    /// Length of the schedule for wrapping.
-    schedule_len: usize,
+    /// Events replayed from a schedule kW series; empty for stochastic starts.
+    replay: EventReplay,
 
     /// Full ZIP model (real + reactive) resolved via
     /// [`crate::config::resolve_zip`] (governing: the real-power polynomial
@@ -349,10 +393,7 @@ impl EventBasedLoad {
             power_setpoint_override: None,
             delay_remaining_s: 0.0,
             start_draws: config.rng_stream.map(|stream| StartDraws::at(stream, 0)),
-            extracted_events: Vec::new(),
-            event_cursor: 0,
-            current_step: 0,
-            schedule_len: 0,
+            replay: EventReplay::default(),
             zip: ResolvedZip::governing(ZipLoad::constant_power()),
         }
     }
@@ -442,13 +483,7 @@ impl EventBasedLoad {
         // but only when the equipment is actually in an active event phase.
         // OCHRE gates p_setpoint on self.mode == "On".
         let active_power_kw = if active_now {
-            let base_kw = if !self.extracted_events.is_empty()
-                && self.event_cursor < self.extracted_events.len()
-            {
-                self.extracted_events[self.event_cursor].power_kw
-            } else {
-                self.active_power_kw
-            };
+            let base_kw = self.replay.power_kw().unwrap_or(self.active_power_kw);
             self.power_setpoint_override
                 .take()
                 .unwrap_or(base_kw * self.load_fraction.max(0.0) * month_scale)
@@ -655,18 +690,7 @@ impl Equipment for EventBasedLoad {
             0,
         ));
 
-        // If a kW time series was provided, pre-extract events for deterministic replay.
-        if let Some(kw_series) = config.get_f64_array(KEY_EVENT_POWER_KW_SERIES) {
-            self.extracted_events = extract_events_from_kw_series(kw_series);
-            self.schedule_len = kw_series.len();
-            self.event_cursor = 0;
-            self.current_step = 0;
-        } else {
-            self.extracted_events = Vec::new();
-            self.schedule_len = 0;
-            self.event_cursor = 0;
-            self.current_step = 0;
-        }
+        self.replay = EventReplay::from_config(config);
         Ok(())
     }
 
@@ -687,11 +711,10 @@ impl Equipment for EventBasedLoad {
         self.apply_overrides();
 
         // Grid outage (de-energized bus): no power, no gains, but time and
-        // schedule state keep advancing. The event cursor passes completed
-        // events, current_step increments, delay_remaining_s decrements, and
-        // phase timers run. Cycles that fall during the outage are missed, not
-        // deferred. Islanded homes keep an energized bus and are not affected.
-        // See docs/outage-behavior.md.
+        // schedule state keep advancing: replayed events follow the schedule
+        // row, delay_remaining_s decrements and phase timers run. Cycles that
+        // fall during the outage are missed, not deferred. Islanded homes keep
+        // an energized bus and are not affected. See docs/outage-behavior.md.
         let bus_energized = env.grid.bus_energized();
 
         let dt_s = dt.as_secs_f64();
@@ -699,35 +722,13 @@ impl Equipment for EventBasedLoad {
             self.delay_remaining_s = (self.delay_remaining_s - dt_s).max(0.0);
         }
 
-        if !self.extracted_events.is_empty() {
-            // Deterministic schedule-driven mode.
-            let step = self.current_step % self.schedule_len.max(1);
-
-            // Advance cursor past completed events.
-            while self.event_cursor < self.extracted_events.len()
-                && self.extracted_events[self.event_cursor].end_step <= step
-            {
-                self.event_cursor += 1;
-            }
-            // Wrap cursor when schedule wraps.
-            if self.event_cursor >= self.extracted_events.len() && self.schedule_len > 0 {
-                self.event_cursor = 0;
-            }
-
-            // Check if current step is within the current event.
-            let in_event = self.event_cursor < self.extracted_events.len() && {
-                let ev = &self.extracted_events[self.event_cursor];
-                step >= ev.start_step && step < ev.end_step
-            };
-
-            if in_event {
+        if self.replay.is_active() {
+            if self.replay.locate(env)? {
                 self.phase = EventPhase::Active;
                 self.remaining_phase_s = dt_s;
             } else {
                 self.phase = EventPhase::Idle;
             }
-
-            self.current_step += 1;
         } else {
             // Stochastic fallback (no schedule data).
             let window_open = self.event_window_source.value_at(env)? > 0.0;
@@ -741,7 +742,7 @@ impl Equipment for EventBasedLoad {
             .unwrap_or(1.0);
         self.update_outputs(ports, month_scale, env.grid.bus_voltage_pu(), bus_energized)?;
 
-        if self.extracted_events.is_empty() {
+        if !self.replay.is_active() {
             self.advance_phase_timer(dt_s);
         }
         Ok(())
@@ -760,11 +761,7 @@ impl Equipment for EventBasedLoad {
     }
 
     fn expected_mean_power_kw(&self) -> Option<crate::ExpectedMeanPower> {
-        expected_event_mean_power_kw(
-            &self.extracted_events,
-            self.schedule_len,
-            self.month_multipliers,
-        )
+        self.replay.expected_mean_power_kw(self.month_multipliers)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -782,8 +779,6 @@ impl Equipment for EventBasedLoad {
                     &self.event_probability_source,
                 ),
                 delay_remaining_s: self.delay_remaining_s,
-                event_cursor: self.event_cursor,
-                current_step: self.current_step,
             },
             Self::checkpoint_version(),
             "EventBasedLoad",
@@ -803,8 +798,6 @@ impl Equipment for EventBasedLoad {
         self.forced_mode = decoded.forced_mode;
         self.delay_remaining_s = decoded.delay_remaining_s;
         self.start_draws = Some(StartDraws::at(decoded.rng_stream, decoded.rng_draws));
-        self.event_cursor = decoded.event_cursor;
-        self.current_step = decoded.current_step;
 
         restore_schedule_source_state(
             &mut self.event_window_source,
@@ -947,10 +940,7 @@ impl WetAppliance {
             delay_remaining_s: 0.0,
             hot_water_draw_rate_kg_s: 0.0,
             start_draws: config.rng_stream.map(|stream| StartDraws::at(stream, 0)),
-            extracted_events: Vec::new(),
-            event_cursor: 0,
-            current_step: 0,
-            schedule_len: 0,
+            replay: EventReplay::default(),
             zip: ResolvedZip::governing(ZipLoad::constant_power()),
         }
     }
@@ -1027,15 +1017,12 @@ impl WetAppliance {
         bus_energized: bool,
     ) -> std::result::Result<(), HaresError> {
         let active_power_kw = if self.active && bus_energized {
-            // In deterministic mode, use extracted event power directly.
-            // In stochastic mode, use configured phase power × n_units.
-            let base_kw = if !self.extracted_events.is_empty()
-                && self.event_cursor < self.extracted_events.len()
-            {
-                self.extracted_events[self.event_cursor].power_kw
-            } else {
-                self.phases[self.phase_index].power_kw * self.n_units
-            };
+            // A replayed event draws its own power; a stochastic cycle draws
+            // the configured phase power times n_units.
+            let base_kw = self
+                .replay
+                .power_kw()
+                .unwrap_or(self.phases[self.phase_index].power_kw * self.n_units);
             base_kw * self.load_fraction.max(0.0) * month_scale
         } else {
             0.0
@@ -1326,18 +1313,7 @@ impl Equipment for WetAppliance {
             0,
         ));
 
-        // If a kW time series was provided, pre-extract events for deterministic replay.
-        if let Some(kw_series) = config.get_f64_array(KEY_EVENT_POWER_KW_SERIES) {
-            self.extracted_events = extract_events_from_kw_series(kw_series);
-            self.schedule_len = kw_series.len();
-            self.event_cursor = 0;
-            self.current_step = 0;
-        } else {
-            self.extracted_events = Vec::new();
-            self.schedule_len = 0;
-            self.event_cursor = 0;
-            self.current_step = 0;
-        }
+        self.replay = EventReplay::from_config(config);
         Ok(())
     }
 
@@ -1358,11 +1334,11 @@ impl Equipment for WetAppliance {
         self.apply_overrides();
 
         // Grid outage (de-energized bus): no power, no gains, but time and
-        // schedule state keep advancing. The event cursor passes completed
-        // events, current_step increments, delay_remaining_s decrements, and
-        // cycle phases advance. Cycles that fall during the outage are missed,
-        // not deferred. Islanded homes keep an energized bus and are not
-        // affected. See docs/outage-behavior.md.
+        // schedule state keep advancing: replayed events follow the schedule
+        // row, delay_remaining_s decrements and cycle phases advance. Cycles
+        // that fall during the outage are missed, not deferred. Islanded homes
+        // keep an energized bus and are not affected. See
+        // docs/outage-behavior.md.
         let bus_energized = env.grid.bus_energized();
 
         let dt_s = dt.as_secs_f64();
@@ -1370,32 +1346,11 @@ impl Equipment for WetAppliance {
             self.delay_remaining_s = (self.delay_remaining_s - dt_s).max(0.0);
         }
 
-        if !self.extracted_events.is_empty() {
-            // Deterministic schedule-driven mode: use extracted event power
-            // directly instead of multi-phase cycle power.
-            let step = self.current_step % self.schedule_len.max(1);
-
-            // Advance cursor past completed events.
-            while self.event_cursor < self.extracted_events.len()
-                && self.extracted_events[self.event_cursor].end_step <= step
-            {
-                self.event_cursor += 1;
-            }
-            if self.event_cursor >= self.extracted_events.len() && self.schedule_len > 0 {
-                self.event_cursor = 0;
-            }
-
-            let in_event = self.event_cursor < self.extracted_events.len() && {
-                let ev = &self.extracted_events[self.event_cursor];
-                step >= ev.start_step && step < ev.end_step
-            };
-
-            self.active = in_event;
-            if in_event {
+        if self.replay.is_active() {
+            self.active = self.replay.locate(env)?;
+            if self.active {
                 self.phase_index = 0;
             }
-
-            self.current_step += 1;
         } else {
             // Stochastic fallback.
             let window_open = self.event_window_source.value_at(env)? > 0.0;
@@ -1408,7 +1363,7 @@ impl Equipment for WetAppliance {
             .map(|m| m[env.current_time.month0() as usize])
             .unwrap_or(1.0);
         self.update_outputs(ports, month_scale, env.grid.bus_voltage_pu(), bus_energized)?;
-        if self.extracted_events.is_empty() {
+        if !self.replay.is_active() {
             self.advance_cycle(dt_s);
         }
         Ok(())
@@ -1427,11 +1382,7 @@ impl Equipment for WetAppliance {
     }
 
     fn expected_mean_power_kw(&self) -> Option<crate::ExpectedMeanPower> {
-        expected_event_mean_power_kw(
-            &self.extracted_events,
-            self.schedule_len,
-            self.month_multipliers,
-        )
+        self.replay.expected_mean_power_kw(self.month_multipliers)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1451,8 +1402,6 @@ impl Equipment for WetAppliance {
                     &self.event_probability_source,
                 ),
                 delay_remaining_s: self.delay_remaining_s,
-                event_cursor: self.event_cursor,
-                current_step: self.current_step,
             },
             Self::checkpoint_version(),
             "WetAppliance",
@@ -1480,8 +1429,6 @@ impl Equipment for WetAppliance {
         self.forced_mode = decoded.forced_mode;
         self.delay_remaining_s = decoded.delay_remaining_s;
         self.hot_water_draw_rate_kg_s = decoded.hot_water_draw_rate_kg_s;
-        self.event_cursor = decoded.event_cursor;
-        self.current_step = decoded.current_step;
 
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.hot_water_draw_rate_kg_s > 0.0 {
@@ -2137,6 +2084,14 @@ mod tests {
         slot.custom_payload = Some(values);
     }
 
+    fn set_schedule_row(env: &mut EnvironmentState, row: usize) {
+        env.upsert_domain(DomainUpdate {
+            domain_id: hares_types::SCHEDULE_ROW_DOMAIN_ID,
+            zone_temperatures_c: Vec::new(),
+            custom_payload: Some(vec![row as f64]),
+        });
+    }
+
     #[test]
     fn load_fraction_rejects_out_of_domain_on_unchecked_path() {
         use hares_types::ControlSignal;
@@ -2630,8 +2585,6 @@ mod tests {
             event_window_source_state: super::ScheduleSourceState::Stateless,
             event_probability_source_state: super::ScheduleSourceState::Stateless,
             delay_remaining_s: 0.0,
-            event_cursor: 0,
-            current_step: 0,
         };
         let bytes = crate::try_save_versioned(
             &bad_state,
@@ -2742,8 +2695,6 @@ mod tests {
             event_window_source_state: super::ScheduleSourceState::Stateless,
             event_probability_source_state: super::ScheduleSourceState::Stateless,
             delay_remaining_s: 0.0,
-            event_cursor: 0,
-            current_step: 0,
         };
         let bytes = crate::try_save_versioned(
             &good_state,
@@ -3419,18 +3370,33 @@ mod tests {
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env).unwrap();
 
-        for (step, &expected) in expected_w.iter().enumerate() {
+        // Rows out of order: replay reads the row the environment publishes,
+        // not a count of its own steps.
+        for row in [5, 1, 7, 2, 0, 6, 3, 4] {
+            let expected = expected_w[row];
             let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
-            // schedule payload is not used in deterministic mode but must be present
-            set_schedule_payload(&mut env, vec![1.0, 1.0]);
+            set_schedule_row(&mut env, row);
             eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
             let actual = slots.electrical.load_power_w;
             assert!(
                 (actual - expected).abs() < 1e-6,
-                "step {step}: expected {expected} W, got {actual} W"
+                "row {row}: expected {expected} W, got {actual} W"
             );
-            env.current_time += ChronoDuration::minutes(1);
         }
+
+        set_schedule_row(&mut env, expected_w.len());
+        let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
+        let err = eq
+            .step(&env, Duration::from_secs(60), &mut slots)
+            .expect_err("a row past the series is an error");
+        assert!(err.to_string().contains("past the"), "got: {err}");
+
+        let mut no_row = base_env();
+        no_row
+            .custom_domains
+            .retain(|d| d.domain_id != hares_types::SCHEDULE_ROW_DOMAIN_ID);
+        eq.step(&no_row, Duration::from_secs(60), &mut slots)
+            .expect_err("replay without a published schedule row is an error");
     }
 
     // -------------------------------------------------------------------------
@@ -3628,11 +3594,10 @@ mod tests {
 
         let original_active_power_kw = eq.active_power_kw;
 
-        for _ in 0..4 {
+        for row in 0..4 {
             let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
-            set_schedule_payload(&mut env, vec![1.0, 1.0]);
+            set_schedule_row(&mut env, row);
             eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-            env.current_time += chrono::Duration::minutes(1);
         }
 
         assert_eq!(

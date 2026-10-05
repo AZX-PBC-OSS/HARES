@@ -119,43 +119,57 @@ struct Totals {
     latent_wh: f64,
 }
 
-/// Steps the dwelling with `expected` taken out of it, stepping each taken
-/// appliance alone on the dwelling's environment, and checks what each one
-/// delivers to the conditioned zone.
+const DT_H: f64 = TIME_RES_S as f64 / 3600.0;
+
+/// Steps the dwelling for the run with the named appliances taken out of it,
+/// stepping each one alone on the dwelling's environment and handing
+/// `visit` the step index, the appliance's index in `names` and its ports.
+fn step_appliances(run: &Run, names: &[&str], mut visit: impl FnMut(i64, usize, &PortSlots)) {
+    let mut dwelling = Dwelling::from_config(dwelling_config(run)).expect("dwelling builds");
+    let mut appliances: Vec<Box<dyn Equipment>> = names
+        .iter()
+        .map(|name| {
+            dwelling
+                .remove_equipment(name)
+                .unwrap_or_else(|err| panic!("{name}: present in the dwelling: {err}"))
+        })
+        .collect();
+    let dt = StdDuration::from_secs(TIME_RES_S.unsigned_abs());
+    for step in 0..run.days * STEPS_PER_DAY {
+        let env = dwelling.latest_env().clone();
+        for (idx, appliance) in appliances.iter_mut().enumerate() {
+            let mut ports = PortSlots::from_declarations(appliance.ports());
+            appliance
+                .step(&env, dt, &mut ports)
+                .unwrap_or_else(|err| panic!("{} steps: {err}", appliance.descriptor().name));
+            visit(step, idx, &ports);
+        }
+        dwelling.step().expect("dwelling steps");
+    }
+}
+
+/// An appliance's electric plus fuel input this step, in Wh.
+fn input_wh(ports: &PortSlots, fuel: FuelType) -> f64 {
+    (ports.electrical.load_power_w + ports.fuel.get(fuel)) * DT_H
+}
+
+/// Checks what each appliance of `expected` delivers to the conditioned zone.
 fn assert_appliance_gains_reach_conditioned_zone(
     run: &Run,
     fuel: FuelType,
     expected: &[ExpectedSplit],
 ) {
     let zone = conditioned_zone(&run.fixture.join(run.hpxml));
-    let mut dwelling = Dwelling::from_config(dwelling_config(run)).expect("dwelling builds");
-    let mut appliances: Vec<Box<dyn Equipment>> = expected
-        .iter()
-        .map(|e| {
-            dwelling
-                .remove_equipment(e.name)
-                .unwrap_or_else(|err| panic!("{}: present in the dwelling: {err}", e.name))
-        })
-        .collect();
+    let names: Vec<&str> = expected.iter().map(|e| e.name).collect();
     let mut totals: Vec<Totals> = expected.iter().map(|_| Totals::default()).collect();
-    let dt = StdDuration::from_secs(TIME_RES_S.unsigned_abs());
-    let dt_h = TIME_RES_S as f64 / 3600.0;
-
-    for _ in 0..run.days * STEPS_PER_DAY {
-        let env = dwelling.latest_env().clone();
-        for (appliance, total) in appliances.iter_mut().zip(&mut totals) {
-            let mut ports = PortSlots::from_declarations(appliance.ports());
-            appliance
-                .step(&env, dt, &mut ports)
-                .unwrap_or_else(|err| panic!("{} steps: {err}", appliance.descriptor().name));
-            total.input_wh += (ports.electrical.load_power_w + ports.fuel.get(fuel)) * dt_h;
-            for thermal in ports.thermal.iter().filter(|t| t.zone == zone) {
-                total.sensible_wh += thermal.sensible_gain_w * dt_h;
-                total.latent_wh += thermal.latent_gain_w * dt_h;
-            }
+    step_appliances(run, &names, |_, idx, ports| {
+        let total = &mut totals[idx];
+        total.input_wh += input_wh(ports, fuel);
+        for thermal in ports.thermal.iter().filter(|t| t.zone == zone) {
+            total.sensible_wh += thermal.sensible_gain_w * DT_H;
+            total.latent_wh += thermal.latent_gain_w * DT_H;
         }
-        dwelling.step().expect("dwelling steps");
-    }
+    });
 
     for (split, total) in expected.iter().zip(&totals) {
         assert!(
@@ -218,4 +232,84 @@ fn resstock_event_load_replay_delivers_its_gains() {
         bldg_id: 176_227,
     };
     assert_appliance_gains_reach_conditioned_zone(&run, FuelType::Gas, &CONDITIONED_SPACE_SPLITS);
+}
+
+const REPLAYED: [&str; 4] = [
+    "Cooking Range",
+    "Clothes Washer",
+    "Clothes Dryer",
+    "Dishwasher",
+];
+
+/// Each replayed appliance's electric input per day of a run of the parity
+/// building starting at `start`, in Wh: `[day][appliance]`.
+fn daily_replay_wh(start: &'static str, days: i64) -> Vec<[f64; 4]> {
+    let fixture = project_root().join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
+    let run = Run {
+        weather: fixture.join("weather.epw"),
+        fixture,
+        hpxml: "building.xml",
+        schedule: "schedule.csv",
+        start,
+        days,
+        bldg_id: 1,
+    };
+    let mut daily = vec![[0.0; 4]; usize::try_from(days).expect("days fit usize")];
+    step_appliances(&run, &REPLAYED, |step, idx, ports| {
+        let day = usize::try_from(step / STEPS_PER_DAY).expect("day fits usize");
+        daily[day][idx] += input_wh(ports, FuelType::Electric);
+    });
+    daily
+}
+
+fn assert_same_day(label: &str, got: [f64; 4], want: [f64; 4]) {
+    assert!(
+        want.iter().sum::<f64>() > 0.0,
+        "{label}: the reference day must run an appliance"
+    );
+    for (name, (g, w)) in REPLAYED.iter().zip(got.iter().zip(want)) {
+        assert!(
+            (g - w).abs() <= 1e-9 * w.abs().max(1.0),
+            "{label}: {name} replays {g:.3} Wh, the schedule's date gives {w:.3} Wh"
+        );
+    }
+}
+
+/// A run replays the appliance events of its own dates: a run starting on
+/// 7 January and one starting on 13 January each replay that day's events,
+/// the same as a run from 1 January replays on those days.
+#[test]
+fn event_replay_follows_the_calendar_date() {
+    let from_jan_1 = daily_replay_wh("2023-01-01T00:00:00-07:00", 13);
+    let jan_7 = daily_replay_wh("2023-01-07T00:00:00-07:00", 1)[0];
+    let jan_13 = daily_replay_wh("2023-01-13T00:00:00-07:00", 1)[0];
+    assert_same_day("7 January", jan_7, from_jan_1[6]);
+    assert_same_day("13 January", jan_13, from_jan_1[12]);
+    assert_ne!(jan_7, jan_13, "different dates replay different events");
+}
+
+/// The annual schedule has 365 days: 1 March of a leap year replays the
+/// schedule's 1 March, not 29 February's row.
+#[test]
+fn event_replay_skips_february_29() {
+    let leap_mar_1 = daily_replay_wh("2024-03-01T00:00:00-07:00", 1)[0];
+    assert_same_day(
+        "1 March 2024",
+        leap_mar_1,
+        daily_replay_wh("2023-03-01T00:00:00-07:00", 1)[0],
+    );
+    assert_ne!(
+        leap_mar_1,
+        daily_replay_wh("2023-02-28T00:00:00-07:00", 1)[0],
+        "1 March must not replay 28 February"
+    );
+}
+
+/// A run crossing the new year wraps to the schedule's first day.
+#[test]
+fn event_replay_wraps_at_the_year_end() {
+    let across = daily_replay_wh("2023-12-31T00:00:00-07:00", 2);
+    let jan_1 = daily_replay_wh("2023-01-01T00:00:00-07:00", 1)[0];
+    assert_same_day("1 January after the wrap", across[1], jan_1);
+    assert_ne!(across[0], jan_1, "31 December must not replay 1 January");
 }
