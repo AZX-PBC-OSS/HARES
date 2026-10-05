@@ -1831,11 +1831,9 @@ impl PyDwelling {
                 min_kw,
                 max_kw,
             },
-            hares_physics::pv_sizing::PvRoofTuning {
+            crate::py_pv_sizing::PvRoofSiting {
                 wall_azimuths: &dwelling.wall_azimuths,
                 latitude: dwelling.latitude_deg,
-                panel_watts: None,
-                panel_area_m2: None,
                 diffuse_fraction,
                 roof_shape_user_override: user_override,
             },

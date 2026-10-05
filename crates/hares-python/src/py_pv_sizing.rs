@@ -761,16 +761,24 @@ pub(crate) struct PvSizingTargets {
     pub max_kw: f64,
 }
 
-/// Internal helper for PV sizing from dwelling data; groups the optional
-/// sizing knobs into [`pv_sizing::PvRoofTuning`] and
-/// [`pv_sizing::PvSystemTuning`]. The panel spec in `tuning` is ignored in
-/// favour of the resolved `system_tuning` panel spec, which feeds both the
-/// roof-area stage and the sizing stage.
+/// Roof-siting inputs for [`size_pv_from_dwelling`]: the roof-area knobs of
+/// [`pv_sizing::PvRoofTuning`] without its panel spec, which comes only from
+/// the system tuning so one panel spec feeds both stages.
+pub(crate) struct PvRoofSiting<'a> {
+    pub wall_azimuths: &'a [f64],
+    pub latitude: Option<f64>,
+    pub diffuse_fraction: Option<f64>,
+    pub roof_shape_user_override: bool,
+}
+
+/// Internal helper for PV sizing from dwelling data. The panel spec resolved
+/// from `system_tuning` (or the panel defaults) feeds both the roof-area
+/// stage and the sizing stage.
 pub(crate) fn size_pv_from_dwelling(
     roof_info: &RoofInfo,
     roof_shape: RoofShape,
     targets: PvSizingTargets,
-    tuning: pv_sizing::PvRoofTuning<'_>,
+    siting: PvRoofSiting<'_>,
     system_tuning: pv_sizing::PvSystemTuning,
     pv_panel_defaults: &HashMap<String, PvPanelDefaults>,
 ) -> Result<PyPvSizingResult, String> {
@@ -780,13 +788,22 @@ pub(crate) fn size_pv_from_dwelling(
         system_tuning.system_losses,
         pv_panel_defaults,
     );
+    let PvRoofSiting {
+        wall_azimuths,
+        latitude,
+        diffuse_fraction,
+        roof_shape_user_override,
+    } = siting;
     let usable = pv_sizing::compute_usable_area(
         roof_info,
         roof_shape,
         pv_sizing::PvRoofTuning {
+            wall_azimuths,
+            latitude,
             panel_watts,
             panel_area_m2,
-            ..tuning
+            diffuse_fraction,
+            roof_shape_user_override,
         },
     )
     .map_err(|e| e.to_string())?;
@@ -836,11 +853,9 @@ mod tests {
                 min_kw: 2.0,
                 max_kw: 14.0,
             },
-            pv_sizing::PvRoofTuning {
+            PvRoofSiting {
                 wall_azimuths: &[],
                 latitude: Some(40.0),
-                panel_watts: None,
-                panel_area_m2: None,
                 diffuse_fraction: None,
                 roof_shape_user_override: false,
             },
@@ -866,11 +881,9 @@ mod tests {
                 min_kw: 2.0,
                 max_kw: 14.0,
             },
-            pv_sizing::PvRoofTuning {
+            PvRoofSiting {
                 wall_azimuths: &[],
                 latitude: Some(40.0),
-                panel_watts: None,
-                panel_area_m2: None,
                 diffuse_fraction: None,
                 roof_shape_user_override: false,
             },
@@ -1059,11 +1072,9 @@ mod tests {
                 min_kw: 2.0,
                 max_kw: 14.0,
             },
-            pv_sizing::PvRoofTuning {
+            PvRoofSiting {
                 wall_azimuths: &[],
                 latitude: Some(40.0),
-                panel_watts: None,
-                panel_area_m2: None,
                 diffuse_fraction: None,
                 roof_shape_user_override: false,
             },
@@ -1089,11 +1100,9 @@ mod tests {
                 min_kw: 2.0,
                 max_kw: 14.0,
             },
-            pv_sizing::PvRoofTuning {
+            PvRoofSiting {
                 wall_azimuths: &[],
                 latitude: Some(40.0),
-                panel_watts: None,
-                panel_area_m2: None,
                 diffuse_fraction: None,
                 roof_shape_user_override: false,
             },
