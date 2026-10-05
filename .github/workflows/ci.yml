@@ -244,7 +244,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: success() || failure()
         with:
-          name: pytest-results
+          name: pytest-results-${{ matrix.python-version }}
           path: test-results.xml
 
   pyright:
@@ -259,8 +259,32 @@ jobs:
       - run: uv sync --locked --all-extras --all-groups
       - run: uv run --locked --all-extras --all-groups pyright
 
+  ochre-python-test:
+    name: "pytest OCHRE comparison (Python ${{ matrix.python-version }})"
+    runs-on: ubuntu-latest
+    needs: [test]
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Init OCHRE submodule
+        run: git submodule update --init vendors/OCHRE
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --group dev --extra helics --group ochre
+      - run: uv run maturin develop --release
+      - run: uv run pytest -m ochre -rxX --junitxml=test-results-ochre.xml
+      - uses: actions/upload-artifact@v4
+        if: success() || failure()
+        with:
+          name: pytest-ochre-results-${{ matrix.python-version }}
+          path: test-results-ochre.xml
+
   slow-python-test:
-    name: "pytest slow + ochre group (Python ${{ matrix.python-version }})"
+    name: "pytest slow (Python ${{ matrix.python-version }})"
     runs-on: ubuntu-latest
     needs: [test]
     if: github.event_name == 'workflow_dispatch'
@@ -277,11 +301,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --group dev --extra helics --group ochre
       - run: uv run maturin develop
-      - run: uv run pytest -m "slow or ochre" --junitxml=test-results-slow.xml
+      - run: uv run pytest -m "slow and not ochre" --junitxml=test-results-slow.xml
       - uses: actions/upload-artifact@v4
         if: success() || failure()
         with:
-          name: pytest-slow-results
+          name: pytest-slow-results-${{ matrix.python-version }}
           path: test-results-slow.xml
 
   coverage:

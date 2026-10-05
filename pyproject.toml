@@ -163,6 +163,6 @@ tmp_path_retention_policy = "failed"
 tmp_path_retention_count = 3
 markers = [
     "slow: marks tests as slow (run with '-m slow' or '--run-slow')",
-    "ochre: requires the ochre dependency group (xmltodict, pvlib, ...) (run with '-m \"slow or ochre\"')",
+    "ochre: requires the ochre dependency group (xmltodict, pvlib, ...) (run with '-m ochre')",
     "network: reaches hosts beyond loopback; every other test is refused network access",
 ]

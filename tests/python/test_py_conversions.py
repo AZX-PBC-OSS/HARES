@@ -4,40 +4,19 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+from ochre_next import Dwelling, DwellingConfig, Fleet, SimulationConfig
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
-
-
-def _dwelling_class():
-    try:
-        from ochre_next import Dwelling
-    except ModuleNotFoundError:
-        pytest.skip("ochre_next.Dwelling is not available in this environment")
-    return Dwelling
-
-
-def _fleet_class():
-    try:
-        from ochre_next import Fleet
-    except ModuleNotFoundError:
-        pytest.skip("ochre_next.Fleet is not available in this environment")
-    return Fleet
+HPXML = str(EXAMPLES / "BEopt_example.xml")
+SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")
+WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
 
 @pytest.fixture(scope="session")
 def dwelling():
-    """Create a Dwelling using the test fixtures."""
-    dwelling_class = _dwelling_class()
-
-    if (EXAMPLES / "BEopt_example.xml").exists():
-        hpxml = str(EXAMPLES / "BEopt_example.xml")
-        schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
-        weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
-    else:
-        pytest.skip("OCHRE fixtures not available")
-
-    dw = dwelling_class.from_hpxml(hpxml, schedule, weather, write_output=False)
+    """Create a Dwelling from the committed BEopt example inputs."""
+    dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, write_output=False)
     dw.initialize()
     return dw
 
@@ -57,9 +36,6 @@ BUILDING_WEATHER = RESSTOCK_ROOT / "weather" / "G0900090_2018.csv"
 @pytest.fixture
 def fleet(tmp_path: Path):
     """Build a one-dwelling fleet from a ResStock 2025.1 fixture building."""
-    fleet_class = _fleet_class()
-    from ochre_next import DwellingConfig, SimulationConfig
-
     config = DwellingConfig(
         hpxml=str(BUILDING_DIR / "home.xml"),
         schedule=str(BUILDING_DIR / "in.schedules.csv"),
@@ -73,7 +49,7 @@ def fleet(tmp_path: Path):
         ),
         defaults_path=str(ROOT / "defaults"),
     )
-    return fleet_class.from_buildings([config])
+    return Fleet.from_buildings([config])
 
 
 # ---------------------------------------------------------------------------
@@ -93,17 +69,7 @@ def test_results_before_simulate_returns_dataframe(dwelling):
 
     Note: uses a fresh dwelling (not the simulated one) to test the pre-simulate path.
     """
-    dwelling_class = _dwelling_class()
-
-    if not (EXAMPLES / "BEopt_example.xml").exists():
-        pytest.skip("OCHRE fixtures not available")
-
-    fresh = dwelling_class.from_hpxml(
-        str(EXAMPLES / "BEopt_example.xml"),
-        str(EXAMPLES / "BEopt_example_schedule.csv"),
-        str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        write_output=False,
-    )
+    fresh = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, write_output=False)
     df = fresh.results()
 
     assert isinstance(df, pl.DataFrame)
@@ -166,12 +132,7 @@ def test_results_column_dtypes(simulated_df):
 # Fleet tests -- run against one ResStock 2025.1 fixture building
 # ---------------------------------------------------------------------------
 
-# The fleet block runs in the same job as the OCHRE reference block (the
-# "slow or ochre" selector); the default job's "not slow and not ochre"
-# deselects these six instead of running them there.
 
-
-@pytest.mark.ochre
 def test_fleet_aggregate_timeseries_returns_dataframe(fleet):
     """Verify fleet aggregate_timeseries returns polars DataFrame."""
     results = fleet.simulate()
@@ -180,7 +141,6 @@ def test_fleet_aggregate_timeseries_returns_dataframe(fleet):
     assert isinstance(df, pl.DataFrame)
 
 
-@pytest.mark.ochre
 def test_fleet_aggregate_timeseries_shape(fleet):
     """Verify aggregate DataFrame has the fixture's exact shape.
 
@@ -196,7 +156,6 @@ def test_fleet_aggregate_timeseries_shape(fleet):
     )
 
 
-@pytest.mark.ochre
 def test_fleet_aggregate_timeseries_has_time_column(fleet):
     """Verify aggregate DataFrame has Time column."""
     results = fleet.simulate()
@@ -205,7 +164,6 @@ def test_fleet_aggregate_timeseries_has_time_column(fleet):
     assert "Time" in df.columns, "Aggregate DataFrame should have Time column"
 
 
-@pytest.mark.ochre
 def test_fleet_per_dwelling_metrics_returns_dataframe(fleet):
     """Verify fleet per_dwelling_metrics returns polars DataFrame."""
     results = fleet.simulate()
@@ -214,7 +172,6 @@ def test_fleet_per_dwelling_metrics_returns_dataframe(fleet):
     assert isinstance(df, pl.DataFrame)
 
 
-@pytest.mark.ochre
 def test_fleet_per_dwelling_metrics_schema(fleet):
     """Verify per_dwelling_metrics has exactly the expected schema.
 
@@ -238,7 +195,6 @@ def test_fleet_per_dwelling_metrics_schema(fleet):
     )
 
 
-@pytest.mark.ochre
 def test_fleet_per_dwelling_metrics_row_count(fleet):
     """Verify the per-dwelling frame's exact shape and the weighting math.
 
