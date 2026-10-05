@@ -3,7 +3,16 @@
 //! After `resolve_loop_wiring` assigns IDs to cross-referenced combi pairs,
 //! this pass scans all typed configs, finds the maximum already-assigned loop
 //! ID, and assigns unique sequential IDs to equipment whose typed config
-//! carries a `None` loop_id (or `boiler_loop_id` for indirect tanks).
+//! carries a `None` loop_id (or `boiler_loop_id` for indirect tanks). A spec
+//! pending autosizing (typed config `None`) is not skipped: its ID is
+//! written into its raw parameters alone.
+//!
+//! Every assigned or wired ID is mirrored into the spec's raw parameters
+//! under the key the post-autosize typed-config rebuild reads (`loop_id`
+//! for boilers and water heaters, `boiler_loop_id` for indirect tanks), so
+//! autosizing a spec never destroys the ID it was wired or allocated. The
+//! generator arm stays typed-config-only: no rebuild path reads generator
+//! parameters.
 //!
 //! This eliminates the collision risk where standalone equipment constructors
 //! hardcoded `LoopId(1)` as a default, potentially colliding with a combi-pair
@@ -88,6 +97,49 @@ pub(crate) fn collect_allocated_loop_ids(
     iter_allocated_loop_ids(specs).collect()
 }
 
+/// The loop id a spec's raw parameters carry under `key` (written there by
+/// the wiring pass, or by this allocator for equipment pending autosizing).
+fn param_loop_id(spec: &EquipmentSpec, key: &str) -> Option<u16> {
+    spec.parameters
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u16::try_from(v).ok())
+}
+
+/// Allocate one spec's loop id under `param_key`. The id travels in the
+/// spec's raw parameters (which the post-autosize typed-config rebuild
+/// reads) as well as the typed config: a spec pending autosizing (typed
+/// config `None`) carries the id in its parameters alone, and a
+/// typed-present spec's assigned-or-wired id is mirrored into the
+/// parameters so the same rebuild keeps it.
+fn allocate_loop_id<T: EquipmentTypedConfig>(
+    spec: &mut EquipmentSpec,
+    param_key: &str,
+    next_id: &mut u16,
+    set: impl FnOnce(&mut T, u16),
+    get: impl Fn(&T) -> Option<u16>,
+) -> Result<(), HaresError> {
+    if spec.typed_config.is_none() {
+        if param_loop_id(spec, param_key).is_none() {
+            spec.parameters
+                .insert(param_key.to_string(), serde_json::json!(*next_id));
+            *next_id = next_id.saturating_add(1);
+        }
+        return Ok(());
+    }
+    replace_typed::<T>(&mut spec.typed_config, next_id, set, |c| get(c).is_none())?;
+    if let Some(id) = spec
+        .typed_config
+        .as_ref()
+        .and_then(|cfg| cfg.typed::<T>().ok())
+        .and_then(|typed| get(&typed))
+    {
+        spec.parameters
+            .insert(param_key.to_string(), serde_json::json!(id));
+    }
+    Ok(())
+}
+
 /// Centralized loop ID allocator.
 ///
 /// Runs after all equipment specs are finalized and the wiring pass has
@@ -108,59 +160,66 @@ pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) -> Result<(), Hares
     for spec in specs.iter_mut() {
         match spec.name.as_str() {
             "Gas Boiler" => {
-                replace_typed::<GasBoilerConfig>(
-                    &mut spec.typed_config,
+                allocate_loop_id::<GasBoilerConfig>(
+                    spec,
+                    "loop_id",
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
-                    |c| c.loop_id.is_none(),
+                    |c| c.loop_id,
                 )?;
             }
             "Electric Boiler" => {
-                replace_typed::<ElectricBoilerConfig>(
-                    &mut spec.typed_config,
+                allocate_loop_id::<ElectricBoilerConfig>(
+                    spec,
+                    "loop_id",
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
-                    |c| c.loop_id.is_none(),
+                    |c| c.loop_id,
                 )?;
             }
             "Gas Water Heater" => {
-                replace_typed::<GasWaterHeaterConfig>(
-                    &mut spec.typed_config,
+                allocate_loop_id::<GasWaterHeaterConfig>(
+                    spec,
+                    "loop_id",
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
-                    |c| c.loop_id.is_none(),
+                    |c| c.loop_id,
                 )?;
             }
             "Electric Resistance Water Heater" => {
-                replace_typed::<ElectricResistanceWaterHeaterConfig>(
-                    &mut spec.typed_config,
+                allocate_loop_id::<ElectricResistanceWaterHeaterConfig>(
+                    spec,
+                    "loop_id",
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
-                    |c| c.loop_id.is_none(),
+                    |c| c.loop_id,
                 )?;
             }
             "Tankless Water Heater" => {
-                replace_typed::<TanklessWaterHeaterConfig>(
-                    &mut spec.typed_config,
+                allocate_loop_id::<TanklessWaterHeaterConfig>(
+                    spec,
+                    "loop_id",
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
-                    |c| c.loop_id.is_none(),
+                    |c| c.loop_id,
                 )?;
             }
             "Heat Pump Water Heater" => {
-                replace_typed::<HeatPumpWaterHeaterConfig>(
-                    &mut spec.typed_config,
+                allocate_loop_id::<HeatPumpWaterHeaterConfig>(
+                    spec,
+                    "loop_id",
                     &mut next_id,
                     |c, id| c.loop_id = Some(id),
-                    |c| c.loop_id.is_none(),
+                    |c| c.loop_id,
                 )?;
             }
             "Indirect Tank" => {
-                replace_typed::<IndirectTankConfig>(
-                    &mut spec.typed_config,
+                allocate_loop_id::<IndirectTankConfig>(
+                    spec,
+                    "boiler_loop_id",
                     &mut next_id,
                     |c, id| c.boiler_loop_id = Some(id),
-                    |c| c.boiler_loop_id.is_none(),
+                    |c| c.boiler_loop_id,
                 )?;
             }
             "Gas Generator" | "Gas Fuel Cell" => {
@@ -200,6 +259,200 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+        }
+    }
+
+    fn pending_spec(
+        name: &str,
+        parameters: serde_json::Map<String, serde_json::Value>,
+    ) -> EquipmentSpec {
+        EquipmentSpec {
+            name: name.to_string(),
+            instance_name: None,
+            fuel_type: FuelType::None,
+            parameters,
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }
+    }
+
+    fn spec_params(
+        pairs: &[(&str, serde_json::Value)],
+    ) -> serde_json::Map<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
+    fn indirect_tank_config(boiler_loop_id: Option<u16>) -> IndirectTankConfig {
+        IndirectTankConfig {
+            boiler_loop_id,
+            equipment_id: None,
+            zone_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            ua_w_per_k: None,
+            hx_ua_w_per_k: None,
+            setpoint_c: None,
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            draw_flow_rate_kg_s: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+            boiler_loop_flow_rate_kg_s: None,
+        }
+    }
+
+    fn gas_water_heater_config(loop_id: Option<u16>) -> GasWaterHeaterConfig {
+        GasWaterHeaterConfig {
+            fan_power_w: None,
+            loop_id,
+            fuel_type: FuelType::Gas,
+            equipment_id: None,
+            zone_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: None,
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            pilot_power_w: None,
+            flue_loss_fraction: None,
+            skin_loss_fraction: None,
+            ignition_type: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            conversion_efficiency: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+            pilot_fraction_to_tank: None,
+        }
+    }
+
+    fn electric_resistance_water_heater_config(
+        loop_id: Option<u16>,
+    ) -> ElectricResistanceWaterHeaterConfig {
+        ElectricResistanceWaterHeaterConfig {
+            loop_id,
+            equipment_id: None,
+            zone_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: None,
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
+            max_combined_power_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+        }
+    }
+
+    fn tankless_water_heater_config(loop_id: Option<u16>) -> TanklessWaterHeaterConfig {
+        TanklessWaterHeaterConfig {
+            loop_id,
+            fuel_type: FuelType::Gas,
+            equipment_id: None,
+            zone_id: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            setpoint_c: None,
+            parasitic_power_w: None,
+            performance_adjustment: None,
+            inlet_temp_c: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            avg_water_draw_l_per_day: None,
+            zone_type: None,
+            min_flow_kg_s: None,
+            min_flow_gpm: None,
+        }
+    }
+
+    fn heat_pump_water_heater_config(loop_id: Option<u16>) -> HeatPumpWaterHeaterConfig {
+        HeatPumpWaterHeaterConfig {
+            loop_id,
+            equipment_id: None,
+            zone_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            cop: None,
+            backup_element_power_w: None,
+            ua_w_per_k: None,
+            setpoint_c: None,
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            tempering_valve_setpoint_c: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            compressor_power_w: None,
+            backup_enable_offset_c: None,
+            min_ambient_temp_c: None,
+            max_ambient_temp_c: None,
+            min_on_time_s: None,
+            min_off_time_s: None,
+            hp_only_mode: None,
+            element_hp_control_mode: None,
+            fan_power_w: None,
+            parasitic_power_w: None,
+            backup_efficiency: None,
+            shr: None,
+            lost_heat_fraction: None,
+            wall_heat_fraction: None,
+            capacity_biquadratic_coeffs: None,
+            cop_biquadratic_coeffs: None,
+            cop_curve_is_normalized: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            low_power_hpwh: None,
+            uniform_energy_factor: None,
         }
     }
 
@@ -557,23 +810,139 @@ mod tests {
         assert!(ids.contains(&2));
     }
 
+    /// A typed-`None` spec is not skipped: it is pending autosizing, so
+    /// its loop id lives in its raw parameters for the post-autosize
+    /// typed-config rebuild to read. The pinned counter semantics: a
+    /// pending boiler whose parameters already carry the wiring pass's id
+    /// is preserved without consuming the counter, and a second pending
+    /// boiler gets the next id.
     #[test]
-    fn spec_without_typed_config_is_skipped() {
-        let mut specs = vec![EquipmentSpec {
-            name: "Gas Boiler".to_string(),
-            instance_name: None,
-            fuel_type: FuelType::None,
-            parameters: Default::default(),
-            zip_params: None,
-            typed_config: None,
-            system_id: None,
-            related_hvac_idref: None,
-            primary_role: None,
-        }];
+    fn pending_boilers_carry_their_loop_id_in_params_and_wired_ids_do_not_consume_the_counter() {
+        let mut specs = vec![
+            // The wired pair's tank: its typed config carries the wired id
+            // and bounds the allocator's floor above it.
+            typed_spec("Indirect Tank", indirect_tank_config(Some(1))),
+            // The wired pair's boiler, pending autosizing: typed config
+            // `None`, the wiring pass's id in its parameters.
+            pending_spec(
+                "Gas Boiler",
+                spec_params(&[("loop_id", serde_json::json!(1))]),
+            ),
+            // A second pending boiler with no id yet.
+            pending_spec("Electric Boiler", spec_params(&[])),
+            // A typed-present standalone boiler with no id yet.
+            typed_spec(
+                "Gas Boiler",
+                GasBoilerConfig {
+                    loop_id: None,
+                    capacity_w: 10000.0,
+                    afue: 0.85,
+                    ..Default::default()
+                },
+            ),
+        ];
 
         allocate_loop_ids(&mut specs).unwrap();
-        // No panic, no modification (no typed config to patch)
-        assert!(specs[0].typed_config.is_none());
+
+        // The wired-pending boiler is preserved without consuming the
+        // counter: the next id is not skipped.
+        assert!(specs[1].typed_config.is_none());
+        assert_eq!(
+            specs[1].parameters.get("loop_id"),
+            Some(&serde_json::json!(1))
+        );
+        // The second pending boiler gets the next id, in its parameters
+        // alone.
+        assert!(specs[2].typed_config.is_none());
+        assert_eq!(
+            specs[2].parameters.get("loop_id"),
+            Some(&serde_json::json!(2))
+        );
+        // The typed-present boiler takes the id after that, mirrored into
+        // its parameters too.
+        let standalone = specs[3]
+            .typed_config
+            .as_ref()
+            .unwrap()
+            .typed::<GasBoilerConfig>()
+            .unwrap();
+        assert_eq!(standalone.loop_id, Some(3));
+        assert_eq!(
+            specs[3].parameters.get("loop_id"),
+            Some(&serde_json::json!(3))
+        );
+    }
+
+    /// The water-heater and indirect-tank arms mirror their assigned id
+    /// into the spec's raw parameters under the key the post-autosize
+    /// WH-typed-config rebuild reads: `loop_id` for the water-heater
+    /// classes, `boiler_loop_id` for the indirect tank. Without the mirror
+    /// the rebuild rebuilds each config from the stale parameters and
+    /// destroys the id the allocator just assigned.
+    #[test]
+    fn water_heater_and_tank_arms_mirror_assigned_ids_into_params() {
+        let mut specs = vec![
+            typed_spec("Gas Water Heater", gas_water_heater_config(None)),
+            typed_spec(
+                "Electric Resistance Water Heater",
+                electric_resistance_water_heater_config(None),
+            ),
+            typed_spec("Tankless Water Heater", tankless_water_heater_config(None)),
+            typed_spec(
+                "Heat Pump Water Heater",
+                heat_pump_water_heater_config(None),
+            ),
+            typed_spec("Indirect Tank", indirect_tank_config(None)),
+        ];
+
+        allocate_loop_ids(&mut specs).unwrap();
+
+        for (idx, (name, key)) in [
+            ("Gas Water Heater", "loop_id"),
+            ("Electric Resistance Water Heater", "loop_id"),
+            ("Tankless Water Heater", "loop_id"),
+            ("Heat Pump Water Heater", "loop_id"),
+            ("Indirect Tank", "boiler_loop_id"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = (idx + 1) as u16;
+            assert_eq!(
+                specs[idx].parameters.get(key),
+                Some(&serde_json::json!(id)),
+                "{name} must mirror its assigned id into '{key}' in the parameters"
+            );
+        }
+    }
+
+    /// A wired id reaches the parameters mirror without consuming the
+    /// counter: the indirect tank below was wired to its boiler on loop 1,
+    /// so the standalone water heater takes the next id, not the one after.
+    #[test]
+    fn indirect_tank_wired_id_is_mirrored_into_params_without_consuming_the_counter() {
+        let mut specs = vec![
+            typed_spec("Indirect Tank", indirect_tank_config(Some(1))),
+            typed_spec("Gas Water Heater", gas_water_heater_config(None)),
+        ];
+
+        allocate_loop_ids(&mut specs).unwrap();
+
+        assert_eq!(
+            specs[0].parameters.get("boiler_loop_id"),
+            Some(&serde_json::json!(1))
+        );
+        let tank = specs[0]
+            .typed_config
+            .as_ref()
+            .unwrap()
+            .typed::<IndirectTankConfig>()
+            .unwrap();
+        assert_eq!(tank.boiler_loop_id, Some(1), "the wired id is preserved");
+        assert_eq!(
+            specs[1].parameters.get("loop_id"),
+            Some(&serde_json::json!(2))
+        );
     }
 
     #[test]

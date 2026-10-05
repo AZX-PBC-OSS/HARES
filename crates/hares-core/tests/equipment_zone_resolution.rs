@@ -229,6 +229,12 @@ fn hvac_and_water_heaters_without_a_zone_fail_init() {
                 if data.get("zone_type").is_some() {
                     data["zone_type"] = serde_json::Value::Null;
                 }
+                // The dwelling's loop allocator assigns every resolved
+                // boiler's loop id before init; mirror it so the failure
+                // under test is the missing zone, not the missing id.
+                if data.get("loop_id").is_some() {
+                    data["loop_id"] = serde_json::Value::Number(1.into());
+                }
             }
             let mut eq = registry
                 .create(&cfg.ochre_class, cfg.clone())

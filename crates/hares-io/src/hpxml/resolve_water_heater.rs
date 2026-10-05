@@ -946,7 +946,7 @@ fn try_build_gas_wh_config(name: &str, params: &Map<String, Value>) -> Option<Eq
     let cfg = GasWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
-        loop_id: None,
+        loop_id: param_u16(params, "loop_id"),
         fuel_type: param_fuel(params),
         tank_volume_m3: param_f64(params, "tank_volume_m3"),
         tank_height_m: param_f64(params, "tank_height_m"),
@@ -987,7 +987,7 @@ fn try_build_elec_res_wh_config(
     let cfg = ElectricResistanceWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
-        loop_id: None,
+        loop_id: param_u16(params, "loop_id"),
         tank_volume_m3: param_f64(params, "tank_volume_m3"),
         tank_height_m: param_f64(params, "tank_height_m"),
         energy_factor: param_f64(params, "energy_factor"),
@@ -1027,7 +1027,7 @@ fn try_build_hpwh_config(name: &str, params: &Map<String, Value>) -> Option<Equi
     let cfg = HeatPumpWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
-        loop_id: None,
+        loop_id: param_u16(params, "loop_id"),
         tank_volume_m3: param_f64(params, "tank_volume_m3"),
         tank_height_m: param_f64(params, "tank_height_m"),
         cop: param_f64(params, "cop"),
@@ -1077,7 +1077,7 @@ fn try_build_tankless_wh_config(
     let cfg = TanklessWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
-        loop_id: None,
+        loop_id: param_u16(params, "loop_id"),
         fuel_type: param_fuel(params),
         energy_factor: param_f64(params, "energy_factor"),
         uniform_energy_factor: param_f64(params, "uniform_energy_factor"),
@@ -1232,6 +1232,112 @@ mod tests {
         let name = canonical_water_heater_name("storage water heater", FuelType::Propane)
             .expect("propane storage WH should map to gas class");
         assert_eq!(name, "Gas Water Heater");
+    }
+
+    /// The post-autosize typed-config rebuild keeps the loop id each
+    /// water-heater class was wired or allocated: every builder reads it
+    /// from the raw parameters under the key the wiring pass and the loop
+    /// allocator mirror it into (`loop_id` for the water-heater classes,
+    /// `boiler_loop_id` for the indirect tank).
+    #[test]
+    fn rebuild_keeps_the_params_loop_id_for_every_water_heater_class() {
+        for (name, key) in [
+            ("Gas Water Heater", "loop_id"),
+            ("Electric Resistance Water Heater", "loop_id"),
+            ("Tankless Water Heater", "loop_id"),
+            ("Heat Pump Water Heater", "loop_id"),
+            ("Indirect Tank", "boiler_loop_id"),
+        ] {
+            let mut params = serde_json::Map::new();
+            params.insert(
+                key.to_string(),
+                serde_json::Value::Number(serde_json::Number::from(3_u16)),
+            );
+            let cfg = rebuild_wh_typed_config(name, &params)
+                .unwrap_or_else(|| panic!("{name} rebuilds from params"));
+            let loop_id = match name {
+                "Indirect Tank" => {
+                    cfg.typed::<IndirectTankConfig>()
+                        .expect("indirect tank config")
+                        .boiler_loop_id
+                }
+                "Gas Water Heater" => {
+                    cfg.typed::<GasWaterHeaterConfig>()
+                        .expect("gas wh config")
+                        .loop_id
+                }
+                "Electric Resistance Water Heater" => {
+                    cfg.typed::<ElectricResistanceWaterHeaterConfig>()
+                        .expect("electric resistance wh config")
+                        .loop_id
+                }
+                "Tankless Water Heater" => {
+                    cfg.typed::<TanklessWaterHeaterConfig>()
+                        .expect("tankless wh config")
+                        .loop_id
+                }
+                "Heat Pump Water Heater" => {
+                    cfg.typed::<HeatPumpWaterHeaterConfig>()
+                        .expect("heat pump wh config")
+                        .loop_id
+                }
+                other => panic!("unmatched water heater class: {other}"),
+            };
+            assert_eq!(
+                loop_id,
+                Some(3),
+                "{name} rebuild keeps the params {key} it was wired or allocated"
+            );
+        }
+    }
+
+    /// Without a loop id in the parameters the rebuild leaves the field
+    /// unset, exactly as before the id ever travelled there.
+    #[test]
+    fn rebuild_without_a_params_loop_id_leaves_it_none() {
+        for (name, key) in [
+            ("Gas Water Heater", "loop_id"),
+            ("Electric Resistance Water Heater", "loop_id"),
+            ("Tankless Water Heater", "loop_id"),
+            ("Heat Pump Water Heater", "loop_id"),
+            ("Indirect Tank", "boiler_loop_id"),
+        ] {
+            let params = serde_json::Map::new();
+            let cfg = rebuild_wh_typed_config(name, &params)
+                .unwrap_or_else(|| panic!("{name} rebuilds from params"));
+            let loop_id = match name {
+                "Indirect Tank" => {
+                    cfg.typed::<IndirectTankConfig>()
+                        .expect("indirect tank config")
+                        .boiler_loop_id
+                }
+                "Gas Water Heater" => {
+                    cfg.typed::<GasWaterHeaterConfig>()
+                        .expect("gas wh config")
+                        .loop_id
+                }
+                "Electric Resistance Water Heater" => {
+                    cfg.typed::<ElectricResistanceWaterHeaterConfig>()
+                        .expect("electric resistance wh config")
+                        .loop_id
+                }
+                "Tankless Water Heater" => {
+                    cfg.typed::<TanklessWaterHeaterConfig>()
+                        .expect("tankless wh config")
+                        .loop_id
+                }
+                "Heat Pump Water Heater" => {
+                    cfg.typed::<HeatPumpWaterHeaterConfig>()
+                        .expect("heat pump wh config")
+                        .loop_id
+                }
+                other => panic!("unmatched water heater class: {other}"),
+            };
+            assert_eq!(
+                loop_id, None,
+                "{name} rebuild with no {key} param leaves the loop id unset"
+            );
+        }
     }
 
     #[test]

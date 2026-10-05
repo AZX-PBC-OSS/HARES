@@ -656,7 +656,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             GasBoilerConfig {
                 equipment_id: None,
                 zone_id: None,
-                loop_id: None,
+                loop_id: Some(1),
                 afue: 0.82,
                 capacity_w: 7_000.0,
                 number_of_speeds: 1,
@@ -673,7 +673,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             ElectricBoilerConfig {
                 equipment_id: None,
                 zone_id: None,
-                loop_id: None,
+                loop_id: Some(1),
                 eir: 1.0,
                 capacity_w: 7_000.0,
                 number_of_speeds: 1,

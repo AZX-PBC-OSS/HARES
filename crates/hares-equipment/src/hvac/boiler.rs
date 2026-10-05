@@ -163,8 +163,11 @@ impl ElectricBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let zone = zone_id_from_config(&config);
+        // The unassigned placeholder stands in until init applies the typed
+        // config's loop id; a boiler whose config carries no loop id fails
+        // init, so the placeholder never runs a step.
         let loop_id =
-            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
+            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or(LoopId(0));
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
@@ -235,6 +238,14 @@ impl Equipment for ElectricBoiler {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         let typed = config.require_typed::<ElectricBoilerConfig>("Electric Boiler")?;
+        self.loop_id = LoopId(typed.loop_id.ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "Electric Boiler '{}': its config carries no fluid loop id. Every \
+                 resolved boiler carries the loop id its wiring or loop allocation \
+                 assigned, and a boiler without one cannot declare its hydronic loop",
+                config.name
+            ))
+        })?);
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         // The circulation pump is a secondary motor component (pf 0.84); the
@@ -244,9 +255,6 @@ impl Equipment for ElectricBoiler {
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
         self.pump_kw = power_w_to_kw(typed.fan_power_w.unwrap_or(0.0));
-        if let Some(lid) = typed.loop_id {
-            self.loop_id = LoopId(lid);
-        }
         self.fluid_type = typed.fluid_type;
         self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
         self.default_return_temp_c = typed.return_temp_c;
@@ -539,8 +547,11 @@ impl GasBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let zone = zone_id_from_config(&config);
+        // The unassigned placeholder stands in until init applies the typed
+        // config's loop id; a boiler whose config carries no loop id fails
+        // init, so the placeholder never runs a step.
         let loop_id =
-            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
+            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or(LoopId(0));
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
@@ -649,13 +660,18 @@ impl Equipment for GasBoiler {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         let typed = config.require_typed::<GasBoilerConfig>("Gas Boiler")?;
+        self.loop_id = LoopId(typed.loop_id.ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "Gas Boiler '{}': its config carries no fluid loop id. Every \
+                 resolved boiler carries the loop id its wiring or loop allocation \
+                 assigned, and a boiler without one cannot declare its hydronic loop",
+                config.name
+            ))
+        })?);
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         typed.validate()?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
-        if let Some(lid) = typed.loop_id {
-            self.loop_id = LoopId(lid);
-        }
         self.fluid_type = typed.fluid_type;
         self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
         self.default_return_temp_c = typed.return_temp_c;
@@ -1323,6 +1339,57 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// A boiler built with no loop id is a construction error naming the
+    /// boiler: every resolved boiler carries the loop id its wiring or loop
+    /// allocation assigned, so a `None` reached init only if that channel
+    /// dropped it.
+    #[test]
+    fn boiler_without_loop_id_is_a_construction_error() {
+        let env = env(18.0);
+
+        let electric_cfg = EquipmentConfig::from_typed(
+            "Electric Boiler".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: None,
+                eir: 1.0,
+                capacity_w: 5_000.0,
+                ..ElectricBoilerConfig::default()
+            },
+        )
+        .expect("the config builds");
+        let mut electric = ElectricBoiler::new(electric_cfg.clone());
+        let electric_err = electric
+            .init(&electric_cfg, &env)
+            .expect_err("a boiler with no loop id fails init");
+        assert!(
+            electric_err.to_string().contains("Electric Boiler"),
+            "the error names the boiler: {electric_err}"
+        );
+
+        let gas_cfg = EquipmentConfig::from_typed(
+            "Gas Boiler".to_string(),
+            "Gas Boiler".to_string(),
+            GasBoilerConfig {
+                zone_id: Some(1),
+                loop_id: None,
+                afue: 0.85,
+                capacity_w: 10_000.0,
+                ..GasBoilerConfig::default()
+            },
+        )
+        .expect("the config builds");
+        let mut gas = GasBoiler::new(gas_cfg.clone());
+        let gas_err = gas
+            .init(&gas_cfg, &env)
+            .expect_err("a boiler with no loop id fails init");
+        assert!(
+            gas_err.to_string().contains("Gas Boiler"),
+            "the error names the boiler: {gas_err}"
+        );
     }
 
     #[test]

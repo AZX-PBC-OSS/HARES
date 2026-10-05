@@ -66,6 +66,17 @@ fn zone_id_from_params(params: &Map<String, Value>) -> Option<u16> {
         .map(|v| v as u16)
 }
 
+/// The boiler spec's assigned fluid loop id, written into its raw parameters
+/// by the loop wiring pass and the loop allocator. The post-autosize
+/// typed-config rebuild reads the parameters, so the id a boiler was wired
+/// or allocated survives the rebuild.
+fn loop_id_from_params(params: &Map<String, Value>) -> Option<u16> {
+    params
+        .get("loop_id")
+        .and_then(Value::as_u64)
+        .and_then(|v| u16::try_from(v).ok())
+}
+
 fn airflow_defect_multiplier(params: &Map<String, Value>) -> f64 {
     params
         .get("airflow_defect_ratio")
@@ -955,7 +966,7 @@ fn try_build_gas_boiler_config(
     let mut cfg = GasBoilerConfig {
         equipment_id: None,
         zone_id,
-        loop_id: None,
+        loop_id: loop_id_from_params(params),
         afue,
         capacity_w,
         number_of_speeds: n_speeds,
@@ -1038,7 +1049,7 @@ fn try_build_electric_boiler_config(
     let cfg = ElectricBoilerConfig {
         equipment_id: None,
         zone_id,
-        loop_id: None,
+        loop_id: loop_id_from_params(params),
         eir: heating_efficiency,
         capacity_w,
         number_of_speeds: n_speeds,

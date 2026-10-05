@@ -195,14 +195,23 @@ fn fuel_type_label(fuel_type: FuelType) -> String {
 ///
 /// Without this pass, both boiler and indirect tank default to `LoopId(1)`
 /// independently — the cross-reference is parsed but never applied.
+///
+/// A tank's wiring target that is not a resolved boiler spec is a resolve
+/// error naming the tank and the idref it named: an idref that matches no
+/// resolved system id, or one that resolves to an equipment class that
+/// cannot host the tank's fluid loop (a water heater, a furnace), would
+/// otherwise leave the tank silently unwired. The not-a-boiler arm in
+/// `set_boiler_loop_id` stays reachable for direct callers and as defense
+/// in depth; this path validates before dispatch.
 fn resolve_loop_wiring(specs: &mut [EquipmentSpec]) -> Result<(), HpxmlError> {
     let mut next_loop_id: u16 = 1;
 
-    // Build a lookup: HPXML SystemIdentifier/id → index for boiler specs.
-    let boiler_indices: Vec<(String, usize)> = specs
+    // Build a lookup: HPXML SystemIdentifier/id → index for every resolved
+    // spec, so a tank's wiring target that is missing or not a boiler is
+    // diagnosed instead of skipped.
+    let system_indices: Vec<(String, usize)> = specs
         .iter()
         .enumerate()
-        .filter(|(_, s)| matches!(s.name.as_str(), "Gas Boiler" | "Electric Boiler"))
         .filter_map(|(i, s)| s.system_id.clone().map(|id| (id, i)))
         .collect();
 
@@ -215,16 +224,40 @@ fn resolve_loop_wiring(specs: &mut [EquipmentSpec]) -> Result<(), HpxmlError> {
         let Some(ref related_hvac_idref) = tank_spec.related_hvac_idref else {
             continue;
         };
-        let Some(&(_, boiler_idx)) = boiler_indices
+        let tank_display = tank_spec
+            .instance_name
+            .clone()
+            .unwrap_or_else(|| tank_spec.name.clone());
+        let Some(&(_, boiler_idx)) = system_indices
             .iter()
             .find(|(id, _)| id == related_hvac_idref)
         else {
-            tracing::warn!(
-                related_hvac_idref = %related_hvac_idref,
-                "IndirectTank references HVAC system but no matching boiler found in resolved specs"
-            );
-            continue;
+            return Err(HpxmlError::Equipment(hares_types::HaresError::Equipment(
+                format!(
+                    "loop wiring for indirect tank '{tank_display}': its \
+                     RelatedHVACSystem idref '{related_hvac_idref}' matches no \
+                     resolved equipment system id, so the tank's fluid loop \
+                     cannot be wired"
+                ),
+            )));
         };
+        if !matches!(
+            specs[boiler_idx].name.as_str(),
+            "Gas Boiler" | "Electric Boiler"
+        ) {
+            let target_display = specs[boiler_idx]
+                .instance_name
+                .clone()
+                .unwrap_or_else(|| specs[boiler_idx].name.clone());
+            return Err(HpxmlError::Equipment(hares_types::HaresError::Equipment(
+                format!(
+                    "loop wiring for indirect tank '{tank_display}': its \
+                     RelatedHVACSystem idref '{related_hvac_idref}' resolves to \
+                     '{target_display}', which is not a boiler, so the tank's \
+                     fluid loop cannot be wired to it"
+                ),
+            )));
+        }
         let loop_id = next_loop_id;
         next_loop_id += 1;
         wiring_jobs.push((tank_idx, boiler_idx, loop_id));
@@ -245,38 +278,66 @@ fn set_boiler_loop_id(
 ) -> Result<(), HpxmlError> {
     use hares_equipment::{ElectricBoilerConfig, GasBoilerConfig};
 
-    let Some(ref mut cfg) = specs[idx].typed_config else {
-        return Ok(());
-    };
+    let display = specs[idx]
+        .instance_name
+        .clone()
+        .unwrap_or_else(|| specs[idx].name.clone());
     match specs[idx].name.as_str() {
         "Gas Boiler" => {
-            if let Ok(mut typed) = cfg.typed::<GasBoilerConfig>() {
-                typed.loop_id = Some(loop_id);
-                *cfg =
-                    EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
-            } else {
-                tracing::warn!(
-                    name = %specs[idx].name,
-                    loop_id,
-                    "set_boiler_loop_id: failed to deserialize GasBoilerConfig"
-                );
-            }
+            set_spec_loop_id::<GasBoilerConfig>(&mut specs[idx], loop_id, &display, |typed, id| {
+                typed.loop_id = Some(id)
+            })
         }
-        "Electric Boiler" => {
-            if let Ok(mut typed) = cfg.typed::<ElectricBoilerConfig>() {
-                typed.loop_id = Some(loop_id);
-                *cfg =
-                    EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
-            } else {
-                tracing::warn!(
-                    name = %specs[idx].name,
-                    loop_id,
-                    "set_boiler_loop_id: failed to deserialize ElectricBoilerConfig"
-                );
-            }
-        }
-        _ => {}
+        "Electric Boiler" => set_spec_loop_id::<ElectricBoilerConfig>(
+            &mut specs[idx],
+            loop_id,
+            &display,
+            |typed, id| typed.loop_id = Some(id),
+        ),
+        other => Err(HpxmlError::Equipment(hares_types::HaresError::Equipment(
+            format!(
+                "loop wiring for '{display}': the wiring target is a '{other}', \
+                 which is not a boiler, so it cannot take the fluid loop id \
+                 {loop_id} of the indirect tank wired to it"
+            ),
+        ))),
     }
+}
+
+/// Write the wired fluid loop id onto one boiler spec: into its raw
+/// `parameters` (the channel the post-autosize typed-config rebuild reads)
+/// and into its typed config when one is present. A boiler whose typed
+/// config is `None` is pending autosizing by design; its id lives in the
+/// parameters alone until the rebuild materializes it.
+fn set_spec_loop_id<T: hares_equipment::EquipmentTypedConfig>(
+    spec: &mut EquipmentSpec,
+    loop_id: u16,
+    display: &str,
+    set: impl FnOnce(&mut T, u16),
+) -> Result<(), HpxmlError> {
+    let expected_type = T::equipment_type_name();
+    let mut typed = match spec.typed_config.as_ref() {
+        None => {
+            spec.parameters
+                .insert("loop_id".to_string(), serde_json::json!(loop_id));
+            return Ok(());
+        }
+        Some(cfg) => cfg.typed::<T>().map_err(|err| {
+            hares_types::HaresError::Equipment(format!(
+                "loop wiring for '{display}': its typed config does not \
+                 deserialize as {expected_type}, so the fluid loop id \
+                 {loop_id} cannot be applied ({err})"
+            ))
+        })?,
+    };
+    set(&mut typed, loop_id);
+    spec.parameters
+        .insert("loop_id".to_string(), serde_json::json!(loop_id));
+    let cfg = spec
+        .typed_config
+        .as_mut()
+        .expect("typed config checked present above");
+    *cfg = EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
     Ok(())
 }
 
@@ -287,18 +348,35 @@ fn set_indirect_tank_boiler_loop_id(
 ) -> Result<(), HpxmlError> {
     use hares_equipment::IndirectTankConfig;
 
-    if let Some(ref mut cfg) = specs[idx].typed_config {
-        if let Ok(mut typed) = cfg.typed::<IndirectTankConfig>() {
-            typed.boiler_loop_id = Some(loop_id);
-            *cfg = EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
-        } else {
-            tracing::warn!(
-                name = %specs[idx].name,
-                loop_id,
-                "set_indirect_tank_boiler_loop_id: failed to deserialize IndirectTankConfig"
-            );
+    let display = specs[idx]
+        .instance_name
+        .clone()
+        .unwrap_or_else(|| specs[idx].name.clone());
+    let expected_type = IndirectTankConfig::equipment_type_name();
+    let mut typed = match specs[idx].typed_config.as_ref() {
+        None => {
+            specs[idx]
+                .parameters
+                .insert("boiler_loop_id".to_string(), serde_json::json!(loop_id));
+            return Ok(());
         }
-    }
+        Some(cfg) => cfg.typed::<IndirectTankConfig>().map_err(|err| {
+            hares_types::HaresError::Equipment(format!(
+                "loop wiring for '{display}': its typed config does not \
+                 deserialize as {expected_type}, so the shared fluid loop id \
+                 {loop_id} cannot be applied ({err})"
+            ))
+        })?,
+    };
+    typed.boiler_loop_id = Some(loop_id);
+    specs[idx]
+        .parameters
+        .insert("boiler_loop_id".to_string(), serde_json::json!(loop_id));
+    let cfg = specs[idx]
+        .typed_config
+        .as_mut()
+        .expect("typed config checked present above");
+    *cfg = EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
     Ok(())
 }
 
@@ -2491,6 +2569,101 @@ mod tests {
         );
     }
 
+    /// An indirect tank whose RelatedHVACSystem idref names a system that
+    /// is not among the resolved specs is a resolve error naming the tank
+    /// and the idref it named, never a silently unwired tank.
+    #[test]
+    fn indirect_tank_idref_to_missing_system_is_a_resolve_error() {
+        let xml = minimal_combi_xml(
+            r#"<HVAC>
+              <HeatingSystem>
+                <SystemIdentifier id="boiler1"/>
+                <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+                <HeatingSystemType><Boiler/></HeatingSystemType>
+                <HeatingCapacity>60000</HeatingCapacity>
+                <AnnualHeatingEfficiency>
+                  <Units>AFUE</Units><Value>0.95</Value>
+                </AnnualHeatingEfficiency>
+              </HeatingSystem>
+            </HVAC>
+            <WaterHeating>
+              <WaterHeatingSystem>
+                <SystemIdentifier id="wh1"/>
+                <WaterHeaterType>space-heating boiler with storage tank</WaterHeaterType>
+                <RelatedHVACSystem idref="ghost-boiler"/>
+                <TankVolume>40</TankVolume>
+              </WaterHeatingSystem>
+            </WaterHeating>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let err = resolve_equipment(
+            &building,
+            &DefaultsStore::empty(),
+            &json!({}),
+            None,
+            &mut Vec::new(),
+        )
+        .expect_err("a dangling wiring target is a resolve error");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("Indirect Tank") && message.contains("ghost-boiler"),
+            "the error names the tank and the idref it named: {message}"
+        );
+    }
+
+    /// An indirect tank whose RelatedHVACSystem idref names a resolved
+    /// system that is not a boiler (here a storage water heater) is a
+    /// resolve error naming the tank, the idref and the target, never a
+    /// silently unwired tank.
+    #[test]
+    fn indirect_tank_idref_to_non_boiler_is_a_resolve_error() {
+        let xml = minimal_combi_xml(
+            r#"<HVAC>
+              <HeatingSystem>
+                <SystemIdentifier id="boiler1"/>
+                <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+                <HeatingSystemType><Boiler/></HeatingSystemType>
+                <HeatingCapacity>60000</HeatingCapacity>
+                <AnnualHeatingEfficiency>
+                  <Units>AFUE</Units><Value>0.95</Value>
+                </AnnualHeatingEfficiency>
+              </HeatingSystem>
+            </HVAC>
+            <WaterHeating>
+              <WaterHeatingSystem>
+                <SystemIdentifier id="wh1"/>
+                <WaterHeaterType>space-heating boiler with storage tank</WaterHeaterType>
+                <RelatedHVACSystem idref="wh2"/>
+                <TankVolume>40</TankVolume>
+              </WaterHeatingSystem>
+              <WaterHeatingSystem>
+                <SystemIdentifier id="wh2"/>
+                <FuelType>natural gas</FuelType>
+                <WaterHeaterType>storage water heater</WaterHeaterType>
+                <TankVolume>50</TankVolume>
+              </WaterHeatingSystem>
+            </WaterHeating>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let err = resolve_equipment(
+            &building,
+            &DefaultsStore::empty(),
+            &json!({}),
+            None,
+            &mut Vec::new(),
+        )
+        .expect_err("a non-boiler wiring target is a resolve error");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("Indirect Tank")
+                && message.contains("wh2")
+                && message.contains("Gas Water Heater"),
+            "the error names the tank, the idref and the non-boiler target: {message}"
+        );
+    }
+
     #[test]
     fn standalone_boiler_without_indirect_tank_keeps_none_loop_id() {
         let xml = minimal_hvac_xml(
@@ -2585,6 +2758,111 @@ mod tests {
 
         assert_eq!(boiler_cfg.loop_id, Some(1));
         assert_eq!(tank_cfg.boiler_loop_id, Some(1));
+    }
+
+    fn typed_spec_with<T: hares_equipment::EquipmentTypedConfig>(
+        name: &str,
+        config: T,
+    ) -> super::EquipmentSpec {
+        let mut spec = make_spec(name);
+        spec.typed_config = Some(
+            hares_equipment::EquipmentConfig::from_typed(
+                name.to_string(),
+                name.to_string(),
+                config,
+            )
+            .expect("the test config builds"),
+        );
+        spec
+    }
+
+    fn gas_boiler_config() -> hares_equipment::GasBoilerConfig {
+        hares_equipment::GasBoilerConfig {
+            loop_id: None,
+            capacity_w: 10_000.0,
+            afue: 0.85,
+            ..Default::default()
+        }
+    }
+
+    /// The wiring pass's silent paths are errors: a boiler spec whose typed
+    /// payload is a different config type, a wiring target that is not a
+    /// boiler, and a tank spec whose payload is not an `IndirectTankConfig`
+    /// each fail naming the equipment, the expected config type and the
+    /// loop id. A boiler pending autosizing (typed config `None`) is not an
+    /// error: its id goes into its raw parameters, which the post-autosize
+    /// rebuild reads.
+    #[test]
+    fn indirect_tank_wiring_errors() {
+        use super::{set_boiler_loop_id, set_indirect_tank_boiler_loop_id};
+
+        // A boiler spec whose typed payload is a different config type: the
+        // spec is named "Electric Boiler" but its payload's type name is the
+        // GasBoilerConfig's, so the ElectricBoilerConfig read fails.
+        let mut specs = vec![typed_spec_with("Electric Boiler", gas_boiler_config())];
+        let err = set_boiler_loop_id(&mut specs, 0, 1).expect_err("the type mismatch fails");
+        let message = err.to_string();
+        assert!(
+            message.contains("Electric Boiler")
+                && message.contains("Gas Boiler")
+                && message.contains('1'),
+            "the error names the equipment, the expected config type and the loop id: {message}"
+        );
+
+        // A wiring target that is not a boiler.
+        let mut specs = vec![make_spec("Gas Water Heater")];
+        let err = set_boiler_loop_id(&mut specs, 0, 1).expect_err("a non-boiler target fails");
+        let message = err.to_string();
+        assert!(
+            message.contains("Gas Water Heater") && message.contains('1'),
+            "the error names the equipment and the loop id: {message}"
+        );
+
+        // A tank spec whose payload is not an IndirectTankConfig.
+        let mut specs = vec![typed_spec_with("Indirect Tank", gas_boiler_config())];
+        let err = set_indirect_tank_boiler_loop_id(&mut specs, 0, 1)
+            .expect_err("the type mismatch fails");
+        let message = err.to_string();
+        assert!(
+            message.contains("Indirect Tank")
+                && message.contains("config type mismatch")
+                && message.contains('1'),
+            "the error names the equipment, the expected config type and the loop id: {message}"
+        );
+
+        // A boiler pending autosizing takes its id into its raw parameters.
+        let mut specs = vec![make_spec("Gas Boiler")];
+        assert!(specs[0].typed_config.is_none());
+        set_boiler_loop_id(&mut specs, 0, 1)
+            .expect("a pending boiler is wired through its parameters");
+        assert_eq!(
+            specs[0].parameters.get("loop_id"),
+            Some(&serde_json::json!(1)),
+            "the wired loop id lives in the parameters the post-autosize rebuild reads"
+        );
+    }
+
+    /// The wiring pass writes the wired id into the boiler's raw parameters
+    /// alongside its typed config, so the post-autosize rebuild (which reads
+    /// the parameters) carries the id the boiler was wired with.
+    #[test]
+    fn wiring_writes_the_loop_id_into_the_boilers_parameters() {
+        use super::set_boiler_loop_id;
+
+        let mut specs = vec![typed_spec_with("Gas Boiler", gas_boiler_config())];
+        set_boiler_loop_id(&mut specs, 0, 1).expect("the wired boiler takes its id");
+        assert_eq!(
+            specs[0].parameters.get("loop_id"),
+            Some(&serde_json::json!(1)),
+            "the wired loop id lives in the parameters the post-autosize rebuild reads"
+        );
+        let boiler_cfg: hares_equipment::GasBoilerConfig = specs[0]
+            .typed_config
+            .as_ref()
+            .expect("boiler typed config")
+            .typed()
+            .expect("GasBoilerConfig");
+        assert_eq!(boiler_cfg.loop_id, Some(1));
     }
 
     fn make_spec(name: &str) -> super::EquipmentSpec {
