@@ -135,10 +135,7 @@ fn assert_pair_shares_one_wired_loop(config: DwellingConfig) {
 #[test]
 fn autosized_boiler_keeps_its_indirect_tank_loop() {
     let (_dir, hpxml_path) = autosized_boiler_hpxml_path();
-    assert_pair_shares_one_wired_loop(dwelling_config(
-        hpxml_path,
-        sim_config(Duration::hours(1)),
-    ));
+    assert_pair_shares_one_wired_loop(dwelling_config(hpxml_path, sim_config(Duration::hours(1))));
 }
 
 #[test]
@@ -157,11 +154,9 @@ fn wired_boiler_and_indirect_tank_share_the_wired_loop() {
 #[test]
 fn unwired_autosized_tank_keeps_its_allocated_loop() {
     let (_dir, hpxml_path) = unwired_tank_hpxml_path();
-    let dwelling = Dwelling::from_config(dwelling_config(
-        hpxml_path,
-        sim_config(Duration::hours(1)),
-    ))
-    .expect("dwelling builds from the unwired-tank fixture");
+    let dwelling =
+        Dwelling::from_config(dwelling_config(hpxml_path, sim_config(Duration::hours(1))))
+            .expect("dwelling builds from the unwired-tank fixture");
     let tank_loop = supply_loop(&dwelling, "Indirect Tank")
         .expect("the dwelling has an indirect tank with a fluid port");
     assert_ne!(
