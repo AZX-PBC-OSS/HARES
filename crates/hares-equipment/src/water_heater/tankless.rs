@@ -56,6 +56,8 @@ pub struct TanklessWH {
     core_output: CoreOutput,
     fuel_type: FuelType,
     setpoint_c: f64,
+    /// The configured setpoint, which the release form restores.
+    configured_setpoint_c: f64,
     efficiency_factor: f64,
     // si-guard-ignore: `GPM` in doc comment reflects HPXML user-facing config field unit; the
     // value is converted to kg/s (SI) at init and never used imperially in simulation.
@@ -130,6 +132,7 @@ impl TanklessWH {
             core_output: CoreOutput::default(),
             fuel_type,
             setpoint_c: DEFAULT_SETPOINT_C,
+            configured_setpoint_c: DEFAULT_SETPOINT_C,
             efficiency_factor: DEFAULT_EF,
             min_flow_kg_s: 0.0,
             rated_thermal_power_w: DEFAULT_MAX_THERMAL_POWER_W,
@@ -219,6 +222,7 @@ impl TanklessWH {
         self.ports = build_ports(self.fuel_type);
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
+        self.configured_setpoint_c = self.setpoint_c;
 
         // Fallback chain for efficiency factor:
         // 1. energy_factor — pre-2015 EF test procedure value (direct use).
@@ -640,9 +644,7 @@ impl Equipment for TanklessWH {
                          deadband_c {band_c}"
                     )));
                 }
-                if let Some(sp) = update.setpoint_c {
-                    self.setpoint_c = sp;
-                }
+                self.setpoint_c = update.setpoint_c(self.setpoint_c, self.configured_setpoint_c);
             }
             ControlSignal::DutyCycle { on_fraction, .. } => {
                 if !on_fraction.is_finite() || !(0.0..=1.0).contains(on_fraction) {
@@ -932,6 +934,23 @@ mod tests {
 
     fn config() -> EquipmentConfig {
         config_from_typed(typed_config())
+    }
+
+    #[test]
+    fn the_release_restores_the_configured_setpoint() {
+        use hares_types::ControlSignal;
+        let config = config();
+        let mut eq = TanklessWH::new(config.clone());
+        eq.init(&config, &env()).unwrap();
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(55.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        assert_eq!(eq.setpoint_c, 55.0);
+        eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
+        assert_eq!(eq.setpoint_c, 50.0);
     }
 
     /// Grid outage: an electric tankless heater cannot fire — cold water

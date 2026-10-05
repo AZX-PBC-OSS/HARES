@@ -232,23 +232,98 @@ pub(super) fn apply_jacket_r_value(
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct TankThermostatUpdate {
     /// The tank setpoint, from `heating_setpoint_c`.
-    pub setpoint_c: Option<f64>,
+    named_setpoint_c: Option<f64>,
     /// The tank deadband, from `deadband_c` (see `hares_types::thermostat_band`).
     pub band_c: Option<f64>,
-    /// The release form: the deadband returns to its configured value.
-    pub release: bool,
+    /// The release form: setpoint and deadband return to their configured
+    /// values, as an HVAC thermostat returns to its schedule and band.
+    release: bool,
 }
 
 impl TankThermostatUpdate {
+    /// The setpoint after the update: the named one, the configured one on
+    /// release, otherwise the current one.
+    pub fn setpoint_c(&self, current_c: f64, configured_c: f64) -> f64 {
+        Self::after(self.named_setpoint_c, self.release, current_c, configured_c)
+    }
+
+    /// Whether the update moves the setpoint: a named one, or the release.
+    pub fn changes_setpoint(&self) -> bool {
+        self.named_setpoint_c.is_some() || self.release
+    }
+
     /// The deadband after the update: the signalled band, the configured
     /// one on release, otherwise the current one.
     pub fn deadband_c(&self, current_c: f64, configured_c: f64) -> f64 {
-        match (self.band_c, self.release) {
-            (Some(band_c), _) => band_c,
+        Self::after(self.band_c, self.release, current_c, configured_c)
+    }
+
+    fn after(named: Option<f64>, release: bool, current_c: f64, configured_c: f64) -> f64 {
+        match (named, release) {
+            (Some(value_c), _) => value_c,
             (None, true) => configured_c,
             (None, false) => current_c,
         }
     }
+}
+
+/// The thermostat contract every storage water heater shares, checked on
+/// an initialised `eq` through its (setpoint, deadband) and a deadband
+/// writer: rejections leave the thermostat unchanged, a named signal sets
+/// both, the release restores both configured values, a cooling setpoint is
+/// refused, and a checkpoint carrying a band outside the tank class is
+/// refused on restore.
+#[cfg(test)]
+pub(super) fn assert_tank_thermostat_contract<E: crate::Equipment>(
+    eq: &mut E,
+    thermostat: fn(&E) -> (f64, f64),
+    set_deadband: fn(&mut E, f64),
+) {
+    use hares_types::ControlSignal;
+    let configured = thermostat(eq);
+    for (setpoint, db) in [
+        (None, 0.0),
+        (None, 3.0),
+        (Some(50.0), 0.0),
+        (Some(50.0), 1e-17),
+    ] {
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: setpoint,
+            cooling_setpoint_c: None,
+            deadband_c: Some(db),
+        })
+        .expect_err("a release carrying a deadband or a sub-band deadband is rejected");
+        assert_eq!(thermostat(eq), configured);
+    }
+    let event_setpoint_c = configured.0 + 5.0;
+    eq.apply_signal(&ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: Some(event_setpoint_c),
+        cooling_setpoint_c: None,
+        deadband_c: Some(3.0),
+    })
+    .unwrap();
+    assert_eq!(thermostat(eq), (event_setpoint_c, 3.0));
+    eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
+    assert_eq!(
+        thermostat(eq),
+        configured,
+        "the release restores the configured setpoint and deadband"
+    );
+    eq.apply_signal(&ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: None,
+        cooling_setpoint_c: Some(50.0),
+        deadband_c: None,
+    })
+    .expect_err("a water heater has no cooling setpoint");
+    assert_eq!(thermostat(eq), configured);
+
+    set_deadband(eq, hares_types::MAX_TANK_THERMOSTAT_BAND_C + 1.0);
+    let checkpoint = eq.save_state().unwrap();
+    set_deadband(eq, configured.1);
+    assert!(matches!(
+        eq.load_state(&checkpoint).unwrap_err(),
+        HaresError::ThermostatBand { .. }
+    ));
 }
 
 /// A checkpointed tank deadband, held to the tank class like any other
@@ -261,7 +336,8 @@ pub(super) fn restored_tank_deadband_c(deadband_c: f64) -> crate::Result<f64> {
 /// Reads a `ThermalSetpoint` under the contract every water heater shares
 /// with HVAC: a named setpoint overrides it, `deadband_c` is the switching
 /// band, held to the tank class, and comes only with a named setpoint, and
-/// the release form returns the deadband to its configured value. A water
+/// the release form returns the setpoint and deadband to their configured
+/// values. A water
 /// heater has no cooling setpoint, so naming one is an error rather than a
 /// value substituted for the tank setpoint.
 pub(super) fn tank_thermostat_update(
@@ -282,7 +358,7 @@ pub(super) fn tank_thermostat_update(
         )));
     }
     Ok(TankThermostatUpdate {
-        setpoint_c: heating_setpoint_c,
+        named_setpoint_c: heating_setpoint_c,
         band_c: thermal_setpoint_band_c(
             ThermostatBandClass::Tank,
             heating_setpoint_c,

@@ -214,7 +214,10 @@ bitflags! {
 impl ControlSignal {
     /// The release form of [`ControlSignal::ThermalSetpoint`]: it names no
     /// setpoint and carries no band, and hands the thermostat back to its
-    /// schedule and its configured band.
+    /// schedule (a water heater: its configured setpoint) and its configured
+    /// band. OCHRE keeps an external water-heater setpoint until a
+    /// `{'Setpoint': None}` (`WaterHeater.py`); this release is that reset,
+    /// applied to every thermostat alike.
     #[must_use]
     pub const fn thermal_release() -> Self {
         Self::ThermalSetpoint {

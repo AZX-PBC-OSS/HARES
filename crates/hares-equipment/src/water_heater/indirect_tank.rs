@@ -81,7 +81,8 @@ pub struct IndirectTank {
     hx_ua_w_per_k: f64,
     setpoint_c: f64,
     deadband_c: f64,
-    /// The configured deadband, which the release form restores.
+    /// The configured setpoint and deadband, which the release form restores.
+    configured_setpoint_c: f64,
     configured_deadband_c: f64,
     max_tank_temp_c: f64,
     heating_on: bool,
@@ -161,6 +162,7 @@ impl IndirectTank {
             hx_ua_w_per_k: DEFAULT_HX_UA_W_PER_K,
             setpoint_c: DEFAULT_SETPOINT_C,
             deadband_c: DEFAULT_DEADBAND_C,
+            configured_setpoint_c: DEFAULT_SETPOINT_C,
             configured_deadband_c: DEFAULT_DEADBAND_C,
             max_tank_temp_c: DEFAULT_MAX_TANK_TEMP_C,
             heating_on: false,
@@ -261,6 +263,7 @@ impl IndirectTank {
         self.hx_ua_w_per_k = c.hx_ua_w_per_k.unwrap_or(DEFAULT_HX_UA_W_PER_K).max(0.0);
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
         self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
+        self.configured_setpoint_c = self.setpoint_c;
         self.configured_deadband_c = self.deadband_c;
         self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
         self.duty_cycle = 1.0;
@@ -665,7 +668,8 @@ impl Equipment for IndirectTank {
             } => {
                 let update =
                     tank_thermostat_update(*heating_setpoint_c, *cooling_setpoint_c, *deadband_c)?;
-                if let Some(sp) = update.setpoint_c {
+                if update.changes_setpoint() {
+                    let sp = update.setpoint_c(self.target_setpoint_c, self.configured_setpoint_c);
                     self.target_setpoint_c = sp;
                     self.setpoint_c = sp;
                 }
@@ -857,41 +861,11 @@ mod control_domain_tests {
         let cfg = config();
         let mut eq = IndirectTank::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
-        let configured = eq.deadband_c;
-        for (setpoint, db) in [
-            (None, 0.0),
-            (None, 3.0),
-            (Some(50.0), 0.0),
-            (Some(50.0), 1e-17),
-        ] {
-            eq.apply_signal(&ControlSignal::ThermalSetpoint {
-                heating_setpoint_c: setpoint,
-                cooling_setpoint_c: None,
-                deadband_c: Some(db),
-            })
-            .expect_err("a release carrying a deadband or a sub-band deadband is rejected");
-            assert_eq!(eq.deadband_c, configured);
-        }
-        eq.apply_signal(&ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: Some(50.0),
-            cooling_setpoint_c: None,
-            deadband_c: Some(3.0),
-        })
-        .unwrap();
-        assert_eq!(eq.deadband_c, 3.0);
-        eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
-        assert_eq!(
-            eq.deadband_c, configured,
-            "the release restores the configured deadband"
+        super::super::assert_tank_thermostat_contract(
+            &mut eq,
+            |e| (e.setpoint_c, e.deadband_c),
+            |e, db| e.deadband_c = db,
         );
-        let setpoint = eq.setpoint_c;
-        eq.apply_signal(&ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: None,
-            cooling_setpoint_c: Some(50.0),
-            deadband_c: None,
-        })
-        .expect_err("a water heater has no cooling setpoint");
-        assert_eq!(eq.setpoint_c, setpoint);
     }
 
     /// The central validator rejects out-of-domain setpoints and load
