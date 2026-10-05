@@ -109,6 +109,17 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         ("cz5a_ev_charging", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.88),
         ("cz5a_ev_charging", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(112.0),
         // Lighting-parity correction (2026-09-13), see cz4a_pv_only note.
+        //
+        // The lighting split moved this residual away from OCHRE (1.711 →
+        // 1.743; 1.622 after the appliance split alone) and this window's
+        // site-energy residual from 17.15 % to 17.19 %. OCHRE is
+        // simplified here: lighting is 100 % convective (`ochre/utils/
+        // hpxml.py:1522-1527`) and every radiative fraction is summed into
+        // the air-node gain (`ochre/Equipment/Equipment.py:80-85,197`).
+        // HARES keeps the reference split: 0.6 radiant, 0.2 visible
+        // (OS-HPXML v1.12.0 `model.rb:249-251`), the visible part added to
+        // the enclosure's diffuse short-wave (EnergyPlus v24.2.0
+        // `HeatBalanceSurfaceManager.cc:3687-3693`). The band is not moved.
         ("cz5a_minisplit_gas_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(1.75),
         ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(64.8),
         ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(92.5),
@@ -119,6 +130,18 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // removing phantom garage lighting shifts this January midnight
         // window's small HVAC integral (step-0 back-solve dominated).
         ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(59.0),
+        // ── resstock_bldg0112631_24h ──────────────────────────────────────
+        //
+        // Zone temperature, HVAC energy and site energy run on the default
+        // bands, which no override here changes. The internal-gain split
+        // moved all three away from OCHRE, which puts radiative gain on the
+        // air node (`ochre/Equipment/Equipment.py:80-85,197`): the appliance
+        // and plug-load radiant split (0.6 of sensible, OS-HPXML v1.12.0
+        // `hotwater_appliances.rb:80-320`, `misc_loads.rb:89`) took zone
+        // temperature from 0.408 to 0.421 °C, HVAC energy from 20.1 % to
+        // 21.8 % and site energy from 5.14 % to 5.26 %; the lighting split
+        // noted at cz5a_minisplit_gas_wh took zone temperature on to
+        // 0.441 °C. Its one override, below, is the peak HVAC power band.
         ("resstock_bldg0112631_24h", METRIC_PEAK_HVAC_POWER) => Some(25.7),
         _ => None,
     }
