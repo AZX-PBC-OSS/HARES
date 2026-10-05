@@ -15,13 +15,18 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import pytest
 
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER
 
 from ochre_next import Battery, ControlSignal, Dwelling, DwellingConfig, SimulationConfig, SteppableFleet
+
+if TYPE_CHECKING:
+    # The extension's step() returns a plain dict at runtime; its declared
+    # shape lives in ochre_next._hares_types.
+    from ochre_next._hares_types import StepResult
 from ochre_next.helics import (
     HELICSDwelling,
     HELICSFleet,
@@ -35,18 +40,16 @@ from ochre_next.helics import (
 from ochre_next.helics.broker import allocate_ephemeral_port
 
 helics_available = importlib.util.find_spec("helics") is not None
+if not helics_available:  # pragma: no cover - exercised when optional dependency is missing
+    pytest.skip("helics not installed", allow_module_level=True)
+import helics
+
 pytestmark = [
-    pytest.mark.skipif(not helics_available, reason="helics not installed"),
     # Last-resort backstop: raw HELICS calls block inside the C library where
     # SIGALRM cannot interrupt them, so use pytest-timeout's thread method.
     pytest.mark.timeout(120, method="thread"),
     pytest.mark.usefixtures("helics_environment_guard"),
 ]
-
-if helics_available:
-    import helics
-else:  # pragma: no cover - exercised when optional dependency is missing
-    helics = None  # type: ignore[assignment]
 
 
 _TIME_RES_S = 60.0
@@ -216,6 +219,18 @@ class _FederateProbe:
         self.granted_times.append(granted)
         return granted
 
+    def register_publication(self, key: str, type_: str) -> Any:
+        return self._fed.register_publication(key, type_)
+
+    def register_global_publication(self, key: str, type_: str) -> Any:
+        return self._fed.register_global_publication(key, type_)
+
+    def register_subscription(self, key: str, type_: str) -> Any:
+        return self._fed.register_subscription(key, type_)
+
+    def set_flag_option(self, flag: int, enabled: bool) -> None:
+        self._fed.set_flag_option(flag, enabled)
+
     def disconnect(self) -> None:
         self.disconnect_called = True
         self._fed.disconnect()
@@ -240,7 +255,7 @@ class _RecordingDwelling:
     def timesteps(self):  # noqa: ANN201
         return self._dwelling.timesteps()
 
-    def step(self) -> dict[str, Any]:
+    def step(self) -> StepResult:
         result = self._dwelling.step()
         telemetry = self._dwelling.telemetry().equipment()
         names = telemetry.get("names", [])
@@ -275,7 +290,7 @@ class _FaultyDwelling:
     def timesteps(self):  # noqa: ANN201
         return self._dwelling.timesteps()
 
-    def step(self) -> dict[str, Any]:
+    def step(self) -> StepResult:
         self._step_count += 1
         if self._step_count == self._fail_step:
             raise RuntimeError("synthetic dwelling step failure")
@@ -462,13 +477,18 @@ def _start_thread(target: Callable[[], None], name: str) -> tuple[threading.Thre
 def _new_federate_info(
     port: int, core_type: str = "zmq", time_res_s: float = _TIME_RES_S, core_name: str = "aggregator",
 ):
-    if hasattr(helics, "HelicsFederateInfo"):
-        try:
-            fedinfo = helics.HelicsFederateInfo()
-        except TypeError:
-            fedinfo = helics.helicsCreateFederateInfo()
-    else:
+    # The 3.6.1 wheel builds the info object through helicsCreateFederateInfo();
+    # HelicsFederateInfo's constructor requires the raw C handle that only the
+    # factory produces.
+    if hasattr(helics, "helicsCreateFederateInfo"):
         fedinfo = helics.helicsCreateFederateInfo()
+    else:
+        # Fallback for HELICS builds that expose a no-arg HelicsFederateInfo
+        # constructor instead.
+        info_ctor: Callable[[], Any] | None = getattr(helics, "HelicsFederateInfo", None)
+        if info_ctor is None:
+            raise RuntimeError("HELICS Python module does not expose federate info creation API")
+        fedinfo = info_ctor()
 
     if hasattr(helics, "helicsFederateInfoSetCoreTypeFromString"):
         helics.helicsFederateInfoSetCoreTypeFromString(fedinfo, core_type)
@@ -1281,7 +1301,8 @@ def test_mismatched_subscription_topic_logs_stale_warning() -> None:
         # After _TOTAL_STEPS (=10) steps with no data, the stale count should
         # reflect the unresponsive subscription.
         row = orch.get_diagnostic_row()
-        assert row["helics_stale_subscription_count"] >= 1, (
+        stale_count = row["helics_stale_subscription_count"]
+        assert stale_count >= 1, (
             "Expected at least one stale subscription after %d steps without data; "
             "got stale_count=%d, update_mask=%d"
             % (_TOTAL_STEPS, row["helics_stale_subscription_count"], row["helics_update_mask"])

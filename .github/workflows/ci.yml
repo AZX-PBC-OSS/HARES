@@ -247,6 +247,18 @@ jobs:
           name: pytest-results
           path: test-results.xml
 
+  pyright:
+    name: "pyright"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked --all-extras --all-groups
+      - run: uv run --locked --all-extras --all-groups pyright
+
   slow-python-test:
     name: "pytest slow + ochre group (Python ${{ matrix.python-version }})"
     runs-on: ubuntu-latest

@@ -43,7 +43,11 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from ochre_next.data import fetch_resstock_building
-from ochre_next.data.resstock import _backoff_delay, _is_transient_error
+from ochre_next.data.resstock import (
+    ResStockBuilding,
+    _backoff_delay,
+    _is_transient_error,
+)
 
 log = logging.getLogger("download_resstock_fixtures")
 
@@ -91,7 +95,7 @@ def _retry_fetch_resstock_building(
     version: str,
     bldg_name: str,
     max_attempts: int = 3,
-) -> tuple[object, int]:  # (ResStockBuilding | None, retry_count)
+) -> tuple[ResStockBuilding | None, int]:
     """Call fetch_resstock_building with exponential-backoff retries.
 
     Returns ``(building, retry_count)`` where *building* is ``None`` when
@@ -126,6 +130,7 @@ def _retry_fetch_resstock_building(
                     version, bldg_name, retry_count, type(exc).__name__,
                 )
                 return None, retry_count
+    return None, retry_count
 
 
 def _compute_sha256(file_path: Path) -> str:
@@ -210,10 +215,10 @@ def _fetch_metadata_parquet(version: str, tmp_dir: Path) -> Path:
     Returns the path to the downloaded parquet file, or raises if the
     download fails.
     """
-    from ochre_next.data.resstock import _download_file, _metadata_url, _version_config
+    from ochre_next.data.resstock import _download_file, _version_config, metadata_url
 
     cfg = _version_config(version)
-    url = _metadata_url(cfg, upgrade_id=0)
+    url = metadata_url(cfg, upgrade_id=0)
     dest = tmp_dir / f"metadata_{version.replace('.', '_')}.parquet"
     if not dest.exists() or dest.stat().st_size == 0:
         log.info("  Downloading metadata for %s from %s", version, url)
@@ -389,7 +394,7 @@ def _verify_hpxml_equipment(hpxml_path: Path, dimensions: dict[str, str]) -> lis
     """
     results: list[str] = []
     try:
-        tree = ET.parse(hpxml_path)  # noqa: S314
+        tree = ET.parse(hpxml_path)
         root = tree.getroot()
     except ET.ParseError:
         return [f"Could not parse HPXML at {hpxml_path}"]

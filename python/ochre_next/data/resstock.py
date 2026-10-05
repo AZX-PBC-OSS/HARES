@@ -15,8 +15,9 @@ import urllib.request
 import warnings
 import xml.etree.ElementTree as ET
 import zipfile
+from collections.abc import Coroutine
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol, TypeIs
 
 from ochre_next.data._checksum import (
     remove_cache_with_sidecar as _remove_cache_with_sidecar,
@@ -25,7 +26,6 @@ from ochre_next.data._checksum import (
 )
 
 if TYPE_CHECKING:
-    import httpx
     import polars as pl
 
 log = logging.getLogger(__name__)
@@ -39,6 +39,12 @@ _HPXML_NS = {
     "h": "http://hpxmlonline.com/2023/09",
     "h19": "http://hpxmlonline.com/2019/10",
 }
+
+
+def _is_mapping(value: object) -> TypeIs[dict[str, Any]]:
+    """Narrow an exception attribute to the string-keyed mappings that
+    botocore's ClientError.response and httpx use."""
+    return isinstance(value, dict)
 
 
 class ResStockVersion(str, enum.Enum):
@@ -135,7 +141,7 @@ def _zip_url(cfg: _VersionConfig, bldg_id: int, upgrade_id: int) -> str:
     return _OEDI_BASE + cfg.base_path + rel
 
 
-def _metadata_url(cfg: _VersionConfig, upgrade_id: int) -> str:
+def metadata_url(cfg: _VersionConfig, upgrade_id: int) -> str:
     if upgrade_id == 0:
         rel = cfg.metadata_baseline
     else:
@@ -198,7 +204,7 @@ def _is_transient_error(exc: BaseException) -> bool:
             found_transient = True
         # botocore-style ClientError carries response as a dict with HTTP status.
         response_dict = getattr(current, "response", None)
-        if isinstance(response_dict, dict):
+        if _is_mapping(response_dict):
             meta_http = response_dict.get("ResponseMetadata", {}).get("HTTPStatusCode")
             if isinstance(meta_http, int) and meta_http in _TRANSIENT_HTTP_STATUSES:
                 found_transient = True
@@ -274,6 +280,24 @@ def _next_retry_delay(
 
 class ZipIntegrityError(ValueError):
     """ZIP file failed integrity check — ``testzip()`` found a bad member."""
+
+
+class _AsyncGetResponse(Protocol):
+    """The httpx response surface the async downloader consumes."""
+
+    @property
+    def content(self) -> bytes: ...
+
+    def raise_for_status(self) -> object: ...
+
+
+class _AsyncGetClient(Protocol):
+    """The httpx client surface the async downloader consumes.
+
+    Test doubles satisfy this instead of constructing a real AsyncClient.
+    """
+
+    async def get(self, url: str) -> _AsyncGetResponse: ...
 
 
 def _verify_zip(zip_path: Path) -> None:
@@ -365,7 +389,7 @@ def _download_with_retry(
 
 def _try_download(url: str, dest: Path) -> None:
     try:
-        import httpx  # type: ignore[import-not-found]
+        import httpx
 
         with httpx.Client(follow_redirects=True) as client:
             with client.stream("GET", url) as resp:
@@ -378,9 +402,9 @@ def _try_download(url: str, dest: Path) -> None:
         pass
 
     try:
-        import boto3  # type: ignore[import-not-found]
-        from botocore import UNSIGNED  # type: ignore[import-not-found]
-        from botocore.config import Config  # type: ignore[import-not-found]
+        import boto3
+        from botocore import UNSIGNED
+        from botocore.config import Config
 
         prefix = "https://oedi-data-lake.s3.amazonaws.com/"
         if url.startswith(prefix):
@@ -430,7 +454,7 @@ def _parse_weather_station(hpxml_path: Path) -> tuple[str, str] | None:
         return None
 
     # Try both known namespace versions
-    for prefix, uri in _HPXML_NS.items():
+    for uri in _HPXML_NS.values():
         name_el = root.find(f".//{{{uri}}}WeatherStation/{{{uri}}}Name")
         if name_el is not None and name_el.text:
             return _fips_from_weather_name(name_el.text)
@@ -584,7 +608,7 @@ def _parse_climate_zone(hpxml_path: Path) -> str | None:
     except ET.ParseError:
         return None
 
-    for prefix, uri in _HPXML_NS.items():
+    for uri in _HPXML_NS.values():
         zone_el = root.find(
             f".//{{{uri}}}ClimateandRiskZones/{{{uri}}}ClimateZoneIECC/{{{uri}}}ClimateZone"
         )
@@ -899,7 +923,7 @@ async def _noop() -> None:
 
 
 async def _download_building_async(
-    client: httpx.AsyncClient,
+    client: _AsyncGetClient,
     cfg: _VersionConfig,
     bldg_id: int,
     upgrade_id: int,
@@ -953,7 +977,7 @@ async def _download_building_async(
 
 
 async def _download_bytes_async(
-    client: httpx.AsyncClient,
+    client: _AsyncGetClient,
     url: str,
     *,
     max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS,
@@ -981,13 +1005,13 @@ async def _fetch_fleet_async(
     weather_format: WeatherFormat | None = None,
 ) -> list[ResStockBuilding]:
     results: list[ResStockBuilding] = []
-    n_checksum_failures = 0
+    checksum_failure_count = 0
 
     try:
-        import httpx  # type: ignore[import-not-found]
+        import httpx
 
         async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
-            tasks = []
+            tasks: list[Coroutine[Any, Any, None]] = []
             for bid in bldg_ids:
                 bldg_dir = _building_cache_dir(base_cache, version, bid)
                 hpxml_path = bldg_dir / "home.xml"
@@ -1003,7 +1027,7 @@ async def _fetch_fleet_async(
                     ) and _validate_cache_integrity(schedule_path):
                         tasks.append(_noop())
                     else:
-                        n_checksum_failures += 1
+                        checksum_failure_count += 1
                         _remove_cache_with_sidecar(hpxml_path)
                         _remove_cache_with_sidecar(schedule_path)
                         tasks.append(
@@ -1073,7 +1097,7 @@ async def _fetch_fleet_async(
             "%d checksum failures (of %d requested)",
             len(results),
             n_failed,
-            n_checksum_failures,
+            checksum_failure_count,
             len(bldg_ids),
         )
         return results
@@ -1196,12 +1220,23 @@ def fetch_resstock_fleet(
 
 def _bldg_id_col(df: pl.DataFrame) -> str:
     """Return the building ID column name from a polars DataFrame."""
-    import polars as _pl
+    import polars as pl
 
     for candidate in ("bldg_id", "building_id", "Building"):
         if candidate in df.columns:
             return candidate
     for col in df.columns:
-        if df[col].dtype in (_pl.Int32, _pl.Int64, _pl.UInt32, _pl.UInt64):
+        dtype = df[col].dtype
+        # Membership against the dtype classes trips pyright's
+        # reportUnnecessaryContains (a DataType instance and the class
+        # objects "have no overlap"), so the same exact-class set is spelled
+        # as an equality chain. Unlike is_integer(), Int8/Int16/UInt8/UInt16
+        # deliberately do not match.
+        if (
+            dtype == pl.Int32
+            or dtype == pl.Int64
+            or dtype == pl.UInt32
+            or dtype == pl.UInt64
+        ):
             return col
     raise ValueError(f"Cannot find building ID column in: {df.columns}")

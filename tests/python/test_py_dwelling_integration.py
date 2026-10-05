@@ -13,6 +13,12 @@ import pytest
 
 from conftest import make_dwelling
 
+
+def _num(value: object) -> float:
+    """Narrow a polars reduction result (``PythonLiteral | None``) to float."""
+    assert isinstance(value, (int, float)), f"expected numeric, got {value!r}"
+    return float(value)
+
 pl = pytest.importorskip("polars")
 
 
@@ -129,8 +135,8 @@ class TestFullSimulation:
         for tc in temp_cols:
             col = df[tc].drop_nulls()
             if col.len() > 0:
-                assert col.min() >= 10.0, f"{tc} has unrealistically low temp: {col.min()}"
-                assert col.max() <= 30.0, f"{tc} has unrealistically high temp: {col.max()}"
+                assert _num(col.min()) >= 10.0, f"{tc} has unrealistically low temp: {col.min()}"
+                assert _num(col.max()) <= 30.0, f"{tc} has unrealistically high temp: {col.max()}"
                 break
         # verbosity >= 3: equipment mode columns
         mode_cols = [c for c in cols if c.endswith("Mode (-)")]
@@ -142,8 +148,8 @@ class TestFullSimulation:
         assert "Outdoor Dry Bulb (C)" in df.columns
         col = df["Outdoor Dry Bulb (C)"]
         assert col.null_count() == 0
-        assert col.min() > -50.0
-        assert col.max() < 60.0
+        assert _num(col.min()) > -50.0
+        assert _num(col.max()) < 60.0
 
     def test_verbosity_1_includes_outdoor_temp(self, tmp_path):
         # Outdoor Dry Bulb (C) is a context column present at every verbosity level.
@@ -192,7 +198,8 @@ class TestControlInjection:
         # Run baseline (default setpoints) and capture final zone temperature
         dw_base = _init_dwelling(duration_s=600, time_res_s=60)
         name_base = _find_thermal_equipment(dw_base)
-        for _ in range(6):
+        baseline_result = dw_base.step()
+        for _ in range(5):
             baseline_result = dw_base.step()
         temp_keys = [k for k in baseline_result if "Temperature" in k]
         assert len(temp_keys) > 0
@@ -205,7 +212,8 @@ class TestControlInjection:
         name_heat = _find_thermal_equipment(dw_heat)
         signal = ControlSignal.thermal_setpoint(heat_c=25.0, cool_c=30.0)
         dw_heat.apply_control(name_heat, signal)
-        for _ in range(6):
+        heated_result = dw_heat.step()
+        for _ in range(5):
             heated_result = dw_heat.step()
         heated_final_temp = heated_result[temp_keys[0]]
 
@@ -954,22 +962,22 @@ class TestDerSimulationExplorer:
         # PV generation is negative in the telemetry convention (matching
         # OCHRE: negative = generating power, same as battery discharge)
         pv_col = df["PV Electric Power (kW)"]
-        assert pv_col.min() < 0, "PV should produce power during daylight"
+        assert _num(pv_col.min()) < 0, "PV should produce power during daylight"
 
         # Battery SOC should be in [0, 1]
         bat_soc = df["Battery SOC (-)"]
-        assert bat_soc.min() >= 0.0
-        assert bat_soc.max() <= 1.0
+        assert _num(bat_soc.min()) >= 0.0
+        assert _num(bat_soc.max()) <= 1.0
 
         # Total electric power should have negative values (export from PV)
         total = df["Total Electric Power (kW)"]
-        assert total.min() < 0, "Should have export (negative) power from PV"
-        assert total.max() > 0, "Should have import (positive) power"
+        assert _num(total.min()) < 0, "Should have export (negative) power from PV"
+        assert _num(total.max()) > 0, "Should have import (positive) power"
         assert total.is_not_nan().all(), "Net import must be finite (no NaN)"
 
         # Battery SOC should have variance -- it charged/discharged at least once
         bat_soc_std = bat_soc.std()
-        assert bat_soc_std > 0, (
+        assert _num(bat_soc_std) > 0, (
             "Battery SOC should vary over 2-week simulation (charged/discharged)"
         )
 

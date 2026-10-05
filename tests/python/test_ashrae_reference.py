@@ -253,15 +253,22 @@ def test_min_delta_t_tarp_floor_is_applied() -> None:
     # Choosing avg_ambient = 15.0 → t_ext = 20.0 → raw_dt = 0.0 K.
     # Choosing avg_ambient = 15.05 → t_ext = 20.05 → raw_dt = 0.05 K.
     # Both are < MIN_DELTA_T_TARP_NATURAL_K (0.1 K).
-    common_kwargs = dict(
+    inputs_raw_zero = FilmInputs(
+        avg_ambient_temp_c=15.0,
         tilt_deg=90.0,
         interior_zone="LIV",
         exterior_zone="EXT",
         avg_wind_speed_m_s=2.0,
         avg_ground_temp_c=10.0,
     )
-    inputs_raw_zero = FilmInputs(avg_ambient_temp_c=15.0, **common_kwargs)
-    inputs_raw_half = FilmInputs(avg_ambient_temp_c=15.05, **common_kwargs)
+    inputs_raw_half = FilmInputs(
+        avg_ambient_temp_c=15.05,
+        tilt_deg=90.0,
+        interior_zone="LIV",
+        exterior_zone="EXT",
+        avg_wind_speed_m_s=2.0,
+        avg_ground_temp_c=10.0,
+    )
 
     _, r_ext_zero = film_resistances(inputs_raw_zero)
     _, r_ext_half = film_resistances(inputs_raw_half)

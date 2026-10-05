@@ -113,7 +113,14 @@ def _run_ochre_for_fixture(fixture_dir: Path) -> pd.DataFrame:
         save_results=False,
         **extra,
     )
-    df, _metrics, _hourly = dwelling.simulate()
+    import pandas as pd
+
+    sim_result = dwelling.simulate()
+    assert isinstance(sim_result, tuple) and len(sim_result) == 3, (
+        "OCHRE simulate must return (df, metrics_by_end_use, ...)"
+    )
+    df = sim_result[0]
+    assert isinstance(df, pd.DataFrame), "OCHRE simulate must return a results DataFrame"
     return df
 
 

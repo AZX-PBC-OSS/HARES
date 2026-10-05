@@ -14,6 +14,7 @@ import datetime as dt
 import tempfile
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from ochre_names import resolve_hares_kwh
 
@@ -67,14 +68,19 @@ def _run_ochre() -> dict[str, float]:
         verbosity=6,
         save_results=False,
     )
-    df, _metrics, _hourly = dwelling.simulate()
+    result = dwelling.simulate()
+    assert isinstance(result, tuple) and len(result) == 3, (
+        "OCHRE simulate must return (df, metrics_by_end_use, ...)"
+    )
+    df = result[0]
+    assert isinstance(df, pd.DataFrame), "OCHRE simulate must return a results DataFrame"
 
     time_res_h = TIME_RES_MIN / 60.0
-    result: dict[str, float] = {}
+    totals: dict[str, float] = {}
     for col in df.columns:
         if col.endswith(("(kW)", "(therms/hour)")):
-            result[col] = float((df[col] * time_res_h).sum())
-    return result
+            totals[col] = float((df[col] * time_res_h).sum())
+    return totals
 
 
 # ---------------------------------------------------------------------------

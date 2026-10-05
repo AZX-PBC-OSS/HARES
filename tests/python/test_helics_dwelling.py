@@ -580,7 +580,7 @@ def test_helics_dwelling_handle_time_grant_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module, fake_helics = _import_dwelling_module(monkeypatch)
-    fn = module._handle_time_grant
+    fn = module.handle_time_grant
 
     assert fn(60.0, 60.0) is True
     assert fn(60.0, 10.0) is False
@@ -1055,7 +1055,7 @@ def test_validate_control_signal_rejects_nan_power_setpoint(
     module, fake_helics = _import_dwelling_module(monkeypatch)
 
     with caplog.at_level("WARNING"):
-        clamped = module._validate_control_signal(
+        clamped = module.validate_control_signal(
             {"type": "PowerSetpoint", "active_power_kw": float("nan")},
             "Battery",
             module.logging.getLogger("test"),

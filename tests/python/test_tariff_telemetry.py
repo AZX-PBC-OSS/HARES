@@ -151,6 +151,7 @@ def test_tariff_telemetry_to_dict():
     dw.set_electric_tariff(tariff)
 
     t = dw.tariff_telemetry()
+    assert t is not None, "tariff telemetry must be present after set_electric_tariff"
     d = t.to_dict()
     expected_keys = {
         "period_name",
@@ -172,6 +173,7 @@ def test_tariff_telemetry_rate_matches_tariff():
     dw.set_electric_tariff(tariff)
 
     t = dw.tariff_telemetry()
+    assert t is not None, "tariff telemetry must be present after set_electric_tariff"
     # At midnight, should be offpeak with rate 0.10
     assert t.period_name == "offpeak"
     assert abs(t.current_rate_usd_per_kwh - 0.10) < 1e-6

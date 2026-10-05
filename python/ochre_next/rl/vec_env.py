@@ -27,13 +27,25 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from .gym_env import (
     RewardContext,
-    _build_control_signal,
-    _drain_step_warnings,
-    _field_bounds,
-    _observation_field_bounds,
-    _sorted_action_layout,
+    build_control_signal,
+    drain_step_warnings,
+    field_bounds,
+    observation_field_bounds,
+    sorted_action_layout,
     telemetry_to_observation,
 )
+
+__all__ = [
+    "RewardContext",
+    "VecDwellingGymEnv",
+    "build_control_signal",
+    "drain_step_warnings",
+    "field_bounds",
+    "observation_field_bounds",
+    "rust_batch_step",
+    "sorted_action_layout",
+    "telemetry_to_observation",
+]
 
 _warned_initial_nan: bool = False
 
@@ -68,26 +80,32 @@ class VecDwellingGymEnv:
         self._initial_snapshots = [bytes(dwelling.save_state()) for dwelling in self._dwellings]
         self.num_envs = len(self._dwellings)
 
-        self._action_layout, self._signal_type_by_equipment = _sorted_action_layout(
+        self._action_layout, self._signal_type_by_equipment = sorted_action_layout(
             action_space_config
         )
-        action_low = []
-        action_high = []
+        action_low: list[float] = []
+        action_high: list[float] = []
         for _, field in self._action_layout:
-            low, high = _field_bounds(field)
+            low, high = field_bounds(field)
             action_low.append(low)
             action_high.append(high)
 
         action_low_arr = np.asarray(action_low, dtype=np.float64)
         action_high_arr = np.asarray(action_high, dtype=np.float64)
         bounds = [
-            _observation_field_bounds(f) for f in observation_fields
+            observation_field_bounds(f) for f in observation_fields
         ]
         if field_bounds_overrides:
             for idx, field in enumerate(observation_fields):
                 override = field_bounds_overrides.get(field)
                 if override is not None:
                     bounds[idx] = (float(override[0]), float(override[1]))
+        # The bounds are kept directly on the instance so _apply_controls()
+        # and step() need no gymnastics over the optional Gymnasium space
+        # objects (absent when gymnasium is not installed).
+        self._action_low = action_low_arr
+        self._action_high = action_high_arr
+        self._action_dim = len(self._action_layout)
         if spaces is not None:
             obs_low = np.asarray([b[0] for b in bounds], dtype=np.float64)
             obs_high = np.asarray([b[1] for b in bounds], dtype=np.float64)
@@ -160,14 +178,12 @@ class VecDwellingGymEnv:
         )
 
     def _apply_controls(self, dwelling: PyDwelling, action_row: np.ndarray) -> None:
-        low = self.action_space.low if hasattr(self.action_space, "low") else self.action_space["low"]
-        high = self.action_space.high if hasattr(self.action_space, "high") else self.action_space["high"]
-        action_row = np.clip(action_row, low, high)
+        action_row = np.clip(action_row, self._action_low, self._action_high)
         action_values: dict[str, dict[str, float]] = {}
         for idx, (equipment, field) in enumerate(self._action_layout):
             action_values.setdefault(equipment, {})[field] = float(action_row[idx])
         for equipment in sorted(action_values):
-            signal = _build_control_signal(
+            signal = build_control_signal(
                 self._signal_type_by_equipment[equipment],
                 action_values[equipment],
             )
@@ -197,7 +213,7 @@ class VecDwellingGymEnv:
                 stacklevel=2,
             )
 
-        infos = [{"seed": seeds[idx]} for idx in range(self.num_envs)]
+        infos: list[dict[str, Any]] = [{"seed": seeds[idx]} for idx in range(self.num_envs)]
         for idx in range(self.num_envs):
             infos[idx]["initial_observation_mask"] = ~np.isfinite(obs[idx])
         return obs.astype(np.float64, copy=False), infos
@@ -214,12 +230,7 @@ class VecDwellingGymEnv:
         """
         arr = np.asarray(actions, dtype=np.float64)
         arr = np.ascontiguousarray(arr)
-        action_dim = (
-            self.action_space.shape[0]
-            if hasattr(self.action_space, "shape")
-            else self.action_space["shape"][0]
-        )
-        expected = (self.num_envs, action_dim)
+        expected = (self.num_envs, self._action_dim)
         if arr.shape != expected:
             raise ValueError(f"expected actions shape {expected}, got {arr.shape}")
 
@@ -261,11 +272,11 @@ class VecDwellingGymEnv:
         else:
             for idx, dwelling in enumerate(self._dwellings):
                 self._apply_controls(dwelling, arr[idx])
-            obs_rows = []
-            rewards = []
-            dones = []
-            truncs = []
-            infos = []
+            obs_rows: list[np.ndarray] = []
+            reward_rows: list[float] = []
+            done_rows: list[bool] = []
+            trunc_rows: list[bool] = []
+            infos: list[dict[str, Any]] = []
             for dwelling in self._dwellings:
                 step_data = dwelling.step()
                 telemetry = dwelling.telemetry()
@@ -276,18 +287,18 @@ class VecDwellingGymEnv:
                     telemetry_equipment=telemetry.equipment(),
                     total_power_kw=float(telemetry.total_power_kw),
                 )
-                rewards.append(float(self._reward_fn(ctx)))
-                dones.append(False)
-                truncs.append(False)
-                warning_count, warning_messages = _drain_step_warnings(dwelling)
+                reward_rows.append(float(self._reward_fn(ctx)))
+                done_rows.append(False)
+                trunc_rows.append(False)
+                warning_count, warning_messages = drain_step_warnings(dwelling)
                 info: dict[str, Any] = {"step": step_data, "warning_count": warning_count}
                 if warning_messages:
                     info["warnings"] = warning_messages
                 infos.append(info)
             obs = np.asarray(obs_rows, dtype=np.float64)
-            rewards = np.asarray(rewards, dtype=np.float64)
-            dones = np.asarray(dones, dtype=np.bool_)
-            truncs = np.asarray(truncs, dtype=np.bool_)
+            rewards = np.asarray(reward_rows, dtype=np.float64)
+            dones = np.asarray(done_rows, dtype=np.bool_)
+            truncs = np.asarray(trunc_rows, dtype=np.bool_)
 
         for info in infos:
             for field, (low, high) in self._observation_bounds.items():
@@ -319,7 +330,7 @@ class VecDwellingGymEnv:
     ) -> list[Any]:
         if indices is None:
             indices = range(self.num_envs)
-        out = []
+        out: list[Any] = []
         for idx in indices:
             out.append(getattr(self._dwellings[idx], method_name)(*args, **kwargs))
         return out

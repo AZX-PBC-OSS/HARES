@@ -107,6 +107,7 @@ def test_simulation_plan_swap_furnace_to_ashp():
     power_col = "Total Electric Power (kW)"
     seg0_mean = results.filter(pl.col("segment") == 0)[power_col].mean()
     seg1_mean = results.filter(pl.col("segment") == 1)[power_col].mean()
+    assert isinstance(seg0_mean, (int, float)) and isinstance(seg1_mean, (int, float))
     assert seg1_mean > seg0_mean, (
         f"Expected ASHP segment electric power (mean={seg1_mean:.3f}) "
         f"to exceed gas-furnace segment (mean={seg0_mean:.3f})"

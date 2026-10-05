@@ -11,6 +11,7 @@ dependencies = [
     "numpy>=2.5.3",
     "polars>=1.44.2",
     "pyarrow>=25.0.1",
+    "typing-extensions>=4.16.0",
 ]
 license = {text = "BSD-3-Clause"}
 classifiers = [
@@ -49,6 +50,9 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
     "pytest-timeout>=2.4.0",
+    "pyright>=1.1.414",
+    "botocore-stubs>=1.43.67",
+    "pandas-stubs>=3.0.5.260914",
 ]
 ochre = [
     "boto3>=1.43.107",
@@ -83,6 +87,68 @@ manifest-path = "crates/hares-python/Cargo.toml"
 include = [
     {path = "defaults/**", format = ["sdist", "wheel"]},
 ]
+
+[tool.pyright]
+# "standard" is the baseline for scripts/ and tests/. The shipped package
+# (python/ochre_next, the _hares.pyi stub included) runs at strict: pyright
+# has no per-environment typeCheckingMode, so the environment below lists
+# every rule strict promotes over standard, re-levelled to "error".
+typeCheckingMode = "standard"
+include = ["python", "scripts", "tests", "typings"]
+exclude = ["tests/fixtures"]
+
+[[tool.pyright.executionEnvironments]]
+root = "python/ochre_next"
+strictListInference = true
+strictSetInference = true
+strictDictionaryInference = true
+reportMissingTypeStubs = "error"
+reportAssertAlwaysTrue = "error"
+reportInvalidStringEscapeSequence = "error"
+reportInvalidTypeVarUse = "error"
+reportSelfClsParameterName = "error"
+reportUnsupportedDunderAll = "error"
+reportUnusedExpression = "error"
+reportWildcardImportFromLibrary = "error"
+reportConstantRedefinition = "error"
+reportDeprecated = "error"
+reportDuplicateImport = "error"
+reportIncompleteStub = "error"
+reportInconsistentConstructor = "error"
+reportInvalidStubStatement = "error"
+reportMatchNotExhaustive = "error"
+reportMissingParameterType = "error"
+reportMissingTypeArgument = "error"
+reportPrivateUsage = "error"
+reportTypeCommentUsage = "error"
+reportUnknownArgumentType = "error"
+reportUnknownLambdaType = "error"
+reportUnknownMemberType = "error"
+reportUnknownParameterType = "error"
+reportUnknownVariableType = "error"
+reportUnnecessaryCast = "error"
+reportUnnecessaryComparison = "error"
+reportUnnecessaryContains = "error"
+reportUnnecessaryIsInstance = "error"
+reportUnusedClass = "error"
+reportUnusedImport = "error"
+reportUnusedFunction = "error"
+reportUnusedVariable = "error"
+reportUntypedBaseClass = "error"
+reportUntypedClassDecorator = "error"
+reportUntypedFunctionDecorator = "error"
+reportUntypedNamedTuple = "error"
+
+# The vendored OCHRE reference package (pytest pythonpath) and the scripts/
+# helper modules the tests import.
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+extraPaths = ["vendors/OCHRE", "scripts"]
+
+# The scripts run OCHRE-based generators against the vendored reference.
+[[tool.pyright.executionEnvironments]]
+root = "scripts"
+extraPaths = ["vendors/OCHRE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]

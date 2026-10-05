@@ -11,7 +11,6 @@ from unittest import mock
 import polars as pl
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -90,18 +89,18 @@ class TestVersionConfig:
         assert "bldg0000007-up01.zip" in url
 
     def test_v2025_1_metadata_baseline(self):
-        from ochre_next.data.resstock import _version_config, _metadata_url
+        from ochre_next.data.resstock import _version_config, metadata_url
 
         cfg = _version_config("2025.1")
-        url = _metadata_url(cfg, upgrade_id=0)
+        url = metadata_url(cfg, upgrade_id=0)
         assert "upgrade0.parquet" in url
         assert "upgrade00" not in url  # NOT zero-padded for 2025.1
 
     def test_v2024_2_metadata_upgrade(self):
-        from ochre_next.data.resstock import _version_config, _metadata_url
+        from ochre_next.data.resstock import _version_config, metadata_url
 
         cfg = _version_config("2024.2")
-        url = _metadata_url(cfg, upgrade_id=3)
+        url = metadata_url(cfg, upgrade_id=3)
         assert "upgrade03_metadata_and_annual_results.parquet" in url
 
     def test_weather_url_v2024_2(self):
@@ -141,7 +140,7 @@ class TestResStockBuilding:
             schedule_path=Path("/b.csv"),
             weather_path=Path("/c.csv"),
         )
-        with pytest.raises((dataclasses.FrozenInstanceError if False else Exception)):
+        with pytest.raises(dataclasses.FrozenInstanceError if False else Exception):
             b.bldg_id = 99  # type: ignore[misc]
 
     def test_fields_accessible(self):
@@ -152,7 +151,7 @@ class TestResStockBuilding:
         assert b.sample_weight == 2.5
 
 
-import dataclasses  # noqa: E402 – needed for test_frozen above
+import dataclasses
 
 
 class TestResStockBuildingFrozen:
@@ -664,6 +663,7 @@ class TestResStockVersion:
 
     def test_default_version_is_2024_2(self):
         import inspect
+
         from ochre_next.data.resstock import fetch_resstock_building
 
         sig = inspect.signature(fetch_resstock_building)
@@ -931,7 +931,7 @@ class TestDownloadRetry:
 
         with (
             mock.patch.object(resstock, "_try_download", side_effect=flaky),
-            mock.patch.object(resstock.time, "sleep") as sleep,
+            mock.patch("time.sleep") as sleep,
         ):
             resstock._download_file("https://oedi/out.zip", dest)
 
@@ -952,7 +952,7 @@ class TestDownloadRetry:
 
         with (
             mock.patch.object(resstock, "_try_download", side_effect=always_503),
-            mock.patch.object(resstock.time, "sleep"),
+            mock.patch("time.sleep"),
             pytest.raises(_FakeHTTPStatusError),
         ):
             resstock._download_file("https://oedi/out.zip", dest)
@@ -975,7 +975,7 @@ class TestDownloadRetry:
 
         with (
             mock.patch.object(resstock, "_try_download", side_effect=always_404),
-            mock.patch.object(resstock.time, "sleep") as sleep,
+            mock.patch("time.sleep") as sleep,
             pytest.raises(_FakeHTTPStatusError),
         ):
             resstock._download_file("https://oedi/out.zip", dest)
@@ -1001,8 +1001,8 @@ class TestDownloadRetry:
             ]
         )
 
-        with mock.patch.object(
-            resstock.asyncio, "sleep", new_callable=mock.AsyncMock
+        with mock.patch(
+            "asyncio.sleep", new_callable=mock.AsyncMock
         ) as sleep:
             asyncio.run(resstock._download_building_async(client, cfg, 1, 0, bldg_dir))
 
@@ -1026,8 +1026,8 @@ class TestDownloadRetry:
         )
 
         with (
-            mock.patch.object(
-                resstock.asyncio, "sleep", new_callable=mock.AsyncMock
+            mock.patch(
+                "asyncio.sleep", new_callable=mock.AsyncMock
             ) as sleep,
             pytest.raises(_FakeHTTPStatusError),
         ):
@@ -1237,13 +1237,13 @@ class TestZipIntegrity:
             mock.patch.object(
                 resstock, "_download_bytes_async", side_effect=flaky_download
             ),
-            mock.patch.object(
-                resstock.asyncio, "sleep", new_callable=mock.AsyncMock
+            mock.patch(
+                "asyncio.sleep", new_callable=mock.AsyncMock
             ) as sleep_mock,
         ):
             asyncio.run(
                 resstock._download_building_async(
-                    None,
+                    _FakeAsyncClient([]),
                     cfg,
                     1,
                     0,
@@ -1268,7 +1268,9 @@ class TestSha256Sidecar:
             compute_sha256_hex,
             sha256_path,
         )
-        from ochre_next.data.resstock import _validate_cache_integrity
+        from ochre_next.data._checksum import (
+            validate_cache_integrity as _validate_cache_integrity,
+        )
 
         f = tmp_path / "data.csv"
         f.write_text("col1,col2\n1.0,2.0\n")
@@ -1280,7 +1282,9 @@ class TestSha256Sidecar:
     def test_sidecar_hash_mismatch(self, tmp_path: Path):
         """_validate_cache_integrity returns False when sidecar mismatches."""
         from ochre_next.data._checksum import sha256_path
-        from ochre_next.data.resstock import _validate_cache_integrity
+        from ochre_next.data._checksum import (
+            validate_cache_integrity as _validate_cache_integrity,
+        )
 
         f = tmp_path / "data.csv"
         f.write_text("col1,col2\n1.0,2.0\n")
@@ -1290,7 +1294,9 @@ class TestSha256Sidecar:
 
     def test_no_sidecar_returns_true(self, tmp_path: Path):
         """_validate_cache_integrity returns True when no sidecar exists."""
-        from ochre_next.data.resstock import _validate_cache_integrity
+        from ochre_next.data._checksum import (
+            validate_cache_integrity as _validate_cache_integrity,
+        )
 
         f = tmp_path / "data.csv"
         f.write_text("col1,col2\n1.0,2.0\n")
@@ -1299,8 +1305,10 @@ class TestSha256Sidecar:
 
     def test_remove_cache_with_sidecar(self, tmp_path: Path):
         """_remove_cache_with_sidecar deletes both file and sidecar."""
+        from ochre_next.data._checksum import (
+            remove_cache_with_sidecar as _remove_cache_with_sidecar,
+        )
         from ochre_next.data._checksum import sha256_path
-        from ochre_next.data.resstock import _remove_cache_with_sidecar
 
         f = tmp_path / "data.csv"
         f.write_text("data")
@@ -1320,7 +1328,9 @@ class TestSha256Sidecar:
 class TestWeatherCacheIntegrity:
     def test_csv_cache_reused_when_sidecar_matches(self, tmp_path: Path):
         """Weather CSV with valid sidecar is reused without re-download."""
-        from ochre_next.data.resstock import _write_sha256_sidecar
+        from ochre_next.data._checksum import (
+            write_sha256_sidecar as _write_sha256_sidecar,
+        )
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text(_minimal_hpxml("G0800130"))
@@ -1400,7 +1410,9 @@ class TestWeatherCacheIntegrity:
             )
 
         assert len(download_calls) == 1
-        from ochre_next.data.resstock import _validate_cache_integrity
+        from ochre_next.data._checksum import (
+            validate_cache_integrity as _validate_cache_integrity,
+        )
 
         assert _validate_cache_integrity(weather_dest) is True
 
@@ -1505,7 +1517,7 @@ class TestWeatherEpwIntegrity:
             mock.patch.object(
                 weather, "_download_large_file", side_effect=flaky_download
             ),
-            mock.patch.object(weather.time, "sleep"),
+            mock.patch("time.sleep"),
         ):
             weather._ensure_tmy3_zip_extracted(epw_dir, tmp_path)
 

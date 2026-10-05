@@ -139,6 +139,7 @@ ghi = row['Global Horizontal Radiation [W/m2]']
 dni = row['Direct Normal Radiation [W/m2]']
 dhi = row.get('Diffuse Horizontal Radiation [W/m2]', np.nan)
 
+dhi_col: list[str] = []
 if pd.isna(dhi):
     dhi_col = [c for c in w.columns if 'diffus' in c.lower() or 'dhi' in c.lower()]
     if dhi_col:
@@ -155,8 +156,8 @@ site = tree.find('.//h:Site', ns) or tree.find('.//h:BuildingDetails/h:Climatean
 # Try to find lat/lon
 lat_el = tree.find('.//h:Latitude', ns)
 lon_el = tree.find('.//h:Longitude', ns)
-lat = float(lat_el.text) if lat_el is not None else 40.0
-lon = float(lon_el.text) if lon_el is not None else -105.0
+lat = float(lat_el.text) if lat_el is not None and lat_el.text is not None else 40.0
+lon = float(lon_el.text) if lon_el is not None and lon_el.text is not None else -105.0
 tz = -7  # Mountain Standard
 
 print(f"\n--- Manual Analysis ---")
@@ -237,11 +238,6 @@ for hour in range(9, 17):
     row_h = w[w['date_time'] == ts_h].iloc[0]
     ghi_h = row_h['Global Horizontal Radiation [W/m2]']
     dni_h = row_h['Direct Normal Radiation [W/m2]']
-    if dhi_col:
-        dhi_h = row_h[dhi_col[0]]
-    else:
-        cos_z_h = np.cos(np.radians(zenith_for_hour(lat, decl, hour)))
-        dhi_h = max(ghi_h - dni_h * cos_z_h, 0)
 
     ha = (hour - 12) * 15
     cos_z = np.sin(np.radians(lat))*np.sin(np.radians(decl)) + np.cos(np.radians(lat))*np.cos(np.radians(decl))*np.cos(np.radians(ha))
@@ -254,6 +250,12 @@ for hour in range(9, 17):
         sin_az = -np.cos(np.radians(decl))*np.sin(np.radians(ha))/np.sin(np.radians(z_h))
         cos_az = (np.sin(np.radians(decl)) - np.sin(np.radians(lat))*np.cos(np.radians(z_h)))/(np.cos(np.radians(lat))*np.sin(np.radians(z_h)))
         az_h = np.degrees(np.arctan2(sin_az, cos_az)) % 360
+
+    if dhi_col:
+        dhi_h = row_h[dhi_col[0]]
+    else:
+        # Estimate DHI from GHI and DNI at this hour's zenith
+        dhi_h = max(ghi_h - dni_h * np.cos(np.radians(z_h)), 0)
 
     r = perez_tilted(ghi_h, dni_h, dhi_h, z_h, az_h, 20.0, 180.0, day_of_year)
     p_h = pv_power(10.0, r['poa'], row_h['Dry Bulb Temperature [°C]'], row_h['Wind Speed [m/s]'])
@@ -274,6 +276,11 @@ dw.initialize()
 dw.add_pv(PV("PV", capacity_kw=10.0, tilt=20.0, azimuth=180.0))
 df = dw.simulate()
 print("Simulated PV output per timestep:")
+pv_min = df['PV Electric Power (kW)'].min()
+assert isinstance(pv_min, (int, float)), "PV power column must be numeric"
+peak_pv_kw = -float(pv_min)
 for row in df.iter_rows(named=True):
-    print(f"  {row['Time']}: PV={-row['PV Electric Power (kW)']:.2f} kW")
-print(f"\nPeak PV AC: {-df['PV Electric Power (kW)'].min():.2f} kW")
+    pv_kw = row['PV Electric Power (kW)']
+    assert isinstance(pv_kw, (int, float)), "PV power column must be numeric"
+    print(f"  {row['Time']}: PV={-float(pv_kw):.2f} kW")
+print(f"\nPeak PV AC: {peak_pv_kw:.2f} kW")

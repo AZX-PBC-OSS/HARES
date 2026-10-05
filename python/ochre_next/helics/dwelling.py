@@ -43,14 +43,14 @@ Expected HELICS subscription units
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 import json
 import logging
 import math
 from itertools import chain
-from typing import Any
+from typing import Any, TypedDict
 
 try:
     import helics
@@ -62,7 +62,7 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
 from ochre_next import ControlSignal
 from ochre_next._hares import Dwelling as PyDwelling
 
-from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike
+from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike, is_json_object
 from .broker import allocate_ephemeral_port
 from .federate import (
     DEFAULT_CONNECT_TIMEOUT_S,
@@ -80,6 +80,17 @@ _LOG = logging.getLogger(__name__)
 # the external federate (publishing in volts) and HARES (expecting per-unit).
 VOLTAGE_PU_MIN = 0.5
 VOLTAGE_PU_MAX = 1.5
+
+
+class HELICSDiagnostics(TypedDict):
+    """Per-timestep HELICS diagnostic fields returned by ``get_diagnostic_row()``."""
+
+    helics_voltage_valid: bool
+    helics_price_valid: bool
+    helics_control_clamped: int
+    helics_range_violations_total: int
+    helics_stale_subscription_count: int
+    helics_update_mask: int
 
 # Control signal value range guards.
 # These Python-level guards mirror the Rust layer's validate_numeric_bounds()
@@ -105,7 +116,7 @@ DUTY_CYCLE_ON_FRACTION_MAX = 1.0
 STALE_SUBSCRIPTION_THRESHOLD = 10
 
 
-def _validate_control_signal(
+def validate_control_signal(
     signal_body: dict[str, Any],
     equipment: str,
     logger: logging.Logger,
@@ -203,7 +214,7 @@ def _validate_control_signal(
     return clamped
 
 
-def _handle_time_grant(requested: float, granted: float) -> bool:
+def handle_time_grant(requested: float, granted: float) -> bool:
     """Return ``True`` when the dwelling should advance model state on this grant.
 
     HELICS guarantees ``granted <= requested``.  In multi-rate co-simulations
@@ -244,7 +255,7 @@ def _handle_time_grant(requested: float, granted: float) -> bool:
     return True
 
 
-def _set_publication_info(pub: HelicsPublicationLike, info: str) -> None:
+def set_publication_info(pub: HelicsPublicationLike, info: str) -> None:
     """Attach unit metadata to a HELICS publication via ``setInfo()``.
 
     HELICS ``setInfo()`` stores an arbitrary string that external federates can
@@ -387,8 +398,8 @@ class HELICSDwelling:
         self._pub_power = self._fed.register_publication(power_name, "double")
         self._pub_reactive = self._fed.register_publication(reactive_name, "double")
 
-        _set_publication_info(self._pub_power, "units=kW")
-        _set_publication_info(self._pub_reactive, "units=kvar")
+        set_publication_info(self._pub_power, "units=kW")
+        set_publication_info(self._pub_reactive, "units=kvar")
 
         configs: list[HELICSPublicationConfig] = [
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_name}"),
@@ -402,7 +413,7 @@ class HELICSDwelling:
         for zi in range(len(zone_names)):
             key = f"zone_{zi}/temp_air_c"
             pub = self._fed.register_publication(key, "double")
-            _set_publication_info(pub, "units=degC")
+            set_publication_info(pub, "units=degC")
             self._pub_zone_temp.append(pub)
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{key}"))
 
@@ -418,24 +429,24 @@ class HELICSDwelling:
             mode_key = f"equipment_{ei}/operating_mode"
 
             pub_power = self._fed.register_publication(power_key, "double")
-            _set_publication_info(pub_power, "units=kW")
+            set_publication_info(pub_power, "units=kW")
             self._pub_equipment_power.append(pub_power)
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_key}"))
 
             pub_soc = self._fed.register_publication(soc_key, "double")
-            _set_publication_info(pub_soc, "units=pct")
+            set_publication_info(pub_soc, "units=pct")
             self._pub_equipment_soc.append(pub_soc)
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{soc_key}"))
 
             pub_mode = self._fed.register_publication(mode_key, "double")
-            _set_publication_info(pub_mode, "units=enum")
+            set_publication_info(pub_mode, "units=enum")
             self._pub_equipment_mode.append(pub_mode)
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{mode_key}"))
 
         # PV generation publication
         pv_key = "pv_generation_kw"
         self._pub_pv_generation = self._fed.register_publication(pv_key, "double")
-        _set_publication_info(self._pub_pv_generation, "units=kW")
+        set_publication_info(self._pub_pv_generation, "units=kW")
         configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{pv_key}"))
 
         self._publication_configs = configs
@@ -516,7 +527,7 @@ class HELICSDwelling:
             for timestamp in self._timesteps:
                 exit_time_s = (timestamp - self._start_time).total_seconds() + self._period_s
                 granted = self._request_time(exit_time_s)
-                while not _handle_time_grant(exit_time_s, granted):
+                while not handle_time_grant(exit_time_s, granted):
                     self._publish_results()
                     granted = self._request_time(exit_time_s)
                 if granted >= helics.HELICS_TIME_MAXTIME:
@@ -693,7 +704,7 @@ class HELICSDwelling:
                 return
 
             for equipment, signal_body in entries:
-                clamped = _validate_control_signal(signal_body, equipment, _LOG)
+                clamped = validate_control_signal(signal_body, equipment, _LOG)
                 self._control_clamped += clamped
                 try:
                     signal = ControlSignal.from_dict(signal_body)
@@ -783,9 +794,11 @@ class HELICSDwelling:
             )
 
     def _publish_results(self) -> None:
+        if self._pub_power is None or self._pub_reactive is None:
+            raise RuntimeError("Publications are not registered; call register_publications() first")
         telemetry = self._dwelling.telemetry()
-        self._pub_power.publish(float(telemetry.total_power_kw))  # type: ignore[union-attr]
-        self._pub_reactive.publish(float(telemetry.reactive_power_kvar))  # type: ignore[union-attr]
+        self._pub_power.publish(float(telemetry.total_power_kw))
+        self._pub_reactive.publish(float(telemetry.reactive_power_kvar))
 
         _published_count = 2
 
@@ -870,13 +883,8 @@ class HELICSDwelling:
         """Cumulative absolute time drift in seconds accumulated across the run."""
         return self._time_drift_cumulative_s
 
-    def get_diagnostic_row(self) -> dict[str, object]:
+    def get_diagnostic_row(self) -> HELICSDiagnostics:
         """Return a dict of HELICS diagnostic fields for this timestep.
-
-        Keys: ``helics_voltage_valid`` (bool), ``helics_price_valid`` (bool),
-        ``helics_control_clamped`` (int), ``helics_range_violations_total`` (int),
-        ``helics_stale_subscription_count`` (int),
-        ``helics_update_mask`` (int).
 
         Callers can collect these per-timestep and write to a CSV or telemetry sink.
         """
@@ -922,15 +930,25 @@ class HELICSDwelling:
 
     @staticmethod
     def _create_federate_info() -> HelicsFederateInfoLike:
-        if hasattr(helics, "HelicsFederateInfo"):
-            try:
-                return helics.HelicsFederateInfo()
-            except TypeError:
-                # Some HELICS builds expose HelicsFederateInfo but require an internal handle.
-                pass
+        # The 3.6.1 wheel builds the info object through
+        # helicsCreateFederateInfo(): HelicsFederateInfo's constructor
+        # requires the raw C handle that only the factory produces.
         if hasattr(helics, "helicsCreateFederateInfo"):
             return helics.helicsCreateFederateInfo()
-        raise RuntimeError("HELICS Python module does not expose federate info creation API")
+
+        # Fallback for HELICS builds that expose a no-arg HelicsFederateInfo
+        # constructor instead.
+        info_ctor: Callable[[], HelicsFederateInfoLike] | None = getattr(
+            helics, "HelicsFederateInfo", None
+        )
+        if info_ctor is None:
+            raise RuntimeError("HELICS Python module does not expose federate info creation API")
+        try:
+            return info_ctor()
+        except TypeError as exc:
+            raise RuntimeError(
+                "HELICS Python module does not expose federate info creation API"
+            ) from exc
 
     def _configure_federate_info(self, fedinfo: HelicsFederateInfoLike) -> None:
         if hasattr(helics, "helicsFederateInfoSetCoreTypeFromString"):
@@ -1005,19 +1023,19 @@ class HELICSDwelling:
 
     @staticmethod
     def _iter_control_entries(message: Any) -> list[tuple[str, dict[str, Any]]]:
-        if not isinstance(message, dict):
+        if not is_json_object(message):
             raise ValueError("Control payload must decode to a JSON object")
 
         if "equipment" in message and "signal" in message:
             equipment = message["equipment"]
             signal = message["signal"]
-            if not isinstance(equipment, str) or not isinstance(signal, dict):
+            if not isinstance(equipment, str) or not is_json_object(signal):
                 raise ValueError("Single-equipment payload requires string equipment + dict signal")
             return [(equipment, signal)]
 
         entries: list[tuple[str, dict[str, Any]]] = []
-        for equipment, signal in message.items():
-            if not isinstance(equipment, str) or not isinstance(signal, dict):
+        for item_key, item_value in message.items():
+            if not is_json_object(item_value):
                 raise ValueError("Multi-equipment payload must be {str: dict}")
-            entries.append((equipment, signal))
+            entries.append((item_key, item_value))
         return entries

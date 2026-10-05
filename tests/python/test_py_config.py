@@ -1,6 +1,7 @@
 """Tests for SimulationConfig and DwellingConfig Python bindings."""
 
 import pytest
+from typing import Any, cast
 
 from ochre_next import SimulationConfig, DwellingConfig
 
@@ -280,7 +281,7 @@ class TestDwellingConfig:
                 hpxml="path/to/building.xml",
                 schedule="path/to/schedules.csv",
                 weather="path/to/weather.epw",
-                overrides={1: 1.0},
+                overrides=cast(dict[str, Any], {1: 1.0}),
             )
 
     def test_with_simulation_config_round_trips(self):
@@ -300,8 +301,9 @@ class TestDwellingConfig:
 
     def test_missing_required_fields_raises_type_error(self):
         """Verify DwellingConfig with missing required fields raises TypeError."""
+        kwargs: dict[str, Any] = {"hpxml": "path/to/building.xml"}
         with pytest.raises(TypeError):
-            DwellingConfig(hpxml="path/to/building.xml")
+            DwellingConfig(**kwargs)
 
     def test_overrides_round_trips_as_dict(self):
         """Verify DwellingConfig with overrides round-trips through getter as dict."""

@@ -6,6 +6,7 @@ import numpy as np
 import polars as pl
 import pytest
 from pathlib import Path
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
@@ -353,7 +354,7 @@ class TestSolarOverrideValidation:
         dw.initialize()
 
         with pytest.raises(ValueError):
-            dw.set_solar_override(12345)
+            dw.set_solar_override(cast("str", 12345))
 
     def test_invalid_dict_raises_value_error(self):
         from ochre_next import Dwelling
@@ -373,7 +374,7 @@ class TestSolarOverrideValidation:
         dw.initialize()
 
         with pytest.raises(ValueError):
-            dw.set_solar_override({"not": "valid"})
+            dw.set_solar_override(cast("dict[int, dict[str, Any]]", {"not": "valid"}))
 
 
 class TestSolarOverridePVProduction:

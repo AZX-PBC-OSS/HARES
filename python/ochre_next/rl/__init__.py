@@ -1,10 +1,10 @@
 """Reinforcement learning environment wrappers."""
 
+from ochre_next._hares_types import StepInfo, StepResult
+
 from .gym_env import (
     GymDwellingConfig,
     RewardContext,
-    StepInfo,
-    StepResult,
     DwellingGymEnv,
     telemetry_to_observation,
 )

@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TypedDict
 from unittest import mock
 
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
+
+
+class _EfficiencyKwargs(TypedDict):
+    capacity_ah: float
+    n_series: int
+    n_parallel: int
+    temperature_range_c: tuple[float, float]
+    soc_range: tuple[float, float]
+    power_range_kw: tuple[float, float]
+    age_cycles: int
 
 
 # ---------------------------------------------------------------------------
@@ -424,9 +435,7 @@ class TestPybammBatteryEfficiencyLut:
     def test_without_pybamm_returns_defaults(self) -> None:
         from ochre_next.adapters import pybamm_battery
 
-        original = pybamm_battery._HAS_PYBAMM
-        try:
-            pybamm_battery._HAS_PYBAMM = False
+        with mock.patch.object(pybamm_battery, "_pybamm", None):
             lut = pybamm_battery.generate_efficiency_lut(
                 chemistry="NMC",
                 capacity_ah=50,
@@ -440,8 +449,6 @@ class TestPybammBatteryEfficiencyLut:
             assert isinstance(lut, pybamm_battery.EfficiencyLut)
             assert lut.metadata.get("source") == "defaults"
             assert lut.table.num_rows > 0
-        finally:
-            pybamm_battery._HAS_PYBAMM = original
 
     # --- chemistry-specific nominal voltage ---
 
@@ -600,9 +607,7 @@ class TestPybammBatteryEfficiencyLut:
         """Regression: NMC default efficiency values must be numerically unchanged."""
         from ochre_next.adapters import pybamm_battery
 
-        original = pybamm_battery._HAS_PYBAMM
-        try:
-            pybamm_battery._HAS_PYBAMM = False
+        with mock.patch.object(pybamm_battery, "_pybamm", None):
             lut = pybamm_battery.generate_efficiency_lut(
                 chemistry="NMC",
                 capacity_ah=50,
@@ -613,8 +618,6 @@ class TestPybammBatteryEfficiencyLut:
                 power_range_kw=(-5, 5),
                 age_cycles=0,
             )
-        finally:
-            pybamm_battery._HAS_PYBAMM = original
 
         assert lut.table.num_rows > 0
         eff_col = lut.table.column("efficiency").to_pylist()
@@ -641,15 +644,15 @@ class TestPybammBatteryEfficiencyLut:
             fake.ParameterValues.side_effect = lambda _name: _TrackingDict()
             return fake
 
-        common = dict(
-            capacity_ah=50,
-            n_series=14,
-            n_parallel=4,
-            temperature_range_c=(0.0, 45.0),
-            soc_range=(0.1, 0.95),
-            power_range_kw=(-5.0, 5.0),
-            age_cycles=0,
-        )
+        common: _EfficiencyKwargs = {
+            "capacity_ah": 50,
+            "n_series": 14,
+            "n_parallel": 4,
+            "temperature_range_c": (0.0, 45.0),
+            "soc_range": (0.1, 0.95),
+            "power_range_kw": (-5.0, 5.0),
+            "age_cycles": 0,
+        }
 
         nmc_currents: list[float] = []
         fake_nmc = _build_fake_pybamm(nmc_currents)
@@ -721,9 +724,7 @@ class TestPybammBatteryDegradationParams:
     def test_without_pybamm_returns_defaults(self) -> None:
         from ochre_next.adapters import pybamm_battery
 
-        original = pybamm_battery._HAS_PYBAMM
-        try:
-            pybamm_battery._HAS_PYBAMM = False
+        with mock.patch.object(pybamm_battery, "_pybamm", None):
             result = pybamm_battery.generate_degradation_params(
                 chemistry="NMC",
                 capacity_ah=50,
@@ -731,29 +732,22 @@ class TestPybammBatteryDegradationParams:
             )
             assert isinstance(result, pybamm_battery.DegradationParams)
             assert "model" in result.params
-        finally:
-            pybamm_battery._HAS_PYBAMM = original
 
     def test_produces_consistent_output_with_and_without_pybamm(self) -> None:
         """Degradation params must be identical regardless of PyBaMM availability."""
         from ochre_next.adapters import pybamm_battery
 
-        original = pybamm_battery._HAS_PYBAMM
-        try:
-            pybamm_battery._HAS_PYBAMM = False
+        with mock.patch.object(pybamm_battery, "_pybamm", None):
             result_without = pybamm_battery.generate_degradation_params(
                 chemistry="NMC",
                 capacity_ah=50,
                 temperature_range_c=25.0,
             )
-            pybamm_battery._HAS_PYBAMM = True
-            result_with = pybamm_battery.generate_degradation_params(
-                chemistry="NMC",
-                capacity_ah=50,
-                temperature_range_c=25.0,
-            )
-        finally:
-            pybamm_battery._HAS_PYBAMM = original
+        result_with = pybamm_battery.generate_degradation_params(
+            chemistry="NMC",
+            capacity_ah=50,
+            temperature_range_c=25.0,
+        )
 
         assert result_without.params == result_with.params, (
             "params must be identical with and without PyBaMM"
@@ -865,22 +859,16 @@ class TestChargingLutFallback:
 
         from ochre_next.adapters import pybamm_battery
 
-        # PyBaMM is not installed; enable mock mode.
-        original_has_pybamm = pybamm_battery._HAS_PYBAMM
-        pybamm_battery._HAS_PYBAMM = True
-        try:
-            # Grid: 7 temps × 8 crates × 4 SOHs = 224 points.
-            # Fail the last temperature at highest C-rate and lowest SOH:
-            # temp[6] = 45°C, crate[7] = 2.0C, soh[0] = 0.70.
-            fail_idx: set[tuple[int, int, int]] = {(6, 7, 0)}
-            fake_pybamm = self._setup_pybamm_mock(fail_idx)
+        # Grid: 7 temps × 8 crates × 4 SOHs = 224 points.
+        # Fail the last temperature at highest C-rate and lowest SOH:
+        # temp[6] = 45°C, crate[7] = 2.0C, soh[0] = 0.70.
+        fail_idx: set[tuple[int, int, int]] = {(6, 7, 0)}
+        fake_pybamm = self._setup_pybamm_mock(fail_idx)
 
-            with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
-                result = pybamm_battery.generate_charging_curve_lut(
-                    param_set="Chen2020",
-                )
-        finally:
-            pybamm_battery._HAS_PYBAMM = original_has_pybamm
+        with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
+            result = pybamm_battery.generate_charging_curve_lut(
+                param_set="Chen2020",
+            )
 
         lut = result["lut"]
         coverage = result["lut_coverage"]
@@ -915,19 +903,14 @@ class TestChargingLutFallback:
         and the fallback uses linear derating."""
         from ochre_next.adapters import pybamm_battery
 
-        original_has_pybamm = pybamm_battery._HAS_PYBAMM
-        pybamm_battery._HAS_PYBAMM = True
-        try:
-            # Fail the very first grid point: temp[0] = -15°C, crate[0] = 0.04C, soh[0] = 0.70
-            fail_idx: set[tuple[int, int, int]] = {(0, 0, 0)}
-            fake_pybamm = self._setup_pybamm_mock(fail_idx)
+        # Fail the very first grid point: temp[0] = -15°C, crate[0] = 0.04C, soh[0] = 0.70
+        fail_idx: set[tuple[int, int, int]] = {(0, 0, 0)}
+        fake_pybamm = self._setup_pybamm_mock(fail_idx)
 
-            with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
-                result = pybamm_battery.generate_charging_curve_lut(
-                    param_set="Chen2020",
-                )
-        finally:
-            pybamm_battery._HAS_PYBAMM = original_has_pybamm
+        with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
+            result = pybamm_battery.generate_charging_curve_lut(
+                param_set="Chen2020",
+            )
 
         lut = result["lut"]
         coverage = result["lut_coverage"]
@@ -950,17 +933,12 @@ class TestChargingLutFallback:
         regardless of whether any solves failed."""
         from ochre_next.adapters import pybamm_battery
 
-        original_has_pybamm = pybamm_battery._HAS_PYBAMM
-        pybamm_battery._HAS_PYBAMM = True
-        try:
-            fake_pybamm = self._setup_pybamm_mock(set())
+        fake_pybamm = self._setup_pybamm_mock(set())
 
-            with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
-                result = pybamm_battery.generate_charging_curve_lut(
-                    param_set="Chen2020",
-                )
-        finally:
-            pybamm_battery._HAS_PYBAMM = original_has_pybamm
+        with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
+            result = pybamm_battery.generate_charging_curve_lut(
+                param_set="Chen2020",
+            )
 
         coverage = result["lut_coverage"]
         mask = result["fallback_mask"]
@@ -977,16 +955,11 @@ class TestChargingLutFallback:
 
         from ochre_next.adapters import pybamm_battery
 
-        original_has_pybamm = pybamm_battery._HAS_PYBAMM
-        pybamm_battery._HAS_PYBAMM = True
-        try:
-            fake_pybamm = self._setup_pybamm_mock(set())
-            with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
-                result = pybamm_battery.generate_charging_curve_lut(
-                    param_set="Chen2020",
-                )
-        finally:
-            pybamm_battery._HAS_PYBAMM = original_has_pybamm
+        fake_pybamm = self._setup_pybamm_mock(set())
+        with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
+            result = pybamm_battery.generate_charging_curve_lut(
+                param_set="Chen2020",
+            )
 
         lut = result["lut"]
         temp_arr = result["temp_grid"]

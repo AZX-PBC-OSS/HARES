@@ -16,6 +16,7 @@ Covers:
 import math
 
 import pytest
+from typing import Any, TypedDict
 
 from conftest import make_dwelling
 
@@ -24,6 +25,19 @@ HARES_DEFAULTS = ROOT / "defaults"
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
+
+
+class _CommonKwargs(TypedDict):
+    hpxml: str
+    schedule: str
+    weather: str
+    start_time: str
+    duration_s: int
+    time_res_s: int
+    defaults_path: str
+    bldg_id: int
+    master_seed: int
+    write_output: bool
 
 
 def _battery_kw(name, equipment_list):
@@ -282,14 +296,14 @@ class TestEvPowerFactorCharging:
 
 
 class TestEvReactiveSetpoint:
-    def _make_ev_dwelling(self, **ev_kw):
+    def _make_ev_dwelling(self, **ev_kw: Any):
         from ochre_next import EV, EvConnectionState
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
         )
         dw.initialize()
-        defaults = dict(
+        defaults: dict[str, Any] = dict(
             capacity_kwh=75.0,
             max_charging_kw=7.2,
             initial_soc=0.5,
@@ -417,18 +431,18 @@ class TestZipPfOverride:
         # July afternoon so the AC compressor actually runs (a pf override
         # retargets the compressor component; the resistive crankcase heater
         # that runs on cold winter standby emits Q == 0 regardless of pf).
-        common = dict(
-            hpxml=HPXML,
-            schedule=SCHEDULE,
-            weather=WEATHER,
-            start_time="2019-07-01T14:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        common: _CommonKwargs = {
+            "hpxml": HPXML,
+            "schedule": SCHEDULE,
+            "weather": WEATHER,
+            "start_time": "2019-07-01T14:00:00",
+            "duration_s": 3600,
+            "time_res_s": 60,
+            "defaults_path": str(HARES_DEFAULTS),
+            "bldg_id": 42,
+            "master_seed": 0,
+            "write_output": False,
+        }
 
         # Baseline: no override.
         dw_base = Dwelling.from_hpxml(**common)
@@ -492,18 +506,18 @@ class TestZipPfOverride:
         # July afternoon: the compressor must run for Q != 0 — on winter
         # standby only the resistive crankcase heater draws power and the
         # per-component model correctly reports Q == 0 for it.
-        common = dict(
-            hpxml=HPXML,
-            schedule=SCHEDULE,
-            weather=WEATHER,
-            start_time="2019-07-01T14:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        common: _CommonKwargs = {
+            "hpxml": HPXML,
+            "schedule": SCHEDULE,
+            "weather": WEATHER,
+            "start_time": "2019-07-01T14:00:00",
+            "duration_s": 3600,
+            "time_res_s": 60,
+            "defaults_path": str(HARES_DEFAULTS),
+            "bldg_id": 42,
+            "master_seed": 0,
+            "write_output": False,
+        }
 
         dw = Dwelling.from_hpxml(
             overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
@@ -671,11 +685,13 @@ class TestResolvedZipInspection:
         dw.initialize()
         self._add_battery(dw)
 
-        assert dw.equipment_zip("Bat")["pf"] == 1.0
+        zip_before = dw.equipment_zip("Bat")
+        assert zip_before is not None and zip_before["pf"] == 1.0
         dw.apply_control("Bat", ControlSignal.power_factor_setpoint(0.8))
         # Control signals dispatch during the step.
         dw.step()
         zip_dict = dw.equipment_zip("Bat")
+        assert zip_dict is not None, "resolved_zip must be present for a battery"
         assert zip_dict["pf"] == 0.8, (
             f"PowerFactorSetpoint(0.8) must be visible in resolved_zip, "
             f"got pf={zip_dict['pf']}"

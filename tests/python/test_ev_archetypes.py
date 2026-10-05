@@ -41,7 +41,7 @@ class TestFromVehicleWithArchetype:
             VehicleId.tesla_model_y_lr(),
             EvArchetypeId.daily_commuter_l1(),
         )
-        assert ev.max_charging_kw <= 1.8
+        assert ev.max_charging_kw is not None and ev.max_charging_kw <= 1.8
 
     def test_l2_archetype_preserves_vehicle_power(self):
         ev = EV.from_vehicle_with_archetype(

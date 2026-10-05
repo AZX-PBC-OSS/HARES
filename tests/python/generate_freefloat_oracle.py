@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import TypedDict
 
+import pandas as pd
+
 # Add OCHRE to path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OCHRE_ROOT = REPO_ROOT / "vendors" / "OCHRE"
@@ -122,7 +124,12 @@ def run_scenario(scenario: Scenario) -> None:
     removed = strip_equipment(dwelling)
     print(f"  Removed equipment: {removed}")
 
-    df, _metrics, _hourly = dwelling.simulate()
+    sim_result = dwelling.simulate()
+    assert isinstance(sim_result, tuple) and len(sim_result) == 3, (
+        "OCHRE simulate must return (df, metrics_by_end_use, ...)"
+    )
+    df = sim_result[0]
+    assert isinstance(df, pd.DataFrame), "OCHRE simulate must return a results DataFrame"
 
     # Select columns of interest
     columns_of_interest = [

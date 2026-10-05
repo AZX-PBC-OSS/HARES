@@ -21,6 +21,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[2]
 VENDOR_OCHRE = ROOT / "vendors" / "OCHRE"
 EXAMPLES = ROOT / "data" / "examples"
@@ -116,7 +118,12 @@ def _run_ochre() -> tuple[dict[str, float], float, float]:
     init_elapsed = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    df, _, _ = dwelling.simulate()
+    sim_result = dwelling.simulate()
+    assert isinstance(sim_result, tuple) and len(sim_result) == 3, (
+        "OCHRE simulate must return (df, metrics_by_end_use, ...)"
+    )
+    df = sim_result[0]
+    assert isinstance(df, pd.DataFrame), "OCHRE simulate must return a results DataFrame"
     sim_elapsed = time.perf_counter() - t1
 
     time_res_h = TIME_RES_MIN / 60.0

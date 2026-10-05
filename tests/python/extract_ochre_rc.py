@@ -126,6 +126,9 @@ def main() -> None:
     for zone_name, zone in env.zones.items():
         print(f"\nZone: {zone_name}  (label={zone.label})")
         print(f"  Volume        : {zone.volume} m^3")
+        if zone.capacitance is None:
+            print("  Capacitance   : none (zone has no air volume)")
+            continue
         print(f"  Capacitance   : {zone.capacitance:.2f} kJ/K  = {zone.capacitance*1000:.0f} J/K")
         print(f"  t_idx (output): {zone.t_idx}")
         print(f"  h_idx (input) : {zone.h_idx}")

@@ -5,6 +5,7 @@ import tempfile
 
 import pytest
 from pathlib import Path
+from typing import TypedDict
 
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
@@ -16,9 +17,18 @@ SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 from ochre_next import Dwelling, SimulationMetrics
 
+
+class _OutputKwargs(TypedDict):
+    write_output: bool
+    output_path: str
+
+
 # metrics() and the simulate() DataFrame read the output pipeline, so these
 # tests run with write_output=True; the CSV lands in a temp dir, never the tree.
-_OUTPUT = dict(write_output=True, output_path=str(Path(tempfile.mkdtemp()) / "dwelling_0.csv"))
+_OUTPUT: _OutputKwargs = {
+    "write_output": True,
+    "output_path": str(Path(tempfile.mkdtemp()) / "dwelling_0.csv"),
+}
 
 
 class TestMetrics:

@@ -1,6 +1,7 @@
 """Validate realistic energy consumption when swapping equipment types."""
 
 import pytest
+from typing import Any
 from ochre_next import (
     Dwelling, DwellingBlueprint, GasFurnace, ASHPHeater, ASHPCooler,
     AirConditioner, GasWaterHeater, HeatPumpWH, ElectricResistanceWH,
@@ -13,8 +14,8 @@ DURATION_S = 3600  # 1 hour
 TIME_RES_S = 600   # 10 minute steps
 
 
-def _make_blueprint(**kw):
-    params = dict(duration_s=DURATION_S, time_res_s=TIME_RES_S)
+def _make_blueprint(**kw: Any):
+    params: dict[str, Any] = dict(duration_s=DURATION_S, time_res_s=TIME_RES_S)
     params.update(kw)
     return DwellingBlueprint.from_hpxml(
         HPXML, SCHEDULE, WEATHER,

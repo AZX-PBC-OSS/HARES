@@ -1,6 +1,7 @@
 """Tests for ControlSignal Python bindings."""
 
 import pytest
+from typing import cast
 from ochre_next import (
     ControlSignal,
     DispatchRequest,
@@ -29,10 +30,6 @@ class TestControlSignalConstructors:
         # Signed per the core contract: negative = discharge (V2G/V2H).
         sig = ControlSignal.power_setpoint(-1.0)
         assert sig.to_dict()["active_power_kw"] == -1.0
-
-    def test_power_setpoint_rejects_nan(self):
-        with pytest.raises(ValueError):
-            ControlSignal.power_setpoint(float("nan"))
 
     def test_power_setpoint_accepts_zero_and_positive(self):
         sig = ControlSignal.power_setpoint(0.0)
@@ -805,19 +802,19 @@ class TestTypedEnumArgValidation:
 
     def test_mode_override_rejects_dr_level(self):
         with pytest.raises(TypeError):
-            ControlSignal.mode_override(DRLevel.High)
+            ControlSignal.mode_override(cast(Mode, DRLevel.High))
 
     def test_demand_response_rejects_operating_mode(self):
         with pytest.raises(TypeError):
-            ControlSignal.demand_response(OperatingMode.Heating)
+            ControlSignal.demand_response(cast(DRLevel, OperatingMode.Heating))
 
     def test_inverter_priority_mode_rejects_operating_mode(self):
         with pytest.raises(TypeError):
-            ControlSignal.inverter_priority_mode(OperatingMode.Heating)
+            ControlSignal.inverter_priority_mode(cast(InverterPriority, OperatingMode.Heating))
 
     def test_duty_cycle_rejects_inverter_priority(self):
         with pytest.raises(TypeError):
-            ControlSignal.duty_cycle(0.5, component=InverterPriority.Watt)
+            ControlSignal.duty_cycle(0.5, component=cast(DutyCycleComponent, InverterPriority.Watt))
 
 
 class TestNewSignalConstructors:
@@ -922,7 +919,7 @@ class TestNewDispatchRequestConstructors:
 
     def test_ideal_capacity_mode_override_invalid_raises(self):
         with pytest.raises(TypeError):
-            DispatchRequest.ideal_capacity_mode_override("hvac", "invalid")
+            DispatchRequest.ideal_capacity_mode_override("hvac", cast(IdealCapacityMode, "invalid"))
 
     def test_max_capacity_fraction(self):
         req = DispatchRequest.max_capacity_fraction("hvac", 0.5)

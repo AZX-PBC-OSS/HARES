@@ -20,8 +20,7 @@ import pytest
 from ochre_names import hares_columns_for
 
 if TYPE_CHECKING:
-    import pandas as pd  # type: ignore[import-untyped]
-    import polars as pl  # type: ignore[import-untyped]
+    import polars as pl
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
@@ -46,6 +45,8 @@ EXPECTED_OCHRE_VERSION = "0.9.2"
 
 ochre_mod = pytest.importorskip("ochre", reason="OCHRE not installed")
 pl_mod = pytest.importorskip("polars", reason="polars not installed")
+# Runtime import (the isinstance checks below need the class, not just hints)
+import pandas as pd
 
 if ochre_mod.__version__ != EXPECTED_OCHRE_VERSION:
     pytest.fail(
@@ -235,7 +236,12 @@ def ochre_48h() -> pd.DataFrame:
         verbosity=9,
         save_results=False,
     )
-    df, _, _ = dwelling.simulate()
+    result = dwelling.simulate()
+    assert isinstance(result, tuple) and len(result) == 3, (
+        "OCHRE simulate must return (df, metrics_by_end_use, ...)"
+    )
+    df = result[0]
+    assert isinstance(df, pd.DataFrame), "OCHRE simulate must return a results DataFrame"
     return df
 
 

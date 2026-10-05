@@ -160,7 +160,7 @@ def _download_large_file(url: str, dest: Path) -> None:
     try:
         # Try httpx first (supports streaming + progress)
         try:
-            import httpx  # type: ignore[import-not-found]
+            import httpx
 
             with httpx.Client(follow_redirects=True, timeout=300.0) as client:
                 with client.stream("GET", url) as resp:

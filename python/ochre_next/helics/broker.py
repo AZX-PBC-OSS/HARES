@@ -54,7 +54,9 @@ def create_broker(
         HELICS broker handle.
     """
 
-    if not isinstance(n_federates, int) or isinstance(n_federates, bool):
+    # type() rather than isinstance(): bool is an int subclass, and
+    # create_broker(True) would silently mean one federate.
+    if type(n_federates) is not int:
         raise TypeError("n_federates must be an int")
     if n_federates <= 0:
         raise ValueError("n_federates must be positive")

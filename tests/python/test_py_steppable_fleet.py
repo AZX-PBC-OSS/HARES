@@ -77,7 +77,7 @@ def test_steppable_fleet_step_includes_reactive_power() -> None:
     assert len(entries) == 1
     assert entries[0]["ok"] is True
 
-    result = entries[0]["result"]
+    result = entries[0].get("result")
     assert result is not None
     assert "reactive_power_kvar" in result
     assert isinstance(result["reactive_power_kvar"], float)

@@ -120,7 +120,7 @@ def generate_solar_override(scenario: Scenario) -> None:
         dhi = float(weather["dhi"].iloc[i])
         de = float(dni_extra.iloc[i])
 
-        step_data = {"step": i}
+        step_data: dict[str, float] = {"step": i}
         for surf in SURFACES:
             sid = surf["id"]
             tilt = surf["tilt"]
@@ -148,11 +148,13 @@ def generate_solar_override(scenario: Scenario) -> None:
                     tilt, azimuth, z, a, dni, ghi, dhi,
                     dni_extra=de, model="perez", albedo=ALBEDO,
                 )
-                direct = max(0.0, float(irr["poa_direct"]))
-                diffuse = max(0.0, float(irr["poa_diffuse"]))
+                # Scalar inputs give a one-row frame; pandas 3 dropped
+                # float(Series), so extract the row's scalars explicitly.
+                direct = max(0.0, float(irr["poa_direct"].iloc[0]))
+                diffuse = max(0.0, float(irr["poa_diffuse"].iloc[0]))
                 # Split ground diffuse from sky diffuse isn't straightforward,
                 # so use poa_ground_diffuse for reflected
-                reflected = max(0.0, float(irr["poa_ground_diffuse"]))
+                reflected = max(0.0, float(irr["poa_ground_diffuse"].iloc[0]))
                 sky_diff = max(0.0, diffuse - reflected)
             except Exception:
                 direct = 0.0

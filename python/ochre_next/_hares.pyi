@@ -5,77 +5,18 @@ from __future__ import annotations
 import datetime
 from abc import abstractmethod
 from collections.abc import Callable, Iterator
-from typing import Any, NotRequired, TypedDict
+from typing import Any
 
 import polars as pl
 
-class StepResult(TypedDict):
-    """Result from ``Dwelling.step()``.
-
-    Zone temperatures are flattened as ``"Temperature - Indoor (C)"`` for zone 0,
-    and ``"Temperature - Zone_N (C)"`` for other zones.
-    """
-
-    timestamp: datetime.datetime
-    net_electric_power_kw: float
-    hvac_heating_w: float
-    hvac_cooling_w: float
-    gas_power_w: float
-
-class SteppableStepResult(StepResult):
-    reactive_power_kvar: NotRequired[float]
-
-class FleetStepEntry(TypedDict):
-    """Single per-dwelling entry returned by ``SteppableFleet.step()``."""
-
-    ok: bool
-    bldg_id: int
-    result: NotRequired[SteppableStepResult]
-    error: NotRequired[str]
-
-class SteppableBuildError(TypedDict):
-    bldg_id: int
-    error: str
-
-class ActorTimingSummary(TypedDict):
-    """One registered actor's run-total scheduler-entry time.
-
-    ``total_s`` is the actor's share of the summary's ``actors_s`` phase
-    (the interest filter, ``decide()`` and the health check), ``calls`` the
-    number of ``decide()`` invocations the interest filter made. Entries
-    appear in registration order.
-    """
-
-    name: str
-    total_s: float
-    calls: int
-
-class ProfilingSummary(TypedDict):
-    """Per-phase wall-clock split returned by ``Dwelling.profiling_summary()``.
-
-    Seconds per phase, plus the process memory high-water mark, the
-    hot-path allocation counters (each ``None`` when no measurement is
-    available: the extension does not install the counting allocator), and
-    ``per_actor``: the run's per-actor totals, one entry per registered
-    actor in registration order.
-    """
-
-    environment_s: float
-    control_s: float
-    ideal_capacity_s: float
-    actors_s: float
-    dispatch_s: float
-    equipment_s: float
-    envelope_s: float
-    invariants_s: float
-    state_snapshot_s: float
-    output_s: float
-    accounting_s: float
-    step_total_s: float
-    memory_high_water_kb: int | None
-    hot_path_allocations: int | None
-    hot_path_alloc_violations: int | None
-    per_actor: list[ActorTimingSummary]
+from ._hares_types import (
+    ActorTimingSummary as ActorTimingSummary,
+    FleetStepEntry,
+    ProfilingSummary,
+    StepResult,
+    SteppableBuildError,
+    SteppableStepResult as SteppableStepResult,
+)
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -574,8 +515,13 @@ class GridExportRule:
     def __hash__(self) -> int: ...
 
 class StormWatchTrigger:
-    ManualEnable: StormWatchTrigger
-    WeatherSignal: StormWatchTrigger
+    @staticmethod
+    def manual_enable() -> StormWatchTrigger: ...
+    @staticmethod
+    def weather_signal(
+        wind_speed_threshold_m_s: float = ...,
+        wind_speed_deactivation_threshold_m_s: float = ...,
+    ) -> StormWatchTrigger: ...
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
     def __hash__(self) -> int: ...
@@ -667,7 +613,10 @@ class BmsMode:
 class ControlSignal:
     @staticmethod
     def power_setpoint(
-        kw: float, reactive_kvar: float | None = ...
+        kw: float,
+        reactive_kvar: float | None = ...,
+        min_soc: float | None = ...,
+        max_soc: float | None = ...,
     ) -> ControlSignal: ...
     @staticmethod
     def thermal_setpoint(
@@ -718,7 +667,9 @@ class ControlSignal:
     @staticmethod
     def protocol_native(protocol_id: int, payload: bytes) -> ControlSignal: ...
     @staticmethod
-    def ideal_capacity_mode_override(mode: str) -> ControlSignal: ...
+    def ideal_capacity_mode_override(mode: IdealCapacityMode) -> ControlSignal: ...
+    @staticmethod
+    def ideal_capacity_mode_override_str(mode: str) -> ControlSignal: ...
     @staticmethod
     def ideal_capacity(capacity_w: float) -> ControlSignal: ...
     @staticmethod
@@ -757,6 +708,11 @@ class ControlSignal:
 # ---------------------------------------------------------------------------
 
 class Priority:
+    Schedule: Priority
+    Grid: Priority
+    UserOverride: Priority
+    Safety: Priority
+
     @staticmethod
     def schedule() -> Priority: ...
     @staticmethod
@@ -765,7 +721,12 @@ class Priority:
     def grid() -> Priority: ...
     @staticmethod
     def safety() -> Priority: ...
+    @staticmethod
+    def from_str(name: str) -> Priority: ...
     def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
 
 class Signal:
     @staticmethod
@@ -796,7 +757,11 @@ class Signal:
         max_soc: float | None = ...,
     ) -> Signal: ...
     @staticmethod
-    def duty_cycle(on_fraction: float, period_s: float | None = ...) -> Signal: ...
+    def duty_cycle(
+        on_fraction: float,
+        period_s: float | None = ...,
+        component: DutyCycleComponent | None = ...,
+    ) -> Signal: ...
     @staticmethod
     def demand_response(level: DRLevel, duration_s: float | None = ...) -> Signal: ...
     @staticmethod
@@ -891,6 +856,7 @@ class DispatchRequest:
         target: str,
         on_fraction: float,
         period_s: float | None = ...,
+        component: DutyCycleComponent | None = ...,
         priority: Priority | None = ...,
     ) -> DispatchRequest: ...
     @staticmethod
@@ -999,14 +965,21 @@ class Telemetry:
     # Non-authoritative diagnostics dict; use Dwelling.equipment()[...].core_output
     # for simulation-critical typed values.
     def equipment(self) -> dict[str, Any]: ...
+    def actors(self) -> dict[str, Any]: ...
     @property
     def timestep_index(self) -> int: ...
+    @property
+    def initialized(self) -> bool: ...
     @property
     def current_time(self) -> datetime.datetime: ...
     @property
     def total_power_kw(self) -> float: ...
     @property
     def reactive_power_kvar(self) -> float: ...
+    @property
+    def island_unserved_kw(self) -> float: ...
+    @property
+    def island_excess_kw(self) -> float: ...
     def __repr__(self) -> str: ...
 
 class CoreOutput:
@@ -1100,6 +1073,10 @@ class Battery:
     @property
     def discharge_efficiency(self) -> float | None: ...
     @property
+    def power_factor(self) -> float | None: ...
+    @property
+    def inverter_capacity_kva(self) -> float | None: ...
+    @property
     def self_discharge_pct_per_day(self) -> float | None: ...
     @property
     def standby_power_w(self) -> float | None: ...
@@ -1138,6 +1115,8 @@ class Battery:
         inverter_efficiency: float | None = ...,
         charge_efficiency: float | None = ...,
         discharge_efficiency: float | None = ...,
+        power_factor: float | None = ...,
+        inverter_capacity_kva: float | None = ...,
         self_discharge_pct_per_day: float | None = ...,
         standby_power_w: float | None = ...,
         import_limit_w: float | None = ...,
@@ -1334,6 +1313,30 @@ class EV:
     def initial_soc(self) -> float | None: ...
     @property
     def initial_connection_state(self) -> EvConnectionState | None: ...
+    @property
+    def power_factor(self) -> float | None: ...
+    @property
+    def charger_capacity_kva(self) -> float | None: ...
+    @property
+    def battery_temp_c(self) -> float | None: ...
+    @property
+    def min_charge_temp_c(self) -> float | None: ...
+    @property
+    def full_power_temp_c(self) -> float | None: ...
+    @property
+    def heater_power_w(self) -> float | None: ...
+    @property
+    def heater_threshold_c(self) -> float | None: ...
+    @property
+    def thermal_mass_j_per_k(self) -> float | None: ...
+    @property
+    def ua_w_per_k(self) -> float | None: ...
+    @property
+    def n_series(self) -> int | None: ...
+    @property
+    def n_parallel(self) -> int | None: ...
+    @property
+    def cell_resistance_ohm(self) -> float | None: ...
     def __init__(
         self,
         name: str,
@@ -1341,6 +1344,18 @@ class EV:
         max_charging_kw: float | None = ...,
         initial_soc: float | None = ...,
         initial_connection_state: EvConnectionState | None = ...,
+        power_factor: float | None = ...,
+        charger_capacity_kva: float | None = ...,
+        battery_temp_c: float | None = ...,
+        min_charge_temp_c: float | None = ...,
+        full_power_temp_c: float | None = ...,
+        heater_power_w: float | None = ...,
+        heater_threshold_c: float | None = ...,
+        thermal_mass_j_per_k: float | None = ...,
+        ua_w_per_k: float | None = ...,
+        n_series: int | None = ...,
+        n_parallel: int | None = ...,
+        cell_resistance_ohm: float | None = ...,
         charging_curve_lut: str | dict[str, Any] | None = ...,
     ) -> None: ...
     @staticmethod
@@ -1603,6 +1618,99 @@ class ElectricBaseboard:
     def oversizing_factor(self) -> float | None: ...
     def __repr__(self) -> str: ...
 
+class ElectricBoiler:
+    def __init__(
+        self,
+        name: str,
+        autosize: bool = ...,
+        capacity_w: float | None = ...,
+        eir: float | None = ...,
+        zone_id: int | None = ...,
+        heating_setpoint_c: float | None = ...,
+        cooling_setpoint_c: float | None = ...,
+        oversizing_factor: float | None = ...,
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def autosize(self) -> bool: ...
+    @property
+    def capacity_w(self) -> float | None: ...
+    @property
+    def eir(self) -> float | None: ...
+    @property
+    def zone_id(self) -> int | None: ...
+    @property
+    def heating_setpoint_c(self) -> float | None: ...
+    @property
+    def cooling_setpoint_c(self) -> float | None: ...
+    @property
+    def oversizing_factor(self) -> float | None: ...
+    def __repr__(self) -> str: ...
+
+class ElectricFurnace:
+    def __init__(
+        self,
+        name: str,
+        autosize: bool = ...,
+        capacity_w: float | None = ...,
+        eir: float | None = ...,
+        zone_id: int | None = ...,
+        fan_power_w: float | None = ...,
+        heating_setpoint_c: float | None = ...,
+        cooling_setpoint_c: float | None = ...,
+        oversizing_factor: float | None = ...,
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def autosize(self) -> bool: ...
+    @property
+    def capacity_w(self) -> float | None: ...
+    @property
+    def eir(self) -> float | None: ...
+    @property
+    def zone_id(self) -> int | None: ...
+    @property
+    def fan_power_w(self) -> float | None: ...
+    @property
+    def heating_setpoint_c(self) -> float | None: ...
+    @property
+    def cooling_setpoint_c(self) -> float | None: ...
+    @property
+    def oversizing_factor(self) -> float | None: ...
+    def __repr__(self) -> str: ...
+
+class GasBoiler:
+    def __init__(
+        self,
+        name: str,
+        autosize: bool = ...,
+        capacity_w: float | None = ...,
+        afue: float | None = ...,
+        zone_id: int | None = ...,
+        heating_setpoint_c: float | None = ...,
+        cooling_setpoint_c: float | None = ...,
+        oversizing_factor: float | None = ...,
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def autosize(self) -> bool: ...
+    @property
+    def capacity_w(self) -> float | None: ...
+    @property
+    def afue(self) -> float | None: ...
+    @property
+    def zone_id(self) -> int | None: ...
+    @property
+    def heating_setpoint_c(self) -> float | None: ...
+    @property
+    def cooling_setpoint_c(self) -> float | None: ...
+    @property
+    def oversizing_factor(self) -> float | None: ...
+    def __repr__(self) -> str: ...
+
 class IdealHVAC:
     def __init__(
         self,
@@ -1639,6 +1747,69 @@ class IdealHVAC:
 # ---------------------------------------------------------------------------
 # Water heater equipment types
 # ---------------------------------------------------------------------------
+
+class IndirectTank:
+    def __init__(
+        self,
+        name: str,
+        autosize: bool = ...,
+        tank_volume_m3: float | None = ...,
+        hx_ua_w_per_k: float | None = ...,
+        setpoint_c: float | None = ...,
+        zone_id: int | None = ...,
+        boiler_loop_id: int | None = ...,
+        avg_water_draw_l_per_day: float | None = ...,
+        oversizing_factor: float | None = ...,
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def autosize(self) -> bool: ...
+    @property
+    def tank_volume_m3(self) -> float | None: ...
+    @property
+    def hx_ua_w_per_k(self) -> float | None: ...
+    @property
+    def setpoint_c(self) -> float | None: ...
+    @property
+    def zone_id(self) -> int | None: ...
+    @property
+    def boiler_loop_id(self) -> int | None: ...
+    @property
+    def avg_water_draw_l_per_day(self) -> float | None: ...
+    @property
+    def oversizing_factor(self) -> float | None: ...
+    def __repr__(self) -> str: ...
+
+class TanklessWaterHeater:
+    def __init__(
+        self,
+        name: str,
+        autosize: bool = ...,
+        heating_capacity_w: float | None = ...,
+        uniform_energy_factor: float | None = ...,
+        setpoint_c: float | None = ...,
+        zone_id: int | None = ...,
+        avg_water_draw_l_per_day: float | None = ...,
+        oversizing_factor: float | None = ...,
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def autosize(self) -> bool: ...
+    @property
+    def heating_capacity_w(self) -> float | None: ...
+    @property
+    def uniform_energy_factor(self) -> float | None: ...
+    @property
+    def setpoint_c(self) -> float | None: ...
+    @property
+    def zone_id(self) -> int | None: ...
+    @property
+    def avg_water_draw_l_per_day(self) -> float | None: ...
+    @property
+    def oversizing_factor(self) -> float | None: ...
+    def __repr__(self) -> str: ...
 
 class GasWaterHeater:
     def __init__(
@@ -2058,6 +2229,12 @@ class SimulationConfig:
         master_seed: int | None = ...,
         civil_timezone: str | None = ...,
         setpoint_deadband_c: float | None = ...,
+        latitude: float | None = ...,
+        longitude: float | None = ...,
+        elevation_m: float | None = ...,
+        utc_offset_h: float | None = ...,
+        retain_batches: bool | None = ...,
+        rotation: str | None = ...,
     ) -> None: ...
     @property
     def start_time(self) -> str: ...
@@ -2073,20 +2250,60 @@ class SimulationConfig:
     def time_res_s(self, value: int) -> None: ...
     @property
     def output_verbosity(self) -> int: ...
+    @output_verbosity.setter
+    def output_verbosity(self, value: int) -> None: ...
     @property
     def output_path(self) -> str | None: ...
+    @output_path.setter
+    def output_path(self, value: str | None) -> None: ...
     @property
     def write_output(self) -> bool: ...
+    @write_output.setter
+    def write_output(self, value: bool) -> None: ...
     @property
     def output_to_parquet(self) -> bool: ...
+    @output_to_parquet.setter
+    def output_to_parquet(self, value: bool) -> None: ...
     @property
     def output_chunk_size(self) -> int: ...
+    @output_chunk_size.setter
+    def output_chunk_size(self, value: int) -> None: ...
     @property
     def setpoint_deadband_c(self) -> float | None: ...
+    @setpoint_deadband_c.setter
+    def setpoint_deadband_c(self, value: float | None) -> None: ...
     @property
     def master_seed(self) -> int: ...
+    @master_seed.setter
+    def master_seed(self, value: int) -> None: ...
     @property
     def civil_timezone(self) -> str | None: ...
+    @civil_timezone.setter
+    def civil_timezone(self, value: str | None) -> None: ...
+    @property
+    def latitude(self) -> float | None: ...
+    @latitude.setter
+    def latitude(self, value: float | None) -> None: ...
+    @property
+    def longitude(self) -> float | None: ...
+    @longitude.setter
+    def longitude(self, value: float | None) -> None: ...
+    @property
+    def elevation_m(self) -> float | None: ...
+    @elevation_m.setter
+    def elevation_m(self, value: float | None) -> None: ...
+    @property
+    def utc_offset_h(self) -> float | None: ...
+    @utc_offset_h.setter
+    def utc_offset_h(self, value: float | None) -> None: ...
+    @property
+    def retain_batches(self) -> bool: ...
+    @retain_batches.setter
+    def retain_batches(self, value: bool) -> None: ...
+    @property
+    def rotation(self) -> str | None: ...
+    @rotation.setter
+    def rotation(self, value: str | None) -> None: ...
     def __repr__(self) -> str: ...
 
 class DwellingConfig:
@@ -2353,8 +2570,17 @@ class FleetResults:
 # Exceptions
 # ---------------------------------------------------------------------------
 
-class FatalDwellingError(Exception):
+class FatalDwellingError(RuntimeError):
     """Raised when a Dwelling is fatally poisoned (irrecoverable internal state)."""
+
+class HaresConfigError(ValueError):
+    """Raised when a configuration value is invalid or referenced but missing."""
+
+class HaresEquipmentError(ValueError):
+    """Raised when an equipment operation is invalid."""
+
+class HaresSimulationError(RuntimeError):
+    """Raised when a simulation cannot proceed."""
 
 # ---------------------------------------------------------------------------
 # DwellingBlueprint
@@ -2442,6 +2668,13 @@ class Dwelling:
     ) -> None: ...
     def set_price_signal(self, signal: dict[str, float | None]) -> None: ...
     def set_grid_voltage(self, voltage_pu: float) -> None: ...
+    def take_warnings(self) -> list[str]: ...
+    def push_warning(self, message: str) -> None: ...
+    def actor_count(self) -> int: ...
+    def clear_equipment(self) -> None: ...
+    def remove_equipment_by_end_use(self, end_uses: list[EndUse]) -> int: ...
+    def latest_env(self) -> dict[str, Any]: ...
+    def setpoints_reconciled(self) -> dict[str, Any]: ...
     # Available only when compiled with the "observe" feature.
     def enable_observer(self, capacity: int) -> None: ...
     def drain_observations(self) -> list[dict[str, Any]]: ...
@@ -2526,7 +2759,6 @@ class Dwelling:
     def tariff_telemetry(self) -> TariffTelemetry | None: ...
     @property
     def dwelling_fatal(self) -> bool: ...
-    @property
     def config(self) -> SimulationConfig: ...
     def __repr__(self) -> str: ...
 
