@@ -1229,8 +1229,11 @@ impl Dwelling {
         // registered before its equipment existed had no binding), and a
         // stale binding silently reads the old id's core output.
         let id_by_name = &self.equipment_id_by_name;
+        let descriptors: Vec<&hares_types::EquipmentDescriptor> =
+            self.equipment.iter().map(|eq| eq.descriptor()).collect();
         for actor in &mut self.actors {
             actor.resolve_equipment_id(id_by_name);
+            actor.resolve_equipment_descriptors(&descriptors);
         }
         // One timing slot per registered actor, in the live actor order the
         // scheduler's slots index into; totals restart with the roster.

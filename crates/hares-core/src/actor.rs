@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget};
 use hares_types::{
-    ControlCapabilities, EnvironmentState, EquipmentId, HaresError, Telemetry, ZoneId,
+    ControlCapabilities, EnvironmentState, EquipmentDescriptor, EquipmentId, HaresError, Telemetry,
+    ZoneId,
 };
 
 /// What state changes an actor subscribes to. Empty = polled every step.
@@ -129,6 +130,13 @@ pub trait Actor: Send + Sync + 'static {
     /// Default: no-op — actors that are not bound to exactly one equipment
     /// by name have nothing to resolve.
     fn resolve_equipment_id(&mut self, _equipment_id_by_name: &HashMap<String, EquipmentId>) {}
+
+    /// Re-read the dwelling's equipment descriptors (end use, capabilities),
+    /// on the same identity refreshes as [`Self::resolve_equipment_id`].
+    ///
+    /// Default: no-op. Actors that do not depend on what their targets are
+    /// have nothing to read.
+    fn resolve_equipment_descriptors(&mut self, _equipment: &[&EquipmentDescriptor]) {}
 
     /// Declares what state changes this actor cares about.
     ///
