@@ -170,6 +170,59 @@ def test_a_deadband_action_on_equipment_without_a_band_is_rejected():
         )
 
 
+def test_band_range_and_zip_each_carry_their_own_doc():
+    assert "deadband" in PyDwelling.thermostat_band_range.__doc__
+    assert "ZIP" in PyDwelling.equipment_zip.__doc__
+    assert "deadband" not in PyDwelling.equipment_zip.__doc__
+
+
+def test_vec_env_bounds_a_deadband_by_each_dwelling_s_target_class():
+    from ochre_next._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+
+    env = VecDwellingGymEnv(
+        dwellings=[_make_dwelling(seed=i) for i in range(2)],
+        observation_fields=_OBS_FIELDS,
+        action_space_config={"Gas Furnace": ["heat_c", "deadband_c"]},
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    column = env._action_layout.index(("Gas Furnace", "deadband_c"))
+    assert env._action_bounds[column] == (MIN_THERMOSTAT_BAND_C, MAX_HVAC_THERMOSTAT_BAND_C)
+    assert [field for _, field in env._action_layout] == ["deadband_c", "heat_c"]
+    _, _, _, _, infos = env.step(np.asarray([[30.0, 21.0], [30.0, 21.0]]))
+    assert [info["warning_count"] for info in infos] == [0.0, 0.0], "the band is clipped"
+
+
+class _DwellingWithBand:
+    """A dwelling whose furnace reports another thermostat class's range."""
+
+    def __init__(self, dwelling: PyDwelling, band: tuple[float, float]) -> None:
+        self._dwelling = dwelling
+        self._band = band
+
+    def thermostat_band_range(self, name: str) -> tuple[float, float]:
+        return self._band
+
+    def __getattr__(self, attr: str):
+        return getattr(self._dwelling, attr)
+
+
+def test_vec_env_refuses_a_fleet_whose_deadband_bounds_differ():
+    from ochre_next._hares import MAX_TANK_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+
+    other_class = _DwellingWithBand(
+        _make_dwelling(seed=1), (MIN_THERMOSTAT_BAND_C, MAX_TANK_THERMOSTAT_BAND_C)
+    )
+    with pytest.raises(ValueError, match="different bounds across the dwellings"):
+        VecDwellingGymEnv(
+            dwellings=[_make_dwelling(seed=0), other_class],
+            observation_fields=_OBS_FIELDS,
+            action_space_config={"Gas Furnace": ["heat_c", "deadband_c"]},
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+        )
+
+
 def test_deadband_action_without_a_setpoint_field_is_rejected():
     with pytest.raises(ValueError, match="no setpoint field"):
         sorted_action_layout({"HVAC": ["deadband_c"]})

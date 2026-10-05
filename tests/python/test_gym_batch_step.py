@@ -9,6 +9,42 @@ from __future__ import annotations
 from conftest import make_dwelling
 
 _OBS_FIELDS = ["total_power_kw", "outdoor_temp"]
+_SETPOINT_BOUNDS = [(-50.0, 80.0)]
+
+
+def test_batch_step_clips_a_deadband_to_the_bounds_it_is_given():
+    """The environment resolves the furnace's band range once; a 30 C band
+    clipped to it reaches the furnace as a valid band, so nothing is
+    rejected."""
+    from ochre_next._hares import batch_step
+
+    dwelling = make_dwelling(duration_s=600)
+    band = dwelling.thermostat_band_range("Gas Furnace")
+    results = batch_step(
+        [dwelling],
+        [[30.0, 21.0]],
+        _OBS_FIELDS,
+        [("Gas Furnace", "deadband_c"), ("Gas Furnace", "heat_c")],
+        {"Gas Furnace": "ThermalSetpoint"},
+        [band, (-50.0, 80.0)],
+    )
+    assert results[0]["info"]["warning_count"] == 0.0
+
+
+def test_batch_step_refuses_bounds_that_do_not_match_the_layout():
+    import pytest
+    from ochre_next._hares import batch_step
+
+    dwelling = make_dwelling(duration_s=600)
+    with pytest.raises(ValueError, match="action_bounds length"):
+        batch_step(
+            [dwelling],
+            [[21.0]],
+            _OBS_FIELDS,
+            [("Gas Furnace", "heat_c")],
+            {"Gas Furnace": "ThermalSetpoint"},
+            [],
+        )
 
 
 def test_batch_step_info_reports_zero_warnings_on_clean_step():
@@ -25,6 +61,7 @@ def test_batch_step_info_reports_zero_warnings_on_clean_step():
         _OBS_FIELDS,
         [("Gas Furnace", "heat_c")],
         {"Gas Furnace": "ThermalSetpoint"},
+        _SETPOINT_BOUNDS,
     )
     info = results[0]["info"]
     assert info["warning_count"] == 0.0
@@ -48,6 +85,7 @@ def test_batch_step_surfaces_rejected_control_signal_in_info():
         _OBS_FIELDS,
         [("Gas Furnace", "cool_c")],
         {"Gas Furnace": "ThermalSetpoint"},
+        _SETPOINT_BOUNDS,
     )
     info = results[0]["info"]
     assert info["warning_count"] >= 1.0

@@ -1031,6 +1031,14 @@ impl PyDwelling {
             .collect())
     }
 
+    /// The ``(low, high)`` range in °C a ``ThermalSetpoint`` deadband sent
+    /// to the named equipment is held to (its thermostat class), or
+    /// ``None`` when it takes no band. Raises ``ValueError`` for an unknown
+    /// equipment name.
+    pub fn thermostat_band_range(&self, name: &str) -> PyResult<Option<(f64, f64)>> {
+        self.band_range_of(name).map_err(PyValueError::new_err)
+    }
+
     /// The primary resolved ZIP/power-factor model for the named equipment,
     /// as a dict with keys ``zp``/``ip``/``pp``/``zq``/``iq``/``pq``/``pf``/
     /// ``v0``/``real_power_zip_applies``, or ``None`` when the equipment has
@@ -1054,13 +1062,6 @@ impl PyDwelling {
     /// effective power factor (config baseline, later mutated by a
     /// ``PowerFactorSetpoint``). Raises ``ValueError`` for an unknown
     /// equipment name. Pure inspection — never influences the simulation.
-    /// The `(low, high)` range in °C a `ThermalSetpoint` deadband sent to
-    /// the named equipment is held to (its thermostat class), or ``None``
-    /// when it takes no band.
-    pub fn thermostat_band_range(&self, name: &str) -> PyResult<Option<(f64, f64)>> {
-        self.band_range_of(name).map_err(PyValueError::new_err)
-    }
-
     pub fn equipment_zip<'py>(
         &self,
         py: Python<'py>,

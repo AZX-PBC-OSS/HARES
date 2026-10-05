@@ -2821,4 +2821,5 @@ def batch_step(
     observation_fields: list[str],
     action_layout: list[tuple[str, str]],
     signal_type_by_equipment: dict[str, str],
+    action_bounds: list[tuple[float, float]],
 ) -> list[dict[str, Any]]: ...

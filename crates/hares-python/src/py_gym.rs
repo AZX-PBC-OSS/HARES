@@ -53,51 +53,6 @@ struct SendDwellingPtr(*const PyDwelling);
 unsafe impl Send for SendDwellingPtr {}
 unsafe impl Sync for SendDwellingPtr {}
 
-/// Field-specific valid range for action clipping.
-///
-/// Maps an action field name (case-insensitive) to its (low, high) bound,
-/// matching the ranges used by Python `_field_bounds` in `gym_env.py`.
-fn field_bounds(field: &str) -> (f64, f64) {
-    match field.to_lowercase().as_str() {
-        "soc"
-        | "target_soc"
-        | "min_soc"
-        | "max_soc"
-        | "fraction"
-        | "load_fraction"
-        | "on_fraction"
-        | "duty_cycle"
-        | "target_rh"
-        | "min_rh"
-        | "max_rh"
-        | "connected"
-        | "enabled"
-        | "solar_only_charging" => (0.0, 1.0),
-        "setpoint_c" | "heat_c" | "cool_c" | "heating_setpoint_c" | "cooling_setpoint_c" => {
-            (-50.0, 80.0)
-        }
-        _ => (-1.0e6, 1.0e6),
-    }
-}
-
-/// Looks up the deadband range of the named equipment's thermostat class.
-type BandRange<'a> = &'a dyn Fn(&str) -> Result<Option<(f64, f64)>, String>;
-
-/// The bounds an action field is clipped to. A deadband is held to the
-/// range of the target's thermostat class.
-fn action_bounds(
-    equipment: &str,
-    field: &str,
-    band_range: BandRange<'_>,
-) -> Result<(f64, f64), String> {
-    if field.eq_ignore_ascii_case("deadband_c") {
-        return band_range(equipment)?.ok_or_else(|| {
-            format!("equipment '{equipment}' has no thermostat band for a deadband_c action")
-        });
-    }
-    Ok(field_bounds(field))
-}
-
 /// Build a [`ControlSignal`] from a signal type name and field values.
 ///
 /// Mirrors Python `_build_control_signal` in `gym_env.py`. All branches
@@ -232,18 +187,27 @@ static ACTIONS_CLIPPED_WARNED: AtomicBool = AtomicBool::new(false);
 /// Map a flat action vector to per-equipment [`ControlSignal`]s.
 ///
 /// Each action dimension maps to an (equipment, field) pair from `action_layout`.
-/// Values are clipped to field-specific bounds, grouped by equipment, and converted
-/// to typed signals using `signal_type_by_equipment`.
+/// Values are clipped to `action_bounds` (one `(low, high)` per layout column,
+/// resolved once by the environment from the field and, for a deadband, the
+/// target's thermostat class), grouped by equipment, and converted to typed
+/// signals using `signal_type_by_equipment`.
 fn map_action_to_signals(
     action: &[f64],
     action_layout: &[(String, String)],
     signal_type_by_equipment: &HashMap<String, String>,
-    band_range: BandRange<'_>,
+    action_bounds: &[(f64, f64)],
 ) -> Result<Vec<(String, ControlSignal)>, String> {
     if action.len() != action_layout.len() {
         return Err(format!(
             "action length ({}) must match action_layout length ({})",
             action.len(),
+            action_layout.len(),
+        ));
+    }
+    if action_bounds.len() != action_layout.len() {
+        return Err(format!(
+            "action_bounds length ({}) must match action_layout length ({})",
+            action_bounds.len(),
             action_layout.len(),
         ));
     }
@@ -258,7 +222,7 @@ fn map_action_to_signals(
                 "action value at index {idx} for {equipment}.{field} is not finite: {raw_value}",
             ));
         }
-        let (low, high) = action_bounds(equipment, field, band_range)?;
+        let (low, high) = action_bounds[idx];
         let clipped = raw_value.clamp(low, high);
         if clipped != raw_value {
             #[cfg(feature = "observe")]
@@ -406,8 +370,12 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// signals rejected at dispatch time). When non-zero, `"warnings"`
 /// (list of str) holds the drained messages; they are consumed here, so a
 /// subsequent `Dwelling.take_warnings()` will not return them again.
+///
+/// `action_bounds` holds one `(low, high)` per `action_layout` column, which
+/// the environment resolves once from the action space (a deadband by its
+/// target's thermostat class); every action is clipped to it.
 #[pyfunction(name = "batch_step")]
-#[pyo3(signature = (dwellings, actions, observation_fields, action_layout, signal_type_by_equipment))]
+#[pyo3(signature = (dwellings, actions, observation_fields, action_layout, signal_type_by_equipment, action_bounds))]
 pub fn batch_step_py(
     py: Python<'_>,
     dwellings: Vec<Py<PyDwelling>>,
@@ -415,6 +383,7 @@ pub fn batch_step_py(
     observation_fields: Vec<String>,
     action_layout: Vec<(String, String)>,
     signal_type_by_equipment: HashMap<String, String>,
+    action_bounds: Vec<(f64, f64)>,
 ) -> PyResult<Vec<Py<PyAny>>> {
     // Dimension check first (useful error regardless of mapping status).
     if !actions.is_empty() && actions.len() != dwellings.len() {
@@ -439,12 +408,11 @@ pub fn batch_step_py(
         if action.is_empty() {
             continue;
         }
-        let band_range = |equipment: &str| dwelling_ref.band_range_of(equipment);
         let signals = map_action_to_signals(
             action,
             &action_layout,
             &signal_type_by_equipment,
-            &band_range,
+            &action_bounds,
         )
         .map_err(PyValueError::new_err)?;
         for (equipment, signal) in &signals {
@@ -591,41 +559,29 @@ mod tests {
         (layout, sig_map)
     }
 
-    #[test]
-    fn field_bounds_soc_range_fraction_fields() {
-        assert_eq!(field_bounds("SOC"), (0.0, 1.0));
-        assert_eq!(field_bounds("target_soc"), (0.0, 1.0));
-        assert_eq!(field_bounds("fraction"), (0.0, 1.0));
-        assert_eq!(field_bounds("on_fraction"), (0.0, 1.0));
-        assert_eq!(field_bounds("target_rh"), (0.0, 1.0));
-    }
-
-    #[test]
-    fn field_bounds_binary_fields() {
-        assert_eq!(field_bounds("connected"), (0.0, 1.0));
-        assert_eq!(field_bounds("enabled"), (0.0, 1.0));
-    }
-
-    #[test]
-    fn field_bounds_temperature_fields() {
-        assert_eq!(field_bounds("heating_setpoint_c"), (-50.0, 80.0));
-        assert_eq!(field_bounds("cooling_setpoint_c"), (-50.0, 80.0));
-        assert_eq!(field_bounds("heat_c"), (-50.0, 80.0));
-    }
-
-    /// "HVAC" is a cycling unit, "WH" a storage water heater; anything else
-    /// takes no band.
-    fn bands(equipment: &str) -> Result<Option<(f64, f64)>, String> {
+    /// The bounds an environment resolves for `layout`: "HVAC" is a cycling
+    /// unit and "WH" a storage water heater.
+    fn bounds(layout: &[(String, String)]) -> Vec<(f64, f64)> {
         use hares_types::ThermostatBandClass;
-        Ok(match equipment {
-            "HVAC" => Some(ThermostatBandClass::Cycling.range_c()),
-            "WH" => Some(ThermostatBandClass::Tank.range_c()),
-            _ => None,
-        })
+        layout
+            .iter()
+            .map(
+                |(equipment, field)| match (equipment.as_str(), field.as_str()) {
+                    ("WH", "deadband_c") => ThermostatBandClass::Tank.range_c(),
+                    (_, "deadband_c") => ThermostatBandClass::Cycling.range_c(),
+                    (_, "heat_c" | "cool_c" | "setpoint_c")
+                    | (_, "heating_setpoint_c" | "cooling_setpoint_c") => (-50.0, 80.0),
+                    (_, "fraction" | "on_fraction" | "target_soc" | "soc") => (0.0, 1.0),
+                    _ => (-1.0e6, 1.0e6),
+                },
+            )
+            .collect()
     }
 
+    /// Each column is clipped to its own resolved bounds, so a deadband is
+    /// held to its target's thermostat class.
     #[test]
-    fn a_deadband_action_is_clipped_to_the_target_thermostat_class() {
+    fn each_action_is_clipped_to_its_resolved_bounds() {
         let layout = vec![
             ("HVAC".to_string(), "deadband_c".to_string()),
             ("HVAC".to_string(), "heat_c".to_string()),
@@ -637,7 +593,7 @@ mod tests {
             .map(|eq| (eq.to_string(), "ThermalSetpoint".to_string()))
             .collect();
         let action = vec![30.0, 21.0, 30.0, 50.0];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap();
+        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         let band_of = |name: &str| match signals.iter().find(|(eq, _)| eq == name) {
             Some((_, ControlSignal::ThermalSetpoint { deadband_c, .. })) => *deadband_c,
             other => panic!("{other:?}"),
@@ -648,9 +604,9 @@ mod tests {
         );
         assert_eq!(band_of("WH"), Some(30.0));
 
-        let lights = vec![("Lights".to_string(), "deadband_c".to_string())];
-        let err = map_action_to_signals(&[1.0], &lights, &sig_map, &bands).unwrap_err();
-        assert!(err.contains("no thermostat band"), "{err}");
+        let err =
+            map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout[..1])).unwrap_err();
+        assert!(err.contains("action_bounds length"), "{err}");
     }
 
     #[test]
@@ -659,11 +615,6 @@ mod tests {
         values.insert("deadband_c".to_string(), 1.0);
         let err = build_control_signal("ThermalSetpoint", &values).unwrap_err();
         assert!(err.contains("names no setpoint"), "{err}");
-    }
-
-    #[test]
-    fn field_bounds_unknown_falls_back_to_broad() {
-        assert_eq!(field_bounds("max_power_kw"), (-1.0e6, 1.0e6));
     }
 
     #[test]
@@ -856,7 +807,7 @@ mod tests {
     fn map_single_equipment_thermal_action() {
         let (layout, sig_map) = therm_layout();
         let action = vec![21.0, 26.0];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap();
+        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].0, "HVAC");
         assert_eq!(
@@ -873,7 +824,7 @@ mod tests {
     fn map_action_clips_to_bounds() {
         let (layout, sig_map) = therm_layout();
         let action = vec![-100.0, 200.0];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap();
+        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(
             signals[0].1,
             ControlSignal::ThermalSetpoint {
@@ -888,7 +839,7 @@ mod tests {
     fn map_empty_action_is_noop() {
         let (layout, sig_map) = therm_layout();
         let action: Vec<f64> = vec![];
-        let err = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap_err();
+        let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
         assert!(err.contains("must match action_layout length"));
     }
 
@@ -902,7 +853,7 @@ mod tests {
         sig_map.insert("HVAC".to_string(), "ThermalSetpoint".to_string());
         sig_map.insert("Battery".to_string(), "PowerSetpoint".to_string());
         let action = vec![22.0, -1.5];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap();
+        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(signals.len(), 2);
         let hvac_sig = signals.iter().find(|(eq, _)| eq == "HVAC").unwrap();
         assert_eq!(
@@ -929,7 +880,7 @@ mod tests {
     fn map_action_dimension_mismatch_errors() {
         let (layout, sig_map) = therm_layout();
         let action = vec![21.0];
-        let err = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap_err();
+        let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
         assert!(err.contains("must match action_layout length"));
     }
 
@@ -938,7 +889,7 @@ mod tests {
         let layout = vec![("UnknownEquip".to_string(), "fraction".to_string())];
         let sig_map = HashMap::new();
         let action = vec![0.5];
-        let err = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap_err();
+        let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
         assert!(err.contains("no signal type mapping"));
     }
 
@@ -1004,7 +955,7 @@ mod tests {
         let mut sig_map = HashMap::new();
         sig_map.insert("EV".to_string(), "SOCTarget".to_string());
         let action = vec![0.8, 0.1, 0.95];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap();
+        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(signals.len(), 1);
         assert_eq!(
             signals[0].1,
@@ -1025,7 +976,7 @@ mod tests {
         let mut sig_map = HashMap::new();
         sig_map.insert("HPWH".to_string(), "DutyCycle".to_string());
         let action = vec![0.6, 600.0];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap();
+        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(signals.len(), 1);
         assert_eq!(
             signals[0].1,
@@ -1043,7 +994,7 @@ mod tests {
         let mut sig_map = HashMap::new();
         sig_map.insert("Dehumidifier".to_string(), "HumiditySetpoint".to_string());
         let action = vec![0.5];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap();
+        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(
             signals[0].1,
             ControlSignal::HumiditySetpoint {
@@ -1058,7 +1009,7 @@ mod tests {
     fn map_action_rejects_nan() {
         let (layout, sig_map) = therm_layout();
         let action = vec![21.0, f64::NAN];
-        let err = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap_err();
+        let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
         assert!(err.contains("not finite"));
     }
 
@@ -1066,7 +1017,7 @@ mod tests {
     fn map_action_rejects_infinity() {
         let (layout, sig_map) = therm_layout();
         let action = vec![f64::INFINITY, 26.0];
-        let err = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap_err();
+        let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
         assert!(err.contains("not finite"));
     }
 
@@ -1074,7 +1025,7 @@ mod tests {
     fn map_action_rejects_negative_infinity() {
         let (layout, sig_map) = therm_layout();
         let action = vec![21.0, f64::NEG_INFINITY];
-        let err = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap_err();
+        let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
         assert!(err.contains("not finite"));
     }
 
@@ -1087,7 +1038,7 @@ mod tests {
         let mut sig_map = HashMap::new();
         sig_map.insert("HVAC".to_string(), "ThermalSetpoint".to_string());
         let action = vec![21.0, 22.0];
-        let err = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap_err();
+        let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
         assert!(
             err.contains("duplicate action layout entries"),
             "error should mention duplicate entries, got: {err}"
@@ -1104,7 +1055,7 @@ mod tests {
         sig_map.insert("HVAC".to_string(), "ThermalSetpoint".to_string());
         sig_map.insert("Battery".to_string(), "PowerSetpoint".to_string());
         let action = vec![22.0, f64::NAN];
-        let err = map_action_to_signals(&action, &layout, &sig_map, &bands).unwrap_err();
+        let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
         assert!(
             err.contains("not finite"),
             "error should mention not finite, got: {err}"

@@ -503,7 +503,7 @@ class TestBatchStep:
         from ochre_next import batch_step
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        results = batch_step([dw], [[]], ["total_power_kw"], [], {})
+        results = batch_step([dw], [[]], ["total_power_kw"], [], {}, [])
         assert isinstance(results, list)
         assert len(results) == 1
         r = results[0]
@@ -534,6 +534,7 @@ class TestBatchStep:
                         ["total_power_kw"],
                         [],
                         {},
+                        [],
                     )
                     for r in results:
                         assert isinstance(r, dict)
@@ -558,7 +559,7 @@ class TestBatchStep:
         """batch_step with empty dwellings list returns empty results."""
         from ochre_next import batch_step
 
-        results = batch_step([], [], ["total_power_kw"], [], {})
+        results = batch_step([], [], ["total_power_kw"], [], {}, [])
         assert isinstance(results, list)
         assert len(results) == 0
 
@@ -582,6 +583,7 @@ class TestBatchStep:
                         ["total_power_kw"],
                         [],
                         {},
+                        [],
                     )
                     assert len(results) == len(dw_list)
                     for r in results:

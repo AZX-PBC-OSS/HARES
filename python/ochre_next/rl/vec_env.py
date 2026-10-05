@@ -99,6 +99,7 @@ class VecDwellingGymEnv:
             ((low, high),) = per_dwelling
             action_low.append(low)
             action_high.append(high)
+        self._action_bounds = list(zip(action_low, action_high))
 
         action_low_arr = np.asarray(action_low, dtype=np.float64)
         action_high_arr = np.asarray(action_high, dtype=np.float64)
@@ -252,6 +253,7 @@ class VecDwellingGymEnv:
                 self._observation_fields,
                 self._action_layout,
                 self._signal_type_by_equipment,
+                self._action_bounds,
             )
             obs = np.asarray([row["obs"] for row in raw], dtype=np.float64)
             rewards = np.asarray([float(row["reward"]) for row in raw], dtype=np.float64)
