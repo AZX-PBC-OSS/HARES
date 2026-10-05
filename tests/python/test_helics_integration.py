@@ -17,6 +17,11 @@ import pytest
 
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER
 
+if importlib.util.find_spec("helics") is None:  # pragma: no cover - optional dependency
+    pytest.skip("helics not installed", allow_module_level=True)
+
+import helics
+
 from ochre_next import Battery, ControlSignal, Dwelling, DwellingConfig, SimulationConfig, SteppableFleet
 
 if TYPE_CHECKING:
@@ -34,16 +39,9 @@ from ochre_next.helics import (
 )
 from ochre_next.helics.federate import core_init_string
 
-helics_available = importlib.util.find_spec("helics") is not None
-if not helics_available:  # pragma: no cover - exercised when optional dependency is missing
-    pytest.skip("helics not installed", allow_module_level=True)
-import helics
-
-pytestmark = [
-    # Last-resort backstop: raw HELICS calls block inside the C library where
-    # SIGALRM cannot interrupt them, so use pytest-timeout's thread method.
-    pytest.mark.timeout(120, method="thread"),
-]
+# Last-resort backstop: raw HELICS calls block inside the C library where
+# SIGALRM cannot interrupt them, so use pytest-timeout's thread method.
+pytestmark = pytest.mark.timeout(120, method="thread")
 
 
 _TIME_RES_S = 60.0
