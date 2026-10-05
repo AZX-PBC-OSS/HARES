@@ -397,8 +397,13 @@ impl ThermostatFsm {
         env: &EnvironmentState,
         zone_id: ZoneId,
     ) -> crate::Result<ThermostatMode> {
-        self.resolve_profile_setpoints(env);
         let zone_temp = lookup_zone_temp(env, zone_id)?;
+        Ok(self.update_mode_at(env, zone_temp))
+    }
+
+    /// [`Self::update_mode`] at a zone temperature the caller already read.
+    pub fn update_mode_at(&mut self, env: &EnvironmentState, zone_temp: f64) -> ThermostatMode {
+        self.resolve_profile_setpoints(env);
         let setpoints = self.effective_setpoints();
 
         tracing::debug!(
@@ -418,7 +423,7 @@ impl ThermostatFsm {
                 min_cycle_time_s = self.thermostat.min_cycle_time_s,
                 "is_cycle_change_allowed: blocked by min_cycle_time"
             );
-            return Ok(self.mode);
+            return self.mode;
         }
 
         let hysteresis = self.thermostat.hysteresis_c;
@@ -532,11 +537,11 @@ impl ThermostatFsm {
                 min_off_time_s = self.min_off_time_s,
                 "can_transition_mode: blocked by min on/off time"
             );
-            return Ok(self.mode);
+            return self.mode;
         }
 
         self.set_mode(next_mode, env.current_time);
-        Ok(self.mode)
+        self.mode
     }
 
     /// Apply `ThermalSetpoint` and `ThermalSetpointDelta` control signals.

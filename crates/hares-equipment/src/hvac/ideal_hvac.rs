@@ -300,9 +300,11 @@ impl IdealHvac {
         })
     }
 
+    /// The zone temperature is read once: the FSM's transition and the ideal
+    /// solver's target in the deadband both use it.
     fn update_mode(&mut self, env: &EnvironmentState) -> crate::Result<ThermostatMode> {
-        let zone = self.served_zone()?;
-        let mode = self.thermostat_fsm.update_mode(env, zone)?;
+        let zone_temp = lookup_zone_temp(env, self.served_zone()?)?;
+        let mode = self.thermostat_fsm.update_mode_at(env, zone_temp);
 
         let setpoints = self.thermostat_fsm.effective_setpoints();
         match self.thermostat_fsm.mode {
@@ -314,7 +316,6 @@ impl IdealHvac {
                 // The FSM Deadband is correct for physical-equipment cycling
                 // observability; the solver needs the setpoint when active.
                 if self.use_ideal_cached {
-                    let zone_temp = lookup_zone_temp(env, zone)?;
                     self.current_target_c = if zone_temp < setpoints.heating_c {
                         setpoints.heating_c
                     } else if zone_temp > setpoints.cooling_c {
@@ -3325,6 +3326,15 @@ mod tests {
                 .expect_err("the zone temperature is required");
             assert!(err.to_string().contains("not found"), "{mode}: {err}");
         }
+    }
+
+    #[test]
+    fn an_ideal_unit_reports_the_ideal_band_class() {
+        let eq = init_ideal("IH-class", 20.0, 26.0, 21.0);
+        assert_eq!(
+            eq.thermostat_band_class(),
+            Some(hares_types::ThermostatBandClass::Ideal)
+        );
     }
 
     /// The configured field is named in the error and the reason fits the
