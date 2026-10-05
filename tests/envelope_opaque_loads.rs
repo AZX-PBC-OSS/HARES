@@ -22,14 +22,18 @@
 //! net sensible balance with it (~13.5 kW mean gross vs ~100 W net on this
 //! fixture's summer day).
 
+#[path = "support/denver_offset.rs"]
+mod denver_offset;
+
 #[cfg(test)]
 mod tests {
+    use super::denver_offset::denver_offset;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::OnceLock;
 
-    use chrono::{Duration, FixedOffset, TimeZone};
+    use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
     use hares_io::{EnvelopeComponentLoadsKwh, OutputFormat};
 
@@ -98,7 +102,7 @@ mod tests {
             // directory removed once the columns are parsed.
             let output_dir = tempfile::tempdir().expect("temp dir");
             let output_path = output_dir.path().join("hares_opaque_loads_summer_24h.csv");
-            let denver = FixedOffset::west_opt(7 * 3600).expect("Denver UTC-7 offset");
+            let denver = denver_offset();
             let config = DwellingConfig {
                 hpxml_path: examples_dir().join("BEopt_example.xml"),
                 schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),

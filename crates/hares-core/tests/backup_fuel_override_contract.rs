@@ -11,11 +11,14 @@
 
 use std::path::PathBuf;
 
-use chrono::{Duration, FixedOffset, TimeZone};
+use chrono::{Duration, TimeZone};
 use hares_core::{Dwelling, DwellingConfig};
 use hares_io::OutputFormat;
 use hares_types::CoreCapabilities;
 use serde_json::json;
+
+#[path = "../../../tests/support/denver_offset.rs"]
+mod denver_offset;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -24,8 +27,7 @@ fn project_root() -> PathBuf {
 /// Build one of the OS-HPXML sample dwellings with an optional equipment
 /// override map, over the Denver TMY3 weather and a generated schedule.
 fn sample_config(sample: &str, overrides: Option<serde_json::Value>) -> DwellingConfig {
-    let tz_offset = FixedOffset::west_opt(7 * 3600).expect("UTC-7 offset is valid");
-    let start_time = tz_offset
+    let start_time = denver_offset::denver_offset()
         .with_ymd_and_hms(2023, 1, 15, 0, 0, 0)
         .single()
         .expect("valid start time");

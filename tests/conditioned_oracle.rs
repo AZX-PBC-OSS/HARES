@@ -21,13 +21,21 @@
     feature = "observe",
     any(debug_assertions, feature = "observe_detailed")
 ))]
+#[path = "support/denver_offset.rs"]
+mod denver_offset;
+
+#[cfg(all(
+    feature = "observe",
+    any(debug_assertions, feature = "observe_detailed")
+))]
 #[cfg(test)]
 mod tests {
+    use super::denver_offset::denver_offset;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
 
-    use chrono::{Duration, FixedOffset, TimeZone};
+    use chrono::{Duration, TimeZone};
     use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
     use hares_equipment::hvac::heating_config::IdealCapacityModeConfig;
     use hares_equipment::{
@@ -54,7 +62,7 @@ mod tests {
         // .hour() is used directly for schedule evaluation regardless of offset.
         // We use Denver's real offset for clarity, but only the wall-clock
         // digits (hour, minute) actually affect behavior.
-        let denver = FixedOffset::west_opt(7 * 3600).expect("Denver UTC-7 offset");
+        let denver = denver_offset();
         let (start_time, duration) = match scenario {
             "beopt_spring_72h" => (
                 denver.with_ymd_and_hms(2019, 5, 5, 12, 0, 0).unwrap(),

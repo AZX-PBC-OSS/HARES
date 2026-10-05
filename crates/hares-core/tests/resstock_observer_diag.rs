@@ -9,13 +9,17 @@
 //! - Zone temperature stability
 #![cfg(feature = "observe")]
 
+#[path = "../../../tests/support/denver_offset.rs"]
+mod denver_offset;
+
 #[cfg(test)]
 mod tests {
+    use super::denver_offset::denver_offset;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use chrono::{Duration, FixedOffset, TimeZone};
+    use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
 
@@ -75,8 +79,7 @@ mod tests {
             weather_path: weather_for(&bldg_dir, "2024.2"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .unwrap()
+                start_time: denver_offset()
                     .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
                     .unwrap(),
                 duration: Duration::hours(24),

@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::hint::black_box;
 
-use chrono::{FixedOffset, TimeZone};
+use chrono::TimeZone;
 use criterion::{Criterion, criterion_group, criterion_main};
 use hares_envelope::thermal_solver::{
     BoundaryCategory, ExteriorSurfaceInfo, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
@@ -27,6 +27,9 @@ use hares_types::{
     WeatherState, ZoneId, ZoneState,
 };
 use nalgebra::DMatrix;
+
+#[path = "../../../tests/support/denver_offset.rs"]
+mod denver_offset;
 
 const ZONE: ZoneId = ZoneId(1);
 
@@ -109,8 +112,7 @@ fn bench_env() -> EnvironmentState {
         custom_domains: vec![],
         equipment_telemetry: HashMap::new(),
         equipment_core: Default::default(),
-        current_time: FixedOffset::east_opt(-7 * 3600)
-            .unwrap()
+        current_time: denver_offset::denver_offset()
             .with_ymd_and_hms(2026, 7, 19, 14, 0, 0)
             .single()
             .expect("valid time"),

@@ -12,14 +12,18 @@
 //! Fixtures are stored in tests/fixtures/resstock/{version}/ and were
 //! downloaded from the NREL OEDI data lake.
 
+#[path = "support/denver_offset.rs"]
+mod denver_offset;
+
 #[cfg(test)]
 mod tests {
+    use super::denver_offset::denver_offset;
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::Read;
     use std::path::{Path, PathBuf};
 
-    use chrono::{Duration, FixedOffset, TimeZone};
+    use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
     use sha2::{Digest, Sha256};
@@ -180,8 +184,7 @@ mod tests {
             weather_path,
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .expect("UTC-7 offset")
+                start_time: denver_offset()
                     .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
                     .unwrap(),
                 duration: Duration::hours(1),
@@ -370,8 +373,7 @@ mod tests {
             weather_path: weather_path("2024.2", &bldg_dir),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .expect("UTC-7 offset")
+                start_time: denver_offset()
                     .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
                     .unwrap(),
                 duration: Duration::hours(72),
@@ -470,8 +472,7 @@ mod tests {
             weather_path: weather_path(version, bldg_dir),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .expect("UTC-7 offset")
+                start_time: denver_offset()
                     .with_ymd_and_hms(2018, month, day, 0, 0, 0)
                     .unwrap(),
                 duration: Duration::hours(72),

@@ -9,13 +9,17 @@
 //! physics-grounded bounds for plausibility and flag large OCHRE deltas as
 //! diagnostics rather than correctness failures.
 
+#[path = "support/denver_offset.rs"]
+mod denver_offset;
+
 #[cfg(test)]
 mod tests {
+    use super::denver_offset::denver_offset;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
 
-    use chrono::{Duration, FixedOffset, TimeZone};
+    use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
 
@@ -39,8 +43,7 @@ mod tests {
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
                 // Denver local noon (UTC-7).
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .expect("Denver UTC-7 offset")
+                start_time: denver_offset()
                     .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
                     .unwrap(),
                 duration: Duration::hours(1),

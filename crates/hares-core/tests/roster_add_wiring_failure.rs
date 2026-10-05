@@ -5,11 +5,14 @@
 
 use std::path::PathBuf;
 
-use chrono::{Duration, FixedOffset, TimeZone};
+use chrono::{Duration, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_equipment::{ElectricBoilerConfig, Equipment, EquipmentConfig, EquipmentRegistry};
 use hares_io::OutputFormat;
 use hares_types::{FluidType, HaresError};
+
+#[path = "../../../tests/support/denver_offset.rs"]
+mod denver_offset;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -22,8 +25,7 @@ fn config() -> DwellingConfig {
         weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: SimulationConfig {
-            start_time: FixedOffset::west_opt(7 * 3600)
-                .expect("UTC-7 offset is valid")
+            start_time: denver_offset::denver_offset()
                 .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
                 .unwrap(),
             duration: Duration::hours(1),

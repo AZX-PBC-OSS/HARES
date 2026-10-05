@@ -5,13 +5,15 @@ use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml_schedule::generate_schedule_from_hpxml;
 use hares_io::load_default_profiles;
 
+#[path = "../../../tests/support/denver_offset.rs"]
+mod denver_offset;
+
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn test_start() -> DateTime<FixedOffset> {
-    FixedOffset::west_opt(7 * 3600)
-        .unwrap()
+    denver_offset::denver_offset()
         .with_ymd_and_hms(2019, 1, 1, 0, 0, 0)
         .unwrap()
 }

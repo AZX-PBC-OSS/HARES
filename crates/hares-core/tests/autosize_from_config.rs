@@ -1,9 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike};
+use chrono::{Datelike, Duration, NaiveDate, Timelike};
 use hares_core::{Dwelling, DwellingConfig};
 use hares_io::{OutputFormat, SimulationConfig};
+
+#[path = "../../../tests/support/fixture_start.rs"]
+mod fixture_start;
 
 fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
     let path = dir.join(name);
@@ -75,8 +78,7 @@ fn build_minimal_epw() -> String {
 }
 
 fn build_minimal_schedule() -> String {
-    let tz_offset = FixedOffset::east_opt(-7 * 3600).expect("valid offset");
-    let start = tz_offset.with_ymd_and_hms(2021, 1, 1, 0, 0, 0).unwrap();
+    let start = fixture_start::fixture_start();
     let mut lines = vec!["Time,Dummy".to_string()];
     for i in 0..60 {
         let ts = start + Duration::minutes(i as i64);
@@ -167,8 +169,7 @@ fn build_minimal_dwelling(hpxml_xml: &str) -> Dwelling {
     let weather_path = write_file(dir.path(), "weather.epw", &build_minimal_epw());
     let output_path = dir.path().join("output.csv");
 
-    let tz_offset = FixedOffset::east_opt(-7 * 3600).expect("valid offset");
-    let start_time = tz_offset.with_ymd_and_hms(2021, 1, 1, 0, 0, 0).unwrap();
+    let start_time = fixture_start::fixture_start();
 
     let config = DwellingConfig {
         hpxml_path,

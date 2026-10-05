@@ -15,13 +15,17 @@
 //! [`cycling_energy_equals_rated_power_times_on_duration`], which codifies
 //! the per-cycle energy semantic the parity suites depend on.
 
+#[path = "../support/denver_offset.rs"]
+mod denver_offset;
+
 #[cfg(test)]
 mod tests {
+    use super::denver_offset::denver_offset;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
 
-    use chrono::{Duration, FixedOffset, TimeZone};
+    use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
 
@@ -229,8 +233,7 @@ mod tests {
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
                 // Match OCHRE smoke: May 5, 2019, 12:00 PM Denver (UTC-7)
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .expect("Denver UTC-7 offset")
+                start_time: denver_offset()
                     .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
                     .unwrap(),
                 duration: Duration::hours(duration_hours),
@@ -452,8 +455,7 @@ mod tests {
             sim_config: SimulationConfig {
                 // Denver local noon (UTC-7) on May 5 2019 -- mild spring noon,
                 // neither heating nor cooling is expected to dominate.
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .expect("Denver UTC-7 offset")
+                start_time: denver_offset()
                     .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
                     .unwrap(),
                 duration: Duration::hours(1),

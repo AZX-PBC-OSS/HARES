@@ -16,14 +16,14 @@ use hares_io::{
     ResampleMethod, ResampleOverrides, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries,
 };
 
+#[path = "../../../tests/support/denver_offset.rs"]
+mod denver_offset;
+
+use denver_offset::denver_offset;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Denver-ish fixed offset: UTC-7.
-fn denver_offset() -> FixedOffset {
-    FixedOffset::west_opt(7 * 3600).expect("offset")
-}
 
 /// Timestamp for a given hour on 2024-07-15 in Denver local time.
 fn ts(hour: u32) -> DateTime<FixedOffset> {
