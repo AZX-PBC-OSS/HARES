@@ -2826,6 +2826,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }];
 
         let ctx = AutosizeContext {

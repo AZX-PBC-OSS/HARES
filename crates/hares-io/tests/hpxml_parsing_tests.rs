@@ -2649,6 +2649,165 @@ fn declared_spaces_no_surface_touches_are_no_zones() {
     }
 }
 
+/// `xml` with every `<element>...</element>` removed.
+fn without_elements(xml: &str, element: &str) -> String {
+    let (open, close) = (format!("<{element}>"), format!("</{element}>"));
+    let mut out = xml.to_string();
+    while let Some(start) = out.find(&open) {
+        let end = start + out[start..].find(&close).expect("closed") + close.len();
+        out.replace_range(start..end, "");
+    }
+    out
+}
+
+fn parse_edited_sample(sample: &str, edit: impl FnOnce(String) -> String) -> hares_io::Building {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendors/OCHRE/test/OS-HPXML Sample Files")
+        .join(sample);
+    let xml = edit(std::fs::read_to_string(&path).expect("sample readable"));
+    hares_io::hpxml::parse_hpxml_str(&xml).unwrap_or_else(|e| panic!("{sample}: {e:?}"))
+}
+
+/// A crawlspace with no foundation walls is 3 ft high (geometry.rb
+/// `calculate_zone_height`), recorded as a warning naming the location.
+#[test]
+fn crawlspace_without_walls_takes_the_assumed_three_feet() {
+    let building = parse_edited_sample("base-foundation-vented-crawlspace.xml", |xml| {
+        without_elements(&xml, "FoundationWall")
+    });
+    let expected =
+        hares_physics::units::area_ft2_to_m2(1350.0) * hares_physics::units::length_ft_to_m(3.0);
+    let volume = zone_volume_m3(&building, &ZoneType::Foundation).expect("crawlspace volume");
+    assert!(
+        (volume - expected).abs() < 1e-9,
+        "{volume} m3, expected {expected} m3"
+    );
+    assert!(
+        building
+            .parse_warnings
+            .iter()
+            .any(|w| w.message.contains("'crawlspace - vented'") && w.message.contains("3 ft")),
+        "the assumed height must be a warning, got {:?}",
+        building.parse_warnings
+    );
+}
+
+/// An attic the gable geometry cannot size (base.xml without its gable
+/// wall) is a square hip under its roofs: footprint = roof area /
+/// sqrt(1 + slope^2), height = 0.5 sin(atan(slope)) sqrt(footprint), volume
+/// = footprint x height / 3 (geometry.rb:1325-1329, 1373-1393).
+#[test]
+fn attic_without_gables_is_a_square_hip() {
+    let building = parse_edited_sample("base.xml", |xml| {
+        let start = xml
+            .find("<Wall>\n            <SystemIdentifier id='Wall2'/>")
+            .expect("Wall2");
+        let end = start + xml[start..].find("</Wall>").expect("closed") + "</Wall>".len();
+        format!("{}{}", &xml[..start], &xml[end..]).replace("<AttachedToWall idref='Wall2'/>", "")
+    });
+    let slope: f64 = 6.0 / 12.0;
+    let footprint_ft2 = 1509.3 / (1.0 + slope * slope).sqrt();
+    let height_ft = 0.5 * slope.atan().sin() * footprint_ft2.sqrt();
+    let expected = hares_physics::units::volume_ft3_to_m3(footprint_ft2 * height_ft / 3.0);
+    let attic = building
+        .zones
+        .iter()
+        .find(|z| z.zone_type == ZoneType::Attic)
+        .expect("attic zone");
+    let volume = attic.volume_m3.expect("attic volume");
+    assert!(
+        (volume - expected).abs() / expected < 1e-6,
+        "{volume} m3, expected {expected} m3"
+    );
+    let height = attic.height_m.expect("attic height");
+    assert!(
+        (height - hares_physics::units::length_ft_to_m(height_ft)).abs() < 1e-9,
+        "attic height {height} m"
+    );
+}
+
+/// OS-HPXML's default ConditionedBuildingVolume where its own tests pin it
+/// (test_defaults.rb `test_infiltration_height_and_volume` and
+/// `test_building_construction`): a cathedral ceiling raises the 8 ft
+/// average ceiling under the roof (25300 ft3), a conditioned attic adds its
+/// roof height (30816 ft3), a conditioned crawlspace adds its volume
+/// (16200 ft3).
+#[test]
+fn default_conditioned_volume_matches_the_os_hpxml_tests() {
+    for (sample, drop_average_ceiling, expected_ft3) in [
+        ("base-atticroof-cathedral.xml", true, 25300.0),
+        ("base-atticroof-conditioned.xml", true, 30816.0),
+        ("base-foundation-conditioned-crawlspace.xml", false, 16200.0),
+    ] {
+        let building = parse_edited_sample(sample, |xml| {
+            let xml = without_elements(&xml, "ConditionedBuildingVolume");
+            if drop_average_ceiling {
+                without_elements(&xml, "AverageCeilingHeight")
+            } else {
+                xml
+            }
+        });
+        let volume_ft3 = hares_physics::units::volume_m3_to_ft3(building.conditioned_volume_m3);
+        assert!(
+            (volume_ft3 - expected_ft3).abs() / expected_ft3 < 1e-4,
+            "{sample}: {volume_ft3} ft3, OS-HPXML {expected_ft3} ft3"
+        );
+    }
+}
+
+/// A vented crawlspace or attic with no VentilationRate takes OS-HPXML's
+/// default SLA, 1/150 and 1/300 to six places (defaults.rb
+/// `get_vented_crawl_sla`, `get_vented_attic_sla`), as a warning.
+#[test]
+fn vented_spaces_without_a_rate_take_the_os_hpxml_sla() {
+    for (sample, zone_type, expected) in [
+        (
+            "base-foundation-vented-crawlspace.xml",
+            ZoneType::Foundation,
+            0.006667,
+        ),
+        ("base-atticroof-vented.xml", ZoneType::Attic, 0.003333),
+    ] {
+        let building = parse_edited_sample(sample, |xml| without_elements(&xml, "VentilationRate"));
+        let zone = building
+            .zones
+            .iter()
+            .find(|z| z.zone_type == zone_type)
+            .expect("vented space");
+        assert_eq!(zone.ventilation_sla, Some(expected), "{sample}");
+        assert!(
+            building
+                .parse_warnings
+                .iter()
+                .any(|w| w.message.contains("VentilationRate")),
+            "{sample}: the default must be a warning, got {:?}",
+            building.parse_warnings
+        );
+    }
+}
+
+/// A roof over conditioned space with no Pitch cannot raise the default
+/// ceiling; the volume falls to the flat 8 ft ceiling and the missing Pitch
+/// is a warning naming the roof.
+#[test]
+fn default_ceiling_without_a_roof_pitch_is_a_warning() {
+    let building = parse_edited_sample("base-atticroof-cathedral.xml", |xml| {
+        let xml = without_elements(&xml, "ConditionedBuildingVolume");
+        let xml = without_elements(&xml, "AverageCeilingHeight");
+        without_elements(&xml, "Pitch")
+    });
+    let volume_ft3 = hares_physics::units::volume_m3_to_ft3(building.conditioned_volume_m3);
+    assert!((volume_ft3 - 2700.0 * 8.0).abs() < 1e-3, "{volume_ft3} ft3");
+    assert!(
+        building
+            .parse_warnings
+            .iter()
+            .any(|w| w.message.contains("Roof1") && w.message.contains("no Pitch")),
+        "the missing Pitch must be a warning, got {:?}",
+        building.parse_warnings
+    );
+}
+
 /// A file with no ConditionedBuildingVolume takes OS-HPXML's default, the
 /// conditioned floor area times an 8 ft average ceiling (defaults.rb
 /// `apply_building_construction`), recorded as a warning.

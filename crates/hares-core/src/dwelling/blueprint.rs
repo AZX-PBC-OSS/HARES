@@ -112,7 +112,7 @@ impl DwellingBlueprint {
             .transpose()?;
 
         let time_res = super::conversions::chrono_to_std_duration(config.sim_config.time_res)?;
-        let weather_avgs = compute_weather_averages(&weather);
+        let weather_avgs = compute_weather_averages(&weather, &building)?;
         let design_conditions = weather.design_conditions;
         let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
 

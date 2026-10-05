@@ -1474,6 +1474,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             boundaries: vec![
                 Boundary {
@@ -1569,6 +1571,8 @@ mod tests {
             vented: true,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         });
         b
     }
@@ -1585,6 +1589,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             },
             Zone {
                 zone_type: ZoneType::Foundation,
@@ -1595,6 +1601,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             },
             Zone {
                 zone_type: ZoneType::Garage,
@@ -1605,6 +1613,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             },
         ];
         b

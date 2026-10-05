@@ -4040,6 +4040,8 @@ mod tests {
             vented: true,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }
     }
 
@@ -4282,6 +4284,8 @@ mod tests {
             vented,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }
     }
 
@@ -4295,6 +4299,8 @@ mod tests {
             vented,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }
     }
 
@@ -4594,6 +4600,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             };
             let result = zone_type_to_ashrae152_str(&zone, &building);
             assert!(
@@ -4618,6 +4626,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }
     }
 

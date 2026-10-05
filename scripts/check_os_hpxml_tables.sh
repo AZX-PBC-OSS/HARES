@@ -16,6 +16,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="$REPO_ROOT/crates/hares-io/data"
 BASE_URL="https://raw.githubusercontent.com/NREL/OpenStudio-HPXML/v1.12.0/HPXMLtoOpenStudio/resources/data"
 ZIPCODE_SHA256="d453ec428e9ddf21375dc1a3c606cb7ec628eed280cd49ca26d3e2c5ff094ecd"
+WSF_SHA256="94e64f002695bd24a4ee1a10ad0425726fe35c7b822aabbc62f6d1a2bba9edbb"
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
@@ -31,6 +32,8 @@ fetch() { # $1: upstream file name, $2: expected sha256
 }
 
 fetch zipcode_weather_stations.csv "$ZIPCODE_SHA256"
+# The ASHRAE 62.2 weather and shielding factor per station is used verbatim.
+fetch ashrae622_wsf.csv "$WSF_SHA256"
 
 # The IECC zone of each station is the zone of the first row naming it,
 # the row lookup_weather_data_from_wmo (defaults.rb:5471-5500) returns.
@@ -41,7 +44,7 @@ fetch zipcode_weather_stations.csv "$ZIPCODE_SHA256"
 } > "$TMPDIR/wmo_iecc_zones.csv"
 
 status=0
-for table in wmo_iecc_zones.csv; do
+for table in wmo_iecc_zones.csv ashrae622_wsf.csv; do
     if [ "${1:-}" = "--write" ]; then
         cp "$TMPDIR/$table" "$DATA_DIR/$table"
         echo "wrote $DATA_DIR/$table"

@@ -11995,6 +11995,8 @@ occupancy = 1.0
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 },
                 Zone {
                     zone_type: ZoneType::Garage,
@@ -12005,6 +12007,8 @@ occupancy = 1.0
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 },
                 Zone {
                     zone_type: ZoneType::Foundation,
@@ -12015,6 +12019,8 @@ occupancy = 1.0
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 },
                 Zone {
                     zone_type: ZoneType::Attic,
@@ -12025,6 +12031,8 @@ occupancy = 1.0
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 },
             ],
             boundaries: vec![],

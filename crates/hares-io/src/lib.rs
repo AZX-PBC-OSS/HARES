@@ -18,6 +18,7 @@ pub mod schedule_resolve;
 pub mod site_location;
 pub mod tmy3;
 pub mod weather;
+pub mod wsf;
 
 pub use config::{ConfigError, OutputFormat, RotationPolicy, SimulationConfig};
 pub use defaults::{

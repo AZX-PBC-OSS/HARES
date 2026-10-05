@@ -239,6 +239,13 @@ pub struct Zone {
     pub zone_type: ZoneType,
     pub floor_area_m2: Option<f64>,
     pub volume_m3: Option<f64>,
+    /// Height of the space: the gable or hip attic height, the foundation
+    /// or garage height (OS-HPXML `calculate_zone_height`). The one height
+    /// the volume and the infiltration model both read.
+    pub height_m: Option<f64>,
+    /// The HPXML location covering most of the zone's floor
+    /// (`"crawlspace - vented"`, `"basement - unconditioned"`, ...).
+    pub hpxml_location: Option<String>,
     pub attached_wall_ids: Vec<String>,
     pub duct_systems: Vec<DuctSystem>,
     pub vented: bool,
@@ -615,6 +622,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 details,
                 summary.path(&["BuildingConstruction", "AverageCeilingHeight"]),
                 conditioned_floor_area_m2,
+                &mut parse_warnings,
             )?;
             parse_warnings.push(Warning::new(
                 "hpxml",
@@ -829,20 +837,16 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // Post-process foundation wall boundaries: override construction_type with
     // foundation_name, apply insulation details and area scaling.
     // OCHRE hpxml.py:408-410: boundaries["Foundation Wall"]["Construction Type"] = foundation_name
-    let mut foundation_height_m: Option<f64> = None;
     let mut foundation_depth_m: Option<f64> = None;
     for bd in &mut boundaries {
         if bd.boundary_type == BoundaryType::FoundationWall {
             if let Some(ref fnd_name) = foundation_name {
                 bd.construction_type = Some(fnd_name.clone());
             }
-            let (insulation, area_scale, height_m, depth_below_grade) =
+            let (insulation, area_scale, depth_below_grade) =
                 extract_foundation_wall_insulation(details, &bd.id)?;
             bd.insulation_details = insulation;
             bd.area_m2 *= area_scale;
-            if foundation_height_m.is_none() {
-                foundation_height_m = height_m;
-            }
             if foundation_depth_m.is_none() && depth_below_grade > 0.0 {
                 foundation_depth_m = Some(depth_below_grade);
             }
@@ -1078,26 +1082,6 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         );
     }
 
-    // Garage roof tilt for volume augmentation. Prefer direct Garage→Roof
-    // boundaries; fall back to Attic→Roof tilt when none exist.
-    let garage_roof_tilt_rad = boundaries
-        .iter()
-        .filter(|b| {
-            b.boundary_type == BoundaryType::Roof
-                && b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-        })
-        .find_map(|b| b.tilt_deg)
-        .or_else(|| {
-            boundaries
-                .iter()
-                .filter(|b| {
-                    b.boundary_type == BoundaryType::Roof
-                        && b.interior_zone.as_ref() == Some(&ZoneType::Attic)
-                })
-                .find_map(|b| b.tilt_deg)
-        })
-        .map(|d| d.to_radians());
-
     // Attic floor area: OCHRE defines attic_floor_area as the top-floor
     // boundary area (Attic Floor / Roof / Adjacent Ceiling) plus Garage Ceiling area.
     // Ref: OCHRE hpxml.py:428-437.
@@ -1144,53 +1128,54 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         }
     }
 
-    // Assign volumes to all zones: the OCHRE geometry from the zone's floor
-    // area where the HPXML gives one, else OS-HPXML's volume rule for the
-    // zone type (`zone_geometry`). A zone with neither keeps no volume and
-    // the environment rejects it.
+    // Zone geometry, one rule per zone type. Conditioned: floor area times
+    // the ceiling height. Foundation and garage: OS-HPXML's slab-area times
+    // tallest-wall rule (`zone_geometry::slab_space_geometry`). Attic: the
+    // OCHRE gable geometry where the gable walls give it (it reads the real
+    // gable), else OS-HPXML's square hip; the zone carries the height the
+    // rule used. A zone with no geometry keeps no volume and the environment
+    // rejects it.
     for zone in &mut zones_vec {
-        zone.volume_m3 = match zone.zone_type {
-            ZoneType::Conditioned => zone.floor_area_m2.map(|a| a * ceiling_height_m),
-            ZoneType::Attic => {
-                compute_attic_volume(&boundaries, zone.floor_area_m2, garage_geometry.as_ref())
+        let geometry = match zone.zone_type {
+            ZoneType::Conditioned => {
+                zone.volume_m3 = zone.floor_area_m2.map(|a| a * ceiling_height_m);
+                zone.height_m = Some(ceiling_height_m);
+                continue;
             }
-            ZoneType::Garage => zone.floor_area_m2.map(|floor_area| {
-                let volume = compute_garage_volume(
-                    floor_area,
-                    ceiling_height_m,
-                    garage_roof_tilt_rad,
+            ZoneType::Attic => {
+                match compute_attic_volume(
+                    &boundaries,
+                    zone.floor_area_m2,
                     garage_geometry.as_ref(),
-                );
-                #[cfg(feature = "observe")]
-                {
-                    let rectangular = floor_area * ceiling_height_m;
-                    let augmentation = volume - rectangular;
-                    tracing::debug!(
-                        target: "observe",
-                        garage_rectangular_volume_m3 = rectangular,
-                        garage_roof_volume_augmentation_m3 = augmentation,
-                        garage_total_volume_m3 = volume,
-                        garage_tilt_rad = garage_roof_tilt_rad,
-                    );
+                ) {
+                    Some((volume_m3, height_m)) => {
+                        zone.volume_m3 = Some(volume_m3);
+                        zone.height_m = Some(height_m);
+                        zone.hpxml_location =
+                            super::zone_geometry::first_location(details, &ZoneType::Attic);
+                        continue;
+                    }
+                    None => super::zone_geometry::hip_attic_geometry(details, &mut parse_warnings)?,
                 }
-                volume
-            }),
-            ZoneType::Foundation => zone
-                .floor_area_m2
-                .zip(foundation_height_m)
-                .map(|(a, h)| a * h),
+            }
+            ZoneType::Garage | ZoneType::Foundation => super::zone_geometry::slab_space_geometry(
+                details,
+                &zone.zone_type,
+                zone.floor_area_m2,
+                &mut parse_warnings,
+            )?,
             // Outdoor, Ground, Adjacent are filtered above; Other has no volume model.
             ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent | ZoneType::Other(_) => None,
         };
-        if zone.volume_m3.is_none() {
-            zone.volume_m3 = match zone.zone_type {
-                ZoneType::Attic => super::zone_geometry::attic_volume_m3(details)?,
-                ZoneType::Garage | ZoneType::Foundation => {
-                    super::zone_geometry::slab_zone_volume_m3(details, &zone.zone_type)?
-                }
-                _ => None,
-            };
+        if let Some(geometry) = geometry {
+            zone.floor_area_m2 = zone.floor_area_m2.or(Some(geometry.floor_area_m2));
+            zone.volume_m3 = Some(geometry.volume_m3);
+            zone.height_m = Some(geometry.height_m);
+            zone.hpxml_location = Some(geometry.location);
         }
+    }
+    for zone in &mut zones_vec {
+        default_vented_space_sla(zone, &mut parse_warnings);
     }
 
     // Remove Attic↔Garage wall boundaries consumed by Path A attic volume computation.
@@ -2106,21 +2091,21 @@ fn infer_exterior_zone(boundary_type: &BoundaryType) -> Option<ZoneType> {
     }
 }
 
-/// Extract foundation wall insulation details, area scale factor, height,
-/// and depth below grade [m].
+/// Extract foundation wall insulation details, area scale factor and depth
+/// below grade [m].
 ///
 /// Mirrors OCHRE `get_fnd_wall_insulation` (envelope.py:434-459):
 /// - Area scaled by `DepthBelowGrade / Height` when they differ.
 /// - Insulation details: "Half R{n}", "R{n}", or "Uninsulated".
 ///
-/// Returns `(insulation_details, area_scale, height_m, depth_below_grade_m)`.
+/// Returns `(insulation_details, area_scale, depth_below_grade_m)`.
 /// `depth_below_grade_m` defaults to the wall height when absent from HPXML.
 ///
 /// `details` is the BuildingDetails node; `wall_id` identifies which FoundationWall.
 fn extract_foundation_wall_insulation(
     details: &XmlNode,
     wall_id: &str,
-) -> Result<(Option<String>, f64, Option<f64>, f64), HpxmlError> {
+) -> Result<(Option<String>, f64, f64), HpxmlError> {
     // Find the FoundationWall element matching this boundary's ID.
     let wall_node = details
         .path(&["Enclosure", "FoundationWalls"])
@@ -2133,7 +2118,7 @@ fn extract_foundation_wall_insulation(
             })
         });
     let Some(node) = wall_node else {
-        return Ok((Some("Uninsulated".to_string()), 1.0, None, 0.0));
+        return Ok((Some("Uninsulated".to_string()), 1.0, 0.0));
     };
 
     // Area scaling: depth_below_grade / height.
@@ -2198,12 +2183,7 @@ fn extract_foundation_wall_insulation(
         "Uninsulated".to_string()
     };
 
-    Ok((
-        Some(insulation_details),
-        area_scale,
-        height_m,
-        depth_below_grade,
-    ))
+    Ok((Some(insulation_details), area_scale, depth_below_grade))
 }
 
 /// Extract slab insulation details for LUT matching.
@@ -2427,6 +2407,8 @@ fn build_zone_map(
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         },
     );
 
@@ -2441,6 +2423,8 @@ fn build_zone_map(
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         },
     );
 
@@ -2488,6 +2472,8 @@ fn build_zone_map(
                     vented,
                     ventilation_ach,
                     ventilation_sla,
+                    height_m: None,
+                    hpxml_location: None,
                 });
             }
         }
@@ -2506,6 +2492,8 @@ fn build_zone_map(
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 });
             }
         }
@@ -2566,6 +2554,8 @@ fn build_zone_map(
                     vented,
                     ventilation_ach,
                     ventilation_sla,
+                    height_m: None,
+                    hpxml_location: None,
                 });
             }
         }
@@ -2598,6 +2588,8 @@ fn ensure_referenced_zones_exist(boundaries: &[Boundary], zones: &mut HashMap<St
                             vented,
                             ventilation_ach: None,
                             ventilation_sla: None,
+                            height_m: None,
+                            hpxml_location: None,
                         }
                     });
                 }
@@ -3485,34 +3477,6 @@ fn max_areas_by_azimuth(areas: &[f64], azimuths: &[f64]) -> Option<(f64, f64)> {
     Some((vals[0], vals[1]))
 }
 
-/// Compute garage zone volume with optional roof-space augmentation.
-///
-/// OCHRE hpxml.py:730-734 adds a triangular-prism roof-space term for the
-/// protruded garage portion:
-///
-/// ```text
-/// V_garage = floor_area * wall_height + 0.5 * tan(roof_tilt) * protruded_area
-/// ```
-///
-/// HARES uses `tan()`, correcting the apparent `atan()` mis-use in the OCHRE
-/// reference. Falls back to the rectangular formula when roof tilt or garage
-/// geometry is unavailable.
-fn compute_garage_volume(
-    floor_area_m2: f64,
-    wall_height_m: f64,
-    garage_tilt_rad: Option<f64>,
-    garage_geometry: Option<&GarageGeometry>,
-) -> f64 {
-    let rectangular = floor_area_m2 * wall_height_m;
-    let augmentation = match (garage_tilt_rad, garage_geometry) {
-        (Some(tilt), Some(geom)) if tilt > 0.0 && geom.protruded_area_m2 > 0.0 => {
-            0.5 * tilt.tan() * geom.protruded_area_m2
-        }
-        _ => 0.0,
-    };
-    rectangular + augmentation
-}
-
 /// Attempt to infer roof tilt from attic geometry for roofs that are missing
 /// an explicit HPXML `<Pitch>` element.
 ///
@@ -3621,6 +3585,31 @@ fn infer_roof_tilt_from_geometry(boundaries: &mut [Boundary], pitch_absent_ids: 
     }
 }
 
+/// A vented crawlspace or vented attic with no `VentilationRate` takes
+/// OS-HPXML's default specific leakage area, 1/150 and 1/300 rounded to six
+/// places (defaults.rb:1120-1131 and 1022-1031, values at 5717-5727, after
+/// ANSI/RESNET/ICC 301 Table 4.2.2(1)), recorded as a warning.
+fn default_vented_space_sla(zone: &mut Zone, warnings: &mut Vec<Warning>) {
+    if zone.ventilation_sla.is_some() || zone.ventilation_ach.is_some() {
+        return;
+    }
+    let denominator = match zone.hpxml_location.as_deref() {
+        Some("crawlspace - vented") => 150.0,
+        Some("attic - vented") => 300.0,
+        _ => return,
+    };
+    let sla = ((1.0 / denominator) * 1e6_f64).round() / 1e6;
+    let location = zone.hpxml_location.as_deref().unwrap_or_default();
+    warnings.push(Warning::new(
+        "hpxml",
+        format!(
+            "'{location}' has no VentilationRate; its specific leakage area defaults to \
+             {sla} as OS-HPXML does"
+        ),
+    ));
+    zone.ventilation_sla = Some(sla);
+}
+
 /// Compute attic volume from gable wall areas, roof pitch, and garage geometry.
 ///
 /// Two paths following OCHRE `parse_hpxml_zones()` (hpxml.py:582–633):
@@ -3638,11 +3627,13 @@ fn infer_roof_tilt_from_geometry(boundaries: &mut [Boundary], pitch_absent_ids: 
 ///   ```
 ///
 /// Otherwise: simple prism `0.5 * floor_area * attic_height`.
+///
+/// Returns the volume and the attic's peak height.
 fn compute_attic_volume(
     boundaries: &[Boundary],
     attic_floor_area_m2: Option<f64>,
     garage_geometry: Option<&GarageGeometry>,
-) -> Option<f64> {
+) -> Option<(f64, f64)> {
     // Attic floor area: prefer explicit zone value, fall back to the Floor boundary
     // between conditioned space and attic (OCHRE calls this "Attic Floor").
     let floor_area = attic_floor_area_m2
@@ -3730,14 +3721,14 @@ fn compute_attic_volume(
         if merged.len() < 2 {
             return if merged.len() == 1 {
                 let h = (merged[0] * roof_tilt_rad.tan()).sqrt();
-                Some(0.5 * floor_area * h)
+                Some((0.5 * floor_area * h, h))
             } else {
                 None
             };
         }
         let gable_area = merged[0].max(merged[1]);
         let attic_height = (gable_area * roof_tilt_rad.tan()).sqrt();
-        return Some(0.5 * floor_area * attic_height);
+        return Some((0.5 * floor_area * attic_height, attic_height));
     }
 
     // Merge attic outdoor walls + adjacent attic walls for standard path.
@@ -3770,10 +3761,10 @@ fn compute_attic_volume(
             let volume = 0.5 * square_area * attic_height
                 + 0.5 * gg.protruded_area_m2 * garage_height
                 + (1.0 / 6.0) * garage_width * garage_depth_in_house * garage_height;
-            return Some(volume);
+            return Some((volume, attic_height));
         }
 
-        return Some(0.5 * floor_area * attic_height);
+        return Some((0.5 * floor_area * attic_height, attic_height));
     }
 
     // Standard 2-gable or fallback.
@@ -3806,7 +3797,7 @@ fn compute_attic_volume(
     }
 
     let attic_height = (gable_area * roof_tilt_rad.tan()).sqrt();
-    Some(0.5 * floor_area * attic_height)
+    Some((0.5 * floor_area * attic_height, attic_height))
 }
 
 fn zone_sort_key(zone_type: &ZoneType) -> u8 {
@@ -4330,26 +4321,16 @@ mod tests {
         assert!(msg.contains("foundation wall 'FoundationWall1' has non-positive area"));
     }
 
+    /// A foundation slab sizes its space's floor and volume, so a slab with
+    /// no Area is an error naming its location (OS-HPXML requires it).
     #[test]
-    fn slab_missing_area_defaults_to_zero() {
-        // The foundation wall height gives the foundation its volume from its
-        // floor area, so the volume does not need the slab area.
-        let xml = SAMPLE_XML
-            .replace("<Area units=\"ft2\">80</Area>", "")
-            .replace(
-                "<Area units=\"ft2\">60</Area>",
-                "<Area units=\"ft2\">60</Area><Height units=\"ft\">8</Height>",
-            );
-        let building = parse_building(&xml).expect("slab without Area should parse");
-        let slab_boundary = building
-            .boundaries
-            .iter()
-            .find(|b| matches!(b.boundary_type, BoundaryType::Slab));
-        assert!(slab_boundary.is_some(), "slab boundary should be present");
-        assert_eq!(
-            slab_boundary.unwrap().area_m2,
-            0.0,
-            "Slab with missing Area should default to 0.0"
+    fn slab_missing_area_is_an_error() {
+        let xml = SAMPLE_XML.replace("<Area units=\"ft2\">80</Area>", "");
+        let err = parse_building(&xml).expect_err("a slab without Area must fail");
+        assert!(
+            err.to_string()
+                .contains("slab in 'basement - conditioned' has no Area"),
+            "got: {err}"
         );
     }
 
@@ -4743,17 +4724,21 @@ mod tests {
         );
     }
 
+    /// The foundation is as tall as its tallest foundation wall, not its
+    /// first, and its volume is the slab area times that height
+    /// (OS-HPXML geometry.rb `calculate_zone_volume`); the declared
+    /// Foundation FloorArea does not size it.
     #[test]
-    fn foundation_zone_volume_uses_foundation_wall_height() {
-        let xml = SAMPLE_XML
-            .replace(
-                "<FloorArea units=\"ft2\">800</FloorArea>",
-                "<FloorArea units=\"ft2\">100</FloorArea>",
+    fn foundation_zone_volume_is_the_slab_area_times_the_tallest_wall() {
+        let wall = |id: &str, height_ft: f64| {
+            format!(
+                "<FoundationWall>\n            <SystemIdentifier id=\"{id}\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n            <Height units=\"ft\">{height_ft}</Height>\n          </FoundationWall>"
             )
-            .replace(
-                "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n          </FoundationWall>",
-                "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n            <Height units=\"ft\">3</Height>\n          </FoundationWall>",
-            );
+        };
+        let xml = SAMPLE_XML.replace(
+            "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n          </FoundationWall>",
+            &format!("{}{}", wall("FoundationWall1", 3.0), wall("FoundationWall2", 7.0)),
+        );
 
         let building = parse_building(&xml).expect("parse should succeed");
         let foundation = building
@@ -4762,18 +4747,14 @@ mod tests {
             .find(|z| matches!(z.zone_type, ZoneType::Foundation))
             .expect("foundation zone expected");
 
-        let floor_area_m2 = foundation
-            .floor_area_m2
-            .expect("foundation floor area expected");
-        let expected_volume_m3 = floor_area_m2 * 3.0 * 0.3048;
+        let height_m = hares_physics::units::length_ft_to_m(7.0);
+        let expected_volume_m3 = hares_physics::units::area_ft2_to_m2(80.0) * height_m;
         let actual_volume_m3 = foundation.volume_m3.expect("foundation volume expected");
-
         assert!(
-            (actual_volume_m3 - expected_volume_m3).abs() < 1e-6,
-            "foundation volume: got {}, expected {}",
-            actual_volume_m3,
-            expected_volume_m3
+            (actual_volume_m3 - expected_volume_m3).abs() < 1e-9,
+            "foundation volume: got {actual_volume_m3}, expected {expected_volume_m3}"
         );
+        assert_eq!(foundation.height_m, Some(height_m));
     }
 
     #[test]
@@ -6286,7 +6267,7 @@ mod tests {
                 None,
             ),
         ];
-        let vol = compute_attic_volume(&boundaries, Some(floor_area), None)
+        let (vol, _) = compute_attic_volume(&boundaries, Some(floor_area), None)
             .expect("volume should compute");
         let attic_height = (gable_area * tilt_deg.to_radians().tan()).sqrt();
         let expected = 0.5 * floor_area * attic_height;
@@ -6383,7 +6364,7 @@ mod tests {
             protruded_area_m2: 15.0,
         };
         let floor_area = 120.0;
-        let vol = compute_attic_volume(&boundaries, Some(floor_area), Some(&garage_geom))
+        let (vol, _) = compute_attic_volume(&boundaries, Some(floor_area), Some(&garage_geom))
             .expect("volume should compute");
 
         // Expected compound formula using index-1 gable (12.0 m²):
@@ -6498,7 +6479,7 @@ mod tests {
             protruded_area_m2: 15.0,
         };
         let floor_area = 120.0;
-        let vol = compute_attic_volume(&boundaries, Some(floor_area), Some(&garage_geom))
+        let (vol, _) = compute_attic_volume(&boundaries, Some(floor_area), Some(&garage_geom))
             .expect("volume should compute");
 
         // attic_gable_area = gable_areas[1] = 7.0 (NOT sorted median 10.0)
@@ -6590,7 +6571,7 @@ mod tests {
             ),
         ];
         let floor_area = 100.0;
-        let vol = compute_attic_volume(&boundaries, Some(floor_area), None)
+        let (vol, _) = compute_attic_volume(&boundaries, Some(floor_area), None)
             .expect("volume should compute");
         // Merged areas: [10.0, 8.0, 4.0]; max(first two of merged) = max(10, 8) = 10
         let gable_area = 10.0_f64.max(8.0);
@@ -6729,7 +6710,7 @@ mod tests {
                 None,
             ),
         ];
-        let vol = compute_attic_volume(&boundaries, Some(floor_area), None)
+        let (vol, _) = compute_attic_volume(&boundaries, Some(floor_area), None)
             .expect("nearly-equal gables (diff=0.3 m²) should return Some");
         let attic_height = (10.0_f64 * tilt_deg.to_radians().tan()).sqrt();
         let expected = 0.5 * floor_area * attic_height;
@@ -7687,103 +7668,14 @@ mod tests {
         );
     }
 
-    // ── garage volume (roof-space augmentation) ──
-
+    /// A garage with a declared floor area, no slab and no foundation walls
+    /// takes OS-HPXML's 8 ft garage height (geometry.rb
+    /// `calculate_zone_height`); there is no roof augmentation (OS-HPXML
+    /// sizes the garage by its slab and walls only).
     #[test]
-    fn garage_volume_with_pitched_roof() {
-        use super::{GarageGeometry, compute_garage_volume};
-        // 6:12 pitch → tilt = atan(0.5) ≈ 26.565°, tan ≈ 0.5
-        let tilt_rad = (6.0_f64 / 12.0).atan();
-        let floor_area = 30.0; // m²
-        let wall_height = 2.5; // m
-        let protruded = 15.0; // m²
-        let geom = GarageGeometry {
-            protruded_area_m2: protruded,
-        };
-        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));
-        // Expected: floor_area * wall_height + 0.5 * tan(tilt) * protruded
-        //    = 30 * 2.5 + 0.5 * 0.5 * 15 = 75 + 3.75 = 78.75
-        let expected = floor_area * wall_height + 0.5 * tilt_rad.tan() * protruded;
-        assert!(
-            (vol - expected).abs() < 1e-10,
-            "pitched garage: got {vol}, expected {expected}"
-        );
-    }
-
-    #[test]
-    fn garage_volume_flat_roof_no_augmentation() {
-        use super::{GarageGeometry, compute_garage_volume};
-        let tilt_rad = 0.0;
-        let floor_area = 30.0;
-        let wall_height = 2.5;
-        let geom = GarageGeometry {
-            protruded_area_m2: 15.0,
-        };
-        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));
-        // Zero tilt → tan(0) = 0 → augmentation = 0
-        assert!(
-            (vol - floor_area * wall_height).abs() < 1e-10,
-            "flat roof: augmentation should be zero, got {vol}"
-        );
-    }
-
-    #[test]
-    fn garage_volume_no_geometry_falls_back_to_rectangular() {
-        use super::compute_garage_volume;
-        let floor_area = 30.0;
-        let wall_height = 2.5;
-        let tilt_rad = (6.0_f64 / 12.0).atan();
-        // No GarageGeometry provided → falls back to floor_area * wall_height
-        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), None);
-        assert!(
-            (vol - floor_area * wall_height).abs() < 1e-10,
-            "missing geometry: should be rectangular, got {vol}"
-        );
-    }
-
-    #[test]
-    fn garage_volume_no_roof_tilt_falls_back_to_rectangular() {
-        use super::{GarageGeometry, compute_garage_volume};
-        let floor_area = 30.0;
-        let wall_height = 2.5;
-        let geom = GarageGeometry {
-            protruded_area_m2: 15.0,
-        };
-        // No roof tilt → falls back to floor_area * wall_height
-        let vol = compute_garage_volume(floor_area, wall_height, None, Some(&geom));
-        assert!(
-            (vol - floor_area * wall_height).abs() < 1e-10,
-            "missing tilt: should be rectangular, got {vol}"
-        );
-    }
-
-    #[test]
-    fn garage_volume_zero_protruded_no_augmentation() {
-        use super::{GarageGeometry, compute_garage_volume};
-        let tilt_rad = (6.0_f64 / 12.0).atan();
-        let floor_area = 30.0;
-        let wall_height = 2.5;
-        let geom = GarageGeometry {
-            protruded_area_m2: 0.0,
-        };
-        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));
-        assert!(
-            (vol - floor_area * wall_height).abs() < 1e-10,
-            "zero protruded: augmentation should be zero, got {vol}"
-        );
-    }
-
-    #[test]
-    fn garage_volume_inline_hpxml_with_roof_augmentation() {
-        // Integration test: parse a minimal HPXML with explicit garage floor
-        // area and pitched roof; verify the volume includes augmentation.
-        //
-        // Walls are arranged for compute_garage_geometry to produce
-        // protruded_area > 0:
-        //   - 2 perpendicular exterior garage walls → wall height derivable
-        //   - 1 attached wall (Conditioned↔Garage) → garage_area_in_main=0
-        //   → protruded = floor_area.
+    fn garage_without_slab_or_walls_takes_the_assumed_height() {
         use super::parse_building;
+        use hares_physics::units as conv;
         let xml = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
   <Building>
@@ -7855,15 +7747,20 @@ mod tests {
         let volume = garage_zone
             .volume_m3
             .expect("garage zone must have a computed volume");
-
-        let ceiling_height_m = building.ceiling_height_m;
-        let floor_area_m2 = garage_zone.floor_area_m2.expect("must have floor area");
-        let rectangular = floor_area_m2 * ceiling_height_m;
-
-        // 1 attached wall → protruded = floor_area → augmentation > 0
+        let expected = conv::area_ft2_to_m2(600.0) * conv::length_ft_to_m(8.0);
         assert!(
-            volume > rectangular,
-            "garage volume {volume} must exceed rectangular {rectangular} with pitched roof and 1 attached wall (protruded > 0)"
+            (volume - expected).abs() < 1e-9,
+            "garage volume {volume}, expected {expected}"
+        );
+        assert_eq!(garage_zone.height_m, Some(conv::length_ft_to_m(8.0)));
+        assert!(
+            !building
+                .parse_warnings
+                .iter()
+                .any(|w| w.message.contains("'garage'")),
+            "a garage's height has no HPXML input, so 8 ft is the model, not a \
+             substitution to warn about; got {:?}",
+            building.parse_warnings
         );
     }
 

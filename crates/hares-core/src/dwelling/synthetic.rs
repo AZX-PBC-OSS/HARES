@@ -1494,6 +1494,8 @@ pub(crate) fn build_synthetic_building(
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         boundaries,
         windows,

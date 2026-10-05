@@ -48,6 +48,8 @@ fn minimal_building() -> hares_io::Building {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         boundaries: vec![Boundary {
             id: "wall".to_string(),

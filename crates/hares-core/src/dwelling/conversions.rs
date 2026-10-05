@@ -1669,6 +1669,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             vec![furniture_boundary(
                 "conditioned_furniture",
@@ -1694,6 +1696,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             Vec::new(),
         );
@@ -1717,6 +1721,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             vec![furniture_boundary(
                 "conditioned_furniture",
@@ -1743,6 +1749,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             Vec::new(),
         );
@@ -1766,6 +1774,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             vec![furniture_boundary(
                 "conditioned_furniture",
@@ -2740,6 +2750,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2799,6 +2811,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2844,6 +2858,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2863,6 +2879,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2921,6 +2939,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2980,6 +3000,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -3068,6 +3090,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -3100,6 +3124,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             Vec::new(),
         );
@@ -3129,6 +3155,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let zone_b = Zone {
             zone_type: ZoneType::Conditioned,
@@ -3139,6 +3167,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone_a, zone_b], Vec::new());
 
@@ -3167,6 +3197,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let zone_b = Zone {
             zone_type: ZoneType::Conditioned,
@@ -3177,6 +3209,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone_a, zone_b], Vec::new());
 
@@ -3205,6 +3239,8 @@ mod tests {
             vented: true,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
         // No boundary ID provided — uses type-only fallback.
@@ -3240,6 +3276,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
         assert_eq!(find_zone_idx(&building, Some("Door1"), None, 1).unwrap(), 0);
@@ -3258,6 +3296,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
         let result = find_zone_idx(&building, Some("Roof1"), Some(&ZoneType::Attic), 1);
@@ -3279,6 +3319,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
         assert_eq!(
@@ -3300,6 +3342,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
         let result =
@@ -3376,6 +3420,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -3456,6 +3502,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -3532,6 +3580,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -3603,6 +3653,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -3695,6 +3747,8 @@ mod tests {
                         vented: false,
                         ventilation_ach: None,
                         ventilation_sla: None,
+                        height_m: None,
+                        hpxml_location: None,
                     }],
                     vec![],
                 )
@@ -3787,6 +3841,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -3845,6 +3901,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -3966,6 +4024,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             Vec::new(),
         );
@@ -4013,6 +4073,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             Vec::new(),
         );

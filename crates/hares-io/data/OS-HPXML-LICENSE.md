@@ -4,6 +4,7 @@ regenerates them from the pinned upstream files.
 
 - `wmo_iecc_zones.csv`: the first `station_wmo,zipcode_iecc_zone` row per
   station of `zipcode_weather_stations.csv`.
+- `ashrae622_wsf.csv`: `ashrae622_wsf.csv`, unchanged.
 
 OpenStudio-HPXML is distributed under the following licence:
 

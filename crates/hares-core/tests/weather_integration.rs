@@ -178,6 +178,8 @@ fn minimal_building() -> hares_io::Building {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         boundaries: vec![
             Boundary {
@@ -642,6 +644,8 @@ fn leap_year_dec31_reads_correct_weather_row() {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             boundaries: vec![Boundary {
                 id: "wall".to_string(),
@@ -855,6 +859,8 @@ fn wall_missing_azimuth_constructs_with_warning() {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         // azimuth_deg is None — exterior wall with unknown orientation.
         // Valid HPXML: wall azimuth is optional.
@@ -964,6 +970,8 @@ fn roof_missing_azimuth_constructs_successfully() {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         // Roof with no azimuth: valid HPXML for hip/flat roofs.
         boundaries: vec![Boundary {
@@ -1069,6 +1077,8 @@ fn window_missing_azimuth_returns_error() {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         boundaries: vec![Boundary {
             id: "window-no-azimuth".to_string(),
