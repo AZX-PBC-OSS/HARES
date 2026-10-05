@@ -3179,9 +3179,10 @@ fn parse_site_type(text: &str) -> Result<SiteType, HpxmlError> {
         "rural" => Ok(SiteType::Rural),
         "suburban" => Ok(SiteType::Suburban),
         "urban" => Ok(SiteType::Urban),
-        other => Err(HpxmlError::Parse(
+        _ => Err(HpxmlError::Parse(
             format!(
-                "invalid SiteType value '{other}'; allowed values are 'rural', 'suburban' and 'urban'"
+                "invalid SiteType value '{}'; allowed values are 'rural', 'suburban' and 'urban'",
+                text.trim()
             )
             .into(),
         )),
@@ -3193,13 +3194,13 @@ fn parse_shielding_of_home(text: &str) -> Result<ShieldingOfHome, HpxmlError> {
         "normal" => Ok(ShieldingOfHome::Normal),
         "exposed" => Ok(ShieldingOfHome::Exposed),
         "well-shielded" => Ok(ShieldingOfHome::WellShielded),
-        other => Err(HpxmlError::Parse(
+        _ => Err(HpxmlError::Parse(
             format!(
-                "invalid ShieldingOfHome value '{other}'; allowed values are 'normal', 'exposed' and 'well-shielded'"
+                "invalid ShieldingOfHome value '{}'; allowed values are 'normal', 'exposed' and 'well-shielded'",
+                text.trim()
             )
             .into(),
         )),
-
     }
 }
 
@@ -3464,6 +3465,18 @@ mod tests {
         parse_xml_document,
     };
     use crate::hpxml::xml_helpers::assert_reads_xs_boolean;
+
+    /// HPXML's site types parse whatever their case and spacing; any other
+    /// value is an error that keeps the file's own text.
+    #[test]
+    fn site_types_parse_case_insensitively_and_keep_unknown_text() {
+        use super::{SiteType, parse_site_type};
+        assert_eq!(parse_site_type("Rural").unwrap(), SiteType::Rural);
+        assert_eq!(parse_site_type(" SUBURBAN ").unwrap(), SiteType::Suburban);
+        assert_eq!(parse_site_type("urban").unwrap(), SiteType::Urban);
+        let err = parse_site_type("Coastal").expect_err("an unknown site type must fail");
+        assert!(format!("{err}").contains("'Coastal'"), "{err}");
+    }
 
     const SAMPLE_XML: &str = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">

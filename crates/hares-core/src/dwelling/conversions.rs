@@ -1446,15 +1446,20 @@ fn boundary_outside_roughness(
     if exterior != ZoneLabel::Outdoor {
         return Ok(SurfaceRoughness::Rough);
     }
-    Ok(match bd.boundary_type {
+    Ok(match &bd.boundary_type {
         BoundaryType::Wall
         | BoundaryType::Roof
         | BoundaryType::FoundationWall
         | BoundaryType::RimJoist => outside_surface_roughness(exterior, bd.finish_type.as_deref())
             .map_err(|e| HaresError::Physics(format!("boundary '{}': {e}", bd.id)))?,
         BoundaryType::Window | BoundaryType::Skylight => SurfaceRoughness::VerySmooth,
-        BoundaryType::Door | BoundaryType::Floor | BoundaryType::Slab | BoundaryType::Other(_) => {
-            SurfaceRoughness::Rough
+        BoundaryType::Door | BoundaryType::Floor | BoundaryType::Slab => SurfaceRoughness::Rough,
+        BoundaryType::Other(kind) => {
+            return Err(HaresError::Dwelling(format!(
+                "boundary '{}' of unrecognised type '{kind}' faces outdoors; its outside \
+                 convection is undefined",
+                bd.id
+            )));
         }
     })
 }
@@ -2616,6 +2621,12 @@ mod tests {
         )
         .expect_err("an unknown wall material must fail");
         assert!(err.to_string().contains("b-1"), "{err}");
+        let err = super::boundary_outside_roughness(
+            &outdoor(BoundaryType::Other("Canopy".into()), None),
+            ZoneLabel::Outdoor,
+        )
+        .expect_err("an unrecognised outdoor boundary type must fail");
+        assert!(err.to_string().contains("Canopy"), "{err}");
     }
 
     /// A slab boundary without perimeter derives P ≈ 4 × √(area)
