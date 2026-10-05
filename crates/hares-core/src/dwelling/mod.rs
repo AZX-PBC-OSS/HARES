@@ -14360,6 +14360,30 @@ master_seed = 0
             .expect("the restored run steps, with no contribution left from the ended step");
     }
 
+    /// A load replaces the failed step's state, so the restored equipment
+    /// reports its output again before the next step.
+    #[test]
+    fn a_checkpoint_load_clears_the_failed_step_flags() {
+        let mut dwelling = dwelling_with(FlakyPortEquipment::new("FlakyEq", 300.0, &[true]));
+        let start = dwelling.save_checkpoint().expect("checkpoint at the start");
+        dwelling
+            .run_timestep(false)
+            .expect("the equipment succeeds");
+        dwelling
+            .run_timestep(false)
+            .expect("one failure is within the default budget");
+        assert_eq!(
+            dwelling.reported_core_output(0).flows.electric_kw,
+            Some(hares_types::ElectricPower::Consumption(0.0))
+        );
+        dwelling.load_checkpoint(start).expect("load");
+        assert_eq!(
+            dwelling.reported_core_output(0).flows.electric_kw,
+            Some(hares_types::ElectricPower::Consumption(0.3)),
+            "the restored equipment reports its output"
+        );
+    }
+
     #[test]
     fn a_zero_budget_tolerates_no_failure() {
         let mut dwelling = dwelling_with(FlakyPortEquipment::new("FlakyEq", 500.0, &[]));

@@ -169,6 +169,7 @@ impl Dwelling {
         // and connection state on the first post-restore step.
         self.snapshot_equipment_state();
         self.restored_from_checkpoint = true;
+        self.step_failed.fill(false);
         if self.terminal_error.take().is_some() {
             self.ports.zero();
         }
