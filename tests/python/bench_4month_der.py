@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from ochre_units import register_removed_units
+
 ROOT = Path(__file__).resolve().parents[2]
 VENDOR_OCHRE = ROOT / "vendors" / "OCHRE"
 EXAMPLES = ROOT / "data" / "examples"
@@ -82,6 +84,12 @@ def _run_ochre() -> tuple[dict[str, float], float, float]:
     if str(VENDOR_OCHRE) not in sys.path:
         sys.path.insert(0, str(VENDOR_OCHRE))
     from ochre import Dwelling as OchreDwelling  # type: ignore[import-not-found]
+
+    # OCHRE's infiltration model converts with a unit name pint 0.25 removed
+    # from the default registry; re-register it before any dwelling is built.
+    import ochre.utils.units  # type: ignore[import-not-found]  # noqa: E402
+
+    register_removed_units(ochre.utils.units.ureg)
 
     equipment: dict[str, dict] = {
         "PV": {

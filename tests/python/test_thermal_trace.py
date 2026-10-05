@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 from ochre_names import hares_columns_for
+from ochre_units import register_removed_units
 
 if TYPE_CHECKING:
     import polars as pl
@@ -44,6 +45,13 @@ EXPECTED_OCHRE_VERSION = "0.9.2"
 # ---------------------------------------------------------------------------
 
 ochre_mod = pytest.importorskip("ochre", reason="OCHRE not installed")
+
+# OCHRE's infiltration model converts with a unit name pint 0.25 removed from
+# the default registry; re-register it before any dwelling is built.
+import ochre.utils.units  # noqa: E402
+
+register_removed_units(ochre_mod.utils.units.ureg)
+
 pl_mod = pytest.importorskip("polars", reason="polars not installed")
 # Runtime import (the isinstance checks below need the class, not just hints)
 import pandas as pd

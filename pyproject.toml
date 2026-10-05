@@ -62,11 +62,7 @@ ochre = [
     "nrel-pysam>=7.1.1.post1",
     "numba>=0.68.0",
     "pandas>=3.0.6",
-    # <0.25: pint 0.25 removed inch_H2O_39F from the default registry, which
-    # the vendored OCHRE infiltration model needs (vendors/OCHRE/ochre/utils/
-    # envelope.py converts with it at five sites); 0.26.1 raises
-    # UndefinedUnitError at Dwelling init.
-    "pint>=0.24.4,<0.25",
+    "pint>=0.26.1",
     "psychrolib>=2.5.0",
     "pvlib>=0.16.1",
     "pyarrow>=25.0.1",
@@ -145,10 +141,11 @@ reportUntypedNamedTuple = "error"
 root = "tests"
 extraPaths = ["vendors/OCHRE", "scripts"]
 
-# The scripts run OCHRE-based generators against the vendored reference.
+# The scripts run OCHRE-based generators against the vendored reference and
+# the shared tests/python helper modules.
 [[tool.pyright.executionEnvironments]]
 root = "scripts"
-extraPaths = ["vendors/OCHRE"]
+extraPaths = ["vendors/OCHRE", "tests/python"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]

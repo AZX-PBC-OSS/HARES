@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 from ochre_names import resolve_hares_kwh
+from ochre_units import register_removed_units
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
@@ -129,6 +130,12 @@ def _run_hares_simulate() -> dict[str, float]:
 pytestmark = pytest.mark.ochre
 
 ochre = pytest.importorskip("ochre", reason="OCHRE not installed")
+
+# OCHRE's infiltration model converts with a unit name pint 0.25 removed from
+# the default registry; re-register it before any dwelling is built.
+import ochre.utils.units  # noqa: E402
+
+register_removed_units(ochre.utils.units.ureg)
 
 
 @pytest.fixture(scope="module")

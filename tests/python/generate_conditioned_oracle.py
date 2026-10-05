@@ -23,12 +23,19 @@ from typing import TypedDict
 
 import pandas as pd
 
+from ochre_units import register_removed_units
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OCHRE_ROOT = REPO_ROOT / "vendors" / "OCHRE"
 EXAMPLES = REPO_ROOT / "data" / "examples"
 sys.path.insert(0, str(OCHRE_ROOT))
 
-from ochre import Dwelling
+from ochre import Dwelling  # noqa: E402
+import ochre.utils.units  # noqa: E402
+
+# OCHRE's infiltration model converts with a unit name pint 0.25 removed from
+# the default registry; re-register it before any dwelling is built.
+register_removed_units(ochre.utils.units.ureg)
 
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures"
 

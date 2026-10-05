@@ -23,6 +23,8 @@ from typing import Any, cast
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from ochre_units import register_removed_units
+
 
 @dataclass(frozen=True)
 class ChannelSpec:
@@ -232,6 +234,12 @@ def run_ochre(
     except Exception:
         parquet = reference_parquet or (fixture_dir / "reference_output.parquet")
         return load_reference_parquet(parquet, sim_cfg)
+
+    # OCHRE's infiltration model converts with a unit name pint 0.25 removed
+    # from the default registry; re-register it before any dwelling is built.
+    import ochre.utils.units  # noqa: E402
+
+    register_removed_units(ochre.utils.units.ureg)
 
     start_local = sim_cfg["start_time"].replace(tzinfo=None)
     sim_result = OchreDwelling(

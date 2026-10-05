@@ -21,6 +21,8 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ochre_units import register_removed_units
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -37,11 +39,16 @@ def _ensure_ochre_importable() -> None:
         sys.path.insert(0, vendor_str)
     try:
         import ochre  # noqa: F401
+        import ochre.utils.units
     except ImportError as exc:
         raise SystemExit(
             f"OCHRE is not importable from {VENDOR_OCHRE}. "
             "Run: uv run --group ochre python tests/python/generate_parity_reference.py"
         ) from exc
+
+    # OCHRE's infiltration model converts with a unit name pint 0.25 removed
+    # from the default registry; re-register it before any dwelling is built.
+    register_removed_units(ochre.utils.units.ureg)
 
 
 def _load_sim_config(config_path: Path) -> dict:

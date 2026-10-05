@@ -53,10 +53,19 @@ _ROOT = Path(__file__).resolve().parents[1]
 _VENDOR_OCHRE = _ROOT / "vendors" / "OCHRE"
 if str(_VENDOR_OCHRE) not in sys.path:
     sys.path.insert(0, str(_VENDOR_OCHRE))
+_TESTS_PYTHON = _ROOT / "tests" / "python"
+if str(_TESTS_PYTHON) not in sys.path:
+    sys.path.insert(0, str(_TESTS_PYTHON))
 
 from ochre.Models.Envelope import Envelope  # noqa: E402
 from ochre.utils import envelope as env_utils  # noqa: E402
 from ochre.utils.schedule import import_weather, resample_and_reindex  # noqa: E402
+import ochre.utils.units  # noqa: E402
+from ochre_units import register_removed_units  # noqa: E402
+
+# OCHRE's infiltration model converts with a unit name pint 0.25 removed from
+# the default registry; re-register it before any dwelling is built.
+register_removed_units(ochre.utils.units.ureg)
 
 
 # ---------------------------------------------------------------------------
