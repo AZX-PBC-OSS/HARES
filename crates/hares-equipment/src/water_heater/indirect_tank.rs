@@ -566,6 +566,10 @@ impl Equipment for IndirectTank {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(hares_types::ThermostatBandClass::Tank)
+    }
+
     // `resolved_zip()` keeps the default `None`: the indirect tank is heated
     // by the boiler loop and has no electric draw of its own.
 

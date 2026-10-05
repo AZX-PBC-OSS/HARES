@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from .gym_env import (
     RewardContext,
+    action_bounds,
     build_control_signal,
     drain_step_warnings,
     field_bounds,
@@ -38,6 +39,7 @@ from .gym_env import (
 __all__ = [
     "RewardContext",
     "VecDwellingGymEnv",
+    "action_bounds",
     "build_control_signal",
     "drain_step_warnings",
     "field_bounds",
@@ -85,8 +87,16 @@ class VecDwellingGymEnv:
         )
         action_low: list[float] = []
         action_high: list[float] = []
-        for _, field in self._action_layout:
-            low, high = field_bounds(field)
+        for equipment, field in self._action_layout:
+            per_dwelling = {
+                action_bounds(dwelling, equipment, field) for dwelling in self._dwellings
+            }
+            if len(per_dwelling) != 1:
+                raise ValueError(
+                    f"{equipment}.{field} has different bounds across the dwellings: "
+                    f"{sorted(per_dwelling)}; one action space cannot hold them"
+                )
+            ((low, high),) = per_dwelling
             action_low.append(low)
             action_high.append(high)
 

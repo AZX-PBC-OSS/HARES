@@ -405,6 +405,13 @@ pub trait Equipment: Send + Sync {
         None
     }
 
+    /// The thermostat class a `ThermalSetpoint` deadband sent to this
+    /// equipment is held to, or `None` when it takes no band (it has no
+    /// thermostat, or, like a tankless heater, no switching band).
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        None
+    }
+
     /// How this equipment's expected mean real power [kW] over the loaded
     /// schedule horizon can be determined, for premise-level ZIP
     /// aggregation ([`hares_types::zip::ResolvedZip`] mixes weighted by

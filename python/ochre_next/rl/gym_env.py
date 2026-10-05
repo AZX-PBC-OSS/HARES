@@ -13,8 +13,6 @@ import warnings
 import numpy as np
 
 from ochre_next._hares import (
-    MAX_TANK_THERMOSTAT_BAND_C,
-    MIN_THERMOSTAT_BAND_C,
     ControlSignal as PyControlSignal,
     Dwelling as PyDwelling,
     SimulationConfig,
@@ -199,11 +197,19 @@ def field_bounds(field: str) -> tuple[float, float]:
         return (0.0, 1.0)
     if name in {"setpoint_c", "heat_c", "cool_c", "heating_setpoint_c", "cooling_setpoint_c"}:
         return (-50.0, 80.0)
-    if name in {"deadband_c"}:
-        # From the sensor-resolution floor to the widest tank thermostat; the
-        # target equipment holds the band to its own thermostat class.
-        return (MIN_THERMOSTAT_BAND_C, MAX_TANK_THERMOSTAT_BAND_C)
     return (_BROAD_LOW, _BROAD_HIGH)
+
+
+def action_bounds(dwelling: PyDwelling, equipment: str, field: str) -> tuple[float, float]:
+    """A deadband is held to the range of the target's thermostat class."""
+    if field.lower() == "deadband_c":
+        band = dwelling.thermostat_band_range(equipment)
+        if band is None:
+            raise ValueError(
+                f"equipment {equipment!r} has no thermostat band for a deadband_c action"
+            )
+        return band
+    return field_bounds(field)
 
 
 def observation_field_bounds(field: str) -> tuple[float, float]:
@@ -492,8 +498,8 @@ class DwellingGymEnv(_GYM_BASE):
 
         action_low: list[float] = []
         action_high: list[float] = []
-        for _, field in self._action_layout:
-            low, high = field_bounds(field)
+        for equipment, field in self._action_layout:
+            low, high = action_bounds(self._dwelling, equipment, field)
             action_low.append(low)
             action_high.append(high)
         # Kept on the instance so _apply_action() does not reach through the

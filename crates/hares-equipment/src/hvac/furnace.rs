@@ -392,6 +392,10 @@ impl Equipment for ElectricFurnace {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(self.hvac.thermostat_fsm.thermostat.band_class)
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
@@ -812,6 +816,10 @@ impl Equipment for GasFurnace {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(self.hvac.thermostat_fsm.thermostat.band_class)
     }
 
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {

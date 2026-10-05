@@ -1054,6 +1054,13 @@ impl PyDwelling {
     /// effective power factor (config baseline, later mutated by a
     /// ``PowerFactorSetpoint``). Raises ``ValueError`` for an unknown
     /// equipment name. Pure inspection — never influences the simulation.
+    /// The `(low, high)` range in °C a `ThermalSetpoint` deadband sent to
+    /// the named equipment is held to (its thermostat class), or ``None``
+    /// when it takes no band.
+    pub fn thermostat_band_range(&self, name: &str) -> PyResult<Option<(f64, f64)>> {
+        self.band_range_of(name).map_err(PyValueError::new_err)
+    }
+
     pub fn equipment_zip<'py>(
         &self,
         py: Python<'py>,
@@ -2144,6 +2151,20 @@ impl PyDwelling {
         }
         let mut dwelling = self.acquire_string()?;
         dwelling.step().map_err(|e| e.to_string())
+    }
+
+    /// The deadband range of the named equipment's thermostat class, or
+    /// `None` when it takes no band.
+    pub(crate) fn band_range_of(&self, name: &str) -> Result<Option<(f64, f64)>, String> {
+        let dwelling = self.acquire_string()?;
+        let eq = dwelling
+            .equipment()
+            .iter()
+            .find(|e| e.descriptor().name == name)
+            .ok_or_else(|| format!("equipment '{name}' not found"))?;
+        Ok(eq
+            .thermostat_band_class()
+            .map(hares_types::ThermostatBandClass::range_c))
     }
 
     pub(crate) fn observation(&self) -> Result<Vec<f64>, String> {

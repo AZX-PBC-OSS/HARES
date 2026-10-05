@@ -101,6 +101,10 @@ macro_rules! delegate_equipment {
             fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
                 self.$inner.resolved_zip()
             }
+
+            fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+                self.$inner.thermostat_band_class()
+            }
         }
     };
 }

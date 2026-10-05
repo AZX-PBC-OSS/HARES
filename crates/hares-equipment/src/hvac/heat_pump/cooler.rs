@@ -286,6 +286,10 @@ impl Equipment for HpCooler {
         self.inner.core_output()
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        self.inner.thermostat_band_class()
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor ZIP resolved by the inner
         // AirConditioner (the user "zip" sidecar is propagated to it).
@@ -704,6 +708,10 @@ impl Equipment for GshpCooler {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        self.inner.thermostat_band_class()
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor ZIP resolved by the inner
         // AirConditioner (the user "zip" sidecar is propagated to it); the
@@ -1047,6 +1055,10 @@ impl Equipment for WshpCooler {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        self.inner.thermostat_band_class()
     }
 
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {

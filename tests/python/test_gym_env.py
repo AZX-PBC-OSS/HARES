@@ -103,18 +103,77 @@ def test_dwelling_gym_spaces_and_mapping():
     assert isinstance(truncated, bool)
 
 
-def test_deadband_action_bounds_are_the_thermostat_band_range():
-    from ochre_next._hares import MAX_TANK_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
-    from ochre_next.rl.gym_env import _field_bounds
+def _water_heater_name(dwelling: PyDwelling) -> str:
+    (name,) = [n for n in dwelling.equipment_names() if "Water Heater" in n]
+    return name
 
-    assert _field_bounds("deadband_c") == (MIN_THERMOSTAT_BAND_C, MAX_TANK_THERMOSTAT_BAND_C)
-    assert MIN_THERMOSTAT_BAND_C > 0.0
+
+def test_deadband_action_bounds_follow_the_target_thermostat_class():
+    from ochre_next._hares import (
+        MAX_HVAC_THERMOSTAT_BAND_C,
+        MAX_TANK_THERMOSTAT_BAND_C,
+        MIN_THERMOSTAT_BAND_C,
+    )
+
+    water_heater = _water_heater_name(_make_dwelling())
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=_OBS_FIELDS,
+        action_space_config={
+            "Gas Furnace": ["heat_c", "deadband_c"],
+            water_heater: ["setpoint_c", "deadband_c"],
+        },
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    bounds = {
+        (equipment, field): (low, high)
+        for (equipment, field), low, high in zip(
+            env._action_layout, env.action_space.low, env.action_space.high
+        )
+    }
+    assert bounds[("Gas Furnace", "deadband_c")] == (
+        MIN_THERMOSTAT_BAND_C,
+        MAX_HVAC_THERMOSTAT_BAND_C,
+    )
+    assert bounds[(water_heater, "deadband_c")] == (
+        MIN_THERMOSTAT_BAND_C,
+        MAX_TANK_THERMOSTAT_BAND_C,
+    )
+
+
+def test_thermostat_band_range_is_the_target_class():
+    from ochre_next._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+
+    dwelling = _make_dwelling()
+    assert dwelling.thermostat_band_range("Gas Furnace") == (
+        MIN_THERMOSTAT_BAND_C,
+        MAX_HVAC_THERMOSTAT_BAND_C,
+    )
+    non_thermostats = [
+        n for n in dwelling.equipment_names() if n != "Gas Furnace" and "Water" not in n
+        and dwelling.thermostat_band_range(n) is None
+    ]
+    assert non_thermostats, "some equipment takes no band"
+
+
+def test_a_deadband_action_on_equipment_without_a_band_is_rejected():
+    dwelling = _make_dwelling()
+    no_band = next(n for n in dwelling.equipment_names() if dwelling.thermostat_band_range(n) is None)
+    with pytest.raises(ValueError, match="no thermostat band"):
+        DwellingGymEnv(
+            config=_DWELLING_CONFIG,
+            observation_fields=_OBS_FIELDS,
+            action_space_config={"Gas Furnace": ["heat_c"], no_band: ["setpoint_c", "deadband_c"]},
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+        )
 
 
 def test_deadband_action_without_a_setpoint_field_is_rejected():
     with pytest.raises(ValueError, match="no setpoint field"):
-        _sorted_action_layout({"HVAC": ["deadband_c"]})
-    layout, _ = _sorted_action_layout({"HVAC": ["deadband_c", "heat_c"]})
+        sorted_action_layout({"HVAC": ["deadband_c"]})
+    layout, _ = sorted_action_layout({"HVAC": ["deadband_c", "heat_c"]})
     assert [f for _, f in layout] == ["deadband_c", "heat_c"]
 
 
