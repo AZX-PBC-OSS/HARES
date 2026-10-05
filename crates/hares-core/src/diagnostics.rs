@@ -416,11 +416,19 @@ pub struct DiagnosticAccumulator {
     zone_has_cooling: Vec<bool>,
     /// Pre-allocated scratch buffers, reused per timestep to avoid heap
     /// allocation in the hot loop.
-    scratch_zone_temps: Vec<f64>,
-    scratch_heating_sps: Vec<Option<f64>>,
-    scratch_cooling_sps: Vec<Option<f64>>,
-    scratch_equipment_modes: Vec<Option<OperatingMode>>,
-    scratch_equipment_zone_indices: Vec<Option<usize>>,
+    scratch: StepScratch,
+}
+
+/// Per-step inputs [`DiagnosticAccumulator::record_from_state`] extracts
+/// from the dwelling's state before recording them.
+#[cfg(feature = "observe")]
+#[derive(Debug, Clone, Default)]
+struct StepScratch {
+    zone_temps: Vec<f64>,
+    heating_sps: Vec<Option<f64>>,
+    cooling_sps: Vec<Option<f64>>,
+    equipment_modes: Vec<Option<OperatingMode>>,
+    equipment_zone_indices: Vec<Option<usize>>,
 }
 
 #[cfg(feature = "observe")]
@@ -468,43 +476,14 @@ impl DiagnosticAccumulator {
             simultaneous_hc_steps: vec![0; nz],
             zone_has_heating: vec![false; nz],
             zone_has_cooling: vec![false; nz],
-            scratch_zone_temps: vec![0.0; nz],
-            scratch_heating_sps: vec![None; nz],
-            scratch_cooling_sps: vec![None; nz],
-            scratch_equipment_modes: vec![None; ne],
-            scratch_equipment_zone_indices: vec![None; ne],
+            scratch: StepScratch {
+                zone_temps: vec![0.0; nz],
+                heating_sps: vec![None; nz],
+                cooling_sps: vec![None; nz],
+                equipment_modes: vec![None; ne],
+                equipment_zone_indices: vec![None; ne],
+            },
         }
-    }
-
-    /// Records one step of data. Call once per timestep when the observer is active.
-    ///
-    /// - `zone_temps_c`, `heating_setpoints_c`, `cooling_setpoints_c` are all
-    ///   indexed by zone position (not ZoneId).
-    /// - `equipment_modes` and `equipment_zone_indices` are indexed by
-    ///   equipment position. `equipment_zone_indices` maps each equipment to
-    ///   the position of its zone in the zone arrays (or `None` if unassigned).
-    pub fn record_step(
-        &mut self,
-        zone_temps_c: &[f64],
-        heating_setpoints_c: &[Option<f64>],
-        cooling_setpoints_c: &[Option<f64>],
-        equipment_modes: &[Option<OperatingMode>],
-        equipment_zone_indices: &[Option<usize>],
-    ) {
-        record_step_impl(
-            &mut self.total_steps,
-            &mut self.zone_counters,
-            &mut self.equipment_counters,
-            &mut self.prev_equipment_modes,
-            &mut self.simultaneous_hc_steps,
-            &mut self.zone_has_heating,
-            &mut self.zone_has_cooling,
-            zone_temps_c,
-            heating_setpoints_c,
-            cooling_setpoints_c,
-            equipment_modes,
-            equipment_zone_indices,
-        );
     }
 
     /// Records one step from the dwelling's live state, using pre-allocated
@@ -512,20 +491,23 @@ impl DiagnosticAccumulator {
     ///
     /// Extracts zone temperatures, heating/cooling setpoints, equipment
     /// operating modes, and equipment zone indices from the dwelling's zone
-    /// list and equipment list, then delegates to [`record_step`].
+    /// list and equipment list, then delegates to [`Self::record_step`]. The
+    /// scratch is moved out for the call and back afterwards, which moves
+    /// only the vectors' handles.
     pub fn record_from_state(&mut self, env_zones: &[ZoneState], equipment: &[Box<dyn Equipment>]) {
-        let nz = env_zones.len().min(self.scratch_zone_temps.len());
-        let ne = equipment.len().min(self.scratch_equipment_modes.len());
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let nz = env_zones.len().min(scratch.zone_temps.len());
+        let ne = equipment.len().min(scratch.equipment_modes.len());
 
         // --- Zone temperatures ---
-        self.scratch_zone_temps[..nz].fill(0.0);
+        scratch.zone_temps[..nz].fill(0.0);
         for (i, z) in env_zones.iter().take(nz).enumerate() {
-            self.scratch_zone_temps[i] = z.temperature_c;
+            scratch.zone_temps[i] = z.temperature_c;
         }
 
         // --- Heating / cooling setpoints ---
-        self.scratch_heating_sps[..nz].fill(None);
-        self.scratch_cooling_sps[..nz].fill(None);
+        scratch.heating_sps[..nz].fill(None);
+        scratch.cooling_sps[..nz].fill(None);
         for eq in equipment.iter() {
             let co = eq.core_output();
             let Some(zone_id) = eq.descriptor().zone else {
@@ -544,42 +526,36 @@ impl DiagnosticAccumulator {
                         | OperatingMode::HeatingHP
                         | OperatingMode::HeatingER
                         | OperatingMode::HeatingHPAndER,
-                    ) => self.scratch_heating_sps[zone_idx] = Some(sp),
-                    Some(OperatingMode::Cooling) => self.scratch_cooling_sps[zone_idx] = Some(sp),
+                    ) => scratch.heating_sps[zone_idx] = Some(sp),
+                    Some(OperatingMode::Cooling) => scratch.cooling_sps[zone_idx] = Some(sp),
                     _ => {}
                 }
             }
         }
 
         // --- Equipment operating modes ---
-        self.scratch_equipment_modes[..ne].fill(None);
+        scratch.equipment_modes[..ne].fill(None);
         for (i, eq) in equipment.iter().take(ne).enumerate() {
-            self.scratch_equipment_modes[i] = eq.core_output().state.operating_mode;
+            scratch.equipment_modes[i] = eq.core_output().state.operating_mode;
         }
 
         // --- Equipment → zone index mapping ---
-        self.scratch_equipment_zone_indices[..ne].fill(None);
+        scratch.equipment_zone_indices[..ne].fill(None);
         for (i, eq) in equipment.iter().take(ne).enumerate() {
-            self.scratch_equipment_zone_indices[i] = eq
+            scratch.equipment_zone_indices[i] = eq
                 .descriptor()
                 .zone
                 .and_then(|zid| env_zones.iter().position(|z| z.id == zid));
         }
 
-        record_step_impl(
-            &mut self.total_steps,
-            &mut self.zone_counters,
-            &mut self.equipment_counters,
-            &mut self.prev_equipment_modes,
-            &mut self.simultaneous_hc_steps,
-            &mut self.zone_has_heating,
-            &mut self.zone_has_cooling,
-            &self.scratch_zone_temps[..nz],
-            &self.scratch_heating_sps[..nz],
-            &self.scratch_cooling_sps[..nz],
-            &self.scratch_equipment_modes[..ne],
-            &self.scratch_equipment_zone_indices[..ne],
+        self.record_step(
+            &scratch.zone_temps[..nz],
+            &scratch.heating_sps[..nz],
+            &scratch.cooling_sps[..nz],
+            &scratch.equipment_modes[..ne],
+            &scratch.equipment_zone_indices[..ne],
         );
+        self.scratch = scratch;
     }
 
     /// Runs all four post-hoc diagnostic checks using accumulated data and
@@ -748,101 +724,104 @@ impl DiagnosticAccumulator {
     }
 }
 
-/// Core step-accumulation logic shared by [`DiagnosticAccumulator::record_step`]
-/// and [`DiagnosticAccumulator::record_from_state`].
-///
-/// Takes individual field references so callers can borrow mutable counter
-/// fields and immutable scratch/input buffers from the same `DiagnosticAccumulator`
-/// without tripping Rust's borrow checker on nested `&self` + `&mut self`.
 #[cfg(feature = "observe")]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "field-splitting is the standard Rust pattern to avoid borrow checker conflicts when a method needs both shared &[T] scratch slices and mutable counter fields from the same struct"
-)]
-fn record_step_impl(
-    total_steps: &mut u64,
-    zone_counters: &mut [ZoneDiagnosticCounters],
-    equipment_counters: &mut [EquipmentDiagnosticCounters],
-    prev_equipment_modes: &mut [Option<OperatingMode>],
-    simultaneous_hc_steps: &mut [u64],
-    zone_has_heating: &mut [bool],
-    zone_has_cooling: &mut [bool],
-    zone_temps_c: &[f64],
-    heating_setpoints_c: &[Option<f64>],
-    cooling_setpoints_c: &[Option<f64>],
-    equipment_modes: &[Option<OperatingMode>],
-    equipment_zone_indices: &[Option<usize>],
-) {
-    *total_steps += 1;
+impl DiagnosticAccumulator {
+    /// Records one step of data. Call once per timestep when the observer is active.
+    ///
+    /// - `zone_temps_c`, `heating_setpoints_c`, `cooling_setpoints_c` are all
+    ///   indexed by zone position (not ZoneId).
+    /// - `equipment_modes` and `equipment_zone_indices` are indexed by
+    ///   equipment position. `equipment_zone_indices` maps each equipment to
+    ///   the position of its zone in the zone arrays (or `None` if unassigned).
+    pub fn record_step(
+        &mut self,
+        zone_temps_c: &[f64],
+        heating_setpoints_c: &[Option<f64>],
+        cooling_setpoints_c: &[Option<f64>],
+        equipment_modes: &[Option<OperatingMode>],
+        equipment_zone_indices: &[Option<usize>],
+    ) {
+        let Self {
+            zone_counters,
+            equipment_counters,
+            prev_equipment_modes,
+            total_steps,
+            simultaneous_hc_steps,
+            zone_has_heating,
+            zone_has_cooling,
+            scratch: _,
+        } = self;
+        *total_steps += 1;
 
-    // --- Zone-level checks ---
-    for (i, zc) in zone_counters.iter_mut().enumerate() {
-        let t = zone_temps_c.get(i).copied().unwrap_or(f64::NAN);
-        if !t.is_finite() {
-            continue;
-        }
-        // Freezing check (conditioned zones only).
-        if zc.is_conditioned && t < 0.0 {
-            zc.freezing_steps += 1;
-        }
-        // Unmet hours: zone temperature vs setpoint bounds.
-        let hsp = heating_setpoints_c.get(i).copied().flatten();
-        let csp = cooling_setpoints_c.get(i).copied().flatten();
-        let has_setpoint = hsp.is_some() || csp.is_some();
-        if has_setpoint {
-            zc.steps_with_setpoint += 1;
-            if let Some(h) = hsp
-                && t < h
-            {
-                zc.unmet_heating_steps += 1;
+        // --- Zone-level checks ---
+        for (i, zc) in zone_counters.iter_mut().enumerate() {
+            let t = zone_temps_c.get(i).copied().unwrap_or(f64::NAN);
+            if !t.is_finite() {
+                continue;
             }
-            if let Some(c) = csp
-                && t > c
-            {
-                zc.unmet_cooling_steps += 1;
+            // Freezing check (conditioned zones only).
+            if zc.is_conditioned && t < 0.0 {
+                zc.freezing_steps += 1;
+            }
+            // Unmet hours: zone temperature vs setpoint bounds.
+            let hsp = heating_setpoints_c.get(i).copied().flatten();
+            let csp = cooling_setpoints_c.get(i).copied().flatten();
+            let has_setpoint = hsp.is_some() || csp.is_some();
+            if has_setpoint {
+                zc.steps_with_setpoint += 1;
+                if let Some(h) = hsp
+                    && t < h
+                {
+                    zc.unmet_heating_steps += 1;
+                }
+                if let Some(c) = csp
+                    && t > c
+                {
+                    zc.unmet_cooling_steps += 1;
+                }
             }
         }
-    }
 
-    // --- Equipment-level checks ---
-    for (i, ec) in equipment_counters.iter_mut().enumerate() {
-        let mode = equipment_modes.get(i).copied().flatten();
-        // Detect mode changes: only transitions between consecutive known
-        // states count.  Entering an active mode on the first step is the
-        // initial state, not a cycling event.
-        if let (Some(prev), Some(curr)) = (prev_equipment_modes.get(i).copied().flatten(), mode)
-            && prev != curr
-        {
-            ec.mode_changes += 1;
+        // --- Equipment-level checks ---
+        for (i, ec) in equipment_counters.iter_mut().enumerate() {
+            let mode = equipment_modes.get(i).copied().flatten();
+            // Detect mode changes: only transitions between consecutive known
+            // states count.  Entering an active mode on the first step is the
+            // initial state, not a cycling event.
+            if let (Some(prev), Some(curr)) = (prev_equipment_modes.get(i).copied().flatten(), mode)
+                && prev != curr
+            {
+                ec.mode_changes += 1;
+            }
+
+            prev_equipment_modes[i] = mode;
         }
 
-        prev_equipment_modes[i] = mode;
-    }
-
-    // --- Simultaneous heating + cooling detection ---
-    let n_zones = zone_counters.len();
-    zone_has_heating.fill(false);
-    zone_has_cooling.fill(false);
-    for (i, mode) in equipment_modes.iter().enumerate() {
-        let Some(zidx) = equipment_zone_indices.get(i).copied().flatten() else {
-            continue;
-        };
-        if zidx >= n_zones {
-            continue;
+        // --- Simultaneous heating + cooling detection ---
+        let n_zones = zone_counters.len();
+        zone_has_heating.fill(false);
+        zone_has_cooling.fill(false);
+        for (i, mode) in equipment_modes.iter().enumerate() {
+            let Some(zidx) = equipment_zone_indices.get(i).copied().flatten() else {
+                continue;
+            };
+            if zidx >= n_zones {
+                continue;
+            }
+            let Some(m) = mode else { continue };
+            match m {
+                OperatingMode::Heating
+                | OperatingMode::HeatingHP
+                | OperatingMode::HeatingER
+                | OperatingMode::HeatingHPAndER => zone_has_heating[zidx] = true,
+                OperatingMode::Cooling => zone_has_cooling[zidx] = true,
+                _ => {}
+            }
         }
-        let Some(m) = mode else { continue };
-        match m {
-            OperatingMode::Heating
-            | OperatingMode::HeatingHP
-            | OperatingMode::HeatingER
-            | OperatingMode::HeatingHPAndER => zone_has_heating[zidx] = true,
-            OperatingMode::Cooling => zone_has_cooling[zidx] = true,
-            _ => {}
-        }
-    }
-    for (zidx, hc) in simultaneous_hc_steps.iter_mut().enumerate() {
-        if zone_has_heating[zidx] && zone_has_cooling[zidx] {
-            *hc += 1;
+        for (zidx, hc) in simultaneous_hc_steps.iter_mut().enumerate() {
+            if zone_has_heating[zidx] && zone_has_cooling[zidx] {
+                *hc += 1;
+            }
         }
     }
 }
