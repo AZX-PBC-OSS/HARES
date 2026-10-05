@@ -40,14 +40,6 @@ const METRIC_EQUIPMENT_MODE_CYCLES: &str = "equipment_mode_cycle_count_relative_
 /// defaults defined in `tolerance.rs`.
 fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
     match (fixture_id, metric) {
-        // cz2a_pv_ev: observed HVAC energy 46.67 % and total site 42.31 %
-        // over a single cooling cycle -- the step-0 ideal-capacity back-solve
-        // in `crates/hares-envelope/src/thermal_solver/stepping.rs:24-66`
-        // drives a higher initial demand than OCHRE, so the integrated
-        // 1-hour window diverges. Bands are sized to observed residual plus
-        // a 1 % margin (no headroom beyond evidence); once the back-solve is
-        // aligned they drop to the defaults in `tolerance.rs`.
-
         // ── Accumulated-drift overrides (2026-09-11) ─────────────────────
         //
         // These fixtures were never exercised in CI: the reference parquets
@@ -60,87 +52,40 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // Bands below are sized to the observed residual plus ~1% margin and
         // exist to LOCK the drift (any worsening fails loudly) while the
         // underlying conformance items are worked; they are not a judgement
-        // that the current residuals are physically correct. Root causes:
-        // zone-temp residuals → T-0075 envelope conformance; HVAC-energy
-        // residuals → step-0 ideal-capacity back-solve noted above.
+        // that the current residuals are physically correct. HVAC-energy
+        // residuals come from the step-0 ideal-capacity back-solve noted
+        // above.
         //
-        // Internal-gain split (2026-10-05): appliance, plug-load and lighting
-        // heat now enters the zone as OS-HPXML's convective, radiant and
-        // visible parts. The nine zone-temperature bands that improved, and
-        // the cz5a_minisplit_gas_wh HVAC-energy band, are re-sized to the
-        // observed residual plus 0.0086 to 0.0168, rounded up to the next
-        // 0.01. With every gain made convective again, seven of the nine
-        // zone-temperature bands fail; cz2a_gas_furnace_ac_res_wh (0.6895),
-        // cz4a_ashp_hpwh (0.8880) and the mini-split HVAC-energy band
-        // (64.19 %) stay inside theirs.
-        ("cz2a_gas_furnace_ac_res_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.69),
-        ("cz2a_gas_furnace_ac_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(45.5),
-        // cz2a_pv_ev: step-0 ideal-capacity back-solve justification above;
-        // values re-sized to observed residual + ~1% on the first real run.
-        ("cz2a_pv_ev", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.91),
-        ("cz2a_pv_ev", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(208.0),
-        ("cz2a_pv_ev", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(48.2),
-        ("cz4a_ashp_hpwh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.90),
-        ("cz4a_ashp_hpwh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(168.5),
-        ("cz4a_ashp_hpwh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(30.7),
-        ("cz4a_battery_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.88),
-        ("cz4a_battery_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(111.2),
-        ("cz4a_pv_battery", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.85),
-        ("cz4a_pv_battery", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(102.1),
-        ("cz4a_pv_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.89),
-        ("cz4a_pv_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(157.5),
-        // Lighting-parity correction (2026-09-13): garage lighting is no
-        // longer created for garage-less buildings (OCHRE hpxml.py:1703-1709)
-        // and lighting schedules now honor HPXML extension fractions
-        // (OCHRE add_simple_schedule_params). Residuals re-measured and bands
-        // re-sized to observed + ~1%.
-        ("cz4a_pv_only", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(26.0),
-        ("cz5a_ev_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.88),
-        ("cz5a_ev_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(111.2),
-        // cz5a_ev_charging: the charging-EV fixture — same building as
-        // cz5a_ev_only, so the same inherited drift (zone-temp → T-0075
-        // envelope conformance; HVAC energy → the step-0 ideal-capacity
-        // back-solve), sized to observed residual + ~1% exactly like its
-        // sibling. The metric this fixture exists for — short-window total
-        // site energy, now dominated by the EV's 11.5 kW charge — passes at
-        // the 25% DEFAULT band (measured 1.36%): the EV charging power
-        // cross-check against OCHRE's event-driven charge needs no override.
-        ("cz5a_ev_charging", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.88),
-        ("cz5a_ev_charging", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(112.0),
-        // Lighting-parity correction (2026-09-13), see cz4a_pv_only note.
-        //
-        // The lighting split moved this residual away from OCHRE (1.711 →
-        // 1.743; 1.622 after the appliance split alone) and this window's
-        // site-energy residual from 17.15 % to 17.19 %. OCHRE is
-        // simplified here: lighting is 100 % convective (`ochre/utils/
-        // hpxml.py:1522-1527`) and every radiative fraction is summed into
-        // the air-node gain (`ochre/Equipment/Equipment.py:80-85,197`).
-        // HARES keeps the reference split: 0.6 radiant, 0.2 visible
-        // (OS-HPXML v1.12.0 `model.rb:249-251`), the visible part added to
-        // the enclosure's diffuse short-wave (EnergyPlus v24.2.0
-        // `HeatBalanceSurfaceManager.cc:3687-3693`). The band is not moved.
-        ("cz5a_minisplit_gas_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(1.75),
-        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(64.8),
-        ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(92.5),
-        ("cz6b_pv_battery_ev", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.87),
-        ("cz6b_pv_battery_ev", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(102.1),
-        ("cz6b_resistance_res_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.72),
-        // Lighting-parity correction (2026-09-13), see cz4a_pv_only note:
-        // removing phantom garage lighting shifts this January midnight
-        // window's small HVAC integral (step-0 back-solve dominated).
-        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(59.0),
-        // ── resstock_bldg0112631_24h ──────────────────────────────────────
-        //
-        // Zone temperature, HVAC energy and site energy run on the default
-        // bands, which no override here changes. The internal-gain split
-        // moved all three away from OCHRE, which puts radiative gain on the
-        // air node (`ochre/Equipment/Equipment.py:80-85,197`): the appliance
-        // and plug-load radiant split (0.6 of sensible, OS-HPXML v1.12.0
-        // `hotwater_appliances.rb:80-320`, `misc_loads.rb:89`) took zone
-        // temperature from 0.408 to 0.421 °C, HVAC energy from 20.1 % to
-        // 21.8 % and site energy from 5.14 % to 5.26 %; the lighting split
-        // noted at cz5a_minisplit_gas_wh took zone temperature on to
-        // 0.441 °C. Its one override, below, is the peak HVAC power band.
+        // Re-measured after every zone took OS-HPXML's temperature
+        // capacitance multiplier of 7 (OCHRE's too): each conditioned-zone
+        // temperature MAE fell to 0.29-0.50 C, inside the 0.6 C default, so
+        // those overrides are gone, and every HVAC-energy band and the
+        // total-site bands that improved were re-sized to observed + ~1%.
+        // The two January heating windows whose total site energy worsened
+        // (cz5a_minisplit_gas_wh 17.2 % to 28.4 %, cz6b_resistance_res_wh
+        // 19.9 % to 25.4 %) already delivered less heat than OCHRE in their
+        // unwarmed first hour; the heavier zone holds its setpoint with less
+        // still, though their HVAC-energy residuals fell (64.2 % to 40.7 %,
+        // 58.1 % to 46.5 %). The minisplit's peak moved 91.5 % to 92.9 %.
+        ("cz2a_gas_furnace_ac_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(41.8),
+        ("cz2a_pv_ev", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(181.2),
+        ("cz2a_pv_ev", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(37.3),
+        ("cz4a_ashp_hpwh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(146.2),
+        ("cz4a_battery_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(93.1),
+        ("cz4a_pv_battery", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(84.8),
+        ("cz4a_pv_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(135.2),
+        ("cz5a_ev_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(93.1),
+        // cz5a_ev_charging: the charging-EV fixture, the same building as
+        // cz5a_ev_only and so the same HVAC-energy residual. The metric this
+        // fixture exists for, short-window total site energy dominated by the
+        // EV's 11.5 kW charge, passes at the 25% default band.
+        ("cz5a_ev_charging", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(93.1),
+        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(41.8),
+        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(29.5),
+        ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(94.0),
+        ("cz6b_pv_battery_ev", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(84.8),
+        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(47.6),
+        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(26.5),
         ("resstock_bldg0112631_24h", METRIC_PEAK_HVAC_POWER) => Some(25.7),
         _ => None,
     }

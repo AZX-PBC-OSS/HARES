@@ -376,8 +376,10 @@ fn ochre_ashp_fixture_total_shape_and_timing_aligns() {
         activity_center_index(&actual_heat).expect("actual heating series must not be empty");
     // Regression anchor: timing center shifts as physics corrections accumulate.
     // Updated after: eta_c fix, HPWH capacity, ER threshold, boiler space_fraction,
-    // combined interior R_film (h_conv + h_rad), surface_node radiation topology.
-    let expected_center: usize = 31;
+    // combined interior R_film (h_conv + h_rad), surface_node radiation topology,
+    // OS-HPXML's temperature capacitance multiplier of 7 on every zone (OCHRE's
+    // own reference centre is step 37.3).
+    let expected_center: usize = 35;
     assert!(
         actual_center.abs_diff(expected_center) <= 2,
         "ASHP HVAC electric power timing center must stay near step {expected_center}: actual={actual_center}"
@@ -398,11 +400,10 @@ fn ochre_minisplit_fixture_total_shape_and_timing_aligns() {
     // Regression anchor: timing center shifts as physics corrections accumulate.
     // Updated after: eta_c fix, HPWH capacity, ER threshold, ideal-mode ER residual,
     // two-phase resolve (current-step inputs for ideal capacity),
-    // B7/D6 fix: mass_multiplier=1.0 when furniture boundaries present (was 7.0,
-    // double-counting with explicit furniture RC nodes; E+ ZoneCapacitanceMultiplier
-    // and InternalMass are mutually exclusive),
     // ER binary on/off fix: resistive elements cannot draw fractional power;
-    // thermostat cycling handles time-averaging.
+    // thermostat cycling handles time-averaging; OS-HPXML's temperature
+    // capacitance multiplier of 7 on every zone (step 28 then; OCHRE's own
+    // reference centre is step 23.9).
     let expected_center: usize = 29;
     assert!(
         actual_center.abs_diff(expected_center) <= 2,
