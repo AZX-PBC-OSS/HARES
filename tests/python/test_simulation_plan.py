@@ -77,9 +77,13 @@ def test_simulation_plan_swap_furnace_to_ashp():
         time_res_s=60,
         write_output=False,
     )
+    # Hour-long segments: the furnace segment can end with the zone above the
+    # heating setpoint, and under the zone's full air capacitance it takes
+    # several minutes to drift down to the heat pump's turn-on; a few-minute
+    # segment can end before the heat pump is ever called.
     plan.add_segment(
         start=datetime(2024, 1, 1, 0, 0),
-        end=datetime(2024, 1, 1, 0, 5),
+        end=datetime(2024, 1, 1, 1, 0),
     )
 
     def setup_ashp(bp: DwellingBlueprint) -> None:
@@ -90,8 +94,8 @@ def test_simulation_plan_swap_furnace_to_ashp():
         bp.add_equipment(ASHPCooler("ASHP Cooler", capacity_w=10000, seer=18.0))
 
     plan.add_segment(
-        start=datetime(2024, 1, 1, 0, 5),
-        end=datetime(2024, 1, 1, 0, 10),
+        start=datetime(2024, 1, 1, 1, 0),
+        end=datetime(2024, 1, 1, 2, 0),
         setup=setup_ashp,
     )
     results = plan.run()
