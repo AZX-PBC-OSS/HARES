@@ -34,6 +34,10 @@ START_HARES = "2019-05-05T13:00:00"
 DURATION_H = 1
 TIME_RES_MIN = 1
 
+# OCHRE seeds numpy's global RNG only when given a seed or an output path;
+# unseeded, its stochastic equipment makes the reference differ run to run.
+OCHRE_SEED = 42
+
 # ZOH resampling for all continuous weather fields -- matches OCHRE's pandas ffill().
 # Note: sky_temp is not overridable -- HARES always recomputes it from the
 # interpolated inputs (see ResampleOverrides::ochre_compat in hares-io).
@@ -67,6 +71,7 @@ def _run_ochre() -> dict[str, float]:
         weather_file=WEATHER,
         verbosity=6,
         save_results=False,
+        seed=OCHRE_SEED,
     )
     result = dwelling.simulate()
     assert isinstance(result, tuple) and len(result) == 3, (
@@ -90,7 +95,6 @@ def _run_ochre() -> dict[str, float]:
 
 def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
     """Run HARES via simulate() and parse the DataFrame for column kWh."""
-    pytest.importorskip("polars")
     from ochre_next import Dwelling as HaresDwelling
 
     dwelling = HaresDwelling.from_hpxml(
@@ -122,9 +126,9 @@ def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
 # Tests
 # ---------------------------------------------------------------------------
 
-# Scoped to the runs whose selector includes the ochre marker (the slow job's
-# "slow or ochre"); the default job's "not slow and not ochre" deselects the
-# module. Environments without the ochre group still import the module during
+# Scoped to the runs whose selector includes the ochre marker (CI's OCHRE
+# comparison job); the default "not slow and not ochre" deselects the module.
+# Environments without the ochre group still import the module during
 # collection, so the guard below reports a module-level skip there.
 pytestmark = pytest.mark.ochre
 
@@ -147,42 +151,44 @@ def hares_results(tmp_path_factory: pytest.TempPathFactory) -> dict[str, float]:
     return _run_hares_simulate(tmp_path_factory.mktemp("hares_parity"))
 
 
-# Tolerances per THERMAL-008 / ASHRAE 140-2023 §5.2.
-# Schedule-driven loads: 2% (exact match expected).
-# HVAC: 15% (ASHRAE 140 acceptance range for annual heating energy).
-# Total: 10% (allows for unimplemented event-driven equipment).
-# Water Heating: 5% (thermostatic, matching the HVAC Cooling tier).
-# Lighting: 5% (schedule-driven, matching Indoor Lighting).
-# Other: 2% (a sum of schedule-driven members).
-PARITY_CHECKS: list[tuple[str, float]] = [
-    ("Total Electric Power (kW)", 0.10),
-    ("HVAC Cooling Electric Power (kW)", 0.05),
-    ("HVAC Heating Electric Power (kW)", 0.15),
-    ("Ventilation Fan Electric Power (kW)", 0.02),
-    ("MELs Electric Power (kW)", 0.02),
-    ("TV Electric Power (kW)", 0.02),
-    ("Refrigerator Electric Power (kW)", 0.02),
-    ("Indoor Lighting Electric Power (kW)", 0.05),
-    ("Exterior Lighting Electric Power (kW)", 0.10),
-    ("Water Heating Electric Power (kW)", 0.05),
-    ("Lighting Electric Power (kW)", 0.05),
-    ("Other Electric Power (kW)", 0.02),
+PARITY_COLUMNS: list[str] = [
+    "Total Electric Power (kW)",
+    "HVAC Cooling Electric Power (kW)",
+    "HVAC Heating Electric Power (kW)",
+    "Ventilation Fan Electric Power (kW)",
+    "MELs Electric Power (kW)",
+    "TV Electric Power (kW)",
+    "Refrigerator Electric Power (kW)",
+    "Indoor Lighting Electric Power (kW)",
+    "Exterior Lighting Electric Power (kW)",
+    "Water Heating Electric Power (kW)",
+    "Lighting Electric Power (kW)",
+    "Other Electric Power (kW)",
 ]
 
-# Declared divergences: a case whose measured relative error exceeds its
+# Over the parity hour both simulators run the same schedules on the same
+# resampled weather, and every case that agrees does so to floating-point
+# rounding (largest measured relative error 1.8e-15, Exterior Lighting). The
+# tolerance holds that agreement with room for summation-order differences
+# across platforms, so any change to a compared quantity fails the case.
+AGREEMENT_REL_TOL = 1e-9
+# HVAC Heating and Water Heating draw nothing in this hour on either side
+# (both measured exactly 0.0 kWh); a nonzero HARES value is a change.
+ZERO_ABS_TOL_KWH = 1e-12
+
+# Declared divergences: a case whose measured relative error exceeds the
 # tolerance stays as a strict xfail citing the measured pair, so a future fix
 # that closes the gap turns the XPASS into a visible test failure and the
-# mark gets removed. Only the cited assertion is expected; a setup error
-# fails the case even under the mark. A missing-column assertion inside an
-# xfail-marked case would report as the declared xfail: the tracked columns
-# are pinned loudly by test_output_columns_present instead.
+# mark gets removed. Only the comparison assertion is expected: a missing
+# column raises LookupError, which fails the case even under the mark, and
+# test_parity_columns_present pins every column without a mark.
 PARITY_XFAILS: dict[str, str] = {
     "Lighting Electric Power (kW)": (
         "HARES's Lighting End Use aggregate holds Indoor Lighting only: "
         "columns.rs's LIGHTING arm does not tag 'Exterior Lighting', which "
         "falls to the Other aggregate; measured over the parity hour: OCHRE "
         "0.09256122877254946 kWh vs HARES 0.08545972626253563 kWh, a relative "
-        "error of 7.7% against the 5% tolerance"
+        "error of 7.7%, the Exterior Lighting share"
     ),
 }
 
@@ -190,15 +196,14 @@ PARITY_XFAILS: dict[str, str] = {
 def _parity_cases() -> list[object]:
     """Build the parametrize cases, carrying the declared divergences' marks."""
     cases: list[object] = []
-    for col, tol in PARITY_CHECKS:
+    for col in PARITY_COLUMNS:
         reason = PARITY_XFAILS.get(col)
         if reason is None:
-            cases.append(pytest.param(col, tol, id=col))
+            cases.append(pytest.param(col, id=col))
         else:
             cases.append(
                 pytest.param(
                     col,
-                    tol,
                     id=col,
                     marks=pytest.mark.xfail(
                         reason=reason, raises=AssertionError, strict=True
@@ -208,24 +213,45 @@ def _parity_cases() -> list[object]:
     return cases
 
 
-@pytest.mark.parametrize("col,tol", _parity_cases())
+def _lookup(
+    col: str, ochre_results: dict[str, float], hares_results: dict[str, float]
+) -> tuple[float, float]:
+    o_val = ochre_results.get(col)
+    if o_val is None:
+        raise LookupError(f"OCHRE output has no column '{col}'")
+    h_val = resolve_hares_kwh(col, hares_results)
+    if h_val is None:
+        raise LookupError(f"HARES output has no column matching '{col}'")
+    return o_val, h_val
+
+
+def test_parity_columns_present(
+    ochre_results: dict[str, float], hares_results: dict[str, float]
+) -> None:
+    """Every compared column resolves on both simulators' results."""
+    missing: list[str] = []
+    for col in PARITY_COLUMNS:
+        if col not in ochre_results:
+            missing.append(f"OCHRE: '{col}'")
+        if resolve_hares_kwh(col, hares_results) is None:
+            missing.append(f"HARES: '{col}'")
+    assert not missing, f"Parity columns missing: {', '.join(missing)}"
+
+
+@pytest.mark.parametrize("col", _parity_cases())
 def test_parity(
     col: str,
-    tol: float,
     ochre_results: dict[str, float],
     hares_results: dict[str, float],
 ) -> None:
-    o_val = ochre_results.get(col)
-    assert o_val is not None, f"OCHRE output has no column '{col}'"
-    h_val = resolve_hares_kwh(col, hares_results)
-    assert h_val is not None, f"HARES output has no column matching '{col}'"
+    o_val, h_val = _lookup(col, ochre_results, hares_results)
 
-    if abs(o_val) < 1e-9:
-        assert abs(h_val) < 1e-3, f"{col}: OCHRE≈0 but HARES={h_val:.4f}"
+    if o_val == 0.0:
+        assert abs(h_val) <= ZERO_ABS_TOL_KWH, f"{col}: OCHRE 0 kWh but HARES {h_val!r} kWh"
         return
 
     rel_err = abs(h_val - o_val) / abs(o_val)
-    assert rel_err <= tol, (
-        f"{col}: relative error {rel_err:.1%} exceeds tolerance {tol:.0%} "
-        f"(OCHRE={o_val:.4f}, HARES={h_val:.4f})"
+    assert rel_err <= AGREEMENT_REL_TOL, (
+        f"{col}: relative error {rel_err:.3e} exceeds {AGREEMENT_REL_TOL:.0e} "
+        f"(OCHRE={o_val!r} kWh, HARES={h_val!r} kWh)"
     )
