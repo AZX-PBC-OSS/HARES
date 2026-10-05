@@ -212,29 +212,280 @@ pub(super) fn first_location(details: &XmlNode, zone_type: &ZoneType) -> Option<
     .find(|location| parse_zone_label(location) == *zone_type)
 }
 
-/// Attic geometry under a square hip roof: the roof footprint, the hip's
-/// peak height, and the footprint times a third of that height, at least
-/// 0.01 ft³ (geometry.rb:1325-1329, with the height and footprint from
-/// geometry.rb:1373-1393). This is OS-HPXML's only attic rule: it applies
-/// it to vented and unvented attics alike and has no gable-roof variant,
-/// so a gable attic takes the hip volume. `None` when no roof with a pitch
-/// covers the attic.
-pub(super) fn hip_attic_geometry(
+/// The conditioned storeys a gable attic sits on: the height of their
+/// above-grade walls (ceiling height times floors above grade) and the
+/// conditioned floor area per floor (conditioned floor area over all
+/// conditioned floors, the basement's included).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Storey {
+    pub wall_height_m: f64,
+    pub floor_area_m2: f64,
+}
+
+/// How far the attic's floors and the floor area per storey may differ
+/// from its roof footprint and still be read as the one rectangle under it.
+/// Areas come rounded to the square foot or the tenth of one, and BEopt
+/// writes roofs without overhang, so a real match is within a fraction of a
+/// percent; a wing or a smaller upper floor differs by far more.
+const FOOTPRINT_MATCH_FRACTION: f64 = 0.02;
+
+/// Attic geometry: the roof footprint (roof area over sqrt(1 + slope²),
+/// geometry.rb:1373-1393), a height and the air volume, at least 0.01 ft³.
+///
+/// A gable attic takes its geometric volume, half the footprint times the
+/// ridge rise, rise = (span / 2) tan θ, with the span from the storey under
+/// it (see [`gable_rise_m`]). This departs from OS-HPXML, whose one attic
+/// rule is a square hip whatever the roof (geometry.rb:1315-1330, "Assume
+/// square hip roof"): for a gable attic that undercounts the air, by 27 %
+/// on base.xml (104.7 m³ against its 143.4 m³). Any other attic, and a
+/// gable whose span the HPXML does not determine, is OS-HPXML's square hip:
+/// the hip's peak height 0.5 sin(atan(slope)) sqrt(footprint) and a third of
+/// the footprint times it. `None` when no roof with a pitch covers the
+/// attic.
+pub(super) fn attic_geometry(
     details: &XmlNode,
+    storey: Option<Storey>,
     warnings: &mut Vec<Warning>,
 ) -> Result<Option<SpaceGeometry>, HpxmlError> {
-    let Some((height_m, footprint_m2)) =
+    let Some((hip_height_m, footprint_m2)) =
         roof_height_and_footprint_m(details, &ZoneType::Attic, warnings)?
     else {
         return Ok(None);
     };
     let location = first_location(details, &ZoneType::Attic).expect("an attic roof was found");
+    let (height_m, volume_m3) = match gable_rise_m(details, footprint_m2, storey, warnings)? {
+        Some(rise_m) => (rise_m, footprint_m2 * rise_m / 2.0),
+        None => (hip_height_m, footprint_m2 * hip_height_m / 3.0),
+    };
     Ok(Some(SpaceGeometry {
         floor_area_m2: footprint_m2,
         height_m,
-        volume_m3: (footprint_m2 * height_m / 3.0).max(conv::volume_ft3_to_m3(0.01)),
+        volume_m3: volume_m3.max(conv::volume_ft3_to_m3(0.01)),
         location,
     }))
+}
+
+/// The ridge rise of a gable attic, (span / 2) tan θ; `None` for an attic
+/// its HPXML does not show to be one, or whose span it does not determine.
+///
+/// A gable attic has walls to the outside, its two gable ends, under roofs
+/// of one positive pitch that face two opposite ways where they give an
+/// azimuth. Gable walls over roofs of several pitches or orientations leave
+/// the roof shape unknown, which is a warning.
+///
+/// The span is a side of the rectangle under the roof: its area the roof
+/// footprint, its perimeter the conditioned walls' area over the storey
+/// wall height (see [`storey_rectangle_sides_m`]). The gable ends stand on
+/// one pair of sides, the pair whose triangles, side² tan θ / 4, come
+/// nearer the gable walls' area per end.
+///
+/// The gable wall area picks that pair and must agree with its triangle,
+/// within [`GABLE_END_RATIO_MIN`] to [`GABLE_END_RATIO_MAX`]. It does not
+/// size the rise: BEopt's gable walls include the eave overhang (144.5 ft²
+/// per end on a 30 ft span at 6:12, where the triangle is 112.5 ft²), so a
+/// rise taken from them, sqrt(end area × tan θ), overstates the volume.
+fn gable_rise_m(
+    details: &XmlNode,
+    footprint_m2: f64,
+    storey: Option<Storey>,
+    warnings: &mut Vec<Warning>,
+) -> Result<Option<f64>, HpxmlError> {
+    let mut gable_area_m2 = 0.0;
+    for (location, wall) in surfaces(details, "Walls", "Wall") {
+        if parse_zone_label(&location) == ZoneType::Attic
+            && child_text(wall, "ExteriorAdjacentTo").as_deref() == Some("outside")
+        {
+            gable_area_m2 += parse_value_with_units(wall.child("Area"), ValueKind::Area)?
+                .ok_or_else(|| {
+                    HpxmlError::Parse(format!("wall in '{location}' has no Area").into())
+                })?;
+        }
+    }
+    if gable_area_m2 <= 0.0 {
+        return Ok(None);
+    }
+    let mut pitches = Vec::new();
+    let mut azimuths = Vec::new();
+    for (location, roof) in surfaces(details, "Roofs", "Roof") {
+        if parse_zone_label(&location) != ZoneType::Attic {
+            continue;
+        }
+        if let Some(pitch) = parse_value_with_units(roof.child("Pitch"), ValueKind::Raw)? {
+            pitches.push(pitch);
+        }
+        if let Some(azimuth) = parse_value_with_units(roof.child("Azimuth"), ValueKind::Raw)? {
+            let azimuth = azimuth.rem_euclid(360.0);
+            if !azimuths.iter().any(|a: &f64| (a - azimuth).abs() < 1e-6) {
+                azimuths.push(azimuth);
+            }
+        }
+    }
+    let one_pitch = pitches
+        .first()
+        .is_some_and(|&p| p > 0.0 && pitches.iter().all(|q| (q - p).abs() < 1e-9));
+    let two_ways = match azimuths.as_slice() {
+        [] => true,
+        [a, b] => ((a - b).abs() - 180.0).abs() < 1e-6,
+        _ => false,
+    };
+    if !(one_pitch && two_ways) {
+        warnings.push(Warning::new(
+            "hpxml",
+            format!(
+                "the attic has {gable_area_m2:.1} m2 of gable walls, but its roofs (pitches \
+                 {pitches:?}, azimuths {azimuths:?}) are not one gable; its volume is \
+                 OS-HPXML's square hip"
+            ),
+        ));
+        return Ok(None);
+    }
+    let slope = pitches[0] / 12.0;
+    let Some(storey) = storey else {
+        return Ok(span_unknown(
+            warnings,
+            "the number of conditioned floors is not given",
+        ));
+    };
+    let Some((short_m, long_m)) =
+        storey_rectangle_sides_m(details, footprint_m2, storey, warnings)?
+    else {
+        return Ok(None);
+    };
+    let end_area_m2 = gable_area_m2 / 2.0;
+    let triangle_m2 = |side_m: f64| side_m * side_m * slope / 4.0;
+    let span_m = if (triangle_m2(short_m) - end_area_m2).abs()
+        <= (triangle_m2(long_m) - end_area_m2).abs()
+    {
+        short_m
+    } else {
+        long_m
+    };
+    let ratio = end_area_m2 / triangle_m2(span_m);
+    if !(GABLE_END_RATIO_MIN..=GABLE_END_RATIO_MAX).contains(&ratio) {
+        return Ok(span_unknown(
+            warnings,
+            &format!(
+                "its {end_area_m2:.1} m2 gable ends are {ratio:.2} times the {:.1} m2 triangle \
+                 of the {span_m:.2} m span the walls give, outside {GABLE_END_RATIO_MIN} to \
+                 {GABLE_END_RATIO_MAX}",
+                triangle_m2(span_m)
+            ),
+        ));
+    }
+    Ok(Some(span_m / 2.0 * slope))
+}
+
+/// The range of a gable end's area over the triangle of the span the walls
+/// give within which the two describe the same roof. A gable wall is at
+/// least its triangle, less only by rounding; it can be more by the eave
+/// overhang it includes, (1 + 2 overhang / span)², 1.28 for BEopt's 2 ft
+/// eaves on a 30 ft span. 1.5 admits eaves up to 11 % of the span on each
+/// side, 3.3 ft on a 30 ft span. Outside the range the storey's walls and
+/// the gable walls disagree about the span, as when the ceiling height
+/// leaves out the floor depth or the walls do not form one rectangle.
+const GABLE_END_RATIO_MIN: f64 = 0.98;
+const GABLE_END_RATIO_MAX: f64 = 1.5;
+
+/// The short and long sides of the rectangle under the attic: area the
+/// roof footprint, perimeter the conditioned walls' gross area (walls whose
+/// inside is conditioned space and whose outside is neither an attic nor
+/// conditioned space) over the storey wall height. The walls bound the attic
+/// only when every attic floor lies over conditioned space and those floors,
+/// and the conditioned floor area per floor, each match the roof footprint
+/// within [`FOOTPRINT_MATCH_FRACTION`]: a wing or a smaller upper floor
+/// would add walls the attic does not sit on. `None`, with a warning naming
+/// why, when the rectangle is not determined.
+fn storey_rectangle_sides_m(
+    details: &XmlNode,
+    footprint_m2: f64,
+    storey: Storey,
+    warnings: &mut Vec<Warning>,
+) -> Result<Option<(f64, f64)>, HpxmlError> {
+    let mut attic_floor_m2 = 0.0;
+    for (location, floor) in surfaces(details, "Floors", "Floor") {
+        let exterior = child_text(floor, "ExteriorAdjacentTo").unwrap_or_default();
+        let below = match (parse_zone_label(&location), parse_zone_label(&exterior)) {
+            (_, ZoneType::Attic) => location.as_str(),
+            (ZoneType::Attic, _) => exterior.as_str(),
+            _ => continue,
+        };
+        if parse_zone_label(below) != ZoneType::Conditioned {
+            return Ok(span_unknown(
+                warnings,
+                &format!(
+                    "the attic also lies over '{below}', which the conditioned walls do not bound"
+                ),
+            ));
+        }
+        attic_floor_m2 += parse_value_with_units(floor.child("Area"), ValueKind::Area)?
+            .ok_or_else(|| HpxmlError::Parse(format!("floor over '{below}' has no Area").into()))?;
+    }
+    let mismatched =
+        |area_m2: f64| (area_m2 - footprint_m2).abs() > FOOTPRINT_MATCH_FRACTION * footprint_m2;
+    if mismatched(attic_floor_m2) {
+        return Ok(span_unknown(
+            warnings,
+            &format!(
+                "its floors over conditioned space, {attic_floor_m2:.1} m2, do not match its \
+                 roof footprint, {footprint_m2:.1} m2"
+            ),
+        ));
+    }
+    if mismatched(storey.floor_area_m2) {
+        return Ok(span_unknown(
+            warnings,
+            &format!(
+                "the conditioned floor area per floor, {:.1} m2, does not match its roof \
+                 footprint, {footprint_m2:.1} m2, so the storeys under it are not one rectangle",
+                storey.floor_area_m2
+            ),
+        ));
+    }
+    let storey_wall_height_m = storey.wall_height_m;
+    let mut wall_area_m2 = 0.0;
+    for (location, wall) in surfaces(details, "Walls", "Wall") {
+        let exterior = child_text(wall, "ExteriorAdjacentTo").unwrap_or_default();
+        if parse_zone_label(&location) == ZoneType::Conditioned
+            && !matches!(
+                parse_zone_label(&exterior),
+                ZoneType::Attic | ZoneType::Conditioned
+            )
+        {
+            wall_area_m2 += parse_value_with_units(wall.child("Area"), ValueKind::Area)?
+                .ok_or_else(|| {
+                    HpxmlError::Parse(format!("wall in '{location}' has no Area").into())
+                })?;
+        }
+    }
+    let half_perimeter_m = wall_area_m2 / storey_wall_height_m / 2.0;
+    let discriminant = half_perimeter_m * half_perimeter_m - 4.0 * footprint_m2;
+    if wall_area_m2 <= 0.0 || discriminant < 0.0 {
+        return Ok(span_unknown(
+            warnings,
+            &format!(
+                "{wall_area_m2:.1} m2 of conditioned walls {storey_wall_height_m:.2} m high do \
+                 not enclose a {footprint_m2:.1} m2 rectangle"
+            ),
+        ));
+    }
+    let root = discriminant.sqrt();
+    Ok(Some((
+        (half_perimeter_m - root) / 2.0,
+        (half_perimeter_m + root) / 2.0,
+    )))
+}
+
+/// Records that a gable attic's span is not determined and that its volume
+/// falls back to OS-HPXML's square hip.
+fn span_unknown<T>(warnings: &mut Vec<Warning>, reason: &str) -> Option<T> {
+    warnings.push(Warning::new(
+        "hpxml",
+        format!(
+            "the gable attic's span cannot be determined ({reason}); its volume is OS-HPXML's \
+             square hip (geometry.rb:1315-1330)"
+        ),
+    ));
+    None
 }
 
 fn round_to(value: f64, places: i32) -> f64 {

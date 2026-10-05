@@ -267,3 +267,49 @@ justification → measured impact → pinning tests.
   and `conversions::tests::the_site_type_sets_the_terrain`. Both fail when
   suburban terrain takes OCHRE's rural (0.85, 0.20) or the site type is
   ignored for rural.
+
+## D-009: A gable attic's volume from its span and pitch
+
+- **Reference behavior:** OS-HPXML v1.12.0 has one attic rule, a square
+  hip under the roofs whatever their shape: volume one third of the roof
+  footprint times a height of 0.5 sin(atan(slope)) sqrt(footprint)
+  (`geometry.rb:1315-1330` and `:1373-1393`, "Assume square hip roof").
+  OCHRE sizes a gable attic from its gable walls: rise
+  sqrt(gable area × tan(pitch)), volume half the floor area times it
+  (`ochre/utils/hpxml.py:617`, in `parse_hpxml_zones`).
+- **HARES behavior:** a gable attic (walls to the outside under roofs of
+  one pitch facing two opposite ways) takes its geometric volume, half the
+  roof footprint times the ridge rise (span / 2) tan(pitch). The span is a
+  side of the rectangle whose area is the roof footprint and whose
+  perimeter is the conditioned wall area over the storey wall height. The
+  gable wall area picks which pair of sides carries the gables, and must
+  lie within 0.98 to 1.5 times that span's triangle, which admits eaves up
+  to 11 % of the span on each side (`gable_rise_m`,
+  `hares-io/src/hpxml/zone_geometry.rs`). Where the input does not
+  determine the span (an attic over a garage, floors that do not match the
+  footprint, a smaller upper storey, no floor counts, gable ends that
+  disagree with the span), the attic keeps OS-HPXML's hip, with a warning
+  naming why.
+- **Justification:** the hip rule undercounts a gable attic's air:
+  OS-HPXML's `base.xml` gable holds 143.4 m³ and the hip gives 104.7 m³
+  (−27 %). OCHRE's gable-wall formula inherits whatever the gable walls
+  include. BEopt's include the eave overhang: 144.5 ft² per end on a
+  30 ft span, whose 6:12 triangle is 112.5 ft². That raises the ridge
+  from 7.5 to 8.5 ft and the volume by 13 %.
+- **Measured impact:** on `data/examples/BEopt_example.xml` the attic is
+  127.4 m³ at a 2.29 m rise. OS-HPXML's hip gives 87.7 m³ and OCHRE 144.4
+  m³. Attic MAE against the OCHRE conditioned oracle, from the hip to this
+  volume (both at the then MediumRough roof roughness): summer 2.16 to
+  1.77 °C (dynamic), spring 1.76 to 1.47 °C, winter 1.55 to 1.44 °C.
+  OCHRE's eave-inflated volume would give 1.55, 1.30 and 1.39 °C; that
+  closer agreement is not taken. Indoor MAE is unchanged within 0.01 °C.
+- **Pinning tests:** `hpxml_parsing_tests::a_gable_attic_takes_its_geometric_volume`,
+  `hpxml_parsing_tests::eaves_in_the_gable_walls_do_not_raise_the_attic`,
+  `hpxml_parsing_tests::a_gable_attic_of_unknown_span_is_a_square_hip_with_a_warning`,
+  and `structural_envelope_oracle` (`beopt_building_structure`,
+  `beopt_rc_network_topology`, `beopt_ua_parity`). With OS-HPXML's hip,
+  the first two and all three structural tests fail. With OCHRE's
+  gable-wall rise, the eaves test and the three structural tests fail;
+  `a_gable_attic_takes_its_geometric_volume` does not discriminate it,
+  since `base.xml`'s gable walls are exactly their triangles and both
+  rules give 7.5 ft there.

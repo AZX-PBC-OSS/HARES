@@ -2758,42 +2758,210 @@ fn non_positive_temperature_capacitance_multiplier_is_an_error() {
     );
 }
 
-/// Every attic is a square hip under its roofs, gable roofs included, as
-/// OS-HPXML has no other attic rule: footprint = roof area /
-/// sqrt(1 + slope^2), height = 0.5 sin(atan(slope)) sqrt(footprint), volume
-/// = footprint x height / 3 (geometry.rb:1325-1329, 1373-1393). base.xml's
-/// attic has gable walls; without them it is sized the same.
-#[test]
-fn every_attic_is_a_square_hip() {
-    let with_gables = parse_vendored_sample("base.xml");
-    let without_gables = parse_edited_sample("base.xml", |xml| {
+fn attic_volume_and_height_m(building: &hares_io::Building) -> (f64, f64) {
+    let attic = building
+        .zones
+        .iter()
+        .find(|z| z.zone_type == ZoneType::Attic)
+        .expect("attic zone");
+    (
+        attic.volume_m3.expect("attic volume"),
+        attic.height_m.expect("attic height"),
+    )
+}
+
+fn assert_attic(building: &hares_io::Building, volume_ft3: f64, height_ft: f64) {
+    let (volume, height) = attic_volume_and_height_m(building);
+    let expected = hares_physics::units::volume_ft3_to_m3(volume_ft3);
+    assert!(
+        (volume - expected).abs() / expected < 1e-6,
+        "{volume} m3, expected {expected} m3"
+    );
+    let expected_height = hares_physics::units::length_ft_to_m(height_ft);
+    assert!(
+        (height - expected_height).abs() / expected_height < 1e-6,
+        "attic height {height} m, expected {expected_height} m"
+    );
+}
+
+/// base.xml without its gable wall.
+fn base_without_gable() -> hares_io::Building {
+    parse_edited_sample("base.xml", |xml| {
         let start = xml
             .find("<Wall>\n            <SystemIdentifier id='Wall2'/>")
             .expect("Wall2");
         let end = start + xml[start..].find("</Wall>").expect("closed") + "</Wall>".len();
         format!("{}{}", &xml[..start], &xml[end..]).replace("<AttachedToWall idref='Wall2'/>", "")
-    });
+    })
+}
+
+/// The two sides of the rectangle with area `area` and perimeter
+/// `perimeter`.
+fn rectangle_sides(area: f64, perimeter: f64) -> (f64, f64) {
+    let half = perimeter / 2.0;
+    let root = (half * half - 4.0 * area).sqrt();
+    ((half - root) / 2.0, (half + root) / 2.0)
+}
+
+/// A gable attic, one whose walls to the outside are its two gable ends,
+/// takes its geometric volume: half its footprint times its ridge rise,
+/// rise = (span / 2) tan(pitch). base.xml: the 1509.3 ft2 roof at 6:12
+/// covers a 1350 ft2 footprint, and 1200 ft2 of conditioned walls 8 ft high
+/// give it a 150 ft perimeter, so a 30 x 45 ft rectangle; the 112.5 ft2
+/// gable ends are the 30 ft span's triangles. Rise 7.5 ft, 5062.5 ft3.
+#[test]
+fn a_gable_attic_takes_its_geometric_volume() {
     let slope: f64 = 6.0 / 12.0;
     let footprint_ft2 = 1509.3 / (1.0 + slope * slope).sqrt();
-    let height_ft = 0.5 * slope.atan().sin() * footprint_ft2.sqrt();
-    let expected = hares_physics::units::volume_ft3_to_m3(footprint_ft2 * height_ft / 3.0);
-    for building in [with_gables, without_gables] {
-        let attic = building
-            .zones
-            .iter()
-            .find(|z| z.zone_type == ZoneType::Attic)
-            .expect("attic zone");
-        let volume = attic.volume_m3.expect("attic volume");
+    let (span_ft, _) = rectangle_sides(footprint_ft2, 1200.0 / 8.0);
+    assert!((span_ft - 30.0).abs() < 1e-2, "span {span_ft} ft");
+    let rise_ft = span_ft / 2.0 * slope;
+    let ceiling_from_the_attic_side = parse_edited_sample("base.xml", |xml| {
+        let from = "<ExteriorAdjacentTo>attic - unvented</ExteriorAdjacentTo>\n            <InteriorAdjacentTo>living space</InteriorAdjacentTo>\n            <FloorOrCeiling>";
+        assert!(xml.contains(from), "base.xml's attic floor");
+        xml.replacen(
+            from,
+            "<ExteriorAdjacentTo>living space</ExteriorAdjacentTo>\n            <InteriorAdjacentTo>attic - unvented</InteriorAdjacentTo>\n            <FloorOrCeiling>",
+            1,
+        )
+    });
+    for building in [
+        parse_vendored_sample("base.xml"),
+        ceiling_from_the_attic_side,
+    ] {
+        assert_attic(&building, footprint_ft2 * rise_ft / 2.0, rise_ft);
+    }
+}
+
+/// The gable walls choose the span but do not size the rise: BEopt's
+/// 144.5 ft2 gable ends include the eave overhang, and sqrt(end area x
+/// tan(pitch)) would raise its 30 ft span's 7.5 ft ridge to 8.5 ft. Its
+/// 1200 ft2 footprint and 1120 ft2 of 8 ft walls make a 30 x 40 ft
+/// rectangle; the gable triangles sit on the 30 ft sides: 4500 ft3.
+#[test]
+fn eaves_in_the_gable_walls_do_not_raise_the_attic() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/examples/BEopt_example.xml");
+    let building = parse_hpxml(&path).expect("BEopt example parses");
+    let (span_ft, long_ft) = rectangle_sides(1200.0, 1120.0 / 8.0);
+    assert!((span_ft - 30.0).abs() < 1e-9 && (long_ft - 40.0).abs() < 1e-9);
+    assert_attic(&building, 1200.0 * 7.5 / 2.0, 7.5);
+}
+
+/// A gable attic whose span the HPXML does not determine is OS-HPXML's
+/// square hip, with a warning naming why: an attic that also covers a
+/// garage is not bounded by the conditioned walls, and without the number
+/// of conditioned floors the area per floor is unknown.
+#[test]
+fn a_gable_attic_of_unknown_span_is_a_square_hip_with_a_warning() {
+    let hip_volume_ft3 = |roof_area_ft2: f64| {
+        let slope: f64 = 6.0 / 12.0;
+        let footprint_ft2 = roof_area_ft2 / (1.0 + slope * slope).sqrt();
+        footprint_ft2 * 0.5 * slope.atan().sin() * footprint_ft2.sqrt() / 3.0
+    };
+    let base_with = |from: &str, to: &str| {
+        let (from, to) = (from.to_string(), to.to_string());
+        parse_edited_sample("base.xml", move |xml| {
+            assert!(xml.contains(&from), "base.xml holds '{from}'");
+            xml.replacen(&from, &to, 1)
+        })
+    };
+    let attic_floor = "<FloorType>\n              <WoodFrame/>\n            </FloorType>\n            <Area>1350.0</Area>";
+    let cases = [
+        (
+            parse_vendored_sample("base-enclosure-garage.xml"),
+            2180.2,
+            "also lies over 'garage'",
+        ),
+        (
+            base_with(
+                "<NumberofConditionedFloors>2.0</NumberofConditionedFloors>",
+                "",
+            ),
+            1509.3,
+            "number of conditioned floors is not given",
+        ),
+        (
+            base_with(attic_floor, &attic_floor.replace("1350.0", "1100.0")),
+            1509.3,
+            "do not match its roof footprint",
+        ),
+        // A larger lower floor, as under a smaller upper storey or beside a
+        // one-storey wing: the walls would bound more than the attic.
+        (
+            base_with(
+                "<ConditionedFloorArea>2700.0</ConditionedFloorArea>",
+                "<ConditionedFloorArea>3500.0</ConditionedFloorArea>",
+            ),
+            1509.3,
+            "per floor",
+        ),
+        (
+            base_with(
+                "<Area>1200.0</Area>\n            <Siding>wood siding</Siding>",
+                "<Area>400.0</Area>\n            <Siding>wood siding</Siding>",
+            ),
+            1509.3,
+            "do not enclose",
+        ),
+        // Gable ends 1.78 times the 30 ft span's triangle: more than any
+        // eave overhang, so the gable and storey walls disagree on the span.
+        (
+            base_with("<Area>225.0</Area>", "<Area>400.0</Area>"),
+            1509.3,
+            "times the",
+        ),
+    ];
+    for (building, roof_area_ft2, reason) in cases {
+        let (volume, _) = attic_volume_and_height_m(&building);
+        let expected = hares_physics::units::volume_ft3_to_m3(hip_volume_ft3(roof_area_ft2));
         assert!(
             (volume - expected).abs() / expected < 1e-6,
-            "{volume} m3, expected {expected} m3"
+            "{volume} m3, expected the hip's {expected} m3"
         );
-        let height = attic.height_m.expect("attic height");
         assert!(
-            (height - hares_physics::units::length_ft_to_m(height_ft)).abs() < 1e-9,
-            "attic height {height} m"
+            building
+                .parse_warnings
+                .iter()
+                .any(|w| w.message.contains("span cannot be determined")
+                    && w.message.contains(reason)),
+            "expected a warning naming '{reason}', got {:?}",
+            building.parse_warnings
         );
     }
+}
+
+/// An attic whose HPXML does not show it is a gable is OS-HPXML's square
+/// hip under its roofs: footprint = roof area / sqrt(1 + slope^2), height =
+/// 0.5 sin(atan(slope)) sqrt(footprint), volume = footprint x height / 3
+/// (geometry.rb:1325-1329, 1373-1393). base.xml without its gable wall has
+/// no gable ends; with roofs of two pitches over gable walls the roof shape
+/// is unknown, which is a warning.
+#[test]
+fn an_attic_not_shown_to_be_a_gable_is_a_square_hip() {
+    let hip = |building: &hares_io::Building, roof_area_ft2: f64, slope: f64| {
+        let footprint_ft2 = roof_area_ft2 / (1.0 + slope * slope).sqrt();
+        let height_ft = 0.5 * slope.atan().sin() * footprint_ft2.sqrt();
+        assert_attic(building, footprint_ft2 * height_ft / 3.0, height_ft);
+    };
+    hip(&base_without_gable(), 1509.3, 6.0 / 12.0);
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/examples/BEopt_example.xml");
+    let xml = std::fs::read_to_string(path)
+        .expect("BEopt example readable")
+        .replacen("<Pitch>6.0</Pitch>", "<Pitch>8.0</Pitch>", 1);
+    let two_pitches = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
+    let slope = (6.0 + 8.0) / 2.0 / 12.0;
+    hip(&two_pitches, 2.0 * 670.8204, slope);
+    assert!(
+        two_pitches
+            .parse_warnings
+            .iter()
+            .any(|w| w.message.contains("gable") && w.message.contains("hip")),
+        "the unknown roof shape must be a warning, got {:?}",
+        two_pitches.parse_warnings
+    );
 }
 
 /// The foundation top above grade is the highest foundation wall top

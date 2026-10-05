@@ -42,16 +42,19 @@ mod tests {
     // Ref: ochre/utils/hpxml.py parse_hpxml_zones(), gable_area=13.42 m², pitch=6/12
     const OCHRE_ATTIC_VOLUME_M3: f64 = 144.415918;
 
-    /// OS-HPXML's attic volume, the one HARES models: a square hip under
-    /// the 6/12 roofs, footprint = roof area / sqrt(1 + slope^2), height =
-    /// 0.5 sin(atan(slope)) sqrt(footprint), volume = footprint x height / 3
-    /// (geometry.rb:1325-1329, 1373-1393).
-    fn os_hpxml_attic_volume_m3() -> f64 {
+    /// The gable attic's geometric volume: half the footprint under the 6/12
+    /// roofs (roof area / sqrt(1 + slope^2)) times the ridge rise over the
+    /// house's 30 ft span, (span / 2) x slope. OCHRE's rise comes from the
+    /// gable wall area, which includes the eaves, and is 13 % higher.
+    fn gable_attic_volume_m3() -> f64 {
         let slope: f64 = 6.0 / 12.0;
         let footprint_m2 = ATTIC_ROOF_TOTAL_M2 / (1.0 + slope * slope).sqrt();
-        let height_m = 0.5 * slope.atan().sin() * footprint_m2.sqrt();
-        footprint_m2 * height_m / 3.0
+        let rise_m = ATTIC_SPAN_M / 2.0 * slope;
+        footprint_m2 * rise_m / 2.0
     }
+
+    /// The span under the gable: the 30 ft side of the 30 x 40 ft house.
+    const ATTIC_SPAN_M: f64 = 30.0 * 0.3048;
 
     /// OS-HPXML's zone temperature capacitance multiplier, one for every zone
     /// (simcontrols.rb:27-28, default 7 at defaults.rb:219-221).
@@ -143,7 +146,7 @@ mod tests {
         let attic_vol = attic
             .volume_m3
             .expect("attic volume must be computed from its roofs");
-        assert_within_pct(attic_vol, os_hpxml_attic_volume_m3(), 0.01, "attic volume");
+        assert_within_pct(attic_vol, gable_attic_volume_m3(), 0.01, "attic volume");
 
         // Floor area
         let cond_area = conditioned.floor_area_m2.expect("conditioned floor area");
@@ -421,7 +424,7 @@ mod tests {
             "indoor zone capacitance",
         );
 
-        let hares_attic_cap = 1.2 * 1006.0 * os_hpxml_attic_volume_m3() * OS_HPXML_TCM;
+        let hares_attic_cap = 1.2 * 1006.0 * gable_attic_volume_m3() * OS_HPXML_TCM;
         assert_within_pct(
             zone_caps[attic_idx],
             hares_attic_cap,
@@ -1050,7 +1053,7 @@ mod tests {
             1.0,
             "indoor zone capacitance",
         );
-        let hares_attic_cap = 1.2 * 1006.0 * os_hpxml_attic_volume_m3() * OS_HPXML_TCM;
+        let hares_attic_cap = 1.2 * 1006.0 * gable_attic_volume_m3() * OS_HPXML_TCM;
         assert_within_pct(
             zone_caps[attic_idx],
             hares_attic_cap,

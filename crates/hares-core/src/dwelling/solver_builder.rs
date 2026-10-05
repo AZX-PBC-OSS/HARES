@@ -1684,7 +1684,7 @@ fn foundation_infiltration_method(
 /// attic leaks through its specific leakage area (given, OS-HPXML's 1/300
 /// default applied at parse, or the one its natural ACH gives at the
 /// reference height, ACH / (1000 WSF)) times its floor area, driven by
-/// stack and wind at its own hip height above the walls top; an unvented
+/// stack and wind at its own height above the walls top; an unvented
 /// attic exchanges 0.1 ACH.
 fn attic_infiltration_method(
     zone: &hares_io::hpxml::Zone,

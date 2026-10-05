@@ -239,8 +239,8 @@ pub struct Zone {
     pub zone_type: ZoneType,
     pub floor_area_m2: Option<f64>,
     pub volume_m3: Option<f64>,
-    /// Height of the space: the attic's hip height, the foundation or
-    /// garage height (OS-HPXML `calculate_zone_height`). The one height
+    /// Height of the space: the attic's gable rise or hip peak, the
+    /// foundation or garage height (OS-HPXML `calculate_zone_height`). The one height
     /// the volume and the infiltration model both read.
     pub height_m: Option<f64>,
     /// The HPXML location covering most of the zone's floor
@@ -1121,9 +1121,9 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 
     // Zone geometry, one rule per zone type. Conditioned: floor area times
     // the ceiling height. Foundation and garage: OS-HPXML's slab-area times
-    // tallest-wall rule (`zone_geometry::slab_space_geometry`). Attic:
-    // OS-HPXML's one attic rule, a square hip under its roofs, gable roofs
-    // included (`zone_geometry::hip_attic_geometry`). Each zone carries the
+    // tallest-wall rule (`zone_geometry::slab_space_geometry`). Attic: a
+    // gable attic's geometric volume, else OS-HPXML's square hip under its
+    // roofs (`zone_geometry::attic_geometry`). Each zone carries the
     // height its rule used. A zone with no geometry keeps no volume and the
     // environment rejects it.
     for zone in &mut zones_vec {
@@ -1133,9 +1133,14 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 zone.height_m = Some(ceiling_height_m);
                 continue;
             }
-            ZoneType::Attic => {
-                super::zone_geometry::hip_attic_geometry(details, &mut parse_warnings)?
-            }
+            ZoneType::Attic => super::zone_geometry::attic_geometry(
+                details,
+                total_conditioned_floors.map(|all| super::zone_geometry::Storey {
+                    wall_height_m: floors_above_grade * average_ceiling_height_m,
+                    floor_area_m2: conditioned_floor_area_m2 / all,
+                }),
+                &mut parse_warnings,
+            )?,
             ZoneType::Garage | ZoneType::Foundation => super::zone_geometry::slab_space_geometry(
                 details,
                 &zone.zone_type,
