@@ -508,6 +508,17 @@ impl HeatPumpHeaterCore {
             HeaterVariant::Wshp => HvacEquipmentType::WshpHeatPumpHeating,
         };
 
+        // A combustion backup (dual-fuel heat pump) burns fuel while the
+        // burner runs and the step publishes that flow in
+        // `flows.fuel_w`; the FUEL capability must be declared exactly when
+        // the flow can appear, so the contract holds in both directions.
+        // An electric backup draws no fuel and declares none.
+        let declares_fuel = config
+            .typed::<HeatPumpHeaterConfig>()
+            .ok()
+            .and_then(|cfg| fuel_type_from_backup_fuel(cfg.common.backup_fuel))
+            .is_some();
+
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(constructor_equipment_id(&config)),
@@ -532,7 +543,12 @@ impl HeatPumpHeaterCore {
                     | CoreCapabilities::HAS_SPEED
                     | CoreCapabilities::HAS_SETPOINT
                     | CoreCapabilities::HAS_COP
-                    | CoreCapabilities::REACTIVE,
+                    | CoreCapabilities::REACTIVE
+                    | (if declares_fuel {
+                        CoreCapabilities::FUEL
+                    } else {
+                        CoreCapabilities::empty()
+                    }),
                 telemetry_fields: heater_telemetry_fields(),
                 zone_type: None,
             },
@@ -1534,14 +1550,10 @@ impl HeatPumpHeaterCore {
                 "heating latent gain during defrost"
             );
         }
-        let core_fuel_w = if scaled_fuel_w > 0.0 {
-            self.backup_fuel_type.map(|fuel_type| FuelPower {
-                fuel_type,
-                consumption_w: scaled_fuel_w,
-            })
-        } else {
-            None
-        };
+        let core_fuel_w = self.backup_fuel_type.map(|fuel_type| FuelPower {
+            fuel_type,
+            consumption_w: scaled_fuel_w.max(0.0),
+        });
         let sp = self.hvac.effective_setpoints();
         let active_setpoint_c = match original_mode {
             OperatingMode::Heating => sp.heating_c + self.dr_setpoint_offset_c,
@@ -2637,7 +2649,14 @@ impl HeatPumpHeaterCore {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
                 reactive_power_kvar: Some(0.0),
-                fuel_w: None,
+                // A declared FUEL capability (combustion backup) must be
+                // satisfied on the restored output too; the burner state is
+                // not checkpointed, so the restored instant carries the
+                // zero-burn flow and the next step recomputes it.
+                fuel_w: self.backup_fuel_type.map(|fuel_type| FuelPower {
+                    fuel_type,
+                    consumption_w: 0.0,
+                }),
                 thermal_output_w: Some(decoded.thermal_output_w),
                 sensible_cooling_w: None,
                 latent_cooling_w: None,
@@ -3476,6 +3495,100 @@ mod tests {
         );
     }
 
+    /// A dual-fuel heat pump (combustion backup) burns backup fuel while the
+    /// burner runs, and the core output's fuel flow must then be a declared
+    /// capability carrying `Some` on every step: burning steps carry the
+    /// consumption, idle steps carry `Some(0.0)`, so
+    /// `validate_core_contract` accepts both against a static FUEL
+    /// declaration. Electric-backup units never publish a fuel flow and
+    /// declare no FUEL.
+    #[test]
+    fn dual_fuel_backup_core_output_declares_its_fuel_flow() {
+        let cfg = heater_config_with(|typed| {
+            typed.common.backup_fuel = Some(hares_types::FuelType::Gas);
+        });
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let cold = env(18.0, 0.0, 0.003);
+        eq.init(&cfg, &cold).unwrap();
+
+        // Burner step: zone below setpoint, so the ER thermostat call brings
+        // the backup on alongside the compressor and the fuel flow is
+        // nonzero.
+        eq.update_control(&cold);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&cold, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            eq.telemetry().get(tk::FUEL_INPUT_W).unwrap_or(0.0) > 0.0,
+            "cold step with a gas backup must burn fuel"
+        );
+        let co = eq.core_output();
+        match co.flows.fuel_w {
+            Some(fuel) => assert!(
+                fuel.consumption_w > 0.0,
+                "burning step must carry a positive fuel consumption"
+            ),
+            None => panic!("burning step must publish flows.fuel_w"),
+        }
+        hares_types::validate_core_contract(eq.descriptor(), co)
+            .expect("burning step's core output must satisfy the contract with FUEL declared");
+
+        // Idle step: zone in the deadband ⇒ no call ⇒ no burn, and the
+        // declared FUEL capability is still satisfied by Some(0.0).
+        let warm = env(23.0, 10.0, 0.005);
+        eq.update_control(&warm);
+        let mut idle_ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&warm, Duration::from_secs(60), &mut idle_ports)
+            .unwrap();
+        let idle_co = eq.core_output();
+        assert_eq!(
+            idle_co.flows.fuel_w.map(|f| f.consumption_w),
+            Some(0.0),
+            "idle step of a dual-fuel unit carries a zero fuel flow, not None"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), idle_co)
+            .expect("idle step's core output must satisfy the contract with FUEL declared");
+    }
+
+    /// An electric-backup heat pump never publishes a fuel flow and declares
+    /// no FUEL capability: the backup's draw is electric, and a FUEL
+    /// declaration against an always-None flow would fail the contract the
+    /// other way.
+    #[test]
+    fn electric_backup_heater_declares_no_fuel_capability() {
+        let cfg = heater_config_with(|typed| {
+            typed.common.backup_fuel = Some(hares_types::FuelType::Electric);
+        });
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let cold = env(18.0, 0.0, 0.003);
+        eq.init(&cfg, &cold).unwrap();
+        eq.update_control(&cold);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&cold, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            !eq.descriptor()
+                .core_capabilities
+                .contains(hares_types::CoreCapabilities::FUEL),
+            "electric backup must not declare FUEL"
+        );
+        assert!(
+            eq.core_output().flows.fuel_w.is_none(),
+            "electric backup must not publish a fuel flow"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            .expect("electric-backup core output must satisfy the contract");
+    }
+
     /// Compressor-only operation (fan power configured to zero, no ER/pan/
     /// pump): Q/P must equal tan(acos(0.84)) — the pure compressor arm of the
     /// per-component model.
@@ -3819,6 +3932,40 @@ mod tests {
         restored.load_state(&state).unwrap();
         hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
             .expect("an ASHP heater checkpoint must restore a contract-valid output");
+    }
+
+    /// The same restore contract for a dual-fuel heater: the FUEL capability
+    /// is declared, so the restored output must carry the fuel flow (the
+    /// burner state is not checkpointed; the restored instant carries the
+    /// zero-burn flow and the next step recomputes it).
+    #[test]
+    fn dual_fuel_restored_checkpoint_output_satisfies_the_core_contract() {
+        let cfg = heater_config_with(|typed| {
+            typed.common.backup_fuel = Some(hares_types::FuelType::Gas);
+        });
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let env = env(18.0, -3.0, 0.005);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let state = eq.save_state().unwrap();
+
+        let mut restored = ASHPHeater::new(cfg);
+        restored
+            .init(
+                &heater_config_with(|typed| {
+                    typed.common.backup_fuel = Some(hares_types::FuelType::Gas);
+                }),
+                &env,
+            )
+            .unwrap();
+        restored.load_state(&state).unwrap();
+        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
+            .expect("a dual-fuel heater checkpoint must restore a contract-valid output");
     }
 
     #[test]

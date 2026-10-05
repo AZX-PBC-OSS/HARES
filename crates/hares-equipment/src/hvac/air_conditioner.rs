@@ -1262,13 +1262,19 @@ impl CoolingCore {
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         self.telemetry.set(tk::SHR, self.hvac.config.shr);
         let original_mode = self.operating_mode;
-        let has_nonzero_flow = electric_kw > 0.0;
         let post_dse_sensible_w = sensible_cooling_w * dse;
         let post_dse_latent_w = latent_cooling_w * dse;
-        self.operating_mode = original_mode.resolve_idle(
-            has_nonzero_flow,
-            Some(-(post_dse_sensible_w + post_dse_latent_w) + fan_heat_w * dse),
-        );
+        let delivered_thermal_w = -(post_dse_sensible_w + post_dse_latent_w) + fan_heat_w * dse;
+        // The delivered thermal flow counts as activity, the same term the
+        // mode-flow guard's active-mode rule and the ASHP heater's
+        // mode resolution count: a unit whose space-fraction-scaled electric
+        // draw is zero (fraction_load_served = 0, a heating-only heat pump's
+        // cooling side) still delivers real zone cooling and must keep its
+        // active mode rather than resolve to Standby, which the thermal-sign
+        // contract rejects against a cooling flow.
+        let has_nonzero_flow = electric_kw > 0.0 || delivered_thermal_w != 0.0;
+        self.operating_mode =
+            original_mode.resolve_idle(has_nonzero_flow, Some(delivered_thermal_w));
         self.telemetry
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         self.telemetry.set(
@@ -1390,9 +1396,7 @@ impl CoolingCore {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
                 reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: None,
-                thermal_output_w: Some(
-                    -(post_dse_sensible_w + post_dse_latent_w) + fan_heat_w * dse,
-                ),
+                thermal_output_w: Some(delivered_thermal_w),
                 sensible_cooling_w: Some(-post_dse_sensible_w),
                 latent_cooling_w: Some(-post_dse_latent_w),
             },
@@ -2451,6 +2455,49 @@ mod tests {
             Some(0.0),
             "no power should be drawn when operating mode is Off",
         );
+    }
+
+    /// A cooling unit serving none of the load (`fraction_load_served = 0`,
+    /// a heating-only heat pump's dormant cooling side) still runs its
+    /// thermostat: on a cooling call the step delivers zone cooling while
+    /// the space-fraction-scaled electric draw is zero. The delivered
+    /// thermal flow is the unit's real output, so the published operating
+    /// mode must stay Cooling (the flow the mode-flow guard counts) and the
+    /// core output must satisfy the contract. Mirrors OCHRE HVAC.py:556-561:
+    /// power scales by the space fraction, "sensible/latent gains to
+    /// envelope are not updated".
+    #[test]
+    fn zero_fraction_cooling_step_satisfies_the_core_contract() {
+        let cfg = ac_config_with(|typed| typed.fraction_load_served = Some(0.0));
+        let mut eq = AirConditioner::new(cfg.clone());
+        let hot = env(26.0, 0.01, 19.0, 30.0);
+        eq.init(&cfg, &hot).unwrap();
+        assert_eq!(eq.update_control(&hot), OperatingMode::Cooling);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&hot, Duration::from_secs(60), &mut ports).unwrap();
+
+        // The OCHRE-faithful delivery: zone cooling happens, electric is
+        // scaled to zero by the zero fraction.
+        assert!(
+            ports.thermal[0].sensible_gain_w < 0.0,
+            "the cooling side still delivers its zone cooling"
+        );
+        assert_eq!(
+            ports.electrical.load_power_w, 0.0,
+            "a zero fraction scales the electric draw to zero"
+        );
+        let co = eq.core_output();
+        assert_eq!(
+            co.state.operating_mode,
+            Some(OperatingMode::Cooling),
+            "an active cooling delivery must report Cooling, not Standby"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), co)
+            .expect("zero-fraction cooling step must satisfy the core-output contract");
     }
 
     /// Grid outage (de-energized bus): the compressor/blower have no supply,
