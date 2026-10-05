@@ -7,8 +7,7 @@
 //! from: an override of a typed field changes the equipment's behaviour, an
 //! unknown field is an error naming the equipment and field, and a value
 //! the typed schema rejects fails the build at the point the override is
-//! applied (never an init that non-critical equipment survives by being
-//! skipped and silently missing from the run).
+//! applied, before any equipment init runs.
 
 use std::path::{Path, PathBuf};
 

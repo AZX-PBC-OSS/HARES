@@ -343,6 +343,17 @@ impl Building {
             (_, others) => Err(MultipleConditionedZones { count: others + 1 }),
         }
     }
+
+    /// Whether a garage is modeled: the building resolves at least one
+    /// Garage zone. Gates garage-only equipment (garage lighting): OCHRE
+    /// hpxml.py:1703-1709 creates it only when a garage is modeled, and an
+    /// equipment giving zone heat to a Garage zone that does not exist
+    /// cannot join the dwelling.
+    pub fn models_garage(&self) -> bool {
+        self.zones
+            .iter()
+            .any(|z| matches!(z.zone_type, ZoneType::Garage))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

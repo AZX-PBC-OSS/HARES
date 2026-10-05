@@ -489,6 +489,7 @@ pub fn inject_schedule_into_specs(
     defaults_path: Option<&Path>,
     defaults: &DefaultsStore,
     foundation_name: Option<&str>,
+    garage_modeled: bool,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
     let mut csv_col_map: HashMap<String, usize> = schedule
@@ -549,7 +550,13 @@ pub fn inject_schedule_into_specs(
 
     // Ensure specs exist for CSV columns that have column mappings but
     // no corresponding spec from HPXML parsing (e.g. microwave).
-    ensure_specs_for_csv_columns(specs, &csv_col_map, defaults, foundation_name);
+    ensure_specs_for_csv_columns(
+        specs,
+        &csv_col_map,
+        defaults,
+        foundation_name,
+        garage_modeled,
+    );
 
     let profiles = defaults_path.map(load_default_profiles).unwrap_or_default();
 
@@ -1424,6 +1431,7 @@ fn ensure_specs_for_csv_columns(
     csv_col_map: &HashMap<String, usize>,
     defaults: &DefaultsStore,
     foundation_name: Option<&str>,
+    garage_modeled: bool,
 ) {
     for mapping in COLUMN_MAPPINGS {
         if matches!(
@@ -1438,6 +1446,15 @@ fn ensure_specs_for_csv_columns(
         if mapping.equipment_name == "Basement Lighting"
             && foundation_name != Some("Finished Basement")
         {
+            continue;
+        }
+        // Same OCHRE rule the HPXML lighting resolver applies
+        // (hpxml.py:1703-1709, resolve_loads.rs): garage lighting is created
+        // only when a garage is modeled. A `lighting_garage` column in the
+        // schedule template must not resurrect garage lighting for a
+        // dwelling without a garage: that spec gives zone heat to a Garage
+        // zone that does not exist and cannot join the dwelling.
+        if mapping.equipment_name == "Garage Lighting" && !garage_modeled {
             continue;
         }
         let col_name = normalize_schedule_col_name(mapping.csv_column);
@@ -1780,6 +1797,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -1805,6 +1823,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -1834,6 +1853,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -1861,6 +1881,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -1904,6 +1925,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -1923,6 +1945,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -1950,6 +1973,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -1996,6 +2020,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2026,6 +2051,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2051,6 +2077,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2167,6 +2194,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2415,6 +2443,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2506,6 +2535,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2556,6 +2586,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         );
         assert!(result.is_err(), "expected Err, got Ok");
@@ -2635,6 +2666,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         );
         assert!(result.is_err(), "expected Err, got Ok");
@@ -2691,6 +2723,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2902,6 +2935,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3067,6 +3101,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3290,6 +3325,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3353,6 +3389,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3413,6 +3450,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3458,6 +3496,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3493,6 +3532,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3554,6 +3594,7 @@ mod tests {
             Some(dir.path()),
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3622,6 +3663,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3716,6 +3758,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject should succeed");
@@ -3861,6 +3904,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -3932,6 +3976,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -3953,6 +3998,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Unfinished Basement"),
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -3974,6 +4020,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Finished Basement"),
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -3998,6 +4045,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Crawlspace"),
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -4023,6 +4071,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Finished Basement"),
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -4063,6 +4112,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Finished Basement"),
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -4108,6 +4158,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             Some("Finished Basement"),
+            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -4228,6 +4279,7 @@ mod tests {
             None,
             &DefaultsStore::empty(),
             None,
+            false,
             &mut warnings,
         )
         .expect("an unknown column is a warning, not an error");

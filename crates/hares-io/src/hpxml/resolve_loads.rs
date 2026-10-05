@@ -1167,6 +1167,17 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
             }
         }
         "Clothes Washer" => Some((0.27, 0.03)),
+        // OCHRE parse_clothes_dryer vented-electric derivation: (1 - 0.85
+        // exhaust) * 0.90 sensible = 0.135, latent = 1 - 0.135 - 0.85 = 0.015.
+        // Reached only by a spec the dryer resolver did not build (a
+        // schedule-injected dryer with no HPXML declaration); a declared
+        // dryer carries its vented/gas-aware fractions from the resolver and
+        // never reaches this default.
+        "Clothes Dryer" => Some((
+            (1.0 - DRYER_EXHAUST_FRACTION_VENTED) * DRYER_ELECTRIC_SENSIBLE_GAIN,
+            1.0 - (1.0 - DRYER_EXHAUST_FRACTION_VENTED) * DRYER_ELECTRIC_SENSIBLE_GAIN
+                - DRYER_EXHAUST_FRACTION_VENTED,
+        )),
         "Dishwasher" => Some((0.30, 0.30)),
         "Refrigerator" => Some((1.00, 0.00)),
         // 0.00 matches OCHRE (freezers are typically in unconditioned space).
@@ -1301,10 +1312,7 @@ fn garage_floor_area_m2(building: &Building) -> f64 {
 /// zone without an area). Mirrors OCHRE's positive garage floor area gate in
 /// hpxml.py:1703-1709, which is derived from garage wall geometry.
 fn has_garage_zone(building: &Building) -> bool {
-    building
-        .zones
-        .iter()
-        .any(|z| matches!(z.zone_type, ZoneType::Garage))
+    building.models_garage()
 }
 
 #[cfg(test)]

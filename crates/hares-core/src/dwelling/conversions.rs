@@ -894,9 +894,8 @@ fn spec_config_from_typed(
     // Validation rides the override delta: a value the schema rejects must
     // error at the merge that applied it, but a payload that carried its
     // defect before any override reached it keeps the init-time semantics
-    // (fatal for critical equipment, skipped with a warning for
-    // non-critical): the merge changed nothing, so the merge reports
-    // nothing.
+    // (the init fails the build): the merge changed nothing, so the merge
+    // reports nothing.
     let overrides_landed = merged != before_overrides;
     // Peel the reserved "zip" override object (it travels inside the
     // override map) into the sidecar so deny_unknown_fields payloads never
@@ -1001,11 +1000,10 @@ fn merge_zip_override(
     // Magnitude bounds, not a point probe, at the override channel's
     // earliest stage: a cancelling row (e.g. zp = 1.79e308, ip = -1.79e308)
     // passes finiteness, the sum checks, and any single-voltage probe, but
-    // NaNs real power across the service band — and downstream, equipment
-    // init rejections for non-critical loads are deliberately
-    // skip-and-warn, so this boundary is where the typo must fail the
-    // build. Shared bounds live in `hares_types::zip` (single source of
-    // truth with the init backstop).
+    // NaNs real power across the service band, and an init that reads the
+    // row fails the build for the same reason: the typo is rejected at the
+    // earliest boundary that sees it. Shared bounds live in
+    // `hares_types::zip` (single source of truth with the init backstop).
     hares_types::zip::validate_plausible_magnitudes(&zip).map_err(|err| {
         HaresError::Equipment(format!(
             "equipment '{equipment_name}': \"zip\" \

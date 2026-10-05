@@ -2339,6 +2339,7 @@ fn build_from_blueprint_inner(
         ),
         &defaults,
         bp.building.foundation_name.as_deref(),
+        bp.building.models_garage(),
         &mut schedule_warnings,
     )?;
     for warning in schedule_warnings.drain(..) {
@@ -2555,14 +2556,12 @@ fn build_from_blueprint_inner(
         let merged_cfg = merged_equipment_config(spec, &override_root)?;
         let mut eq = create_equipment_from_config(&registry, merged_cfg)?;
 
-        // Entrance-1 identity validation runs before `init` — and therefore
-        // before the non-critical init-failure skip below — so an unassigned
+        // Entrance-1 identity validation runs before `init` so an unassigned
         // id (a malformed explicit `equipment_id` the constructor stamped as
         // the sentinel, an explicit 0, or an injection write that did not
-        // land) fails the build loudly on every config channel. Placed after
-        // `init` it would instead surface as an init error, and non-critical
-        // equipment is dropped on init errors — a dwelling built `Ok` with
-        // the equipment silently missing.
+        // land) fails the build as its own error naming the defect on every
+        // config channel, not as an init error attributed to whatever the
+        // equipment's config otherwise rejected.
         if eq.descriptor().id.0 == 0 {
             return Err(unassigned_equipment_id_rejection(
                 spec,
@@ -2607,30 +2606,18 @@ fn build_from_blueprint_inner(
         for warning in init_warning_scratch.drain(..) {
             warnings.push_warning(warning);
         }
-        match init_result {
-            Ok(()) => equipment.push(eq),
-            Err(err) => {
-                let end_use = eq.descriptor().end_use.clone();
-                let is_critical = end_use == EndUse::HVAC_HEATING
-                    || end_use == EndUse::HVAC_COOLING
-                    || end_use == EndUse::WATER_HEATING
-                    || end_use == EndUse::EV
-                    || end_use == EndUse::BATTERY
-                    || end_use == EndUse::PV;
-                if is_critical {
-                    return Err(HaresError::Equipment(format!(
-                        "equipment '{}' init failed: {err}",
-                        merged_cfg.name
-                    )));
-                }
-                let msg = format!(
-                    "equipment '{}' init failed, skipping: {err}",
-                    merged_cfg.name
-                );
-                tracing::error!("{msg}");
-                warnings.push(msg);
-            }
+        // An init failure stops construction for every equipment, HVAC or
+        // not: a load the input declares must join the model or the build
+        // must fail naming the equipment and the cause. Skipping a
+        // non-critical failure would run the dwelling short a declared
+        // load while reporting success.
+        if let Err(err) = init_result {
+            return Err(HaresError::Equipment(format!(
+                "equipment '{}' init failed: {err}",
+                merged_cfg.name
+            )));
         }
+        equipment.push(eq);
     }
     let mut equipment_id_by_name = HashMap::with_capacity(equipment.len());
     // Entrance-1 identity validation, beside the name check it mirrors: no

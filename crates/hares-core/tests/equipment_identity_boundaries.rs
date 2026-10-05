@@ -471,9 +471,10 @@ fn midrun_readd_of_a_removed_name_reuses_its_frozen_columns() {
 /// and the dwelling build must fail loudly — whichever boundary catches it
 /// (constructor deserialization, init, or the entrance's unassigned-id
 /// rejection). The raw-channel chain is pinned above; this pins that the
-/// second config channel cannot reach a silently-built dwelling either —
-/// including the silent-skip face, where a non-critical equipment whose init
-/// fails is dropped with only a warning and the build *succeeds*.
+/// second config channel cannot reach a silently-built dwelling either:
+/// every init failure stops construction, so no config defect on any
+/// equipment can end in a dwelling built `Ok` with the equipment dropped
+/// as a warning.
 #[test]
 fn malformed_equipment_id_in_the_typed_payload_fails_the_build_loudly() {
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -505,20 +506,18 @@ fn malformed_equipment_id_in_the_typed_payload_fails_the_build_loudly() {
     blueprint.add_equipment_spec(spec).expect("add spec");
 
     // GREEN since the fix that moved the entrance-1 id-0 rejection ahead
-    // of `init` (and therefore ahead of the non-critical init-failure
-    // skip): pre-fix, the malformed typed id failed the dehumidifier's
+    // of `init`: pre-fix, the malformed typed id failed the dehumidifier's
     // init and the skip silently dropped the equipment — the build
     // returned `Ok` with the dehumidifier absent. The assertion pins the
     // post-fix contract: the build fails loudly with the same
     // unassigned-id error as the raw channel (both channels construct
     // with the sentinel; the pre-init check rejects it through the shared
-    // error helper).
+    // error helper, before any init).
     let err = blueprint.build().map(|_| ()).expect_err(
         "a malformed equipment_id in the typed payload must fail the build \
          loudly — never a silently-built dwelling missing the equipment (the \
          raw channel already fails loudly with the entrance's unassigned-id \
-         rejection; the typed channel must not silently drop the equipment \
-         through the non-critical init-failure skip)",
+         rejection; the typed channel must not silently drop the equipment)",
     );
     let msg = err.to_string();
     assert!(
@@ -539,14 +538,14 @@ fn malformed_equipment_id_in_the_typed_payload_fails_the_build_loudly() {
 }
 
 /// The tolerance design the identity checks narrowly scope around: a
-/// NON-identity init failure on non-critical equipment is still skipped
-/// with a warning — the build succeeds with the equipment absent, not
-/// fatally rejected. The pre-init identity check must not overcorrect into
-/// rejecting valid ids (this spec carries a valid explicit id 7, which
-/// must pass it), and the skip must not have been broken or made fatal by
-/// the check's insertion directly above it.
+/// NON-identity init failure is fatal for every equipment, critical or
+/// not, so no config defect can end in a dwelling built `Ok` with the
+/// equipment dropped. The pre-init identity check must not overcorrect
+/// into rejecting valid ids: this spec carries a valid explicit id 7,
+/// which must pass the check, so the reported failure is the init's, not
+/// the unassigned-id rejection.
 #[test]
-fn noncritical_init_failure_is_skipped_not_fatal_after_the_identity_checks() {
+fn noncritical_init_failure_is_fatal_after_the_identity_checks() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
     let config = dwelling_config(&hpxml, sim_config(Duration::days(1), None, 0));
@@ -555,8 +554,8 @@ fn noncritical_init_failure_is_skipped_not_fatal_after_the_identity_checks() {
         hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
     // A valid explicit id (passes the pre-init identity check) plus a
     // non-identity field init cannot accept (a string where an f64 is
-    // required): construction defers the parse error to init, init fails,
-    // and the dehumidifier is non-critical — skipped with a warning.
+    // required): construction defers the parse error to init, and the
+    // init failure stops construction naming the equipment.
     let typed = hares_equipment::EquipmentConfig::with_payload(
         "Dehumidifier".to_string(),
         "Dehumidifier".to_string(),
@@ -579,20 +578,23 @@ fn noncritical_init_failure_is_skipped_not_fatal_after_the_identity_checks() {
     };
     blueprint.add_equipment_spec(spec).expect("add spec");
 
-    let dwelling = blueprint.build().expect(
-        "a non-identity init failure on non-critical equipment must be \
-             skipped, not fatal",
+    let err = blueprint.build().map(|_| ()).expect_err(
+        "a non-identity init failure must stop construction naming the \
+             equipment, never a dwelling built with the equipment dropped",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Dehumidifier"),
+        "the error must name the equipment whose init failed, got: {msg}"
     );
     assert!(
-        !dwelling
-            .equipment()
-            .iter()
-            .any(|eq| eq.descriptor().name == "Dehumidifier"),
-        "the init-failing non-critical equipment must be absent from the \
-             built dwelling (skipped with a warning)"
+        msg.contains("init failed"),
+        "the failure must be the init's: the valid explicit id 7 must pass \
+             the pre-init identity check instead of surfacing the \
+             unassigned-id rejection, got: {msg}"
     );
     assert!(
-        dwelling.equipment().len() > 1,
-        "the rest of the dwelling must have assembled normally"
+        msg.contains("not a number"),
+        "the error must carry the init failure's received value, got: {msg}"
     );
 }
