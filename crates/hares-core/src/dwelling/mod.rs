@@ -1785,8 +1785,6 @@ pub struct Dwelling {
     /// convert it to a person count.  Equals `number_of_occupants` from the
     /// Occupancy equipment spec (defaults to 1.0 when unspecified).
     occupancy_scale: f64,
-    #[expect(dead_code, reason = "reserved for potential future use")]
-    zone_capacitances_j_k: Vec<(ZoneId, f64)>,
     prev_humidity_ratios: Vec<(ZoneId, f64)>,
     /// Run-total health counters (port rollbacks, rejected control signals,
     /// clamped actions, curve-index clamps, warm-up outcome). Every event is
@@ -2788,7 +2786,6 @@ fn build_from_blueprint_inner(
         timestamp_buf: String::with_capacity(32),
         occupancy_column_idx,
         occupancy_scale,
-        zone_capacitances_j_k: solvers.zone_capacitances_j_k,
         prev_humidity_ratios: init_humidity_ratios,
         health: RunHealth::default(),
         actors: Vec::new(),
@@ -2871,37 +2868,32 @@ fn build_from_blueprint_inner(
         let rng_stream_before = dwelling.rng.get_stream();
         let rng_word_pos_before = dwelling.rng.get_word_pos();
 
-        let warmup_result = dwelling.run_warmup_converged(0.5, 25);
-        if let Err(err) = warmup_result {
-            // The dwelling is about to be dropped carrying the
-            // accumulated warning log; emit it so this failure carries
-            // the context that led here.
-            for entry in dwelling.take_warnings() {
-                tracing::warn!("{entry}");
+        match dwelling.run_warmup_converged(0.5, 25) {
+            Err(err) => {
+                // The dwelling is about to be dropped carrying the
+                // accumulated warning log; emit it so this failure carries
+                // the context that led here.
+                for entry in dwelling.take_warnings() {
+                    tracing::warn!("{entry}");
+                }
+                return Err(err);
             }
-            return Err(err);
+            #[cfg(feature = "observe")]
+            Ok(iterations) => tracing::debug!(
+                warmup_iterations = iterations,
+                rng_word_pos_delta =
+                    (dwelling.rng.get_word_pos() as i128) - (rng_word_pos_before as i128),
+                "warmup complete; restoring the RNG for production-phase reproducibility"
+            ),
+            #[cfg(not(feature = "observe"))]
+            Ok(_) => {}
         }
-        #[cfg(feature = "observe")]
-        let iterations = warmup_result.expect("warmup just returned Ok");
-
-        #[cfg(feature = "observe")]
-        let rng_word_pos_after_warmup = dwelling.rng.get_word_pos();
 
         // Restore RNG state to pre-warmup position.
         let mut restored_rng = ChaCha8Rng::from_seed(rng_seed_before);
         restored_rng.set_stream(rng_stream_before);
         restored_rng.set_word_pos(rng_word_pos_before);
         dwelling.rng = restored_rng;
-
-        #[cfg(feature = "observe")]
-        {
-            let rng_delta = (rng_word_pos_after_warmup as i128) - (rng_word_pos_before as i128);
-            tracing::debug!(
-                warmup_iterations = iterations,
-                rng_word_pos_delta = rng_delta,
-                "warmup complete; RNG restored for production-phase reproducibility"
-            );
-        }
 
         clock = SimClock::new(
             local_start,
@@ -4517,16 +4509,9 @@ impl Dwelling {
         self.thermal_solver
             .prepare_inputs(&self.ports, &self.latest_env)?;
 
-        // Steps 1e–1f: phase-ordered actor execution driven by the scheduler.
-        // The scheduler plan replaces the previously hard-coded
-        // "solver feedback first, then all actors in registration order"
-        // with explicit phase registration and within-phase priority ordering.
-        #[expect(
-            unused_must_use,
-            reason = "plan is accessed via .plan() below; build() ensures freshness"
-        )]
-        self.scheduler.build();
-
+        // Steps 1e–1f: phase-ordered actor execution driven by the scheduler's
+        // plan (explicit phase registration, within-phase priority ordering),
+        // rebuilt below only when a registration changed.
         #[cfg(feature = "observe")]
         let mut scheduled_phases: Vec<String> = Vec::new();
         #[cfg(feature = "observe")]
@@ -4540,7 +4525,7 @@ impl Dwelling {
             std::collections::HashSet::new();
 
         self.actor_dispatch_buf.clear();
-        for entry in self.scheduler.plan() {
+        for entry in self.scheduler.build() {
             // The scheduler loop interleaves `ideal_capacity` and `actors`
             // spans in plan order: each entry closes the previous span and
             // opens its own phase. An `ActorDecide` entry's span (the
