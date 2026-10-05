@@ -217,9 +217,15 @@ def test_nothing():
 """
 
 
+def _guarded_session(pytester: pytest.Pytester) -> None:
+    """A pytest project of its own, so the repository's options never reach it."""
+    pytester.makeini("[pytest]\n")
+    pytester.makeconftest('pytest_plugins = ["offline_guard_plugin"]')
+
+
 @pytest.mark.parametrize("workers", ["0", "2"])
 def test_an_attempt_outside_any_test_fails_the_session(pytester: pytest.Pytester, workers: str) -> None:
-    pytester.makeconftest('pytest_plugins = ["offline_guard_plugin"]')
+    _guarded_session(pytester)
     pytester.makepyfile(test_import_time=_IMPORT_TIME_PROBE)
     result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-n", workers)
     assert result.ret == pytest.ExitCode.TESTS_FAILED
@@ -228,7 +234,7 @@ def test_an_attempt_outside_any_test_fails_the_session(pytester: pytest.Pytester
 
 
 def test_an_attempt_fails_the_test_that_made_it_even_when_swallowed(pytester: pytest.Pytester) -> None:
-    pytester.makeconftest('pytest_plugins = ["offline_guard_plugin"]')
+    _guarded_session(pytester)
     pytester.makepyfile(test_probes=_SESSION_PROBES)
     result = pytester.runpytest_inprocess("-p", "no:cacheprovider", "-p", "no:xdist")
     result.assert_outcomes(passed=3, errors=2)
