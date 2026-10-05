@@ -9,6 +9,7 @@
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200.0</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500.0</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
           <NumberofBedrooms>3</NumberofBedrooms>
         </BuildingConstruction>
       </BuildingSummary>

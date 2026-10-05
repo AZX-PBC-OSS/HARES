@@ -210,6 +210,7 @@ fn minimal_hpxml() -> String {
             <BuildingConstruction>
               <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
               <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+              <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
             </BuildingConstruction>
           </BuildingSummary>
           <Enclosure><Walls/></Enclosure>
@@ -229,6 +230,7 @@ fn minimal_hpxml_with_hvac_control() -> String {
             <BuildingConstruction>
               <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
               <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+              <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
             </BuildingConstruction>
           </BuildingSummary>
           <Enclosure><Walls/></Enclosure>

@@ -62,6 +62,25 @@ pub(crate) fn child_text(node: &XmlNode, child_name: &str) -> Option<String> {
     node.child(child_name).map(|n| n.text.trim().to_string())
 }
 
+/// Parse an `xsd:boolean` element's text.
+///
+/// The `xsd:boolean` lexical space is exactly `true`, `false`, `1` and `0`
+/// (after whitespace collapse); anything else, including the case-variant
+/// `True` and the word `yes`, is rejected with the element name and the
+/// offending value instead of being silently read as `false`.
+pub(crate) fn parse_xsd_boolean(element: &str, text: &str) -> Result<bool, super::HpxmlError> {
+    match text.trim() {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        other => Err(super::HpxmlError::Parse(
+            format!(
+                "invalid {element} value '{other}'; allowed values are 'true', 'false', '1' and '0'"
+            )
+            .into(),
+        )),
+    }
+}
+
 pub(crate) fn child_f64(node: &XmlNode, child_name: &str) -> Option<f64> {
     node.child(child_name)
         .and_then(|n| parse_trimmed_f64(&n.text))

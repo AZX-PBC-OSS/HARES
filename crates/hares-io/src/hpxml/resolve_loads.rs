@@ -14,7 +14,7 @@ use super::equipment::{EquipmentSpec, build_spec, build_typed_spec, canonical_in
 use super::resolve_pool::resolve_pool_and_spa_loads;
 use super::xml_helpers::{
     capitalize, child_f64, child_load_kwh, child_load_therms, child_text, element_id, parse_fuel,
-    parse_schedule_extension_params,
+    parse_schedule_extension_params, parse_xsd_boolean,
 };
 use hares_physics::units as conv;
 
@@ -319,9 +319,10 @@ pub(super) fn resolve_scheduled_loads(
                         } else if let Some(ef) = child_f64(node, "EnergyFactor") {
                             params.insert("energy_factor".to_string(), json!(ef));
                         }
-                        let vented = child_text(node, "Vented")
-                            .map(|v| v.eq_ignore_ascii_case("true"))
-                            .unwrap_or(true);
+                        let vented = match child_text(node, "Vented") {
+                            Some(v) => parse_xsd_boolean("Vented", &v)?,
+                            None => true,
+                        };
                         params.insert("vented".to_string(), json!(vented));
 
                         // Vented dryers exhaust 85% of energy; unvented keep all.
@@ -487,9 +488,10 @@ pub(super) fn resolve_scheduled_loads(
                             && !params.contains_key("annual_gas_therms") =>
                     {
                         // OCHRE hpxml.py parse_cooking_range:1451-1461.
-                        let is_induction = child_text(node, "IsInduction")
-                            .map(|v| v.eq_ignore_ascii_case("true"))
-                            .unwrap_or(false);
+                        let is_induction = match child_text(node, "IsInduction") {
+                            Some(v) => parse_xsd_boolean("IsInduction", &v)?,
+                            None => false,
+                        };
                         let multiplier = node
                             .child("extension")
                             .and_then(|e| child_f64(e, "UsageMultiplier"))
@@ -620,9 +622,10 @@ pub(super) fn resolve_scheduled_loads(
                 // parse_zone_label / parse_duct_location. Primary refrigerators
                 // default to "conditioned space"; non-primary default to "".
                 let is_non_primary_fridge = if tag == "Refrigerator" {
-                    let is_primary = child_text(node, "PrimaryIndicator")
-                        .map(|v| v.eq_ignore_ascii_case("true"))
-                        .unwrap_or(true);
+                    let is_primary = match child_text(node, "PrimaryIndicator") {
+                        Some(v) => parse_xsd_boolean("PrimaryIndicator", &v)?,
+                        None => true,
+                    };
                     let default_loc = if is_primary { "conditioned space" } else { "" };
                     let location =
                         child_text(node, "Location").unwrap_or_else(|| default_loc.to_string());
@@ -993,10 +996,14 @@ pub(super) fn resolve_ventilation(
 
     for fan in vent_fans.children_named("VentilationFan") {
         // Only include fans used for whole-building or seasonal cooling ventilation.
-        let is_whole_building = child_text(fan, "UsedForWholeBuildingVentilation")
-            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
-        let is_seasonal_cooling = child_text(fan, "UsedForSeasonalCoolingLoadReduction")
-            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+        let is_whole_building = match child_text(fan, "UsedForWholeBuildingVentilation") {
+            Some(v) => parse_xsd_boolean("UsedForWholeBuildingVentilation", &v)?,
+            None => false,
+        };
+        let is_seasonal_cooling = match child_text(fan, "UsedForSeasonalCoolingLoadReduction") {
+            Some(v) => parse_xsd_boolean("UsedForSeasonalCoolingLoadReduction", &v)?,
+            None => false,
+        };
         if !is_whole_building && !is_seasonal_cooling {
             continue;
         }
@@ -1486,6 +1493,7 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure><Walls /></Enclosure>
@@ -1527,6 +1535,7 @@ mod tests {
                       <NumberofBedrooms>5</NumberofBedrooms>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure><Walls /></Enclosure>
@@ -1566,6 +1575,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure><Walls /></Enclosure>
@@ -1605,6 +1615,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
@@ -1726,6 +1737,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
@@ -1825,6 +1837,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
@@ -1881,6 +1894,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
@@ -1931,6 +1945,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
@@ -1991,6 +2006,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
@@ -2033,6 +2049,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
@@ -2085,6 +2102,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
@@ -2142,6 +2160,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
@@ -2187,6 +2206,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
@@ -2234,6 +2254,7 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure><Walls /></Enclosure>
@@ -2281,6 +2302,7 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure><Walls /></Enclosure>
@@ -2331,6 +2353,7 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure><Walls /></Enclosure>
@@ -2435,6 +2458,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea>1000</ConditionedFloorArea>
                       <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure><Walls /></Enclosure>
@@ -2501,9 +2525,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,

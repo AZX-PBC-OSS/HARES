@@ -15,21 +15,39 @@ use hares_physics::units as conv;
 use super::HpxmlError;
 use super::ParseError;
 use super::xml_helpers::element_id;
+use super::xml_helpers::parse_xsd_boolean;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// HPXML `<SiteType>` -- the terrain class of the building's surroundings.
+///
+/// Allowed values per the HPXML data dictionary: `rural`, `suburban`,
+/// `urban`. OpenStudio-HPXML defaults a missing element to `suburban`
+/// ("HPXML Site", Workflow Inputs); HARES resolves the missing case the
+/// same way in `site_type_to_terrain`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SiteType {
     Rural,
     Suburban,
     Urban,
-    Other(String),
+}
+
+/// HPXML `<ShieldingOfHome>` -- the wind shielding class of the site.
+///
+/// Allowed values per the HPXML data dictionary: `normal`, `exposed`,
+/// `well-shielded`. A missing element stays `None` for the solver's
+/// shielding default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShieldingOfHome {
+    Normal,
+    Exposed,
+    WellShielded,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Site {
     pub elevation_m: Option<f64>,
     pub site_type: Option<SiteType>,
-    /// HPXML `<ShieldingOfHome>` -- string value ("normal", "exposed", "well-shielded").
-    pub shielding_of_home: Option<String>,
+    /// HPXML `<ShieldingOfHome>` -- parsed enum value.
+    pub shielding_of_home: Option<ShieldingOfHome>,
     pub latitude_deg: Option<f64>,
     pub longitude_deg: Option<f64>,
     /// HPXML `<Site>/<TimeZone>/<UTCOffset>` — the site's offset from UTC in
@@ -265,11 +283,14 @@ pub struct Building {
     pub battery_round_trip_efficiency: Option<f64>,
     pub pv_tilt_deg: Option<f64>,
     pub conditioned_volume_m3: Option<f64>,
-    pub ceiling_height_m: Option<f64>,
+    /// Average ceiling height in metres, derived from the declared
+    /// conditioned volume and floor area (both are parser-required).
+    pub ceiling_height_m: f64,
     /// `<InfiltrationHeight>` converted from ft to m.
     pub infiltration_height_m: Option<f64>,
-    /// `<NumberofConditionedFloorsAboveGrade>` from `<BuildingConstruction>`.
-    pub floors_above_grade: Option<f64>,
+    /// `<NumberofConditionedFloorsAboveGrade>` from `<BuildingConstruction>`;
+    /// the parser requires the element.
+    pub floors_above_grade: f64,
     /// `<extension><HasFlueOrChimneyInConditionedSpace>` boolean.
     pub has_flue_or_chimney: Option<bool>,
     /// Foundation type name for LUT matching (e.g. "Unfinished Basement", "Crawlspace").
@@ -521,13 +542,14 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     let elevation_m = elevation_primary
         .or(elevation_fallback1)
         .or(elevation_fallback2);
-    let site_type = site_node
-        .child("SiteType")
-        .map(|node| parse_site_type(node.text.trim()));
-    let shielding_of_home = site_node
-        .child("ShieldingOfHome")
-        .map(|n| normalize_ascii(&n.text))
-        .filter(|s| !s.is_empty());
+    let site_type = match site_node.child("SiteType") {
+        Some(node) => Some(parse_site_type(&node.text)?),
+        None => None,
+    };
+    let shielding_of_home = match site_node.child("ShieldingOfHome") {
+        Some(node) => Some(parse_shielding_of_home(&node.text)?),
+        None => None,
+    };
     let latitude_primary = root
         .path(&["Building", "Site", "Latitude"])
         .and_then(XmlNode::text_as_f64);
@@ -593,7 +615,12 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             "NumberofConditionedFloorsAboveGrade",
         ]),
         ValueKind::Raw,
-    )?;
+    )?.ok_or_else(|| HpxmlError::MissingField {
+        path: "BuildingSummary/BuildingConstruction/NumberofConditionedFloorsAboveGrade",
+        system_kind: "Building",
+        system_id: "construction".to_string(),
+        reason: "the number of conditioned floors above grade is required to set up infiltration and foundations; no silent default permitted",
+    })?;
 
     let residential_facility_type = summary
         .path(&["BuildingConstruction", "ResidentialFacilityType"])
@@ -623,11 +650,21 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // <BuildingAirLeakage><UnitofMeasure>CFM</UnitofMeasure>... (HPXML 3.x wrapper form).
     let (infiltration_cfm50, infiltration_cfm_natural) = parse_air_leakage_cfm50(details)?;
 
-    // <extension><HasFlueOrChimneyInConditionedSpace> -- boolean text
-    let has_flue_or_chimney = details
-        .first_descendant("HasFlueOrChimneyInConditionedSpace")
-        .map(|n| n.text.trim().eq_ignore_ascii_case("true"));
-
+    // <extension><HasFlueOrChimneyInConditionedSpace> -- xsd:boolean text.
+    // The element's older name <HasFlueOrChimney> is not read; a document
+    // carrying it is rejected so the declaration cannot be dropped silently.
+    if details.first_descendant("HasFlueOrChimney").is_some() {
+        return Err(HpxmlError::Parse(
+            "deprecated element <HasFlueOrChimney>; rename it to <HasFlueOrChimneyInConditionedSpace>".into(),
+        ));
+    }
+    let has_flue_or_chimney = match details.first_descendant("HasFlueOrChimneyInConditionedSpace") {
+        Some(node) => Some(parse_xsd_boolean(
+            "HasFlueOrChimneyInConditionedSpace",
+            &node.text,
+        )?),
+        None => None,
+    };
     // Foundation type name for LUT matching of foundation wall boundaries.
     // OCHRE hpxml.py:276-286: FoundationType child tag → "Crawlspace" | "Unfinished Basement" | "Finished Basement".
     //
@@ -651,12 +688,13 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         // Prefer HPXML 4.x <Conditioned> element if present.
                         // Fall back to OCHRE heuristic: total_floors > floors_above_grade
                         // means basement is conditioned (finished).
-                        let explicit = child
-                            .child("Conditioned")
-                            .map(|n| n.text.trim().eq_ignore_ascii_case("true"));
-                        let inferred = match (total_conditioned_floors, floors_above_grade) {
-                            (Some(total), Some(above)) => total > above,
-                            _ => false,
+                        let explicit = match child.child("Conditioned") {
+                            Some(n) => Some(parse_xsd_boolean("Conditioned", &n.text)?),
+                            None => None,
+                        };
+                        let inferred = match total_conditioned_floors {
+                            Some(total) => total > floors_above_grade,
+                            None => false,
                         };
                         let is_finished = explicit.unwrap_or(inferred);
                         if is_finished {
@@ -809,7 +847,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         .map(|id| id == &bd.id)
                         .unwrap_or(false)
                 }) {
-                    bd.insulation_details = extract_slab_insulation(slab_node);
+                    bd.insulation_details = extract_slab_insulation(slab_node)?;
 
                     // Parse exposed perimeter length for F-factor method.
                     // HPXML 4.x <ExposedPerimeter> and 3.x <Perimeter>, in feet;
@@ -839,19 +877,18 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     let indoor_floor_area_m2 = match (
         conditioned_floor_area_m2,
         total_conditioned_floors,
-        floors_above_grade,
         foundation_floor_area_m2,
     ) {
-        (Some(total), Some(n_total), Some(n_above), Some(foundation_area))
-            if n_total > 0.0 && n_above >= 0.0 && n_above < n_total =>
+        (Some(total), Some(n_total), Some(foundation_area))
+            if n_total > 0.0 && floors_above_grade >= 0.0 && floors_above_grade < n_total =>
         {
-            let below_grade_floors = (n_total - n_above).max(0.0);
+            let below_grade_floors = (n_total - floors_above_grade).max(0.0);
             Some((total - foundation_area * below_grade_floors).max(0.0))
         }
-        (Some(total), Some(n_total), Some(n_above), None)
-            if n_total > 0.0 && n_above >= 0.0 && n_above < n_total =>
+        (Some(total), Some(n_total), None)
+            if n_total > 0.0 && floors_above_grade >= 0.0 && floors_above_grade < n_total =>
         {
-            Some(total * n_above / n_total)
+            Some(total * floors_above_grade / n_total)
         }
         _ => conditioned_floor_area_m2,
     };
@@ -1226,7 +1263,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         )?,
         pv_tilt_deg: find_descendant_f64(details, "Tilt", ValueKind::Raw)?,
         conditioned_volume_m3,
-        ceiling_height_m: Some(ceiling_height_m),
+        ceiling_height_m,
         infiltration_height_m,
         floors_above_grade,
         has_flue_or_chimney,
@@ -1603,10 +1640,10 @@ fn parse_boundary(
     let assembly_r_value_m2_k_w = assembly_r_value_primary.or(assembly_r_value_fallback);
     let material_layers = parse_material_layers(node, area_m2)?;
 
-    let has_radiant_barrier = node
-        .first_descendant("RadiantBarrier")
-        .map(|n| n.text.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let has_radiant_barrier = match node.first_descendant("RadiantBarrier") {
+        Some(n) => parse_xsd_boolean("RadiantBarrier", &n.text)?,
+        None => false,
+    };
 
     // Solar absorptance and emittance from HPXML, validated to [0, 1].
     // Ref: OCHRE hpxml.py:155-158, OCHRE Envelope.py:222.
@@ -2099,7 +2136,7 @@ fn extract_foundation_wall_insulation(
 ///
 /// All numeric values are raw IP (HPXML native) -- no unit conversion needed
 /// since the LUT CSV uses IP values.
-fn extract_slab_insulation(node: &XmlNode) -> Option<String> {
+fn extract_slab_insulation(node: &XmlNode) -> Result<Option<String>, HpxmlError> {
     let r_perimeter = node
         .path(&["PerimeterInsulation", "Layer", "NominalRValue"])
         .and_then(|n| n.text_as_f64())
@@ -2122,10 +2159,11 @@ fn extract_slab_insulation(node: &XmlNode) -> Option<String> {
         let r = r_perimeter.round() as i32;
         format!("{d}ft R{r} Perimeter")
     } else if r_perimeter <= 0.0 && r_under > 0.0 {
-        let full_width = node
-            .path(&["UnderSlabInsulation", "Layer", "InsulationSpansEntireSlab"])
-            .map(|n| n.text.trim().eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let full_width =
+            match node.path(&["UnderSlabInsulation", "Layer", "InsulationSpansEntireSlab"]) {
+                Some(n) => parse_xsd_boolean("InsulationSpansEntireSlab", &n.text)?,
+                None => false,
+            };
         let r = r_under.round() as i32;
         if full_width {
             format!("R{r} Whole Slab")
@@ -2141,7 +2179,7 @@ fn extract_slab_insulation(node: &XmlNode) -> Option<String> {
         "Uninsulated".to_string()
     };
 
-    Some(insulation)
+    Ok(Some(insulation))
 }
 
 /// Extract construction type and finish type from HPXML boundary elements.
@@ -2337,10 +2375,10 @@ fn build_zone_map(
                     parse_value_with_units(node.child("FloorArea"), ValueKind::Area)?;
 
                 // Parse vented status from <AtticType><Attic><Vented>
-                let vented = attic_type_child
-                    .and_then(|child| child.child("Vented"))
-                    .map(|v| v.text.trim().eq_ignore_ascii_case("true"))
-                    .unwrap_or(true); // default vented for attics
+                let vented = match attic_type_child.and_then(|child| child.child("Vented")) {
+                    Some(v) => parse_xsd_boolean("Vented", &v.text)?,
+                    None => true, // default vented for attics
+                };
 
                 let (ventilation_ach, ventilation_sla) = parse_ventilation_rate(node);
 
@@ -2392,9 +2430,10 @@ fn build_zone_map(
                     .child("FoundationType")
                     .and_then(|ft| ft.children.first());
                 let foundation_type = ft_child.map(|child| child.name.as_str());
-                let vented_explicit = ft_child
-                    .and_then(|child| child.child("Vented"))
-                    .map(|v| v.text.trim().eq_ignore_ascii_case("true"));
+                let vented_explicit = match ft_child.and_then(|child| child.child("Vented")) {
+                    Some(v) => Some(parse_xsd_boolean("Vented", &v.text)?),
+                    None => None,
+                };
                 let vented = match foundation_type {
                     Some("Crawlspace") => vented_explicit.unwrap_or(true),
                     Some("Basement") => vented_explicit.unwrap_or(false),
@@ -3089,12 +3128,32 @@ fn parse_air_leakage_ach50(details: &XmlNode) -> Result<(Option<f64>, Option<f64
     Ok((None, None))
 }
 
-fn parse_site_type(text: &str) -> SiteType {
+fn parse_site_type(text: &str) -> Result<SiteType, HpxmlError> {
     match normalize_ascii(text).as_str() {
-        "rural" => SiteType::Rural,
-        "suburban" => SiteType::Suburban,
-        "urban" => SiteType::Urban,
-        other => SiteType::Other(other.to_string()),
+        "rural" => Ok(SiteType::Rural),
+        "suburban" => Ok(SiteType::Suburban),
+        "urban" => Ok(SiteType::Urban),
+        other => Err(HpxmlError::Parse(
+            format!(
+                "invalid SiteType value '{other}'; allowed values are 'rural', 'suburban' and 'urban'"
+            )
+            .into(),
+        )),
+    }
+}
+
+fn parse_shielding_of_home(text: &str) -> Result<ShieldingOfHome, HpxmlError> {
+    match normalize_ascii(text).as_str() {
+        "normal" => Ok(ShieldingOfHome::Normal),
+        "exposed" => Ok(ShieldingOfHome::Exposed),
+        "well-shielded" => Ok(ShieldingOfHome::WellShielded),
+        other => Err(HpxmlError::Parse(
+            format!(
+                "invalid ShieldingOfHome value '{other}'; allowed values are 'normal', 'exposed' and 'well-shielded'"
+            )
+            .into(),
+        )),
+
     }
 }
 
@@ -3698,6 +3757,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">2152</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">17216</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -3915,7 +3975,7 @@ mod tests {
         // Ceiling height: volume / floor_area
         let expected_floor_area_m2 = 2152.0 * 0.092_903_04;
         let expected_ceiling_height = expected_volume_m3 / expected_floor_area_m2;
-        assert!((building.ceiling_height_m.unwrap() - expected_ceiling_height).abs() < 1e-6,);
+        assert!((building.ceiling_height_m - expected_ceiling_height).abs() < 1e-6,);
 
         // Conditioned zone should have volume derived from ceiling height × floor area
         let conditioned = building
@@ -3956,6 +4016,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">2000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">16000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -4207,6 +4268,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -4359,6 +4421,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -4385,6 +4448,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -4628,7 +4692,7 @@ mod tests {
             expected_foundation_area_m2
         );
 
-        let ceiling_height_m = building.ceiling_height_m.expect("ceiling height expected");
+        let ceiling_height_m = building.ceiling_height_m;
         let conditioned_volume_m3 = conditioned.volume_m3.expect("conditioned volume expected");
         assert!(
             (conditioned_volume_m3 - conditioned_area_m2 * ceiling_height_m).abs() < 1e-6,
@@ -5715,6 +5779,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -6561,6 +6626,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -6648,6 +6714,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -6887,6 +6954,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea>1000</ConditionedFloorArea>
           <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure/>
@@ -7217,6 +7285,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7279,6 +7348,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7338,6 +7408,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7430,6 +7501,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7592,6 +7664,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7654,7 +7727,7 @@ mod tests {
             .volume_m3
             .expect("garage zone must have a computed volume");
 
-        let ceiling_height_m = building.ceiling_height_m.expect("must have ceiling height");
+        let ceiling_height_m = building.ceiling_height_m;
         let floor_area_m2 = garage_zone.floor_area_m2.expect("must have floor area");
         let rectangular = floor_area_m2 * ceiling_height_m;
 
@@ -7684,6 +7757,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">100</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">800</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7727,6 +7801,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">100</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">800</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7772,6 +7847,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7862,6 +7938,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7908,6 +7985,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7971,6 +8049,105 @@ mod tests {
         assert!(
             (tilt - expected_approx).abs() < 2.0,
             "geometric inference should produce tilt ~{expected_approx}°, got {tilt}"
+        );
+    }
+
+    #[test]
+    fn missing_floors_above_grade_is_a_parse_error() {
+        let xml = SAMPLE_XML.replace(
+            "<NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>",
+            "",
+        );
+        let err = parse_building(&xml).expect_err("expected missing-field failure");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NumberofConditionedFloorsAboveGrade"),
+            "error must name the element, got: {msg}"
+        );
+        assert!(
+            msg.contains("no silent default permitted"),
+            "error must state the strictness rule, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_shielding_or_site_type_is_a_parse_error() {
+        let shielding = SAMPLE_XML.replace(
+            "<ShieldingOfHome>normal</ShieldingOfHome>",
+            "<ShieldingOfHome>windy</ShieldingOfHome>",
+        );
+        let err = parse_building(&shielding).expect_err("expected parse failure");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ShieldingOfHome") && msg.contains("windy"),
+            "error must name the element and the value, got: {msg}"
+        );
+        assert!(
+            msg.contains("normal") && msg.contains("exposed") && msg.contains("well-shielded"),
+            "error must name the allowed values, got: {msg}"
+        );
+
+        let site_type = SAMPLE_XML.replace(
+            "<SiteType>suburban</SiteType>",
+            "<SiteType>coastal</SiteType>",
+        );
+        let err = parse_building(&site_type).expect_err("expected parse failure");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SiteType") && msg.contains("coastal"),
+            "error must name the element and the value, got: {msg}"
+        );
+        assert!(
+            msg.contains("rural") && msg.contains("suburban") && msg.contains("urban"),
+            "error must name the allowed values, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn xsd_boolean_accepts_one_and_zero() {
+        let with_flue = |v: &str| {
+            SAMPLE_XML.replacen(
+                "        </AirInfiltrationMeasurement>",
+                &format!(
+                    "          <extension><HasFlueOrChimneyInConditionedSpace>{v}</HasFlueOrChimneyInConditionedSpace></extension>\n        </AirInfiltrationMeasurement>"
+                ),
+                1,
+            )
+        };
+
+        let building = parse_building(&with_flue("1")).expect("parse should succeed");
+        assert_eq!(
+            building.has_flue_or_chimney,
+            Some(true),
+            "xsd:boolean 1 is true"
+        );
+        let building = parse_building(&with_flue("0")).expect("parse should succeed");
+        assert_eq!(
+            building.has_flue_or_chimney,
+            Some(false),
+            "xsd:boolean 0 is false"
+        );
+
+        let err = parse_building(&with_flue("yes")).expect_err("yes is outside the lexical space");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("HasFlueOrChimneyInConditionedSpace") && msg.contains("yes"),
+            "error must name the element and the value, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn legacy_flue_element_names_its_replacement() {
+        let xml = SAMPLE_XML.replacen(
+            "        </AirInfiltrationMeasurement>",
+            "          <extension><HasFlueOrChimney>false</HasFlueOrChimney></extension>\n        </AirInfiltrationMeasurement>",
+            1,
+        );
+        let err = parse_building(&xml).expect_err("the deprecated element must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("HasFlueOrChimneyInConditionedSpace"),
+            "error must name the current element, got: {msg}"
         );
     }
 }

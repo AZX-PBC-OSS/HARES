@@ -649,11 +649,12 @@ mod tests {
         <Site>
           <Elevation units="ft">100</Elevation>
           <SiteType>suburban</SiteType>
-          <ShieldingOfHome>0.7</ShieldingOfHome>
+          <ShieldingOfHome>normal</ShieldingOfHome>
         </Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -840,6 +841,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>

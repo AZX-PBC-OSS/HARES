@@ -1257,30 +1257,36 @@ pub(crate) fn validate_sim_config(sim_config: &SimulationConfig) -> Result<()> {
 }
 
 /// Map HPXML `<SiteType>` to [`TerrainClass`] for AIM-2 wind correction.
+///
+/// A missing `<SiteType>` resolves to suburban: OpenStudio-HPXML's
+/// documented default ("HPXML Site", Workflow Inputs,
+/// <https://openstudio-hpxml.readthedocs.io/en/latest/workflow_inputs.html>).
+/// The parser rejects values outside the element's allowed list, so no
+/// other case reaches the resolver.
 pub(crate) fn site_type_to_terrain(
-    site_type: &Option<hares_io::hpxml::SiteType>,
+    site_type: Option<&hares_io::hpxml::SiteType>,
 ) -> hares_physics::infiltration::TerrainClass {
     use hares_io::hpxml::SiteType;
     use hares_physics::infiltration::TerrainClass;
     match site_type {
         Some(SiteType::Rural) => TerrainClass::Rural,
         Some(SiteType::Urban) => TerrainClass::Urban,
-        _ => TerrainClass::Suburban,
+        Some(SiteType::Suburban) | None => TerrainClass::Suburban,
     }
 }
 
-/// Map HPXML `<ShieldingOfHome>` string to [`ShieldingClass`].
+/// Map HPXML `<ShieldingOfHome>` to [`ShieldingClass`].
 ///
-/// HPXML values: "normal", "exposed", "well-shielded".
 /// Walker & Wilson (1998) Table 3; ResStock `airflow.get_aim2_shelter_coefficient`.
-pub(crate) fn shielding_str_to_class(
-    s: Option<&str>,
+pub(crate) fn shielding_to_class(
+    shielding: Option<&hares_io::hpxml::ShieldingOfHome>,
 ) -> hares_physics::infiltration::ShieldingClass {
+    use hares_io::hpxml::ShieldingOfHome;
     use hares_physics::infiltration::ShieldingClass;
-    match s {
-        Some("exposed") => ShieldingClass::Exposed,
-        Some("well-shielded") => ShieldingClass::WellShielded,
-        _ => ShieldingClass::Normal,
+    match shielding {
+        Some(ShieldingOfHome::Exposed) => ShieldingClass::Exposed,
+        Some(ShieldingOfHome::WellShielded) => ShieldingClass::WellShielded,
+        Some(ShieldingOfHome::Normal) | None => ShieldingClass::Normal,
     }
 }
 
@@ -1390,9 +1396,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,

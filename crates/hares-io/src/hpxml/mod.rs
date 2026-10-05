@@ -24,7 +24,7 @@ use validation::{ValidationError, validate_building_ranges, validate_hpxml_schem
 
 pub use building::{
     Boundary, BoundaryType, Building, DuctLocation, DuctSystem, DuctType, MaterialLayer,
-    MultipleConditionedZones, Site, SiteType, Window, Zone, ZoneType,
+    MultipleConditionedZones, ShieldingOfHome, Site, SiteType, Window, Zone, ZoneType,
 };
 pub use data_patches::HpxmlDataPatches;
 pub(crate) use equipment::build_spec;
@@ -246,8 +246,8 @@ mod tests {
   <Building>
     <BuildingDetails>
       <BuildingSummary>
-        <Site><Elevation>100</Elevation><SiteType>suburban</SiteType><ShieldingOfHome>0.5</ShieldingOfHome></Site>
-        <BuildingConstruction><ConditionedFloorArea units="m2">5</ConditionedFloorArea><ConditionedBuildingVolume units="m3">12.5</ConditionedBuildingVolume></BuildingConstruction>
+        <Site><Elevation>100</Elevation><SiteType>suburban</SiteType><ShieldingOfHome>normal</ShieldingOfHome></Site>
+        <BuildingConstruction><ConditionedFloorArea units="m2">5</ConditionedFloorArea><ConditionedBuildingVolume units="m3">12.5</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
     </BuildingDetails>

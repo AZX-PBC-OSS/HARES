@@ -199,9 +199,8 @@ pub fn compute_default_internal_gains(ctx: &AutosizeContext, building: &Building
     // Floor area from building geometry.
     let floor_area_m2 = building
         .conditioned_volume_m3
-        .zip(building.ceiling_height_m)
-        .filter(|&(_v, h)| h > 0.0)
-        .map(|(v, h)| v / h)
+        .filter(|_v| building.ceiling_height_m > 0.0)
+        .map(|v| v / building.ceiling_height_m)
         .or_else(|| {
             building
                 .zones
@@ -1126,9 +1125,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
@@ -2126,6 +2125,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">2000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">16000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -2163,6 +2163,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">2000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">16000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -2820,7 +2821,7 @@ mod tests {
 
         let mut building = minimal_building();
         building.conditioned_volume_m3 = Some(180.0); // 150 m² × 2.4 m ceiling
-        building.ceiling_height_m = Some(2.4);
+        building.ceiling_height_m = 2.4;
         building.zones = vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(75.0),

@@ -39,6 +39,7 @@ fn minimal_hpxml_with_systems(systems_xml: &str) -> String {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -58,7 +59,7 @@ fn base_fixture_preserves_summary_fields_and_imperial_unit_defaults() {
         Some("single-family detached"),
         "fixture residential facility type should not be silently dropped"
     );
-    assert_eq!(building.floors_above_grade, Some(1.0));
+    assert_eq!(building.floors_above_grade, 1.0);
 
     let conditioned = building
         .zones
@@ -71,7 +72,7 @@ fn base_fixture_preserves_summary_fields_and_imperial_unit_defaults() {
     let volume_m3 = building
         .conditioned_volume_m3
         .expect("conditioned volume expected");
-    let ceiling_height_m = building.ceiling_height_m.expect("ceiling height expected");
+    let ceiling_height_m = building.ceiling_height_m;
 
     let expected_floor_area_m2 = (2700.0 * 0.092_903_04) * 0.5;
     let expected_volume_m3 = 21600.0 * 0.028_316_846_592;

@@ -23,7 +23,7 @@ use super::Result;
 use super::conversions::zone_type_to_label;
 use super::conversions::{
     boundary_zone_index, building_to_boundary_inputs, building_to_zone_inputs,
-    check_multi_unit_zones, has_vented_crawlspace, shielding_str_to_class, site_type_to_terrain,
+    check_multi_unit_zones, has_vented_crawlspace, shielding_to_class, site_type_to_terrain,
 };
 
 // ── Intermediate representation ─────────────────────────────────────────────
@@ -1321,19 +1321,44 @@ pub(crate) fn build_default_solvers(
         //   cfm50 = ela_cm2 × 0.0524 × 50^0.65
         // where 0.0524 is the discharge-coefficient/unit-conversion factor
         // (ELA defined at 4 Pa with Cd=1.0, scaled to 50 Pa via power law).
+        //
+        // Both infiltration sites that read the conditioned volume -- the
+        // CFM50/ELA → ACH50 conversion below and the AIM-2 coefficients in
+        // the conditioned-zone branch -- are reached only when a blower-door
+        // leakage input (ACH50, CFM50, or ELA) is present and the leakage is
+        // not a constant ACH, so the volume is resolved once here and a
+        // missing value is an error naming the element.
+        let volume_needed = building.infiltration_constant_ach.is_none()
+            && (building.infiltration_ach50.is_some()
+                || building.infiltration_cfm50.is_some()
+                || building.infiltration_ela_cm2.is_some());
+        let conditioned_volume_m3: f64 = if volume_needed {
+            building.conditioned_volume_m3.ok_or_else(|| {
+                HaresError::Dwelling(
+                    "HPXML is missing required field \
+                     `BuildingSummary/BuildingConstruction/ConditionedBuildingVolume` on Building \
+                     `conditioned` -- conditioned volume (m³) is required for infiltration set-up \
+                     (CFM50/ELA to ACH50 conversion and AIM-2 coefficients); no silent default \
+                     permitted"
+                        .to_string(),
+                )
+            })?
+        } else {
+            building.conditioned_volume_m3.unwrap_or(0.0)
+        };
+
         let resolved_ach50: Option<f64> = building.infiltration_ach50.or_else(|| {
-            let volume_m3 = building.conditioned_volume_m3.unwrap_or(400.0);
             let cfm50 = building.infiltration_cfm50.or_else(|| {
                 building
                     .infiltration_ela_cm2
                     .map(|ela_cm2| ela_cm2 * 0.0524 * 50.0_f64.powf(N_I_DEFAULT))
             })?;
             // 1 ft³ = 0.0283168 m³  →  volume_ft3 = volume_m3 / 0.0283168 = volume_m3 × 35.3147
-            let volume_ft3 = volume_m3 * 35.3147;
+            let volume_ft3 = conditioned_volume_m3 * 35.3147;
             Some((cfm50 * 60.0) / volume_ft3)
         });
 
-        let default_ceiling_height_m = building.ceiling_height_m.unwrap_or(2.5);
+        let default_ceiling_height_m = building.ceiling_height_m;
         let building_height_m = default_ceiling_height_m
             * building
                 .zones
@@ -1347,15 +1372,15 @@ pub(crate) fn build_default_solvers(
         // These drive terrain-corrected wind coefficients for all ELA infiltration
         // (conditioned zone uses them via aim2_coefficients_from_ach50; attic, garage,
         // and foundation use them via the parameterized convenience functions).
-        let terrain = site_type_to_terrain(&building.site.site_type);
-        let shielding = shielding_str_to_class(building.site.shielding_of_home.as_deref());
+        //
+        // A missing <SiteType> resolves to suburban: OpenStudio-HPXML's
+        // documented default ("HPXML Site", Workflow Inputs,
+        // https://openstudio-hpxml.readthedocs.io/en/latest/workflow_inputs.html);
+        // the parser rejects any value outside the element's allowed list, so
+        // no silent substitution happens here.
+        let terrain = site_type_to_terrain(building.site.site_type.as_ref());
+        let shielding = shielding_to_class(building.site.shielding_of_home.as_ref());
 
-        if building.site.site_type.is_none() {
-            tracing::warn!(
-                "building site type not specified; defaulting to {:?} for ELA wind correction",
-                terrain
-            );
-        }
         if building.site.shielding_of_home.is_none() {
             tracing::warn!(
                 "building shielding-of-home not specified; defaulting to {:?} for ELA wind correction",
@@ -1370,11 +1395,13 @@ pub(crate) fn build_default_solvers(
             .and_then(|z| z.floor_area_m2);
 
         for (zone_idx, bz) in building.zones.iter().enumerate() {
-            let zone_id = env
-                .zones
-                .get(zone_idx)
-                .map(|z| z.id)
-                .unwrap_or(hares_types::ZoneId(zone_idx as u16));
+            let zone_id = env.zones.get(zone_idx).map(|z| z.id).ok_or_else(|| {
+                HaresError::Dwelling(format!(
+                    "building zone {zone_idx} ({:?}) has no matching environment zone; the \
+                         environment must declare a zone for every building zone",
+                    bz.zone_type
+                ))
+            })?;
 
             let method = match bz.zone_type {
                 ZoneType::Conditioned => {
@@ -1386,19 +1413,19 @@ pub(crate) fn build_default_solvers(
                         } else {
                             FoundationLeakageClass::Other
                         };
-                        let h = building.infiltration_height_m.unwrap_or(
-                            default_ceiling_height_m * building.floors_above_grade.unwrap_or(1.0),
-                        );
+                        let h = building
+                            .infiltration_height_m
+                            .unwrap_or(default_ceiling_height_m * building.floors_above_grade);
                         let coeffs = aim2_coefficients_from_ach50(&Aim2Params {
                             ach50,
-                            volume_m3: building.conditioned_volume_m3.unwrap_or(400.0),
+                            volume_m3: conditioned_volume_m3,
                             infiltration_height_m: h,
                             foundation,
                             shielding,
                             terrain,
                             has_flue: building.has_flue_or_chimney.unwrap_or(false),
                             n_i: N_I_DEFAULT,
-                            floors_above_grade: building.floors_above_grade.unwrap_or(1.0),
+                            floors_above_grade: building.floors_above_grade,
                         });
 
                         #[cfg(feature = "observe")]
@@ -1564,7 +1591,7 @@ pub(crate) fn build_default_solvers(
     // Cw from compute_natural_ventilation_cw (T-0452).
     {
         use hares_envelope::NaturalVentilationConfig;
-        let default_ceiling_height_m = building.ceiling_height_m.unwrap_or(2.5);
+        let default_ceiling_height_m = building.ceiling_height_m;
         let n_conditioned = building
             .zones
             .iter()
@@ -1900,9 +1927,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
@@ -1960,6 +1987,159 @@ mod tests {
             super::indoor_zone(&building_with_zones(zones), &env)
                 .expect_err("the indoor zone must be the one conditioned zone");
         }
+    }
+
+    /// Solver construction from a parsed ochre sample with the conditioned
+    /// volume removed. Both infiltration sites that read the volume fail the
+    /// build naming `ConditionedBuildingVolume`: the ACH50 input goes through
+    /// the AIM-2 coefficients, the same leakage declared as CFM50 goes through
+    /// the CFM50 → ACH50 conversion.
+    #[test]
+    fn infiltration_without_conditioned_volume_is_an_error() {
+        use chrono::TimeZone;
+        use hares_io::hpxml::building::parse_building;
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/hpxml/ochre_samples/base.xml");
+        let xml = std::fs::read_to_string(&fixture).expect("base fixture should be readable");
+        let mut building = parse_building(&xml).expect("base fixture should parse");
+        building.conditioned_volume_m3 = None;
+
+        let build = |building: &hares_io::Building| {
+            let mut env = crate::actor::testing::TestEnvBuilder::new().build();
+            env.zones = (0..building.zones.len())
+                .map(|i| hares_types::ZoneState {
+                    id: ZoneId(u16::try_from(i + 1).expect("zone index fits u16")),
+                    temperature_c: 21.0,
+                    humidity_ratio: 0.008,
+                    volume_m3: 200.0,
+                })
+                .collect();
+            let sim_config = hares_io::SimulationConfig {
+                start_time: chrono::FixedOffset::east_opt(0)
+                    .expect("UTC offset")
+                    .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)
+                    .single()
+                    .expect("timestamp"),
+                duration: chrono::Duration::hours(1),
+                time_res: chrono::Duration::minutes(1),
+                output_verbosity: 0,
+                output_path: None,
+                write_output: false,
+                output_format: hares_io::OutputFormat::Csv,
+                output_chunk_size: 128,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                retain_batches: false,
+                rotation: hares_io::RotationPolicy::None,
+            };
+            let weather_avgs = super::WeatherAverages {
+                avg_wind_m_s: 2.0,
+                avg_ambient_c: 10.0,
+                avg_ground_c: 12.0,
+            };
+            super::build_default_solvers(
+                &env,
+                &sim_config,
+                building,
+                &hares_io::DefaultsStore::empty(),
+                &weather_avgs,
+                &[],
+            )
+        };
+
+        // ACH50 kept: the AIM-2 coefficients read the volume.
+        let err = match build(&building) {
+            Err(err) => err,
+            Ok(_) => panic!("missing conditioned volume must fail solver construction"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ConditionedBuildingVolume"),
+            "error must name the element, got: {msg}"
+        );
+        assert!(
+            msg.contains("no silent default permitted"),
+            "error must state the strictness rule, got: {msg}"
+        );
+
+        // The same leakage declared as CFM50 (3 ACH50 on the sample's
+        // 21600 ft³: cfm50 = 3 × 21600 / 60): the CFM50 → ACH50 conversion
+        // reads the volume.
+        building.infiltration_ach50 = None;
+        building.infiltration_cfm50 = Some(1080.0);
+        let err = match build(&building) {
+            Err(err) => err,
+            Ok(_) => panic!("missing conditioned volume must fail solver construction"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ConditionedBuildingVolume"),
+            "error must name the element, got: {msg}"
+        );
+    }
+
+    /// A building zone with no matching environment zone fails solver
+    /// construction naming the zone index; the `ZoneId(zone_idx)` fallback
+    /// that silently wired the zone to a wrong id is gone.
+    #[test]
+    fn zone_without_environment_zone_is_an_assembly_error() {
+        use chrono::TimeZone;
+
+        let building = building_with_zones(vec![
+            zone_of_type(ZoneType::Conditioned),
+            zone_of_type(ZoneType::Attic),
+        ]);
+        let env = env_with_zone_temps(&[21.0]);
+
+        let sim_config = hares_io::SimulationConfig {
+            start_time: chrono::FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)
+                .single()
+                .expect("timestamp"),
+            duration: chrono::Duration::hours(1),
+            time_res: chrono::Duration::minutes(1),
+            output_verbosity: 0,
+            output_path: None,
+            write_output: false,
+            output_format: hares_io::OutputFormat::Csv,
+            output_chunk_size: 128,
+            setpoint_deadband_c: None,
+            master_seed: 0,
+            civil_timezone: None,
+            site_location: hares_io::SiteLocationOverride::default(),
+            retain_batches: false,
+            rotation: hares_io::RotationPolicy::None,
+        };
+        let weather_avgs = super::WeatherAverages {
+            avg_wind_m_s: 2.0,
+            avg_ambient_c: 10.0,
+            avg_ground_c: 12.0,
+        };
+
+        let err = match super::build_default_solvers(
+            &env,
+            &sim_config,
+            &building,
+            &hares_io::DefaultsStore::empty(),
+            &weather_avgs,
+            &[],
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("a zone without an environment zone must fail assembly"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("zone 1"),
+            "error must name the zone index, got: {msg}"
+        );
+        assert!(
+            msg.contains("no matching environment zone"),
+            "error must state the cause, got: {msg}"
+        );
     }
 
     /// The eliminated-skin radiative resistance must be the PARALLEL
@@ -3047,6 +3227,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -3174,9 +3355,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
@@ -3381,9 +3562,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
@@ -3614,9 +3795,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
@@ -3850,9 +4031,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
@@ -4138,9 +4319,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
@@ -4404,9 +4585,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
@@ -4660,9 +4841,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,

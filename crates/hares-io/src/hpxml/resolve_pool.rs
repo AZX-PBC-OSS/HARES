@@ -411,6 +411,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>
@@ -502,6 +503,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>
@@ -568,6 +570,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>
@@ -598,6 +601,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>
@@ -637,6 +641,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>
@@ -676,6 +681,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>
@@ -766,6 +772,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>
@@ -801,6 +808,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>
@@ -831,6 +839,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>
@@ -872,6 +881,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>
@@ -909,6 +919,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>
@@ -956,6 +967,7 @@ mod tests {
                 <BuildingConstruction>
                   <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
                   <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+                  <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                 </BuildingConstruction>
               </BuildingSummary>
               <Enclosure><Walls /></Enclosure>

@@ -41,6 +41,7 @@ fn minimal_xml_with_systems(systems_xml: &str) -> String {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -647,6 +648,7 @@ fn missing_enclosure_returns_error() {
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
     </BuildingDetails>
@@ -670,6 +672,7 @@ fn missing_site_returns_error() {
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -706,6 +709,7 @@ fn complete_minimal_xml_passes_schema_check() {
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -732,6 +736,7 @@ fn area_above_1000_without_units_is_converted_as_ft2() {
         <BuildingConstruction>
           <ConditionedFloorArea>2000</ConditionedFloorArea>
           <ConditionedBuildingVolume>16000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -764,6 +769,7 @@ fn area_without_units_is_treated_as_ft2() {
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -1024,6 +1030,7 @@ fn wall_xml_with_stud_geometry(spacing_in: f64, width_in: f64) -> String {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -1126,6 +1133,7 @@ fn wall_xml_with_construction_type(construction_type_element: &str) -> String {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -1429,6 +1437,7 @@ fn cfm25_duct_leakage_parse_resolve_pipeline_succeeds() {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -1538,6 +1547,7 @@ fn refrigerator_in_conditioned_basement_retains_gain_fractions() {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">150</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">375</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
           <NumberofBedrooms>3</NumberofBedrooms>
         </BuildingConstruction>
       </BuildingSummary>
@@ -1992,6 +2002,7 @@ fn gable_roof_without_pitch_not_classified_as_flat() {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -2420,4 +2431,264 @@ fn parse_other_exterior_wh_carries_ambient_location() {
         "base-dhw-tank-gas-outside.xml",
         AmbientLocation::OtherExterior,
     );
+}
+
+// ===========================================================================
+// xsd:boolean parsing at every boolean element
+// ===========================================================================
+
+/// Every boolean element the parser reads goes through
+/// `parse_xsd_boolean`: each of the twelve census sites parses `1` as
+/// true and `0` as false through its own parse path, so a site that
+/// regresses to the old case-insensitive `true`-only test fails here
+/// instead of only at the single flue site.
+#[test]
+fn every_xsd_boolean_site_uses_parse_xsd_boolean() {
+    // (site, value) -> the XML system/enclosure fragment under test.
+    let fragment = |site: usize, v: &str| match site {
+        0 => format!(
+            "<Enclosure><Walls /><extension><HasFlueOrChimneyInConditionedSpace>{v}</HasFlueOrChimneyInConditionedSpace></extension></Enclosure>"
+        ),
+        1 => format!(
+            "<Enclosure><Walls /><Foundations><Foundation><SystemIdentifier id=\"F1\"/><FoundationType><Basement><Conditioned>{v}</Conditioned></Basement></FoundationType><FloorArea units=\"m2\">50</FloorArea></Foundation></Foundations></Enclosure>"
+        ),
+        2 => format!(
+            "<Enclosure><Roofs><Roof><SystemIdentifier id=\"R1\"/><InteriorAdjacentTo>attic</InteriorAdjacentTo><ExteriorAdjacentTo>outside</ExteriorAdjacentTo><Area units=\"m2\">50</Area><RadiantBarrier>{v}</RadiantBarrier></Roof></Roofs></Enclosure>"
+        ),
+        3 => format!(
+            "<Enclosure><Slabs><Slab><SystemIdentifier id=\"S1\"/><InteriorAdjacentTo>basement - unconditioned</InteriorAdjacentTo><ExteriorAdjacentTo>ground</ExteriorAdjacentTo><Area units=\"m2\">50</Area><UnderSlabInsulation><Layer><NominalRValue>10</NominalRValue><InsulationSpansEntireSlab>{v}</InsulationSpansEntireSlab></Layer></UnderSlabInsulation></Slab></Slabs></Enclosure>"
+        ),
+        4 => format!(
+            "<Enclosure><Roofs><Roof><SystemIdentifier id=\"R1\"/><InteriorAdjacentTo>attic</InteriorAdjacentTo><ExteriorAdjacentTo>outside</ExteriorAdjacentTo><Area units=\"m2\">50</Area></Roof></Roofs><Attics><Attic><SystemIdentifier id=\"A1\"/><AttachedToRoof idref=\"R1\"/><AtticType><Attic><Vented>{v}</Vented></Attic></AtticType><FloorArea units=\"m2\">40</FloorArea></Attic></Attics></Enclosure>"
+        ),
+        5 => format!(
+            "<Enclosure><Walls /><Foundations><Foundation><SystemIdentifier id=\"F1\"/><FoundationType><Crawlspace><Vented>{v}</Vented></Crawlspace></FoundationType><FloorArea units=\"m2\">30</FloorArea></Foundation></Foundations></Enclosure>"
+        ),
+        6 => format!(
+            "<Appliances><ClothesDryer><FuelType>electricity</FuelType><Vented>{v}</Vented></ClothesDryer></Appliances>"
+        ),
+        7 => format!(
+            "<Appliances><CookingRange><FuelType>electricity</FuelType><IsInduction>{v}</IsInduction></CookingRange></Appliances>"
+        ),
+        8 => format!(
+            "<Appliances><Refrigerator><PrimaryIndicator>{v}</PrimaryIndicator></Refrigerator></Appliances>"
+        ),
+        9 => format!(
+            "<MechanicalVentilation><VentilationFans><VentilationFan><UsedForWholeBuildingVentilation>{v}</UsedForWholeBuildingVentilation><RatedFlowRate>72</RatedFlowRate><FanPower>30</FanPower></VentilationFan></VentilationFans></MechanicalVentilation>"
+        ),
+        10 => format!(
+            "<MechanicalVentilation><VentilationFans><VentilationFan><UsedForSeasonalCoolingLoadReduction>{v}</UsedForSeasonalCoolingLoadReduction><RatedFlowRate>72</RatedFlowRate><FanPower>30</FanPower></VentilationFan></VentilationFans></MechanicalVentilation>"
+        ),
+        11 => format!(
+            "<WaterHeating><WaterFixture><LowFlow>{v}</LowFlow></WaterFixture><WaterHeatingSystem><WaterHeaterType>storage water heater</WaterHeaterType><FuelType>electricity</FuelType><EnergyFactor>0.95</EnergyFactor></WaterHeatingSystem></WaterHeating>"
+        ),
+        _ => unreachable!(),
+    };
+
+    // Enclosure fragments (sites 0-5) supply their own <Enclosure> content
+    // and replace the minimal document's empty walls; appliance fragments
+    // (sites 6-8) sit directly under BuildingDetails; the mechanical
+    // ventilation fragments (sites 9-10) are wrapped in <Systems>; the
+    // LowFlow fragment (site 11) also sits directly under BuildingDetails,
+    // which is the layout its parse path reads.
+    let doc = |site: usize, v: &str| {
+        let body = fragment(site, v);
+        if body.starts_with("<Enclosure>") {
+            minimal_xml_with_systems("").replace("<Enclosure><Walls /></Enclosure>", &body)
+        } else if (6..=8).contains(&site) || site == 11 {
+            minimal_xml_with_systems(&body)
+        } else {
+            minimal_xml_with_systems(&format!("<Systems>{body}</Systems>"))
+        }
+    };
+
+    let resolve = |xml: &str| -> Vec<hares_io::EquipmentSpec> {
+        let building = parse_building(xml).expect("should parse");
+        resolve_equipment(
+            &building,
+            &DefaultsStore::empty(),
+            &json!({}),
+            None,
+            &mut Vec::new(),
+        )
+        .expect("resolve_equipment should succeed")
+    };
+
+    let site_names = [
+        "HasFlueOrChimneyInConditionedSpace",
+        "Foundation/Basement/Conditioned",
+        "Roof/RadiantBarrier",
+        "UnderSlabInsulation InsulationSpansEntireSlab",
+        "AtticType/Attic/Vented",
+        "FoundationType/Crawlspace/Vented",
+        "ClothesDryer/Vented",
+        "CookingRange/IsInduction",
+        "Refrigerator/PrimaryIndicator",
+        "VentilationFan/UsedForWholeBuildingVentilation",
+        "VentilationFan/UsedForSeasonalCoolingLoadReduction",
+        "WaterFixture/LowFlow",
+    ];
+
+    for (site, name) in site_names.iter().enumerate() {
+        let specs_true = resolve(&doc(site, "1"));
+        let specs_false = resolve(&doc(site, "0"));
+
+        match *name {
+            "HasFlueOrChimneyInConditionedSpace" => {
+                let building = parse_building(&doc(site, "1")).expect("should parse");
+                assert_eq!(
+                    building.has_flue_or_chimney,
+                    Some(true),
+                    "{name}: 1 must read as true"
+                );
+            }
+            "Foundation/Basement/Conditioned" => {
+                let b_true = parse_building(&doc(site, "1")).expect("should parse");
+                let b_false = parse_building(&doc(site, "0")).expect("should parse");
+                assert_eq!(
+                    b_true.foundation_name.as_deref(),
+                    Some("Finished Basement"),
+                    "{name}: 1 must read as conditioned"
+                );
+                assert_eq!(
+                    b_false.foundation_name.as_deref(),
+                    Some("Unfinished Basement"),
+                    "{name}: 0 must read as unconditioned"
+                );
+            }
+            "Roof/RadiantBarrier" => {
+                let read = |xml: &str| {
+                    parse_building(xml)
+                        .expect("should parse")
+                        .boundaries
+                        .iter()
+                        .find(|b| b.boundary_type == hares_io::hpxml::building::BoundaryType::Roof)
+                        .expect("roof expected")
+                        .has_radiant_barrier
+                };
+                assert!(read(&doc(site, "1")), "{name}: 1 must read as true");
+                assert!(!read(&doc(site, "0")), "{name}: 0 must read as false");
+            }
+            "UnderSlabInsulation InsulationSpansEntireSlab" => {
+                let read = |xml: &str| {
+                    parse_building(xml)
+                        .expect("should parse")
+                        .boundaries
+                        .iter()
+                        .find(|b| b.boundary_type == hares_io::hpxml::building::BoundaryType::Slab)
+                        .expect("slab expected")
+                        .insulation_details
+                        .clone()
+                        .expect("insulation details expected")
+                };
+                assert!(
+                    read(&doc(site, "1")).contains("Whole Slab"),
+                    "{name}: 1 must read as spanning the whole slab"
+                );
+                assert!(
+                    read(&doc(site, "0")).contains("Exterior"),
+                    "{name}: 0 must read as partial"
+                );
+            }
+            "AtticType/Attic/Vented" | "FoundationType/Crawlspace/Vented" => {
+                let read = |xml: &str| {
+                    parse_building(xml)
+                        .expect("should parse")
+                        .zones
+                        .iter()
+                        .find(|z| {
+                            matches!(
+                                z.zone_type,
+                                hares_io::hpxml::building::ZoneType::Attic
+                                    | hares_io::hpxml::building::ZoneType::Foundation
+                            )
+                        })
+                        .expect("zone expected")
+                        .vented
+                };
+                assert!(read(&doc(site, "1")), "{name}: 1 must read as vented");
+                assert!(!read(&doc(site, "0")), "{name}: 0 must read as unvented");
+            }
+            "ClothesDryer/Vented" => {
+                let read = |specs: &[hares_io::EquipmentSpec]| {
+                    specs
+                        .iter()
+                        .find(|s| s.name == "Clothes Dryer")
+                        .expect("clothes dryer spec expected")
+                        .parameters
+                        .get("vented")
+                        .and_then(serde_json::Value::as_bool)
+                        .expect("vented param expected")
+                };
+                assert!(read(&specs_true), "{name}: 1 must read as vented");
+                assert!(!read(&specs_false), "{name}: 0 must read as unvented");
+            }
+            "CookingRange/IsInduction" => {
+                let read = |specs: &[hares_io::EquipmentSpec]| {
+                    specs
+                        .iter()
+                        .find(|s| s.name == "Cooking Range")
+                        .expect("cooking range spec expected")
+                        .parameters
+                        .get("annual_electric_kwh")
+                        .and_then(serde_json::Value::as_f64)
+                        .expect("annual kwh expected")
+                };
+                // Induction burners carry a 0.91 burner efficiency factor
+                // against 1.0 for a standard range, so the annual kWh differ.
+                assert!(
+                    read(&specs_true) < read(&specs_false),
+                    "{name}: 1 (induction) must use less energy than 0"
+                );
+            }
+            "Refrigerator/PrimaryIndicator" => {
+                let read = |specs: &[hares_io::EquipmentSpec]| {
+                    specs
+                        .iter()
+                        .find(|s| s.name == "Refrigerator")
+                        .expect("refrigerator spec expected")
+                        .instance_name
+                        .clone()
+                };
+                assert_eq!(
+                    read(&specs_true),
+                    None,
+                    "{name}: 1 must read as the primary refrigerator"
+                );
+                assert_eq!(
+                    read(&specs_false).as_deref(),
+                    Some("Refrigerator (Secondary)"),
+                    "{name}: 0 must read as a secondary refrigerator"
+                );
+            }
+            "VentilationFan/UsedForWholeBuildingVentilation"
+            | "VentilationFan/UsedForSeasonalCoolingLoadReduction" => {
+                let emits = |specs: &[hares_io::EquipmentSpec]| {
+                    specs.iter().any(|s| s.name == "Ventilation Fan")
+                };
+                assert!(emits(&specs_true), "{name}: 1 must emit the fan spec");
+                assert!(!emits(&specs_false), "{name}: 0 must skip the fan spec");
+            }
+            "WaterFixture/LowFlow" => {
+                let read = |specs: &[hares_io::EquipmentSpec]| {
+                    specs
+                        .iter()
+                        .find(|s| s.name.contains("Water Heater"))
+                        .expect("water heater spec expected")
+                        .parameters
+                        .get("avg_water_draw_l_per_day")
+                        .and_then(serde_json::Value::as_f64)
+                        .expect("draw expected")
+                };
+                let draw_true = read(&specs_true);
+                let draw_false = read(&specs_false);
+                // Low-flow fixtures use less hot water per day.
+                assert!(
+                    draw_true < draw_false,
+                    "{name}: 1 (low flow) must draw less water than 0, got {draw_true} vs {draw_false}"
+                );
+            }
+            other => unreachable!("uncovered boolean site: {other}"),
+        }
+    }
 }

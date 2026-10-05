@@ -15,7 +15,7 @@ use super::data_patches::HpxmlDataPatches;
 use super::equipment::EquipmentSpec;
 use super::water_heater_ua::{UaInputs, WhCategory, ua_from_energy_factor};
 use super::xml_helpers::{
-    child_f64, child_temperature_c, child_text, descendants_named, element_id,
+    child_f64, child_temperature_c, child_text, descendants_named, element_id, parse_xsd_boolean,
 };
 use hares_physics::units as conv;
 
@@ -169,7 +169,7 @@ pub(super) fn resolve_water_heaters(
 ) -> std::result::Result<(), super::HpxmlError> {
     let details = &building.details_xml;
     let (avg_water_draw_l_per_day, n_bedrooms) =
-        parse_avg_water_draw_and_bedrooms(details, data_patches);
+        parse_avg_water_draw_and_bedrooms(details, data_patches)?;
 
     for wh in descendants_named(details, "WaterHeatingSystem") {
         let wh_type = child_text(wh, "WaterHeaterType").unwrap_or_default();
@@ -552,7 +552,7 @@ pub(super) fn resolve_water_heaters(
 fn parse_avg_water_draw_and_bedrooms(
     details: &XmlNode,
     data_patches: Option<&HpxmlDataPatches>,
-) -> (Option<f64>, Option<f64>) {
+) -> Result<(Option<f64>, Option<f64>), super::HpxmlError> {
     let n_bedrooms_raw = match details
         .path(&[
             "BuildingSummary",
@@ -585,15 +585,18 @@ fn parse_avg_water_draw_and_bedrooms(
     };
 
     // Fixture efficiency: low-flow if any WaterFixture has <LowFlow>true</LowFlow>.
-    let fixture_efficiency = if details
-        .path(&["WaterHeating"])
-        .map(|wh_section| {
-            descendants_named(wh_section, "WaterFixture")
-                .iter()
-                .any(|f| child_text(f, "LowFlow").is_some_and(|v| v.eq_ignore_ascii_case("true")))
-        })
-        .unwrap_or(false)
-    {
+    let mut has_low_flow_fixture = false;
+    if let Some(wh_section) = details.path(&["WaterHeating"]) {
+        for fixture in descendants_named(wh_section, "WaterFixture") {
+            if let Some(v) = child_text(fixture, "LowFlow")
+                && parse_xsd_boolean("LowFlow", &v)?
+            {
+                has_low_flow_fixture = true;
+                break;
+            }
+        }
+    }
+    let fixture_efficiency = if has_low_flow_fixture {
         FixtureEfficiency::LowFlow
     } else {
         FixtureEfficiency::Standard
@@ -615,7 +618,7 @@ fn parse_avg_water_draw_and_bedrooms(
         &distribution,
     );
 
-    (Some(draw_l_per_day), Some(n_bedrooms))
+    Ok((Some(draw_l_per_day), Some(n_bedrooms)))
 }
 
 /// Public entry point: extract the bedroom count from a parsed [`Building`].
@@ -1214,9 +1217,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
@@ -1469,6 +1472,7 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1543,6 +1547,7 @@ mod tests {
                       <NumberofBedrooms>4</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1607,6 +1612,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1675,6 +1681,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1740,6 +1747,7 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1803,6 +1811,7 @@ mod tests {
                       <NumberofBedrooms>4</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1872,6 +1881,7 @@ mod tests {
                       <NumberofBedrooms>3.7</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -2602,6 +2612,7 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -2715,9 +2726,9 @@ mod tests {
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
@@ -2761,6 +2772,7 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
