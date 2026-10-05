@@ -51,11 +51,11 @@ ochre_mod = pytest.importorskip("ochre", reason="OCHRE not installed")
 
 # OCHRE's infiltration model converts with a unit name pint 0.25 removed from
 # the default registry; re-register it before any dwelling is built.
-import ochre.utils.units  # noqa: E402
+from ochre.utils import units as ochre_unit_registry
 
-register_removed_units(ochre_mod.utils.units.ureg)
+register_removed_units(ochre_unit_registry.ureg)
 
-import pandas as pd  # noqa: E402  (ships in the ochre group, guarded above)
+import pandas as pd
 
 if ochre_mod.__version__ != EXPECTED_OCHRE_VERSION:
     pytest.fail(

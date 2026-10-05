@@ -13,7 +13,6 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-import pandas as pd
 import pytest
 from ochre_names import resolve_hares_kwh
 from ochre_units import register_removed_units
@@ -132,13 +131,15 @@ def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
 # collection, so the guard below reports a module-level skip there.
 pytestmark = pytest.mark.ochre
 
-ochre = pytest.importorskip("ochre", reason="OCHRE not installed")
+pytest.importorskip("ochre", reason="OCHRE not installed")
 
 # OCHRE's infiltration model converts with a unit name pint 0.25 removed from
 # the default registry; re-register it before any dwelling is built.
-import ochre.utils.units  # noqa: E402
+from ochre.utils import units as ochre_unit_registry
 
-register_removed_units(ochre.utils.units.ureg)
+register_removed_units(ochre_unit_registry.ureg)
+
+import pandas as pd
 
 
 @pytest.fixture(scope="module")
