@@ -4069,6 +4069,23 @@ mod tests {
         );
     }
 
+    /// Ducts in a zone with no ASHRAE 152 zone type have no derating, and the
+    /// duct parameters are an error naming the zone type, never a default.
+    #[test]
+    fn ducts_in_a_zone_without_an_ashrae_152_type_are_an_error() {
+        let mut zone = unconditioned_zone(vec![duct(DuctType::Supply, 10.0, 6.0)]);
+        zone.zone_type = ZoneType::Other("other housing unit".to_string());
+        let mut building = empty_building(vec![zone]);
+        building.site.latitude_deg = Some(40.0);
+        building.site.longitude_deg = Some(-105.0);
+        building.conditioned_volume_m3 = Some(400.0);
+        let err = compute_duct_dse_params(&building).unwrap_err();
+        assert!(
+            err.to_string().contains("other housing unit"),
+            "the error names the zone type, got: {err}"
+        );
+    }
+
     /// Regression test: unequal-area ducts should weight the larger duct more.
     #[test]
     fn duct_r_value_area_weighted_unequal_areas() {
