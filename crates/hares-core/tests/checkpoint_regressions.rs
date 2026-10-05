@@ -529,7 +529,7 @@ fn resumable_dwelling_config(case: &ResumeCase, output_dir: &Path, run: &str) ->
     let root = repo_root();
     DwellingConfig {
         hpxml_path: case.hpxml_path.clone(),
-        schedule_path: resume_home_dir().join("in.schedules.csv"),
+        schedule_path: Some(resume_home_dir().join("in.schedules.csv")),
         weather_path: root
             .join("tests/fixtures/resstock/2025.1/weather")
             .join(case.weather_file),

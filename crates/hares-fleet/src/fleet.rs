@@ -195,7 +195,7 @@ impl Fleet {
                 FleetEntry {
                     config: DwellingConfig {
                         hpxml_path: building.hpxml_path,
-                        schedule_path: building.schedule_path,
+                        schedule_path: Some(building.schedule_path),
                         weather_path,
                         defaults_path: None,
                         sim_config: sim_config.clone(),
@@ -1176,7 +1176,7 @@ mod tests {
         (0..count)
             .map(|idx| DwellingConfig {
                 hpxml_path: fixture_hpxml_path(),
-                schedule_path: schedule_path.clone(),
+                schedule_path: Some(schedule_path.clone()),
                 weather_path: weather_path.clone(),
                 sim_config: simulation_config(unique_temp_path("csv")),
                 defaults_path: None,
@@ -1193,7 +1193,7 @@ mod tests {
         (0..count)
             .map(|idx| DwellingConfig {
                 hpxml_path: PathBuf::from("/tmp/missing-hpxml.xml"),
-                schedule_path: PathBuf::from("/tmp/missing-schedule.csv"),
+                schedule_path: Some(PathBuf::from("/tmp/missing-schedule.csv")),
                 weather_path: PathBuf::from("/tmp/missing-weather.epw"),
                 sim_config: simulation_config(unique_temp_path("csv")),
                 defaults_path: None,

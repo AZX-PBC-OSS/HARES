@@ -551,7 +551,9 @@ impl PySimulationConfig {
 #[derive(Debug, Clone)]
 pub struct PyDwellingConfig {
     hpxml: String,
-    schedule: String,
+    /// `None` requests a schedule generated from the HPXML; a set path is
+    /// read as the dwelling's schedule and any read failure is an error.
+    schedule: Option<String>,
     weather: String,
     config: Option<PySimulationConfig>,
     defaults_path: Option<String>,
@@ -584,7 +586,7 @@ impl PyDwellingConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         hpxml: String,
-        schedule: String,
+        schedule: Option<String>,
         weather: String,
         config: Option<PySimulationConfig>,
         defaults_path: Option<String>,
@@ -666,8 +668,8 @@ impl PyDwellingConfig {
     }
 
     #[getter]
-    pub fn schedule(&self) -> &str {
-        &self.schedule
+    pub fn schedule(&self) -> Option<&str> {
+        self.schedule.as_deref()
     }
 
     #[getter]
@@ -727,9 +729,14 @@ impl PyDwellingConfig {
     }
 
     pub fn __repr__(&self) -> String {
+        let schedule = self
+            .schedule
+            .as_deref()
+            .map(|s| format!("'{s}'"))
+            .unwrap_or_else(|| "None".to_string());
         format!(
-            "DwellingConfig(hpxml='{}', schedule='{}', weather='{}', bldg_id={})",
-            self.hpxml, self.schedule, self.weather, self.bldg_id
+            "DwellingConfig(hpxml='{}', schedule={}, weather='{}', bldg_id={})",
+            self.hpxml, schedule, self.weather, self.bldg_id
         )
     }
 }
@@ -798,7 +805,7 @@ impl PyDwellingConfig {
 
         Ok(DwellingConfig {
             hpxml_path: PathBuf::from(&self.hpxml),
-            schedule_path: PathBuf::from(&self.schedule),
+            schedule_path: self.schedule.as_deref().map(PathBuf::from),
             weather_path: PathBuf::from(&self.weather),
             defaults_path: self.defaults_path.clone().map(PathBuf::from),
             sim_config,
@@ -820,7 +827,9 @@ mod tests {
 
     use chrono::DateTime;
 
-    use super::{DEFAULT_START, MAX_CHRONO_SECONDS, PySimulationConfig, default_start_time};
+    use super::{
+        DEFAULT_START, MAX_CHRONO_SECONDS, PyDwellingConfig, PySimulationConfig, default_start_time,
+    };
 
     #[test]
     fn new_rejects_duration_s_above_chrono_bound() {
@@ -926,5 +935,52 @@ mod tests {
             dt.format("%Y-%m-%dT%H:%M:%S%z").to_string(),
             "2019-01-01T00:00:00+0000"
         );
+    }
+
+    #[test]
+    fn schedule_none_requests_the_generated_schedule() {
+        Python::attach(|_py| {
+            let cfg = PyDwellingConfig::new(
+                "building.xml".to_string(),
+                None,
+                "weather.epw".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("a None schedule constructs");
+            let rust_config = cfg.to_dwelling_config().expect("the config converts");
+            assert!(
+                rust_config.schedule_path.is_none(),
+                "a None schedule must request the generated schedule"
+            );
+        });
+    }
+
+    #[test]
+    fn schedule_path_keeps_the_given_file() {
+        Python::attach(|_py| {
+            let cfg = PyDwellingConfig::new(
+                "building.xml".to_string(),
+                Some("schedules.csv".to_string()),
+                "weather.epw".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("a schedule path constructs");
+            let rust_config = cfg.to_dwelling_config().expect("the config converts");
+            assert_eq!(
+                rust_config.schedule_path,
+                Some(std::path::PathBuf::from("schedules.csv")),
+                "a set schedule must reach the Rust config as the path to read"
+            );
+        });
     }
 }

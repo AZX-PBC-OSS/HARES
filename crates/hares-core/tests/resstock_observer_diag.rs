@@ -71,7 +71,7 @@ mod tests {
 
         let config = DwellingConfig {
             hpxml_path: bldg_dir.join("home.xml"),
-            schedule_path: bldg_dir.join("in.schedules.csv"),
+            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
             weather_path: weather_for(&bldg_dir, "2024.2"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {

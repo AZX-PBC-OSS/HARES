@@ -116,7 +116,7 @@ pub fn build_dwelling_config(
 ) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path,
+        schedule_path: Some(schedule_path),
         weather_path,
         sim_config: SimulationConfig {
             start_time: Utc::now().with_timezone(&FixedOffset::east_opt(0).expect("UTC offset")),

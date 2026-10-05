@@ -634,7 +634,7 @@ impl PyDwelling {
     pub fn from_hpxml(
         _cls: &Bound<'_, PyType>,
         hpxml: String,
-        schedule: String,
+        schedule: Option<String>,
         weather: String,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
@@ -2296,7 +2296,7 @@ fn extract_site_location_override(
 
 pub(crate) fn build_config(
     hpxml: String,
-    schedule: String,
+    schedule: Option<String>,
     weather: String,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<DwellingConfig> {
@@ -2591,7 +2591,9 @@ pub(crate) fn build_config(
 
     Ok(DwellingConfig {
         hpxml_path: PathBuf::from(hpxml),
-        schedule_path: PathBuf::from(schedule),
+        // `None` requests a schedule generated from the HPXML; a set path
+        // must be readable at construction.
+        schedule_path: schedule.map(PathBuf::from),
         weather_path: PathBuf::from(weather),
         defaults_path,
         sim_config,

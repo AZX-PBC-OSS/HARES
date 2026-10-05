@@ -112,7 +112,7 @@ fn dwelling_config(
 ) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: hpxml.to_path_buf(),
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: project_root()
             .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         defaults_path: Some(project_root().join("defaults")),
@@ -297,7 +297,7 @@ fn fixture_dwelling_config(
     (
         DwellingConfig {
             hpxml_path,
-            schedule_path: bldg_dir.join("in.schedules.csv"),
+            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
             weather_path: weather_for(bldg_dir),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: sim_config(Duration::hours(1), None, 0),
@@ -853,7 +853,7 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
     });
     let config = DwellingConfig {
         hpxml_path: hpxml,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
@@ -983,7 +983,7 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
     });
     let config = DwellingConfig {
         hpxml_path: hpxml,
-        schedule_path: second_fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(second_fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&second_fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(Duration::days(45), Some(output_path.clone()), 5),
@@ -1811,7 +1811,7 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
     });
     let config = DwellingConfig {
         hpxml_path: hpxml,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
@@ -2180,7 +2180,7 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
     });
     let config = DwellingConfig {
         hpxml_path: hpxml,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
@@ -2376,7 +2376,7 @@ fn user_added_actor_resolves_its_equipment_binding_on_add() {
 
     let config = DwellingConfig {
         hpxml_path: hpxml,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(Duration::hours(6), None, 0),

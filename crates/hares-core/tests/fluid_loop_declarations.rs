@@ -61,7 +61,7 @@ fn dwelling_config(
 ) -> DwellingConfig {
     DwellingConfig {
         hpxml_path,
-        schedule_path,
+        schedule_path: Some(schedule_path),
         weather_path,
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim,

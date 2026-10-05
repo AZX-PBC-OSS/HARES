@@ -178,7 +178,7 @@ fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
 
     let config = DwellingConfig {
         hpxml_path: repo_path(req.repo_root, &home.hpxml),
-        schedule_path: repo_path(req.repo_root, &home.schedule),
+        schedule_path: Some(repo_path(req.repo_root, &home.schedule)),
         weather_path: repo_path(req.repo_root, &home.weather),
         defaults_path: Some(defaults_tree.dir().to_path_buf()),
         sim_config: sim.clone(),
@@ -285,7 +285,7 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
             }
             DwellingConfig {
                 hpxml_path: repo_path(req.repo_root, &home.hpxml),
-                schedule_path: repo_path(req.repo_root, &home.schedule),
+                schedule_path: Some(repo_path(req.repo_root, &home.schedule)),
                 weather_path: repo_path(req.repo_root, &home.weather),
                 defaults_path: Some(defaults_tree.dir().to_path_buf()),
                 sim_config: sim,

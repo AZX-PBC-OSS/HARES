@@ -44,7 +44,7 @@ fn build_sample(sample: &str, month: u32) -> Dwelling {
         hpxml_path,
         // No schedule file: the dwelling generates the schedule from the
         // HPXML, the sweep's generated-schedule condition.
-        schedule_path: project_root().join("data/examples/no-such-schedule.csv"),
+        schedule_path: None,
         weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: hares_io::SimulationConfig {

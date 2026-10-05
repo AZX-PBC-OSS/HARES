@@ -46,7 +46,7 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
 
     let config = DwellingConfig {
         hpxml_path: root.join("building.xml"),
-        schedule_path: root.join("schedule.csv"),
+        schedule_path: Some(root.join("schedule.csv")),
         weather_path: root.join("weather.epw"),
         defaults_path: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")),
         sim_config,

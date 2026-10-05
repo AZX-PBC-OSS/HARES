@@ -152,7 +152,7 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
 
     let config = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: schedule_path.clone(),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config: simulation_config(output_path.clone()),
         defaults_path: None,
@@ -207,7 +207,7 @@ fn run_with_zero_duration_reports_zero_step() {
 
     let config = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: schedule_path.clone(),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config,
         defaults_path: None,
@@ -238,7 +238,7 @@ fn run_with_zero_duration_reports_zero_step() {
 fn run_returns_err_for_missing_hpxml_path() {
     let config = DwellingConfig {
         hpxml_path: PathBuf::from("/tmp/does-not-exist-hpxml.xml"),
-        schedule_path: PathBuf::from("/tmp/schedule.csv"),
+        schedule_path: Some(PathBuf::from("/tmp/schedule.csv")),
         weather_path: PathBuf::from("/tmp/weather.epw"),
         sim_config: simulation_config(unique_temp_path("csv")),
         defaults_path: None,
@@ -259,9 +259,10 @@ fn run_returns_err_for_missing_hpxml_path() {
 #[test]
 fn run_returns_err_for_missing_weather_path() {
     let engine = SimulationEngine::new();
+    let schedule_path = unique_temp_path("csv");
     let weather_missing = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: unique_temp_path("csv"),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: PathBuf::from("/tmp/does-not-exist-weather.epw"),
         sim_config: simulation_config(unique_temp_path("csv")),
         defaults_path: None,
@@ -271,14 +272,13 @@ fn run_returns_err_for_missing_weather_path() {
         resample_overrides: None,
         patches: None,
     };
-    fs::write(&weather_missing.schedule_path, build_schedule_csv())
-        .expect("failed to write temp schedule");
+    fs::write(&schedule_path, build_schedule_csv()).expect("failed to write temp schedule");
     let weather_err = engine
         .run(weather_missing.clone())
         .expect_err("missing weather path should return error");
     assert!(weather_err.to_string().contains("weather_path"));
 
-    let _ = fs::remove_file(weather_missing.schedule_path);
+    let _ = fs::remove_file(schedule_path);
 }
 
 /// A streaming run (retain_batches=false, the default configuration shape)
@@ -294,7 +294,7 @@ fn run_with_streaming_output_computes_metrics() {
 
     let build_config = |output_path: PathBuf, retain: bool| DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: schedule_path.clone(),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config: simulation_config_with_flags(output_path, retain, true),
         defaults_path: None,
@@ -364,7 +364,7 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
     let output_dir = tempfile::tempdir().expect("temp dir");
     let build_config = |retain: bool| DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: schedule_path.clone(),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config: {
             let output_path = output_dir.path().join(format!("retain_{retain}.csv"));
@@ -421,7 +421,7 @@ fn run_with_zero_duration_flags_zero_step() {
 
     let config = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: schedule_path.clone(),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config,
         defaults_path: None,
@@ -462,7 +462,7 @@ fn run_without_output_recorder_reports_metrics_unavailable() {
 
     let config = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: schedule_path.clone(),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config: simulation_config_with_flags(unique_temp_path("csv"), false, false),
         defaults_path: None,

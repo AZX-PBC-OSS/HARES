@@ -39,7 +39,7 @@ START = "2023-01-15T10:00:00-07:00"
 def make_sample_dwelling(hpxml: str, **kw):
     dw = Dwelling.from_hpxml(
         hpxml,
-        str(ROOT / "data/examples/no-such-schedule.csv"),
+        None,
         WEATHER,
         start_time=START,
         duration_s=timedelta(hours=24),
@@ -136,7 +136,7 @@ class TestTypedSpecBuilderConstructions:
     def make_blueprint(self, hpxml: str):
         bp = DwellingBlueprint.from_hpxml(
             hpxml,
-            str(ROOT / "data/examples/no-such-schedule.csv"),
+            None,
             WEATHER,
             start_time=START,
             duration_s=timedelta(hours=24),

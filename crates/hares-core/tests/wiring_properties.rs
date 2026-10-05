@@ -122,7 +122,7 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
 
     let config = DwellingConfig {
         hpxml_path: PathBuf::from(config_path),
-        schedule_path: schedule_path.clone(),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config: SimulationConfig {
             start_time: FixedOffset::east_opt(0)
@@ -160,7 +160,7 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
     // construction-invariant).
     let config2 = DwellingConfig {
         hpxml_path: PathBuf::from(config_path),
-        schedule_path: schedule_path.clone(),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config: SimulationConfig {
             start_time: FixedOffset::east_opt(0)
@@ -302,7 +302,7 @@ fn indoor_zone_has_exactly_one_beam_receiving_floor_on_ochre_base() {
         .join("../../tests/fixtures/hpxml/ochre_samples/base.xml");
     let config = DwellingConfig {
         hpxml_path: base,
-        schedule_path: schedule_path.clone(),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config: SimulationConfig {
             start_time: FixedOffset::east_opt(0)
@@ -440,7 +440,7 @@ fn attic_floor_never_takes_the_exterior_sky_exposed_path() {
         .join("../../tests/fixtures/hpxml/ochre_samples/base.xml");
     let config = DwellingConfig {
         hpxml_path: base,
-        schedule_path: schedule_path.clone(),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config: SimulationConfig {
             start_time: FixedOffset::east_opt(0)

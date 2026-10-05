@@ -395,7 +395,7 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
     };
     let config = DwellingConfig {
         hpxml_path,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather,
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim,
@@ -478,7 +478,7 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
     };
     let config = DwellingConfig {
         hpxml_path,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather,
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim,
@@ -608,7 +608,7 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
     };
     let config = DwellingConfig {
         hpxml_path,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather,
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim,
@@ -675,7 +675,7 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
     };
     let base = DwellingConfig {
         hpxml_path: hpxml_path.clone(),
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather,
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim,

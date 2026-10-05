@@ -35,7 +35,8 @@ fn config(hpxml: &Path, overrides: Option<Value>, start_hour: u32) -> DwellingCo
         .expect("valid start time");
     DwellingConfig {
         hpxml_path: hpxml.to_path_buf(),
-        schedule_path: project_root().join("data/examples/no-such-schedule.csv"),
+        // No schedule file: the generated schedule is the test's condition.
+        schedule_path: None,
         weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: hares_io::SimulationConfig {

@@ -240,7 +240,7 @@ mod tests {
     fn beopt_config(duration_hours: i64, output_path: PathBuf) -> DwellingConfig {
         DwellingConfig {
             hpxml_path: examples_dir().join("BEopt_example.xml"),
-            schedule_path: examples_dir().join("BEopt_example_schedule.csv"),
+            schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
             weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
@@ -464,7 +464,7 @@ mod tests {
         let engine = SimulationEngine::new();
         let config = DwellingConfig {
             hpxml_path: examples_dir().join("bldg0112631-up00.xml"),
-            schedule_path: examples_dir().join("bldg0112631_schedule.csv"),
+            schedule_path: Some(examples_dir().join("bldg0112631_schedule.csv")),
             weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {

@@ -28,7 +28,7 @@ fn bldg0000007_config() -> DwellingConfig {
     let fixture_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0000007");
     DwellingConfig {
         hpxml_path: fixture_dir.join("home.xml"),
-        schedule_path: fixture_dir.join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir.join("in.schedules.csv")),
         weather_path: project_root()
             .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         defaults_path: Some(project_root().join("defaults")),

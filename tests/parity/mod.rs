@@ -469,7 +469,7 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     let defaults_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
     let dwelling_config = DwellingConfig {
         hpxml_path: fixture.building_xml.clone(),
-        schedule_path: fixture.schedule_csv.clone(),
+        schedule_path: Some(fixture.schedule_csv.clone()),
         weather_path: fixture.weather_epw.clone(),
         sim_config,
         defaults_path: Some(defaults_path),

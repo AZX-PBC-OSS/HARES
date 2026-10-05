@@ -173,13 +173,22 @@ mod tests {
 
     fn run_resstock_smoke(version: &str, bldg_dir: &Path) {
         let hpxml_path = bldg_dir.join("home.xml");
-        let schedule_path = bldg_dir.join("in.schedules.csv");
         let weather_path = weather_path(version, bldg_dir);
         let output_path =
             std::env::temp_dir().join(unique_temp_name("hares_resstock_smoke", "csv"));
         let _guard = TempFile(output_path.clone());
 
         let bldg_name = bldg_dir.file_name().unwrap().to_str().unwrap();
+        // The bldg0527060 fixture carries no in.schedules.csv, so it runs the
+        // generated schedule; every other fixture building runs its own. The
+        // schedule source is named by building, not probed on the file
+        // system, so a building whose CSV goes missing fails construction
+        // instead of silently switching schedules.
+        let schedule_path = if bldg_name == "bldg0527060" {
+            None
+        } else {
+            Some(bldg_dir.join("in.schedules.csv"))
+        };
 
         let engine = SimulationEngine::new();
         let config = DwellingConfig {
@@ -375,7 +384,7 @@ mod tests {
 
         let config = DwellingConfig {
             hpxml_path: bldg_dir.join("home.xml"),
-            schedule_path: bldg_dir.join("in.schedules.csv"),
+            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
             weather_path: weather_path("2024.2", &bldg_dir),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
@@ -475,7 +484,7 @@ mod tests {
     ) -> DwellingConfig {
         DwellingConfig {
             hpxml_path: bldg_dir.join("home.xml"),
-            schedule_path: bldg_dir.join("in.schedules.csv"),
+            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
             weather_path: weather_path(version, bldg_dir),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {

@@ -156,7 +156,7 @@ fn built_consumer_shape_home() -> (Dwelling, tempfile::TempDir) {
 
     let config = DwellingConfig {
         hpxml_path: project_root().join(home["hpxml"].as_str().expect("hpxml path")),
-        schedule_path: project_root().join(home["schedule"].as_str().expect("schedule path")),
+        schedule_path: Some(project_root().join(home["schedule"].as_str().expect("schedule path"))),
         weather_path: project_root().join(home["weather"].as_str().expect("weather path")),
         defaults_path: Some(defaults_dir),
         sim_config: sim,
@@ -210,7 +210,7 @@ fn resstock_homes_carry_no_schedule_warning() {
     };
     let config = DwellingConfig {
         hpxml_path: bldg.join("home.xml"),
-        schedule_path: bldg.join("in.schedules.csv"),
+        schedule_path: Some(bldg.join("in.schedules.csv")),
         weather_path: project_root()
             .join("tests/fixtures/resstock/2025.1/weather/G3400270_2018.csv"),
         defaults_path: Some(project_root().join("defaults")),

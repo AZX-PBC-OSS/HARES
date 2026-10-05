@@ -676,7 +676,7 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
 
     DwellingConfig {
         hpxml_path: fixture.building_xml(),
-        schedule_path: fixture.schedule_csv(),
+        schedule_path: Some(fixture.schedule_csv()),
         weather_path: fixture.weather_epw(),
         sim_config,
         defaults_path: Some(defaults_path),

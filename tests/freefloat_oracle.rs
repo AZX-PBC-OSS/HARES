@@ -58,7 +58,7 @@ mod tests {
 
         DwellingConfig {
             hpxml_path,
-            schedule_path: examples_dir().join("BEopt_example_schedule.csv"),
+            schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
             weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {

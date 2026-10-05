@@ -176,7 +176,7 @@ fn build_minimal_dwelling(hpxml_xml: &str) -> Dwelling {
 
     let config = DwellingConfig {
         hpxml_path: hpxml_path.clone(),
-        schedule_path: schedule_path.clone(),
+        schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         defaults_path: None,
         sim_config: SimulationConfig {

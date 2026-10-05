@@ -70,7 +70,7 @@ pub fn assert_vendor_fixtures_exist() {
 pub fn build_beopt_dwelling_config(bldg_id: i64, duration: Duration, seed: u64) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: ochre_hpxml_path(),
-        schedule_path: ochre_schedule_path(),
+        schedule_path: Some(ochre_schedule_path()),
         weather_path: ochre_weather_path(),
         sim_config: SimulationConfig {
             start_time: Utc::now().into(),
@@ -104,7 +104,7 @@ pub fn build_resstock_dwelling_config(
 ) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: resstock_hpxml_path(),
-        schedule_path: resstock_schedule_path(),
+        schedule_path: Some(resstock_schedule_path()),
         weather_path: ochre_weather_path(),
         sim_config: SimulationConfig {
             start_time: Utc::now().into(),
@@ -229,7 +229,7 @@ pub fn build_dwelling_config(
 ) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path,
+        schedule_path: Some(schedule_path),
         weather_path,
         sim_config: SimulationConfig {
             start_time: Utc::now().into(),

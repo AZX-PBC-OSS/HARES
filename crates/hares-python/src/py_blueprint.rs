@@ -37,7 +37,7 @@ impl PyDwellingBlueprint {
     pub fn from_hpxml(
         _cls: &Bound<'_, PyType>,
         hpxml: String,
-        schedule: String,
+        schedule: Option<String>,
         weather: String,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {

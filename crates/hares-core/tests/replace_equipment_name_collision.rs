@@ -57,7 +57,7 @@ fn sim_config() -> SimulationConfig {
 fn dwelling_config(hpxml: &std::path::Path) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: hpxml.to_path_buf(),
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: project_root()
             .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         defaults_path: Some(project_root().join("defaults")),

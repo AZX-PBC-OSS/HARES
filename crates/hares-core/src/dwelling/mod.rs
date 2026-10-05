@@ -218,7 +218,12 @@ pub type Result<T> = std::result::Result<T, HaresError>;
 #[derive(Debug, Clone)]
 pub struct DwellingConfig {
     pub hpxml_path: PathBuf,
-    pub schedule_path: PathBuf,
+    /// The dwelling's schedule source. `None` requests a schedule generated
+    /// from the HPXML; `Some(path)` requests the CSV at `path`. A set path
+    /// that cannot be read is a construction error naming it: a mistyped
+    /// path must never silently run on a generated schedule's different
+    /// occupancy and loads.
+    pub schedule_path: Option<PathBuf>,
     pub weather_path: PathBuf,
     pub defaults_path: Option<PathBuf>,
     pub sim_config: SimulationConfig,
@@ -234,6 +239,34 @@ pub struct DwellingConfig {
     /// document contains missing or invalid values.
     /// `None` for direct HPXML use where no external metadata is available.
     pub patches: Option<hares_io::HpxmlDataPatches>,
+}
+
+impl DwellingConfig {
+    /// The raw schedule this config requests, before resampling to the
+    /// simulation's step: the schedule file when `schedule_path` is set,
+    /// otherwise a schedule generated from the parsed HPXML. A set path
+    /// that cannot be read is an error naming it.
+    pub(crate) fn load_schedule(
+        &self,
+        building: &Building,
+        weather_meta: &hares_io::WeatherMeta,
+    ) -> Result<ScheduleTimeSeries> {
+        match self.schedule_path.as_deref() {
+            Some(path) => parse_schedule_csv(path, &[], Some(weather_meta), None).map_err(|err| {
+                HaresError::Io(format!(
+                    "schedule file '{}' could not be read: {err}",
+                    path.display()
+                ))
+            }),
+            None => Ok(hares_io::hpxml_schedule::generate_schedule_from_hpxml(
+                building,
+                self.sim_config.start_time,
+                self.sim_config.duration,
+                self.sim_config.time_res,
+                self.defaults_path.as_deref(),
+            )),
+        }
+    }
 }
 
 /// Wall-clock breakdown of one dwelling's `run_timestep` work, behind the
@@ -1940,18 +1973,7 @@ impl Dwelling {
         let weather = parse_weather(&config.weather_path)
             .map_err(|err| HaresError::Io(format!("weather parse failed: {err}")))?;
 
-        let schedule_raw = if config.schedule_path.exists() {
-            parse_schedule_csv(&config.schedule_path, &[], Some(&weather.meta), None)
-                .map_err(|err| HaresError::Io(format!("schedule parse failed: {err}")))?
-        } else {
-            hares_io::hpxml_schedule::generate_schedule_from_hpxml(
-                &building,
-                config.sim_config.start_time,
-                config.sim_config.duration,
-                config.sim_config.time_res,
-                config.defaults_path.as_deref(),
-            )
-        };
+        let schedule_raw = config.load_schedule(&building, &weather.meta)?;
 
         let target_step_secs = duration_to_u32_secs(config.sim_config.time_res)?;
         let schedule = schedule_raw
@@ -2019,7 +2041,7 @@ impl Dwelling {
 
         let config = DwellingConfig {
             hpxml_path: hpxml_path.to_path_buf(),
-            schedule_path: schedule_path.to_path_buf(),
+            schedule_path: Some(schedule_path.to_path_buf()),
             weather_path: weather_path.to_path_buf(),
             defaults_path: None,
             sim_config,
@@ -2099,7 +2121,10 @@ impl Dwelling {
         let weather = build_synthetic_weather(&config, path)?;
         let dwelling_config = DwellingConfig {
             hpxml_path: path.to_path_buf(),
-            schedule_path: path.to_path_buf(),
+            // The synthetic schedule is built below from the TOML definition
+            // and handed to `from_preparsed` directly; the config's schedule
+            // source is never read on this path.
+            schedule_path: None,
             weather_path: path.to_path_buf(),
             defaults_path: None,
             sim_config,
@@ -12735,7 +12760,9 @@ occupancy = 1.0
         let empty_defaults = tempfile::tempdir().expect("create empty temp dir");
         let dwelling_config = DwellingConfig {
             hpxml_path: base_path.clone(),
-            schedule_path: base_path.clone(),
+            // `from_preparsed` receives the schedule directly and never
+            // reads the config's schedule source.
+            schedule_path: None,
             weather_path: base_path.clone(),
             defaults_path: Some(empty_defaults.path().to_path_buf()),
             sim_config,

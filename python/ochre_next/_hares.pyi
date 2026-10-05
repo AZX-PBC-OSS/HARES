@@ -2310,7 +2310,7 @@ class DwellingConfig:
     def __init__(
         self,
         hpxml: str,
-        schedule: str,
+        schedule: str | None,
         weather: str,
         config: SimulationConfig | None = ...,
         defaults_path: str | None = ...,
@@ -2322,7 +2322,7 @@ class DwellingConfig:
     @property
     def hpxml(self) -> str: ...
     @property
-    def schedule(self) -> str: ...
+    def schedule(self) -> str | None: ...
     @property
     def weather(self) -> str: ...
     @property
@@ -2591,7 +2591,7 @@ class DwellingBlueprint:
     def from_hpxml(
         cls,
         hpxml: str,
-        schedule: str,
+        schedule: str | None,
         weather: str,
         *,
         start_time: str | datetime.datetime | None = ...,
@@ -2633,7 +2633,7 @@ class Dwelling:
     def from_hpxml(
         cls,
         hpxml: str,
-        schedule: str,
+        schedule: str | None,
         weather: str,
         *,
         start_time: str | datetime.datetime | None = ...,

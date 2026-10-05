@@ -49,18 +49,7 @@ impl DwellingBlueprint {
         let weather = hares_io::parse_weather(&config.weather_path)
             .map_err(|err| HaresError::Io(format!("weather parse failed: {err}")))?;
 
-        let schedule_raw = if config.schedule_path.exists() {
-            hares_io::parse_schedule_csv(&config.schedule_path, &[], Some(&weather.meta), None)
-                .map_err(|err| HaresError::Io(format!("schedule parse failed: {err}")))?
-        } else {
-            hares_io::hpxml_schedule::generate_schedule_from_hpxml(
-                &building,
-                config.sim_config.start_time,
-                config.sim_config.duration,
-                config.sim_config.time_res,
-                config.defaults_path.as_deref(),
-            )
-        };
+        let schedule_raw = config.load_schedule(&building, &weather.meta)?;
 
         let target_step_secs =
             super::conversions::duration_to_u32_secs(config.sim_config.time_res)?;
