@@ -1484,6 +1484,26 @@ mod tests {
         assert_eq!(param(freezer, "sensible_gain_fraction"), Some(1.0));
     }
 
+    /// The HPXML extension's FracSensible and FracLatent land under the one
+    /// parameter each fraction has, and the resolver's defaults leave them.
+    #[test]
+    fn extension_gain_fractions_take_the_parameter_names() {
+        let specs = resolve_appliances(
+            r"<Refrigerator><extension>
+                <FracSensible>0.4</FracSensible><FracLatent>0.1</FracLatent>
+              </extension></Refrigerator>",
+            vec![conditioned_zone()],
+        );
+        let fridge = specs
+            .iter()
+            .find(|s| s.name == "Refrigerator")
+            .expect("fridge");
+        assert_eq!(param(fridge, "sensible_gain_fraction"), Some(0.4));
+        assert_eq!(param(fridge, "latent_gain_fraction"), Some(0.1));
+        assert!(!fridge.parameters.contains_key("frac_sensible"));
+        assert!(!fridge.parameters.contains_key("frac_latent"));
+    }
+
     #[test]
     fn non_electric_range_takes_the_fuel_split() {
         for fuel in [FuelType::Gas, FuelType::Propane, FuelType::Oil] {

@@ -131,7 +131,8 @@ justification → measured impact → pinning tests.
 - **Pinning tests:** `crates/hares-core/tests/appliance_zone_gains.rs`
   (`hpxml_appliance_gains_reach_the_conditioned_zone`,
   `resstock_event_load_replay_delivers_its_gains`,
-  `overridden_sensible_fraction_keeps_the_radiant_and_visible_shares`),
+  `overridden_sensible_fraction_keeps_the_radiant_and_visible_shares`,
+  `every_gain_override_changes_the_split`),
   `gain_fractions::tests::radiant_part_of_sensible_leaves_the_rest_convective`,
   `resolve_loads::tests::resolver_carries_the_radiant_share`. With
   the heat made all convective, the resolver test fails when the resolver
@@ -167,7 +168,8 @@ justification → measured impact → pinning tests.
   energy 17.15 % to 17.19 %.
 - **Pinning tests:** `appliance_zone_gains.rs`
   (`hpxml_lighting_splits_convective_radiant_and_visible`,
-  `overridden_sensible_fraction_keeps_the_radiant_and_visible_shares`),
+  `overridden_sensible_fraction_keeps_the_radiant_and_visible_shares`,
+  `every_gain_override_changes_the_split`),
   `gain_fractions::tests::visible_part_takes_the_short_wave_path`,
   `resolve_loads::tests::lighting_carries_a_visible_part`,
   `resolve_loads::tests::resolver_carries_the_radiant_share`. Each

@@ -23,6 +23,7 @@ use crate::config::constructor_equipment_id;
 use crate::gain_fractions::{GainFractions, accumulate_zone_gain};
 use crate::hvac::helpers::parse_fuel_type;
 use crate::load_zone::resolve_load_zone;
+use crate::raw_params::{IndexCount, ParamKind, RawParam};
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_usize,
     parse_zone_id, restore_schedule_source_state,
@@ -48,6 +49,7 @@ const KEY_EVENT_PROBABILITY_CONSTANT: &str = "event_probability_constant";
 
 const KEY_HOT_WATER_DRAW_VOLUME_L: &str = "hot_water_draw_volume_l";
 const KEY_EVENT_POWER_KW_SERIES: &str = "event_power_kw_series";
+const KEY_FUEL_TYPE: &str = "fuel_type";
 
 #[derive(Clone, Debug, PartialEq)]
 struct ExtractedEvent {
@@ -200,20 +202,54 @@ fn expected_event_mean_power_kw(
     }
 }
 
-const PHASE_POWER_PREFIX_A: &str = "phase_";
-const PHASE_POWER_SUFFIX_A: &str = "_power_kw";
-const PHASE_DURATION_PREFIX_A: &str = "phase_";
-const PHASE_DURATION_SUFFIX_A: &str = "_duration_s";
+const PHASE_PREFIX: &str = "phase_";
+const PHASE_POWER_SUFFIX: &str = "_power_kw";
+const PHASE_DURATION_SUFFIX: &str = "_duration_s";
+const PHASE_WATER_DRAW_SUFFIX: &str = "_has_water_draw";
 
-const PHASE_POWER_PREFIX_B: &str = "cycle_phase_";
-const PHASE_POWER_SUFFIX_B: &str = "_power_kw";
-const PHASE_DURATION_PREFIX_B: &str = "cycle_phase_";
-const PHASE_DURATION_SUFFIX_B: &str = "_duration_s";
+/// The parameters both event-driven kinds read beside the ones every
+/// raw-parameter load reads: when events may start, the fuel and the
+/// recorded power series events are replayed from.
+pub(crate) const EVENT_PARAMS: &[RawParam] = &[
+    RawParam::key(KEY_EVENT_WINDOW_SOURCE, ParamKind::Text),
+    RawParam::key(KEY_EVENT_WINDOW_SCHEDULE_COL, ParamKind::Number),
+    RawParam::key(KEY_EVENT_PROBABILITY_SOURCE, ParamKind::Text),
+    RawParam::key(KEY_EVENT_PROBABILITY_SCHEDULE_COL, ParamKind::Number),
+    RawParam::key(KEY_EVENT_PROBABILITY_CONSTANT, ParamKind::Number),
+    RawParam::key(KEY_FUEL_TYPE, ParamKind::Text),
+    RawParam::key(KEY_EVENT_POWER_KW_SERIES, ParamKind::NumberList),
+];
 
-const PHASE_WATER_DRAW_PREFIX_A: &str = "phase_";
-const PHASE_WATER_DRAW_SUFFIX_A: &str = "_has_water_draw";
-const PHASE_WATER_DRAW_PREFIX_B: &str = "cycle_phase_";
-const PHASE_WATER_DRAW_SUFFIX_B: &str = "_has_water_draw";
+const fn phase_param(suffix: &'static str, kind: ParamKind) -> RawParam {
+    RawParam::indexed(PHASE_PREFIX, suffix, IndexCount::Param(KEY_PHASE_LEN), kind)
+}
+
+/// What an [`EventBasedLoad`] alone reads.
+pub(crate) const EVENT_LOAD_PARAMS: &[RawParam] = &[
+    RawParam::key(KEY_ACTIVE_POWER_KW, ParamKind::Number),
+    RawParam::key(KEY_ACTIVE_DURATION_S, ParamKind::Number),
+    RawParam::key(KEY_COOLDOWN_DURATION_S, ParamKind::Number),
+];
+
+/// What a [`WetAppliance`] alone reads. The single-phase `active_*` pair is
+/// its cycle when `phase_len` is absent or 0.
+pub(crate) const WET_APPLIANCE_PARAMS: &[RawParam] = &[
+    RawParam::key(KEY_N_UNITS, ParamKind::Number),
+    RawParam::key(KEY_HOT_WATER_DRAW_VOLUME_L, ParamKind::Number),
+    RawParam::key(KEY_ACTIVE_POWER_KW, ParamKind::Number),
+    RawParam::key(KEY_ACTIVE_DURATION_S, ParamKind::Number),
+    RawParam::key(KEY_PHASE_LEN, ParamKind::Number),
+    phase_param(PHASE_POWER_SUFFIX, ParamKind::Number),
+    phase_param(PHASE_DURATION_SUFFIX, ParamKind::Number),
+    phase_param(PHASE_WATER_DRAW_SUFFIX, ParamKind::Bool),
+];
+
+/// The classes registered as [`EventBasedLoad`]s.
+pub(crate) const EVENT_LOAD_CLASSES: [&str; 3] = ["EventBasedLoad", "Cooking Range", "Microwave"];
+
+/// The classes registered as [`WetAppliance`]s.
+pub(crate) const WET_APPLIANCE_CLASSES: [&str; 3] =
+    ["Clothes Washer", "Dishwasher", "Clothes Dryer"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum ForcedMode {
@@ -626,7 +662,7 @@ impl Equipment for EventBasedLoad {
 
         self.month_multipliers = parse_month_multipliers(config)?;
 
-        self.fuel_type = match config.get_str("fuel_type") {
+        self.fuel_type = match config.get_str(KEY_FUEL_TYPE) {
             None => FuelType::Electric,
             Some(raw) => parse_fuel_type(Some(raw))
                 .ok_or_else(|| HaresError::Equipment(format!("unrecognised fuel_type: {raw}")))?,
@@ -1189,7 +1225,7 @@ impl Equipment for WetAppliance {
 
         self.month_multipliers = parse_month_multipliers(config)?;
 
-        self.fuel_type = match config.get_str("fuel_type") {
+        self.fuel_type = match config.get_str(KEY_FUEL_TYPE) {
             None => FuelType::Electric,
             Some(raw) => parse_fuel_type(Some(raw))
                 .ok_or_else(|| HaresError::Equipment(format!("unrecognised fuel_type: {raw}")))?,
@@ -1455,30 +1491,18 @@ impl Equipment for WetAppliance {
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
-    registry.register(
-        "EventBasedLoad",
-        Box::new(|config| Box::new(EventBasedLoad::new(config))),
-    );
-    registry.register(
-        "Clothes Washer",
-        Box::new(|config| Box::new(WetAppliance::new(config, "Clothes Washer"))),
-    );
-    registry.register(
-        "Dishwasher",
-        Box::new(|config| Box::new(WetAppliance::new(config, "Dishwasher"))),
-    );
-    registry.register(
-        "Clothes Dryer",
-        Box::new(|config| Box::new(WetAppliance::new(config, "Clothes Dryer"))),
-    );
-    registry.register(
-        "Cooking Range",
-        Box::new(|config| Box::new(EventBasedLoad::new(config))),
-    );
-    registry.register(
-        "Microwave",
-        Box::new(|config| Box::new(EventBasedLoad::new(config))),
-    );
+    for class in EVENT_LOAD_CLASSES {
+        registry.register(
+            class,
+            Box::new(|config| Box::new(EventBasedLoad::new(config))),
+        );
+    }
+    for class in WET_APPLIANCE_CLASSES {
+        registry.register(
+            class,
+            Box::new(move |config| Box::new(WetAppliance::new(config, class))),
+        );
+    }
 }
 
 /// Convert a 1440-minute OCHRE-style daily start-probability vector (`pdf_*.csv`)
@@ -1616,29 +1640,20 @@ fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>
 
     let mut phases = Vec::with_capacity(count);
     for idx in 0..count {
-        let p_a = format!("{PHASE_POWER_PREFIX_A}{idx}{PHASE_POWER_SUFFIX_A}");
-        let d_a = format!("{PHASE_DURATION_PREFIX_A}{idx}{PHASE_DURATION_SUFFIX_A}");
-        let p_b = format!("{PHASE_POWER_PREFIX_B}{idx}{PHASE_POWER_SUFFIX_B}");
-        let d_b = format!("{PHASE_DURATION_PREFIX_B}{idx}{PHASE_DURATION_SUFFIX_B}");
-        let w_a = format!("{PHASE_WATER_DRAW_PREFIX_A}{idx}{PHASE_WATER_DRAW_SUFFIX_A}");
-        let w_b = format!("{PHASE_WATER_DRAW_PREFIX_B}{idx}{PHASE_WATER_DRAW_SUFFIX_B}");
+        let power_key = format!("{PHASE_PREFIX}{idx}{PHASE_POWER_SUFFIX}");
+        let duration_key = format!("{PHASE_PREFIX}{idx}{PHASE_DURATION_SUFFIX}");
+        let water_draw_key = format!("{PHASE_PREFIX}{idx}{PHASE_WATER_DRAW_SUFFIX}");
 
-        let power_kw = config
-            .get_f64(&p_a)
-            .or_else(|| config.get_f64(&p_b))
-            .ok_or_else(|| {
-                HaresError::Equipment(format!(
-                    "missing wet appliance phase power at index {idx} (keys '{p_a}' or '{p_b}')"
-                ))
-            })?;
-        let duration_s = config
-            .get_f64(&d_a)
-            .or_else(|| config.get_f64(&d_b))
-            .ok_or_else(|| {
-                HaresError::Equipment(format!(
-                    "missing wet appliance phase duration at index {idx} (keys '{d_a}' or '{d_b}')"
-                ))
-            })?;
+        let power_kw = config.get_f64(&power_key).ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "missing wet appliance phase power at index {idx} (key '{power_key}')"
+            ))
+        })?;
+        let duration_s = config.get_f64(&duration_key).ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "missing wet appliance phase duration at index {idx} (key '{duration_key}')"
+            ))
+        })?;
 
         if !power_kw.is_finite() || power_kw < 0.0 {
             return Err(HaresError::Equipment(format!(
@@ -1651,10 +1666,7 @@ fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>
             )));
         }
 
-        let has_water_draw = config
-            .get_bool(&w_a)
-            .or_else(|| config.get_bool(&w_b))
-            .unwrap_or(false);
+        let has_water_draw = config.get_bool(&water_draw_key).unwrap_or(false);
 
         phases.push(CyclePhase {
             power_kw,
@@ -1965,6 +1977,15 @@ mod tests {
         raw.insert("sensible_gain_fraction".to_string(), 0.2.into());
         raw.insert("latent_gain_fraction".to_string(), 0.05.into());
         raw_config(name.to_string(), class_name.to_string(), raw)
+    }
+
+    /// An event load carrying the clothes washer's voltage-dependent ZIP
+    /// row (power factor 0.65), so its real and reactive draws move with
+    /// the bus voltage.
+    fn event_config_with_washer_zip(name: &str) -> EquipmentConfig {
+        let mut config = event_config(name, "EventBasedLoad");
+        config.zip = hares_types::zip::zip_defaults_for_class("Clothes Washer");
+        config
     }
 
     fn set_schedule_payload(env: &mut EnvironmentState, values: Vec<f64>) {
@@ -3691,7 +3712,7 @@ mod tests {
     #[test]
     fn event_based_load_with_zip_produces_reactive_power_under_voltage_deviation() {
         let mut env = base_env();
-        let config = event_config("zip_event", "Clothes Washer");
+        let config = event_config_with_washer_zip("zip_event");
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env).unwrap();
 
@@ -3895,7 +3916,7 @@ mod tests {
         // At sag voltage, real power drops → thermal gain must also drop.
         let mut env_nominal = base_env();
         env_nominal.grid.voltage_pu = 1.0;
-        let config = event_config("zip_thermal", "Clothes Washer");
+        let config = event_config_with_washer_zip("zip_thermal");
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env_nominal).unwrap();
         assert!(
@@ -4115,18 +4136,18 @@ mod tests {
         assert!(!phases[1].has_water_draw);
     }
 
+    /// A phase has one spelling, `phase_<n>_*`; a phase given only under
+    /// another is missing, not read from it.
     #[test]
-    fn parse_cycle_phases_alternate_key_format() {
+    fn parse_cycle_phases_reads_one_spelling() {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert("phase_len".to_string(), 1.0.into());
         raw.insert("cycle_phase_0_power_kw".to_string(), 0.5.into());
         raw.insert("cycle_phase_0_duration_s".to_string(), 60.0.into());
-        raw.insert("cycle_phase_0_has_water_draw".to_string(), true.into());
 
         let config = raw_config("test_alt_key".to_string(), "Dishwasher".to_string(), raw);
-        let phases = super::parse_cycle_phases(&config).unwrap();
-        assert_eq!(phases.len(), 1);
-        assert!(phases[0].has_water_draw);
+        let err = super::parse_cycle_phases(&config).unwrap_err();
+        assert!(err.to_string().contains("phase_0_power_kw"), "{err}");
     }
 
     #[test]

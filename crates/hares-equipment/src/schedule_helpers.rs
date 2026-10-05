@@ -121,7 +121,7 @@ pub(crate) fn restore_schedule_source_state(
 }
 
 pub(crate) fn parse_zone_id(config: &EquipmentConfig) -> Option<ZoneId> {
-    let zone = parse_u16(config, "zone_id").ok()??;
+    let zone = parse_u16(config, crate::config::KEY_ZONE_ID).ok()??;
     Some(ZoneId(zone))
 }
 

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::constructor_equipment_id;
 use crate::gain_fractions::{GainFractions, accumulate_zone_gain};
 use crate::load_zone::resolve_load_zone;
+use crate::raw_params::{ParamKind, RawParam};
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_usize,
     parse_zone_id, restore_schedule_source_state,
@@ -38,6 +39,54 @@ const KEY_GAS_PROFILE_WEEKDAY: &str = "gas_profile_weekday";
 const KEY_GAS_PROFILE_WEEKEND: &str = "gas_profile_weekend";
 const KEY_GAS_PROFILE_MONTH: &str = "gas_profile_month";
 const KEY_GAS_CONSTANT: &str = "gas_constant";
+
+/// The schedule parameters a scheduled load reads, beside the ones every
+/// raw-parameter load reads ([`crate::raw_params::SCHEDULED_LOAD`]).
+pub(crate) const SCHEDULE_PARAMS: &[RawParam] = &[
+    RawParam::key(KEY_GAS_SCHEDULE_IS_W, ParamKind::Bool),
+    RawParam::key(KEY_POWER_SCHEDULE_SOURCE, ParamKind::Text),
+    RawParam::key(KEY_POWER_SCHEDULE_COL, ParamKind::Number),
+    RawParam::key(KEY_POWER_PROFILE_MAX_KW, ParamKind::Number),
+    RawParam::key(KEY_POWER_PROFILE_WEEKDAY, ParamKind::NumberList),
+    RawParam::key(KEY_POWER_PROFILE_WEEKEND, ParamKind::NumberList),
+    RawParam::key(KEY_POWER_PROFILE_MONTH, ParamKind::NumberList),
+    RawParam::key(KEY_POWER_CONSTANT_KW, ParamKind::Number),
+    RawParam::key(KEY_GAS_SCHEDULE_SOURCE, ParamKind::Text),
+    RawParam::key(KEY_GAS_SCHEDULE_COL, ParamKind::Number),
+    RawParam::key(KEY_GAS_PROFILE_MAX, ParamKind::Number),
+    RawParam::key(KEY_GAS_PROFILE_WEEKDAY, ParamKind::NumberList),
+    RawParam::key(KEY_GAS_PROFILE_WEEKEND, ParamKind::NumberList),
+    RawParam::key(KEY_GAS_PROFILE_MONTH, ParamKind::NumberList),
+    RawParam::key(KEY_GAS_CONSTANT, ParamKind::Number),
+];
+
+/// The classes registered as scheduled loads, each with its end use.
+pub(crate) const CLASSES: &[(&str, EndUse)] = &[
+    ("Lighting", EndUse::LIGHTING),
+    ("Plug Loads", EndUse::PLUG_LOADS),
+    ("Other", EndUse::OTHER),
+    ("Refrigerator", EndUse::REFRIGERATION),
+    ("Freezer", EndUse::REFRIGERATION),
+    ("MELs", EndUse::PLUG_LOADS),
+    ("TV", EndUse::PLUG_LOADS),
+    ("Well Pump", EndUse::OTHER),
+    ("Pool Pump", EndUse::POOL_PUMP),
+    ("Pool Heater", EndUse::POOL_HEATER),
+    ("Spa Pump", EndUse::SPA_PUMP),
+    ("Spa Heater", EndUse::SPA_HEATER),
+    ("Gas Grill", EndUse::COOKING),
+    // Gas Fireplace has no direct HPXML EndUse equivalent: it is neither
+    // cooking, heating (it is decorative) nor an HPXML 4.2 §3 appliance
+    // category, so it stays OTHER until the data dictionary gains a
+    // fireplace end use.
+    ("Gas Fireplace", EndUse::OTHER),
+    ("Gas Lighting", EndUse::LIGHTING),
+    ("Ceiling Fan", EndUse::CEILING_FAN),
+    ("Indoor Lighting", EndUse::LIGHTING),
+    ("Exterior Lighting", EndUse::LIGHTING),
+    ("Basement Lighting", EndUse::LIGHTING),
+    ("Garage Lighting", EndUse::LIGHTING),
+];
 
 #[derive(Clone, Copy, Debug)]
 enum GasScheduleUnit {
@@ -172,7 +221,7 @@ impl ScheduledLoad {
         self.power_source = parse_power_schedule_source(config)?;
         let (gas_source, gas_unit) = parse_optional_gas_schedule_source(config)?;
         self.gas_source = gas_source;
-        self.gas_schedule_unit = if parse_bool(config, KEY_GAS_SCHEDULE_IS_W)?.unwrap_or(false) {
+        self.gas_schedule_unit = if config.get_bool(KEY_GAS_SCHEDULE_IS_W).unwrap_or(false) {
             GasScheduleUnit::Watts
         } else {
             gas_unit
@@ -193,13 +242,13 @@ impl ScheduledLoad {
             pf = self.zip.pf,
             "resolved ZIP coefficients",
         );
+        // A daily profile's own month factors are its shape; the load's month
+        // multipliers scale whatever schedule it has on top (OCHRE
+        // ScheduledLoad.py:38-41), the profile included.
         self.month_multipliers = parse_month_multipliers(config)?;
-        if matches!(self.power_source, ScheduleSource::DailyProfile { .. }) {
-            // Month multipliers are already baked into the DailyProfile evaluation,
-            // so clear runtime month multipliers to avoid double-scaling.
-            self.month_multipliers = None;
-        }
-        let usage_multiplier = config.get_f64("usage_multiplier").unwrap_or(1.0);
+        let usage_multiplier = config
+            .get_f64(crate::config::KEY_USAGE_MULTIPLIER)
+            .unwrap_or(1.0);
         if usage_multiplier != 1.0 {
             scale_schedule_source(&mut self.power_source, usage_multiplier);
             if let Some(gas_source) = &mut self.gas_source {
@@ -534,19 +583,35 @@ impl Equipment for ScheduledLoad {
                 }
             }
             source => {
-                let mean = source.mean();
                 // `step()` scales every draw by the runtime month
                 // multipliers (`raw * load_fraction * month_scale`), so the
                 // published expectation must describe the same load: the
                 // unscaled source mean would overstate a seasonal load's
                 // premise weight by the inverse of the mean multiplier.
                 // Equal-weight month averaging is the same convention
-                // `ScheduleSource::mean()` uses for DailyProfile months.
-                let month_scale_mean = self
-                    .month_multipliers
-                    .map(|m| m.iter().sum::<f64>() / 12.0)
-                    .unwrap_or(1.0);
-                let mean = mean * month_scale_mean;
+                // `ScheduleSource::mean()` uses for DailyProfile months; a
+                // daily profile's own month factors take the multipliers
+                // month by month, so the mean is that of their product.
+                let mean = match (source, self.month_multipliers) {
+                    (
+                        ScheduleSource::DailyProfile {
+                            weekday,
+                            weekend,
+                            month_multipliers,
+                            max_value,
+                        },
+                        Some(scale),
+                    ) => ScheduleSource::DailyProfile {
+                        weekday: *weekday,
+                        weekend: *weekend,
+                        month_multipliers: std::array::from_fn(|m| month_multipliers[m] * scale[m]),
+                        max_value: *max_value,
+                    }
+                    .mean(),
+                    (source, scale) => {
+                        source.mean() * scale.map_or(1.0, |m| m.iter().sum::<f64>() / 12.0)
+                    }
+                };
                 // `ScheduleSource::mean()` has no finiteness guard (it is
                 // used for planning hints, not stepping); a non-finite mean
                 // must not be published as a weight-looking `Some` value.
@@ -692,140 +757,12 @@ impl Equipment for ScheduledLoad {
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
-    registry.register(
-        "Lighting",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::LIGHTING, "Lighting"))),
-    );
-    registry.register(
-        "Plug Loads",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PLUG_LOADS, "Plug Loads"))),
-    );
-    registry.register(
-        "Other",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Other"))),
-    );
-
-    // Appliance loads
-    registry.register(
-        "Refrigerator",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::REFRIGERATION,
-                "Refrigerator",
-            ))
-        }),
-    );
-    registry.register(
-        "Freezer",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::REFRIGERATION, "Freezer"))),
-    );
-    registry.register(
-        "MELs",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PLUG_LOADS, "MELs"))),
-    );
-    registry.register(
-        "TV",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PLUG_LOADS, "TV"))),
-    );
-
-    // Pumps
-    registry.register(
-        "Well Pump",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Well Pump"))),
-    );
-    registry.register(
-        "Pool Pump",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::POOL_PUMP, "Pool Pump"))),
-    );
-    registry.register(
-        "Pool Heater",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::POOL_HEATER,
-                "Pool Heater",
-            ))
-        }),
-    );
-    registry.register(
-        "Spa Pump",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::SPA_PUMP, "Spa Pump"))),
-    );
-    registry.register(
-        "Spa Heater",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::SPA_HEATER, "Spa Heater"))),
-    );
-
-    // Gas appliances
-    registry.register(
-        "Gas Grill",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::COOKING, "Gas Grill"))),
-    );
-    // Gas Fireplace has no direct HPXML EndUse equivalent — it is neither Cooking,
-    // Heating (it's decorative/ambient), nor an appliance category in HPXML 4.2 §3.
-    // Keep as OTHER until the HPXML data dictionary gains a Fireplace end-use.
-    registry.register(
-        "Gas Fireplace",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Gas Fireplace"))),
-    );
-    registry.register(
-        "Gas Lighting",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::LIGHTING, "Gas Lighting"))),
-    );
-
-    // Fans
-    registry.register(
-        "Ceiling Fan",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::CEILING_FAN,
-                "Ceiling Fan",
-            ))
-        }),
-    );
-    // Lighting variants
-    registry.register(
-        "Indoor Lighting",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::LIGHTING,
-                "Indoor Lighting",
-            ))
-        }),
-    );
-    registry.register(
-        "Exterior Lighting",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::LIGHTING,
-                "Exterior Lighting",
-            ))
-        }),
-    );
-    registry.register(
-        "Basement Lighting",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::LIGHTING,
-                "Basement Lighting",
-            ))
-        }),
-    );
-    registry.register(
-        "Garage Lighting",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::LIGHTING,
-                "Garage Lighting",
-            ))
-        }),
-    );
+    for (class, end_use) in CLASSES {
+        registry.register(
+            *class,
+            Box::new(move |config| Box::new(ScheduledLoad::new(config, end_use.clone(), class))),
+        );
+    }
 }
 
 fn default_telemetry() -> Telemetry {
@@ -1093,25 +1030,6 @@ fn is_schedule_source_zero(source: &ScheduleSource) -> bool {
     }
 }
 
-fn parse_bool(config: &EquipmentConfig, key: &str) -> crate::Result<Option<bool>> {
-    if let Some(b) = config.get_bool(key) {
-        return Ok(Some(b));
-    }
-    let value = match config.get_f64(key) {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-    if value == 0.0 {
-        return Ok(Some(false));
-    }
-    if value == 1.0 {
-        return Ok(Some(true));
-    }
-    Err(HaresError::Equipment(format!(
-        "invalid boolean for key {key}: expected 0.0 or 1.0, got {value}"
-    )))
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -1134,8 +1052,8 @@ mod tests {
         KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE, ScheduledLoad,
     };
     use crate::gain_fractions::{
-        KEY_CONVECTIVE as KEY_CONVECTIVE_GAIN_FRACTION, KEY_LATENT as KEY_LATENT_GAIN_FRACTION,
-        KEY_RADIANT as KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE as KEY_SENSIBLE_GAIN_FRACTION,
+        KEY_LATENT as KEY_LATENT_GAIN_FRACTION, KEY_RADIANT as KEY_RADIATIVE_GAIN_FRACTION,
+        KEY_SENSIBLE as KEY_SENSIBLE_GAIN_FRACTION,
     };
 
     use crate::schedule_helpers::KEY_MONTH_MULTIPLIER_PREFIX;
@@ -1596,7 +1514,7 @@ mod tests {
                 (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (KEY_GAS_SCHEDULE_SOURCE, "constant".into()),
                 (KEY_GAS_CONSTANT, 1000.0.into()),
-                (KEY_GAS_SCHEDULE_IS_W, 1.0.into()),
+                (KEY_GAS_SCHEDULE_IS_W, true.into()),
             ],
         );
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
@@ -1836,7 +1754,7 @@ mod tests {
             let mut raw: HashMap<String, ConfigValue> = HashMap::new();
             raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
             raw.insert(KEY_POWER_CONSTANT_KW.to_string(), 1.0.into());
-            raw.insert("frac_sensible".to_string(), 1.0.into());
+            raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 1.0.into());
             EquipmentConfig::raw(name.to_string(), name.to_string(), raw)
         };
         let end_use_of = |name: &str| {
@@ -1997,13 +1915,13 @@ mod tests {
     }
 
     #[test]
-    fn convective_and_radiative_fractions_sum_to_sensible() {
+    fn an_absolute_radiative_fraction_leaves_the_rest_of_sensible_convective() {
         let config = config_with_extras(
             "s",
             "Lighting",
             &[1.0],
             &[
-                (KEY_CONVECTIVE_GAIN_FRACTION, 0.3.into()),
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.5.into()),
                 (KEY_RADIATIVE_GAIN_FRACTION, 0.2.into()),
             ],
         );
@@ -2016,9 +1934,6 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        // 1 kW = 1000 W; sensible = conv(0.3) + rad(0.2) = 0.5 → total sensible = 500W
-        // convective = total_sensible - radiant = 500 - 200 = 300W
-        // radiant = 1000 * 0.2 = 200W
         assert!((ports.thermal[0].sensible_gain_w - 300.0).abs() < 1e-9);
         assert!((ports.thermal[0].radiant_gain_w - 200.0).abs() < 1e-9);
     }
@@ -3032,6 +2947,60 @@ mod tests {
                 "a month-scaled constant load has a computable expected draw, \
                  got {other:?}"
             ),
+        }
+    }
+
+    /// A daily profile's month factors are its shape; the load's month
+    /// multipliers scale it on top, in its draws and its expected mean.
+    #[test]
+    fn month_multipliers_scale_a_daily_profile() {
+        use super::{
+            KEY_POWER_PROFILE_MAX_KW, KEY_POWER_PROFILE_MONTH, KEY_POWER_PROFILE_WEEKDAY,
+            KEY_POWER_PROFILE_WEEKEND,
+        };
+        use hares_types::EndUse;
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
+        raw.insert(
+            KEY_POWER_SCHEDULE_SOURCE.to_string(),
+            "daily_profile".into(),
+        );
+        raw.insert(KEY_POWER_PROFILE_MAX_KW.to_string(), 2.0.into());
+        for key in [KEY_POWER_PROFILE_WEEKDAY, KEY_POWER_PROFILE_WEEKEND] {
+            raw.insert(
+                key.to_string(),
+                crate::config::ConfigValue::FloatArray(vec![1.0; 24]),
+            );
+        }
+        let mut profile_months = vec![1.0; 12];
+        profile_months[2] = 0.5;
+        raw.insert(
+            KEY_POWER_PROFILE_MONTH.to_string(),
+            crate::config::ConfigValue::FloatArray(profile_months),
+        );
+        raw.insert("month_multiplier_2".to_string(), 0.5.into());
+        let config = EquipmentConfig::raw("Profile".to_string(), "Lighting".to_string(), raw);
+        let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(
+            ports.electrical.net_active_w(),
+            500.0,
+            "March: 2 kW, times the profile's 0.5, times the multiplier's 0.5"
+        );
+        match eq.expected_mean_power_kw() {
+            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
+                (kw - 2.0 * 11.25 / 12.0).abs() < 1e-12,
+                "eleven months at 2 kW and March at 0.5 kW, got {kw}"
+            ),
+            other => panic!("a daily profile has a computable mean, got {other:?}"),
         }
     }
 

@@ -113,6 +113,7 @@ use conversions::{
     apply_humidity_update_to_zones, apply_thermal_update_to_zones, chrono_to_std_duration,
     default_output_path, duration_to_u32_secs, merged_equipment_config, required_datetime,
     required_duration, required_path, validate_equipment_override_keys, validate_sim_config,
+    validate_wildcard_override,
 };
 #[cfg(feature = "profiling")]
 use hares_types::alloc_count::thread_allocations;
@@ -2557,6 +2558,18 @@ fn build_from_blueprint_inner(
         Option<Vec<SetpointReconciliation>>,
     > = HashMap::new();
 
+    // The wildcard override is checked against the population as it is
+    // built, after autosizing gave the autosized equipment its typed config,
+    // so a wildcard parameter is admitted only when some equipment built
+    // below reads it.
+    {
+        let population: Vec<&hares_io::EquipmentSpec> = equipment_specs
+            .iter()
+            .filter(|s| !HANDLED_OUTSIDE_REGISTRY.contains(&s.name.as_str()))
+            .collect();
+        validate_wildcard_override(&override_root, &population)?;
+    }
+
     let registry = EquipmentRegistry::new();
     let mut equipment: Vec<Box<dyn Equipment>> = Vec::new();
     let mut equipment_by_rng_stream: HashMap<u64, (String, &str)> = HashMap::new();
@@ -2570,8 +2583,8 @@ fn build_from_blueprint_inner(
         // own parameters landed in its payload at add time) is what the
         // constructor and `init` both read, so every constructor-time
         // decision sees the same config the step's flows follow.
-        let merged_cfg = merged_equipment_config(spec, &override_root)?;
-        let mut eq = create_equipment_from_config(&registry, merged_cfg)?;
+        let mut merged_cfg = merged_equipment_config(spec, &override_root)?;
+        let mut eq = create_equipment_from_config(&registry, merged_cfg.clone())?;
 
         // Entrance-1 identity validation runs before `init` so an unassigned
         // id (a malformed explicit `equipment_id` the constructor stamped as
@@ -2586,7 +2599,6 @@ fn build_from_blueprint_inner(
             ));
         }
 
-        let mut merged_cfg = merged_equipment_config(spec, &override_root)?;
         setpoints_reconciled_by_equipment.insert(
             merged_cfg.name.clone(),
             merged_cfg.setpoints_reconciled.clone(),
@@ -2627,12 +2639,16 @@ fn build_from_blueprint_inner(
         // not: a load the input declares must join the model or the build
         // must fail naming the equipment and the cause. Skipping a
         // non-critical failure would run the dwelling short a declared
-        // load while reporting success.
+        // load while reporting success. A parameter error already names
+        // both and keeps its type.
         if let Err(err) = init_result {
-            return Err(HaresError::Equipment(format!(
-                "equipment '{}' init failed: {err}",
-                merged_cfg.name
-            )));
+            return Err(match err {
+                err @ HaresError::InvalidEquipmentParameter { .. } => err,
+                err => HaresError::Equipment(format!(
+                    "equipment '{}' init failed: {err}",
+                    merged_cfg.name
+                )),
+            });
         }
         equipment.push(eq);
     }

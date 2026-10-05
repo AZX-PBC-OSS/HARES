@@ -415,3 +415,210 @@ fn equipment_init_failure_fails_the_dwelling() {
         "the error names the equipment and the cause, got: {message}"
     );
 }
+
+/// Every gain parameter a load reads takes an override, and the split
+/// follows it: the HPXML spellings replace the resolved fraction, an
+/// absolute radiant fraction sets the radiant part, and the shares scale
+/// the sensible fraction. The range's resolved split is 0.72 sensible, 0.6
+/// of it radiant, and 0.08 latent.
+#[test]
+fn every_gain_override_changes_the_split() {
+    for (name, overrides, fractions) in [
+        (
+            "Cooking Range",
+            serde_json::json!({ "frac_sensible": 0.3 }),
+            [0.12, 0.18, 0.0, 0.08],
+        ),
+        (
+            "Cooking Range",
+            serde_json::json!({ "frac_latent": 0.2 }),
+            [0.288, 0.432, 0.0, 0.2],
+        ),
+        (
+            "Cooking Range",
+            serde_json::json!({ "radiative_gain_fraction": 0.2 }),
+            [0.52, 0.2, 0.0, 0.08],
+        ),
+        (
+            "Cooking Range",
+            serde_json::json!({ "radiant_share_of_sensible": 0.9 }),
+            [0.072, 0.648, 0.0, 0.08],
+        ),
+        (
+            "Indoor Lighting",
+            serde_json::json!({ "visible_share_of_sensible": 0.0 }),
+            [0.4, 0.6, 0.0, 0.0],
+        ),
+        (
+            "Indoor Lighting",
+            serde_json::json!({
+                "radiant_share_of_sensible": 0.5,
+                "visible_share_of_sensible": 0.5,
+            }),
+            [0.0, 0.5, 0.5, 0.0],
+        ),
+    ] {
+        assert_zone_split(
+            &cz2a_day(Some(serde_json::json!({ name: overrides }))),
+            name,
+            fractions,
+        );
+    }
+}
+
+/// An override the load cannot take fails construction naming the
+/// parameter and the equipment: a key it does not read (a misspelling, a
+/// renamed key, a spelling of the sensible fraction it no longer takes), a
+/// gain value that is not a number, and one fraction given twice.
+#[test]
+fn an_override_the_load_cannot_take_fails_the_build() {
+    for (name, overrides, key) in [
+        (
+            "Cooking Range",
+            serde_json::json!({ "sensibel_gain_fraction": 0.1 }),
+            "sensibel_gain_fraction",
+        ),
+        (
+            "Indoor Lighting",
+            serde_json::json!({ "visible_gain_fraction": 0.1 }),
+            "visible_gain_fraction",
+        ),
+        (
+            "Cooking Range",
+            serde_json::json!({ "convective_gain_fraction": 0.5 }),
+            "convective_gain_fraction",
+        ),
+        (
+            "Cooking Range",
+            serde_json::json!({ "radiant_share_of_sensible": "0.9" }),
+            "radiant_share_of_sensible",
+        ),
+        (
+            "Cooking Range",
+            serde_json::json!({ "radiant_share_of_sensible": null }),
+            "radiant_share_of_sensible",
+        ),
+        (
+            "Cooking Range",
+            serde_json::json!({ "frac_sensible": 0.3, "sensible_gain_fraction": 0.5 }),
+            "frac_sensible",
+        ),
+    ] {
+        let err = Dwelling::from_config(dwelling_config(&cz2a_day(Some(
+            serde_json::json!({ name: overrides }),
+        ))))
+        .err()
+        .unwrap_or_else(|| panic!("{name} {key}: the override must fail construction"));
+        assert!(
+            matches!(
+                &err,
+                hares_types::HaresError::InvalidEquipmentParameter { equipment, key: k, .. }
+                    if equipment == name && k == key
+            ),
+            "{name} {key}: got {err}"
+        );
+    }
+}
+
+/// Each named load's electric input over the run, in Wh.
+fn inputs_wh(run: &Run, names: &[&str]) -> Vec<f64> {
+    let mut inputs = vec![0.0; names.len()];
+    step_appliances(run, names, |_, idx, ports| {
+        inputs[idx] += input_wh(ports, FuelType::Electric);
+    });
+    inputs
+}
+
+/// A scheduled load's monthly scale factor and its gas-schedule unit take an
+/// override although the resolver set neither: the month factor scales the
+/// load in its month.
+#[test]
+fn a_scheduled_load_takes_the_parameters_the_resolver_left_out() {
+    let base = inputs_wh(&cz2a_day(None), &["Indoor Lighting"])[0];
+    let doubled = inputs_wh(
+        &cz2a_day(Some(serde_json::json!({
+            "Indoor Lighting": { "month_multiplier_0": 2.0, "gas_schedule_is_w": false },
+        }))),
+        &["Indoor Lighting"],
+    )[0];
+    assert!(base > 0.0);
+    assert!(
+        (doubled - 2.0 * base).abs() <= 1e-9 * base,
+        "January's factor 2 doubles the lighting: {base} Wh to {doubled} Wh"
+    );
+}
+
+/// The wildcard, under either spelling, reaches every load that reads its
+/// parameter and skips the equipment that does not (the typed furnace and
+/// air conditioner, the event-driven appliances): the scheduled loads
+/// double and the range does not change.
+#[test]
+fn a_wildcard_reaches_the_loads_that_read_it() {
+    let names = ["Indoor Lighting", "Cooking Range"];
+    let base = inputs_wh(&cz2a_day(None), &names);
+    for wildcard in ["all", "*"] {
+        let scaled = inputs_wh(
+            &cz2a_day(Some(
+                serde_json::json!({ wildcard: { "usage_multiplier": 2.0 } }),
+            )),
+            &names,
+        );
+        assert!(
+            (scaled[0] - 2.0 * base[0]).abs() <= 1e-9 * base[0],
+            "{wildcard}: the lighting doubles, {} Wh to {} Wh",
+            base[0],
+            scaled[0]
+        );
+        assert_eq!(
+            scaled[1], base[1],
+            "{wildcard}: the range reads no usage multiplier"
+        );
+    }
+}
+
+/// Both wildcard spellings, and a wildcard parameter no equipment reads,
+/// fail construction; neither is dropped.
+#[test]
+fn a_wildcard_no_equipment_can_take_fails_the_build() {
+    let both = Dwelling::from_config(dwelling_config(&cz2a_day(Some(serde_json::json!({
+        "all": { "usage_multiplier": 2.0 },
+        "*": { "usage_multiplier": 3.0 },
+    })))))
+    .err()
+    .expect("two wildcards must fail construction");
+    assert!(both.to_string().contains("both 'all' and '*'"), "{both}");
+
+    for wildcard in ["all", "*"] {
+        let err = Dwelling::from_config(dwelling_config(&cz2a_day(Some(serde_json::json!({
+            wildcard: { "usage_multiplir": 2.0 },
+        })))))
+        .err()
+        .expect("a misspelt wildcard parameter must fail construction");
+        assert!(
+            matches!(
+                &err,
+                hares_types::HaresError::InvalidEquipmentParameter { key, .. }
+                    if key == "usage_multiplir"
+            ) && err.to_string().contains(&format!("'{wildcard}'")),
+            "{wildcard}: got {err}"
+        );
+    }
+}
+
+/// A gain parameter given an object fails construction naming it.
+#[test]
+fn a_nested_value_for_a_load_parameter_fails_the_build() {
+    let err = Dwelling::from_config(dwelling_config(&cz2a_day(Some(serde_json::json!({
+        "Cooking Range": { "radiant_share_of_sensible": { "value": 0.5 } },
+    })))))
+    .err()
+    .expect("an object is no fraction");
+    assert!(
+        matches!(
+            &err,
+            hares_types::HaresError::InvalidEquipmentParameter { key, .. }
+                if key == "radiant_share_of_sensible"
+        ),
+        "got {err}"
+    );
+}

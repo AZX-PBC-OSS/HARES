@@ -376,10 +376,10 @@ pub(crate) fn parse_schedule_extension_params(
     }
 
     if let Some(frac) = child_f64(ext, "FracSensible") {
-        out.push(("frac_sensible".to_string(), json!(frac)));
+        out.push(("sensible_gain_fraction".to_string(), json!(frac)));
     }
     if let Some(frac) = child_f64(ext, "FracLatent") {
-        out.push(("frac_latent".to_string(), json!(frac)));
+        out.push(("latent_gain_fraction".to_string(), json!(frac)));
     }
     if let Some(frac) = child_f64(ext, "FracRadiant") {
         out.push(("radiative_gain_fraction".to_string(), json!(frac)));

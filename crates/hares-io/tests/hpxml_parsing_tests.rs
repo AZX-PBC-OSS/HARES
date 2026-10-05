@@ -978,7 +978,7 @@ fn pv_inverter_max_power_output_w_converted_to_kw() {
     let specs = resolve_equipment(
         &building,
         &defaults,
-        &serde_json::Value::Null,
+        &serde_json::json!({}),
         None,
         &mut Vec::new(),
     )

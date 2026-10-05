@@ -65,6 +65,15 @@ pub enum HaresError {
         reason: Box<HaresError>,
         warnings: Vec<String>,
     },
+    /// An equipment parameter, from the input or an override, that the
+    /// equipment cannot take: a key it does not read, or a value of the
+    /// wrong type for the key.
+    #[error("equipment '{equipment}': parameter '{key}' {reason}")]
+    InvalidEquipmentParameter {
+        equipment: String,
+        key: String,
+        reason: String,
+    },
 }
 
 fn rejected_equipment_warnings(warnings: &[String]) -> String {
@@ -133,6 +142,11 @@ mod tests {
             HaresError::RejectedEquipment {
                 reason: Box::new(HaresError::Dwelling("not found".to_string())),
                 warnings: Vec::new(),
+            },
+            HaresError::InvalidEquipmentParameter {
+                equipment: "Cooking Range".to_string(),
+                key: "sensibel_gain_fraction".to_string(),
+                reason: "is not a parameter this equipment reads".to_string(),
             },
         ];
         for err in errors {

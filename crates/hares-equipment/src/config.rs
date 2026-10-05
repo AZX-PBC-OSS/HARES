@@ -96,6 +96,9 @@ pub fn constructor_equipment_id(config: &EquipmentConfig) -> u32 {
 /// Typed configs carry this as a struct field instead.
 pub const KEY_ZONE_ID: &str = "zone_id";
 
+/// Raw config key scaling a scheduled load's power and fuel schedules.
+pub const KEY_USAGE_MULTIPLIER: &str = "usage_multiplier";
+
 /// Catches the config keys no other field of a `#[serde(flatten)]`-ed struct
 /// consumed, failing deserialization and naming them.
 ///
@@ -378,28 +381,55 @@ impl EquipmentConfig {
         })
     }
 
+    /// The `Raw` payload's value at `key`, read as `kind`. A raw-parameter
+    /// load reads only the parameters on its class's list
+    /// ([`crate::raw_params`]), each as the kind listed; in debug and test
+    /// builds a read of any other key, or as another kind, panics, so the
+    /// list cannot fall behind its readers. The dwelling checks the values
+    /// against the same list when it builds the config.
+    pub fn raw_value(&self, key: &str, kind: crate::raw_params::ParamKind) -> Option<&ConfigValue> {
+        #[cfg(debug_assertions)]
+        if let ConfigPayload::Raw { .. } = &self.payload
+            && let Some(params) = crate::raw_params::raw_params_for_class(&self.ochre_class)
+        {
+            let listed = params.named(key).map(|param| param.kind);
+            assert!(
+                listed == Some(kind),
+                "{} '{}' reads '{key}' as {}, which the {} parameter list does not \
+                 name as that kind (listed: {listed:?})",
+                self.ochre_class,
+                self.name,
+                kind.describe(),
+                params.kind
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = kind;
+        self.raw_data().and_then(|data| data.get(key))
+    }
+
     /// Extract a numeric value from the `Raw` payload.
     pub fn get_f64(&self, key: &str) -> Option<f64> {
-        self.raw_data()
-            .and_then(|data| data.get(key).and_then(ConfigValue::as_f64))
+        self.raw_value(key, crate::raw_params::ParamKind::Number)
+            .and_then(ConfigValue::as_f64)
     }
 
     /// Extract a string value from the `Raw` payload.
     pub fn get_str(&self, key: &str) -> Option<&str> {
-        self.raw_data()
-            .and_then(|data| data.get(key).and_then(ConfigValue::as_str))
+        self.raw_value(key, crate::raw_params::ParamKind::Text)
+            .and_then(ConfigValue::as_str)
     }
 
     /// Extract a boolean value from the `Raw` payload.
     pub fn get_bool(&self, key: &str) -> Option<bool> {
-        self.raw_data()
-            .and_then(|data| data.get(key).and_then(ConfigValue::as_bool))
+        self.raw_value(key, crate::raw_params::ParamKind::Bool)
+            .and_then(ConfigValue::as_bool)
     }
 
     /// Extract a float array value from the `Raw` payload.
     pub fn get_f64_array(&self, key: &str) -> Option<&[f64]> {
-        self.raw_data()
-            .and_then(|data| data.get(key).and_then(ConfigValue::as_f64_array))
+        self.raw_value(key, crate::raw_params::ParamKind::NumberList)
+            .and_then(ConfigValue::as_f64_array)
     }
 
     /// Extract the zone ID from either `Raw` or `Typed` payloads.
@@ -429,8 +459,9 @@ impl EquipmentConfig {
         }
     }
 
-    /// Get the raw config data, or None if typed.
-    pub fn raw_data(&self) -> Option<&HashMap<String, ConfigValue>> {
+    /// Get the raw config data, or None if typed. Readers go through
+    /// [`Self::raw_value`], which checks a listed class's reads.
+    pub(crate) fn raw_data(&self) -> Option<&HashMap<String, ConfigValue>> {
         #[cfg(test)]
         if let ConfigPayload::Typed { .. } = &self.payload
             && !self.test_extras.is_empty()
@@ -440,20 +471,6 @@ impl EquipmentConfig {
         match &self.payload {
             ConfigPayload::Raw { data } => Some(data),
             ConfigPayload::Typed { .. } => None,
-        }
-    }
-
-    /// Get the raw config data. Panics if called on a `Typed` payload.
-    pub fn raw_data_or_empty(&self) -> &HashMap<String, ConfigValue> {
-        #[cfg(test)]
-        if let ConfigPayload::Typed { .. } = &self.payload {
-            return &self.test_extras;
-        }
-        match &self.payload {
-            ConfigPayload::Raw { data } => data,
-            ConfigPayload::Typed { .. } => {
-                unreachable!("raw_data_or_empty called on typed config")
-            }
         }
     }
 
@@ -593,6 +610,32 @@ pub fn validate_typed_payload(type_name: &str, data: &serde_json::Value) -> Resu
     validate_typed_payload_detailed(type_name, data).map_err(|err| err.to_string())
 }
 
+/// Whether the typed config registered as `type_name` has a field `key`:
+/// the payload `data` carries it, or the schema takes `data` with `key` set
+/// to `value` without naming `key` an unknown field. Every typed config
+/// rejects unknown fields, so a field the schema takes is one it reads.
+///
+/// # Errors
+///
+/// No typed config is registered as `type_name`.
+pub fn typed_payload_reads(
+    type_name: &str,
+    data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<bool, TypedPayloadError> {
+    let check = typed_schema(type_name)?;
+    if data.contains_key(key) {
+        return Ok(true);
+    }
+    let mut probe = data.clone();
+    probe.insert(key.to_string(), value.clone());
+    Ok(match check(&serde_json::Value::Object(probe)) {
+        Ok(()) => true,
+        Err(err) => !err.message.starts_with(&format!("unknown field `{key}`")),
+    })
+}
+
 /// A typed payload's schema failure: the serde field path when serde's path
 /// tracking can see the failing field, and the deserialization problem
 /// itself.
@@ -626,6 +669,18 @@ pub fn validate_typed_payload_detailed(
     type_name: &str,
     data: &serde_json::Value,
 ) -> Result<(), TypedPayloadError> {
+    typed_schema(type_name)?(data)
+}
+
+/// A typed payload's schema check.
+type SchemaCheck = fn(&serde_json::Value) -> Result<(), TypedPayloadError>;
+
+/// The schema check of the typed config registered as `type_name`.
+///
+/// # Errors
+///
+/// No typed config is registered as `type_name`.
+fn typed_schema(type_name: &str) -> Result<SchemaCheck, TypedPayloadError> {
     use crate::hvac::cooling_config::{
         CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig,
     };
@@ -669,37 +724,35 @@ pub fn validate_typed_payload_detailed(
     }
 
     match type_name {
-        "Gas Furnace" => check::<GasFurnaceConfig>(data),
-        "Electric Furnace" => check::<ElectricFurnaceConfig>(data),
-        "Gas Boiler" => check::<GasBoilerConfig>(data),
-        "Electric Boiler" => check::<ElectricBoilerConfig>(data),
-        "Electric Baseboard" => check::<ElectricBaseboardConfig>(data),
-        "Ideal HVAC" => check::<IdealHvacConfig>(data),
-        "Central AC" => check::<CentralAirConditionerConfig>(data),
-        "Room AC" => check::<RoomAcConfig>(data),
-        "Dehumidifier" => check::<DehumidifierConfig>(data),
+        "Gas Furnace" => Ok(check::<GasFurnaceConfig>),
+        "Electric Furnace" => Ok(check::<ElectricFurnaceConfig>),
+        "Gas Boiler" => Ok(check::<GasBoilerConfig>),
+        "Electric Boiler" => Ok(check::<ElectricBoilerConfig>),
+        "Electric Baseboard" => Ok(check::<ElectricBaseboardConfig>),
+        "Ideal HVAC" => Ok(check::<IdealHvacConfig>),
+        "Central AC" => Ok(check::<CentralAirConditionerConfig>),
+        "Room AC" => Ok(check::<RoomAcConfig>),
+        "Dehumidifier" => Ok(check::<DehumidifierConfig>),
         "ASHP Heater" | "MSHP Heater" | "GSHP Heater" | "WSHP Heater" => {
-            check::<HeatPumpHeaterConfig>(data)
+            Ok(check::<HeatPumpHeaterConfig>)
         }
         "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler" | "WSHP Cooler" => {
-            check::<HeatPumpCoolerConfig>(data)
+            Ok(check::<HeatPumpCoolerConfig>)
         }
-        "Gas Water Heater" => check::<GasWaterHeaterConfig>(data),
-        "Electric Resistance Water Heater" => check::<ElectricResistanceWaterHeaterConfig>(data),
+        "Gas Water Heater" => Ok(check::<GasWaterHeaterConfig>),
+        "Electric Resistance Water Heater" => Ok(check::<ElectricResistanceWaterHeaterConfig>),
         "Tankless Water Heater" | "Gas Tankless Water Heater" => {
-            check::<TanklessWaterHeaterConfig>(data)
+            Ok(check::<TanklessWaterHeaterConfig>)
         }
-        "Indirect Tank" => check::<IndirectTankConfig>(data),
-        "Heat Pump Water Heater" | "HPWH" => check::<HeatPumpWaterHeaterConfig>(data),
-        "Battery" => check::<crate::BatteryConfig>(data),
-        "PV" => check::<crate::PvConfig>(data),
-        "EV" | "Electric Vehicle" | "Scheduled EV" => check::<crate::EvConfig>(data),
-        "Generator" | "Gas Generator" | "Gas Fuel Cell" => check::<crate::GeneratorConfig>(data),
-        "Ventilation" | "HRV" | "ERV" | "Ventilation Fan" => {
-            check::<crate::VentilationConfig>(data)
-        }
+        "Indirect Tank" => Ok(check::<IndirectTankConfig>),
+        "Heat Pump Water Heater" | "HPWH" => Ok(check::<HeatPumpWaterHeaterConfig>),
+        "Battery" => Ok(check::<crate::BatteryConfig>),
+        "PV" => Ok(check::<crate::PvConfig>),
+        "EV" | "Electric Vehicle" | "Scheduled EV" => Ok(check::<crate::EvConfig>),
+        "Generator" | "Gas Generator" | "Gas Fuel Cell" => Ok(check::<crate::GeneratorConfig>),
+        "Ventilation" | "HRV" | "ERV" | "Ventilation Fan" => Ok(check::<crate::VentilationConfig>),
         "Protocol Bridge" | "ProtocolBridge" => {
-            check::<crate::protocol_bridge::ProtocolBridgeConfig>(data)
+            Ok(check::<crate::protocol_bridge::ProtocolBridgeConfig>)
         }
         unknown => Err(TypedPayloadError {
             path: None,
@@ -1142,6 +1195,30 @@ mod tests {
         assert_eq!(ec.get_f64_array("arr"), Some(&[1.0, 2.0, 3.0][..]));
         assert_eq!(ec.get_f64("missing"), None);
         assert!(!ec.is_typed());
+    }
+
+    /// The schema probe tells a field the typed config has from one it does
+    /// not, through the flattened heat-pump config too, and an unregistered
+    /// type name is an error rather than a config that reads everything.
+    #[test]
+    fn typed_payload_reads_probes_the_schema() {
+        let furnace = serde_json::Map::new();
+        let value = serde_json::json!(0.9);
+        assert_eq!(
+            typed_payload_reads("Gas Furnace", &furnace, "afue", &value),
+            Ok(true)
+        );
+        assert_eq!(
+            typed_payload_reads("Gas Furnace", &furnace, "afuee", &value),
+            Ok(false)
+        );
+        assert_eq!(
+            typed_payload_reads("ASHP Heater", &furnace, "backup_fuell", &value),
+            Ok(false)
+        );
+        let err = typed_payload_reads("No Such Config", &furnace, "afue", &value)
+            .expect_err("an unregistered type name");
+        assert!(err.message.contains("No Such Config"), "{err}");
     }
 
     #[test]

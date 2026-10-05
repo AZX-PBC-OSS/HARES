@@ -15,6 +15,7 @@ pub mod ndinterp;
 pub(crate) mod pack_electrical;
 pub mod protocol_bridge;
 pub mod pv;
+pub mod raw_params;
 pub mod registry;
 pub(crate) mod schedule_helpers;
 pub mod scheduled_load;
@@ -54,10 +55,15 @@ pub use battery::{BatteryConfig, BatteryLutType, OcvTable, UNegTable};
 pub use config::{
     ConfigPayload, EquipmentConfig, EquipmentTypedConfig, RejectUnknownKeys,
     SetpointReconciliation, TypedPayloadError, constructor_equipment_id, equipment_id_from_config,
-    normalize_enum_text, resolve_zip, validate_typed_payload, validate_typed_payload_detailed,
+    normalize_enum_text, resolve_zip, typed_payload_reads, validate_typed_payload,
+    validate_typed_payload_detailed,
 };
 pub use ev::ChargingCurveLut;
 pub use ev::EvConfig;
+pub use gain_fractions::{
+    GAIN_KEY_ALIASES, GAIN_KEYS, canonical_gain_key, canonicalize_gain_params,
+    check_one_gain_spelling,
+};
 pub use generator::GeneratorConfig;
 pub use generator::GeneratorEfficiencyCurvePoint;
 pub use hares_types::Telemetry;
@@ -81,6 +87,7 @@ pub use protocol_bridge::{
     JsonHandler, ProtocolBridgeConfig, config::HandlerConfig, handler::EquipmentCommand,
 };
 pub use pv::PvConfig;
+pub use raw_params::{IndexCount, ParamForm, ParamKind, RawParam, RawParams, raw_params_for_class};
 pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistry};
 pub use ventilation::VentilationConfig;
 pub use water_heater::DHW_DEMAND_LOOP;

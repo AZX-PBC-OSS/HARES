@@ -8,7 +8,7 @@ use hares_equipment::hvac::heat_pump_config::{
     HeatPumpCommonConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
 };
 use hares_equipment::{Equipment, EquipmentConfig, config::ConfigValue};
-use hares_equipment::{event_load::EventBasedLoad, scheduled_load::ScheduledLoad};
+use hares_equipment::{event_load::WetAppliance, scheduled_load::ScheduledLoad};
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
 use hares_io::{EquipmentSpec, ScheduleTimeSeries, inject_schedule_into_specs, resolve_equipment};
@@ -392,13 +392,12 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
         &[
             ("active_power_kw", 1.5.into()),
             ("active_duration_s", 60.0.into()),
-            ("cooldown_duration_s", 0.0.into()),
         ],
         &[],
     )
     .with_rng_stream(RngStream::event_load(dwelling_seed(0, 0), &specs[0].name));
 
-    let mut eq = EventBasedLoad::new(config.clone());
+    let mut eq = WetAppliance::new(config.clone(), "Dishwasher");
     // payload len=2 while injected column index is 2. BoundaryPolicy::Wrap should map idx 2 -> 0.
     let env = base_env(vec![1.0, 1.0]);
     eq.init(&config, &env).expect("event load init should pass");

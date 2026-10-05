@@ -3,9 +3,8 @@
 use hares_types::{EndUse, EnvironmentState, HaresError, ZoneId, ZoneRole};
 
 use crate::EquipmentConfig;
+use crate::config::KEY_ZONE_ID;
 use crate::schedule_helpers::parse_u16;
-
-const KEY_ZONE_ID: &str = "zone_id";
 
 /// Resolves a load's zone once its gain fractions are known.
 ///

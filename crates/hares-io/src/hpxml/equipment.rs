@@ -66,7 +66,7 @@ pub fn resolve_equipment(
     resolve_scheduled_loads(building, defaults, &mut specs)?;
     resolve_ventilation(details, defaults, &mut specs)?;
 
-    apply_overrides(&mut specs, overrides);
+    apply_overrides(&mut specs, overrides)?;
     resolve_loop_wiring(&mut specs)?;
     assign_instance_names(&mut specs);
     Ok(specs)
@@ -74,36 +74,110 @@ pub fn resolve_equipment(
 
 pub fn nested_update(base: &mut Map<String, Value>, overrides: &Map<String, Value>) {
     for (key, override_value) in overrides {
-        match (base.get_mut(key), override_value) {
-            (Some(Value::Object(base_obj)), Value::Object(override_obj)) => {
-                nested_update(base_obj, override_obj);
-            }
-            _ => {
-                base.insert(key.clone(), override_value.clone());
-            }
+        nested_insert(base, key, override_value);
+    }
+}
+
+/// Sets `key` to `value` in `base`, merging an object into an object
+/// already there key by key.
+pub fn nested_insert(base: &mut Map<String, Value>, key: &str, value: &Value) {
+    match (base.get_mut(key), value) {
+        (Some(Value::Object(base_obj)), Value::Object(override_obj)) => {
+            nested_update(base_obj, override_obj);
+        }
+        _ => {
+            base.insert(key.to_string(), value.clone());
         }
     }
 }
 
-fn apply_overrides(specs: &mut [EquipmentSpec], overrides: &Value) {
-    let Value::Object(root) = overrides else {
-        return;
-    };
+/// The two spellings of the override that reaches every equipment.
+pub const WILDCARD_OVERRIDE_KEYS: [&str; 2] = ["all", "*"];
 
-    let global = root
-        .get("all")
-        .or_else(|| root.get("*"))
-        .and_then(Value::as_object);
+/// The wildcard override: its spelling and its parameters.
+pub type WildcardOverride<'a> = (&'static str, &'a Map<String, Value>);
 
-    for spec in specs {
-        if let Some(global_obj) = global {
-            nested_update(&mut spec.parameters, global_obj);
+/// The override layers that reach one equipment, lowest first: the
+/// wildcard that reaches every equipment, then the equipment's own entry.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OverrideLayers<'a> {
+    pub wildcard: Option<WildcardOverride<'a>>,
+    pub own: Option<&'a Map<String, Value>>,
+}
+
+/// The wildcard of an override map: `all` or `*`, its one spelling.
+///
+/// # Errors
+///
+/// Both spellings, or a wildcard that is not an object of parameters.
+pub fn wildcard_override(
+    root: &Map<String, Value>,
+) -> Result<Option<WildcardOverride<'_>>, hares_types::HaresError> {
+    let mut found = None;
+    for spelling in WILDCARD_OVERRIDE_KEYS {
+        let Some(value) = root.get(spelling) else {
+            continue;
+        };
+        if found.is_some() {
+            return Err(hares_types::HaresError::Equipment(
+                "equipment overrides give both 'all' and '*', two spellings of the \
+                 override every equipment takes; give one"
+                    .to_string(),
+            ));
         }
+        found = Some((spelling, override_object(spelling, value)?));
+    }
+    Ok(found)
+}
 
-        if let Some(Value::Object(eq_obj)) = root.get(&spec.name) {
-            nested_update(&mut spec.parameters, eq_obj);
+/// The override layers of `root` that reach the equipment named `name`.
+///
+/// # Errors
+///
+/// As [`wildcard_override`], or an equipment entry that is not an object of
+/// parameters.
+pub fn override_layers<'a>(
+    root: &'a Map<String, Value>,
+    name: &str,
+) -> Result<OverrideLayers<'a>, hares_types::HaresError> {
+    Ok(OverrideLayers {
+        wildcard: wildcard_override(root)?,
+        own: root
+            .get(name)
+            .map(|value| override_object(name, value))
+            .transpose()?,
+    })
+}
+
+fn override_object<'a>(
+    source: &str,
+    value: &'a Value,
+) -> Result<&'a Map<String, Value>, hares_types::HaresError> {
+    value.as_object().ok_or_else(|| {
+        hares_types::HaresError::Equipment(format!(
+            "the '{source}' equipment override must be an object of parameters, got: {value}"
+        ))
+    })
+}
+
+fn apply_overrides(specs: &mut [EquipmentSpec], overrides: &Value) -> Result<(), HpxmlError> {
+    let Value::Object(root) = overrides else {
+        return Err(hares_types::HaresError::Equipment(format!(
+            "equipment overrides must be an object mapping equipment names to \
+             parameters, got: {overrides}"
+        ))
+        .into());
+    };
+    for spec in specs {
+        let layers = override_layers(root, &spec.name)?;
+        if let Some((_, layer)) = layers.wildcard {
+            nested_update(&mut spec.parameters, layer);
+        }
+        if let Some(layer) = layers.own {
+            nested_update(&mut spec.parameters, layer);
         }
     }
+    Ok(())
 }
 
 pub(crate) fn build_spec(
@@ -118,14 +192,11 @@ pub(crate) fn build_spec(
     );
 
     // Inject OCHRE-compatible default gain fractions when HPXML did not provide them.
-    if !parameters.contains_key("frac_sensible")
-        && !parameters.contains_key("sensible_gain_fraction")
+    if !parameters.contains_key("sensible_gain_fraction")
         && let Some((sensible, latent)) = default_gain_fractions(&name, fuel_type)
     {
         parameters.insert("sensible_gain_fraction".to_string(), json!(sensible));
-        if !parameters.contains_key("frac_latent")
-            && !parameters.contains_key("latent_gain_fraction")
-        {
+        if !parameters.contains_key("latent_gain_fraction") {
             parameters.insert("latent_gain_fraction".to_string(), json!(latent));
         }
     }
@@ -548,9 +619,45 @@ mod tests {
     use hares_physics::units as conv;
     use hares_types::{FuelType, ScheduleSourceConfig};
 
-    use super::{HpxmlError, nested_update, resolve_equipment};
+    use super::{HpxmlError, nested_update, override_layers, resolve_equipment};
     use crate::defaults::DefaultsStore;
     use crate::hpxml::building::parse_building;
+
+    /// The layers reaching one equipment are the wildcard, under either
+    /// spelling, and its own entry; both spellings, or a layer that is not
+    /// an object, are errors.
+    #[test]
+    fn override_layers_resolve_one_wildcard() {
+        let root = |value: Value| value.as_object().cloned().expect("object");
+        for spelling in ["all", "*"] {
+            let overrides = root(json!({ spelling: { "a": 1 }, "Range": { "b": 2 } }));
+            let layers = override_layers(&overrides, "Range").expect("valid");
+            let (source, wildcard) = layers.wildcard.expect("a wildcard");
+            assert_eq!(source, spelling);
+            assert_eq!(wildcard.get("a"), Some(&json!(1)));
+            assert_eq!(layers.own.and_then(|own| own.get("b")), Some(&json!(2)));
+            assert!(
+                override_layers(&overrides, "Dryer")
+                    .expect("valid")
+                    .own
+                    .is_none()
+            );
+        }
+        for (overrides, needle) in [
+            (json!({ "all": {}, "*": {} }), "both 'all' and '*'"),
+            (
+                json!({ "all": 3 }),
+                "'all' equipment override must be an object",
+            ),
+            (
+                json!({ "Range": [1] }),
+                "'Range' equipment override must be an object",
+            ),
+        ] {
+            let err = override_layers(&root(overrides), "Range").expect_err(needle);
+            assert!(err.to_string().contains(needle), "{err}");
+        }
+    }
 
     #[test]
     fn nested_update_merges_objects_without_clobbering_siblings() {

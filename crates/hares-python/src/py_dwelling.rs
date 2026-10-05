@@ -2646,7 +2646,9 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         HaresError::Io(_) | HaresError::Dwelling(_) | HaresError::Envelope(_) => {
             HaresConfigError::new_err(msg)
         }
-        HaresError::Equipment(_) => HaresEquipmentError::new_err(msg),
+        HaresError::Equipment(_) | HaresError::InvalidEquipmentParameter { .. } => {
+            HaresEquipmentError::new_err(msg)
+        }
         // Physics variant is DEPRECATED: zero production constructors remain in
         // the codebase (T-0144). Kept for serialization compatibility and future
         // hares-physics crate retrofitting (T-0145).

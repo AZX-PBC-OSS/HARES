@@ -677,14 +677,39 @@ pub(crate) fn equipment_config_from_spec(
         // sidecar already present on the typed config when the spec carries
         // none.
         let zip = spec.zip_params.or(typed.zip);
-        return spec_config_from_typed(typed, spec, zip, &Value::Object(Map::new()));
+        return spec_config_from_typed(
+            typed,
+            spec,
+            zip,
+            hares_io::hpxml::OverrideLayers::default(),
+        );
     }
 
-    let raw_config: HashMap<String, ConfigValue> = spec
-        .parameters
-        .iter()
-        .filter_map(|(k, v)| json_value_to_config_value(v).map(|cv| (k.clone(), cv)))
-        .collect();
+    // A parameter a load reads must hold the kind it reads it as: any other
+    // value (a string for a number, a null, an object) would read as absent
+    // and run the load on its default. Other keys are the resolver's own
+    // state, which the load does not read.
+    let params = hares_equipment::raw_params_for_class(&spec.name);
+    let lookup = |name: &str| spec.parameters.get(name);
+    let mut raw_config: HashMap<String, ConfigValue> =
+        HashMap::with_capacity(spec.parameters.len());
+    for (key, value) in &spec.parameters {
+        let config_value = json_value_to_config_value(value);
+        if let Some(param) = params.and_then(|params| params.param(key, &lookup))
+            && !config_value
+                .as_ref()
+                .is_some_and(|config_value| param.kind.holds(config_value))
+        {
+            return Err(HaresError::InvalidEquipmentParameter {
+                equipment: spec.instance_name.as_ref().unwrap_or(&spec.name).clone(),
+                key: key.clone(),
+                reason: format!("must be {}, got {value}", param.kind.describe()),
+            });
+        }
+        if let Some(config_value) = config_value {
+            raw_config.insert(key.clone(), config_value);
+        }
+    }
 
     let display_name = spec.instance_name.as_ref().unwrap_or(&spec.name).clone();
     let mut cfg = EquipmentConfig::raw(display_name, spec.name.clone(), raw_config);
@@ -852,10 +877,10 @@ fn land_spec_parameters(
 /// merged payload against the typed struct the payload's type name
 /// registers when the overrides landed something.
 ///
-/// The layers, lowest first: the typed payload's own data, then
-/// `extra_overrides` (the dwelling-level override map's contribution for
-/// this spec, in the canonical vocabulary the payload's serde deserializer
-/// reads). A merged result that fails its schema is an error naming the
+/// The layers, lowest first: the typed payload's own data, then the
+/// dwelling-level override layers that reach this spec (in the canonical
+/// vocabulary the payload's serde deserializer reads, applied by
+/// [`apply_typed_overrides`]). A merged result that fails its schema is an error naming the
 /// equipment and the offending field when serde's path tracking can see it
 /// (the flattened heat-pump configs' members cannot be pathed; their
 /// failures carry the deserialization problem alone), at the conversion
@@ -866,7 +891,7 @@ fn spec_config_from_typed(
     typed: &EquipmentConfig,
     spec: &hares_io::EquipmentSpec,
     base_zip: Option<hares_types::zip::ZipLoad>,
-    extra_overrides: &Value,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
 ) -> Result<EquipmentConfig> {
     let ConfigPayload::Typed {
         type_name,
@@ -889,7 +914,7 @@ fn spec_config_from_typed(
         )));
     };
     let before_overrides = merged.clone();
-    apply_equipment_overrides(&mut merged, extra_overrides, &spec.name)?;
+    apply_typed_overrides(&mut merged, layers, type_name, &spec.name)?;
     // Validation rides the override delta: a value the schema rejects must
     // error at the merge that applied it, but a payload that carried its
     // defect before any override reached it keeps the init-time semantics
@@ -1012,18 +1037,30 @@ fn merge_zip_override(
     Ok(Some(zip))
 }
 
+/// The config of `spec` with the dwelling's equipment overrides applied:
+/// the wildcard's parameters the equipment reads, then its own entry.
+///
+/// # Errors
+///
+/// A malformed override map ([`hares_io::hpxml::override_layers`]), the
+/// reserved `equipment_id` in a layer, a parameter the equipment cannot take
+/// (a typed config's schema or a load's parameter list rejects it), or a
+/// malformed `zip` override.
 pub(crate) fn merged_equipment_config(
     spec: &hares_io::EquipmentSpec,
     overrides: &Value,
 ) -> Result<EquipmentConfig> {
+    let Value::Object(root) = overrides else {
+        return Err(non_object_overrides(overrides));
+    };
+    let layers = hares_io::hpxml::override_layers(root, &spec.name)?;
     if let Some(typed) = &spec.typed_config
         && matches!(typed.payload, ConfigPayload::Typed { .. })
     {
-        return spec_config_from_typed(typed, spec, spec.zip_params.or(typed.zip), overrides);
+        return spec_config_from_typed(typed, spec, spec.zip_params.or(typed.zip), layers);
     }
 
-    let mut merged = spec.parameters.clone();
-    apply_equipment_overrides(&mut merged, overrides, &spec.name)?;
+    let mut merged = raw_load_parameters(spec, layers)?;
     // Raw equipment honor the reserved "zip" override object too, for
     // consistency with typed equipment: it is merged field-wise over the
     // spec's zip_params base and folded back into `zip_params`, which
@@ -1048,6 +1085,233 @@ pub(crate) fn merged_equipment_config(
         primary_role: spec.primary_role.clone(),
     };
     equipment_config_from_spec(&merged_spec)
+}
+
+/// The reserved override object that carries an equipment's ZIP
+/// coefficients, which every equipment takes.
+const RESERVED_ZIP_OVERRIDE: &str = "zip";
+
+fn non_object_overrides(overrides: &Value) -> HaresError {
+    HaresError::Equipment(format!(
+        "equipment overrides payload must be a JSON object mapping \
+         equipment names to override fields, got: {overrides}; a \
+         non-object payload can never match an equipment name and \
+         would silently no-op every override"
+    ))
+}
+
+/// Rejects the reserved `equipment_id` in the override layer `source`:
+/// equipment ids are assigned by the dwelling.
+fn reject_reserved_key(source: &str, key: &str, equipment: &str) -> Result<()> {
+    if key == hares_equipment::config::KEY_EQUIPMENT_ID {
+        return Err(HaresError::InvalidEquipmentParameter {
+            equipment: equipment.to_string(),
+            key: key.to_string(),
+            reason: format!(
+                "in the '{source}' override is rejected: equipment ids are \
+                 assigned by the dwelling, not configurable; remove the field"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The value a load's parameter `key` has once the override layers that
+/// reach it are applied: its own entry's, else the wildcard's, else its
+/// resolved value.
+fn layered_value<'v>(
+    resolved: &'v Map<String, Value>,
+    layers: hares_io::hpxml::OverrideLayers<'v>,
+    key: &str,
+) -> Option<&'v Value> {
+    layers
+        .own
+        .and_then(|own| own.get(key))
+        .or_else(|| layers.wildcard.and_then(|(_, wildcard)| wildcard.get(key)))
+        .or_else(|| resolved.get(key))
+}
+
+/// Whether the typed config `type_name` with payload `data` has the field
+/// `key` (given `value`).
+fn typed_reads(
+    type_name: &str,
+    data: &Map<String, Value>,
+    key: &str,
+    value: &Value,
+    equipment: &str,
+) -> Result<bool> {
+    hares_equipment::typed_payload_reads(type_name, data, key, value)
+        .map_err(|err| HaresError::Equipment(format!("equipment '{equipment}': {err}")))
+}
+
+/// Whether the equipment `spec` reads the wildcard parameter `key` (given
+/// `value`) once the override layers of `root` that reach it are applied: a
+/// typed config whose schema has the field, or a raw-parameter load whose
+/// list holds it. A raw spec of a class no list declares vouches for no
+/// parameter.
+fn spec_reads(
+    spec: &hares_io::EquipmentSpec,
+    root: &Map<String, Value>,
+    key: &str,
+    value: &Value,
+) -> Result<bool> {
+    if let Some(EquipmentConfig {
+        payload: ConfigPayload::Typed {
+            type_name, data, ..
+        },
+        ..
+    }) = &spec.typed_config
+    {
+        return match data.as_object() {
+            Some(data) => typed_reads(type_name, data, key, value, &spec.name),
+            None => Ok(false),
+        };
+    }
+    let Some(params) = hares_equipment::raw_params_for_class(&spec.name) else {
+        return Ok(false);
+    };
+    let layers = hares_io::hpxml::override_layers(root, &spec.name)?;
+    Ok(params.reads(key, &|name| layered_value(&spec.parameters, layers, name)))
+}
+
+/// Checks the wildcard override (`all` or `*`) against the whole
+/// population: every parameter it gives is read by some equipment of the
+/// dwelling. Each equipment then takes the wildcard parameters it reads and
+/// skips the rest, which other equipment read.
+///
+/// # Errors
+///
+/// Both wildcard spellings, a wildcard that is not an object, the reserved
+/// `equipment_id`, a fraction under both of its spellings, or a parameter no
+/// equipment reads (a misspelling).
+pub(crate) fn validate_wildcard_override(
+    overrides: &Value,
+    population: &[&hares_io::EquipmentSpec],
+) -> Result<()> {
+    let Value::Object(root) = overrides else {
+        return Err(non_object_overrides(overrides));
+    };
+    let Some((source, wildcard)) = hares_io::hpxml::wildcard_override(root)? else {
+        return Ok(());
+    };
+    let every_equipment = format!("every equipment (the '{source}' override)");
+    hares_equipment::check_one_gain_spelling(wildcard, &every_equipment)?;
+    for (key, value) in wildcard {
+        reject_reserved_key(source, key, &every_equipment)?;
+        let key = hares_equipment::canonical_gain_key(key);
+        if key == RESERVED_ZIP_OVERRIDE {
+            continue;
+        }
+        let mut read = false;
+        for spec in population {
+            if spec_reads(spec, root, key, value)? {
+                read = true;
+                break;
+            }
+        }
+        if read {
+            continue;
+        }
+        return Err(HaresError::InvalidEquipmentParameter {
+            equipment: every_equipment,
+            key: key.to_string(),
+            reason: format!("in the '{source}' override is read by no equipment of this dwelling"),
+        });
+    }
+    Ok(())
+}
+
+/// The parameters of a raw-parameter load with the overrides that reach it
+/// applied: the wildcard's parameters the load reads once every layer is
+/// applied (the rest are other equipment's, checked by
+/// [`validate_wildcard_override`]), then its own entry, each HPXML gain
+/// spelling rewritten to the parameter it stands for so that it replaces
+/// the resolved value.
+///
+/// # Errors
+///
+/// The reserved `equipment_id`; a fraction under both spellings in one
+/// layer; a parameter of its own entry the load does not read (named in the
+/// error with the list it reads). A raw spec of a class no list declares
+/// takes the whole wildcard and its own entry unchecked, and vouches for no
+/// wildcard parameter.
+fn raw_load_parameters(
+    spec: &hares_io::EquipmentSpec,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+) -> Result<Map<String, Value>> {
+    use hares_equipment::canonical_gain_key;
+    use hares_io::hpxml::nested_insert;
+
+    let params = hares_equipment::raw_params_for_class(&spec.name);
+    let mut merged = spec.parameters.clone();
+    hares_equipment::canonicalize_gain_params(&mut merged, &spec.name)?;
+    if let Some((source, wildcard)) = layers.wildcard {
+        hares_equipment::check_one_gain_spelling(wildcard, &spec.name)?;
+        let lookup = |name: &str| layered_value(&spec.parameters, layers, name);
+        for (key, value) in wildcard {
+            reject_reserved_key(source, key, &spec.name)?;
+            let key = canonical_gain_key(key);
+            if key == RESERVED_ZIP_OVERRIDE
+                || params.is_none_or(|params| params.reads(key, &lookup))
+            {
+                nested_insert(&mut merged, key, value);
+            }
+        }
+    }
+    let Some(own) = layers.own else {
+        return Ok(merged);
+    };
+    hares_equipment::check_one_gain_spelling(own, &spec.name)?;
+    for (key, value) in own {
+        reject_reserved_key(&spec.name, key, &spec.name)?;
+        nested_insert(&mut merged, canonical_gain_key(key), value);
+    }
+    if let Some(params) = params
+        && let Some(key) = own.keys().map(|key| canonical_gain_key(key)).find(|key| {
+            *key != RESERVED_ZIP_OVERRIDE && !params.reads(key, &|name| merged.get(name))
+        })
+    {
+        return Err(HaresError::InvalidEquipmentParameter {
+            equipment: spec.name.clone(),
+            key: key.to_string(),
+            reason: format!(
+                "in the '{}' override is not a parameter a {} reads; it reads: {}",
+                spec.name,
+                params.kind,
+                params.describe()
+            ),
+        });
+    }
+    Ok(merged)
+}
+
+/// Applies the overrides that reach a typed config to its payload: the
+/// wildcard's parameters its schema has (the rest are other equipment's,
+/// checked by [`validate_wildcard_override`]), then its own entry, which
+/// the schema validates after the merge.
+fn apply_typed_overrides(
+    merged: &mut Map<String, Value>,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+    type_name: &str,
+    equipment: &str,
+) -> Result<()> {
+    use hares_io::hpxml::nested_insert;
+
+    if let Some((source, wildcard)) = layers.wildcard {
+        for (key, value) in wildcard {
+            reject_reserved_key(source, key, equipment)?;
+            if key == RESERVED_ZIP_OVERRIDE
+                || typed_reads(type_name, merged, key, value, equipment)?
+            {
+                nested_insert(merged, key, value);
+            }
+        }
+    }
+    for (key, value) in layers.own.into_iter().flatten() {
+        reject_reserved_key(equipment, key, equipment)?;
+        nested_insert(merged, key, value);
+    }
+    Ok(())
 }
 
 /// Validate equipment-override keys against the equipment population at
@@ -1081,15 +1345,10 @@ pub(crate) fn validate_equipment_override_keys(
     // and is rejected with everything else non-object. The same rule the
     // `zip` override channel already enforces ("must be an object", above).
     let Value::Object(root) = overrides else {
-        return Err(HaresError::Equipment(format!(
-            "equipment overrides payload must be a JSON object mapping \
-             equipment names to override fields, got: {overrides} — a \
-             non-object payload can never match an equipment name and \
-             would silently no-op every override"
-        )));
+        return Err(non_object_overrides(overrides));
     };
     for key in root.keys() {
-        if key == "all" || key == "*" {
+        if hares_io::hpxml::WILDCARD_OVERRIDE_KEYS.contains(&key.as_str()) {
             continue;
         }
         if overridable_names.contains(&key.as_str()) {
@@ -1109,46 +1368,6 @@ pub(crate) fn validate_equipment_override_keys(
              names: {}",
             overridable_names.join(", ")
         )));
-    }
-    Ok(())
-}
-
-fn apply_equipment_overrides(
-    base: &mut Map<String, Value>,
-    overrides: &Value,
-    name: &str,
-) -> Result<()> {
-    let Value::Object(root) = overrides else {
-        return Ok(());
-    };
-    // `equipment_id` is reserved: ids are assigned by the dwelling assembly
-    // (and auto-assigned by `add_equipment`), never configurable. The check
-    // sits on the override *delta* — not the merged result, whose base
-    // already carries the assembly-injected id — so a user-supplied id is
-    // rejected here, loudly, instead of being silently clobbered by the
-    // injection or silently overriding it. A wildcard ("all"/"*") form
-    // would assign one id to every equipment and is covered by the same
-    // check.
-    for (source, obj) in [
-        ("all", root.get("all")),
-        ("*", root.get("*")),
-        (name, root.get(name)),
-    ] {
-        if let Some(Value::Object(fields)) = obj
-            && fields.contains_key("equipment_id")
-        {
-            return Err(HaresError::Equipment(format!(
-                "equipment '{name}': the 'equipment_id' field in the '{source}' \
-                 override is rejected — equipment ids are assigned by the \
-                 dwelling, not configurable; remove the field"
-            )));
-        }
-    }
-    if let Some(Value::Object(all)) = root.get("all").or_else(|| root.get("*")) {
-        hares_io::hpxml::nested_update(base, all);
-    }
-    if let Some(Value::Object(eq)) = root.get(name) {
-        hares_io::hpxml::nested_update(base, eq);
     }
     Ok(())
 }
@@ -1329,7 +1548,7 @@ mod tests {
         apply_spec_bag_to_typed_config, building_to_boundary_inputs, building_to_zone_inputs,
         chrono_to_std_duration, duration_to_u32_secs, equipment_config_from_spec, find_zone_idx,
         mass_multiplier_for_zone, merged_equipment_config, resolve_exterior,
-        zone_has_furniture_boundaries, zone_type_to_label,
+        validate_wildcard_override, zone_has_furniture_boundaries, zone_type_to_label,
     };
     use hares_types::HaresError;
 
@@ -2283,7 +2502,7 @@ mod tests {
         assert_eq!((zip.zq, zip.iq, zip.pq), (base.zq, base.iq, base.pq));
         // The reserved "zip" key must not leak into the raw parameter map.
         assert!(
-            !merged.raw_data().expect("raw payload").contains_key("zip"),
+            !raw_keys(&merged).iter().any(|key| *key == "zip"),
             "reserved \"zip\" key must be peeled from raw parameters"
         );
         // End-to-end through the resolver.
@@ -2304,11 +2523,10 @@ mod tests {
         assert_eq!(cfg.zip, Some(base));
         assert_eq!(hares_equipment::resolve_zip(&cfg).zip, base);
         // No legacy zip_* keys anywhere in the raw payload.
-        let raw = cfg.raw_data().expect("raw payload");
+        let keys = raw_keys(&cfg);
         assert!(
-            raw.keys().all(|k| !k.starts_with("zip")),
-            "raw payload must carry no zip_* keys, got: {:?}",
-            raw.keys().collect::<Vec<_>>()
+            keys.iter().all(|k| !k.starts_with("zip")),
+            "raw payload must carry no zip_* keys, got: {keys:?}"
         );
     }
 
@@ -3827,6 +4045,346 @@ mod tests {
             result.unwrap(),
             hares_envelope::ExteriorTarget::Outdoor,
             "unrecognised exterior zone type must map to Outdoor target"
+        );
+    }
+
+    // ── overrides of raw-parameter loads ────────────────────────────────
+
+    /// A load of each kind, by a class registered as that kind, resolved
+    /// with a four-phase cycle so the wet appliance's phase keys exist.
+    const LOAD_OF_EACH_KIND: [&str; 3] = ["Plug Loads", "Cooking Range", "Dishwasher"];
+
+    fn raw_load_spec(class: &str) -> hares_io::EquipmentSpec {
+        let Value::Object(parameters) = json!({ "sensible_gain_fraction": 0.5, "phase_len": 4 })
+        else {
+            unreachable!()
+        };
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: class.to_string(),
+            fuel_type: FuelType::Electric,
+            parameters,
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }
+    }
+
+    /// A key of each form on `params`'s list, a numbered one by its first
+    /// member, with the kind the load reads it as.
+    fn listed_keys(
+        params: &hares_equipment::RawParams,
+    ) -> Vec<(String, hares_equipment::ParamKind)> {
+        params
+            .params()
+            .map(|param| {
+                let key = match param.form {
+                    hares_equipment::ParamForm::Key(name) => name.to_string(),
+                    hares_equipment::ParamForm::Indexed { prefix, suffix, .. } => {
+                        format!("{prefix}0{suffix}")
+                    }
+                };
+                (key, param.kind)
+            })
+            .collect()
+    }
+
+    /// A value of `kind`, and one of another kind.
+    fn values_of(kind: hares_equipment::ParamKind) -> (Value, Value) {
+        use hares_equipment::ParamKind;
+        match kind {
+            ParamKind::Number => (json!(1.0), json!("1")),
+            ParamKind::Text => (json!("constant"), json!(1.0)),
+            ParamKind::Bool => (json!(true), json!(1.0)),
+            ParamKind::NumberList => (json!([1.0]), json!(1.0)),
+        }
+    }
+
+    /// The keys of a raw config's parameters.
+    fn raw_keys(cfg: &hares_equipment::EquipmentConfig) -> Vec<&String> {
+        match &cfg.payload {
+            hares_equipment::ConfigPayload::Raw { data } => data.keys().collect(),
+            hares_equipment::ConfigPayload::Typed { .. } => panic!("a raw payload"),
+        }
+    }
+
+    fn rejected_key(spec: &hares_io::EquipmentSpec, overrides: &Value) -> Option<String> {
+        match merged_equipment_config(spec, overrides) {
+            Ok(_) => None,
+            Err(HaresError::InvalidEquipmentParameter { key, .. }) => Some(key),
+            Err(other) => panic!("{}: not a parameter error: {other}", spec.name),
+        }
+    }
+
+    /// Derived from the lists, so a key added to a load's list is covered:
+    /// every key a load kind reads takes an override of the kind it reads
+    /// (`equipment_id` aside, which ids reserve) and rejects one of another
+    /// kind, and every other key is rejected by name: the other kinds' keys
+    /// this kind does not read, a misspelling of each of its own, and a
+    /// numbered key past its family's count.
+    #[test]
+    fn a_load_takes_an_override_of_exactly_the_parameters_it_reads() {
+        for class in LOAD_OF_EACH_KIND {
+            let spec = raw_load_spec(class);
+            let params = hares_equipment::raw_params_for_class(class).expect("a load class");
+            let own = listed_keys(params);
+            for (key, kind) in &own {
+                let (value, wrong) = values_of(*kind);
+                let rejected = rejected_key(&spec, &json!({ class: { key.as_str(): value } }));
+                if key == hares_equipment::config::KEY_EQUIPMENT_ID {
+                    assert_eq!(rejected.as_deref(), Some(key.as_str()), "{class}");
+                    continue;
+                }
+                assert_eq!(rejected, None, "{class} must take an override of {key}");
+                assert_eq!(
+                    rejected_key(&spec, &json!({ class: { key.as_str(): wrong } })).as_deref(),
+                    Some(key.as_str()),
+                    "{class} must reject {key} given {wrong}"
+                );
+            }
+            let mut others: Vec<String> = hares_equipment::raw_params::ALL
+                .iter()
+                .flat_map(|other| listed_keys(other))
+                .map(|(key, _)| key)
+                .filter(|key| !params.names(key))
+                .collect();
+            others.extend(own.iter().map(|(key, _)| format!("{key}x")));
+            others.extend([
+                "month_multiplier_12".to_string(),
+                "phase_4_power_kw".to_string(),
+            ]);
+            others.push("fuel_type".to_string());
+            for key in others
+                .iter()
+                .filter(|key| !params.reads(key, &|name| spec.parameters.get(name)))
+            {
+                let overrides = json!({ class: { key.as_str(): 1.0 } });
+                assert_eq!(
+                    rejected_key(&spec, &overrides).as_deref(),
+                    Some(key.as_str()),
+                    "{class} must reject an override of {key}"
+                );
+            }
+        }
+    }
+
+    /// The rejection names the parameters the load does read.
+    #[test]
+    fn a_rejected_override_lists_what_the_load_reads() {
+        let err = merged_equipment_config(
+            &raw_load_spec("Plug Loads"),
+            &json!({ "Plug Loads": { "usage_multiplir": 2.0 } }),
+        )
+        .expect_err("a misspelt parameter");
+        let message = err.to_string();
+        for key in [
+            "usage_multiplier",
+            "power_constant_kw",
+            "month_multiplier_<n>",
+        ] {
+            assert!(message.contains(key), "{key} missing from: {message}");
+        }
+    }
+
+    /// A wildcard parameter a load does not read is skipped for that load;
+    /// one it reads reaches it, under either wildcard spelling.
+    #[test]
+    fn a_wildcard_reaches_the_loads_that_read_its_parameters() {
+        for wildcard in ["all", "*"] {
+            let overrides = json!({ wildcard: { "usage_multiplier": 2.0, "n_units": 3.0 } });
+            let plug = merged_equipment_config(&raw_load_spec("Plug Loads"), &overrides)
+                .expect("the scheduled load takes the usage multiplier");
+            assert_eq!(plug.get_f64("usage_multiplier"), Some(2.0), "{wildcard}");
+            assert!(!raw_keys(&plug).iter().any(|key| *key == "n_units"));
+            let washer = merged_equipment_config(&raw_load_spec("Dishwasher"), &overrides)
+                .expect("the wet appliance takes the unit count");
+            assert_eq!(washer.get_f64("n_units"), Some(3.0), "{wildcard}");
+            assert!(
+                !raw_keys(&washer)
+                    .iter()
+                    .any(|key| *key == "usage_multiplier")
+            );
+        }
+    }
+
+    /// A numbered wildcard key reaches a load only within its family's
+    /// count as every layer leaves it: a four-phase dishwasher skips a
+    /// fifth phase unless the wildcard also lengthens its cycle.
+    #[test]
+    fn a_wildcard_numbered_key_reaches_a_load_within_its_count() {
+        let washer = raw_load_spec("Dishwasher");
+        let short =
+            merged_equipment_config(&washer, &json!({ "all": { "phase_4_power_kw": 1.0 } }))
+                .expect("skipped for a four-phase cycle");
+        assert!(
+            !raw_keys(&short)
+                .iter()
+                .any(|key| *key == "phase_4_power_kw")
+        );
+        let long = merged_equipment_config(
+            &washer,
+            &json!({ "all": { "phase_len": 5, "phase_4_power_kw": 1.0 } }),
+        )
+        .expect("the fifth phase exists");
+        assert_eq!(long.get_f64("phase_4_power_kw"), Some(1.0));
+    }
+
+    /// Both wildcard spellings are an error, never one shadowing the other.
+    #[test]
+    fn both_wildcard_spellings_are_an_error() {
+        let overrides = json!({ "all": { "usage_multiplier": 2.0 }, "*": { "zone_id": 1 } });
+        let err = merged_equipment_config(&raw_load_spec("Plug Loads"), &overrides)
+            .expect_err("two wildcards");
+        assert!(err.to_string().contains("both 'all' and '*'"), "{err}");
+        let err = validate_wildcard_override(&overrides, &[&raw_load_spec("Plug Loads")])
+            .expect_err("two wildcards");
+        assert!(err.to_string().contains("both 'all' and '*'"), "{err}");
+    }
+
+    /// A wildcard parameter no equipment of the dwelling reads is a
+    /// misspelling, rejected by name; one some equipment reads is not.
+    #[test]
+    fn a_wildcard_parameter_must_be_read_by_some_equipment() {
+        let plug = raw_load_spec("Plug Loads");
+        let washer = raw_load_spec("Dishwasher");
+        let furnace = gas_furnace_spec();
+        let population = [&plug, &washer, &furnace];
+        for overrides in [
+            json!({ "all": { "usage_multiplier": 2.0 } }),
+            json!({ "*": { "n_units": 2.0 } }),
+            json!({ "all": { "afue": 0.9 } }),
+            json!({ "all": { "frac_sensible": 0.4 } }),
+            json!({ "all": { "zip": { "pf": 0.9 } } }),
+        ] {
+            validate_wildcard_override(&overrides, &population)
+                .unwrap_or_else(|err| panic!("{overrides}: {err}"));
+        }
+        for (wildcard, key) in [
+            ("all", "usage_multiplir"),
+            ("*", "afuee"),
+            ("all", "month_multiplier_12"),
+            ("*", "phase_4_power_kw"),
+        ] {
+            let err = validate_wildcard_override(&json!({ wildcard: { key: 2.0 } }), &population)
+                .expect_err("read by no equipment");
+            assert!(
+                matches!(&err, HaresError::InvalidEquipmentParameter { key: k, .. } if k == key),
+                "{err}"
+            );
+            assert!(err.to_string().contains(wildcard), "{err}");
+        }
+        let err = validate_wildcard_override(&json!({ "all": { "n_units": 2.0 } }), &[&plug])
+            .expect_err("no wet appliance reads it here");
+        assert!(err.to_string().contains("n_units"), "{err}");
+        validate_wildcard_override(
+            &json!({ "all": { "phase_4_power_kw": 1.0 }, "Dishwasher": { "phase_len": 5 } }),
+            &population,
+        )
+        .expect("the dishwasher's own entry gives it a fifth phase");
+        let raw_ev = raw_load_spec("EV");
+        let err =
+            validate_wildcard_override(&json!({ "all": { "soc_max": 0.9 } }), &[&plug, &raw_ev])
+                .expect_err("a raw spec no list declares vouches for no parameter");
+        assert!(err.to_string().contains("soc_max"), "{err}");
+    }
+
+    /// The typed furnace takes the wildcard parameters its schema has and
+    /// skips the loads' ones.
+    #[test]
+    fn a_typed_config_takes_the_wildcard_parameters_its_schema_has() {
+        let overrides = json!({ "all": { "afue": 0.9, "usage_multiplier": 2.0 } });
+        let merged = merged_equipment_config(&gas_furnace_spec(), &overrides)
+            .expect("the furnace skips the load parameter");
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("typed");
+        assert!((cfg.afue - 0.9).abs() < 1e-12);
+    }
+
+    /// The reserved `zip` object reaches a load from its own entry and from
+    /// a wildcard; `equipment_id` is rejected from either.
+    #[test]
+    fn reserved_override_keys() {
+        for overrides in [
+            json!({ "Plug Loads": { "zip": { "pf": 0.9 } } }),
+            json!({ "all": { "zip": { "pf": 0.9 } } }),
+        ] {
+            let merged = merged_equipment_config(&raw_load_spec("Plug Loads"), &overrides)
+                .unwrap_or_else(|err| panic!("{overrides}: {err}"));
+            assert_eq!(merged.zip.map(|zip| zip.pf), Some(0.9), "{overrides}");
+        }
+        for (source, overrides) in [
+            ("Plug Loads", json!({ "Plug Loads": { "equipment_id": 3 } })),
+            ("all", json!({ "all": { "equipment_id": 3 } })),
+        ] {
+            let err = merged_equipment_config(&raw_load_spec("Plug Loads"), &overrides)
+                .expect_err("ids are the dwelling's");
+            assert!(
+                matches!(&err, HaresError::InvalidEquipmentParameter { key, .. } if key == "equipment_id")
+                    && err.to_string().contains(&format!("'{source}' override")),
+                "{err}"
+            );
+        }
+    }
+
+    /// An override may add a parameter the resolver left out: the usage
+    /// multiplier and the zone.
+    #[test]
+    fn an_override_adds_a_parameter_the_resolver_left_out() {
+        let spec = raw_load_spec("Plug Loads");
+        assert!(!spec.parameters.contains_key("usage_multiplier"));
+        assert!(!spec.parameters.contains_key("zone_id"));
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({ "Plug Loads": { "usage_multiplier": 1.5, "zone_id": 2 } }),
+        )
+        .expect("both are parameters the load reads");
+        assert_eq!(merged.get_f64("usage_multiplier"), Some(1.5));
+        assert_eq!(merged.get_f64("zone_id"), Some(2.0));
+    }
+
+    /// A parameter a load reads, given a value no config value holds (an
+    /// object, a null, a list with a non-number), is rejected by name rather
+    /// than read as absent.
+    #[test]
+    fn a_parameter_value_no_config_holds_is_rejected() {
+        for value in [json!({ "nested": 0.5 }), Value::Null, json!([1.0, "two"])] {
+            for key in [
+                "radiant_share_of_sensible",
+                "month_multiplier_3",
+                "usage_multiplier",
+            ] {
+                let overrides = json!({ "Plug Loads": { key: value.clone() } });
+                assert_eq!(
+                    rejected_key(&raw_load_spec("Plug Loads"), &overrides).as_deref(),
+                    Some(key),
+                    "{key} = {value}"
+                );
+            }
+        }
+    }
+
+    /// The HPXML spelling of a fraction in an override replaces the resolved
+    /// fraction; both spellings in one layer are an error.
+    #[test]
+    fn an_hpxml_gain_spelling_replaces_the_resolved_fraction() {
+        let merged = merged_equipment_config(
+            &raw_load_spec("Plug Loads"),
+            &json!({ "all": { "frac_latent": 0.1 }, "Plug Loads": { "frac_sensible": 0.3 } }),
+        )
+        .expect("both spellings are read");
+        assert_eq!(merged.get_f64("sensible_gain_fraction"), Some(0.3));
+        assert_eq!(merged.get_f64("latent_gain_fraction"), Some(0.1));
+        let err = merged_equipment_config(
+            &raw_load_spec("Plug Loads"),
+            &json!({ "Plug Loads": { "frac_sensible": 0.3, "sensible_gain_fraction": 0.2 } }),
+        )
+        .expect_err("one fraction twice");
+        assert!(
+            matches!(&err, HaresError::InvalidEquipmentParameter { key, .. } if key == "frac_sensible"),
+            "{err}"
         );
     }
 }

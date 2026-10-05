@@ -1,18 +1,110 @@
 //! The share of a load's input that becomes heat in its zone, and its split.
 
-use hares_types::{HaresError, PortContribution, PortSlots, ThermalCategory, ZoneId};
+use hares_types::{HaresError, PortContribution, PortSlots, ThermalCategory, ZoneHeat, ZoneId};
+use serde_json::{Map, Value};
 
 use crate::EquipmentConfig;
+use crate::config::ConfigValue;
+use crate::raw_params::{ParamKind, RawParam};
 
 pub(crate) const KEY_SENSIBLE: &str = "sensible_gain_fraction";
-const KEY_SENSIBLE_HPXML: &str = "frac_sensible";
-pub(crate) const KEY_CONVECTIVE: &str = "convective_gain_fraction";
 pub(crate) const KEY_RADIANT: &str = "radiative_gain_fraction";
 pub(crate) const KEY_LATENT: &str = "latent_gain_fraction";
-const KEY_LATENT_HPXML: &str = "frac_latent";
 pub(crate) const KEY_RADIANT_SHARE: &str = "radiant_share_of_sensible";
 pub(crate) const KEY_VISIBLE_SHARE: &str = "visible_share_of_sensible";
 const TOLERANCE: f64 = 1e-9;
+
+/// The parameters a load's zone heat is read from.
+pub const GAIN_KEYS: [&str; 5] = [
+    KEY_SENSIBLE,
+    KEY_RADIANT,
+    KEY_LATENT,
+    KEY_RADIANT_SHARE,
+    KEY_VISIBLE_SHARE,
+];
+
+/// [`GAIN_KEYS`] as entries of a load's parameter list, each a number.
+pub(crate) const GAIN_PARAMS: [RawParam; GAIN_KEYS.len()] = {
+    let mut params = [RawParam::key(GAIN_KEYS[0], ParamKind::Number); GAIN_KEYS.len()];
+    let mut i = 1;
+    while i < GAIN_KEYS.len() {
+        params[i] = RawParam::key(GAIN_KEYS[i], ParamKind::Number);
+        i += 1;
+    }
+    params
+};
+
+/// The HPXML spellings (`extension/FracSensible`, `extension/FracLatent`)
+/// and the parameter each one stands for.
+pub const GAIN_KEY_ALIASES: [(&str, &str); 2] =
+    [("frac_sensible", KEY_SENSIBLE), ("frac_latent", KEY_LATENT)];
+
+/// The parameter `key` names: the gain parameter an HPXML spelling stands
+/// for, else `key` itself.
+#[must_use]
+pub fn canonical_gain_key(key: &str) -> &str {
+    GAIN_KEY_ALIASES
+        .iter()
+        .find_map(|(alias, canonical)| (*alias == key).then_some(*canonical))
+        .unwrap_or(key)
+}
+
+/// Rewrites the HPXML spellings in `params` to the parameters they stand
+/// for, so one key carries each fraction wherever it came from. The values
+/// are the load's to check when it reads them.
+///
+/// # Errors
+///
+/// A fraction given under both spellings.
+pub fn canonicalize_gain_params(
+    params: &mut Map<String, Value>,
+    equipment: &str,
+) -> Result<(), HaresError> {
+    check_one_gain_spelling(params, equipment)?;
+    for (alias, key) in GAIN_KEY_ALIASES {
+        if let Some(value) = params.remove(alias) {
+            params.insert(key.to_string(), value);
+        }
+    }
+    Ok(())
+}
+
+/// Checks that `params` gives each fraction under one spelling.
+///
+/// # Errors
+///
+/// A fraction under both its HPXML spelling and its parameter name, an
+/// error naming the HPXML spelling and `equipment`.
+pub fn check_one_gain_spelling(
+    params: &Map<String, Value>,
+    equipment: &str,
+) -> Result<(), HaresError> {
+    match GAIN_KEY_ALIASES
+        .iter()
+        .find(|(alias, key)| params.contains_key(*alias) && params.contains_key(*key))
+    {
+        Some((alias, key)) => Err(HaresError::InvalidEquipmentParameter {
+            equipment: equipment.to_string(),
+            key: (*alias).to_string(),
+            reason: format!("and '{key}' set the same fraction; give one of them"),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// A gain parameter of `config`: `None` when absent, an error when present
+/// with a value that is not a number.
+fn fraction(config: &EquipmentConfig, key: &str, name: &str) -> crate::Result<Option<f64>> {
+    match config.raw_value(key, ParamKind::Number) {
+        None => Ok(None),
+        Some(ConfigValue::Float(value)) => Ok(Some(*value)),
+        Some(other) => Err(HaresError::InvalidEquipmentParameter {
+            equipment: name.to_string(),
+            key: key.to_string(),
+            reason: format!("must be a number, got {other}"),
+        }),
+    }
+}
 
 /// Fractions of a load's input that enter its zone: `sensible` in total,
 /// of which `radiant` is long-wave radiation, `visible` short-wave
@@ -25,21 +117,10 @@ pub(crate) struct GainFractions {
     pub(crate) latent: f64,
 }
 
-/// One step's heat from a load into its zone, in watts.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ZoneGain {
-    pub(crate) convective_w: f64,
-    pub(crate) radiant_w: f64,
-    pub(crate) shortwave_w: f64,
-    pub(crate) latent_w: f64,
-}
-
 impl GainFractions {
-    /// Reads the fractions from a load's config. The sensible fraction is
-    /// required: `sensible_gain_fraction`, its HPXML spelling
-    /// `frac_sensible`, or the sum of `convective_gain_fraction` and
-    /// `radiative_gain_fraction`. The radiant and visible parts are shares
-    /// of the final sensible fraction (`radiant_share_of_sensible`,
+    /// Reads the fractions from a load's config. The sensible fraction
+    /// (`sensible_gain_fraction`) is required. The radiant and visible parts
+    /// are shares of the final sensible fraction (`radiant_share_of_sensible`,
     /// `visible_share_of_sensible`), resolved here, after every override has
     /// set the sensible fraction; an explicit `radiative_gain_fraction` sets
     /// the radiant fraction itself instead. An absent share or latent
@@ -47,31 +128,20 @@ impl GainFractions {
     ///
     /// # Errors
     ///
-    /// A missing sensible fraction; a non-finite or negative fraction or
-    /// share; a share above 1 or shares summing above 1; a sensible fraction
-    /// above 1, a sensible and latent sum above 1, or radiant and visible
-    /// fractions above the sensible one.
+    /// A missing sensible fraction; a gain parameter that is not a number;
+    /// a non-finite or negative fraction or share; a share above 1 or shares
+    /// summing above 1; a sensible fraction above 1, a sensible and latent
+    /// sum above 1, or radiant and visible fractions above the sensible one.
     pub(crate) fn from_config(config: &EquipmentConfig, name: &str) -> crate::Result<Self> {
-        let radiant_fraction = config.get_f64(KEY_RADIANT);
-        let radiant_share = config.get_f64(KEY_RADIANT_SHARE).unwrap_or(0.0);
-        let visible_share = config.get_f64(KEY_VISIBLE_SHARE).unwrap_or(0.0);
-        let sensible = config
-            .get_f64(KEY_SENSIBLE)
-            .or_else(|| config.get_f64(KEY_SENSIBLE_HPXML))
-            .or_else(|| {
-                let convective = config.get_f64(KEY_CONVECTIVE).unwrap_or(0.0);
-                let radiant = radiant_fraction.unwrap_or(0.0);
-                (convective > 0.0 || radiant > 0.0).then_some(convective + radiant)
-            })
-            .ok_or_else(|| {
-                HaresError::Equipment(format!(
-                    "sensible_gain_fraction missing for '{name}'; must be specified explicitly"
-                ))
-            })?;
-        let latent = config
-            .get_f64(KEY_LATENT)
-            .or_else(|| config.get_f64(KEY_LATENT_HPXML))
-            .unwrap_or(0.0);
+        let radiant_fraction = fraction(config, KEY_RADIANT, name)?;
+        let radiant_share = fraction(config, KEY_RADIANT_SHARE, name)?.unwrap_or(0.0);
+        let visible_share = fraction(config, KEY_VISIBLE_SHARE, name)?.unwrap_or(0.0);
+        let sensible = fraction(config, KEY_SENSIBLE, name)?.ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "sensible_gain_fraction missing for '{name}'; must be specified explicitly"
+            ))
+        })?;
+        let latent = fraction(config, KEY_LATENT, name)?.unwrap_or(0.0);
         for (key, value) in [
             (KEY_RADIANT_SHARE, radiant_share),
             (KEY_VISIBLE_SHARE, visible_share),
@@ -133,10 +203,10 @@ impl GainFractions {
     }
 
     /// The zone heat from `input_w` of electric and fuel input.
-    pub(crate) fn of(&self, input_w: f64) -> ZoneGain {
+    pub(crate) fn of(&self, input_w: f64) -> ZoneHeat {
         let radiant_w = input_w * self.radiant;
         let shortwave_w = input_w * self.visible;
-        ZoneGain {
+        ZoneHeat {
             convective_w: input_w * self.sensible - radiant_w - shortwave_w,
             radiant_w,
             shortwave_w,
@@ -156,7 +226,7 @@ impl GainFractions {
 pub(crate) fn accumulate_zone_gain(
     ports: &mut PortSlots,
     zone: Option<ZoneId>,
-    gain: ZoneGain,
+    gain: ZoneHeat,
 ) -> crate::Result<()> {
     let Some(zone) = zone else {
         return Ok(());
@@ -270,14 +340,53 @@ mod tests {
         assert_eq!(explicit.radiant, 0.1);
     }
 
+    /// A gain parameter whose value is not a number is an error naming the
+    /// parameter and the load, never an absent share.
     #[test]
-    fn convective_and_radiant_parts_give_the_sensible_fraction() {
-        let fractions = GainFractions::from_config(
-            &config(&[(KEY_CONVECTIVE, 0.3), (KEY_RADIANT, 0.2)]),
-            "Load",
-        )
-        .unwrap();
-        assert!((fractions.sensible - 0.5).abs() < 1e-12);
+    fn a_gain_parameter_that_is_not_a_number_is_rejected() {
+        for key in GAIN_KEYS {
+            let mut raw: HashMap<String, ConfigValue> = HashMap::new();
+            raw.insert(KEY_SENSIBLE.to_string(), 0.72.into());
+            raw.insert(key.to_string(), "0.9".into());
+            let config = EquipmentConfig::raw("Range".to_string(), "Range".to_string(), raw);
+            let err = GainFractions::from_config(&config, "Range").unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    HaresError::InvalidEquipmentParameter { equipment, key: k, .. }
+                        if equipment == "Range" && k == key
+                ),
+                "{key}: {err}"
+            );
+        }
+    }
+
+    /// The HPXML spelling becomes the parameter it stands for, so an
+    /// override under either key replaces the other; both together are an
+    /// error.
+    #[test]
+    fn hpxml_spellings_collapse_onto_one_parameter() {
+        let mut params = Map::new();
+        params.insert("frac_sensible".to_string(), serde_json::json!(0.3));
+        params.insert("frac_latent".to_string(), serde_json::json!(0.2));
+        canonicalize_gain_params(&mut params, "Range").unwrap();
+        assert_eq!(params.get(KEY_SENSIBLE), Some(&serde_json::json!(0.3)));
+        assert_eq!(params.get(KEY_LATENT), Some(&serde_json::json!(0.2)));
+        assert!(!params.contains_key("frac_sensible"));
+        assert!(!params.contains_key("frac_latent"));
+
+        let Value::Object(mut both) =
+            serde_json::json!({"frac_sensible": 0.3, "sensible_gain_fraction": 0.5})
+        else {
+            unreachable!()
+        };
+        let err = canonicalize_gain_params(&mut both, "Range").unwrap_err();
+        assert!(
+            matches!(&err, HaresError::InvalidEquipmentParameter { key, .. } if key == "frac_sensible"),
+            "{err}"
+        );
+        assert_eq!(canonical_gain_key("frac_latent"), KEY_LATENT);
+        assert_eq!(canonical_gain_key("zone_id"), "zone_id");
     }
 
     #[test]
