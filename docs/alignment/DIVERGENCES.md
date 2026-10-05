@@ -254,6 +254,9 @@ justification → measured impact → pinning tests.
 - **HARES behavior:** the site's `SiteType` sets the terrain, and attic
   and garage leakage use OS-HPXML's `f_t_SG`
   (`sherman_grimsrud_terrain_factor`, `hares-physics/src/infiltration.rs`).
+  A file without a `SiteType` is suburban, OS-HPXML's default
+  (`defaults.rb:817-818`); a value outside rural, suburban and urban is
+  a parse error (`parse_site_type`, `hares-io/src/hpxml/building.rs`).
   This follows OS-HPXML and departs from OCHRE.
 - **Justification:** the input states the terrain. A suburban house does
   not see open-country wind.
@@ -266,7 +269,7 @@ justification → measured impact → pinning tests.
 - **Pinning tests:** `infiltration::tests::ela_wind_terrain_factor_is_os_hpxml_sherman_grimsrud`
   and `conversions::tests::the_site_type_sets_the_terrain`. Both fail when
   suburban terrain takes OCHRE's rural (0.85, 0.20) or the site type is
-  ignored for rural.
+  ignored for rural. The second also pins the suburban default.
 
 ## D-009: A gable attic's volume from its span and pitch
 

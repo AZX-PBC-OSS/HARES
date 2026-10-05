@@ -1413,13 +1413,10 @@ pub(crate) fn validate_sim_config(sim_config: &SimulationConfig) -> Result<()> {
     Ok(())
 }
 
-/// Map HPXML `<SiteType>` to [`TerrainClass`] for AIM-2 wind correction.
-///
-/// A missing `<SiteType>` resolves to suburban: OpenStudio-HPXML's
-/// documented default ("HPXML Site", Workflow Inputs,
-/// <https://openstudio-hpxml.readthedocs.io/en/latest/workflow_inputs.html>).
-/// The parser rejects values outside the element's allowed list, so no
-/// other case reaches the resolver.
+/// Map HPXML `<SiteType>` to [`TerrainClass`] for the wind on every leakage
+/// path. A file without one is suburban, OS-HPXML v1.12.0's default
+/// (defaults.rb:817-818). The parser rejects a value outside HPXML's rural,
+/// suburban and urban, so no other case reaches the resolver.
 pub(crate) fn site_type_to_terrain(
     site_type: Option<&hares_io::hpxml::SiteType>,
 ) -> hares_physics::infiltration::TerrainClass {
@@ -2835,17 +2832,20 @@ mod tests {
 
     /// The site's HPXML terrain drives the wind on every leakage path, as in
     /// OS-HPXML (airflow.rb:200-221); OCHRE assumes rural terrain whatever
-    /// the site (utils/envelope.py:648-649).
+    /// the site (utils/envelope.py:648-649). A file without a site type is
+    /// OS-HPXML's default suburban (defaults.rb:817-818); the parser rejects
+    /// any other value (`hpxml::building` tests).
     #[test]
     fn the_site_type_sets_the_terrain() {
         use hares_io::hpxml::SiteType;
         use hares_physics::infiltration::TerrainClass;
         for (site, terrain) in [
-            (SiteType::Rural, TerrainClass::Rural),
-            (SiteType::Suburban, TerrainClass::Suburban),
-            (SiteType::Urban, TerrainClass::Urban),
+            (Some(SiteType::Rural), TerrainClass::Rural),
+            (Some(SiteType::Suburban), TerrainClass::Suburban),
+            (Some(SiteType::Urban), TerrainClass::Urban),
+            (None, TerrainClass::Suburban),
         ] {
-            assert_eq!(super::site_type_to_terrain(Some(site).as_ref()), terrain);
+            assert_eq!(super::site_type_to_terrain(site.as_ref()), terrain);
         }
     }
 
