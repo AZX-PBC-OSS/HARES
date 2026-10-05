@@ -243,12 +243,9 @@ pub struct DuctDseInput {
 // ---------------------------------------------------------------------------
 
 struct ClimateStation {
-    // `state` is read only by this crate's tests, which assert the CSV
-    // province/state column parsed correctly (e.g. MN for Winnipeg). The
-    // field must exist in every build for the single struct literal in the
-    // parser, so the suppression applies only to non-test builds, where the
-    // dead_code lint cannot see the test-only reads.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Province or state column; only the tests read it, to check the CSV
+    /// parse (e.g. MB for Winnipeg).
+    #[cfg(test)]
     state: &'static str,
     latitude_deg: f64,
     longitude_deg: f64,
@@ -308,6 +305,7 @@ fn parse_climate_csv() -> Vec<ClimateStation> {
         let Some(seas_h_in) = parse(16) else { continue };
 
         stations.push(ClimateStation {
+            #[cfg(test)]
             state: fields[2],
             latitude_deg: lat,
             longitude_deg: lon,
