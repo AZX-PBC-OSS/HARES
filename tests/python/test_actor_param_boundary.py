@@ -21,6 +21,9 @@ import pytest
 
 from conftest import make_dwelling
 
+# The fixture dwelling's heating equipment, the thermostat's target.
+HEATING = "Gas Furnace"
+
 
 @pytest.mark.parametrize(
     "param",
@@ -32,7 +35,7 @@ def test_nan_thermostat_param_fails_loudly_at_the_boundary(param: str) -> None:
         dwelling.add_actor_by_name(
             "IdealThermostat",
             "Thermostat",
-            {"target": "HVAC", param: float("nan")},
+            {"target": HEATING, param: float("nan")},
         )
 
 
@@ -46,31 +49,30 @@ def test_inf_thermostat_param_fails_loudly_at_the_boundary(param: str) -> None:
         dwelling.add_actor_by_name(
             "IdealThermostat",
             "Thermostat",
-            {"target": "HVAC", param: float("inf")},
+            {"target": HEATING, param: float("inf")},
         )
 
 
 def test_finite_thermostat_param_still_attaches_and_simulates(tmp_path) -> None:
     # Control: the rejection must be value-triggered, not blanket — a
     # finite setpoint attaches, simulates without panic, and the
-    # thermostat heats the dwelling (the observed behavior the NaN
-    # variant silently loses).
-    dwelling = make_dwelling(
-        output_verbosity=5, output_path=str(tmp_path / "dwelling_42.csv"), write_output=True
-    )
-    dwelling.add_actor_by_name(
-        "IdealThermostat",
-        "Thermostat",
-        {"target": "HVAC", "heating_c": 21.0},
-    )
-    df = dwelling.simulate()
-    heat_cols = [
-        c for c in df.columns if "HVAC" in c and "Heating" in c and "kW" in c
-    ]
-    assert heat_cols, "the fixture dwelling exposes an HVAC heating column"
-    assert df[heat_cols[0]].sum() > 0.0, (
-        "a finite 21 °C heating setpoint must produce heating energy — "
-        "the observable the NaN variant silently loses"
+    # thermostat's override heats the dwelling beyond its own schedule (the
+    # observed behavior the NaN variant silently loses). The fixture's
+    # scheduled heating setpoint is 20 °C, below the 21 °C override.
+    def heating_delivered_w_sum(tag: str, params: dict[str, object] | None) -> float:
+        dwelling = make_dwelling(
+            output_verbosity=5, output_path=str(tmp_path / f"{tag}.csv"), write_output=True
+        )
+        if params is not None:
+            dwelling.add_actor_by_name("IdealThermostat", "Thermostat", params)
+        return float(dwelling.simulate()["HVAC Heating Delivered (W)"].sum())
+
+    scheduled = heating_delivered_w_sum("scheduled", None)
+    overridden = heating_delivered_w_sum("overridden", {"target": HEATING, "heating_c": 21.0})
+    assert overridden > scheduled, (
+        f"a finite 21 °C override must heat beyond the schedule alone "
+        f"(override {overridden:.0f}, schedule {scheduled:.0f}), the observable "
+        "the NaN variant silently loses"
     )
 
 

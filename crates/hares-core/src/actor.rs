@@ -162,6 +162,12 @@ pub trait Actor: Send + Sync + 'static {
         true
     }
 
+    /// Why this actor is unhealthy, carried into the step error. `None` when
+    /// healthy or when the actor has no cause to name.
+    fn health_detail(&self) -> Option<&str> {
+        None
+    }
+
     /// Called after Independent-stage equipment (including PV) has stepped
     /// but before Electrical-stage equipment (including battery) steps.
     ///

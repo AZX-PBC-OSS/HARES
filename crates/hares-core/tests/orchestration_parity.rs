@@ -1000,3 +1000,77 @@ fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
     // If steps_survived < 10, the debug panic stopped the simulation —
     // which is also correct behavior (loud failure on invariant violation).
 }
+
+// ---------------------------------------------------------------------------
+// Test: an IdealThermostat bound to equipment the dwelling lacks fails loudly
+//
+// The override is a user's deliberate setpoint; dropping it because the
+// target name matches nothing leaves the equipment on its schedule while the
+// caller believes the override holds. The step must fail with an error that
+// names the missing target.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn thermostat_targeting_absent_equipment_fails_the_step() {
+    let path = unique_temp_toml("absent-target");
+    write_synthetic_toml(&path, 0.0, "electricity", 30.0, 600);
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
+    let _ = fs::remove_file(&path);
+
+    let thermostat = IdealThermostat::new("No Such Equipment").with_heating_setpoint(21.0);
+    dwelling.add_actor(Box::new(thermostat)).unwrap();
+
+    let err = dwelling
+        .step()
+        .expect_err("an override bound to absent equipment must fail the step");
+    assert!(
+        err.to_string().contains("No Such Equipment"),
+        "the error must name the missing target, got: {err}"
+    );
+}
+
+// Removing the thermostat's equipment evicts the thermostat with it, as it
+// does every actor bound to one equipment instance, so the dwelling keeps
+// stepping; a thermostat added again for the removed name fails the step.
+#[test]
+fn thermostat_is_evicted_with_its_equipment() {
+    let path = unique_temp_toml("removed-target");
+    write_synthetic_toml(&path, 0.0, "electricity", 30.0, 600);
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
+    let _ = fs::remove_file(&path);
+
+    let heating_name = dwelling
+        .equipment()
+        .iter()
+        .find(|eq| eq.descriptor().end_use == hares_types::EndUse::HVAC_HEATING)
+        .map(|eq| eq.descriptor().name.clone())
+        .expect("the synthetic dwelling holds heating equipment");
+    let actors_before = dwelling.actor_count();
+    let thermostat = IdealThermostat::new(&heating_name).with_heating_setpoint(21.0);
+    dwelling.add_actor(Box::new(thermostat)).unwrap();
+    dwelling
+        .step()
+        .expect("a thermostat bound to present equipment steps");
+
+    dwelling.remove_equipment(&heating_name).unwrap();
+    assert_eq!(
+        dwelling.actor_count(),
+        actors_before,
+        "the thermostat left with its equipment"
+    );
+    dwelling
+        .step()
+        .expect("the dwelling steps without the evicted thermostat");
+
+    dwelling
+        .add_actor(Box::new(
+            IdealThermostat::new(&heating_name).with_heating_setpoint(21.0),
+        ))
+        .unwrap();
+    let err = dwelling
+        .step()
+        .expect_err("a thermostat for the removed equipment must fail the step");
+    assert!(err.to_string().contains(&heating_name), "{err}");
+}

@@ -897,7 +897,7 @@ class TestActorSystem:
 
     def test_builtin_actor_by_name(self):
         dw = _init_dwelling(duration_s=300, time_res_s=60)
-        dw.add_actor_by_name("IdealThermostat", "thermo1", {})
+        dw.add_actor_by_name("IdealThermostat", "thermo1", {"target": "Gas Furnace"})
 
         for _ in range(3):
             result = dw.step()

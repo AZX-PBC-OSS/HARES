@@ -19,9 +19,13 @@
 //! 3. When no override is active, emit nothing -- equipment uses its internal schedule
 //! 4. Override signals use `PriorityTier::UserOverride` (higher than Schedule)
 
+use std::collections::HashMap;
+
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_equipment::hvac::ThermalSetpoints;
-use hares_types::{ControlSignal, EnvironmentState, HaresError, Telemetry};
+use hares_types::{
+    ControlCapabilities, ControlSignal, EnvironmentState, EquipmentId, HaresError, Telemetry,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::Actor;
@@ -136,6 +140,10 @@ pub struct IdealThermostat {
     /// First deadband-violating override seen in `decide()`: the actor
     /// reports unhealthy and the step fails at the post-decide health check.
     override_violation: Option<String>,
+    /// Set when the dwelling holds no equipment by the target name: an
+    /// override routed nowhere would leave the equipment on its schedule
+    /// while the caller believes the override holds.
+    missing_target: Option<String>,
 }
 
 impl IdealThermostat {
@@ -158,6 +166,7 @@ impl IdealThermostat {
             telemetry,
             hysteresis_c: 1.0,
             override_violation: None,
+            missing_target: None,
         }
     }
 
@@ -273,8 +282,32 @@ impl Actor for IdealThermostat {
         &self.name
     }
 
+    fn dispatch_target_name(&self) -> Option<&str> {
+        Some(self.target_name())
+    }
+
+    fn required_control_capabilities(&self) -> ControlCapabilities {
+        ControlCapabilities::THERMAL_SETPOINT
+    }
+
+    fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
+        let target = self.target_name();
+        self.missing_target = (!equipment_id_by_name.contains_key(target)).then(|| {
+            format!(
+                "IdealThermostat '{}' targets equipment '{target}', which the dwelling does not hold",
+                self.name
+            )
+        });
+    }
+
     fn healthy(&self) -> bool {
-        self.override_violation.is_none()
+        self.override_violation.is_none() && self.missing_target.is_none()
+    }
+
+    fn health_detail(&self) -> Option<&str> {
+        self.override_violation
+            .as_deref()
+            .or(self.missing_target.as_deref())
     }
 
     fn telemetry(&self) -> Option<&Telemetry> {

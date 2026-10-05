@@ -278,7 +278,9 @@ impl ActorRegistry {
         registry.register(
             "IdealThermostat",
             Box::new(|config: ActorConfig| {
-                let target = config.get_str("target").unwrap_or("HVAC");
+                let target = config.get_str("target").ok_or_else(|| {
+                    HaresError::Control("IdealThermostat requires 'target' parameter".into())
+                })?;
                 let mut actor = IdealThermostat::new(target).with_name(&config.name);
                 if let (Some(heat), Some(cool)) =
                     (config.get_f64("heating_c"), config.get_f64("cooling_c"))
@@ -794,6 +796,18 @@ mod tests {
 
         let actor = registry.create(config).expect("create actor");
         assert_eq!(actor.name(), "Thermostat");
+    }
+
+    #[test]
+    fn actor_registry_ideal_thermostat_requires_target() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("Thermostat", "IdealThermostat")
+            .with_param("heating_c", ConfigValue::Float(20.0));
+        let err = registry
+            .create(config)
+            .err()
+            .expect("a thermostat with no target must be rejected");
+        assert!(err.to_string().contains("'target'"), "{err}");
     }
 
     #[test]

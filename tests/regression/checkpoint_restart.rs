@@ -337,6 +337,16 @@ pub fn run_equipment_crc_corruption_regression() -> Result<(), Vec<String>> {
     }
 }
 
+fn heating_equipment_name(dwelling: &Dwelling) -> String {
+    dwelling
+        .equipment()
+        .iter()
+        .map(|eq| eq.descriptor())
+        .find(|desc| desc.end_use == hares_types::EndUse::HVAC_HEATING)
+        .map(|desc| desc.name.clone())
+        .expect("the regression fixture dwelling holds heating equipment")
+}
+
 /// Regression: actor mutable state round-trips correctly through
 /// Dwelling::save_checkpoint() → DwellingCheckpoint::save() →
 /// DwellingCheckpoint::load() → Dwelling::load_checkpoint().
@@ -378,7 +388,9 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
             Occupant::new("TestOccupant").with_presence_schedule(vec![Presence::Home; 12]),
         ))
         .unwrap();
-    let mut reference_thermostat = actors::IdealThermostat::new("HVAC");
+    let heating_name = heating_equipment_name(&dwelling_ref);
+    let thermostat_name = format!("IdealThermostat({heating_name})");
+    let mut reference_thermostat = actors::IdealThermostat::new(&heating_name);
     reference_thermostat
         .set_override(actors::OverrideState::heating(22.0))
         .expect("valid override");
@@ -451,7 +463,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
             Occupant::new("TestOccupant").with_presence_schedule(vec![Presence::Home; 12]),
         ))
         .unwrap();
-    let mut checkpoint_thermostat = actors::IdealThermostat::new("HVAC");
+    let mut checkpoint_thermostat = actors::IdealThermostat::new(&heating_name);
     checkpoint_thermostat
         .set_override(actors::OverrideState::heating(22.0))
         .expect("valid override");
@@ -521,8 +533,8 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     if !actor_names.contains(&"TestOccupant") {
         failures.push("checkpoint missing TestOccupant actor state".to_string());
     }
-    if !actor_names.contains(&"IdealThermostat(HVAC)") {
-        failures.push("checkpoint missing IdealThermostat(HVAC) actor state".to_string());
+    if !actor_names.contains(&thermostat_name.as_str()) {
+        failures.push(format!("checkpoint missing {thermostat_name} actor state"));
     }
     if !actor_names.contains(&"TestEV") {
         failures.push("checkpoint missing TestEV actor state".to_string());
@@ -559,7 +571,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         ))
         .unwrap();
     dwelling_b
-        .add_actor(Box::new(actors::IdealThermostat::new("HVAC")))
+        .add_actor(Box::new(actors::IdealThermostat::new(&heating_name)))
         .unwrap();
     dwelling_b
         .add_actor(Box::new(hares_core::actors::EvDriverActor::new(

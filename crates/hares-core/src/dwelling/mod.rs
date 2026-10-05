@@ -4672,9 +4672,10 @@ impl Dwelling {
         // tracing::error! already logged it).
         for (i, actor) in self.actors.iter().enumerate() {
             if !actor.healthy() {
+                let cause = actor.health_detail().unwrap_or("no cause reported");
                 return Err(HaresError::Dwelling(format!(
-                    "actor '{}' (index {}) is unhealthy after the ActorDecide phase; \
-                     its decide() swallowed an error; dispatch output may be compromised",
+                    "actor '{}' (index {}) is unhealthy after the ActorDecide phase: \
+                     {cause}; dispatch output may be compromised",
                     actor.name(),
                     i
                 )));
