@@ -2,8 +2,20 @@
 
 **Severity**: Medium
 **Priority**: P3
-**Status**: Open
+**Status**: Resolved
 **Areas**: hares-core/dwelling/conversions.rs, hares-physics/film_coefficients.rs
+
+## Resolution
+
+Resolved differently from the plan below, which this note replaces. Every
+HPXML `Siding` and `RoofType` value maps to the class of the EnergyPlus
+Engineering Reference's Walton table example or of the material's record
+in EnergyPlus v24.2.0's ASHRAE 2005 HOF dataset, with no MediumRough
+default. The mapping and its measured impact are register entry D-010 in
+`docs/alignment/DIVERGENCES.md`; the code is
+`surface_roughness_from_finish_type` in
+`crates/hares-physics/src/film_coefficients.rs`. The class table below is
+not the Engineering Reference's and is kept only as the original report.
 
 ## Problem
 

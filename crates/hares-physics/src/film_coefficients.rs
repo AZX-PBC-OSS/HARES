@@ -18,6 +18,8 @@
 //! - Engineers Edge surface heat transfer coefficients (citing ASHRAE
 //!   peak-load convention): 34.0 W/(m²·°C) winter, 22.7 W/(m²·°C) summer.
 
+use hares_types::HaresError;
+
 /// Combined exterior film coefficient [W/(m²·K)] — ASHRAE conventional
 /// (convective + radiative) peak-load value at ~15 mph (6.7 m/s) wind for
 /// opaque outer surfaces. Commonly applied to fenestration in simplified
@@ -89,44 +91,107 @@ impl SurfaceRoughness {
     }
 }
 
-/// Map HPXML `<Siding>` finish type string to a [`SurfaceRoughness`] class.
+/// The roughness class of an outside surface finished in the HPXML
+/// `<Siding>` or `<RoofType>` material `finish_type`.
 ///
-/// Mapping derived from EnergyPlus Engineering Reference "DOE-2 Model"
-/// surface roughness examples and the HPXML v4.2 `<Siding>` enumeration.
-/// Unknown or absent finish types fall back to [`SurfaceRoughness::MediumRough`]
-/// with a `tracing::warn!` — bare OSB/sheathing as the conservative default.
+/// The classes and their multipliers are the EnergyPlus Engineering
+/// Reference's (v24.2, Outside Surface Heat Balance, "Surface Roughness
+/// Multipliers (Walton 1981)"). A material the table names as its example
+/// takes that class: stucco Very Rough, brick Rough, concrete Medium Rough.
+/// Any other material takes the roughness of its record in EnergyPlus's
+/// ASHRAE 2005 HOF material dataset (v24.2.0
+/// `datasets/ASHRAE_2005_HOF_Materials.idf`, line of the record's name):
 ///
-/// # References
-/// - EnergyPlus Engineering Reference, "DOE-2 Model" section under Outside
-///   Surface Heat Balance — roughness multiplier table (Walton 1981).
-/// - HPXML Data Dictionary v4.2, `<Siding>` enumeration.
-pub fn surface_roughness_from_finish_type(finish_type: Option<&str>) -> SurfaceRoughness {
-    match finish_type {
-        // Stucco is VeryRough per EnergyPlus material library examples.
-        Some("stucco") | Some("synthetic stucco") => SurfaceRoughness::VeryRough,
-        // Brick is Rough per EnergyPlus material library (not VeryRough).
-        Some("brick veneer") => SurfaceRoughness::Rough,
-        // Wood siding, fiber cement, and other composite siding products
-        // are medium-rough: rougher than smooth vinyl/aluminum but smoother
-        // than rough-sawn lumber (Rough) or stucco (VeryRough).
-        Some("wood siding")
-        | Some("fiber cement siding")
-        | Some("asbestos siding")
-        | Some("masonite siding")
-        | Some("composite shingle siding") => SurfaceRoughness::MediumRough,
-        // Vinyl and aluminum siding are smooth manufactured products.
-        Some("vinyl siding") | Some("aluminum siding") => SurfaceRoughness::Smooth,
-        // "none" means bare sheathing/OSB; "other" is HPXML catch-all.
-        // Absent finish_type (None) likewise defaults to MediumRough.
-        None | Some("none") | Some("other") | Some(_) => {
-            let value = finish_type.unwrap_or("<absent>");
+/// | HPXML material | Dataset record | Class |
+/// |---|---|---|
+/// | asphalt or fiberglass shingles, shingles, composite shingle siding | F12 Asphalt shingles (164) | Very Rough |
+/// | wood shingles or shakes | F15 Wood shingles (188) | Very Rough |
+/// | slate or tile shingles, concrete tiles | F14 Slate or tile (180) | Very Rough |
+/// | expanded polystyrene sheathing | EPS molded beads (810) | Very Rough |
+/// | plastic/rubber/synthetic sheeting | F13 Built-up roofing (172), the dataset's membrane roof | Rough |
+/// | metal surfacing, aluminum siding | F08 Metal surface (132) | Smooth |
+/// | wood siding | F11 Wood siding (156) | Medium Smooth |
+/// | fiber cement siding, asbestos siding | Asbestos-cement board (498) | Smooth |
+/// | masonite siding | Hardboard Medium density (658) | Smooth |
+///
+/// Vinyl siding has no dataset record and is Smooth, as the sheet siding
+/// it replaces (aluminum, metal surface). Stone veneer has none either and
+/// is Rough, as the table's other masonry veneer, brick. A green roof is
+/// EnergyPlus's `Material:RoofVegetation`, whose roughness defaults to
+/// Medium Rough (v24.2.0 `idd/Energy+.idd.in`, lines 5064-5072). The
+/// dataset gives stucco (F07, 124) Smooth and brick (M01, 332) Medium
+/// Rough; the Engineering Reference table, which names them, is followed
+/// instead.
+///
+/// No material ("other", "unknown", "not present", "no one major type",
+/// "cool roof", a coating over a roof the HPXML does not name, "none", the
+/// pre-v4 spelling of "not present", or no element at all) takes OS-HPXML
+/// v1.12.0's class, Rough, which every OS-HPXML surface carries
+/// (`model.rb:49`, `:95`, the `roughness: 'Rough'` default no caller
+/// overrides), with a warning.
+///
+/// # Errors
+///
+/// A `finish_type` outside the HPXML `<Siding>` and `<RoofType>`
+/// enumerations (OS-HPXML v1.12.0's schema and HPXML's current one).
+pub fn surface_roughness_from_finish_type(
+    finish_type: Option<&str>,
+) -> Result<SurfaceRoughness, HaresError> {
+    Ok(match finish_type {
+        Some("stucco" | "synthetic stucco") => SurfaceRoughness::VeryRough,
+        Some("brick veneer" | "stone veneer") => SurfaceRoughness::Rough,
+        Some("concrete" | "green roof") => SurfaceRoughness::MediumRough,
+        Some(
+            "asphalt or fiberglass shingles"
+            | "shingles"
+            | "composite shingle siding"
+            | "wood shingles or shakes"
+            | "slate or tile shingles"
+            | "concrete tiles"
+            | "expanded polystyrene sheathing",
+        ) => SurfaceRoughness::VeryRough,
+        Some("plastic/rubber/synthetic sheeting") => SurfaceRoughness::Rough,
+        Some(
+            "metal surfacing"
+            | "aluminum siding"
+            | "vinyl siding"
+            | "fiber cement siding"
+            | "asbestos siding"
+            | "masonite siding",
+        ) => SurfaceRoughness::Smooth,
+        Some("wood siding") => SurfaceRoughness::MediumSmooth,
+        None
+        | Some("none" | "other" | "unknown" | "not present" | "no one major type" | "cool roof") => {
             tracing::warn!(
-                finish_type = value,
-                roughness = ?SurfaceRoughness::MediumRough,
-                "unknown or absent exterior finish type; defaulting to MediumRough"
+                finish_type = finish_type.unwrap_or("<absent>"),
+                "outside surface names no material; it takes OS-HPXML's roughness, Rough"
             );
-            SurfaceRoughness::MediumRough
+            SurfaceRoughness::Rough
         }
+        Some(unknown) => {
+            return Err(HaresError::Physics(format!(
+                "outside surface material '{unknown}' is not an HPXML Siding or RoofType value"
+            )));
+        }
+    })
+}
+
+/// The roughness class the outside film of a surface facing `exterior`
+/// takes: its material's ([`surface_roughness_from_finish_type`]) when it
+/// faces outdoors, where forced convection acts; otherwise none applies and
+/// the class is not read, so no material is required.
+///
+/// # Errors
+///
+/// An outdoor surface's unknown material.
+pub fn outside_surface_roughness(
+    exterior: ZoneLabel,
+    finish_type: Option<&str>,
+) -> Result<SurfaceRoughness, HaresError> {
+    if exterior == ZoneLabel::Outdoor {
+        surface_roughness_from_finish_type(finish_type)
+    } else {
+        Ok(SurfaceRoughness::Rough)
     }
 }
 
@@ -513,91 +578,77 @@ mod tests {
 
     // --- surface_roughness_from_finish_type tests ---
 
+    /// Every HPXML `<Siding>` and `<RoofType>` value maps to the class of its
+    /// Engineering Reference example or EnergyPlus dataset record.
     #[test]
-    fn surface_roughness_vinyl_siding_maps_to_smooth() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("vinyl siding")),
-            SurfaceRoughness::Smooth
-        );
+    fn every_hpxml_material_takes_its_energyplus_roughness() {
+        use SurfaceRoughness::*;
+        for (material, class) in [
+            ("stucco", VeryRough),
+            ("synthetic stucco", VeryRough),
+            ("brick veneer", Rough),
+            ("stone veneer", Rough),
+            ("concrete", MediumRough),
+            ("green roof", MediumRough),
+            ("concrete tiles", VeryRough),
+            ("asphalt or fiberglass shingles", VeryRough),
+            ("shingles", VeryRough),
+            ("composite shingle siding", VeryRough),
+            ("wood shingles or shakes", VeryRough),
+            ("slate or tile shingles", VeryRough),
+            ("expanded polystyrene sheathing", VeryRough),
+            ("plastic/rubber/synthetic sheeting", Rough),
+            ("metal surfacing", Smooth),
+            ("aluminum siding", Smooth),
+            ("vinyl siding", Smooth),
+            ("fiber cement siding", Smooth),
+            ("asbestos siding", Smooth),
+            ("masonite siding", Smooth),
+            ("wood siding", MediumSmooth),
+        ] {
+            assert_eq!(
+                surface_roughness_from_finish_type(Some(material)).unwrap(),
+                class,
+                "{material}"
+            );
+        }
+    }
+
+    /// A surface naming no material is OS-HPXML's Rough, not a guess.
+    #[test]
+    fn a_surface_without_a_material_is_os_hpxml_rough() {
+        for finish in [
+            None,
+            Some("none"),
+            Some("other"),
+            Some("unknown"),
+            Some("not present"),
+            Some("no one major type"),
+            Some("cool roof"),
+        ] {
+            assert_eq!(
+                surface_roughness_from_finish_type(finish).unwrap(),
+                SurfaceRoughness::Rough,
+                "{finish:?}"
+            );
+        }
     }
 
     #[test]
-    fn surface_roughness_aluminum_siding_maps_to_smooth() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("aluminum siding")),
-            SurfaceRoughness::Smooth
-        );
+    fn a_material_outside_the_hpxml_enumerations_is_an_error() {
+        let err = surface_roughness_from_finish_type(Some("diamond plate")).unwrap_err();
+        assert!(err.to_string().contains("diamond plate"), "{err}");
     }
 
+    /// Only an outdoor surface needs a material; an unknown one is still an
+    /// error there.
     #[test]
-    fn surface_roughness_brick_veneer_maps_to_rough() {
+    fn only_an_outdoor_surface_reads_its_material() {
+        assert!(outside_surface_roughness(ZoneLabel::Attic, Some("diamond plate")).is_ok());
+        assert!(outside_surface_roughness(ZoneLabel::Outdoor, Some("diamond plate")).is_err());
         assert_eq!(
-            surface_roughness_from_finish_type(Some("brick veneer")),
-            SurfaceRoughness::Rough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_stucco_maps_to_very_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("stucco")),
-            SurfaceRoughness::VeryRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_synthetic_stucco_maps_to_very_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("synthetic stucco")),
-            SurfaceRoughness::VeryRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_wood_siding_maps_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("wood siding")),
-            SurfaceRoughness::MediumRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_fiber_cement_siding_maps_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("fiber cement siding")),
-            SurfaceRoughness::MediumRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_none_finish_defaults_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("none")),
-            SurfaceRoughness::MediumRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_absent_finish_type_defaults_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(None),
-            SurfaceRoughness::MediumRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_unknown_finish_defaults_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("diamond plate")),
-            SurfaceRoughness::MediumRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_other_finish_defaults_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("other")),
-            SurfaceRoughness::MediumRough
+            outside_surface_roughness(ZoneLabel::Outdoor, Some("wood siding")).unwrap(),
+            SurfaceRoughness::MediumSmooth
         );
     }
 

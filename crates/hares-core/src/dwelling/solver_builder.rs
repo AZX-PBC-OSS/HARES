@@ -14,7 +14,7 @@ use hares_envelope::{
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
 #[cfg(feature = "observe")]
-use hares_physics::film_coefficients::{film_resistances, surface_roughness_from_finish_type};
+use hares_physics::film_coefficients::{SurfaceRoughness, film_resistances};
 use hares_physics::infiltration::{ShieldingClass, TerrainClass};
 use hares_types::{EnvironmentState, HaresError, ZoneId};
 
@@ -507,7 +507,8 @@ fn build_solver_boundaries(
                         weather_avgs.avg_wind_m_s,
                         weather_avgs.avg_ground_c,
                         weather_avgs.avg_ambient_c,
-                        surface_roughness_from_finish_type(boundary.finish_type.as_deref()),
+                        // Glass, the Engineering Reference's Very Smooth example.
+                        SurfaceRoughness::VerySmooth,
                     );
                     let r_glass_tarp = (r_total - r_film_int_tarp - r_film_ext_tarp).max(0.0);
                     let diff_pct = if r_glass > 0.0 {

@@ -313,3 +313,44 @@ justification → measured impact → pinning tests.
   `a_gable_attic_takes_its_geometric_volume` does not discriminate it,
   since `base.xml`'s gable walls are exactly their triangles and both
   rules give 7.5 ft there.
+
+## D-010: Outside convective roughness from the surface's material
+
+- **Reference behavior:** OS-HPXML v1.12.0 gives every surface the
+  roughness `Rough` (multiplier 1.67): `model.rb:49` and `:95` default
+  `roughness: 'Rough'` and no caller passes another. OCHRE hardcodes 1.67
+  for every outside surface, its material lookup commented out
+  (`ochre/utils/envelope.py:393`).
+- **HARES behavior:** an outdoor-facing surface takes the roughness class
+  of its HPXML `Siding` or `RoofType` material
+  (`surface_roughness_from_finish_type`,
+  `hares-physics/src/film_coefficients.rs`): the EnergyPlus Engineering
+  Reference's Walton table where it names the material, else the
+  material's record in EnergyPlus v24.2.0's
+  `datasets/ASHRAE_2005_HOF_Materials.idf` or a named analogue, each
+  stated in the function's documentation. A surface naming no material
+  takes OS-HPXML's `Rough`, with a warning. An unknown value is an error.
+- **Justification:** EnergyPlus's DOE-2 and TARP outside convection scale
+  forced convection by the roughness of the outside material layer.
+  OS-HPXML builds that layer without passing the roughness its material
+  has, so a shingle roof and a vinyl wall convect alike. The dataset
+  record for the same material is the evidence for each class.
+- **Measured impact:** on `data/examples/BEopt_example.xml` (asphalt
+  shingle roof, vinyl siding), attic MAE against the OCHRE conditioned
+  oracle in the dynamic runs:
+
+  | Run | Summer (°C) | Spring (°C) | Winter (°C) |
+  |---|---|---|---|
+  | HARES's old MediumRough default | 1.77 | 1.47 | 1.44 |
+  | OS-HPXML's and OCHRE's 1.67 | 1.48 | 1.24 | 1.37 |
+  | Material roughness | 0.89 | 0.78 | 1.28 |
+
+  Indoor MAE moves by at most 0.03 °C. The oracle is not evidence for any
+  class: the closer summer and spring agreement comes from departing from
+  OCHRE's own 1.67, and the winter cold bias is untouched.
+- **Pinning tests:** `film_coefficients::tests::every_hpxml_material_takes_its_energyplus_roughness`,
+  `film_coefficients::tests::only_an_outdoor_surface_reads_its_material`
+  and `conversions::tests::finish_type_roughness_changes_exterior_film_resistance`.
+  All three fail when every surface takes OS-HPXML's `Rough`.
+  `film_coefficients::tests::a_surface_without_a_material_is_os_hpxml_rough`
+  pins the fallback.

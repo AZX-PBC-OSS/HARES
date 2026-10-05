@@ -53,7 +53,7 @@ pub fn building_to_boundary_inputs(
 ) -> Result<Vec<BoundaryInput>> {
     use hares_envelope::PrecomputedRCLayer;
     use hares_io::hpxml::{BoundaryType, ZoneType};
-    use hares_physics::film_coefficients::{film_resistances, surface_roughness_from_finish_type};
+    use hares_physics::film_coefficients::{film_resistances, outside_surface_roughness};
     use hares_physics::ground::f2_coefficient;
     use hares_physics::solar::window_u_factor_decomposition;
 
@@ -77,7 +77,9 @@ pub fn building_to_boundary_inputs(
                 avg_wind_m_s,
                 avg_ground_c,
                 avg_ambient_c,
-                surface_roughness_from_finish_type(bd.finish_type.as_deref()),
+                outside_surface_roughness(exterior_label, bd.finish_type.as_deref()).map_err(
+                    |e| HaresError::Physics(format!("boundary '{}': {e}", bd.id)),
+                )?,
             );
 
             // fallback_r is material-only R (no film). HPXML AssemblyEffectiveRValue
@@ -2849,9 +2851,8 @@ mod tests {
 
     /// Exterior film resistance varies with finish_type: stucco (VeryRough)
     /// must produce lower R_ext than vinyl siding (Smooth) at the same wind speed.
-    /// This is the regression test for the hardcoded `SurfaceRoughness::Rough` bug.
-    /// If `surface_roughness_from_finish_type` were bypassed, both boundaries
-    /// would get identical R_ext and this test would fail.
+    /// If the finish type were bypassed, both boundaries would get identical
+    /// R_ext and this test would fail.
     #[test]
     fn finish_type_roughness_changes_exterior_film_resistance() {
         let building = hares_io::Building {
