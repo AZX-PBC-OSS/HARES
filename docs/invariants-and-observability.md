@@ -131,7 +131,8 @@ logged as a run warning naming the equipment and counted in
 without it. For that step the equipment delivered nothing: the consistency
 checks skip it, and the recorded flows (per-equipment and end-use power,
 the frame's flow and telemetry columns, `DwellingTelemetry` power, the next
-step's electrical summary) report zero for it, while its state columns
+step's electrical summary, `Dwelling::reported_core_output` and Python's
+`Dwelling.equipment()`) report zero for it, while its state columns
 (mode, setpoint, SOC, speed, defrost state, and the verbosity-8 temperature,
 timer, irradiance and EV connection columns) keep its committed state.
 

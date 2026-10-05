@@ -4278,6 +4278,24 @@ impl Dwelling {
         (!self.step_failed[idx]).then(|| self.equipment[idx].core_output())
     }
 
+    /// The core output equipment `idx` reports for the latest step, as every
+    /// other power reader sees it: after a failed step its flows read zero
+    /// and it has no performance figures, while its state is the committed
+    /// one.
+    #[must_use]
+    pub fn reported_core_output(&self, idx: usize) -> CoreOutput {
+        let co = self.equipment[idx].core_output();
+        if self.step_failed[idx] {
+            CoreOutput {
+                flows: co.flows.none_delivered(),
+                state: co.state.clone(),
+                performance: hares_types::CorePerformance::default(),
+            }
+        } else {
+            co.clone()
+        }
+    }
+
     /// Books a successful equipment step: it ends the equipment's failure
     /// streak.
     fn record_equipment_step_success(&mut self, idx: usize) {
@@ -14170,6 +14188,32 @@ master_seed = 0
             .expect_err("a half-stepped dwelling is not a resumable state")
             .to_string();
         assert!(refused.contains(&ended), "{refused}");
+    }
+
+    /// After a failed step the reported output carries no stale power: its
+    /// flows read zero, while its state stays the committed one.
+    #[test]
+    fn a_failed_step_reports_no_flow_and_the_committed_state() {
+        let mut dwelling =
+            dwelling_with(FlakyPortEquipment::new("FlakyEq", 500.0, &[true]).battery());
+        dwelling
+            .run_timestep(false)
+            .expect("the equipment succeeds");
+        let committed = dwelling.reported_core_output(0);
+        assert_eq!(
+            committed.flows.electric_kw.map(|e| e.net_consumption_kw()),
+            Some(0.5)
+        );
+        dwelling
+            .run_timestep(false)
+            .expect("one failure is within the default budget");
+        let reported = dwelling.reported_core_output(0);
+        assert_eq!(
+            reported.flows.electric_kw.map(|e| e.net_consumption_kw()),
+            Some(0.0)
+        );
+        assert_eq!(reported.state, committed.state);
+        assert!(reported.state.soc.is_some());
     }
 
     #[test]

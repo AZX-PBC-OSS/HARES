@@ -1011,15 +1011,19 @@ impl PyDwelling {
             .collect())
     }
 
+    /// Each equipment with its core output for the latest step. After a
+    /// tolerated step failure that equipment's flows read zero (it delivered
+    /// nothing) and its state is the committed one.
     pub fn equipment(&self) -> PyResult<Vec<PyEquipment>> {
         let dwelling = self.acquire()?;
         Ok(dwelling
             .equipment()
             .iter()
-            .map(|eq| {
+            .enumerate()
+            .map(|(idx, eq)| {
                 PyEquipment::new(
                     eq.descriptor().clone(),
-                    eq.core_output().clone(),
+                    dwelling.reported_core_output(idx),
                     eq.telemetry().clone(),
                     eq.resolved_zip(),
                 )

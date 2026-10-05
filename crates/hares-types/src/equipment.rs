@@ -1184,6 +1184,30 @@ pub struct CoreFlows {
     pub latent_cooling_w: Option<f64>,
 }
 
+impl CoreFlows {
+    /// The flows of a step that delivered nothing: each flow these report,
+    /// at zero, in the same sign convention.
+    #[must_use]
+    pub fn none_delivered(&self) -> Self {
+        let zero = |v: Option<f64>| v.map(|_| 0.0);
+        Self {
+            electric_kw: self.electric_kw.map(|e| match e {
+                ElectricPower::Consumption(_) => ElectricPower::Consumption(0.0),
+                ElectricPower::Generation(_) => ElectricPower::Generation(0.0),
+                ElectricPower::Bidirectional(_) => ElectricPower::Bidirectional(0.0),
+            }),
+            reactive_power_kvar: zero(self.reactive_power_kvar),
+            fuel_w: self.fuel_w.map(|f| FuelPower {
+                fuel_type: f.fuel_type,
+                consumption_w: 0.0,
+            }),
+            thermal_output_w: zero(self.thermal_output_w),
+            sensible_cooling_w: zero(self.sensible_cooling_w),
+            latent_cooling_w: zero(self.latent_cooling_w),
+        }
+    }
+}
+
 /// Discrete/continuous state outputs from one equipment step.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CoreState {
