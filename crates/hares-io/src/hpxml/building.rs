@@ -281,9 +281,10 @@ pub struct Building {
     pub cooling_weekend_setpoints_c: Option<Vec<f64>>,
     pub battery_round_trip_efficiency: Option<f64>,
     pub pv_tilt_deg: Option<f64>,
-    pub conditioned_volume_m3: Option<f64>,
-    /// Average ceiling height in metres, derived from the declared
-    /// conditioned volume and floor area (both are parser-required).
+    /// `ConditionedBuildingVolume`, or OS-HPXML's default for it.
+    pub conditioned_volume_m3: f64,
+    /// Average ceiling height in metres: the conditioned volume over the
+    /// conditioned floor area, which the parser requires.
     pub ceiling_height_m: f64,
     /// `<InfiltrationHeight>` converted from ft to m.
     pub infiltration_height_m: Option<f64>,
@@ -1316,17 +1317,17 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             Some(wh) => find_descendant_f64(wh, "HotWaterTemperature", ValueKind::Temperature)?,
             None => None,
         },
-        heating_weekday_setpoints_c: parse_hvac_setpoints(details, "Heating", true),
-        heating_weekend_setpoints_c: parse_hvac_setpoints(details, "Heating", false),
-        cooling_weekday_setpoints_c: parse_hvac_setpoints(details, "Cooling", true),
-        cooling_weekend_setpoints_c: parse_hvac_setpoints(details, "Cooling", false),
+        heating_weekday_setpoints_c: parse_hvac_setpoints(details, "Heating", true)?,
+        heating_weekend_setpoints_c: parse_hvac_setpoints(details, "Heating", false)?,
+        cooling_weekday_setpoints_c: parse_hvac_setpoints(details, "Cooling", true)?,
+        cooling_weekend_setpoints_c: parse_hvac_setpoints(details, "Cooling", false)?,
         battery_round_trip_efficiency: find_descendant_f64(
             details,
             "RoundTripEfficiency",
             ValueKind::Raw,
         )?,
         pv_tilt_deg: find_descendant_f64(details, "Tilt", ValueKind::Raw)?,
-        conditioned_volume_m3: Some(conditioned_volume_m3),
+        conditioned_volume_m3,
         ceiling_height_m,
         infiltration_height_m,
         floors_above_grade,
@@ -1348,9 +1349,17 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 ///
 /// Delegates to the shared `xml_helpers::parse_setpoint_from_control` after
 /// locating the HVACControl node.
-fn parse_hvac_setpoints(details: &XmlNode, hvac_type: &str, weekday: bool) -> Option<Vec<f64>> {
-    let control = super::xml_helpers::find_hvac_control(details)?;
-    super::xml_helpers::parse_setpoint_from_control(control, hvac_type, weekday)
+fn parse_hvac_setpoints(
+    details: &XmlNode,
+    hvac_type: &str,
+    weekday: bool,
+) -> Result<Option<Vec<f64>>, HpxmlError> {
+    match super::xml_helpers::find_hvac_control(details) {
+        Some(control) => {
+            super::xml_helpers::parse_setpoint_from_control(control, hvac_type, weekday)
+        }
+        None => Ok(None),
+    }
 }
 
 fn parse_boundaries(details: &XmlNode) -> Result<(Vec<Boundary>, Vec<String>), HpxmlError> {
@@ -4069,9 +4078,9 @@ mod tests {
         // Volume: 17216 ft³ × 0.028316846592 ≈ 487.49 m³
         let expected_volume_m3 = 17_216.0 * 0.028_316_846_592;
         assert!(
-            (building.conditioned_volume_m3.unwrap() - expected_volume_m3).abs() < 0.01,
+            (building.conditioned_volume_m3 - expected_volume_m3).abs() < 0.01,
             "conditioned_volume_m3: got {}, expected {}",
-            building.conditioned_volume_m3.unwrap(),
+            building.conditioned_volume_m3,
             expected_volume_m3,
         );
 
@@ -4427,7 +4436,7 @@ mod tests {
         let building = parse_building(&xml).expect("a missing volume takes the default");
         assert_eq!(
             building.conditioned_volume_m3,
-            Some(hares_physics::units::volume_ft3_to_m3(2152.0 * 8.0))
+            hares_physics::units::volume_ft3_to_m3(2152.0 * 8.0)
         );
         assert!(
             building

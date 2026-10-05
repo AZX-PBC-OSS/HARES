@@ -1326,10 +1326,9 @@ pub(crate) fn build_default_solvers(
         // CFM50/ELA → ACH50 conversion below and the AIM-2 coefficients in
         // the conditioned-zone branch -- are reached only when a blower-door
         // leakage input (ACH50, CFM50, or ELA) is present and the leakage is
-        // not a constant ACH, so the volume is resolved there alone, and a
-        // missing value is an error naming the element. `blower_door` holds
-        // the ACH50 and the volume together so no other path can read a
-        // volume the input did not supply.
+        // not a constant ACH. `blower_door` holds the ACH50 and the volume
+        // together so no other path can read a volume the input did not
+        // supply; the parser derives the volume, so there is no stand-in.
         enum Leakage {
             Ach50(f64),
             Cfm50(f64),
@@ -1346,19 +1345,7 @@ pub(crate) fn build_default_solvers(
         });
         let blower_door: Option<(f64, f64)> = match leakage {
             Some(leakage) if building.infiltration_constant_ach.is_none() => {
-                let volume_m3 = building.conditioned_volume_m3.ok_or_else(|| {
-                    HaresError::Dwelling(
-                        hares_io::hpxml::HpxmlError::MissingField {
-                            path: "BuildingSummary/BuildingConstruction/ConditionedBuildingVolume",
-                            system_kind: "Building",
-                            system_id: "conditioned".to_string(),
-                            reason: "conditioned volume (m³) is required for infiltration \
-                                     set-up (CFM50/ELA to ACH50 conversion and AIM-2 \
-                                     coefficients); no silent default permitted",
-                        }
-                        .to_string(),
-                    )
-                })?;
+                let volume_m3 = building.conditioned_volume_m3;
                 let ach50 = match leakage {
                     Leakage::Ach50(ach50) => ach50,
                     // 1 ft³ = 0.0283168 m³  →  volume_ft3 = volume_m3 × 35.3147
@@ -1938,7 +1925,7 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
+            conditioned_volume_m3: 400.0,
             ceiling_height_m: 2.5,
             infiltration_height_m: None,
             floors_above_grade: 1.0,
@@ -1999,105 +1986,6 @@ mod tests {
         ] {
             super::indoor_zone(&building_with_zones(zones), &env)
                 .expect_err("the indoor zone must be the one conditioned zone");
-        }
-    }
-
-    /// Solver construction from a parsed ochre sample with the conditioned
-    /// volume removed. Both infiltration sites that read the volume fail the
-    /// build naming `ConditionedBuildingVolume`: the ACH50 input goes through
-    /// the AIM-2 coefficients, the same leakage declared as CFM50 goes through
-    /// the CFM50 → ACH50 conversion.
-    #[test]
-    fn infiltration_without_conditioned_volume_is_an_error() {
-        use chrono::TimeZone;
-        use hares_io::hpxml::building::parse_building;
-
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/hpxml/ochre_samples/base.xml");
-        let xml = std::fs::read_to_string(&fixture).expect("base fixture should be readable");
-        let mut building = parse_building(&xml).expect("base fixture should parse");
-        building.conditioned_volume_m3 = None;
-
-        let build = |building: &hares_io::Building| {
-            let mut env = crate::actor::testing::TestEnvBuilder::new().build();
-            env.zones = (0..building.zones.len())
-                .map(|i| hares_types::ZoneState {
-                    id: ZoneId(u16::try_from(i + 1).expect("zone index fits u16")),
-                    temperature_c: 21.0,
-                    humidity_ratio: 0.008,
-                    volume_m3: 200.0,
-                })
-                .collect();
-            let sim_config = hares_io::SimulationConfig {
-                start_time: chrono::FixedOffset::east_opt(0)
-                    .expect("UTC offset")
-                    .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)
-                    .single()
-                    .expect("timestamp"),
-                duration: chrono::Duration::hours(1),
-                time_res: chrono::Duration::minutes(1),
-                output_verbosity: 0,
-                output_path: None,
-                write_output: false,
-                output_format: hares_io::OutputFormat::Csv,
-                output_chunk_size: 128,
-                setpoint_deadband_c: None,
-                master_seed: 0,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: false,
-                rotation: hares_io::RotationPolicy::None,
-            };
-            let weather_avgs = super::WeatherAverages {
-                avg_wind_m_s: 2.0,
-                avg_ambient_c: 10.0,
-                avg_ground_c: 12.0,
-            };
-            super::build_default_solvers(
-                &env,
-                &sim_config,
-                building,
-                &hares_io::DefaultsStore::empty(),
-                &weather_avgs,
-                &[],
-            )
-        };
-
-        // ACH50 kept: the AIM-2 coefficients read the volume.
-        let err = match build(&building) {
-            Err(err) => err,
-            Ok(_) => panic!("missing conditioned volume must fail solver construction"),
-        };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("ConditionedBuildingVolume"),
-            "error must name the element, got: {msg}"
-        );
-        assert!(
-            msg.contains("no silent default permitted"),
-            "error must state the strictness rule, got: {msg}"
-        );
-
-        // The same leakage declared as CFM50 (3 ACH50 on the sample's
-        // 21600 ft³: cfm50 = 3 × 21600 / 60): the CFM50 → ACH50 conversion
-        // reads the volume.
-        building.infiltration_ach50 = None;
-        building.infiltration_cfm50 = Some(1080.0);
-        let err = match build(&building) {
-            Err(err) => err,
-            Ok(_) => panic!("missing conditioned volume must fail solver construction"),
-        };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("ConditionedBuildingVolume"),
-            "error must name the element, got: {msg}"
-        );
-
-        // A constant ACH reads no volume: the same building without one
-        // builds.
-        building.infiltration_constant_ach = Some(0.5);
-        if let Err(err) = build(&building) {
-            panic!("a constant-ACH building needs no conditioned volume, got: {err}");
         }
     }
 
@@ -3374,7 +3262,7 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
+            conditioned_volume_m3: 400.0,
             ceiling_height_m: 2.5,
             infiltration_height_m: None,
             floors_above_grade: 1.0,
@@ -3583,7 +3471,7 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
+            conditioned_volume_m3: 400.0,
             ceiling_height_m: 2.5,
             infiltration_height_m: None,
             floors_above_grade: 1.0,
@@ -3818,7 +3706,7 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
+            conditioned_volume_m3: 400.0,
             ceiling_height_m: 2.5,
             infiltration_height_m: None,
             floors_above_grade: 1.0,
@@ -4056,7 +3944,7 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
+            conditioned_volume_m3: 400.0,
             ceiling_height_m: 2.5,
             infiltration_height_m: None,
             floors_above_grade: 1.0,
@@ -4346,7 +4234,7 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
+            conditioned_volume_m3: 400.0,
             ceiling_height_m: 2.5,
             infiltration_height_m: None,
             floors_above_grade: 1.0,
@@ -4614,7 +4502,7 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
+            conditioned_volume_m3: 400.0,
             ceiling_height_m: 2.5,
             infiltration_height_m: None,
             floors_above_grade: 1.0,
@@ -4872,7 +4760,7 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
+            conditioned_volume_m3: 400.0,
             ceiling_height_m: 2.5,
             infiltration_height_m: None,
             floors_above_grade: 1.0,

@@ -1551,11 +1551,7 @@ fn hpxml_v3_parses_resolves_equipment_with_schema_warning() {
         "floor area should be 200 m²"
     );
     assert!(
-        building.conditioned_volume_m3.is_some(),
-        "conditioned volume should be parsed"
-    );
-    assert!(
-        (building.conditioned_volume_m3.unwrap() - 500.0).abs() < 1.0,
+        (building.conditioned_volume_m3 - 500.0).abs() < 1.0,
         "conditioned volume should be 500 m³"
     );
     assert!(
@@ -1769,7 +1765,7 @@ fn hpxml_v4_building_sync_parses_resolves_without_rejection() {
         conditioned.floor_area_m2.unwrap()
     );
     assert!(
-        building.conditioned_volume_m3.is_some(),
+        building.conditioned_volume_m3 > 0.0,
         "conditioned volume should be parsed"
     );
     assert!(
@@ -2660,9 +2656,7 @@ fn declared_spaces_no_surface_touches_are_no_zones() {
 fn missing_conditioned_volume_takes_the_os_hpxml_default() {
     let building = parse_vendored_sample("base-misc-defaults.xml");
     let expected = hares_physics::units::volume_ft3_to_m3(2700.0 * 8.0);
-    let volume = building
-        .conditioned_volume_m3
-        .expect("the defaulted conditioned volume");
+    let volume = building.conditioned_volume_m3;
     assert!(
         (volume - expected).abs() < 1e-6,
         "conditioned volume {volume} m3, expected {expected} m3"
@@ -2674,5 +2668,69 @@ fn missing_conditioned_volume_takes_the_os_hpxml_default() {
             .any(|w| w.message.contains("ConditionedBuildingVolume")),
         "the default must be a warning, got {:?}",
         building.parse_warnings
+    );
+}
+
+/// A constant setpoint with a daily setback or setup takes it for
+/// `TotalSetbackHoursperWeek / 7` hours from the start hour, every day
+/// (OS-HPXML hvac.rb `get_hvac_setpoints`): 66 °F heating 23:00-06:00 and
+/// 80 °F cooling 09:00-15:00 in base-hvac-setpoints-daily-setbacks.xml.
+#[test]
+fn constant_setpoints_carry_their_daily_setback() {
+    let building = parse_vendored_sample("base-hvac-setpoints-daily-setbacks.xml");
+    let f = hares_physics::units::temperature_f_to_c;
+    let mut heating = [f(68.0); 24];
+    for hour in [23, 0, 1, 2, 3, 4, 5] {
+        heating[hour] = f(66.0);
+    }
+    let mut cooling = [f(78.0); 24];
+    cooling[9..15].fill(f(80.0));
+    for (label, setpoints, expected) in [
+        (
+            "heating weekday",
+            &building.heating_weekday_setpoints_c,
+            heating,
+        ),
+        (
+            "heating weekend",
+            &building.heating_weekend_setpoints_c,
+            heating,
+        ),
+        (
+            "cooling weekday",
+            &building.cooling_weekday_setpoints_c,
+            cooling,
+        ),
+        (
+            "cooling weekend",
+            &building.cooling_weekend_setpoints_c,
+            cooling,
+        ),
+    ] {
+        assert_eq!(
+            setpoints.as_deref(),
+            Some(&expected[..]),
+            "{label} setpoints"
+        );
+    }
+}
+
+/// A setback with no weekly hours is an incomplete control, not a flat
+/// setpoint.
+#[test]
+fn setback_without_hours_is_an_error() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../vendors/OCHRE/test/OS-HPXML Sample Files/base-hvac-setpoints-daily-setbacks.xml",
+    );
+    let xml = std::fs::read_to_string(path)
+        .expect("sample readable")
+        .replace(
+            "<TotalSetbackHoursperWeekHeating>49</TotalSetbackHoursperWeekHeating>",
+            "",
+        );
+    let err = hares_io::hpxml::parse_hpxml_str(&xml).expect_err("missing hours must fail");
+    assert!(
+        err.to_string().contains("TotalSetbackHoursperWeekHeating"),
+        "got: {err}"
     );
 }

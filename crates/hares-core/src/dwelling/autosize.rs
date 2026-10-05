@@ -197,10 +197,8 @@ pub fn compute_default_internal_gains(ctx: &AutosizeContext, building: &Building
     let occ_latent = DEFAULT_OCCUPANTS * OCCUPANT_LATENT_GAIN_W;
 
     // Floor area from building geometry.
-    let floor_area_m2 = building
-        .conditioned_volume_m3
-        .filter(|_v| building.ceiling_height_m > 0.0)
-        .map(|v| v / building.ceiling_height_m)
+    let floor_area_m2 = (building.ceiling_height_m > 0.0)
+        .then(|| building.conditioned_volume_m3 / building.ceiling_height_m)
         .or_else(|| {
             building
                 .zones
@@ -1125,7 +1123,7 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
+            conditioned_volume_m3: 400.0,
             ceiling_height_m: 2.5,
             infiltration_height_m: None,
             floors_above_grade: 1.0,
@@ -2778,7 +2776,8 @@ mod tests {
         // - Lighting/plug: 5 W/m² per ASHRAE 62.2-2022 Appendix B
         // - Occupancy latent: 2 × 55 W/person = 110 W (ASHRAE HoF 2021 Ch.18 Table 1)
 
-        let building = minimal_building();
+        let mut building = minimal_building();
+        building.conditioned_volume_m3 = 0.0;
         let ctx = AutosizeContext {
             design_conditions: None,
             weather_lat: 39.74,
@@ -2789,8 +2788,8 @@ mod tests {
             internal_gains_latent_w: 0.0,
         };
 
-        // minimal_building() has no conditioned volume or floor area, so
-        // the function should return occupancy-only gains with a warning.
+        // A zero conditioned volume and no zone floor area leave no floor
+        // area, so the function returns occupancy-only gains with a warning.
         let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
 
         // Sensible from occupancy only (no floor area → no lights/plug component).
@@ -2816,7 +2815,7 @@ mod tests {
         use hares_io::hpxml::building::{Zone, ZoneType};
 
         let mut building = minimal_building();
-        building.conditioned_volume_m3 = Some(180.0); // 150 m² × 2.4 m ceiling
+        building.conditioned_volume_m3 = 180.0; // 150 m² × 2.4 m ceiling
         building.ceiling_height_m = 2.4;
         building.zones = vec![Zone {
             zone_type: ZoneType::Conditioned,

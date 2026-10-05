@@ -12046,7 +12046,7 @@ occupancy = 1.0
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
+            conditioned_volume_m3: 400.0,
             ceiling_height_m: 2.5,
             infiltration_height_m: None,
             floors_above_grade: 1.0,

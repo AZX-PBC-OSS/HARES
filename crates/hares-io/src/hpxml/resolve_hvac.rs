@@ -256,15 +256,7 @@ pub fn compute_duct_dse_params(
         return Ok(DuctDseParams::default());
     }
 
-    let house_volume_m3 = building.conditioned_volume_m3.ok_or_else(|| {
-        HpxmlError::MissingField {
-            path: "BuildingSummary/BuildingConstruction/ConditionedBuildingVolume",
-            system_kind: "Building",
-            system_id: "conditioned".to_string(),
-            reason:
-                "conditioned volume (m³) is required for ASHRAE 152 duct DSE when ducts are outside conditioned space; no silent default permitted",
-        }
-    })?;
+    let house_volume_m3 = building.conditioned_volume_m3;
     let latitude_deg = building.site.latitude_deg.ok_or_else(|| {
         HpxmlError::MissingField {
             path: "Site/Latitude",
@@ -2001,7 +1993,7 @@ pub(super) fn resolve_hvac(
         .path(&["HVACPlant", "PrimarySystems", "PrimaryCoolingSystem"])
         .and_then(|n| n.attrs.get("idref").cloned());
 
-    let setpoint_params = parse_hvac_setpoint_params(details);
+    let setpoint_params = parse_hvac_setpoint_params(details)?;
     let duct_params = compute_duct_dse_params(building)?;
     let basement_params = compute_basement_params(building);
 
@@ -3699,18 +3691,20 @@ fn select_variants_for_speed_count(
 ///
 /// Delegates to the shared `xml_helpers::parse_setpoint_from_control` for
 /// the actual XML parsing logic.
-fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
+fn parse_hvac_setpoint_params(
+    details: &XmlNode,
+) -> std::result::Result<Vec<(String, Value)>, HpxmlError> {
     let mut out = Vec::new();
 
     let Some(control) = super::xml_helpers::find_hvac_control(details) else {
-        return out;
+        return Ok(out);
     };
 
     let mut heating: Option<([f64; 24], [f64; 24])> = None;
     let mut cooling: Option<([f64; 24], [f64; 24])> = None;
     for (hvac_type, slot) in [("Heating", &mut heating), ("Cooling", &mut cooling)] {
-        let weekday = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, true);
-        let weekend = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, false);
+        let weekday = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, true)?;
+        let weekend = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, false)?;
         if let Some(wd) = weekday {
             let mut weekday_arr = [0.0; 24];
             weekday_arr.copy_from_slice(&wd[..24]);
@@ -3749,7 +3743,7 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
         ));
     }
 
-    out
+    Ok(out)
 }
 
 /// Clip inverted or too-close heating/cooling setpoint pairs to the daily
@@ -3990,7 +3984,7 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
+            conditioned_volume_m3: 400.0,
             ceiling_height_m: 2.5,
             infiltration_height_m: None,
             floors_above_grade: 1.0,
@@ -4060,7 +4054,7 @@ mod tests {
         ])]);
         building.site.latitude_deg = Some(40.0);
         building.site.longitude_deg = Some(-105.0);
-        building.conditioned_volume_m3 = Some(400.0);
+        building.conditioned_volume_m3 = 400.0;
         let params = compute_duct_dse_params(&building)
             .expect("duct DSE params must resolve when lat/lon/volume are set");
         let supply_r = params.supply_r_m2_k_w;
@@ -4097,7 +4091,7 @@ mod tests {
         ])]);
         building.site.latitude_deg = Some(40.0);
         building.site.longitude_deg = Some(-105.0);
-        building.conditioned_volume_m3 = Some(400.0);
+        building.conditioned_volume_m3 = 400.0;
         let params = compute_duct_dse_params(&building)
             .expect("duct DSE params must resolve when lat/lon/volume are set");
         let return_r = params.return_r_m2_k_w;
@@ -5028,7 +5022,7 @@ mod tests {
             .path(&["Building", "BuildingDetails"])
             .expect("details node must exist");
 
-        let params = parse_hvac_setpoint_params(details);
+        let params = parse_hvac_setpoint_params(details).expect("setpoints parse");
         let mut map = Map::new();
         for (key, value) in params {
             map.insert(key, value);
@@ -5094,7 +5088,7 @@ mod tests {
             .path(&["Building", "BuildingDetails"])
             .expect("details node must exist");
 
-        let params = parse_hvac_setpoint_params(details);
+        let params = parse_hvac_setpoint_params(details).expect("setpoints parse");
         let mut map = Map::new();
         for (key, value) in params {
             map.insert(key, value);
@@ -6083,7 +6077,7 @@ mod tests {
             .path(&["Building", "BuildingDetails"])
             .expect("details node must exist");
 
-        let params = parse_hvac_setpoint_params(details);
+        let params = parse_hvac_setpoint_params(details).expect("setpoints parse");
 
         // Find the setpoints_reconciled entry.
         let key_found = params.iter().any(|(k, _)| k == "setpoints_reconciled");

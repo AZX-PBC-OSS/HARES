@@ -389,6 +389,18 @@ mod tests {
 
     use crate::epw::{clark_allen_sky_temp_c, monthly_day_counts};
 
+    /// The TMY3 header's first field is the station's USAF/WMO number; an
+    /// empty field names no station.
+    #[test]
+    fn station_header_carries_the_station_wmo() {
+        let meta = parse_station_header("723860,Denver Intl AP,CO,-7,39.833,-104.650,1650")
+            .expect("valid header");
+        assert_eq!(meta.station_wmo.as_deref(), Some("723860"));
+        let meta = parse_station_header(" ,Denver Intl AP,CO,-7,39.833,-104.650,1650")
+            .expect("valid header");
+        assert_eq!(meta.station_wmo, None);
+    }
+
     /// Build a minimal TMY3 CSV string for testing.
     ///
     /// Only includes the columns required by the parser.

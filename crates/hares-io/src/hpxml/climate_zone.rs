@@ -13,6 +13,8 @@ use super::Building;
 /// `HPXMLtoOpenStudio/resources/data/zipcode_weather_stations.csv` (sha256
 /// d453ec428e9ddf21375dc1a3c606cb7ec628eed280cd49ca26d3e2c5ff094ecd), the
 /// row `lookup_weather_data_from_wmo` (defaults.rb:5471-5500) returns.
+/// `scripts/check_os_hpxml_tables.sh` regenerates it; the licence notice is
+/// `data/OS-HPXML-LICENSE.md`.
 const WMO_IECC_ZONES_CSV: &str = include_str!("../../data/wmo_iecc_zones.csv");
 
 fn wmo_iecc_zones() -> &'static HashMap<&'static str, &'static str> {
@@ -31,7 +33,7 @@ fn wmo_iecc_zones() -> &'static HashMap<&'static str, &'static str> {
 
 /// OS-HPXML's IECC zone for the weather station `wmo`, or `None` when its
 /// table has no such station.
-pub fn iecc_zone_for_wmo(wmo: &str) -> Option<&'static str> {
+pub(crate) fn iecc_zone_for_wmo(wmo: &str) -> Option<&'static str> {
     wmo_iecc_zones().get(wmo.trim()).copied()
 }
 
@@ -64,7 +66,22 @@ pub fn apply_climate_zone_default(building: &mut Building, station_wmo: Option<&
 
 #[cfg(test)]
 mod tests {
-    use super::iecc_zone_for_wmo;
+    use sha2::{Digest, Sha256};
+
+    use super::{WMO_IECC_ZONES_CSV, iecc_zone_for_wmo};
+
+    /// The committed table is the one `scripts/check_os_hpxml_tables.sh`
+    /// regenerates from the pinned upstream source; an edit by hand fails
+    /// here.
+    #[test]
+    fn station_table_is_the_regenerated_one() {
+        let digest = Sha256::digest(WMO_IECC_ZONES_CSV.as_bytes());
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "0648ef5cd50114870549a039cde22ee4f23b1220e8de1e9eb8271ff4f934bdcb"
+        );
+    }
 
     /// Denver International and Miami International, the stations of the
     /// OS-HPXML samples, and a station no table row names.

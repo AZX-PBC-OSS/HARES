@@ -1514,7 +1514,7 @@ pub(crate) fn build_synthetic_building(
         cooling_weekend_setpoints_c: cooling_weekday,
         battery_round_trip_efficiency: None,
         pv_tilt_deg: None,
-        conditioned_volume_m3: Some(config.geometry.zone_volume_m3),
+        conditioned_volume_m3: config.geometry.zone_volume_m3,
         ceiling_height_m: 2.5,
         infiltration_height_m: None,
         floors_above_grade: 1.0,

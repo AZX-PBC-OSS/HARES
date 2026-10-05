@@ -1200,6 +1200,16 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    /// The EPW LOCATION header's sixth field is the station's WMO number.
+    #[test]
+    fn location_header_carries_the_station_wmo() {
+        let meta = super::parse_location_header(
+            "LOCATION,Denver Intl Ap,CO,USA,TMY3,725650,39.83,-104.65,-7.0,1650.0",
+        )
+        .expect("valid header");
+        assert_eq!(meta.station_wmo.as_deref(), Some("725650"));
+    }
+
     use tracing_subscriber;
 
     use super::{

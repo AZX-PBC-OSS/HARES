@@ -67,9 +67,7 @@ fn base_fixture_preserves_summary_fields_and_imperial_unit_defaults() {
     let floor_area_m2 = conditioned
         .floor_area_m2
         .expect("conditioned area expected");
-    let volume_m3 = building
-        .conditioned_volume_m3
-        .expect("conditioned volume expected");
+    let volume_m3 = building.conditioned_volume_m3;
     let ceiling_height_m = building.ceiling_height_m;
 
     let expected_floor_area_m2 = (2700.0 * 0.092_903_04) * 0.5;

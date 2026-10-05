@@ -246,12 +246,17 @@ pub(crate) fn find_hvac_control(details: &XmlNode) -> Option<&XmlNode> {
 /// Parse a single HVAC setpoint schedule (24h array in °C) from an `HVACControl` node.
 ///
 /// Returns `None` if no setpoint data is found for the given `hvac_type`/`weekday` combination.
+/// A constant setpoint carries its daily setback (heating) or setup (cooling)
+/// as OS-HPXML applies it (hvac.rb:1785-1798, `get_hvac_setpoints`): the
+/// setback temperature for `TotalSetback{Hours}perWeek / 7` hours a day from
+/// the start hour, which defaults to 23:00 for heating and 09:00 for cooling
+/// (defaults.rb:2851-2859); weekends follow weekdays.
 /// Used by both `building.rs::parse_hvac_setpoints` and `resolve_hvac.rs::parse_hvac_setpoint_params`.
 pub(crate) fn parse_setpoint_from_control(
     control: &XmlNode,
     hvac_type: &str,
     weekday: bool,
-) -> Option<Vec<f64>> {
+) -> Result<Option<Vec<f64>>, super::HpxmlError> {
     let day_prefix = if weekday { "Weekday" } else { "Weekend" };
     let ext_key = format!("{day_prefix}SetpointTemps{hvac_type}Season");
 
@@ -266,20 +271,52 @@ pub(crate) fn parse_setpoint_from_control(
             .map(conv::temperature_f_to_c)
             .collect();
         if vals.len() == 24 {
-            return Some(vals);
+            return Ok(Some(vals));
         }
     }
 
     // Fallback: single constant value from <SetpointTemp{hvac_type}Season>
     let const_key = format!("SetpointTemp{hvac_type}Season");
-    if let Some(node) = control.child(&const_key)
-        && let Some(f_val) = parse_trimmed_f64(&node.text)
-    {
-        let c_val = conv::temperature_f_to_c(f_val);
-        return Some(vec![c_val; 24]);
+    let Some(setpoint_f) = control
+        .child(&const_key)
+        .and_then(|node| parse_trimmed_f64(&node.text))
+    else {
+        return Ok(None);
+    };
+    let mut setpoints = vec![conv::temperature_f_to_c(setpoint_f); 24];
+    let (setback_key, hours_key, start_key, default_start_hour) = if hvac_type == "Heating" {
+        (
+            "SetbackTempHeatingSeason",
+            "TotalSetbackHoursperWeekHeating",
+            "SetbackStartHourHeating",
+            23,
+        )
+    } else {
+        (
+            "SetupTempCoolingSeason",
+            "TotalSetupHoursperWeekCooling",
+            "SetupStartHourCooling",
+            9,
+        )
+    };
+    if let Some(setback_f) = child_f64(control, setback_key) {
+        let hours_per_week = child_f64(control, hours_key).ok_or_else(|| {
+            super::HpxmlError::Parse(
+                format!("HVACControl has {setback_key} but no {hours_key}").into(),
+            )
+        })?;
+        let start_hour = control
+            .child("extension")
+            .and_then(|ext| child_f64(ext, start_key))
+            .map_or(default_start_hour, |hour| hour as usize);
+        let setback_c = conv::temperature_f_to_c(setback_f);
+        // Ruby's Integer() truncates the daily hours.
+        let daily_hours = (hours_per_week / 7.0).trunc() as usize;
+        for hour in start_hour..start_hour + daily_hours {
+            setpoints[hour % 24] = setback_c;
+        }
     }
-
-    None
+    Ok(Some(setpoints))
 }
 
 /// Parse schedule extension parameters from an `<extension>` child.
