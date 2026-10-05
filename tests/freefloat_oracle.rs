@@ -1257,7 +1257,7 @@ mod tests {
         ));
         if !path.exists() {
             panic!(
-                "pvlib solar override not found: {}\nRun: PYTHONPATH=vendors/OCHRE vendors/OCHRE/.venv/bin/python tests/python/generate_pvlib_solar_override.py",
+                "pvlib solar override not found: {}\nRun: uv run --group ochre python tests/python/generate_pvlib_solar_override.py --out <dir>, then copy the generated files into tests/fixtures/freefloat/ only as a deliberate replacement, in a commit that states the pvlib version and the reason",
                 path.display()
             );
         }
