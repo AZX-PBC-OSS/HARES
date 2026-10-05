@@ -2188,6 +2188,37 @@ mod tests {
         }
     }
 
+    /// The interior surface diagnostic holds one (surface temperature, net
+    /// long-wave flux) pair per surface, in the zone's surface order, each the
+    /// converged value the injection used.
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    #[test]
+    fn interior_surface_diagnostic_pairs_follow_surface_order() {
+        let env = env_for_temp(21.0, 10.0);
+        let mut solver = interior_lwr_solver(&env);
+        solver.x = DVector::from_row_slice(&[21.0, 35.0, 5.0]);
+
+        let mut u = DVector::zeros(3);
+        solver.apply_interior_longwave_inputs(&mut u, &env);
+
+        let pairs: Vec<(f64, f64)> = solver
+            .int_surface_diag_buf
+            .iter()
+            .map(|d| (d.surface_temp_c, d.lwr_flux_w))
+            .collect();
+        let expected: Vec<(f64, f64)> = solver.interior_surface_temps[0]
+            .iter()
+            .copied()
+            .zip(solver.lwr_net_flux_buf.iter().copied())
+            .collect();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs, expected);
+        assert!(
+            pairs[0].0 > pairs[1].0 && pairs[0].1 < 0.0 && pairs[1].1 > 0.0,
+            "the warm surface (first) loses long-wave to the cold one: {pairs:?}"
+        );
+    }
+
     #[test]
     fn interior_longwave_surface_states_persist_with_clamp_and_damping() {
         let env = env_for_temp(21.0, 10.0);

@@ -848,6 +848,43 @@ mod tests {
 
     use super::*;
 
+    /// `record_from_state` moves its scratch out for the step and back: the
+    /// same buffers (same allocation, same capacity) come back holding the
+    /// step's extracted zone temperatures, and the counters see those values.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn record_from_state_returns_the_same_scratch_buffers_with_the_steps_values() {
+        let mut acc = DiagnosticAccumulator::new(&[ZoneId(1), ZoneId(2)], &[true, true], &[], &[]);
+        let buffers = |acc: &DiagnosticAccumulator| {
+            let s = &acc.scratch;
+            [
+                (s.zone_temps.as_ptr() as usize, s.zone_temps.capacity()),
+                (s.heating_sps.as_ptr() as usize, s.heating_sps.capacity()),
+                (s.cooling_sps.as_ptr() as usize, s.cooling_sps.capacity()),
+            ]
+        };
+        let before = buffers(&acc);
+
+        for temps in [[-1.0, 5.0], [-2.0, -3.0]] {
+            let zones: Vec<ZoneState> = [ZoneId(1), ZoneId(2)]
+                .into_iter()
+                .zip(temps)
+                .map(|(id, t)| ZoneState::new(id, t, 0.008, 100.0))
+                .collect();
+            acc.record_from_state(&zones, &[]);
+            assert_eq!(
+                buffers(&acc),
+                before,
+                "the scratch buffers must be moved back, not replaced"
+            );
+            assert_eq!(acc.scratch.zone_temps, temps);
+        }
+
+        assert_eq!(acc.total_steps, 2);
+        let freezing: Vec<u64> = acc.zone_counters.iter().map(|z| z.freezing_steps).collect();
+        assert_eq!(freezing, [2, 1]);
+    }
+
     /// Verifies that `capture()` extracts zone temperatures, thermal gains,
     /// and electrical net power from live environment and port state, and
     /// that `write_header()` + `write_row()` produce well-formed CSV with
