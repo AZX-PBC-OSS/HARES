@@ -245,7 +245,10 @@ impl DwellingConfig {
     /// The raw schedule this config requests, before resampling to the
     /// simulation's step: the schedule file when `schedule_path` is set,
     /// otherwise a schedule generated from the parsed HPXML. A set path
-    /// that cannot be read is an error naming it.
+    /// that cannot be read is an error naming it. A generated schedule
+    /// needs the default schedule profiles from the defaults directory:
+    /// no directory, an unreadable profile file, or a missing profile is
+    /// a construction error naming it.
     pub(crate) fn load_schedule(
         &self,
         building: &Building,
@@ -258,13 +261,24 @@ impl DwellingConfig {
                     path.display()
                 ))
             }),
-            None => Ok(hares_io::hpxml_schedule::generate_schedule_from_hpxml(
-                building,
-                self.sim_config.start_time,
-                self.sim_config.duration,
-                self.sim_config.time_res,
-                self.defaults_path.as_deref(),
-            )),
+            None => {
+                let defaults_dir = self.defaults_path.as_deref().ok_or_else(|| {
+                    HaresError::Io(format!(
+                        "no defaults directory is configured: a generated schedule \
+                         needs the default schedule profiles file '{}' from the \
+                         defaults directory; set defaults_path",
+                        hares_io::schedule_resolve::DEFAULT_SCHEDULES_CSV,
+                    ))
+                })?;
+                let profiles = hares_io::load_default_profiles(defaults_dir)?;
+                Ok(hares_io::hpxml_schedule::generate_schedule_from_hpxml(
+                    building,
+                    self.sim_config.start_time,
+                    self.sim_config.duration,
+                    self.sim_config.time_res,
+                    &profiles,
+                )?)
+            }
         }
     }
 }
@@ -1935,6 +1949,12 @@ impl Dwelling {
     }
 
     /// Builds a dwelling directly from ResStock-style input files.
+    ///
+    /// No defaults directory is configured, so the schedule file must name
+    /// every mapped column the building's equipment needs: an equipment with
+    /// no schedule column, no HPXML fractions and no default profile is a
+    /// construction error. Pass a defaults directory via
+    /// [`Self::from_hpxml_with_write_output`] or [`Self::from_config`].
     pub fn from_hpxml(
         hpxml_path: &Path,
         schedule_path: &Path,
@@ -1955,11 +1975,19 @@ impl Dwelling {
             duration,
             overrides,
             None,
+            None,
         )
     }
 
     /// [`Self::from_hpxml`] with an optional output-write override, for tests
     /// that exercise this constructor's defaults without paying for a file.
+    ///
+    /// `defaults_path` feeds `DwellingConfig.defaults_path`: the default
+    /// schedule profiles load from there, and equipment whose schedule source
+    /// is missing otherwise (no schedule column, no HPXML fractions) errors.
+    /// The BEopt example schedule this constructor family is tested with does
+    /// not name every mapped column, so the warmup regression passes the
+    /// repo's `defaults/` directory.
     pub fn from_hpxml_with_write_output(
         inputs: HpxmlInputs<'_>,
         start_time: DateTime<FixedOffset>,
@@ -1967,6 +1995,7 @@ impl Dwelling {
         duration: Duration,
         overrides: Option<Value>,
         write_output_override: Option<bool>,
+        defaults_path: Option<PathBuf>,
     ) -> Result<Self> {
         let HpxmlInputs {
             hpxml_path,
@@ -1994,7 +2023,7 @@ impl Dwelling {
             hpxml_path: hpxml_path.to_path_buf(),
             schedule_path: Some(schedule_path.to_path_buf()),
             weather_path: weather_path.to_path_buf(),
-            defaults_path: None,
+            defaults_path,
             sim_config,
             overrides,
             bldg_id: 0,
@@ -2332,11 +2361,7 @@ fn build_from_blueprint_inner(
     hares_io::inject_schedule_into_specs(
         &mut equipment_specs,
         environment.schedule_mut(),
-        Some(
-            &bp.defaults_path
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("defaults")),
-        ),
+        bp.defaults_path.as_deref(),
         &defaults,
         bp.building.foundation_name.as_deref(),
         bp.building.models_garage(),
@@ -11622,17 +11647,37 @@ occupancy = 1.0
         };
         validate_sim_config(&sim_config).expect("valid sim config");
 
-        // Point defaults_path to a non-existent directory so the default
-        // Occupancy profile is NOT available, and the Occupancy spec has
-        // no HPXML extension fractions (only NumberofResidents).
-        let empty_defaults = tempfile::tempdir().expect("create empty temp dir");
+        // Point defaults_path at a defaults directory whose CSV loads but
+        // carries no 'Occupancy' profile, and the Occupancy spec has no
+        // HPXML extension fractions (only NumberofResidents): no occupancy
+        // source of any kind is available.
+        let no_occupancy_defaults = tempfile::tempdir().expect("create temp dir");
+        std::fs::write(
+            no_occupancy_defaults
+                .path()
+                .join("Default Schedule Parameters.csv"),
+            // A valid but Occupancy-free profile file: the strict loader
+            // requires every row present, so one complete dummy profile.
+            concat!(
+                "Category,Name,OCHRE Name,OCHRE Element,Values\n",
+                "Schedules,Occupants,Dummy,weekday_fractions,\"",
+                "0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, ",
+                "0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1\"\n",
+                "Schedules,Occupants,Dummy,weekend_fractions,\"",
+                "0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, ",
+                "0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1\"\n",
+                "Schedules,Occupants,Dummy,month_multipliers,\"",
+                "1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0\"\n",
+            ),
+        )
+        .expect("write the Occupancy-free defaults CSV");
         let dwelling_config = DwellingConfig {
             hpxml_path: base_path.clone(),
             // `from_preparsed` receives the schedule directly and never
             // reads the config's schedule source.
             schedule_path: None,
             weather_path: base_path.clone(),
-            defaults_path: Some(empty_defaults.path().to_path_buf()),
+            defaults_path: Some(no_occupancy_defaults.path().to_path_buf()),
             sim_config,
             overrides: config.overrides.clone(),
             bldg_id: config.building_id.unwrap_or(0),

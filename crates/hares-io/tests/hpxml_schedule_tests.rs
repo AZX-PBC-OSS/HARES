@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use chrono::{DateTime, Duration, FixedOffset, TimeZone};
+use chrono::{DateTime, Datelike, Duration, FixedOffset, TimeZone, Timelike};
 use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml_schedule::generate_schedule_from_hpxml;
+use hares_io::load_default_profiles;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -15,6 +16,11 @@ fn test_start() -> DateTime<FixedOffset> {
         .unwrap()
 }
 
+fn shipped_profiles() -> hares_io::DefaultProfiles {
+    load_default_profiles(&project_root().join("defaults"))
+        .expect("the shipped defaults CSV must load")
+}
+
 #[test]
 fn generated_schedule_has_all_required_columns() {
     let xml = minimal_hpxml();
@@ -24,8 +30,9 @@ fn generated_schedule_has_all_required_columns() {
         test_start(),
         Duration::hours(1),
         Duration::minutes(1),
-        None,
-    );
+        &shipped_profiles(),
+    )
+    .expect("the shipped profiles generate the schedule");
 
     let required = &[
         "occupants",
@@ -56,8 +63,9 @@ fn generated_schedule_uses_hpxml_setpoints() {
         test_start(),
         Duration::hours(2),
         Duration::minutes(60),
-        None,
-    );
+        &shipped_profiles(),
+    )
+    .expect("the shipped profiles generate the schedule");
 
     let heat = sched.columns[sched.column_index["heating_setpoint"]][0];
     let cool = sched.columns[sched.column_index["cooling_setpoint"]][0];
@@ -74,8 +82,9 @@ fn generated_schedule_defaults_setpoints_when_hpxml_missing() {
         test_start(),
         Duration::hours(1),
         Duration::minutes(1),
-        None,
-    );
+        &shipped_profiles(),
+    )
+    .expect("the shipped profiles generate the schedule");
     let heat = sched.columns[sched.column_index["heating_setpoint"]][0];
     let cool = sched.columns[sched.column_index["cooling_setpoint"]][0];
     assert!((heat - 20.0).abs() < 1e-9);
@@ -90,8 +99,9 @@ fn generated_schedule_timestamps_are_correct() {
         test_start(),
         Duration::hours(3),
         Duration::minutes(15),
-        None,
-    );
+        &shipped_profiles(),
+    )
+    .expect("the shipped profiles generate the schedule");
     assert_eq!(sched.len(), 12);
     assert_eq!(sched.timestamps[0], test_start());
     assert_eq!(
@@ -102,15 +112,15 @@ fn generated_schedule_timestamps_are_correct() {
 
 #[test]
 fn generated_schedule_uses_default_profiles_when_dir_provided() {
-    let defaults_dir = project_root().join("defaults");
     let building = parse_building(&minimal_hpxml()).expect("parse");
     let sched = generate_schedule_from_hpxml(
         &building,
         test_start(),
         Duration::hours(24),
         Duration::minutes(60),
-        Some(&defaults_dir),
-    );
+        &shipped_profiles(),
+    )
+    .expect("the shipped profiles generate the schedule");
     // Occupancy varies over the day when using defaults profile
     let occ_idx = sched.column_index["occupants"];
     let midnight = sched.columns[occ_idx][0];
@@ -122,38 +132,61 @@ fn generated_schedule_uses_default_profiles_when_dir_provided() {
     );
 }
 
+/// The generated schedule's columns, names, index, and aggregations agree on
+/// one column count, the names are unique, and `occupants` is exactly the
+/// `Occupancy` profile series: no constant stand-in column, no length drift
+/// between a column vector and its aggregation.
 #[test]
-fn generated_schedule_without_defaults_uses_constant_one() {
+fn generated_schedule_has_one_occupants_column() {
     let building = parse_building(&minimal_hpxml()).expect("parse");
+    let profiles = shipped_profiles();
     let sched = generate_schedule_from_hpxml(
         &building,
         test_start(),
-        Duration::hours(1),
-        Duration::minutes(1),
-        None,
+        Duration::hours(24),
+        Duration::minutes(60),
+        &profiles,
+    )
+    .expect("the shipped profiles generate the schedule");
+
+    let mut names: Vec<&str> = sched.column_names.iter().map(String::as_str).collect();
+    names.sort_unstable();
+    let unique = names.len();
+    names.dedup();
+    assert_eq!(
+        unique,
+        names.len(),
+        "generated column names must be unique, got: {names:?}"
     );
-    for col_name in &[
-        "plug_loads_other",
-        "plug_loads_tv",
-        "lighting_interior",
-        "dishwasher",
-        "clothes_washer",
-        "clothes_dryer",
-        "cooking_range",
-        "hot_water_dishwasher",
-        "hot_water_clothes_washer",
-        "hot_water_fixtures",
-    ] {
-        let idx = sched.column_index[*col_name];
-        for &v in &sched.columns[idx] {
-            assert!((v - 1.0).abs() < 1e-9, "{col_name} value {v} != 1.0");
-        }
+    assert_eq!(sched.columns.len(), sched.column_names.len());
+    assert_eq!(sched.column_aggregations.len(), sched.column_names.len());
+    assert_eq!(sched.column_index.len(), sched.column_names.len());
+
+    // occupants equals the Occupancy profile series: for every timestamp the
+    // weekday or weekend fraction times the month multiplier.
+    let occupancy = profiles
+        .get("Occupancy")
+        .expect("the shipped defaults CSV has an Occupancy profile");
+    let occ_idx = sched.column_index["occupants"];
+    assert_eq!(sched.column_names[occ_idx], "occupants");
+    for (i, ts) in sched.timestamps.iter().enumerate() {
+        let hour = ts.hour() as usize;
+        let month = ts.month0() as usize;
+        let is_weekend = ts.weekday().num_days_from_monday() >= 5;
+        let expected = if is_weekend {
+            occupancy.weekend_fractions[hour]
+        } else {
+            occupancy.weekday_fractions[hour]
+        } * occupancy.month_multipliers[month];
+        assert_eq!(
+            sched.columns[occ_idx][i], expected,
+            "occupants[{i}] must be the Occupancy profile value"
+        );
     }
 }
 
 #[test]
 fn generated_schedule_parity_with_real_csv_for_resstock_2025_1() {
-    let defaults_dir = project_root().join("defaults");
     let bldg_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0527060");
 
     // Skip if fixture not available
@@ -169,8 +202,9 @@ fn generated_schedule_parity_with_real_csv_for_resstock_2025_1() {
         test_start(),
         Duration::hours(1),
         Duration::minutes(1),
-        Some(&defaults_dir),
-    );
+        &shipped_profiles(),
+    )
+    .expect("the shipped profiles generate the schedule");
 
     // Must have all required columns
     for col in &[

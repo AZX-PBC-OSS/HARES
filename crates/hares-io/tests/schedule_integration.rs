@@ -172,6 +172,49 @@ fn write_default_profile_csv(path: &std::path::Path) {
         .expect("write default profile csv");
 }
 
+/// A spec whose power schedule has none of its three sources (no schedule
+/// CSV column, no HPXML fractions on the spec, no default profile in the
+/// defaults file) fails the injection naming the equipment and the sources.
+#[test]
+fn equipment_without_any_schedule_source_is_an_error() {
+    let dir = tempdir().expect("create temp dir");
+    write_default_profile_csv(dir.path());
+
+    let mut schedule = make_schedule(&[
+        ("occupants", &[1.0, 1.0]),
+        // The schedule file has no `freezer` column.
+        ("lighting_interior", &[0.2, 1.0]),
+    ]);
+    let mut specs = vec![make_spec("Freezer", 500.0)];
+    let err = inject_schedule_into_specs(
+        &mut specs,
+        &mut schedule,
+        Some(dir.path()),
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect_err("a Freezer with no schedule source must fail the injection");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("Freezer"),
+        "the error must name the equipment, got: {message}"
+    );
+    assert!(
+        message.contains("freezer"),
+        "the error must name the schedule column looked for, got: {message}"
+    );
+    assert!(
+        message.contains("no HPXML schedule fractions"),
+        "the error must name the HPXML profile looked for, got: {message}"
+    );
+    assert!(
+        message.contains("no 'Freezer' profile"),
+        "the error must name the default profile looked for, got: {message}"
+    );
+}
+
 #[test]
 fn io_injection_to_scheduled_load_step_column_source() {
     let mut schedule = make_schedule(&[("lighting_interior", &[0.2, 1.0, 0.4])]);
@@ -280,8 +323,13 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
 
 #[test]
 fn io_injection_to_scheduled_load_step_constant_source() {
+    // The Ventilation Fan is the constant-power schedule source: its rated
+    // power_w becomes a constant kW the load steps at.
+    let mut spec = make_spec("Ventilation Fan", 876.0);
+    spec.parameters
+        .insert("power_w".to_string(), Value::from(876.0));
     let mut schedule = make_schedule(&[("occupants", &[1.0, 1.0])]);
-    let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
+    let mut specs = vec![spec];
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
@@ -308,7 +356,7 @@ fn io_injection_to_scheduled_load_step_constant_source() {
         .expect("power_constant_kw should be injected");
 
     let config = equipment_config_from_spec(&specs[0]);
-    let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
+    let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Ventilation Fan");
 
     let env = base_env(payload_for_row(&schedule, 0));
     eq.init(&config, &env)

@@ -208,6 +208,10 @@ mod tests {
             Duration::hours(2),
             None,
             Some(false),
+            // The BEopt example schedule does not name every mapped column,
+            // and an equipment with no schedule source is a construction
+            // error: the profiles load from the repo's defaults directory.
+            Some(project_root().join("defaults")),
         )
         .expect("HPXML dwelling must build");
 

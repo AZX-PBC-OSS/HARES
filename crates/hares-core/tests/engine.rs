@@ -112,6 +112,13 @@ fn fixture_hpxml_path() -> PathBuf {
         .join("../../tests/fixtures/hpxml/ochre_samples/base.xml")
 }
 
+/// The repo's defaults directory: equipment whose schedule source is missing
+/// (no schedule column, no HPXML fractions) resolves its default profile
+/// there instead of erroring.
+fn repo_defaults_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+}
+
 fn simulation_config(output_path: PathBuf) -> SimulationConfig {
     simulation_config_with_flags(output_path, true, true)
 }
@@ -155,7 +162,7 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
         schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config: simulation_config(output_path.clone()),
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
@@ -210,7 +217,7 @@ fn run_with_zero_duration_reports_zero_step() {
         schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config,
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
@@ -297,7 +304,7 @@ fn run_with_streaming_output_computes_metrics() {
         schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config: simulation_config_with_flags(output_path, retain, true),
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
@@ -372,7 +379,7 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
             cfg.output_verbosity = 6;
             cfg
         },
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
@@ -424,7 +431,7 @@ fn run_with_zero_duration_flags_zero_step() {
         schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config,
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
@@ -465,7 +472,7 @@ fn run_without_output_recorder_reports_metrics_unavailable() {
         schedule_path: Some(schedule_path.clone()),
         weather_path: weather_path.clone(),
         sim_config: simulation_config_with_flags(unique_temp_path("csv"), false, false),
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,

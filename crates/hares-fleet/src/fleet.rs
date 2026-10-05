@@ -1148,6 +1148,13 @@ mod tests {
             .join("../../tests/fixtures/hpxml/ochre_samples/base.xml")
     }
 
+    /// The repo's defaults directory: equipment whose schedule source is
+    /// missing (no schedule column, no HPXML fractions) resolves its default
+    /// profile there instead of erroring.
+    fn repo_defaults_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+    }
+
     fn simulation_config(output_path: PathBuf) -> SimulationConfig {
         SimulationConfig {
             start_time: chrono::Utc::now().fixed_offset(),
@@ -1179,7 +1186,7 @@ mod tests {
                 schedule_path: Some(schedule_path.clone()),
                 weather_path: weather_path.clone(),
                 sim_config: simulation_config(unique_temp_path("csv")),
-                defaults_path: None,
+                defaults_path: Some(repo_defaults_path()),
                 overrides: None,
                 bldg_id: idx as i64 + 1,
                 initialization_duration: None,

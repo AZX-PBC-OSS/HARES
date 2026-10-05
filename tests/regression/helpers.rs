@@ -30,6 +30,13 @@ fn examples_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
 }
 
+/// The repo's defaults directory: equipment whose schedule source is missing
+/// (no schedule column, no HPXML fractions) resolves its default profile
+/// there instead of erroring.
+fn repo_defaults_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+}
+
 pub fn ochre_hpxml_path() -> PathBuf {
     examples_dir().join("BEopt_example.xml")
 }
@@ -92,7 +99,7 @@ pub fn build_beopt_dwelling_config(bldg_id: i64, duration: Duration, seed: u64) 
         bldg_id,
         initialization_duration: None,
         resample_overrides: None,
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         patches: None,
     }
 }
@@ -126,7 +133,7 @@ pub fn build_resstock_dwelling_config(
         bldg_id,
         initialization_duration: None,
         resample_overrides: None,
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         patches: None,
     }
 }
@@ -251,7 +258,7 @@ pub fn build_dwelling_config(
         bldg_id,
         initialization_duration: None,
         resample_overrides: None,
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         patches: None,
     }
 }

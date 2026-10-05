@@ -39,6 +39,13 @@ fn write_temp_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("failed to write temp file");
 }
 
+/// The repo's defaults directory: equipment whose schedule source is missing
+/// (no schedule column, no HPXML fractions) resolves its default profile
+/// there instead of erroring.
+fn repo_defaults_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+}
+
 fn build_schedule_csv() -> String {
     [
         "Time,Clothes Washer (kW),HVAC Heating (C)",
@@ -143,7 +150,7 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
             retain_batches: false,
             rotation: hares_io::RotationPolicy::None,
         },
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
@@ -181,7 +188,7 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
             retain_batches: false,
             rotation: hares_io::RotationPolicy::None,
         },
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
@@ -323,7 +330,7 @@ fn indoor_zone_has_exactly_one_beam_receiving_floor_on_ochre_base() {
             retain_batches: false,
             rotation: hares_io::RotationPolicy::None,
         },
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
@@ -461,7 +468,7 @@ fn attic_floor_never_takes_the_exterior_sky_exposed_path() {
             retain_batches: false,
             rotation: hares_io::RotationPolicy::None,
         },
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,

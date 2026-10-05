@@ -148,6 +148,12 @@ impl DwellingBlueprint {
         )
         .map_err(|e| HaresError::Io(e.to_string()))?;
 
+        // The config's own defaults directory, verbatim: the schedule
+        // profiles load from what the config named, and a config with
+        // no directory runs with no default profiles rather than on a
+        // working-directory guess. The store above keeps the resolved
+        // directory until the defaults path becomes required.
+        let config_defaults_path = config.defaults_path.clone();
         Ok(Self {
             config,
             building,
@@ -157,7 +163,7 @@ impl DwellingBlueprint {
             design_conditions,
             site_location,
             defaults,
-            defaults_path: Some(resolved_defaults_dir),
+            defaults_path: config_defaults_path,
             equipment_specs,
             equipment_warnings,
             local_start,
