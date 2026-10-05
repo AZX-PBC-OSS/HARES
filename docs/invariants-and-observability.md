@@ -134,7 +134,12 @@ the frame's flow and telemetry columns, `DwellingTelemetry` power, the next
 step's electrical summary, `Dwelling::reported_core_output` and Python's
 `Dwelling.equipment()`) report zero for it, while its state columns
 (mode, setpoint, SOC, speed, defrost state, and the verbosity-8 temperature,
-timer, irradiance and EV connection columns) keep its committed state.
+timer and EV connection columns) keep its committed state. A PV's
+irradiance column is the absorbed irradiance its step computes, so a failed
+step reports zero there too. Two readers keep the last known values instead:
+the actors' `equipment_core` snapshot (the previous successful step's core
+output) and the equipment telemetry, including Python's
+`Equipment.telemetry()`.
 
 A failure that repeats on the next step comes from the equipment's state or
 configuration, not from one step's inputs, so the run errors

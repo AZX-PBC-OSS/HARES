@@ -926,7 +926,9 @@ fn resolve_v8_columns(
     ];
     const PV: &[(&str, &str, RecordedValue)] = &[
         (tk::DC_POWER_KW, PV_DC_POWER_SUFFIX, Flow),
-        (tk::IRRADIANCE_W_M2, PV_IRRADIANCE_SUFFIX, State),
+        // The absorbed (soiled, capacity-weighted) irradiance the step
+        // computes: an output of the step, not the array's state.
+        (tk::IRRADIANCE_W_M2, PV_IRRADIANCE_SUFFIX, Flow),
     ];
     const EV: &[(&str, &str, RecordedValue)] = &[
         (tk::CONNECTION_STATE, EV_CONNECTION_STATE_SUFFIX, State),
@@ -13778,6 +13780,8 @@ master_seed = 0
         outcomes: std::collections::VecDeque<bool>,
         ports: Vec<PortDeclaration>,
         heats_zone: bool,
+        /// Telemetry a successful step writes (key, value).
+        step_telemetry: Vec<(&'static str, f64)>,
     }
 
     impl FlakyPortEquipment {
@@ -13806,6 +13810,7 @@ master_seed = 0
                 outcomes: outcomes.iter().copied().collect(),
                 ports: vec![PortDeclaration::electrical()],
                 heats_zone: false,
+                step_telemetry: Vec::new(),
             }
         }
 
@@ -13822,16 +13827,26 @@ master_seed = 0
                 | CoreCapabilities::THERMAL
                 | CoreCapabilities::HAS_SPEED;
             self.core_output.state.speed_index = Some(0);
-            for key in [
-                tk::DEFROST_CYCLE_STATE,
-                tk::SUPPLY_TEMP_C,
-                tk::MIN_ON_TIME_S,
-                tk::COMPRESSOR_KW,
-            ] {
-                self.telemetry.insert(key, 0.0);
-            }
+            let compressor_kw = self.power_w / 1000.0;
             self.ports.push(PortDeclaration::thermal(ZoneId(1)));
             self.heats_zone = true;
+            self.writes_telemetry(&[
+                (tk::DEFROST_CYCLE_STATE, 1.0),
+                (tk::SUPPLY_TEMP_C, 35.0),
+                (tk::RETURN_TEMP_C, 21.0),
+                (tk::MIN_ON_TIME_S, 300.0),
+                (tk::MIN_OFF_TIME_S, 240.0),
+                (tk::SUPPLY_AIR_TEMP_C, 38.0),
+                (tk::COMPRESSOR_KW, compressor_kw),
+            ])
+        }
+
+        /// Each successful step writes `values` into these telemetry keys.
+        fn writes_telemetry(mut self, values: &[(&'static str, f64)]) -> Self {
+            for &(key, value) in values {
+                self.telemetry.insert(key, 0.0);
+                self.step_telemetry.push((key, value));
+            }
             self
         }
 
@@ -13913,10 +13928,9 @@ master_seed = 0
             if self.heats_zone {
                 self.core_output.flows.thermal_output_w = Some(self.power_w);
                 self.core_output.state.speed_index = Some(2);
-                self.telemetry.set(tk::DEFROST_CYCLE_STATE, 1.0);
-                self.telemetry.set(tk::SUPPLY_TEMP_C, 35.0);
-                self.telemetry.set(tk::MIN_ON_TIME_S, 300.0);
-                self.telemetry.set(tk::COMPRESSOR_KW, self.power_w / 1000.0);
+            }
+            for &(key, value) in &self.step_telemetry {
+                self.telemetry.set(key, value);
             }
             Ok(())
         }
@@ -14071,6 +14085,21 @@ master_seed = 0
                 FlakyPortEquipment::new(heater, 500.0, &[true]).heating_zone(),
             ))
             .expect("register the equipment");
+        dwelling
+            .add_equipment(Box::new(
+                FlakyPortEquipment::new("EV", 300.0, &[true])
+                    .with_id(1004)
+                    .battery()
+                    .writes_telemetry(&[(tk::CONNECTION_STATE, 1.0), (tk::CHARGING_LEVEL, 2.0)]),
+            ))
+            .expect("register the EV");
+        dwelling
+            .add_equipment(Box::new(
+                FlakyPortEquipment::new("PV", 200.0, &[true])
+                    .with_id(1005)
+                    .writes_telemetry(&[(tk::IRRADIANCE_W_M2, 640.0), (tk::DC_POWER_KW, 0.2)]),
+            ))
+            .expect("register the PV");
         dwelling.step().expect("the equipment succeeds");
         dwelling
             .step()
@@ -14092,20 +14121,29 @@ master_seed = 0
                 })
                 .collect()
         };
-        for flow in [
-            format!("{heater} {ELECTRIC_POWER_SUFFIX}"),
-            format!("{heater} {COMPRESSOR_POWER_KW_SUFFIX}"),
-            end_use_electric_power_column(&EndUse::HVAC_HEATING),
+        // The PV's irradiance is the absorbed (soiled, capacity-weighted)
+        // irradiance its step computes, an output of the step like its
+        // power: a failed step computed none.
+        for (flow, delivered) in [
+            (format!("{heater} {ELECTRIC_POWER_SUFFIX}"), 0.5),
+            (format!("{heater} {COMPRESSOR_POWER_KW_SUFFIX}"), 0.5),
+            (end_use_electric_power_column(&EndUse::HVAC_HEATING), 0.5),
+            (format!("PV {PV_IRRADIANCE_SUFFIX}"), 640.0),
+            (format!("PV {PV_DC_POWER_SUFFIX}"), 0.2),
         ] {
-            assert_eq!(recorded(&flow), vec![0.5, 0.0], "{flow}");
+            assert_eq!(recorded(&flow), vec![delivered, 0.0], "{flow}");
         }
-        for (state, committed) in [
-            (SPEED_SUFFIX, 2.0),
-            (DEFROST_STATE_SUFFIX, 1.0),
-            (SUPPLY_TEMP_SUFFIX, 35.0),
-            (MIN_ON_TIME_SUFFIX, 300.0),
+        for (column, committed) in [
+            (format!("{heater} {SPEED_SUFFIX}"), 2.0),
+            (format!("{heater} {DEFROST_STATE_SUFFIX}"), 1.0),
+            (format!("{heater} {SUPPLY_TEMP_SUFFIX}"), 35.0),
+            (format!("{heater} {RETURN_TEMP_SUFFIX}"), 21.0),
+            (format!("{heater} {MIN_ON_TIME_SUFFIX}"), 300.0),
+            (format!("{heater} {MIN_OFF_TIME_SUFFIX}"), 240.0),
+            (format!("{heater} {SUPPLY_AIR_TEMP_SUFFIX}"), 38.0),
+            (format!("EV {EV_CONNECTION_STATE_SUFFIX}"), 1.0),
+            (format!("EV {EV_CHARGING_LEVEL_SUFFIX}"), 2.0),
         ] {
-            let column = format!("{heater} {state}");
             assert_eq!(recorded(&column), vec![committed; 2], "{column}");
         }
     }
