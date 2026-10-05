@@ -45,6 +45,13 @@ pub enum HaresError {
         value_c: f64,
         class: crate::ThermostatBandClass,
     },
+    /// A solar override timestep without an entry for a PV array's
+    /// orientation surface, which the PV needs to step.
+    #[error(
+        "solar override timestep {timestep} has no entry for PV surface {surface_id}: \
+         an override must carry every PV array's orientation surface"
+    )]
+    SolarOverrideMissingSurface { timestep: usize, surface_id: u32 },
     #[error("invariant violation in '{check_name}': value={value:.6e}, tolerance={tolerance:.6e}")]
     InvariantViolation {
         check_name: String,

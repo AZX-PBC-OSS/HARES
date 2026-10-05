@@ -1376,7 +1376,10 @@ mod tests {
             solar_data.len(),
             n_surfaces
         );
-        dwelling_ov.environment.set_solar_override(solar_data);
+        dwelling_ov
+            .environment
+            .set_solar_override(solar_data)
+            .expect("the freefloat scenarios carry no PV");
 
         for _ in 0..n_steps {
             dwelling_ov.step().expect("dwelling.step (override)");

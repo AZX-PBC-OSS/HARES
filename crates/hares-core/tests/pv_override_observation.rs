@@ -1,52 +1,21 @@
-//! Behavioral replication of the coverage-triage PV scenario: a solar
-//! override whose rows lack the PV arrays' synthetic orientation surfaces
-//! makes every PV `step()` fail. Under the default failure budget the run
-//! ends at the second consecutive failure, naming the PV; under a budget
-//! that tolerates the whole run, the dwelling's per-step observable
-//! contract survives: every equipment stays individually observable and the
-//! start-of-step core-entry invariant never fires.
+//! A solar override on a dwelling with PV: one that lacks the PV arrays'
+//! orientation surfaces is a configuration error caught at the call, and
+//! one that carries them lets the PV step, producing nothing at night.
 
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_io::OutputFormat;
-use hares_types::SurfaceIrradiance;
+use hares_types::{HaresError, SurfaceIrradiance};
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn sample_dir() -> PathBuf {
-    project_root().join("tests/fixtures/hpxml/ochre_samples")
-}
-
-/// The override the triage exercised: rows carrying only the envelope
-/// surfaces (0..=13), omitting the PV arrays' synthetic orientation
-/// surfaces (the large ids like 200018000) — the exact shape the Python
-/// DataFrame conversion produces for a pvlib CSV that has no PV-surface
-/// columns.
-fn envelope_only_override() -> Vec<Vec<SurfaceIrradiance>> {
-    (0..24)
-        .map(|_| {
-            (0..=13)
-                .map(|sid| SurfaceIrradiance {
-                    surface_id: sid,
-                    direct_w_m2: 0.0,
-                    diffuse_w_m2: 0.0,
-                    reflected_w_m2: 0.0,
-                    angle_of_incidence_rad: 0.0,
-                })
-                .collect()
-        })
-        .collect()
-}
-
-const STEPS: u32 = 6;
-
-fn pv_dwelling_with_surface_less_override(max_consecutive_step_failures: u32) -> Dwelling {
+fn pv_dwelling() -> Dwelling {
     let config = DwellingConfig {
-        hpxml_path: sample_dir().join("base-pv.xml"),
+        hpxml_path: project_root().join("tests/fixtures/hpxml/ochre_samples/base-pv.xml"),
         schedule_path: Some(project_root().join("data/examples/BEopt_example_schedule.csv")),
         weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         defaults_path: Some(project_root().join("defaults")),
@@ -55,7 +24,7 @@ fn pv_dwelling_with_surface_less_override(max_consecutive_step_failures: u32) ->
                 .expect("UTC")
                 .with_ymd_and_hms(2019, 7, 15, 0, 0, 0)
                 .unwrap(),
-            duration: Duration::hours(6),
+            duration: Duration::hours(4),
             time_res: Duration::hours(1),
             output_verbosity: 0,
             write_output: false,
@@ -68,7 +37,7 @@ fn pv_dwelling_with_surface_less_override(max_consecutive_step_failures: u32) ->
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: false,
             rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,
         bldg_id: 42,
@@ -76,68 +45,85 @@ fn pv_dwelling_with_surface_less_override(max_consecutive_step_failures: u32) ->
         resample_overrides: None,
         patches: None,
     };
-    let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
-    assert!(
-        dwelling
-            .equipment()
-            .iter()
-            .any(|eq| eq.descriptor().name.starts_with("PV")),
-        "precondition: the base-pv fixture must assemble PV equipment"
-    );
-    dwelling
-        .environment
-        .set_solar_override(envelope_only_override());
-    dwelling
+    Dwelling::from_config(config).expect("dwelling builds")
 }
 
-#[test]
-fn a_pv_failing_every_step_ends_the_run_under_the_default_budget() {
-    let mut dwelling =
-        pv_dwelling_with_surface_less_override(hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES);
-    dwelling
-        .step()
-        .expect("one failure is within the default budget");
-    let err = dwelling
-        .step()
-        .expect_err("the second consecutive failure ends the run");
-    assert!(err.to_string().contains("'PV"), "{err}");
-}
-
-#[test]
-fn tolerated_pv_step_failure_under_surface_less_override_keeps_equipment_observable() {
-    let mut dwelling = pv_dwelling_with_surface_less_override(STEPS);
-
-    // Behavioral contract under a budget that tolerates every step: the
-    // dwelling does not panic on its start-of-step core-entry invariant,
-    // because a tolerated step failure must not make an equipment
-    // permanently unobservable.
-    for step in 0..STEPS {
-        dwelling
-            .step()
-            .unwrap_or_else(|e| panic!("step {step} must tolerate the PV failure: {e}"));
-    }
-
-    // The observable: every equipment in the vector is individually
-    // addressable in the environment snapshot after the run — a tolerated
-    // failure retains the equipment's last committed core output instead of
-    // dropping it from observation.
-    let missing: Vec<String> = dwelling
+fn pv_names(dwelling: &Dwelling) -> Vec<String> {
+    let names: Vec<String> = dwelling
         .equipment()
         .iter()
         .map(|eq| eq.descriptor().name.clone())
-        .zip(dwelling.equipment().iter().map(|eq| {
-            dwelling
-                .latest_env()
-                .equipment_core
-                .contains_key(&eq.descriptor().id)
-        }))
-        .filter(|(_, present)| !present)
-        .map(|(name, _)| name)
+        .filter(|name| name.starts_with("PV"))
         .collect();
+    assert!(!names.is_empty(), "the base-pv fixture assembles PV");
+    names
+}
+
+/// A dark override over the surfaces the predicate keeps.
+fn dark_override(dwelling: &Dwelling, keep: impl Fn(u32) -> bool) -> Vec<Vec<SurfaceIrradiance>> {
+    let row: Vec<SurfaceIrradiance> = dwelling
+        .environment
+        .surface_geometry()
+        .iter()
+        .map(|s| s.surface_id)
+        .filter(|&id| keep(id))
+        .map(|surface_id| SurfaceIrradiance {
+            surface_id,
+            direct_w_m2: 0.0,
+            diffuse_w_m2: 0.0,
+            reflected_w_m2: 0.0,
+            angle_of_incidence_rad: 0.0,
+        })
+        .collect();
+    vec![row; 24]
+}
+
+/// The coverage-triage shape: rows carrying only the envelope surfaces
+/// (0..=13), the shape the Python DataFrame conversion produces for a pvlib
+/// CSV without PV-surface columns.
+#[test]
+fn an_override_without_the_pv_surfaces_is_rejected_at_the_call() {
+    let mut dwelling = pv_dwelling();
+    pv_names(&dwelling);
+    let err = dwelling
+        .environment
+        .set_solar_override(dark_override(&dwelling, |id| id <= 13))
+        .expect_err("the PV surfaces are missing");
     assert!(
-        missing.is_empty(),
-        "a tolerated step failure must not leave equipment unobservable in \
-         equipment_core (missing: {missing:?}) — actors reading those ids get \
-         the no-observation sentinel for the rest of the run"
+        matches!(
+            err,
+            HaresError::SolarOverrideMissingSurface { timestep: 0, .. }
+        ),
+        "{err}"
     );
+    assert!(!dwelling.environment.has_solar_override());
+    dwelling
+        .step()
+        .expect("the dwelling steps without the override");
+}
+
+#[test]
+fn pv_produces_nothing_at_night_under_an_override_carrying_its_surfaces() {
+    let mut dwelling = pv_dwelling();
+    let pvs = pv_names(&dwelling);
+    dwelling
+        .environment
+        .set_solar_override(dark_override(&dwelling, |_| true))
+        .expect("the override carries every surface");
+    for step in 0..4 {
+        dwelling
+            .step()
+            .unwrap_or_else(|e| panic!("step {step}: {e}"));
+        for eq in dwelling.equipment() {
+            if pvs.contains(&eq.descriptor().name) {
+                let kw = eq
+                    .core_output()
+                    .flows
+                    .electric_kw
+                    .map_or(0.0, |e| e.signed_kw());
+                assert_eq!(kw, 0.0, "step {step}: {} at night", eq.descriptor().name);
+            }
+        }
+    }
+    assert_eq!(dwelling.health().port_rollbacks, 0);
 }

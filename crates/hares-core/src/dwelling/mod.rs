@@ -1520,7 +1520,10 @@ fn build_hvac_thermal_consistency(
 /// Register PV array orientations as environment surfaces so Perez irradiance
 /// is computed for them. PV orientations use quantised surface IDs that differ
 /// from the sequential envelope boundary IDs.
-fn register_pv_surfaces(specs: &[hares_io::EquipmentSpec], env: &mut EnvironmentManager) {
+fn register_pv_surfaces(
+    specs: &[hares_io::EquipmentSpec],
+    env: &mut EnvironmentManager,
+) -> Result<()> {
     use hares_equipment::pv::surface_id_for_orientation;
     for spec in specs.iter().filter(|s| s.name == "PV") {
         let tilt = spec
@@ -1534,15 +1537,16 @@ fn register_pv_surfaces(specs: &[hares_io::EquipmentSpec], env: &mut Environment
             .and_then(|v| v.as_f64())
             .unwrap_or(180.0);
         if let Ok(sid) = surface_id_for_orientation(tilt, az, 5.0) {
-            env.register_surface(crate::environment::SurfaceGeometry {
+            env.register_pv_surface(crate::environment::SurfaceGeometry {
                 surface_id: sid,
                 azimuth_deg: az,
                 tilt_deg: tilt,
                 area_m2: 1.0, // area irrelevant for Perez -- only orientation matters
                 omni_directional: false,
-            });
+            })?;
         }
     }
+    Ok(())
 }
 
 /// Auto-attach PV arrays to the closest matching roof boundary by orientation.
@@ -2285,7 +2289,7 @@ fn build_from_blueprint_inner(
 
     // Register PV surfaces with the environment so Perez irradiance is
     // computed for PV orientations (which may not match any envelope surface).
-    register_pv_surfaces(&equipment_specs, &mut environment);
+    register_pv_surfaces(&equipment_specs, &mut environment)?;
 
     // Auto-attach PV arrays to the closest matching roof surface and
     // register shading coverage on attached roofs.

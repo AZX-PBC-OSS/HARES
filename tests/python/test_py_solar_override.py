@@ -437,12 +437,9 @@ class TestSolarOverridePVProduction:
             f"power_zero={power_zero:.6f}, power_high={power_high:.6f}"
         )
 
-    def test_override_without_the_pv_surfaces_ends_the_run(self):
-        """The pvlib override carries only the envelope surfaces, so every PV
-        step fails; the second consecutive failure ends the run, naming the
-        PV, instead of running on with the PV dead."""
+    @staticmethod
+    def _summer_night_pv_dwelling():
         from ochre_next import Dwelling
-        from ochre_next._hares import HaresSimulationError
 
         dw = Dwelling.from_hpxml(
             HPXML_PV,
@@ -457,14 +454,48 @@ class TestSolarOverridePVProduction:
             write_output=False,
         )
         dw.initialize()
+        return dw
 
-        df = pl.read_csv(PVLIB_SOLAR_SUMMER_CSV)
-        df = df.head(24)
+    def test_override_without_the_pv_surfaces_is_rejected_at_the_call(self):
+        """The pvlib CSV carries only the envelope surfaces; the PV cannot
+        step without its own, so the override is refused when set."""
+        from ochre_next._hares import HaresConfigError
+
+        dw = self._summer_night_pv_dwelling()
+        df = pl.read_csv(PVLIB_SOLAR_SUMMER_CSV).head(24)
+        with pytest.raises(HaresConfigError, match="PV surface"):
+            dw.set_solar_override(df)
+        assert not dw.has_solar_override()
+
+    def test_pv_produces_zero_at_night_with_summer_override(self):
+        dw = self._summer_night_pv_dwelling()
+        # The CSV starts at 12:00 at one-minute resolution: hourly rows from
+        # 22:00 to 04:00 are the summer night.
+        df = pl.read_csv(PVLIB_SOLAR_SUMMER_CSV).slice(600, 361).gather_every(60)
+        irradiance = [c for c in df.columns if not c.endswith("_aoi") and c != "step"]
+        assert df.select(irradiance).to_numpy().max() == 0.0, "the rows are night"
+        missing = [
+            sid for sid in dw.surface_ids() if f"s{sid}_direct" not in df.columns
+        ]
+        assert missing, "the PV surfaces are absent from the pvlib CSV"
+        # At night the PV arrays' surfaces are as dark as the envelope's.
+        df = df.with_columns(
+            pl.lit(0.0).alias(f"s{sid}_{field}")
+            for sid in missing
+            for field in ("direct", "diffuse", "reflected", "aoi")
+        )
         dw.set_solar_override(df)
 
-        dw.step()
-        with pytest.raises(HaresSimulationError, match="PV"):
-            dw.step()
+        pv_names = [eq.name for eq in dw.equipment() if eq.name.startswith("PV")]
+        assert pv_names, "the base-pv fixture assembles PV"
+        for step in range(5):
+            result = dw.step()
+            assert result["net_electric_power_kw"] >= 0, f"step {step}"
+            for eq in dw.equipment():
+                if eq.name in pv_names:
+                    assert eq.core_output.electric_kw == 0.0, (
+                        f"step {step}: {eq.name} produced at night"
+                    )
 
     def test_summer_daytime_with_pv_produces_negative_power(self):
         from ochre_next import Dwelling, PV

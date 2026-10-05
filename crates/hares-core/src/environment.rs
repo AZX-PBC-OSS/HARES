@@ -92,6 +92,22 @@ pub enum EnvironmentManagerError {
     },
 }
 
+fn check_override_carries(
+    data: &[Vec<SurfaceIrradiance>],
+    surface_id: u32,
+) -> Result<(), HaresError> {
+    match data
+        .iter()
+        .position(|row| row.iter().all(|s| s.surface_id != surface_id))
+    {
+        Some(timestep) => Err(HaresError::SolarOverrideMissingSurface {
+            timestep,
+            surface_id,
+        }),
+        None => Ok(()),
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EnvironmentInitOptions<'a> {
     pub civil_timezone: Option<&'a str>,
@@ -154,6 +170,9 @@ pub struct EnvironmentManager {
     /// in `update()`. Indexed as `solar_override[step % len][surface_idx]`.
     /// Use for parity testing with OCHRE (pvlib) or injecting PySAM/PVWatts data.
     solar_override: Option<Vec<Vec<SurfaceIrradiance>>>,
+    /// The PV arrays' orientation surfaces, which every solar override
+    /// timestep must carry.
+    pv_surface_ids: Vec<u32>,
     /// Per-roof PV coverage fractions. When PV panels are attached to a roof
     /// surface, the covered fraction reduces incident solar irradiance on that
     /// envelope surface (shading effect).
@@ -337,6 +356,7 @@ impl EnvironmentManager {
             #[cfg(feature = "dst")]
             civil_tz,
             solar_override: None,
+            pv_surface_ids: Vec::new(),
             pv_roof_coverage: std::collections::HashMap::new(),
             solar_irradiance_buf: Vec::with_capacity(num_surfaces),
             schedule_values_buf: Vec::with_capacity(num_schedule_cols),
@@ -354,8 +374,24 @@ impl EnvironmentManager {
     ///
     /// `data[step][surface_idx]` must match the surface geometry order from
     /// `build_surface_geometry()` (same as `building.boundaries` order).
-    pub fn set_solar_override(&mut self, data: Vec<Vec<SurfaceIrradiance>>) {
+    ///
+    /// Every timestep must carry each PV array's orientation surface: a PV
+    /// cannot step without its irradiance, so an override that lacks one is
+    /// rejected here rather than failing every PV step.
+    pub fn set_solar_override(
+        &mut self,
+        data: Vec<Vec<SurfaceIrradiance>>,
+    ) -> Result<(), HaresError> {
+        if data.is_empty() {
+            return Err(HaresError::Dwelling(
+                "a solar override needs at least one timestep".to_string(),
+            ));
+        }
+        for &surface_id in &self.pv_surface_ids {
+            check_override_carries(&data, surface_id)?;
+        }
         self.solar_override = Some(data);
+        Ok(())
     }
 
     /// Clear the solar override, reverting to built-in Perez computation.
@@ -378,11 +414,14 @@ impl EnvironmentManager {
         &self.surfaces
     }
 
-    /// Register an additional surface for Perez irradiance computation.
-    ///
-    /// Used to add PV array orientations that don't correspond to an envelope
-    /// boundary. Deduplicates by `surface_id`.
-    pub fn register_surface(&mut self, geom: SurfaceGeometry) {
+    /// Register a PV array orientation, which need not match an envelope
+    /// boundary, as a surface to compute irradiance for. Deduplicates by
+    /// `surface_id`. Rejected when an active solar override lacks it.
+    pub fn register_pv_surface(&mut self, geom: SurfaceGeometry) -> Result<(), HaresError> {
+        self.check_pv_surface(geom.surface_id)?;
+        if !self.pv_surface_ids.contains(&geom.surface_id) {
+            self.pv_surface_ids.push(geom.surface_id);
+        }
         if !self
             .surfaces
             .iter()
@@ -390,6 +429,17 @@ impl EnvironmentManager {
         {
             self.surfaces.push(geom);
             self.solar_irradiance_buf.reserve(1);
+        }
+        Ok(())
+    }
+
+    /// Whether a PV surface can be registered: an active solar override must
+    /// carry it. Checked before a panel joins, so a refused panel leaves the
+    /// dwelling as it was.
+    pub fn check_pv_surface(&self, surface_id: u32) -> Result<(), HaresError> {
+        match &self.solar_override {
+            Some(data) => check_override_carries(data, surface_id),
+            None => Ok(()),
         }
     }
 
@@ -2717,35 +2767,99 @@ mod tests {
     }
 
     #[test]
-    fn register_surface_deduplicates() {
-        let start = ts(0);
-        let mut env = EnvironmentManager::new(
+    fn register_pv_surface_deduplicates() {
+        let mut env = manager();
+        let initial_count = env.surface_count();
+        env.register_pv_surface(pv_surface(999_999)).unwrap();
+        assert_eq!(env.surface_count(), initial_count + 1);
+        env.register_pv_surface(pv_surface(999_999)).unwrap();
+        assert_eq!(env.surface_count(), initial_count + 1);
+    }
+
+    fn dark(surface_id: u32) -> SurfaceIrradiance {
+        SurfaceIrradiance {
+            surface_id,
+            direct_w_m2: 0.0,
+            diffuse_w_m2: 0.0,
+            reflected_w_m2: 0.0,
+            angle_of_incidence_rad: 0.0,
+        }
+    }
+
+    fn pv_surface(surface_id: u32) -> SurfaceGeometry {
+        SurfaceGeometry {
+            surface_id,
+            azimuth_deg: 180.0,
+            tilt_deg: 30.0,
+            area_m2: 1.0,
+            omni_directional: false,
+        }
+    }
+
+    fn override_for(env: &EnvironmentManager, skip: u32) -> Vec<Vec<SurfaceIrradiance>> {
+        let row: Vec<SurfaceIrradiance> = env
+            .surface_geometry()
+            .iter()
+            .filter(|s| s.surface_id != skip)
+            .map(|s| dark(s.surface_id))
+            .collect();
+        vec![row; 2]
+    }
+
+    fn manager() -> EnvironmentManager {
+        EnvironmentManager::new(
             weather_series(),
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(3600),
-            start,
+            ts(0),
             None,
         )
-        .unwrap();
-        let initial_count = env.surface_count();
-        env.register_surface(SurfaceGeometry {
-            surface_id: 999_999,
-            azimuth_deg: 180.0,
-            tilt_deg: 30.0,
-            area_m2: 1.0,
-            omni_directional: false,
-        });
-        assert_eq!(env.surface_count(), initial_count + 1);
-        // Duplicate should be ignored.
-        env.register_surface(SurfaceGeometry {
-            surface_id: 999_999,
-            azimuth_deg: 180.0,
-            tilt_deg: 30.0,
-            area_m2: 1.0,
-            omni_directional: false,
-        });
-        assert_eq!(env.surface_count(), initial_count + 1);
+        .unwrap()
+    }
+
+    #[test]
+    fn a_solar_override_must_carry_every_pv_surface() {
+        let mut env = manager();
+        env.register_pv_surface(pv_surface(999_999)).unwrap();
+        let err = env
+            .set_solar_override(override_for(&env, 999_999))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            HaresError::SolarOverrideMissingSurface {
+                timestep: 0,
+                surface_id: 999_999
+            }
+        );
+        assert!(!env.has_solar_override());
+        env.set_solar_override(override_for(&env, u32::MAX))
+            .expect("an override carrying the PV surface is accepted");
+        assert!(env.has_solar_override());
+    }
+
+    #[test]
+    fn a_pv_surface_the_active_override_lacks_is_rejected() {
+        let mut env = manager();
+        env.set_solar_override(override_for(&env, u32::MAX))
+            .unwrap();
+        let surfaces = env.surface_count();
+        let err = env.register_pv_surface(pv_surface(999_999)).unwrap_err();
+        assert_eq!(
+            err,
+            HaresError::SolarOverrideMissingSurface {
+                timestep: 0,
+                surface_id: 999_999
+            }
+        );
+        assert_eq!(env.surface_count(), surfaces);
+    }
+
+    #[test]
+    fn an_empty_solar_override_is_rejected() {
+        let mut env = manager();
+        assert!(env.set_solar_override(Vec::new()).is_err());
+        assert!(!env.has_solar_override());
     }
 
     #[test]

@@ -1198,17 +1198,24 @@ impl PyDwelling {
             });
         }
         eq.init(&config, &init_env).map_err(to_py_err)?;
+        dwelling
+            .environment
+            .check_pv_surface(surface_id)
+            .map_err(to_py_err)?;
 
         dwelling.add_equipment(eq).map_err(to_py_err)?;
         // Only an accepted panel registers its orientation, so that Perez
         // irradiance is computed for it during simulation.
-        dwelling.environment.register_surface(SurfaceGeometry {
-            surface_id,
-            azimuth_deg: pv.azimuth,
-            tilt_deg: pv.tilt,
-            area_m2: 1.0,
-            omni_directional: false,
-        });
+        dwelling
+            .environment
+            .register_pv_surface(SurfaceGeometry {
+                surface_id,
+                azimuth_deg: pv.azimuth,
+                tilt_deg: pv.tilt,
+                area_m2: 1.0,
+                omni_directional: false,
+            })
+            .map_err(to_py_err)?;
         Ok(())
     }
 
@@ -1653,8 +1660,10 @@ impl PyDwelling {
             }
         }
         let mut dwelling = self.acquire()?;
-        dwelling.environment.set_solar_override(solar_data);
-        Ok(())
+        dwelling
+            .environment
+            .set_solar_override(solar_data)
+            .map_err(to_py_err)
     }
 
     pub fn clear_solar_override(&self) -> PyResult<()> {
@@ -2655,7 +2664,8 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         HaresError::Io(_)
         | HaresError::Dwelling(_)
         | HaresError::Envelope(_)
-        | HaresError::ThermostatBand { .. } => HaresConfigError::new_err(msg),
+        | HaresError::ThermostatBand { .. }
+        | HaresError::SolarOverrideMissingSurface { .. } => HaresConfigError::new_err(msg),
         HaresError::Equipment(_) | HaresError::InvalidEquipmentParameter { .. } => {
             HaresEquipmentError::new_err(msg)
         }
