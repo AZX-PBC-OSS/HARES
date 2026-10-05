@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
-import ipaddress
+from collections.abc import Callable, Mapping
 from pathlib import Path
-import socket
 import sys
-from typing import Any
 
 import pytest
+
+# Every test runs off the network unless marked ``network`` (offline_guard).
+pytest_plugins = ["offline_guard_plugin", "pytester"]
 
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON_SRC = ROOT / "python"
@@ -31,78 +30,6 @@ HARES_DEFAULTS = ROOT / "defaults"
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
-
-
-def _is_loopback(host: object) -> bool:
-    if host in (None, "", "localhost"):
-        return True
-    if not isinstance(host, str):
-        return False
-    try:
-        return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
-    except ValueError:
-        return False
-
-
-@contextmanager
-def refuse_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
-    """Refuse name lookups and socket connects beyond loopback; yield the attempts.
-
-    Every refused attempt is recorded as well as raised, so one swallowed by
-    the code under test (a retry loop, a skip-on-failure fleet fetch) is still
-    seen. Loopback stays open for in-process brokers and local services.
-    """
-    attempts: list[str] = []
-
-    def refuse(what: str) -> OSError:
-        attempts.append(what)
-        return ConnectionRefusedError(f"offline test reached the network: {what}")
-
-    real_getaddrinfo = socket.getaddrinfo
-    real_connect = socket.socket.connect
-    real_connect_ex = socket.socket.connect_ex
-
-    def getaddrinfo(host: str | bytes | None, *args: Any, **kwargs: Any) -> Any:
-        if not _is_loopback(host.decode() if isinstance(host, bytes) else host):
-            raise refuse(f"getaddrinfo({host!r})")
-        return real_getaddrinfo(host, *args, **kwargs)
-
-    def remote(sock: socket.socket, address: object) -> bool:
-        return sock.family in (socket.AF_INET, socket.AF_INET6) and not _is_loopback(
-            address[0] if isinstance(address, tuple) else address
-        )
-
-    def connect(sock: socket.socket, address: object) -> None:
-        if remote(sock, address):
-            raise refuse(f"connect({address!r})")
-        real_connect(sock, address)
-
-    def connect_ex(sock: socket.socket, address: object) -> int:
-        if remote(sock, address):
-            raise refuse(f"connect_ex({address!r})")
-        return real_connect_ex(sock, address)
-
-    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
-    monkeypatch.setattr(socket.socket, "connect", connect)
-    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
-    yield attempts
-
-
-@pytest.fixture(autouse=True)
-def _offline_unless_marked_network(
-    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[None]:
-    """Fail any test that reaches past this host unless it is marked ``network``."""
-    if request.node.get_closest_marker("network") is not None:
-        yield
-        return
-    with refuse_network(monkeypatch) as attempts:
-        yield
-    if attempts:
-        pytest.fail(
-            "test is not marked network but reached the network: " + "; ".join(attempts),
-            pytrace=False,
-        )
 
 
 def output_in_test_dir(config: Mapping[str, object], filename: str) -> Callable[..., None]:
