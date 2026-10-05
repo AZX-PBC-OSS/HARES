@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
 use chrono::{Duration, FixedOffset, TimeZone};
-use hares_core::actors::BatteryManagementActor;
+use hares_core::actors::{BatteryManagementActor, BmsParams};
 use hares_core::{Dwelling, DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
 use hares_equipment::config::ConfigValue;
 use hares_equipment::{Equipment, EquipmentConfig, EquipmentRegistry};
@@ -2330,18 +2330,20 @@ fn midrun_added_equipment_is_observable_before_its_first_step() {
 fn user_bms_actor() -> Box<dyn hares_core::actor::Actor> {
     Box::new(BatteryManagementActor::new(
         "Battery",
-        BmsMode::SelfConsumption {
-            min_soc: 0.1,
-            max_soc: 1.0,
-            solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+        BmsParams {
+            bms_mode: BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 1.0,
+                solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
+            },
+            grid_export_rule: GridExportRule::Unrestricted,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            price_schedule: None,
+            steps_per_day: 96,
+            min_dwell_steps: 0,
         },
-        GridExportRule::Unrestricted,
-        5.0,
-        5.0,
-        None,
-        96,
-        0,
     ))
 }
 

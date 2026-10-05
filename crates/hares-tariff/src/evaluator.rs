@@ -2,7 +2,10 @@ use chrono::{DateTime, Datelike, Duration, Timelike};
 use chrono_tz::Tz;
 use hares_types::{HaresError, season_contains_month};
 
-use crate::billing::{BillingPeriodSummary, BillingState, compute_tiered_energy_cost};
+use crate::billing::{
+    BillingPeriodCharges, BillingPeriodSummary, BillingState, BillingStep,
+    compute_tiered_energy_cost,
+};
 use crate::types::{ElectricTariff, ExportMode};
 
 pub struct TariffEvaluator {
@@ -294,12 +297,8 @@ impl TariffEvaluator {
         // warn when the window is longer than the interval but not evenly
         // divisible -- that silently truncates the averaging window.
         let window_seconds = demand_window_minutes as u64 * 60;
-        // Why: clippy::manual_is_multiple_of fires on `a % b != 0` even when the
-        // semantics are "is not evenly divisible" — the guard checks
-        // non-divisibility, not divisibility, and `is_multiple_of()` reads
-        // awkwardly when negated.
-        #[allow(clippy::manual_is_multiple_of)]
-        if window_seconds > interval_seconds as u64 && window_seconds % interval_seconds as u64 != 0
+        if window_seconds > interval_seconds as u64
+            && !window_seconds.is_multiple_of(interval_seconds as u64)
         {
             return Err(HaresError::Tariff(format!(
                 "demand_window_minutes ({demand_window_minutes}) must be evenly \
@@ -578,15 +577,15 @@ impl TariffEvaluator {
 
         let period_idx = self.period_indices[self.step_index];
         let demand_period_idx = self.demand_period_indices[self.step_index];
-        self.billing_state.update(
+        self.billing_state.update(BillingStep {
             net_power_kw,
             dt_seconds,
-            effective_import_price,
+            import_price: effective_import_price,
             export_price,
             period_idx,
             demand_period_idx,
             ev_import_kwh,
-        );
+        });
 
         let result = if current_time >= self.billing_state.period_end {
             let month = self.billing_state.period_start.month() as u8;
@@ -610,15 +609,17 @@ impl TariffEvaluator {
             let summary = BillingPeriodSummary::new(
                 self.billing_state.period_start,
                 self.billing_state.period_end,
-                energy_charge,
-                demand_charge,
-                fixed_charge,
-                export_credit,
-                self.tariff.minimum_charge,
-                self.tariff.minimum_charge_excludes_export,
-                self.billing_state.peak_demand_kw,
-                self.billing_state.cumulative_import_kwh,
-                self.billing_state.cumulative_export_kwh,
+                BillingPeriodCharges {
+                    energy_charge_usd: energy_charge,
+                    demand_charge_usd: demand_charge,
+                    fixed_charge_usd: fixed_charge,
+                    export_credit_usd: export_credit,
+                    minimum_charge: self.tariff.minimum_charge,
+                    minimum_charge_excludes_export: self.tariff.minimum_charge_excludes_export,
+                    peak_demand_kw: self.billing_state.peak_demand_kw,
+                    total_import_kwh: self.billing_state.cumulative_import_kwh,
+                    total_export_kwh: self.billing_state.cumulative_export_kwh,
+                },
             );
 
             self.billing_state.reset(self.billing_state.period_end);
@@ -697,15 +698,17 @@ impl TariffEvaluator {
         BillingPeriodSummary::new(
             self.billing_state.period_start(),
             actual_end,
-            energy_charge,
-            demand_charge,
-            fixed_charge,
-            export_credit,
-            self.tariff.minimum_charge,
-            self.tariff.minimum_charge_excludes_export,
-            self.billing_state.peak_demand_kw(),
-            self.billing_state.cumulative_import_kwh(),
-            self.billing_state.cumulative_export_kwh(),
+            BillingPeriodCharges {
+                energy_charge_usd: energy_charge,
+                demand_charge_usd: demand_charge,
+                fixed_charge_usd: fixed_charge,
+                export_credit_usd: export_credit,
+                minimum_charge: self.tariff.minimum_charge,
+                minimum_charge_excludes_export: self.tariff.minimum_charge_excludes_export,
+                peak_demand_kw: self.billing_state.peak_demand_kw(),
+                total_import_kwh: self.billing_state.cumulative_import_kwh(),
+                total_export_kwh: self.billing_state.cumulative_export_kwh(),
+            },
         )
     }
 
@@ -774,15 +777,17 @@ impl TariffEvaluator {
         Some(BillingPeriodSummary::new(
             start,
             end,
-            energy_charge,
-            demand_charge,
-            fixed_charge,
-            export_credit,
-            self.tariff.minimum_charge,
-            self.tariff.minimum_charge_excludes_export,
-            peak,
-            import,
-            export,
+            BillingPeriodCharges {
+                energy_charge_usd: energy_charge,
+                demand_charge_usd: demand_charge,
+                fixed_charge_usd: fixed_charge,
+                export_credit_usd: export_credit,
+                minimum_charge: self.tariff.minimum_charge,
+                minimum_charge_excludes_export: self.tariff.minimum_charge_excludes_export,
+                peak_demand_kw: peak,
+                total_import_kwh: import,
+                total_export_kwh: export,
+            },
         ))
     }
 }

@@ -320,6 +320,7 @@ impl PyBattery {
         ocv_table=None,
         uneg_table=None,
     ))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -708,8 +709,9 @@ pub struct PyEv {
 #[pymethods]
 impl PyEv {
     #[new]
-    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (name, capacity_kwh=None, max_charging_kw=None, initial_soc=None, initial_connection_state=None, power_factor=None, charger_capacity_kva=None, battery_temp_c=None, min_charge_temp_c=None, full_power_temp_c=None, heater_power_w=None, heater_threshold_c=None, thermal_mass_j_per_k=None, ua_w_per_k=None, n_series=None, n_parallel=None, cell_resistance_ohm=None, charging_curve_lut=None))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         name: String,

@@ -23,6 +23,30 @@ use super::config::{FilmCoefficientModel, StateSpaceWiring, ThermalSolverError};
 use crate::boundary_rc::depth_mm_key;
 use crate::state_space::SolveScratch;
 
+/// Site coordinates and elevation for the solar-geometry and film-model
+/// inputs of the autosizing entry points.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SiteLocation {
+    /// Site latitude in decimal degrees.
+    pub latitude_deg: f64,
+    /// Site longitude in decimal degrees.
+    pub longitude_deg: f64,
+    /// Site elevation in meters above sea level.
+    pub elevation_m: f64,
+}
+
+/// The outdoor profile of one design day: the diurnal dry-bulb range and the
+/// optional pre-computed hourly solar series.
+#[derive(Clone, Copy, Debug)]
+struct DesignDayProfile<'a> {
+    /// Diurnal dry-bulb range [K] for the ASHRAE design-day profile
+    /// (0 for constant, heating; ∼12 °C for cooling).
+    daily_range_c: f64,
+    /// Pre-computed hourly solar data for the design day, or `None` for
+    /// zero solar (heating design day).
+    solar_data: Option<&'a [Option<HourlySolar>]>,
+}
+
 impl ThermalSolver {
     /// Compute the HVAC capacity (W) required to maintain `target_c` at
     /// design outdoor conditions.
@@ -196,19 +220,21 @@ impl ThermalSolver {
     /// The input screen is unconditional: `internal_gains_w` must be
     /// non-negative and plausible for a single-family residence (< 5 kW
     /// sensible); a violation is a typed error in every build profile.
-    #[allow(clippy::too_many_arguments)]
     pub fn autosize_capacity_cooling(
         &self,
         zone: ZoneId,
         target_c: f64,
         design_outdoor_c: f64,
-        site_lat_deg: f64,
-        site_lon_deg: f64,
-        site_elevation_m: f64,
+        site: SiteLocation,
         internal_gains_w: f64,
     ) -> Result<f64, ThermalSolverError> {
         use chrono::{Datelike, FixedOffset, TimeZone};
 
+        let SiteLocation {
+            latitude_deg: site_lat_deg,
+            longitude_deg: site_lon_deg,
+            elevation_m: site_elevation_m,
+        } = site;
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return Ok(0.0);
         };
@@ -265,14 +291,20 @@ impl ThermalSolver {
 
             let irr = perez_tilted_irradiance(
                 *surface_id,
-                ghi_clear,
-                dni_clear,
-                dhi_clear,
-                solar_zenith_deg,
-                pos.azimuth_deg,
-                win_props.tilt_deg,
-                win_props.azimuth_deg,
-                doy,
+                hares_physics::solar::SkyIrradiance {
+                    ghi: ghi_clear,
+                    dni: dni_clear,
+                    dhi: dhi_clear,
+                },
+                hares_physics::solar::SunPosition {
+                    zenith_deg: solar_zenith_deg,
+                    azimuth_deg: pos.azimuth_deg,
+                    day_of_year: doy,
+                },
+                hares_physics::solar::SurfaceOrientation {
+                    tilt_deg: win_props.tilt_deg,
+                    azimuth_deg: win_props.azimuth_deg,
+                },
                 DEFAULT_GROUND_ALBEDO,
                 site_elevation_m,
             );
@@ -297,14 +329,20 @@ impl ThermalSolver {
 
             let irr = perez_tilted_irradiance(
                 info.surface_id,
-                ghi_clear,
-                dni_clear,
-                dhi_clear,
-                solar_zenith_deg,
-                pos.azimuth_deg,
-                info.tilt_deg,
-                info.azimuth_deg,
-                doy,
+                hares_physics::solar::SkyIrradiance {
+                    ghi: ghi_clear,
+                    dni: dni_clear,
+                    dhi: dhi_clear,
+                },
+                hares_physics::solar::SunPosition {
+                    zenith_deg: solar_zenith_deg,
+                    azimuth_deg: pos.azimuth_deg,
+                    day_of_year: doy,
+                },
+                hares_physics::solar::SurfaceOrientation {
+                    tilt_deg: info.tilt_deg,
+                    azimuth_deg: info.azimuth_deg,
+                },
                 DEFAULT_GROUND_ALBEDO,
                 site_elevation_m,
             );
@@ -1198,7 +1236,17 @@ impl ThermalSolver {
         target_c: f64,
         design_outdoor_c: f64,
     ) -> Result<f64, ThermalSolverError> {
-        self.run_design_day(zone, target_c, design_outdoor_c, 0.0, None, 0.0, 0.0)
+        self.run_design_day(
+            zone,
+            target_c,
+            design_outdoor_c,
+            DesignDayProfile {
+                daily_range_c: 0.0,
+                solar_data: None,
+            },
+            0.0,
+            SiteLocation::default(),
+        )
     }
 
     /// Run a design-day simulation for cooling equipment sizing.
@@ -1220,51 +1268,66 @@ impl ThermalSolver {
     /// Returns the peak HVAC input (positive) across the recording day
     /// timesteps as the sizing capacity, or 0.0 if the zone is unknown or
     /// solving fails.
-    #[allow(clippy::too_many_arguments)]
     pub fn autosize_design_day_cooling(
         &self,
         zone: ZoneId,
         target_c: f64,
         design_outdoor_c: f64,
-        site_lat_deg: f64,
-        site_lon_deg: f64,
-        site_elevation_m: f64,
+        site: SiteLocation,
         internal_gains_w: f64,
     ) -> Result<f64, ThermalSolverError> {
+        let SiteLocation {
+            latitude_deg: site_lat_deg,
+            longitude_deg: site_lon_deg,
+            elevation_m: site_elevation_m,
+        } = site;
         let solar = precompute_hourly_solar_july21(site_lat_deg, site_lon_deg);
         self.run_design_day(
             zone,
             target_c,
             design_outdoor_c,
-            COOLING_DESIGN_DAY_RANGE_C,
-            Some(&solar),
+            DesignDayProfile {
+                daily_range_c: COOLING_DESIGN_DAY_RANGE_C,
+                solar_data: Some(&solar),
+            },
             internal_gains_w,
-            site_elevation_m,
+            SiteLocation {
+                latitude_deg: site_lat_deg,
+                longitude_deg: site_lon_deg,
+                elevation_m: site_elevation_m,
+            },
         )
     }
 
     /// Shared design-day simulation loop.
     ///
     /// Parameters:
-    /// - `daily_range_c`: diurnal range for the outdoor temperature profile
-    ///   (0 for constant — heating; ∼12 °C for cooling)
-    /// - `solar_data`: pre-computed hourly solar data for the design day,
-    ///   or `None` for zero solar (heating design day)
+    /// - `profile`: the design-day outdoor profile: the diurnal range for the
+    ///   dry-bulb profile (0 for constant, heating; ∼12 °C for cooling) and
+    ///   pre-computed hourly solar data, or `None` for zero solar (heating
+    ///   design day)
     /// - `internal_gains_w`: sensible internal gains [W]; added to the
-    ///   HVAC load for cooling design days (solar_data is `Some`).
+    ///   HVAC load for cooling design days (solar is `Some`).
     ///   Zero for heating design days (conservative per Manual J).
-    /// - `site_elevation_m`: site elevation in meters
-    #[allow(clippy::too_many_arguments)]
+    /// - `site`: site coordinates; only the elevation is read here.
     fn run_design_day(
         &self,
         zone: ZoneId,
         target_c: f64,
         design_outdoor_c: f64,
-        daily_range_c: f64,
-        solar_data: Option<&[Option<HourlySolar>]>,
+        profile: DesignDayProfile<'_>,
         internal_gains_w: f64,
-        site_elevation_m: f64,
+        site: SiteLocation,
     ) -> Result<f64, ThermalSolverError> {
+        let DesignDayProfile {
+            daily_range_c,
+            solar_data,
+        } = profile;
+        let SiteLocation {
+            latitude_deg: _,
+            longitude_deg: _,
+            elevation_m: site_elevation_m,
+        } = site;
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return Ok(0.0);
         };
@@ -1344,14 +1407,16 @@ impl ThermalSolver {
                             }
                             let irr = perez_tilted_irradiance(
                                 *surface_id,
-                                ghi,
-                                dni,
-                                dhi,
-                                zenith_deg,
-                                azimuth_deg,
-                                win_props.tilt_deg,
-                                win_props.azimuth_deg,
-                                doy,
+                                hares_physics::solar::SkyIrradiance { ghi, dni, dhi },
+                                hares_physics::solar::SunPosition {
+                                    zenith_deg,
+                                    azimuth_deg,
+                                    day_of_year: doy,
+                                },
+                                hares_physics::solar::SurfaceOrientation {
+                                    tilt_deg: win_props.tilt_deg,
+                                    azimuth_deg: win_props.azimuth_deg,
+                                },
                                 DEFAULT_GROUND_ALBEDO,
                                 site_elevation_m,
                             );
@@ -1368,14 +1433,16 @@ impl ThermalSolver {
                             }
                             let irr = perez_tilted_irradiance(
                                 info.surface_id,
-                                ghi,
-                                dni,
-                                dhi,
-                                zenith_deg,
-                                azimuth_deg,
-                                info.tilt_deg,
-                                info.azimuth_deg,
-                                doy,
+                                hares_physics::solar::SkyIrradiance { ghi, dni, dhi },
+                                hares_physics::solar::SunPosition {
+                                    zenith_deg,
+                                    azimuth_deg,
+                                    day_of_year: doy,
+                                },
+                                hares_physics::solar::SurfaceOrientation {
+                                    tilt_deg: info.tilt_deg,
+                                    azimuth_deg: info.azimuth_deg,
+                                },
                                 DEFAULT_GROUND_ALBEDO,
                                 site_elevation_m,
                             );

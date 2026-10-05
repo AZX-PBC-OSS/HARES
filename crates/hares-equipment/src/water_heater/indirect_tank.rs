@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::siting::{self, Siting};
-use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
+use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
 };
@@ -442,10 +442,12 @@ impl Equipment for IndirectTank {
             draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
-            ambient_c,
-            tempered_flow_m3_s,
-            hot_flow_m3_s,
-            mains_temp_c,
+            TemperedDrawInputs {
+                ambient_temp_c: ambient_c,
+                tempered_flow_m3_s,
+                hot_flow_m3_s,
+                mains_temp_c,
+            },
             heat_injections,
             tmv,
             dt,

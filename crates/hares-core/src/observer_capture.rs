@@ -198,20 +198,31 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
     }
 }
 
+/// Electrical port balance observability scalars for [`capture_solvers`],
+/// grouped because they describe one ZIP/port balance state.
+pub(crate) struct PortBalance {
+    pub zip_load_scale: f64,
+    pub port_load_raw_kw: f64,
+    pub port_load_adjusted_kw: f64,
+    pub residual_kw: f64,
+}
+
 /// Captures all four domain solver outputs + envelope component gains,
 /// plus electrical balance observability for ZIP-adjusted invariant checking.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn capture_solvers(
     thermal_update: &DomainUpdate,
     humidity_update: &DomainUpdate,
     electrical_update: &DomainUpdate,
     fluid_update: &DomainUpdate,
     thermal_solver: &ThermalSolver,
-    zip_load_scale: f64,
-    port_load_raw_kw: f64,
-    port_load_adjusted_kw: f64,
-    residual_kw: f64,
+    balance: PortBalance,
 ) -> SolverCapture {
+    let PortBalance {
+        zip_load_scale,
+        port_load_raw_kw,
+        port_load_adjusted_kw,
+        residual_kw,
+    } = balance;
     SolverCapture {
         thermal_update: thermal_update.clone(),
         humidity_update: humidity_update.clone(),

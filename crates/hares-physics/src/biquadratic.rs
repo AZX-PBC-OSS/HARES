@@ -102,8 +102,8 @@ mod tests {
         (a - b).abs() / denom
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn ochre_biquadratic_reference(
+    /// Named inputs for [`ochre_biquadratic_reference`].
+    struct OchreReferenceArgs {
         t_in: f64,
         t_ext: f64,
         coeffs_t: [f64; 6],
@@ -116,7 +116,23 @@ mod tests {
         tdb_bounds: (f64, f64),
         ff_bounds: (f64, f64),
         plf_bounds: (f64, f64),
-    ) -> f64 {
+    }
+
+    fn ochre_biquadratic_reference(args: OchreReferenceArgs) -> f64 {
+        let OchreReferenceArgs {
+            t_in,
+            t_ext,
+            coeffs_t,
+            ff,
+            coeffs_ff,
+            plr,
+            coeffs_plr,
+            rated,
+            twb_bounds,
+            tdb_bounds,
+            ff_bounds,
+            plf_bounds,
+        } = args;
         let t_in = t_in.clamp(twb_bounds.0, twb_bounds.1);
         let t_ext = t_ext.clamp(tdb_bounds.0, tdb_bounds.1);
         let ff = ff.clamp(ff_bounds.0, ff_bounds.1);
@@ -371,10 +387,20 @@ mod tests {
         ];
 
         for (t_in, t_ext, ff, plr) in samples {
-            let expected = ochre_biquadratic_reference(
-                t_in, t_ext, coeffs_t, ff, coeffs_ff, plr, coeffs_plr, rated, twb_bounds,
-                tdb_bounds, ff_bounds, plf_bounds,
-            );
+            let expected = ochre_biquadratic_reference(OchreReferenceArgs {
+                t_in,
+                t_ext,
+                coeffs_t,
+                ff,
+                coeffs_ff,
+                plr,
+                coeffs_plr,
+                rated,
+                twb_bounds,
+                tdb_bounds,
+                ff_bounds,
+                plf_bounds,
+            });
 
             let curve = BiquadraticCurve {
                 coeffs: coeffs_t,

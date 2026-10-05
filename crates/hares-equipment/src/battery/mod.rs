@@ -417,13 +417,6 @@ pub struct Battery {
     /// setters. Set to `true` by `Dwelling::add_equipment` → `mark_initialized()`.
     initialized: bool,
 
-    /// Count of SOCTarget signals that violated SOC ordering constraints
-    /// (min_soc < target_soc < max_soc) and were auto-corrected.
-    /// Gated on `observe` feature for diagnostic CSV output.
-    #[cfg(feature = "observe")]
-    #[allow(dead_code)]
-    setpoint_violation_count: u64,
-
     /// Warnings raised since the last drain (init plausibility checks).
     warnings: Vec<Warning>,
 }
@@ -524,8 +517,6 @@ impl Battery {
             min_dwell_steps: 0,
             grid_forming: true,
             initialized: false,
-            #[cfg(feature = "observe")]
-            setpoint_violation_count: 0,
             warnings: Vec::new(),
         }
     }
@@ -1872,11 +1863,6 @@ impl Equipment for Battery {
                 self.self_consumption_enabled = false;
 
                 if was_clamped {
-                    #[cfg(feature = "observe")]
-                    {
-                        self.setpoint_violation_count =
-                            self.setpoint_violation_count.saturating_add(1);
-                    }
                     tracing::warn!(
                         raw_target_soc = raw_target,
                         raw_min_soc = raw_min,

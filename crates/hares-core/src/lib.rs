@@ -26,7 +26,7 @@ pub use actor_registry::{ActorConfig, ActorFactory, ActorRegistry};
 pub use checkpoint::DwellingCheckpoint;
 pub use clock::SimClock;
 pub use dwelling::{
-    BatteryLutData, Dwelling, DwellingConfig, PremiseZip,
+    BatteryLutData, Dwelling, DwellingConfig, HpxmlInputs, PremiseZip,
     SimulationResults as DwellingSimulationResults, StepResult, building_to_boundary_inputs,
     building_to_zone_inputs, mass_multiplier_for_zone,
 };

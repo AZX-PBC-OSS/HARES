@@ -133,11 +133,6 @@ pub struct IdealThermostat {
     /// validate setpoint ordering via `ThermalSetpoints::validate_for_deadband`.
     /// Defaults to 1.0 °C (matches `ThermostatConfig::default()`).
     hysteresis_c: f64,
-    /// Count of setpoint overrides rejected because heating >= cooling.
-    /// Gated on `observe` feature for diagnostic CSV output.
-    #[cfg(feature = "observe")]
-    #[allow(dead_code)]
-    setpoint_inversion_rejected_count: u64,
     /// First deadband-violating override seen in `decide()`: the actor
     /// reports unhealthy and the step fails at the post-decide health check.
     override_violation: Option<String>,
@@ -162,8 +157,6 @@ impl IdealThermostat {
             override_state: OverrideState::default(),
             telemetry,
             hysteresis_c: 1.0,
-            #[cfg(feature = "observe")]
-            setpoint_inversion_rejected_count: 0,
             override_violation: None,
         }
     }
@@ -330,11 +323,6 @@ impl Actor for IdealThermostat {
                 // with a typed error) and the emission is rejected with the
                 // observable counter/telemetry flag so the rejection is
                 // auditable.
-                #[cfg(feature = "observe")]
-                {
-                    self.setpoint_inversion_rejected_count =
-                        self.setpoint_inversion_rejected_count.saturating_add(1);
-                }
                 self.telemetry.set("setpoint_inversion_rejected", 1.0);
                 self.override_violation = Some(format!(
                     "setpoint deadband violation in IdealThermostat '{}': \

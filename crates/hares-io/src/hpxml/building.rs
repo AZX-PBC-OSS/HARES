@@ -3188,10 +3188,7 @@ pub(crate) fn zone_key(zone_type: &ZoneType) -> String {
 ///
 /// Ref: OCHRE `hpxml.py` lines 449–494.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 struct GarageGeometry {
-    floor_area_m2: f64,
-    wall_height_m: f64,
     protruded_area_m2: f64,
 }
 
@@ -3293,8 +3290,6 @@ fn compute_garage_geometry(
     let protruded = (garage_floor_area_m2 - garage_area_in_main).max(0.0);
 
     Some(GarageGeometry {
-        floor_area_m2: garage_floor_area_m2,
-        wall_height_m: wall_height,
         protruded_area_m2: protruded,
     })
 }
@@ -5924,7 +5919,9 @@ mod tests {
         ];
         let gg = compute_garage_geometry(&boundaries, 12.0).expect("geometry should compute");
         let wall_height = (6.0 * 8.0 / 12.0_f64).sqrt();
-        assert!((gg.wall_height_m - wall_height).abs() < 1e-6, "wall_height");
+        // The derived protruded area encodes the computed wall height: it is
+        // garage_floor_area - a1*a2/wall_height², so an exact match here also
+        // pins the intermediate height.
         let area_in_main = 3.0 * 4.0 / (wall_height * wall_height);
         let expected_protruded = 12.0 - area_in_main;
         assert!(
@@ -6189,8 +6186,6 @@ mod tests {
             ),
         ];
         let garage_geom = GarageGeometry {
-            floor_area_m2: 30.0,
-            wall_height_m: 2.5,
             protruded_area_m2: 15.0,
         };
         let floor_area = 120.0;
@@ -6306,8 +6301,6 @@ mod tests {
             ),
         ];
         let garage_geom = GarageGeometry {
-            floor_area_m2: 30.0,
-            wall_height_m: 2.5,
             protruded_area_m2: 15.0,
         };
         let floor_area = 120.0;
@@ -7504,8 +7497,6 @@ mod tests {
         let wall_height = 2.5; // m
         let protruded = 15.0; // m²
         let geom = GarageGeometry {
-            floor_area_m2: floor_area,
-            wall_height_m: wall_height,
             protruded_area_m2: protruded,
         };
         let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));
@@ -7525,8 +7516,6 @@ mod tests {
         let floor_area = 30.0;
         let wall_height = 2.5;
         let geom = GarageGeometry {
-            floor_area_m2: floor_area,
-            wall_height_m: wall_height,
             protruded_area_m2: 15.0,
         };
         let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));
@@ -7557,8 +7546,6 @@ mod tests {
         let floor_area = 30.0;
         let wall_height = 2.5;
         let geom = GarageGeometry {
-            floor_area_m2: floor_area,
-            wall_height_m: wall_height,
             protruded_area_m2: 15.0,
         };
         // No roof tilt → falls back to floor_area * wall_height
@@ -7576,8 +7563,6 @@ mod tests {
         let floor_area = 30.0;
         let wall_height = 2.5;
         let geom = GarageGeometry {
-            floor_area_m2: floor_area,
-            wall_height_m: wall_height,
             protruded_area_m2: 0.0,
         };
         let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));

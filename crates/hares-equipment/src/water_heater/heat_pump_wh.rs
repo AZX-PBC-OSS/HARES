@@ -30,7 +30,7 @@ use super::hpwh_compressor::{
     DEFAULT_ZONE_TEMP_BOUNDS_C,
 };
 use super::siting::{self, Siting};
-use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
+use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::wh_config::HeatPumpWaterHeaterConfig;
 use super::{hysteresis_call, parse_usize, weighted_average_tank_temp};
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
@@ -977,10 +977,12 @@ impl Equipment for HeatPumpWH {
             self.draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
-            inlet.dry_bulb_c,
-            tempered_flow_m3_s,
-            hot_flow_m3_s,
-            self.mains_temp_c,
+            TemperedDrawInputs {
+                ambient_temp_c: inlet.dry_bulb_c,
+                tempered_flow_m3_s,
+                hot_flow_m3_s,
+                mains_temp_c: self.mains_temp_c,
+            },
             &heat_injections,
             tmv,
             dt,
@@ -1582,7 +1584,6 @@ fn default_condenser_weights(n_nodes: usize) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -2365,7 +2366,6 @@ mod tests {
             )],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         }
     }
 
@@ -3543,7 +3543,6 @@ mod tests {
 
 #[cfg(test)]
 mod mutual_exclusion_tests {
-    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -3629,7 +3628,6 @@ mod mutual_exclusion_tests {
             )],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         }
     }
 
@@ -3868,7 +3866,6 @@ mod mutual_exclusion_tests {
 
 #[cfg(test)]
 mod dr_tests {
-    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -3953,7 +3950,6 @@ mod dr_tests {
             )],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         }
     }
 
@@ -4184,7 +4180,6 @@ mod dr_tests {
 
 #[cfg(test)]
 mod new_feature_tests {
-    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -4258,7 +4253,6 @@ mod new_feature_tests {
             )],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         }
     }
 

@@ -59,7 +59,6 @@ duration_s = 3600
 [geometry]
 floor_area_m2 = 120.0
 zone_volume_m3 = 300.0
-wall_area_m2 = 200.0
 
 [materials]
 wall_r_value_m2_k_w = 2.5

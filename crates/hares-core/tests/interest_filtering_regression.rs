@@ -39,17 +39,28 @@ fn unique_temp_toml(tag: &str) -> PathBuf {
     path
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_synthetic_toml(
-    path: &PathBuf,
-    start_time: &str,
+/// Field values for [`write_synthetic_toml`], grouped so the writer takes
+/// one coherent spec.
+struct SyntheticTomlSpec<'a> {
+    start_time: &'a str,
     duration_s: i64,
-    hvac_equipment: &str,
-    hvac_fuel: &str,
+    hvac_equipment: &'a str,
+    hvac_fuel: &'a str,
     heating_capacity_kbtu_h: f64,
     outdoor_temp_c: f64,
     dew_point_c: f64,
-) {
+}
+
+fn write_synthetic_toml(path: &PathBuf, spec: SyntheticTomlSpec<'_>) {
+    let SyntheticTomlSpec {
+        start_time,
+        duration_s,
+        hvac_equipment,
+        hvac_fuel,
+        heating_capacity_kbtu_h,
+        outdoor_temp_c,
+        dew_point_c,
+    } = spec;
     let content = format!(
         r#"building_id = 4242
 
@@ -61,7 +72,6 @@ duration_s = {duration_s}
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -93,7 +103,18 @@ master_seed = 0
 
 fn build_dwelling(tag: &str, start_time: &str, duration_s: i64) -> Dwelling {
     let path = unique_temp_toml(tag);
-    write_synthetic_toml(&path, start_time, duration_s, "none", "", 0.0, 20.0, 10.0);
+    write_synthetic_toml(
+        &path,
+        SyntheticTomlSpec {
+            start_time,
+            duration_s,
+            hvac_equipment: "none",
+            hvac_fuel: "",
+            heating_capacity_kbtu_h: 0.0,
+            outdoor_temp_c: 20.0,
+            dew_point_c: 10.0,
+        },
+    );
     let dwelling = Dwelling::from_toml_config(&path).expect("synthetic TOML must load");
     let _ = fs::remove_file(&path);
     dwelling
@@ -103,13 +124,15 @@ fn build_furnace_dwelling(tag: &str) -> Dwelling {
     let path = unique_temp_toml(tag);
     write_synthetic_toml(
         &path,
-        "2024-01-15T00:00:00Z",
-        36000,
-        "Furnace",
-        "electricity",
-        500.0,
-        -20.0,
-        -25.0,
+        SyntheticTomlSpec {
+            start_time: "2024-01-15T00:00:00Z",
+            duration_s: 36000,
+            hvac_equipment: "Furnace",
+            hvac_fuel: "electricity",
+            heating_capacity_kbtu_h: 500.0,
+            outdoor_temp_c: -20.0,
+            dew_point_c: -25.0,
+        },
     );
     let dwelling = Dwelling::from_toml_config(&path).expect("synthetic TOML must load");
     let _ = fs::remove_file(&path);
@@ -395,7 +418,6 @@ duration_s = 3600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 [materials]
 wall_r_value_m2_k_w = 2.8
 [hvac]

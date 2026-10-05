@@ -243,10 +243,12 @@ pub struct DuctDseInput {
 // ---------------------------------------------------------------------------
 
 struct ClimateStation {
-    // Why: `state` is parsed from the CSV and asserted in tests to guard against
-    // province/state code errors (e.g. MN for Winnipeg). Clippy's dead_code lint
-    // cannot see test-only reads of a private field.
-    #[allow(dead_code)]
+    // `state` is read only by this crate's tests, which assert the CSV
+    // province/state column parsed correctly (e.g. MN for Winnipeg). The
+    // field must exist in every build for the single struct literal in the
+    // parser, so the suppression applies only to non-test builds, where the
+    // dead_code lint cannot see the test-only reads.
+    #[cfg_attr(not(test), allow(dead_code))]
     state: &'static str,
     latitude_deg: f64,
     longitude_deg: f64,

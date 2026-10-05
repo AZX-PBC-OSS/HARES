@@ -789,9 +789,10 @@ pub fn clark_allen_sky_emissivity(dew_point_c: f64) -> f64 {
 /// Cite: Clark, G. and Allen, C. (1978), "The Estimation of Atmospheric
 /// Radiation for Clear and Cloudy Skies", Proc. 2nd National Passive Solar
 /// Conference (AS/ISES), pp. 675-678.
-// Why: used by test code in epw.rs, tmy3.rs, psm3.rs, weather.rs for
-// direct Clark-Allen comparison against the compute_sky_temp_c cascade.
-#[allow(dead_code)]
+// Read only by this crate's test modules (epw.rs, tmy3.rs, psm3.rs,
+// resstock_csv.rs) for direct Clark-Allen comparison against the
+// compute_sky_temp_c cascade; compiled only for tests.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn clark_allen_sky_temp_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
     let emissivity = clark_allen_sky_emissivity(dew_point_c);

@@ -1333,20 +1333,22 @@ impl PyDwelling {
         let actor = EvDriverActor::new(
             &format!("EvDriver:{}", spec.label),
             spec.label,
-            preset.strategy.clone(),
-            preset.plug_in_policy.clone(),
-            preset.build_miles_schedule(seed_bytes),
-            preset.build_departure_schedule(seed_bytes),
-            preset.build_duration_schedule(seed_bytes),
-            preset.build_arrival_schedule(seed_bytes),
-            preset.event_day_ratio,
-            fuel_economy,
-            spec.capacity_kwh,
-            max_power,
-            30.0, // average_speed_mph
-            20.0, // range_anxiety_miles
-            0.0,  // away_charge_fraction
-            0.0,  // away_charge_power_kw
+            hares_core::actors::EvDriverParams {
+                strategy: preset.strategy.clone(),
+                plug_in_policy: preset.plug_in_policy.clone(),
+                daily_drive_miles: preset.build_miles_schedule(seed_bytes),
+                departure_time: preset.build_departure_schedule(seed_bytes),
+                trip_duration: preset.build_duration_schedule(seed_bytes),
+                arrival_time: preset.build_arrival_schedule(seed_bytes),
+                event_day_ratio: preset.event_day_ratio,
+                fuel_economy_kwh_per_mi: fuel_economy,
+                capacity_kwh: spec.capacity_kwh,
+                max_charge_kw: max_power,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             hares_core::ChaCha8Rng::from_seed(seed_bytes),
         );
 
@@ -1741,13 +1743,15 @@ impl PyDwelling {
         crate::py_pv_sizing::pv_candidates_from_dwelling(
             &dwelling.roof_info,
             roof_shape,
-            &dwelling.wall_azimuths,
-            dwelling.latitude_deg,
-            diffuse_fraction,
-            panel_watts,
-            panel_area_m2,
+            hares_physics::pv_sizing::PvRoofTuning {
+                wall_azimuths: &dwelling.wall_azimuths,
+                latitude: dwelling.latitude_deg,
+                panel_watts,
+                panel_area_m2,
+                diffuse_fraction,
+                roof_shape_user_override: user_override,
+            },
             dwelling.pv_panel_defaults(),
-            user_override,
         )
     }
 
@@ -1833,21 +1837,29 @@ impl PyDwelling {
         crate::py_pv_sizing::size_pv_from_dwelling(
             &dwelling.roof_info,
             roof_shape,
-            &dwelling.wall_azimuths,
-            dwelling.latitude_deg,
-            target_kw,
-            min_kw,
-            max_kw,
-            diffuse_fraction,
-            panel_watts,
-            panel_area_m2,
-            system_losses,
-            inverter_kw_ac,
-            max_dc_ac_ratio,
-            main_panel_ampacity,
-            main_breaker_ampacity,
+            crate::py_pv_sizing::PvSizingTargets {
+                target_kw,
+                min_kw,
+                max_kw,
+            },
+            hares_physics::pv_sizing::PvRoofTuning {
+                wall_azimuths: &dwelling.wall_azimuths,
+                latitude: dwelling.latitude_deg,
+                panel_watts: None,
+                panel_area_m2: None,
+                diffuse_fraction,
+                roof_shape_user_override: user_override,
+            },
+            hares_physics::pv_sizing::PvSystemTuning {
+                system_losses,
+                panel_watts,
+                panel_area_m2,
+                inverter_kw_ac,
+                max_dc_ac_ratio,
+                main_panel_ampacity,
+                main_breaker_ampacity,
+            },
             dwelling.pv_panel_defaults(),
-            user_override,
         )
         .map_err(pyo3::exceptions::PyValueError::new_err)
     }

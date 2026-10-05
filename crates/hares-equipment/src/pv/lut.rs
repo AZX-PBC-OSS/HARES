@@ -473,17 +473,6 @@ impl PvLut {
         self.sam_losses
     }
 
-    /// Raw SAM `array_type` index stored in LUT metadata. Callers that need
-    /// the NOCT value should use `sam_noct_c()` instead.
-    // Why: sam_noct_c() reads self.sam_array_type directly; this accessor is
-    // dormant until an external caller (e.g. a diagnostics layer) needs the
-    // raw index. Suppression retained to keep the public(crate) surface stable.
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn sam_array_type(&self) -> Option<u8> {
-        self.sam_array_type
-    }
-
     /// SAM's internal NOCT (°C) derived from this LUT's `array_type` metadata.
     ///
     /// Returns `None` when the LUT lacks `harvest_lut_sam_array_type` metadata
@@ -654,9 +643,6 @@ fn parse_csv_f64(raw: Option<&str>) -> Option<f64> {
 
 #[cfg(test)]
 impl PvLut {
-    // Why: from_raw is only compiled in test builds; the dead_code lint fires
-    // in non-test builds where cfg(test) modules are excluded from analysis.
-    #[allow(dead_code)]
     pub(crate) fn from_raw(
         solar_zenith_values: Vec<f64>,
         solar_azimuth_values: Vec<f64>,

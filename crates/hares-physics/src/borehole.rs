@@ -343,12 +343,11 @@ fn borehole_resistance_per_unit_length(config: &BoreholeConfig) -> f64 {
 /// of the U-tube provide parallel heat transfer paths.
 ///
 /// Reference: Javed, S. & Spitler, J.D. (2016). Equation 3.
-// Why: dead_code — grout_resistance_per_unit_length is a validation helper
-// used only in test assertions. Production code uses borehole_resistance_per_unit_length
-// which calls the first-order multipole method directly. The grout-only split is
-// kept because it provides a verifiable intermediate value for test coverage of
-// Javed & Spitler (2016) Eq. 3.
-#[allow(dead_code)]
+// Validation helper used only by the tests below; production code uses
+// borehole_resistance_per_unit_length, which calls the first-order multipole
+// method directly. The grout-only split provides a verifiable intermediate
+// value for test coverage of Javed & Spitler (2016) Eq. 3.
+#[cfg(test)]
 fn grout_resistance_per_unit_length(config: &BoreholeConfig) -> f64 {
     let r_b_avg = borehole_resistance_first_order_multipole(config);
     let r_pipe = pipe_conduction_resistance_per_unit_length(

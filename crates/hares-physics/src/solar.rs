@@ -477,16 +477,11 @@ pub const OMNI_AZIMUTH_SAMPLES: usize = 12;
 /// - Duffie & Beckman (2020) Solar Engineering of Thermal Processes,
 ///   Eq. 1.6.2 — azimuth appears in three terms of the AOI formula.
 #[must_use]
-#[allow(clippy::too_many_arguments)]
 pub fn omni_directional_irradiance(
     surface_id: u32,
-    ghi: f64,
-    dni: f64,
-    dhi: f64,
-    solar_zenith_deg: f64,
-    solar_azimuth_deg: f64,
+    sky: SkyIrradiance,
+    sun: SunPosition,
     surface_tilt_deg: f64,
-    day_of_year: u32,
     ground_albedo: f64,
     num_samples: usize,
     elevation_m: f64,
@@ -501,14 +496,12 @@ pub fn omni_directional_irradiance(
         let sample_azimuth = (i as f64) * 360.0 / (n as f64);
         let irr = perez_tilted_irradiance(
             surface_id,
-            ghi,
-            dni,
-            dhi,
-            solar_zenith_deg,
-            solar_azimuth_deg,
-            surface_tilt_deg,
-            sample_azimuth,
-            day_of_year,
+            sky,
+            sun,
+            SurfaceOrientation {
+                tilt_deg: surface_tilt_deg,
+                azimuth_deg: sample_azimuth,
+            },
             ground_albedo,
             elevation_m,
         );
@@ -528,6 +521,35 @@ pub fn omni_directional_irradiance(
     }
 }
 
+/// Horizontal sky irradiance components [W/m²] for the tilted-irradiance
+/// models.
+#[derive(Clone, Copy, Debug)]
+pub struct SkyIrradiance {
+    pub ghi: f64,
+    pub dni: f64,
+    pub dhi: f64,
+}
+
+/// Sun position angles plus the day of year the extraterrestrial-irradiance
+/// correction needs. Angles are the values [`solar_position`] computes, with
+/// zenith in place of altitude.
+#[derive(Clone, Copy, Debug)]
+pub struct SunPosition {
+    /// Solar zenith angle [°] (90° − altitude).
+    pub zenith_deg: f64,
+    /// Solar azimuth angle [°].
+    pub azimuth_deg: f64,
+    /// 1-based day-of-year ordinal.
+    pub day_of_year: u32,
+}
+
+/// Tilted-surface orientation in degrees.
+#[derive(Clone, Copy, Debug)]
+pub struct SurfaceOrientation {
+    pub tilt_deg: f64,
+    pub azimuth_deg: f64,
+}
+
 /// Perez (1990) all-weather anisotropic diffuse irradiance model.
 ///
 /// This is the primary surface irradiance API for callers that have full solar
@@ -538,20 +560,24 @@ pub fn omni_directional_irradiance(
 /// used by the Perez airmass correction factor (`AirMassH`). At sea level
 /// (0 m) the correction is 1.0; at 1000 m it is 0.9 (a 10% reduction).
 #[must_use]
-#[allow(clippy::too_many_arguments)]
 pub fn perez_tilted_irradiance(
     surface_id: u32,
-    ghi: f64,
-    dni: f64,
-    dhi: f64,
-    solar_zenith_deg: f64,
-    solar_azimuth_deg: f64,
-    surface_tilt_deg: f64,
-    surface_azimuth_deg: f64,
-    day_of_year: u32,
+    sky: SkyIrradiance,
+    sun: SunPosition,
+    surface: SurfaceOrientation,
     ground_albedo: f64,
     elevation_m: f64,
 ) -> SurfaceIrradiance {
+    let SkyIrradiance { ghi, dni, dhi } = sky;
+    let SunPosition {
+        zenith_deg: solar_zenith_deg,
+        azimuth_deg: solar_azimuth_deg,
+        day_of_year,
+    } = sun;
+    let SurfaceOrientation {
+        tilt_deg: surface_tilt_deg,
+        azimuth_deg: surface_azimuth_deg,
+    } = surface;
     // Nighttime: all components zero
     if ghi <= 0.0 && dni <= 0.0 && dhi <= 0.0 {
         return SurfaceIrradiance {
@@ -994,6 +1020,25 @@ mod tests {
 
     use super::*;
 
+    fn sky(ghi: f64, dni: f64, dhi: f64) -> SkyIrradiance {
+        SkyIrradiance { ghi, dni, dhi }
+    }
+
+    fn sun(zenith_deg: f64, azimuth_deg: f64, day_of_year: u32) -> SunPosition {
+        SunPosition {
+            zenith_deg,
+            azimuth_deg,
+            day_of_year,
+        }
+    }
+
+    fn orient(tilt_deg: f64, azimuth_deg: f64) -> SurfaceOrientation {
+        SurfaceOrientation {
+            tilt_deg,
+            azimuth_deg,
+        }
+    }
+
     #[test]
     fn equatorial_equinox_noon_altitude_is_near_zenith() {
         // Find true solar noon (peak altitude) over the day to avoid clock-noon assumptions.
@@ -1038,14 +1083,9 @@ mod tests {
     fn nighttime_irradiance_is_exactly_zero() {
         let irr = perez_tilted_irradiance(
             0,
-            0.0,
-            0.0,
-            0.0,
-            90.0,
-            180.0,
-            45.0,
-            180.0,
-            1,
+            sky(0.0, 0.0, 0.0),
+            sun(90.0, 180.0, 1),
+            orient(45.0, 180.0),
             DEFAULT_GROUND_ALBEDO,
             0.0,
         );
@@ -1128,14 +1168,9 @@ mod tests {
 
         let perez = perez_tilted_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
-            tilt,
-            surf_az,
-            doy,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
+            orient(tilt, surf_az),
             DEFAULT_GROUND_ALBEDO,
             0.0,
         );
@@ -1165,14 +1200,9 @@ mod tests {
 
         let perez = perez_tilted_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
-            tilt,
-            surf_az,
-            doy,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
+            orient(tilt, surf_az),
             DEFAULT_GROUND_ALBEDO,
             0.0,
         );
@@ -1201,14 +1231,9 @@ mod tests {
 
         let result = perez_tilted_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
-            tilt,
-            surf_az,
-            doy,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
+            orient(tilt, surf_az),
             DEFAULT_GROUND_ALBEDO,
             0.0,
         );
@@ -1230,10 +1255,20 @@ mod tests {
         let doy = 172;
 
         let bare = perez_tilted_irradiance(
-            0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.2, 0.0,
+            0,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
+            orient(tilt, surf_az),
+            0.2,
+            0.0,
         );
         let snow = perez_tilted_irradiance(
-            0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.8, 0.0,
+            0,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
+            orient(tilt, surf_az),
+            0.8,
+            0.0,
         );
 
         assert!(
@@ -1562,14 +1597,9 @@ mod tests {
         // should be zero and the model must return zero for all components
         let result = perez_tilted_irradiance(
             0,
-            0.0,
-            0.0,
-            0.0,
-            100.0,
-            180.0,
-            30.0,
-            180.0,
-            172,
+            sky(0.0, 0.0, 0.0),
+            sun(100.0, 180.0, 172),
+            orient(30.0, 180.0),
             DEFAULT_GROUND_ALBEDO,
             0.0,
         );
@@ -1585,14 +1615,9 @@ mod tests {
         for zenith in [87.5, 88.0, 89.0, 89.5, 89.9] {
             let result = perez_tilted_irradiance(
                 0,
-                50.0,
-                20.0,
-                30.0,
-                zenith,
-                180.0,
-                30.0,
-                180.0,
-                172,
+                sky(50.0, 20.0, 30.0),
+                sun(zenith, 180.0, 172),
+                orient(30.0, 180.0),
                 DEFAULT_GROUND_ALBEDO,
                 0.0,
             );
@@ -1633,14 +1658,9 @@ mod tests {
 
         let result = perez_tilted_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
-            tilt,
-            surf_az,
-            doy,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
+            orient(tilt, surf_az),
             DEFAULT_GROUND_ALBEDO,
             0.0,
         );
@@ -1780,14 +1800,9 @@ mod tests {
             let ghi = dhi + dni * zenith_deg.to_radians().cos().max(0.0);
             let full = perez_tilted_irradiance(
                 0,
-                ghi,
-                dni,
-                dhi,
-                zenith_deg,
-                solar_az,
-                tilt_deg,
-                surf_az,
-                doy,
+                sky(ghi, dni, dhi),
+                sun(zenith_deg, solar_az, doy),
+                orient(tilt_deg, surf_az),
                 DEFAULT_GROUND_ALBEDO,
                 0.0,
             );
@@ -1819,14 +1834,9 @@ mod tests {
 
         let perez = perez_tilted_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
-            tilt,
-            surf_az,
-            doy,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
+            orient(tilt, surf_az),
             DEFAULT_GROUND_ALBEDO,
             0.0,
         );
@@ -1874,14 +1884,9 @@ mod tests {
                 let zenith = 90.0 - pos.altitude_deg;
                 perez_tilted_irradiance(
                     0,
-                    ghi,
-                    dni,
-                    dhi,
-                    zenith,
-                    pos.azimuth_deg,
-                    surface_tilt,
-                    surface_az,
-                    doy,
+                    sky(ghi, dni, dhi),
+                    sun(zenith, pos.azimuth_deg, doy),
+                    orient(surface_tilt, surface_az),
                     DEFAULT_GROUND_ALBEDO,
                     0.0,
                 )
@@ -1900,14 +1905,9 @@ mod tests {
                 let zenith = 90.0 - pos.altitude_deg;
                 perez_tilted_irradiance(
                     0,
-                    ghi,
-                    dni,
-                    dhi,
-                    zenith,
-                    pos.azimuth_deg,
-                    surface_tilt,
-                    surface_az,
-                    doy,
+                    sky(ghi, dni, dhi),
+                    sun(zenith, pos.azimuth_deg, doy),
+                    orient(surface_tilt, surface_az),
                     DEFAULT_GROUND_ALBEDO,
                     0.0,
                 )
@@ -2477,13 +2477,9 @@ mod tests {
 
         let irr = omni_directional_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
             tilt,
-            doy,
             DEFAULT_GROUND_ALBEDO,
             12,
             0.0,
@@ -2508,14 +2504,9 @@ mod tests {
         // at the same conditions (which would get direct ≈ DNI × sin(60°) = 606).
         let south_irr = perez_tilted_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
-            tilt,
-            180.0,
-            doy,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
+            orient(tilt, 180.0),
             DEFAULT_GROUND_ALBEDO,
             0.0,
         );
@@ -2541,39 +2532,27 @@ mod tests {
 
         let irr_n4 = omni_directional_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
             tilt,
-            doy,
             DEFAULT_GROUND_ALBEDO,
             4,
             0.0,
         );
         let irr_n12 = omni_directional_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
             tilt,
-            doy,
             DEFAULT_GROUND_ALBEDO,
             12,
             0.0,
         );
         let irr_n36 = omni_directional_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
             tilt,
-            doy,
             DEFAULT_GROUND_ALBEDO,
             36,
             0.0,
@@ -2616,39 +2595,27 @@ mod tests {
 
         let irr_n4 = omni_directional_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
             tilt,
-            doy,
             DEFAULT_GROUND_ALBEDO,
             4,
             0.0,
         );
         let irr_n12 = omni_directional_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
             tilt,
-            doy,
             DEFAULT_GROUND_ALBEDO,
             12,
             0.0,
         );
         let irr_n36 = omni_directional_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
             tilt,
-            doy,
             DEFAULT_GROUND_ALBEDO,
             36,
             0.0,
@@ -2711,14 +2678,9 @@ mod tests {
         // Single-azimuth Perez (explicit south)
         let single = perez_tilted_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
-            tilt,
-            surf_az,
-            doy,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
+            orient(tilt, surf_az),
             DEFAULT_GROUND_ALBEDO,
             0.0,
         );
@@ -2727,13 +2689,9 @@ mod tests {
         // because it averages over all orientations, diluting the south bias.
         let omni_12 = omni_directional_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
             tilt,
-            doy,
             DEFAULT_GROUND_ALBEDO,
             12,
             0.0,
@@ -2775,14 +2733,9 @@ mod tests {
         for &az in &cardinals {
             let irr = perez_tilted_irradiance(
                 0,
-                ghi,
-                dni,
-                dhi,
-                zenith,
-                solar_az,
-                tilt,
-                az,
-                doy,
+                sky(ghi, dni, dhi),
+                sun(zenith, solar_az, doy),
+                orient(tilt, az),
                 DEFAULT_GROUND_ALBEDO,
                 0.0,
             );
@@ -2793,13 +2746,9 @@ mod tests {
         // Omnidirectional average for the same conditions.
         let omni = omni_directional_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
             tilt,
-            doy,
             DEFAULT_GROUND_ALBEDO,
             12,
             0.0,
@@ -2834,26 +2783,17 @@ mod tests {
 
         let single = perez_tilted_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
-            tilt,
-            0.0, // azimuth 0°
-            doy,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
+            orient(tilt, 0.0), // azimuth 0°
             DEFAULT_GROUND_ALBEDO,
             0.0,
         );
         let omni = omni_directional_irradiance(
             0,
-            ghi,
-            dni,
-            dhi,
-            zenith,
-            solar_az,
+            sky(ghi, dni, dhi),
+            sun(zenith, solar_az, doy),
             tilt,
-            doy,
             DEFAULT_GROUND_ALBEDO,
             1,
             0.0,

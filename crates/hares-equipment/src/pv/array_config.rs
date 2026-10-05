@@ -49,22 +49,6 @@ impl ArrayType {
         }
     }
 
-    /// SAM `array_type` integer index (0=OpenRack, 1=RoofMounted, 2=InsulatedBack).
-    /// Used by the Python LUT adapter when writing `harvest_lut_sam_array_type`
-    /// Parquet metadata; without this adapter, the method is dormant but serves
-    /// as the canonical mapping definition for the crate.
-    // Why: the Python LUT adapter (python/ochre_next/adapters/sam_pv.py) is the
-    // intended consumer; until it is updated to write harvest_lut_sam_array_type,
-    // this method is unused on the Rust side.
-    #[allow(dead_code)]
-    pub(crate) fn to_sam_index(self) -> u8 {
-        match self {
-            Self::OpenRack => 0,
-            Self::RoofMounted => 1,
-            Self::InsulatedBack => 2,
-        }
-    }
-
     /// Decode from SAM `array_type` integer index.
     /// Used by `PvLut::sam_noct_c()` for LUT-path NOCT derivation.
     pub(crate) fn from_sam_index(idx: u8) -> Self {

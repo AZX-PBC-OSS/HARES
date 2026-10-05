@@ -28,7 +28,8 @@ use super::ac_config::{
     CentralAirConditionerConfig, RoomAcConfig, default_telemetry, load_curve_pair, telemetry_fields,
 };
 use super::coil_physics::{
-    CoilResult, LatentDegradationParams, calculate_shr, effective_shr_with_latent_degradation,
+    CoilOperatingState, CoilResult, LatentDegradationParams, calculate_shr,
+    effective_shr_with_latent_degradation,
 };
 use super::latent_degradation::compute_coil_ao_by_stage;
 use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_speed_stages};
@@ -1735,12 +1736,14 @@ impl CoolingCore {
             let rated_latent_w = rated_cap_w * (1.0 - self.rated_shr);
             let actual_latent_w = total_capacity_w * (1.0 - steady_state_shr);
             effective_shr_with_latent_degradation(
-                steady_state_shr,
-                rtf,
-                zone.temperature_c,
-                coil_entering_wb_c,
-                rated_latent_w,
-                actual_latent_w,
+                CoilOperatingState {
+                    steady_state_shr,
+                    runtime_fraction: rtf,
+                    entering_db_c: zone.temperature_c,
+                    entering_wb_c: coil_entering_wb_c,
+                    rated_latent_capacity_w: rated_latent_w,
+                    actual_latent_capacity_w: actual_latent_w,
+                },
                 &self.latent_degradation,
                 None,
             )

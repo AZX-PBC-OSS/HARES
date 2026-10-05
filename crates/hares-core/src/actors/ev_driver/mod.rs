@@ -270,6 +270,30 @@ fn build_preferences(
     }
 }
 
+/// Behavioral inputs for [`EvDriverActor::new`], grouped so the constructor
+/// reads as identity + behavior + RNG.
+pub struct EvDriverParams {
+    pub strategy: ChargingStrategy,
+    pub plug_in_policy: PlugInPolicy,
+    /// Distribution of miles driven per day.
+    pub daily_drive_miles: ScheduleSource,
+    /// Distribution of daily departure time.
+    pub departure_time: ScheduleSource,
+    /// Distribution of trip duration.
+    pub trip_duration: ScheduleSource,
+    /// Distribution of arrival time, when driven explicitly.
+    pub arrival_time: Option<ScheduleSource>,
+    /// Fraction of days with a driving event.
+    pub event_day_ratio: f64,
+    pub fuel_economy_kwh_per_mi: f64,
+    pub capacity_kwh: f64,
+    pub max_charge_kw: f64,
+    pub average_speed_mph: f64,
+    pub range_anxiety_miles: f64,
+    pub away_charge_fraction: f64,
+    pub away_charge_power_kw: f64,
+}
+
 /// Actor that models a human EV driver's daily behavior.
 ///
 /// Rolls a stochastic daily event (departure time, arrival time, miles driven)
@@ -337,28 +361,26 @@ impl EvDriverActor {
     /// derive from this RNG. Callers using the dwelling RNG hierarchy should
     /// pass a pre-configured `ChaCha8Rng` from `derive_sub_rng` so the stream
     /// nonce is preserved.
-    // Why: all parameters are independent behavioral inputs with no sensible defaults —
-    // the actor's stochastic behavior depends on each being explicitly set by the caller.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        name: &str,
-        target: &str,
-        strategy: ChargingStrategy,
-        plug_in_policy: PlugInPolicy,
-        daily_drive_miles: ScheduleSource,
-        departure_time: ScheduleSource,
-        trip_duration: ScheduleSource,
-        arrival_time: Option<ScheduleSource>,
-        event_day_ratio: f64,
-        fuel_economy_kwh_per_mi: f64,
-        capacity_kwh: f64,
-        max_charge_kw: f64,
-        average_speed_mph: f64,
-        range_anxiety_miles: f64,
-        away_charge_fraction: f64,
-        away_charge_power_kw: f64,
-        rng: ChaCha8Rng,
-    ) -> Self {
+    // The parameters are independent behavioral inputs with no sensible
+    // defaults; the actor's stochastic behavior depends on each being
+    // explicitly set by the caller; they travel in `EvDriverParams`.
+    pub fn new(name: &str, target: &str, params: EvDriverParams, rng: ChaCha8Rng) -> Self {
+        let EvDriverParams {
+            strategy,
+            plug_in_policy,
+            daily_drive_miles,
+            departure_time,
+            trip_duration,
+            arrival_time,
+            event_day_ratio,
+            fuel_economy_kwh_per_mi,
+            capacity_kwh,
+            max_charge_kw,
+            average_speed_mph,
+            range_anxiety_miles,
+            away_charge_fraction,
+            away_charge_power_kw,
+        } = params;
         let prefs = build_preferences(&strategy, max_charge_kw, CHARGING_EFFICIENCY, None, 24);
         let composer = ChargingComposer::new(prefs, target);
         let expected_daily_miles = daily_drive_miles.mean();
@@ -1603,20 +1625,22 @@ mod tests {
         EvDriverActor::new(
             "TestDriver",
             "EV1",
-            strategy,
-            policy,
-            ScheduleSource::Constant(30.0),  // 30 miles/day
-            ScheduleSource::Constant(480.0), // depart 08:00
-            ScheduleSource::Constant(600.0), // 10h away → arrive 18:00
-            None,                            // no direct arrival sampling
-            1.0,                             // event every day
-            0.3,                             // 0.3 kWh/mi
-            60.0,                            // 60 kWh battery
-            7.2,                             // L2 charge rate
-            30.0,                            // 30 mph average
-            20.0,                            // 20 miles range anxiety buffer
-            0.0,                             // no away charging
-            6.6,                             // workplace L2 default
+            EvDriverParams {
+                strategy,
+                plug_in_policy: policy,
+                daily_drive_miles: ScheduleSource::Constant(30.0), // 30 miles/day
+                departure_time: ScheduleSource::Constant(480.0),   // depart 08:00
+                trip_duration: ScheduleSource::Constant(600.0),    // 10h away → arrive 18:00
+                arrival_time: None,                                // no direct arrival sampling
+                event_day_ratio: 1.0,                              // event every day
+                fuel_economy_kwh_per_mi: 0.3,                      // 0.3 kWh/mi
+                capacity_kwh: 60.0,                                // 60 kWh battery
+                max_charge_kw: 7.2,                                // L2 charge rate
+                average_speed_mph: 30.0,                           // 30 mph average
+                range_anxiety_miles: 20.0,                         // 20 miles range anxiety buffer
+                away_charge_fraction: 0.0,                         // no away charging
+                away_charge_power_kw: 6.6,                         // workplace L2 default
+            },
             seed_from_u64(seed),
         )
     }
@@ -2690,20 +2714,22 @@ mod tests {
         EvDriverActor::new(
             "TestDriver",
             "EV1",
-            strategy,
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            None,
-            event_day_ratio,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.0,
-            6.6,
+            EvDriverParams {
+                strategy,
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: None,
+                event_day_ratio,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 6.6,
+            },
             seed_from_u64(seed),
         )
     }
@@ -4274,20 +4300,22 @@ mod tests {
         EvDriverActor::new(
             "AwayDriver",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            None,
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.5, // 50% away charge
-            6.6,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: None,
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.5, // 50% away charge
+                away_charge_power_kw: 6.6,
+            },
             seed_from_u64(seed),
         )
     }
@@ -5891,20 +5919,22 @@ mod tests {
         let mut actor = EvDriverActor::new(
             "TestDriver",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            Some(ScheduleSource::Constant(900.0)),
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.0,
-            0.0,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: Some(ScheduleSource::Constant(900.0)),
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             seed_from_u64(42),
         );
 
@@ -5968,20 +5998,22 @@ mod tests {
         let mut actor = EvDriverActor::new(
             "TestDriver",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(420.0),
-            None,
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.0,
-            0.0,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(420.0),
+                arrival_time: None,
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             seed_from_u64(42),
         );
 
@@ -6043,40 +6075,44 @@ mod tests {
         let mut actor_direct = EvDriverActor::new(
             "DriverDirect",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(420.0),
-            Some(ScheduleSource::Constant(1020.0)),
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.0,
-            0.0,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(420.0),
+                arrival_time: Some(ScheduleSource::Constant(1020.0)),
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             seed_from_u64(42),
         );
 
         let mut actor_derived = EvDriverActor::new(
             "DriverDerived",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(420.0),
-            None,
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.0,
-            0.0,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(420.0),
+                arrival_time: None,
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             seed_from_u64(43),
         );
 
@@ -6598,20 +6634,22 @@ mod tests {
         let mut actor = EvDriverActor::new(
             "AnxietyDriver",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(expected_daily_miles),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            None,
-            if todays_drive_kwh.is_some() { 1.0 } else { 0.0 },
-            fuel_economy_kwh_per_mi,
-            capacity_kwh,
-            7.2,
-            30.0,
-            range_anxiety_miles,
-            0.0,
-            0.0,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(expected_daily_miles),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: None,
+                event_day_ratio: if todays_drive_kwh.is_some() { 1.0 } else { 0.0 },
+                fuel_economy_kwh_per_mi,
+                capacity_kwh,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             seed_from_u64(42),
         );
         actor.estimated_soc = estimated_soc;

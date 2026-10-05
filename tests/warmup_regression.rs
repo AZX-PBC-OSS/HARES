@@ -198,9 +198,11 @@ mod tests {
         // Use 1-hour timesteps so warmup convergence (24 h/day iterations) is fast.
         // A short duration keeps the test lightweight.
         let mut dwelling = Dwelling::from_hpxml_with_write_output(
-            &hpxml,
-            &schedule,
-            &weather,
+            hares_core::HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
             start_time,
             Duration::hours(1),
             Duration::hours(2),

@@ -133,13 +133,6 @@ pub(crate) struct SyntheticSimulationConfig {
 pub(crate) struct SyntheticGeometryConfig {
     pub(crate) floor_area_m2: f64,
     pub(crate) zone_volume_m3: f64,
-    #[serde(default = "default_wall_area_m2")]
-    #[allow(dead_code)]
-    // Why: wall_area_m2 is parsed from 30+ existing TOML configs and test
-    // fixtures for backward compatibility but is no longer read by
-    // build_synthetic_building — T-0226 replaces the single-wall default
-    // with geometry-derived wall areas from floor_area and zone_volume.
-    pub(crate) wall_area_m2: f64,
     #[serde(default)]
     pub(crate) mass_multiplier: Option<f64>,
 }
@@ -419,10 +412,6 @@ fn default_interior_zone() -> String {
 
 fn default_exterior_zone() -> String {
     "Outdoor".to_string()
-}
-
-fn default_wall_area_m2() -> f64 {
-    120.0
 }
 
 fn default_outdoor_temp_c() -> f64 {
@@ -3694,7 +3683,6 @@ duration_s = 86400
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.0

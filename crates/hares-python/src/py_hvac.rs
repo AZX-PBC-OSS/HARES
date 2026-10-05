@@ -197,6 +197,7 @@ pub struct PyAirConditioner {
 impl PyAirConditioner {
     #[new]
     #[pyo3(signature = (name, autosize=true, capacity_w=None, eir=None, seer=None, zone_id=None, shr=None, number_of_speeds=None, fan_power_w=None, heating_setpoint_c=None, cooling_setpoint_c=None, oversizing_factor=None))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
@@ -375,6 +376,7 @@ pub struct PyASHPHeater {
 impl PyASHPHeater {
     #[new]
     #[pyo3(signature = (name, autosize=true, capacity_w=None, hspf=None, zone_id=None, is_mini_split=None, backup_capacity_w=None, backup_fuel=None, fan_power_w=None, heating_setpoint_c=None, cooling_setpoint_c=None, oversizing_factor=None))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
@@ -548,6 +550,7 @@ pub struct PyASHPCooler {
 impl PyASHPCooler {
     #[new]
     #[pyo3(signature = (name, autosize=true, capacity_w=None, seer=None, zone_id=None, is_mini_split=None, shr=None, fan_power_w=None, heating_setpoint_c=None, cooling_setpoint_c=None, oversizing_factor=None))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
@@ -1172,6 +1175,7 @@ pub struct PyElectricFurnace {
 impl PyElectricFurnace {
     #[new]
     #[pyo3(signature = (name, autosize=true, capacity_w=None, eir=None, zone_id=None, fan_power_w=None, heating_setpoint_c=None, cooling_setpoint_c=None, oversizing_factor=None))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,

@@ -11,7 +11,8 @@ use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherF
 use hares_physics::{
     psychrometrics::{humidity_ratio_from_tdp, moist_air_enthalpy, wet_bulb_from_humidity_ratio},
     solar::{
-        OMNI_AZIMUTH_SAMPLES, omni_directional_irradiance, perez_tilted_irradiance, solar_position,
+        OMNI_AZIMUTH_SAMPLES, SkyIrradiance, SunPosition, SurfaceOrientation,
+        omni_directional_irradiance, perez_tilted_irradiance, solar_position,
     },
     water_mains::{Hemisphere, water_mains_temperature_c},
 };
@@ -718,13 +719,13 @@ impl EnvironmentManager {
                         // three AOI terms.
                         omni_directional_irradiance(
                             surface.surface_id,
-                            ghi,
-                            dni,
-                            dhi,
-                            solar_zenith_deg,
-                            pos.azimuth_deg,
+                            SkyIrradiance { ghi, dni, dhi },
+                            SunPosition {
+                                zenith_deg: solar_zenith_deg,
+                                azimuth_deg: pos.azimuth_deg,
+                                day_of_year,
+                            },
                             surface.tilt_deg,
-                            day_of_year,
                             ground_albedo,
                             OMNI_AZIMUTH_SAMPLES,
                             self.weather_meta.elevation_m,
@@ -732,14 +733,16 @@ impl EnvironmentManager {
                     } else {
                         perez_tilted_irradiance(
                             surface.surface_id,
-                            ghi,
-                            dni,
-                            dhi,
-                            solar_zenith_deg,
-                            pos.azimuth_deg,
-                            surface.tilt_deg,
-                            surface.azimuth_deg,
-                            day_of_year,
+                            SkyIrradiance { ghi, dni, dhi },
+                            SunPosition {
+                                zenith_deg: solar_zenith_deg,
+                                azimuth_deg: pos.azimuth_deg,
+                                day_of_year,
+                            },
+                            SurfaceOrientation {
+                                tilt_deg: surface.tilt_deg,
+                                azimuth_deg: surface.azimuth_deg,
+                            },
                             ground_albedo,
                             self.weather_meta.elevation_m,
                         )

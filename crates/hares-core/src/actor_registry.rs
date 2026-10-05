@@ -37,8 +37,9 @@ use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, Sched
 
 use crate::Actor;
 use crate::actors::{
-    AlwaysComply, BatteryManagementActor, DrAction, DrCompliance, EquipmentBehavior, EvDriverActor,
-    IdealThermostat, Occupant, Presence, Probabilistic, SafetyMonitor,
+    AlwaysComply, BatteryManagementActor, BmsParams, DrAction, DrCompliance, EquipmentBehavior,
+    EvDriverActor, EvDriverParams, IdealThermostat, Occupant, Presence, Probabilistic,
+    SafetyMonitor,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -409,20 +410,22 @@ impl ActorRegistry {
                 let actor = EvDriverActor::new(
                     &config.name,
                     &target,
-                    strategy,
-                    policy,
-                    miles_schedule,
-                    departure_schedule,
-                    duration_schedule,
-                    arrival_schedule,
-                    event_day_ratio,
-                    fuel_economy,
-                    capacity_kwh,
-                    max_charge_kw,
-                    avg_speed,
-                    config.get_f64("range_anxiety_miles").unwrap_or(20.0),
-                    config.get_f64("away_charge_fraction").unwrap_or(0.0),
-                    config.get_f64("away_charge_power_kw").unwrap_or(6.6),
+                    EvDriverParams {
+                        strategy,
+                        plug_in_policy: policy,
+                        daily_drive_miles: miles_schedule,
+                        departure_time: departure_schedule,
+                        trip_duration: duration_schedule,
+                        arrival_time: arrival_schedule,
+                        event_day_ratio,
+                        fuel_economy_kwh_per_mi: fuel_economy,
+                        capacity_kwh,
+                        max_charge_kw,
+                        average_speed_mph: avg_speed,
+                        range_anxiety_miles: config.get_f64("range_anxiety_miles").unwrap_or(20.0),
+                        away_charge_fraction: config.get_f64("away_charge_fraction").unwrap_or(0.0),
+                        away_charge_power_kw: config.get_f64("away_charge_power_kw").unwrap_or(6.6),
+                    },
                     ChaCha8Rng::from_seed(seed_bytes),
                 );
                 Ok(Box::new(actor))
@@ -572,13 +575,15 @@ impl ActorRegistry {
                 let actor = BatteryManagementActor::with_name(
                     &config.name,
                     &target,
-                    bms_mode,
-                    grid_export_rule,
-                    max_charge_kw,
-                    max_discharge_kw,
-                    None,
-                    steps_per_day,
-                    min_dwell_steps,
+                    BmsParams {
+                        bms_mode,
+                        grid_export_rule,
+                        max_charge_kw,
+                        max_discharge_kw,
+                        price_schedule: None,
+                        steps_per_day,
+                        min_dwell_steps,
+                    },
                 );
                 Ok(Box::new(actor))
             }),

@@ -1153,7 +1153,6 @@ pub fn rebuild_wh_typed_config(name: &str, params: &Map<String, Value>) -> Optio
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::needless_update)]
     use super::*;
     use crate::hpxml::parse_xml_document;
     use serde_json::Value;
@@ -1530,7 +1529,6 @@ mod tests {
 
         let patches = HpxmlDataPatches {
             number_of_bedrooms: Some(5.0),
-            ..Default::default()
         };
 
         let mut specs = Vec::new();
@@ -1727,7 +1725,6 @@ mod tests {
 
         let patches = HpxmlDataPatches {
             number_of_bedrooms: Some(1.0),
-            ..Default::default()
         };
 
         let mut specs = Vec::new();

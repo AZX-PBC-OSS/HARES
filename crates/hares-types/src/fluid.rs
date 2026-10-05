@@ -339,7 +339,6 @@ fn fluid_type_to_f64(fluid_type: FluidType) -> f64 {
 }
 
 fn f64_to_fluid_type(value: f64) -> Result<FluidType, HaresError> {
-    #[allow(clippy::cast_possible_truncation)]
     match value.round() as i64 {
         0 => Ok(FluidType::Water),
         1 => Ok(FluidType::Glycol),

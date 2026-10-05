@@ -38,6 +38,7 @@ mod solar;
 mod stepping;
 
 pub use snapshot::{THERMAL_SNAPSHOT_SCHEMA_VERSION, ThermalSnapshot};
+pub use stepping::SiteLocation;
 
 pub(crate) use config::Result;
 pub use config::{
@@ -200,15 +201,6 @@ pub struct ThermalSolver {
     /// Pre-allocated buffer for previous-iteration interior LWR net flux values.
     /// Used for relative flux-residual convergence checking.
     lwr_net_flux_prev_buf: Vec<f64>,
-    /// Pre-allocated forcing vector for per-step interior convection correction.
-    /// Dimension equals `model.state_dim()`. Cleared before each step and
-    /// populated with ΔQ·dt/C terms for each interior boundary. Empty
-    /// (zero-length) when film model is AshraeSimple.
-    ///
-    /// Currently unused: PerStepTarp is disabled at solver_builder level pending
-    /// resolution of the Courant-condition constraint.
-    #[allow(dead_code)]
-    convection_forcing: DVector<f64>,
     /// Per-boundary A-matrix film resistance [m²·K/W] paralleling the
     /// `convection_injection` vec for computing per-step correction.
     /// Cached at init to avoid repeated HashMap lookups.
@@ -965,12 +957,6 @@ impl ThermalSolver {
         let y_buf = DVector::<f64>::zeros(model.output_dim());
         let du_buf = DVector::<f64>::zeros(model.output_dim());
         let solve_scratch = SolveScratch::new(n_states);
-        let convection_forcing =
-            if config.film_coefficient_model == FilmCoefficientModel::PerStepTarp {
-                DVector::<f64>::zeros(n_states)
-            } else {
-                DVector::<f64>::zeros(0)
-            };
         let per_boundary_static_r_film = config
             .interior_convection_injections
             .iter()
@@ -1136,7 +1122,6 @@ impl ThermalSolver {
             opaque_exterior_solar_w: 0.0,
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_net_flux_prev_buf: Vec::with_capacity(max_interior_surfaces),
-            convection_forcing,
             per_boundary_static_r_film,
             prev_zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),
             radiant_weights_buf: Vec::with_capacity(max_radiant_surfaces),
@@ -1680,7 +1665,6 @@ impl DomainSolver for ThermalSolver {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::needless_update)]
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -2342,8 +2326,9 @@ mod tests {
         let ua_windows = 3.0 * 12.0; // 36 W/K
         let ua_walls = 0.514 * 68.0; // 34.95 W/K
         #[allow(clippy::approx_constant)]
-        #[allow(clippy::approx_constant)]
-        let ua_roof = 0.318 * 48.0; // 15.26 W/K -- U-value, not 1/π -- U-value, not 1/π
+        // Physical U-value for the BESTEST roof [W/m²K]; coincidentally close
+        // to 1/π but not equal, and the model must keep the exact value.
+        let ua_roof = 0.318 * 48.0; // 15.26 W/K -- U-value, not 1/π
         let ua_envelope = ua_windows + ua_walls + ua_roof; // ~86.2 W/K (walls+roof+windows to outdoor)
         let ua_floor = 0.039 * 48.0; // 1.872 W/K (floor to ground)
 
@@ -6606,7 +6591,6 @@ mod tests {
             fluid: vec![],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         };
 
         solver.prepare_inputs(&ports, &env).unwrap();

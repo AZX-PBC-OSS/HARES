@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use hares_core::actor::testing::TestEnvBuilder;
-use hares_core::actors::BatteryManagementActor;
+use hares_core::actors::{BatteryManagementActor, BmsParams};
 use hares_core::{Actor, Dwelling, DwellingConfig, StepResult};
 use hares_io::SimulationConfig;
 use hares_types::{
@@ -281,18 +281,20 @@ fn gas_fuel_core_output_matches_dwelling_aggregation() {
 fn actors_observe_previous_equipment_core_snapshot() {
     let mut actor = BatteryManagementActor::new(
         "Battery1",
-        BmsMode::SelfConsumption {
-            min_soc: 0.1,
-            max_soc: 0.8,
-            solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+        BmsParams {
+            bms_mode: BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.8,
+                solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
+            },
+            grid_export_rule: GridExportRule::Unrestricted,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            price_schedule: None,
+            steps_per_day: 24,
+            min_dwell_steps: 0,
         },
-        GridExportRule::Unrestricted,
-        5.0,
-        5.0,
-        None,
-        24,
-        0,
     );
     let battery_id = EquipmentId(42);
     let mut id_map = std::collections::HashMap::new();

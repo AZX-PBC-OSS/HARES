@@ -494,12 +494,14 @@ pub fn compute_usable_area(
     let result = hares_physics::pv_sizing::compute_usable_area(
         &roof,
         roof_shape.into(),
-        &azimuths,
-        latitude,
-        panel_watts,
-        panel_area_m2,
-        diffuse_fraction,
-        roof_shape_user_override,
+        hares_physics::pv_sizing::PvRoofTuning {
+            wall_azimuths: &azimuths,
+            latitude,
+            panel_watts,
+            panel_area_m2,
+            diffuse_fraction,
+            roof_shape_user_override,
+        },
     )
     .map_err(|e: PvSizingError| PyValueError::new_err(e.to_string()))?;
     Ok(PyUsableRoofArea { inner: result })
@@ -546,12 +548,14 @@ pub fn enumerate_pv_candidates(
     let result = hares_physics::pv_sizing::enumerate_pv_candidates(
         &roof,
         roof_shape.into(),
-        &azimuths,
-        latitude,
-        panel_watts,
-        panel_area_m2,
-        diffuse_fraction,
-        roof_shape_user_override,
+        hares_physics::pv_sizing::PvRoofTuning {
+            wall_azimuths: &azimuths,
+            latitude,
+            panel_watts,
+            panel_area_m2,
+            diffuse_fraction,
+            roof_shape_user_override,
+        },
     )
     .map_err(|e: PvSizingError| PyValueError::new_err(e.to_string()))?;
     Ok(result
@@ -618,13 +622,15 @@ pub fn size_pv_system(
         target_kw,
         min_kw,
         max_kw,
-        system_losses,
-        panel_watts,
-        panel_area_m2,
-        inverter_kw_ac,
-        max_dc_ac_ratio,
-        main_panel_ampacity,
-        main_breaker_ampacity,
+        hares_physics::pv_sizing::PvSystemTuning {
+            system_losses,
+            panel_watts,
+            panel_area_m2,
+            inverter_kw_ac,
+            max_dc_ac_ratio,
+            main_panel_ampacity,
+            main_breaker_ampacity,
+        },
     )
     .map_err(|e: PvSizingError| PyValueError::new_err(e.to_string()))?;
     Ok(PyPvSizingResult { inner: result })
@@ -716,34 +722,35 @@ fn resolve_panel_defaults(
     (panel_watts, panel_area_m2, system_losses)
 }
 
-/// Internal helper – mirrors the full Rust API surface for PV candidate
-/// enumeration including all optional parameters.
-// Why: the parameter count reflects the complete set of tunable PV sizing
-// inputs; constructing a builder/params type would add indirection for no
-// benefit at this binding layer.
-#[allow(clippy::too_many_arguments)]
+/// Internal helper for PV candidate enumeration from dwelling data; groups
+/// the optional sizing knobs into [`pv_sizing::PvRoofTuning`].
 pub(crate) fn pv_candidates_from_dwelling(
     roof_info: &RoofInfo,
     roof_shape: RoofShape,
-    wall_azimuths: &[f64],
-    latitude: Option<f64>,
-    diffuse_fraction: Option<f64>,
-    panel_watts: Option<u32>,
-    panel_area_m2: Option<f64>,
+    tuning: pv_sizing::PvRoofTuning<'_>,
     pv_panel_defaults: &HashMap<String, PvPanelDefaults>,
-    roof_shape_user_override: bool,
 ) -> PyResult<Vec<PyPvCandidate>> {
-    let (panel_watts, panel_area_m2, _) =
-        resolve_panel_defaults(panel_watts, panel_area_m2, None, pv_panel_defaults);
-    let result = pv_sizing::enumerate_pv_candidates(
-        roof_info,
-        roof_shape,
+    let pv_sizing::PvRoofTuning {
         wall_azimuths,
         latitude,
         panel_watts,
         panel_area_m2,
         diffuse_fraction,
         roof_shape_user_override,
+    } = tuning;
+    let (panel_watts, panel_area_m2, _) =
+        resolve_panel_defaults(panel_watts, panel_area_m2, None, pv_panel_defaults);
+    let result = pv_sizing::enumerate_pv_candidates(
+        roof_info,
+        roof_shape,
+        pv_sizing::PvRoofTuning {
+            wall_azimuths,
+            latitude,
+            panel_watts,
+            panel_area_m2,
+            diffuse_fraction,
+            roof_shape_user_override,
+        },
     )
     .map_err(|e: PvSizingError| PyValueError::new_err(e.to_string()))?;
     Ok(result
@@ -752,55 +759,54 @@ pub(crate) fn pv_candidates_from_dwelling(
         .collect())
 }
 
-/// Internal helper – mirrors the full Rust API surface for PV sizing
-/// including all optional parameters. The argument count reflects the
-/// complete set of tunable inputs; constructing a builder/params type
-/// would add indirection for no benefit at this binding layer.
-#[allow(clippy::too_many_arguments)]
+/// Target capacity bounds for [`size_pv_from_dwelling`], mirroring the
+/// `target_kw` / `min_kw` / `max_kw` triple of `pv_sizing::size_pv_system`.
+pub(crate) struct PvSizingTargets {
+    pub target_kw: f64,
+    pub min_kw: f64,
+    pub max_kw: f64,
+}
+
+/// Internal helper for PV sizing from dwelling data; groups the optional
+/// sizing knobs into [`pv_sizing::PvRoofTuning`] and
+/// [`pv_sizing::PvSystemTuning`]. The panel spec in `tuning` is ignored in
+/// favour of the resolved `system_tuning` panel spec, which feeds both the
+/// roof-area stage and the sizing stage.
 pub(crate) fn size_pv_from_dwelling(
     roof_info: &RoofInfo,
     roof_shape: RoofShape,
-    wall_azimuths: &[f64],
-    latitude: Option<f64>,
-    target_kw: f64,
-    min_kw: f64,
-    max_kw: f64,
-    diffuse_fraction: Option<f64>,
-    panel_watts: Option<u32>,
-    panel_area_m2: Option<f64>,
-    system_losses: Option<f64>,
-    inverter_kw_ac: Option<f64>,
-    max_dc_ac_ratio: Option<f64>,
-    main_panel_ampacity: Option<u32>,
-    main_breaker_ampacity: Option<u32>,
+    targets: PvSizingTargets,
+    tuning: pv_sizing::PvRoofTuning<'_>,
+    system_tuning: pv_sizing::PvSystemTuning,
     pv_panel_defaults: &HashMap<String, PvPanelDefaults>,
-    roof_shape_user_override: bool,
 ) -> Result<PyPvSizingResult, String> {
-    let (panel_watts, panel_area_m2, system_losses) =
-        resolve_panel_defaults(panel_watts, panel_area_m2, system_losses, pv_panel_defaults);
+    let (panel_watts, panel_area_m2, system_losses) = resolve_panel_defaults(
+        system_tuning.panel_watts,
+        system_tuning.panel_area_m2,
+        system_tuning.system_losses,
+        pv_panel_defaults,
+    );
     let usable = pv_sizing::compute_usable_area(
         roof_info,
         roof_shape,
-        wall_azimuths,
-        latitude,
-        panel_watts,
-        panel_area_m2,
-        diffuse_fraction,
-        roof_shape_user_override,
+        pv_sizing::PvRoofTuning {
+            panel_watts,
+            panel_area_m2,
+            ..tuning
+        },
     )
     .map_err(|e| e.to_string())?;
     let result = pv_sizing::size_pv_system(
         &usable,
-        target_kw,
-        min_kw,
-        max_kw,
-        system_losses,
-        panel_watts,
-        panel_area_m2,
-        inverter_kw_ac,
-        max_dc_ac_ratio,
-        main_panel_ampacity,
-        main_breaker_ampacity,
+        targets.target_kw,
+        targets.min_kw,
+        targets.max_kw,
+        pv_sizing::PvSystemTuning {
+            panel_watts,
+            panel_area_m2,
+            system_losses,
+            ..system_tuning
+        },
     )
     .map_err(|e| e.to_string())?;
     Ok(PyPvSizingResult { inner: result })
@@ -831,21 +837,29 @@ mod tests {
         let result_default = size_pv_from_dwelling(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(40.0),
-            5.0,
-            2.0,
-            14.0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            PvSizingTargets {
+                target_kw: 5.0,
+                min_kw: 2.0,
+                max_kw: 14.0,
+            },
+            pv_sizing::PvRoofTuning {
+                wall_azimuths: &[],
+                latitude: Some(40.0),
+                panel_watts: None,
+                panel_area_m2: None,
+                diffuse_fraction: None,
+                roof_shape_user_override: false,
+            },
+            pv_sizing::PvSystemTuning {
+                system_losses: None,
+                panel_watts: None,
+                panel_area_m2: None,
+                inverter_kw_ac: None,
+                max_dc_ac_ratio: None,
+                main_panel_ampacity: None,
+                main_breaker_ampacity: None,
+            },
             &HashMap::new(),
-            false,
         )
         .expect("default sizing");
 
@@ -853,21 +867,29 @@ mod tests {
         let result_custom = size_pv_from_dwelling(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(40.0),
-            5.0,
-            2.0,
-            14.0,
-            None,
-            Some(300),
-            Some(1.6),
-            Some(0.14),
-            None,
-            None,
-            None,
-            None,
+            PvSizingTargets {
+                target_kw: 5.0,
+                min_kw: 2.0,
+                max_kw: 14.0,
+            },
+            pv_sizing::PvRoofTuning {
+                wall_azimuths: &[],
+                latitude: Some(40.0),
+                panel_watts: None,
+                panel_area_m2: None,
+                diffuse_fraction: None,
+                roof_shape_user_override: false,
+            },
+            pv_sizing::PvSystemTuning {
+                system_losses: Some(0.14),
+                panel_watts: Some(300),
+                panel_area_m2: Some(1.6),
+                inverter_kw_ac: None,
+                max_dc_ac_ratio: None,
+                main_panel_ampacity: None,
+                main_breaker_ampacity: None,
+            },
             &HashMap::new(),
-            false,
         )
         .expect("custom sizing");
 
@@ -888,25 +910,29 @@ mod tests {
         let candidates_default = pv_candidates_from_dwelling(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(40.0),
-            None,
-            None,
-            None,
+            pv_sizing::PvRoofTuning {
+                wall_azimuths: &[],
+                latitude: Some(40.0),
+                panel_watts: None,
+                panel_area_m2: None,
+                diffuse_fraction: None,
+                roof_shape_user_override: false,
+            },
             &HashMap::new(),
-            false,
         )
         .unwrap();
         let candidates_custom = pv_candidates_from_dwelling(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(40.0),
-            None,
-            Some(470),
-            Some(2.0),
+            pv_sizing::PvRoofTuning {
+                wall_azimuths: &[],
+                latitude: Some(40.0),
+                panel_watts: Some(470),
+                panel_area_m2: Some(2.0),
+                diffuse_fraction: None,
+                roof_shape_user_override: false,
+            },
             &HashMap::new(),
-            false,
         )
         .unwrap();
 
@@ -944,13 +970,15 @@ mod tests {
         let candidates = pv_candidates_from_dwelling(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(40.0),
-            None,
-            None,
-            None,
+            pv_sizing::PvRoofTuning {
+                wall_azimuths: &[],
+                latitude: Some(40.0),
+                panel_watts: None,
+                panel_area_m2: None,
+                diffuse_fraction: None,
+                roof_shape_user_override: false,
+            },
             &store,
-            false,
         )
         .unwrap();
 
@@ -961,14 +989,16 @@ mod tests {
         let def_candidates = pv_candidates_from_dwelling(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(40.0),
-            None,
-            None,
-            None,
+            pv_sizing::PvRoofTuning {
+                wall_azimuths: &[],
+                latitude: Some(40.0),
+                panel_watts: None,
+                panel_area_m2: None,
+                diffuse_fraction: None,
+                roof_shape_user_override: false,
+            },
             // Empty store → compile-time defaults (440W / 2.1 m²)
             &HashMap::new(),
-            false,
         )
         .unwrap();
         assert_ne!(
@@ -1030,21 +1060,29 @@ mod tests {
         let result_no_inv = size_pv_from_dwelling(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(40.0),
-            8.0,
-            2.0,
-            14.0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            PvSizingTargets {
+                target_kw: 8.0,
+                min_kw: 2.0,
+                max_kw: 14.0,
+            },
+            pv_sizing::PvRoofTuning {
+                wall_azimuths: &[],
+                latitude: Some(40.0),
+                panel_watts: None,
+                panel_area_m2: None,
+                diffuse_fraction: None,
+                roof_shape_user_override: false,
+            },
+            pv_sizing::PvSystemTuning {
+                system_losses: None,
+                panel_watts: None,
+                panel_area_m2: None,
+                inverter_kw_ac: None,
+                max_dc_ac_ratio: None,
+                main_panel_ampacity: None,
+                main_breaker_ampacity: None,
+            },
             &HashMap::new(),
-            false,
         )
         .expect("no inverter");
 
@@ -1052,21 +1090,29 @@ mod tests {
         let result_with_inv = size_pv_from_dwelling(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(40.0),
-            8.0,
-            2.0,
-            14.0,
-            None,
-            None,
-            None,
-            None,
-            Some(5.0),
-            Some(1.2),
-            None,
-            None,
+            PvSizingTargets {
+                target_kw: 8.0,
+                min_kw: 2.0,
+                max_kw: 14.0,
+            },
+            pv_sizing::PvRoofTuning {
+                wall_azimuths: &[],
+                latitude: Some(40.0),
+                panel_watts: None,
+                panel_area_m2: None,
+                diffuse_fraction: None,
+                roof_shape_user_override: false,
+            },
+            pv_sizing::PvSystemTuning {
+                system_losses: None,
+                panel_watts: None,
+                panel_area_m2: None,
+                inverter_kw_ac: Some(5.0),
+                max_dc_ac_ratio: Some(1.2),
+                main_panel_ampacity: None,
+                main_breaker_ampacity: None,
+            },
             &HashMap::new(),
-            false,
         )
         .expect("with inverter");
 

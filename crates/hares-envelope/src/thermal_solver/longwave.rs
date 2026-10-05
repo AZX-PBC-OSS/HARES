@@ -618,7 +618,13 @@ impl ThermalSolver {
             // surfaces — a physically meaningful, non-zero indicator of how active
             // the interior radiation exchange is.
             let mut zone_exchange = 0.0_f64;
-            #[allow(clippy::unused_enumerate_index)]
+            // The enumerate index is read only by the diagnostic push below,
+            // which is compiled under debug_assertions or observe_detailed;
+            // in other builds the index is genuinely unused.
+            #[cfg_attr(
+                not(any(debug_assertions, feature = "observe_detailed")),
+                allow(clippy::unused_enumerate_index)
+            )]
             for (_j, (info, &q)) in zone_cfg
                 .surfaces
                 .iter()

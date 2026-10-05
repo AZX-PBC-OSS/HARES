@@ -3948,15 +3948,25 @@ mod tests {
         }
     }
 
-    // The struct update is only "needless" without the `observe` feature,
-    // which adds a contribution-count field to ElectricalAccumulator.
-    #[allow(clippy::needless_update)]
     fn accumulator(load_w: f64, generation_w: f64, reactive_kvar: f64) -> ElectricalAccumulator {
-        ElectricalAccumulator {
-            load_power_w: load_w,
-            generation_power_w: generation_w,
-            reactive_power_kvar: reactive_kvar,
-            ..Default::default()
+        // The `observe` feature adds electrical_contribution_count to
+        // ElectricalAccumulator, so the two builds need different literals.
+        #[cfg(feature = "observe")]
+        {
+            ElectricalAccumulator {
+                load_power_w: load_w,
+                generation_power_w: generation_w,
+                reactive_power_kvar: reactive_kvar,
+                electrical_contribution_count: 0,
+            }
+        }
+        #[cfg(not(feature = "observe"))]
+        {
+            ElectricalAccumulator {
+                load_power_w: load_w,
+                generation_power_w: generation_w,
+                reactive_power_kvar: reactive_kvar,
+            }
         }
     }
 

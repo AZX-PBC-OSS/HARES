@@ -1852,11 +1852,6 @@ mod tests {
     ///    applied to moisture and NOT the electric scalar (RTF).
     #[test]
     fn energyplus_regression_independent_plr_rtf_scalars() {
-        // Why: Clippy fires `items_after_test_module` on inner function definitions
-        // inside test functions because rustc treats them as module-level items even
-        // when nested inside a function body. There is no way to move this helper
-        // without duplicating the test or pulling it out of the test module.
-        #[allow(clippy::items_after_test_module)]
         fn custom_eplus_dehumidifier_config(coeffs: Option<[f64; 4]>) -> EquipmentConfig {
             EquipmentConfig::from_typed(
                 "E+ Regression".to_string(),

@@ -4,8 +4,8 @@ use hares_physics::air_properties::check_air_density_plausible;
 use hares_physics::air_properties::moist_air_density_kg_m3;
 use hares_physics::constants::CP_DRY_AIR_J_KG_K;
 use hares_physics::infiltration::{
-    ach_infiltration, ashrae_wind_stack, duct_leakage_infiltration_m3_s, ela_infiltration,
-    natural_ventilation_flow_m3_s,
+    NaturalVentilationInputs, ach_infiltration, ashrae_wind_stack, duct_leakage_infiltration_m3_s,
+    ela_infiltration, natural_ventilation_flow_m3_s,
 };
 #[cfg(feature = "observe")]
 use hares_physics::infiltration::{compute_natural_ventilation_cw, wind_incidence_angle_deg};
@@ -37,10 +37,6 @@ pub(crate) struct InfiltrationCoupling {
     pub h_inf_w_k: f64,
     /// Outdoor temperature driving the sensible forcing [°C].
     pub t_forcing_c: f64,
-    /// Latent gain [W] computed from current-step humidity ratio (explicit value).
-    /// Retained for diagnostic parity with q_sensible_diagnostic_w.
-    #[allow(dead_code)]
-    pub q_latent_w: f64,
     /// Diagnostic sensible gain [W] = h_inf * (T_out - T_zone) for reporting.
     /// Accessed in thermal_solver/mod.rs for component_gains.
     pub q_sensible_diagnostic_w: f64,
@@ -52,11 +48,6 @@ pub(crate) struct InfiltrationCoupling {
     pub q_natural_vent_w: f64,
     /// Combined sensible flow [m³/s] -- infiltration + ventilation after quadrature.
     pub combined_flow_m3_s: f64,
-    /// Latent flow [m³/s] -- may differ from sensible flow when balanced ventilation
-    /// has different sensible/latent recovery efficiencies. Retained for diagnostic
-    /// inspection; the humidity solver uses m_dot_lat_kg_s directly.
-    #[allow(dead_code)]
-    pub latent_flow_m3_s: f64,
     /// Latent mass flow rate [kg/s] = rho * latent_flow_m3_s.
     /// Stored directly (not re-derived from volume flow × density) to avoid
     /// recomputing density in format_domain_update, which lacks env access.
@@ -187,21 +178,21 @@ pub(crate) fn apply_infiltration_and_ventilation(
                 .natural_ventilation
                 .as_ref()
                 .map(|nv| {
-                    natural_ventilation_flow_m3_s(
-                        nv.open_area_m2,
-                        zone.temperature_c,
-                        t_out,
-                        nv.t_base_c,
-                        w_out,
-                        nv.max_outdoor_humidity_ratio,
-                        env.weather.wind_speed_m_s,
-                        zone.volume_m3,
-                        nv.opening_azimuth_deg,
-                        env.weather.wind_dir_deg,
-                        nv.dh_m,
-                        nv.opening_type,
-                        nv.zone_height_m,
-                    )
+                    natural_ventilation_flow_m3_s(NaturalVentilationInputs {
+                        open_area_m2: nv.open_area_m2,
+                        t_zone_c: zone.temperature_c,
+                        t_outdoor_c: t_out,
+                        t_base_c: nv.t_base_c,
+                        outdoor_humidity_ratio: w_out,
+                        max_outdoor_humidity_ratio: nv.max_outdoor_humidity_ratio,
+                        wind_speed_m_s: env.weather.wind_speed_m_s,
+                        zone_volume_m3: zone.volume_m3,
+                        opening_azimuth_deg: nv.opening_azimuth_deg,
+                        wind_direction_deg: env.weather.wind_dir_deg,
+                        dh_m: nv.dh_m,
+                        opening_type: nv.opening_type,
+                        zone_height_m: nv.zone_height_m,
+                    })
                 })
                 .unwrap_or((0.0, 0.0, 0.0, 0.0))
         } else {
@@ -292,13 +283,11 @@ pub(crate) fn apply_infiltration_and_ventilation(
             zone: zone.id,
             h_inf_w_k: h_inf,
             t_forcing_c: t_out,
-            q_latent_w: q_latent,
             q_sensible_diagnostic_w: q_sensible_diagnostic,
             q_infiltration_w: q_infiltration_w_scaled,
             q_forced_vent_w: q_forced_vent_w_scaled,
             q_natural_vent_w: q_natural_vent_w_scaled,
             combined_flow_m3_s: sensible_flow_m3_s,
-            latent_flow_m3_s,
             m_dot_lat_kg_s: m_dot_lat,
             w_outdoor: w_out,
             raw_inf_m3_s: q_inf_m3_s,

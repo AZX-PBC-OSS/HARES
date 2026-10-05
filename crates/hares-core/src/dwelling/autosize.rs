@@ -31,6 +31,7 @@
 //!    50 gal tank, 4500 W element capacity.
 
 use hares_envelope::ThermalSolver;
+use hares_envelope::thermal_solver::SiteLocation;
 use hares_io::{
     Building, DesignConditions, EquipmentSpec,
     hpxml::{
@@ -453,9 +454,11 @@ pub fn autosize_equipment_capacities(
                     indoor_zone_id,
                     cooling_setpoint_c,
                     cooling_design_c,
-                    ctx.weather_lat,
-                    ctx.weather_lon,
-                    ctx.weather_elevation_m,
+                    SiteLocation {
+                        latitude_deg: ctx.weather_lat,
+                        longitude_deg: ctx.weather_lon,
+                        elevation_m: ctx.weather_elevation_m,
+                    },
                     internal_gains_w,
                 )
                 .map_err(|err| {
@@ -991,11 +994,21 @@ fn resolve_cooling_setpoint_c(spec: &EquipmentSpec, building: &Building) -> f64 
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use hares_envelope::thermal_solver::SiteLocation;
     use hares_envelope::{OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolverConfig};
     use hares_types::{EnvironmentState, FuelType, GridState, WeatherState, ZoneId, ZoneState};
     use nalgebra::DMatrix;
     use serde_json::{Map, Value};
     use std::collections::HashMap;
+
+    /// Denver site with zero elevation; the common solar autosize test input.
+    fn denver_site() -> SiteLocation {
+        SiteLocation {
+            latitude_deg: 39.74,
+            longitude_deg: -104.87,
+            elevation_m: 0.0,
+        }
+    }
 
     const ZONE: ZoneId = ZoneId(1);
     const UA: f64 = 20.0; // W/K
@@ -1519,9 +1532,7 @@ mod tests {
                 ZONE,
                 DEFAULT_COOLING_SETPOINT_C,
                 35.0,
-                0.0,
-                0.0,
-                0.0,
+                SiteLocation::default(),
                 internal_gains_w,
             )
             .unwrap()
@@ -1676,9 +1687,11 @@ mod tests {
                 ZONE,
                 DEFAULT_COOLING_SETPOINT_C,
                 35.0,
-                39.74, // Denver
-                -104.87,
-                1609.0,
+                SiteLocation {
+                    latitude_deg: 39.74, // Denver
+                    longitude_deg: -104.87,
+                    elevation_m: 1609.0,
+                },
                 0.0, // zero internal gains for baseline
             )
             .unwrap()
@@ -1920,7 +1933,13 @@ mod tests {
             .autosize_capacity(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0)
             .abs();
         let solar = thermal
-            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0, 0.0)
+            .autosize_capacity_cooling(
+                ZONE,
+                DEFAULT_COOLING_SETPOINT_C,
+                35.0,
+                SiteLocation::default(),
+                0.0,
+            )
             .unwrap()
             .abs();
 
@@ -2440,7 +2459,7 @@ mod tests {
         let thermal = build_1r1c_solver(&env, target + 2.0);
 
         let peak = thermal
-            .autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0)
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, SiteLocation::default(), 0.0)
             .unwrap();
         assert!(peak.is_finite(), "cooling peak load must be finite");
         assert!(peak >= 0.0, "cooling capacity must be non-negative");
@@ -2494,7 +2513,7 @@ mod tests {
             .autosize_capacity(ZONE, target, design_outdoor)
             .abs();
         let design_day_capacity = thermal
-            .autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0)
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, SiteLocation::default(), 0.0)
             .unwrap();
 
         // The design-day method uses a diurnal range of 11.7 °C, so the
@@ -2572,7 +2591,7 @@ mod tests {
 
         // Cooling
         let c = thermal
-            .autosize_design_day_cooling(ZONE, 24.0, 35.0, 0.0, 0.0, 0.0, 0.0)
+            .autosize_design_day_cooling(ZONE, 24.0, 35.0, SiteLocation::default(), 0.0)
             .unwrap();
         assert!(c.is_finite(), "cooling design-day must return finite value");
         assert!(c >= 0.0, "cooling capacity must be non-negative");
@@ -2599,28 +2618,12 @@ mod tests {
         let (thermal, _win_id) = build_1r1c_solver_with_window(&env_west, target + 2.0, 270.0);
 
         let noon_only = thermal
-            .autosize_capacity_cooling(
-                ZONE,
-                target,
-                design_outdoor,
-                39.74, // Denver
-                -104.87,
-                0.0,
-                0.0,
-            )
+            .autosize_capacity_cooling(ZONE, target, design_outdoor, denver_site(), 0.0)
             .unwrap()
             .abs();
 
         let diurnal = thermal
-            .autosize_design_day_cooling(
-                ZONE,
-                target,
-                design_outdoor,
-                39.74, // Denver
-                -104.87,
-                0.0,
-                0.0,
-            )
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, denver_site(), 0.0)
             .unwrap()
             .abs();
 
@@ -2664,28 +2667,12 @@ mod tests {
         let (thermal, _win_id) = build_1r1c_solver_with_window(&env_south, target + 2.0, 180.0);
 
         let noon_only = thermal
-            .autosize_capacity_cooling(
-                ZONE,
-                target,
-                design_outdoor,
-                39.74, // Denver
-                -104.87,
-                0.0,
-                0.0,
-            )
+            .autosize_capacity_cooling(ZONE, target, design_outdoor, denver_site(), 0.0)
             .unwrap()
             .abs();
 
         let diurnal = thermal
-            .autosize_design_day_cooling(
-                ZONE,
-                target,
-                design_outdoor,
-                39.74, // Denver
-                -104.87,
-                0.0,
-                0.0,
-            )
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, denver_site(), 0.0)
             .unwrap()
             .abs();
 
@@ -2723,15 +2710,7 @@ mod tests {
         let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 26.0, 180.0);
 
         let zero_gains_capacity = thermal
-            .autosize_capacity_cooling(
-                ZONE,
-                DEFAULT_COOLING_SETPOINT_C,
-                35.0,
-                39.74, // Denver
-                -104.87,
-                0.0,
-                0.0,
-            )
+            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, denver_site(), 0.0)
             .unwrap()
             .abs();
 
@@ -2740,9 +2719,7 @@ mod tests {
                 ZONE,
                 DEFAULT_COOLING_SETPOINT_C,
                 35.0,
-                39.74, // Denver
-                -104.87,
-                0.0,
+                denver_site(),
                 500.0, // 500 W internal gains
             )
             .unwrap()
@@ -2779,7 +2756,13 @@ mod tests {
         // Cooling-specific method with zero internal gains and zero solar
         // should match the DC-gain baseline.
         let cooling_zero_gains = thermal
-            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0, 0.0)
+            .autosize_capacity_cooling(
+                ZONE,
+                DEFAULT_COOLING_SETPOINT_C,
+                35.0,
+                SiteLocation::default(),
+                0.0,
+            )
             .unwrap()
             .abs();
 
@@ -2914,10 +2897,16 @@ mod tests {
         let thermal = build_1r1c_solver(&env, target + 2.0);
 
         let zero_gains = thermal
-            .autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0)
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, SiteLocation::default(), 0.0)
             .unwrap();
         let with_gains = thermal
-            .autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 500.0)
+            .autosize_design_day_cooling(
+                ZONE,
+                target,
+                design_outdoor,
+                SiteLocation::default(),
+                500.0,
+            )
             .unwrap();
 
         assert!(

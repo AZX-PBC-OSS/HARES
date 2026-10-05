@@ -72,6 +72,27 @@ impl DemandWindow {
     }
 }
 
+/// One per-step set of billing inputs, grouped to keep the
+/// [`BillingState::update`] hot-path signature readable. All fields are
+/// copied, so passing by value adds no allocation.
+#[derive(Clone, Copy, Debug)]
+pub struct BillingStep {
+    /// Net metered power this step [kW] (export negative).
+    pub net_power_kw: f64,
+    /// Step length [s].
+    pub dt_seconds: f64,
+    /// Import price this step [USD/kWh].
+    pub import_price: f64,
+    /// Export price this step [USD/kWh].
+    pub export_price: f64,
+    /// Time-of-use period index for energy/peak accounting.
+    pub period_idx: u16,
+    /// Demand-window TOU period index.
+    pub demand_period_idx: u16,
+    /// EV import energy this step [kWh], tracked separately for CPP events.
+    pub ev_import_kwh: f64,
+}
+
 pub struct BillingState {
     pub(crate) period_start: DateTime<Tz>,
     pub(crate) period_end: DateTime<Tz>,
@@ -181,21 +202,19 @@ impl BillingState {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    // Why: clippy::too_many_arguments — update() is the single hot-path
-    // accumulator for all per-step billing inputs (power, prices, period IDs,
-    // EV kWh). Splitting into multiple calls or a parameter struct would add
-    // heap allocation in the ~525k-call/year simulation loop.
-    pub fn update(
-        &mut self,
-        net_power_kw: f64,
-        dt_seconds: f64,
-        import_price: f64,
-        export_price: f64,
-        period_idx: u16,
-        demand_period_idx: u16,
-        ev_import_kwh: f64,
-    ) {
+    /// One per-step set of billing inputs for [`BillingState::update`],
+    /// grouped so the hot-path signature stays readable. `Copy`, so passing
+    /// by value adds no allocation in the ~525k-call/year simulation loop.
+    pub fn update(&mut self, step: BillingStep) {
+        let BillingStep {
+            net_power_kw,
+            dt_seconds,
+            import_price,
+            export_price,
+            period_idx,
+            demand_period_idx,
+            ev_import_kwh,
+        } = step;
         let import_kwh = net_power_kw.max(0.0) * dt_seconds / 3600.0;
         let export_kwh = (-net_power_kw).max(0.0) * dt_seconds / 3600.0;
         self.cumulative_import_kwh += import_kwh;
@@ -406,6 +425,24 @@ pub fn compute_tiered_energy_cost(
     cost
 }
 
+/// The charge and metering inputs to [`BillingPeriodSummary::new`]; the
+/// net bill is derived from these.
+#[derive(Clone, Copy, Debug)]
+pub struct BillingPeriodCharges {
+    pub energy_charge_usd: f64,
+    pub demand_charge_usd: f64,
+    pub fixed_charge_usd: f64,
+    pub export_credit_usd: f64,
+    /// Minimum monthly charge, when the tariff defines one.
+    pub minimum_charge: Option<f64>,
+    /// Whether `minimum_charge` floors the metered charges before export
+    /// credit (`true`) or the net bill after credit (`false`).
+    pub minimum_charge_excludes_export: bool,
+    pub peak_demand_kw: f64,
+    pub total_import_kwh: f64,
+    pub total_export_kwh: f64,
+}
+
 pub struct BillingPeriodSummary {
     pub period_start: DateTime<Tz>,
     pub period_end: DateTime<Tz>,
@@ -420,20 +457,22 @@ pub struct BillingPeriodSummary {
 }
 
 impl BillingPeriodSummary {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         period_start: DateTime<Tz>,
         period_end: DateTime<Tz>,
-        energy_charge_usd: f64,
-        demand_charge_usd: f64,
-        fixed_charge_usd: f64,
-        export_credit_usd: f64,
-        minimum_charge: Option<f64>,
-        minimum_charge_excludes_export: bool,
-        peak_demand_kw: f64,
-        total_import_kwh: f64,
-        total_export_kwh: f64,
+        charges: BillingPeriodCharges,
     ) -> Self {
+        let BillingPeriodCharges {
+            energy_charge_usd,
+            demand_charge_usd,
+            fixed_charge_usd,
+            export_credit_usd,
+            minimum_charge,
+            minimum_charge_excludes_export,
+            peak_demand_kw,
+            total_import_kwh,
+            total_export_kwh,
+        } = charges;
         let metered = energy_charge_usd + demand_charge_usd + fixed_charge_usd;
         let net_bill_usd = match minimum_charge {
             Some(min) if minimum_charge_excludes_export => {
@@ -489,6 +528,24 @@ mod tests {
             .unwrap()
     }
 
+    /// A `BillingStep` on TOU period 0 with no EV import; the common test case.
+    fn step(
+        net_power_kw: f64,
+        dt_seconds: f64,
+        import_price: f64,
+        export_price: f64,
+    ) -> BillingStep {
+        BillingStep {
+            net_power_kw,
+            dt_seconds,
+            import_price,
+            export_price,
+            period_idx: 0,
+            demand_period_idx: 0,
+            ev_import_kwh: 0.0,
+        }
+    }
+
     #[test]
     fn demand_window_rolling_average() {
         let mut w = DemandWindow::new(3);
@@ -514,7 +571,7 @@ mod tests {
         // 15-min window with 5-min interval = 3 samples
         // Push sequence: 2, 4, 6 -> avg 4.0, then 8, 10, 12 -> avg 10.0
         for &kw in &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0] {
-            state.update(kw, 300.0, 0.0, 0.0, 0, 0, 0.0);
+            state.update(step(kw, 300.0, 0.0, 0.0));
         }
         assert!((state.peak_demand_kw - 10.0).abs() < 1e-10);
     }
@@ -524,7 +581,7 @@ mod tests {
         let mut state =
             BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0);
         // Constant 1 kW for 1 hour (one step of 3600s)
-        state.update(1.0, 3600.0, 0.10, 0.0, 0, 0, 0.0);
+        state.update(step(1.0, 3600.0, 0.10, 0.0));
         assert!((state.cumulative_import_kwh - 1.0).abs() < 1e-10);
         assert!((state.cumulative_export_kwh).abs() < 1e-10);
         assert!((state.cumulative_energy_cost_usd - 0.10).abs() < 1e-10);
@@ -535,7 +592,7 @@ mod tests {
         let mut state =
             BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0);
         // Constant -2 kW for 1 hour
-        state.update(-2.0, 3600.0, 0.10, 0.05, 0, 0, 0.0);
+        state.update(step(-2.0, 3600.0, 0.10, 0.05));
         assert!((state.cumulative_import_kwh).abs() < 1e-10);
         assert!((state.cumulative_export_kwh - 2.0).abs() < 1e-10);
         assert!((state.cumulative_export_credit_usd - 0.10).abs() < 1e-10);
@@ -559,7 +616,7 @@ mod tests {
             1, // need at least 1 month lookback to retain prior peak
             0,
         );
-        state.update(5.0, 3600.0, 0.10, 0.0, 0, 0, 0.0);
+        state.update(step(5.0, 3600.0, 0.10, 0.0));
         assert!(state.cumulative_import_kwh > 0.0);
         assert!(state.peak_demand_kw > 0.0);
 
@@ -590,7 +647,7 @@ mod tests {
         // Simulate a high prior peak
         state.prior_peaks_kw.push_back(10.0);
         // Current peak is only 2 kW
-        state.update(2.0, 3600.0, 0.0, 0.0, 0, 0, 0.0);
+        state.update(step(2.0, 3600.0, 0.0, 0.0));
         let effective = state.effective_peak_with_ratchet(&Some(ratchet));
         // 0.85 * 10.0 = 8.5 > 2.0, so ratchet applies
         assert!((effective - 8.5).abs() < 1e-10);
@@ -612,7 +669,7 @@ mod tests {
         );
         state.prior_peaks_kw.push_back(5.0);
         for _ in 0..3 {
-            state.update(10.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
+            state.update(step(10.0, 300.0, 0.0, 0.0));
         }
         let effective = state.effective_peak_with_ratchet(&Some(ratchet));
         // 0.85 * 5.0 = 4.25 < 10.0, so current peak wins
@@ -663,7 +720,7 @@ mod tests {
         }
         // Lookback 3 → considers [20.0, 25.0, 30.0], max = 30.0
         // Effective = max(2.0, 0.85 * 30.0) = 25.5
-        state.update(2.0, 3600.0, 0.0, 0.0, 0, 0, 0.0);
+        state.update(step(2.0, 3600.0, 0.0, 0.0));
         let effective = state.effective_peak_with_ratchet(&Some(ratchet));
         assert!((effective - 25.5).abs() < 1e-10);
     }
@@ -737,7 +794,15 @@ mod tests {
         }
 
         // Current period: push a single 5 kW reading (instant window, 1-sample average = 5.0).
-        state.update(5.0, 3600.0, 0.0, 0.0, 1, 1, 0.0);
+        state.update(BillingStep {
+            net_power_kw: 5.0,
+            dt_seconds: 3600.0,
+            import_price: 0.0,
+            export_price: 0.0,
+            period_idx: 1,
+            demand_period_idx: 1,
+            ev_import_kwh: 0.0,
+        });
         assert!((state.period_peak_demand_kw[1] - 5.0).abs() < 1e-10);
 
         // effective_peak_for_period(1) = max(5.0, 0.85 * 20.0) = max(5.0, 17.0) = 17.0
@@ -783,20 +848,39 @@ mod tests {
         );
     }
 
+    /// A `BillingPeriodCharges` with the given charge components; metering
+    /// totals are fixed test values.
+    fn charges(
+        energy_charge_usd: f64,
+        demand_charge_usd: f64,
+        fixed_charge_usd: f64,
+        export_credit_usd: f64,
+        minimum_charge: Option<f64>,
+        minimum_charge_excludes_export: bool,
+    ) -> BillingPeriodCharges {
+        BillingPeriodCharges {
+            energy_charge_usd,
+            demand_charge_usd,
+            fixed_charge_usd,
+            export_credit_usd,
+            minimum_charge,
+            minimum_charge_excludes_export,
+            peak_demand_kw: 5.0,
+            total_import_kwh: 500.0,
+            total_export_kwh: 400.0,
+        }
+    }
+
     #[test]
     fn billing_period_summary_net_bill() {
         let summary = BillingPeriodSummary::new(
             make_dt(2025, 1, 1),
             make_dt(2025, 2, 1),
-            50.0,
-            25.0,
-            12.50,
-            5.0,
-            None,
-            true,
-            8.0,
-            500.0,
-            100.0,
+            BillingPeriodCharges {
+                peak_demand_kw: 8.0,
+                total_export_kwh: 100.0,
+                ..charges(50.0, 25.0, 12.50, 5.0, None, true)
+            },
         );
         let expected_net =
             summary.energy_charge_usd + summary.demand_charge_usd + summary.fixed_charge_usd
@@ -876,15 +960,8 @@ mod tests {
         let summary = BillingPeriodSummary::new(
             make_dt(2025, 1, 1),
             make_dt(2025, 2, 1),
-            20.0, // energy
-            5.0,  // demand
-            10.0, // fixed
-            30.0, // export credit
-            Some(50.0),
-            true, // minimum_charge_excludes_export
-            5.0,
-            500.0,
-            400.0,
+            // excludes_export=true: net = max(35, 50) - 30 = 50 - 30 = $20
+            charges(20.0, 5.0, 10.0, 30.0, Some(50.0), true),
         );
         assert!(
             (summary.net_bill_usd - 20.0).abs() < 1e-10,
@@ -900,15 +977,8 @@ mod tests {
         let summary = BillingPeriodSummary::new(
             make_dt(2025, 1, 1),
             make_dt(2025, 2, 1),
-            20.0,
-            5.0,
-            10.0,
-            30.0,
-            Some(50.0),
-            false,
-            5.0,
-            500.0,
-            400.0,
+            // excludes_export=false: net = max(35 - 30, 50) = $50
+            charges(20.0, 5.0, 10.0, 30.0, Some(50.0), false),
         );
         assert!(
             (summary.net_bill_usd - 50.0).abs() < 1e-10,
@@ -960,15 +1030,15 @@ mod tests {
         let mut state =
             BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0);
         // Push a spike in the first post-reset step (count=1, window not full).
-        state.update(100.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
+        state.update(step(100.0, 300.0, 0.0, 0.0));
         assert!(
             state.peak_demand_kw.abs() < 1e-10,
             "spike in partial window should not set peak; got {}",
             state.peak_demand_kw
         );
         // Push two more normal readings to fill the window.
-        state.update(1.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
-        state.update(1.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
+        state.update(step(1.0, 300.0, 0.0, 0.0));
+        state.update(step(1.0, 300.0, 0.0, 0.0));
         // Window now contains [100, 1, 1] → avg = 34.0. The spike is part of the
         // full-window average, so peak reflects the 15-min sliding window average.
         // Window [100, 1, 1] → (100 + 1 + 1) / 3 = 34.0.
@@ -986,7 +1056,7 @@ mod tests {
             BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0);
         // Push three reads of 10 kW → window fills, avg = 10, peak = 10.
         for _ in 0..3 {
-            state.update(10.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
+            state.update(step(10.0, 300.0, 0.0, 0.0));
         }
         assert!(
             (state.peak_demand_kw - 10.0).abs() < 1e-10,
@@ -995,7 +1065,7 @@ mod tests {
         );
         // Push three more reads of 20 kW → window fills with [20,20,20], peak = 20.
         for _ in 0..3 {
-            state.update(20.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
+            state.update(step(20.0, 300.0, 0.0, 0.0));
         }
         assert!(
             (state.peak_demand_kw - 20.0).abs() < 1e-10,

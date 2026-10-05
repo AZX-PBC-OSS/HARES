@@ -55,7 +55,6 @@ duration_s = 600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -252,7 +251,6 @@ fn nonthermal_equipment_sees_predictor_consistent_zone_temps() {
 /// ordering claim was audited and found incorrect. The substantive check is
 /// the code reading recorded in the audit section.
 #[test]
-#[allow(clippy::assertions_on_constants)]
 fn ordering_claim_is_factually_incorrect() {
     // The ticket states:
     //   "Non-thermal equipment step (mod.rs:2168) runs AFTER apply_thermal_update_to_zones
@@ -267,12 +265,9 @@ fn ordering_claim_is_factually_incorrect() {
     // Non-thermal equipment sees the SAME prior-step zone temperatures as thermal
     // equipment — the ordering is predictor-consistent.
     //
-    // This test passes unconditionally; it serves as a permanent regression
-    // marker that the ordering was audited on 2026-05-21 and found correct.
-    assert!(
-        2168 < 2240,
-        "non-thermal step line must precede apply_thermal_update line"
-    );
+    // This test passes unconditionally (no runtime assertion is possible on
+    // source line numbers); it serves as a permanent regression marker that
+    // the ordering was audited on 2026-05-21 and found correct.
 }
 
 /// Defect 2 (mitigated): The humidity solver w_old fallback at

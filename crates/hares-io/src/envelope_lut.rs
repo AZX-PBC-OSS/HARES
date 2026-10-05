@@ -82,11 +82,6 @@ struct MaterialRow {
 struct BoundaryRow {
     #[serde(rename = "Boundary Name")]
     boundary_name: String,
-    #[serde(rename = "Boundary Label")]
-    #[allow(dead_code)]
-    // Why: field must exist for serde to match the CSV column header;
-    // the label is not used in the Rust lookup but is part of the OCHRE schema.
-    boundary_label: String,
     #[serde(rename = "Exterior Zone Label")]
     exterior_zone_label: String,
     #[serde(rename = "Interior Zone Label")]

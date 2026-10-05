@@ -33,7 +33,8 @@ use super::constants::{
     MSHP_PAN_HEATER_DEFAULT_KW, MSHP_PAN_HEATER_DEFAULT_TEMP_C,
 };
 use super::defrost::{
-    DefrostConfig, DefrostControl, DefrostCycleTracker, DefrostStrategy, evaluate_defrost,
+    DefrostConfig, DefrostControl, DefrostCycleTracker, DefrostInputs, DefrostStrategy,
+    evaluate_defrost,
 };
 use super::heater_config::{default_heater_telemetry, heater_telemetry_fields};
 use crate::config::constructor_equipment_id;
@@ -1251,13 +1252,15 @@ impl HeatPumpHeaterCore {
             let rtf = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
             let defrost = evaluate_defrost(
                 &self.defrost_config,
-                env.weather.outdoor_temp_c,
-                env.weather.outdoor_humidity_ratio,
-                pressure_pa,
-                hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa),
-                max_capacity_w,
-                current_cap,
-                rtf,
+                DefrostInputs {
+                    outdoor_db_c: env.weather.outdoor_temp_c,
+                    outdoor_humidity_ratio: env.weather.outdoor_humidity_ratio,
+                    pressure_pa,
+                    inlet_wb_c: hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa),
+                    rated_capacity_w: max_capacity_w,
+                    current_capacity_w: current_cap,
+                    runtime_fraction: rtf,
+                },
             );
             (defrost.active, defrost.time_fraction)
         } else {
@@ -1897,13 +1900,15 @@ impl HeatPumpHeaterCore {
                 .max(0.0);
             let defrost = evaluate_defrost(
                 &self.defrost_config,
-                env.weather.outdoor_temp_c,
-                env.weather.outdoor_humidity_ratio,
-                pressure_pa,
-                hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa),
-                max_capacity_w,
-                hp_capacity_w,
-                plr,
+                DefrostInputs {
+                    outdoor_db_c: env.weather.outdoor_temp_c,
+                    outdoor_humidity_ratio: env.weather.outdoor_humidity_ratio,
+                    pressure_pa,
+                    inlet_wb_c: hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa),
+                    rated_capacity_w: max_capacity_w,
+                    current_capacity_w: hp_capacity_w,
+                    runtime_fraction: plr,
+                },
             );
 
             if defrost.active {

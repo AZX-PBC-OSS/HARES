@@ -365,7 +365,7 @@ pub fn run_equipment_crc_corruption_regression() -> Result<(), Vec<String>> {
 /// a dwelling reconstructed from a checkpoint produces identical simulation
 /// output to an uninterrupted reference run.
 pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
-    use hares_core::actors::{self, Occupant, Presence};
+    use hares_core::actors::{self, BmsParams, Occupant, Presence};
 
     let schedule_path = helpers::unique_temp_path("hares-regr-actor-ckpt-sched", "csv");
     let weather_path = helpers::unique_temp_path("hares-regr-actor-ckpt-weather", "epw");
@@ -408,38 +408,42 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         .add_actor(Box::new(hares_core::actors::EvDriverActor::new(
             "TestEV",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            None,
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            30.0,
-            0.8,
-            7.2,
+            hares_core::actors::EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: None,
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 30.0,
+                away_charge_fraction: 0.8,
+                away_charge_power_kw: 7.2,
+            },
             hares_core::ChaCha8Rng::from_seed([42u8; 32]),
         )))
         .unwrap();
     dwelling_ref
         .add_actor(Box::new(hares_core::actors::BatteryManagementActor::new(
             "TestBattery",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.9,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+            BmsParams {
+                bms_mode: BmsMode::SelfConsumption {
+                    min_soc: 0.1,
+                    max_soc: 0.9,
+                    solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
+                },
+                grid_export_rule: GridExportRule::Unrestricted,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+                price_schedule: None,
+                steps_per_day: 1440,
+                min_dwell_steps: 0,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            1440,
-            0,
         )))
         .unwrap();
 
@@ -479,38 +483,42 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         .add_actor(Box::new(hares_core::actors::EvDriverActor::new(
             "TestEV",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            None,
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            30.0,
-            0.8,
-            7.2,
+            hares_core::actors::EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: None,
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 30.0,
+                away_charge_fraction: 0.8,
+                away_charge_power_kw: 7.2,
+            },
             hares_core::ChaCha8Rng::from_seed([42u8; 32]),
         )))
         .unwrap();
     dwelling_a
         .add_actor(Box::new(hares_core::actors::BatteryManagementActor::new(
             "TestBattery",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.9,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+            BmsParams {
+                bms_mode: BmsMode::SelfConsumption {
+                    min_soc: 0.1,
+                    max_soc: 0.9,
+                    solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
+                },
+                grid_export_rule: GridExportRule::Unrestricted,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+                price_schedule: None,
+                steps_per_day: 1440,
+                min_dwell_steps: 0,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            1440,
-            0,
         )))
         .unwrap();
 
@@ -583,38 +591,42 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         .add_actor(Box::new(hares_core::actors::EvDriverActor::new(
             "TestEV",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            None,
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            30.0,
-            0.8,
-            7.2,
+            hares_core::actors::EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: None,
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 30.0,
+                away_charge_fraction: 0.8,
+                away_charge_power_kw: 7.2,
+            },
             hares_core::ChaCha8Rng::from_seed([42u8; 32]),
         )))
         .unwrap();
     dwelling_b
         .add_actor(Box::new(hares_core::actors::BatteryManagementActor::new(
             "TestBattery",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.9,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+            BmsParams {
+                bms_mode: BmsMode::SelfConsumption {
+                    min_soc: 0.1,
+                    max_soc: 0.9,
+                    solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
+                },
+                grid_export_rule: GridExportRule::Unrestricted,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+                price_schedule: None,
+                steps_per_day: 1440,
+                min_dwell_steps: 0,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            1440,
-            0,
         )))
         .unwrap();
 

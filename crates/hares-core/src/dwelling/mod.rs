@@ -82,7 +82,9 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
 
-use crate::actors::{BatteryManagementActor, EvDriverActor, SolverFeedbackActor};
+use crate::actors::{
+    BatteryManagementActor, BmsParams, EvDriverActor, EvDriverParams, SolverFeedbackActor,
+};
 use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
 #[cfg(feature = "profiling")]
@@ -233,18 +235,6 @@ pub struct DwellingConfig {
     /// document contains missing or invalid values.
     /// `None` for direct HPXML use where no external metadata is available.
     pub patches: Option<hares_io::HpxmlDataPatches>,
-}
-
-/// Snapshot of accumulated port totals at a stage boundary.
-#[cfg(debug_assertions)]
-#[derive(Debug, Clone)]
-struct StageSnapshot {
-    // Why: field is written in debug_assertions builds to snapshot port
-    // state at each stage boundary; not yet consumed by any assertion,
-    // retained for future invariant checks once the verification path is
-    // added.
-    #[allow(dead_code)]
-    ports: PortSlots,
 }
 
 /// Wall-clock breakdown of one dwelling's `run_timestep` work, behind the
@@ -1725,8 +1715,6 @@ pub struct Dwelling {
     /// Pre-allocated DomainUpdate buffers for custom domain solvers, one per solver.
     custom_update_bufs: Vec<hares_types::DomainUpdate>,
     #[cfg(debug_assertions)]
-    stage_snapshot: Option<StageSnapshot>,
-    #[cfg(debug_assertions)]
     test_panic_on_step: bool,
     #[cfg(debug_assertions)]
     test_assert_panic_on_step: bool,
@@ -1935,6 +1923,15 @@ struct InterestFilterState<'a> {
     equipment: &'a [Box<dyn Equipment>],
 }
 
+/// Borrowed paths of the ResStock-style input files for the
+/// [`Dwelling::from_hpxml`] constructor family, grouped so the constructors
+/// take one coherent source bundle.
+pub struct HpxmlInputs<'a> {
+    pub hpxml_path: &'a Path,
+    pub schedule_path: &'a Path,
+    pub weather_path: &'a Path,
+}
+
 impl Dwelling {
     /// Builds a dwelling from HPXML + schedule/weather paths and simulation config.
     pub fn from_config(config: DwellingConfig) -> Result<Self> {
@@ -1976,9 +1973,11 @@ impl Dwelling {
         overrides: Option<Value>,
     ) -> Result<Self> {
         Self::from_hpxml_with_write_output(
-            hpxml_path,
-            schedule_path,
-            weather_path,
+            HpxmlInputs {
+                hpxml_path,
+                schedule_path,
+                weather_path,
+            },
             start_time,
             time_res,
             duration,
@@ -1989,20 +1988,19 @@ impl Dwelling {
 
     /// [`Self::from_hpxml`] with an optional output-write override, for tests
     /// that exercise this constructor's defaults without paying for a file.
-    // Why allow: the signature mirrors from_hpxml's seven parameters plus the
-    // override; a builder would obscure the one-to-one correspondence with the
-    // constructor the tests must exercise.
-    #[allow(clippy::too_many_arguments)]
     pub fn from_hpxml_with_write_output(
-        hpxml_path: &Path,
-        schedule_path: &Path,
-        weather_path: &Path,
+        inputs: HpxmlInputs<'_>,
         start_time: DateTime<FixedOffset>,
         time_res: Duration,
         duration: Duration,
         overrides: Option<Value>,
         write_output_override: Option<bool>,
     ) -> Result<Self> {
+        let HpxmlInputs {
+            hpxml_path,
+            schedule_path,
+            weather_path,
+        } = inputs;
         let sim_config = SimulationConfig {
             start_time,
             duration,
@@ -2917,8 +2915,6 @@ fn build_from_blueprint_inner(
         electrical_update_buf: hares_types::DomainUpdate::empty(hares_types::ELECTRICAL),
         fluid_update_buf: hares_types::DomainUpdate::empty(hares_types::FLUID),
         custom_update_bufs: Vec::new(),
-        #[cfg(debug_assertions)]
-        stage_snapshot: None,
         equipment_column_map,
         end_use_aggregate_indices,
         output_column_index,
@@ -3024,22 +3020,18 @@ fn build_from_blueprint_inner(
         let rng_stream_before = dwelling.rng.get_stream();
         let rng_word_pos_before = dwelling.rng.get_word_pos();
 
-        #[allow(
-            unused_variables,
-            reason = "iterations is logged in the observe feature block below; #[cfg(feature = \"observe\")] gates the only use site"
-        )]
-        let iterations = match dwelling.run_warmup_converged(0.5, 25) {
-            Ok(iterations) => iterations,
-            Err(err) => {
-                // The dwelling is about to be dropped carrying the
-                // accumulated warning log; emit it so this failure carries
-                // the context that led here.
-                for entry in dwelling.take_warnings() {
-                    tracing::warn!("{entry}");
-                }
-                return Err(err);
+        let warmup_result = dwelling.run_warmup_converged(0.5, 25);
+        if let Err(err) = warmup_result {
+            // The dwelling is about to be dropped carrying the
+            // accumulated warning log; emit it so this failure carries
+            // the context that led here.
+            for entry in dwelling.take_warnings() {
+                tracing::warn!("{entry}");
             }
-        };
+            return Err(err);
+        }
+        #[cfg(feature = "observe")]
+        let iterations = warmup_result.expect("warmup just returned Ok");
 
         #[cfg(feature = "observe")]
         let rng_word_pos_after_warmup = dwelling.rng.get_word_pos();
@@ -3059,9 +3051,6 @@ fn build_from_blueprint_inner(
                 "warmup complete; RNG restored for production-phase reproducibility"
             );
         }
-
-        // Debug-build check: restates the restore above (the restore is
-        // unconditional), deleted.
 
         clock = SimClock::new(
             local_start,
@@ -5455,10 +5444,7 @@ impl Dwelling {
         // reflect simulation progress.  The value is intentionally discarded;
         // stochastic components use independent sub-RNGs derived from the
         // dwelling RNG's seed via stream partitioning.
-        #[allow(
-            unused_variables,
-            reason = "rng_word_pos_before is only read inside the cfg(debug_assertions) block below"
-        )]
+        #[cfg(debug_assertions)]
         let rng_word_pos_before = self.rng.get_word_pos();
         let _ = advance_dwelling_rng(&mut self.rng);
 
@@ -6265,13 +6251,6 @@ impl Dwelling {
         }
         self.health.curve_index_clamps += step_curve_index_clamps;
 
-        #[cfg(debug_assertions)]
-        {
-            self.stage_snapshot = Some(StageSnapshot {
-                ports: self.ports.clone(),
-            });
-        }
-
         // Step 3c: propagate per-timestep ventilation recovery effectiveness
         // from equipment to the thermal solver config.  The Ventilation equipment
         // computes effective sensible/latent effectiveness accounting for bypass
@@ -6408,10 +6387,12 @@ impl Dwelling {
                 &self.electrical_update_buf,
                 &self.fluid_update_buf,
                 &self.thermal_solver,
-                zip_scale,
-                port_load_raw_kw,
-                port_load_adj_kw,
-                residual,
+                observer_capture::PortBalance {
+                    zip_load_scale: zip_scale,
+                    port_load_raw_kw,
+                    port_load_adjusted_kw: port_load_adj_kw,
+                    residual_kw: residual,
+                },
             ));
         }
 
@@ -7859,13 +7840,15 @@ pub(crate) fn build_actors_from_seeds(
 
                 let actor = BatteryManagementActor::new(
                     &name,
-                    bms_mode,
-                    grid_export_rule,
-                    max_charge_kw,
-                    max_discharge_kw,
-                    price_schedule.clone(),
-                    steps_per_day,
-                    min_dwell_steps,
+                    BmsParams {
+                        bms_mode,
+                        grid_export_rule,
+                        max_charge_kw,
+                        max_discharge_kw,
+                        price_schedule: price_schedule.clone(),
+                        steps_per_day,
+                        min_dwell_steps,
+                    },
                 );
                 let mut actor = actor;
                 actor.resolve_equipment_id(equipment_id_by_name);
@@ -7923,20 +7906,22 @@ pub(crate) fn build_actors_from_seeds(
                 let mut actor = EvDriverActor::new(
                     &format!("EvDriver:{name}"),
                     &name,
-                    strategy,
-                    plug_in_policy,
-                    ScheduleSource::Constant(30.0),
-                    ScheduleSource::Constant(480.0),
-                    ScheduleSource::Constant(600.0),
-                    None,
-                    0.8,
-                    fuel_economy_kwh_per_mi,
-                    capacity_kwh,
-                    max_charge_kw,
-                    30.0,
-                    20.0,
-                    0.0,
-                    6.6,
+                    EvDriverParams {
+                        strategy,
+                        plug_in_policy,
+                        daily_drive_miles: ScheduleSource::Constant(30.0),
+                        departure_time: ScheduleSource::Constant(480.0),
+                        trip_duration: ScheduleSource::Constant(600.0),
+                        arrival_time: None,
+                        event_day_ratio: 0.8,
+                        fuel_economy_kwh_per_mi,
+                        capacity_kwh,
+                        max_charge_kw,
+                        average_speed_mph: 30.0,
+                        range_anxiety_miles: 20.0,
+                        away_charge_fraction: 0.0,
+                        away_charge_power_kw: 6.6,
+                    },
                     ev_seed,
                 );
 
@@ -9974,7 +9959,6 @@ duration_s = 600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -10042,7 +10026,6 @@ duration_s = 600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -13264,7 +13247,6 @@ duration_s = 120
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -13349,7 +13331,6 @@ duration_s = 120
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -14098,20 +14079,24 @@ master_seed = 0
             Box::new(EvDriverActor::new(
                 "EvDriver:EV1",
                 "EV1",
-                hares_types::equipment::ChargingStrategy::Immediate { target_soc: 0.9 },
-                hares_types::PlugInPolicy::Always,
-                ScheduleSource::Constant(30.0),
-                ScheduleSource::Constant(480.0),
-                ScheduleSource::Constant(600.0),
-                None,
-                0.8,
-                0.3,
-                60.0,
-                7.2,
-                30.0,
-                20.0,
-                0.0,
-                6.6,
+                EvDriverParams {
+                    strategy: hares_types::equipment::ChargingStrategy::Immediate {
+                        target_soc: 0.9,
+                    },
+                    plug_in_policy: hares_types::PlugInPolicy::Always,
+                    daily_drive_miles: ScheduleSource::Constant(30.0),
+                    departure_time: ScheduleSource::Constant(480.0),
+                    trip_duration: ScheduleSource::Constant(600.0),
+                    arrival_time: None,
+                    event_day_ratio: 0.8,
+                    fuel_economy_kwh_per_mi: 0.3,
+                    capacity_kwh: 60.0,
+                    max_charge_kw: 7.2,
+                    average_speed_mph: 30.0,
+                    range_anxiety_miles: 20.0,
+                    away_charge_fraction: 0.0,
+                    away_charge_power_kw: 6.6,
+                },
                 ChaCha8Rng::seed_from_u64(42),
             )) as Box<dyn crate::Actor>
         };
@@ -14279,7 +14264,6 @@ duration_s = 600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -15583,7 +15567,6 @@ initialization_duration_s = 86400
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -15678,7 +15661,6 @@ duration_s = 600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -15790,7 +15772,6 @@ duration_s = 120
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -15899,7 +15880,6 @@ duration_s = 120
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -16082,7 +16062,6 @@ duration_s = 600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -16258,7 +16237,6 @@ duration_s = 600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -16387,7 +16365,6 @@ duration_s = {}
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -17067,7 +17044,6 @@ duration_s = 120
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 [materials]
 wall_r_value_m2_k_w = 2.8
 [hvac]
@@ -17138,7 +17114,6 @@ duration_s = 120
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 [materials]
 wall_r_value_m2_k_w = 2.8
 [hvac]
