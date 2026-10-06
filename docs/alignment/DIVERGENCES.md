@@ -491,3 +491,51 @@ justification → measured impact → pinning tests.
 - **Pinning tests:** `equipment_zone_resolution::the_equivalent_battery_holds_the_multiplied_zone_capacitance`
   (a unit's largest maximum energy at the default 7 is seven times its
   value at 1) and `boundary_rc::tests::zone_capacitance_requires_a_positive_multiplier`.
+
+## D-012: The one-hour parity windows' delivered energy against OCHRE's envelope model
+
+- **Reference behavior:** OS-HPXML v1.12.0 builds each surface from its
+  HPXML construction and drives its zones with the weather; its zone air
+  carries one temperature capacitance multiplier, 7 by default
+  (`defaults.rb:219-221`, applied to EnergyPlus's
+  `OS:ZoneCapacitanceMultiplier:ResearchSpecial`,
+  `simcontrols.rb:27-28`). EnergyPlus v24.2.0's zone heat balance
+  integrates that network, and its residential heating equipment cycles
+  on and off at rated capacity under its thermostat
+  (`EnergyPlus/HVACManager.cc`, the on/off system cycling).
+- **OCHRE's model:** its envelope is a fitted RC network over the same
+  multiplied capacitance (`ochre/Models/Envelope.py:442-446`), its HVAC
+  heating column carries the blower power inside the end use
+  (`Equipment/HVAC.py:514-519` and `:547-554`), and its water heater and
+  other equipment differ in detail from the constructions above.
+- **HARES behavior:** the constructions, film coefficients and
+  infiltration rules of OS-HPXML v1.12.0 (the departures of record are
+  D-008 to D-010), the blower's power carried outside the heating end
+  use.
+- **Measured impact:** on `cz6b_resistance_res_wh` (a resistance furnace
+  at the -26 °C design temperature, one hour from the pinned start both
+  sides hold): both models cycle the element at its rating (HARES
+  10.551 kW, the HPXML's 36000 W; OCHRE 10.944 kW, the element plus its
+  0.39 kW blower), but the duty differs, 24 on-minutes against 30: the
+  two networks put the same total capacitance in different places, so
+  the air node's swing and the cycling phase differ, and the window ends
+  mid-cycle. The delivered energy is 4.40 kWh against 5.65 kWh: 22.1 %
+  of HVAC energy and 20.9 % of total site; the difference is the duty
+  (1.06 kWh) plus the blower's accounting (0.20 kWh). The indoor
+  temperatures agree to 0.41 °C MAE, inside the corpus's 0.6 °C band.
+  The corpus's other heated fixture, `cz2a_gas_furnace_ac_res_wh`, sits
+  at 6.5 % on the same window shape; its unheated variants at 0.5 %. The
+  residual is the one-hour window's phase sensitivity to the two
+  models' zone dynamics, not a missing end use or a one-sided input.
+- **Class:** (a). OCHRE's fitted RC network is its own simplification of
+  the constructions; HARES keeps the reference physics. No HARES change
+  is made toward OCHRE's numbers.
+- **Documented bound:** the fixture's bands in `tests/parity/mod.rs` are
+  the measured residuals plus margin: 23.1 % HVAC energy, 21.9 % total
+  site.
+- **Pinning tests:** the corpus's drift lock
+  (`parity::parity_outputs_against_reference_corpus`, which fails when
+  the residual leaves the documented bound),
+  `equipment_zone_resolution::the_equivalent_battery_holds_the_multiplied_zone_capacitance`
+  and the structural envelope oracles pin the capacitance and the
+  constructions the bound stands on.

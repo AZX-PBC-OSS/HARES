@@ -54,6 +54,20 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // the reference tools support is not yet established; the defect
         // ledger carries the open question.
         ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(21.5),
+        // cz6b_resistance_res_wh: both models cycle the resistance element
+        // at its rating from the same pinned start, but the two envelope
+        // models put the same total capacitance in different places, the
+        // cycling phase differs, and the one-hour window ends mid-cycle:
+        // HARES delivers 22.06 % less HVAC energy and 20.89 % less total
+        // site than OCHRE over the window (24 on-minutes against 30, plus
+        // the blower power OCHRE's end-use column carries and HARES puts
+        // outside it). The indoor temperatures agree to 0.41 C, inside the
+        // 0.6 C band. Class (a): OCHRE's fitted RC network is its own
+        // simplification of the constructions HARES follows
+        // (DIVERGENCES D-012); the bands are the measured residuals plus
+        // margin.
+        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(23.1),
+        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(21.9),
         // resstock_bldg0112631_24h: a lock on a 24 h window that predates
         // this triage, measured 25.4 %; its cause is not yet established.
         ("resstock_bldg0112631_24h", METRIC_PEAK_HVAC_POWER) => Some(25.7),
