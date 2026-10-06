@@ -435,8 +435,8 @@ def _new_fleet(n_dwellings: int = 3) -> SteppableFleet:
             schedule=SCHEDULE,
             weather=WEATHER,
             config=sim_config,
-            bldg_id=i + 1,
             defaults_path=str(HARES_DEFAULTS),
+            bldg_id=i + 1,
         )
         for i in range(n_dwellings)
     ]

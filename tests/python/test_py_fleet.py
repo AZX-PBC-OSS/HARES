@@ -426,16 +426,16 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
         schedule=schedule,
         weather=weather,
         config=sim_config,
-        bldg_id=1,
         defaults_path=str(HARES_DEFAULTS),
+        bldg_id=1,
     )
     config2 = DwellingConfig(
         hpxml=str(fixture_dir / "base-battery.xml"),
         schedule=schedule,
         weather=weather,
         config=sim_config,
-        bldg_id=2,
         defaults_path=str(HARES_DEFAULTS),
+        bldg_id=2,
     )
     fleet = PyFleet.from_buildings([config1, config2])
 
