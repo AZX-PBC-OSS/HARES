@@ -67,8 +67,15 @@ pub enum FleetError {
     ResStock(String),
     #[error("from_configs requires at least one dwelling config")]
     EmptySteppableFleetConfig,
-    #[error("all dwellings failed to initialize ({count} failure(s))")]
-    AllSteppableDwellingsFailed { count: usize },
+    #[error(
+        "all dwellings failed to initialize ({} failure(s)): {}",
+        count,
+        causes.join("; ")
+    )]
+    AllSteppableDwellingsFailed {
+        count: usize,
+        causes: Vec<String>,
+    },
     #[error("failed to build local rayon thread pool: {0}")]
     ThreadPoolBuild(String),
     #[error("fleet has no dwelling with positive sample_weight")]
@@ -502,6 +509,10 @@ impl SteppableFleet {
         if dwellings.is_empty() {
             return Err(FleetError::AllSteppableDwellingsFailed {
                 count: build_errors.len(),
+                causes: build_errors
+                    .iter()
+                    .map(|e| format!("dwelling {}: {}", e.bldg_id, e.message))
+                    .collect(),
             });
         }
 
@@ -541,6 +552,10 @@ impl SteppableFleet {
         if dwellings.is_empty() {
             return Err(FleetError::AllSteppableDwellingsFailed {
                 count: build_errors.len(),
+                causes: build_errors
+                    .iter()
+                    .map(|e| format!("dwelling {}: {}", e.bldg_id, e.message))
+                    .collect(),
             });
         }
 

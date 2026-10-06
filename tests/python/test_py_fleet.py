@@ -7,6 +7,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
+HARES_DEFAULTS = ROOT / "defaults"
 
 
 def _pyfleet_class():
@@ -475,6 +476,7 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
         weather=weather,
         config=sim_config,
         bldg_id=1,
+        defaults_path=str(HARES_DEFAULTS),
     )
     config2 = DwellingConfig(
         hpxml=str(fixture_dir / "base-battery.xml"),
@@ -482,6 +484,7 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
         weather=weather,
         config=sim_config,
         bldg_id=2,
+        defaults_path=str(HARES_DEFAULTS),
     )
     fleet = PyFleet.from_buildings([config1, config2])
 

@@ -11,6 +11,15 @@ PYTHON_SRC = ROOT / "python"
 if str(PYTHON_SRC) not in sys.path:
     sys.path.insert(0, str(PYTHON_SRC))
 
+# The helics wheel's libzmq exports the C++ standard-library symbols it was
+# built against without declaring libstdc++ as a dependency, so importing
+# helics before pyarrow poisons symbol resolution and the first pyarrow
+# parquet writer segfaults. Importing pyarrow first resolves every symbol
+# from libstdc++ and both libraries work. Every worker process imports this
+# conftest before any test module, which fixes the order for the whole run;
+# the defect and its signal are pinned in test_helics_pyarrow_symbol_order.py.
+import pyarrow.parquet  # noqa: F401  (must precede any helics import)
+
 HARES_DEFAULTS = ROOT / "defaults"
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
