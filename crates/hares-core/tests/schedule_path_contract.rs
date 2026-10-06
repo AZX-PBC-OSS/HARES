@@ -126,8 +126,10 @@ fn nonexistent_schedule_path_is_an_error() {
 }
 
 /// `None` generates the schedule from the HPXML: bitwise-equal to the
-/// generator called directly on the same parsed inputs, and bitwise-equal to
-/// the schedule the pre-change behavior produced for a missing path.
+/// generator called directly on the same parsed inputs. The digest is pinned
+/// in `GENERATED_SCHEDULE_DIGEST`; it moved once, when the constant duplicate
+/// `occupants` column was deleted and `cooling_setpoint` became the last
+/// column the resample keeps (see that constant's comment).
 #[test]
 fn no_schedule_generates_from_hpxml() {
     let config = generated_schedule_config(None);
@@ -305,8 +307,9 @@ fn line_number_of(csv_path: &std::path::Path, prefix: &str) -> usize {
 }
 
 /// Drop the last value of a quoted CSV Values field, leaving 23. The Values
-/// field's closing quote is the line's last `"`; the trailing `Data Source`
-/// cell after it must survive the cut.
+/// field's closing quote is the line's last `"`; the cut ends there, so the
+/// trailing `Data Source` cell after it is discarded too. The remaining row
+/// still carries enough fields and values for the loader's line-named error.
 fn cut_last_value(line: &str) -> String {
     let closing = line
         .rfind('"')
