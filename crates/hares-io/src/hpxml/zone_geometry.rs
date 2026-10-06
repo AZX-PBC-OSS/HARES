@@ -280,10 +280,13 @@ pub(super) fn attic_geometry(
 /// nearer the gable walls' area per end.
 ///
 /// The gable wall area picks that pair and must agree with its triangle,
-/// within [`GABLE_END_RATIO_MIN`] to [`GABLE_END_RATIO_MAX`]. It does not
-/// size the rise: BEopt's gable walls include the eave overhang (144.5 ft²
-/// per end on a 30 ft span at 6:12, where the triangle is 112.5 ft²), so a
-/// rise taken from them, sqrt(end area × tan θ), overstates the volume.
+/// from [`GABLE_END_RATIO_MIN`] to [`gable_end_ratio_max`] times it. It does
+/// not size the rise: BEopt's gable walls include the eave overhang
+/// (144.5 ft² per end on a 30 ft span at 6:12, where the triangle is
+/// 112.5 ft²), so a rise taken from them, sqrt(end area × tan θ), overstates
+/// the volume. The span must also be well determined by the walls: a
+/// [`WALL_AREA_TOLERANCE`] error in their area may move it by at most
+/// [`SPAN_SENSITIVITY_MAX`].
 fn gable_rise_m(
     details: &XmlNode,
     footprint_m2: f64,
@@ -346,28 +349,46 @@ fn gable_rise_m(
             "the number of conditioned floors is not given",
         ));
     };
-    let Some((short_m, long_m)) =
-        storey_rectangle_sides_m(details, footprint_m2, storey, warnings)?
-    else {
+    let Some(rectangle) = storey_rectangle_sides_m(details, footprint_m2, storey, warnings)? else {
         return Ok(None);
     };
     let end_area_m2 = gable_area_m2 / 2.0;
     let triangle_m2 = |side_m: f64| side_m * side_m * slope / 4.0;
-    let span_m = if (triangle_m2(short_m) - end_area_m2).abs()
-        <= (triangle_m2(long_m) - end_area_m2).abs()
-    {
-        short_m
+    let span_is_long = (triangle_m2(rectangle.long_m) - end_area_m2).abs()
+        < (triangle_m2(rectangle.short_m) - end_area_m2).abs();
+    let span_m = if span_is_long {
+        rectangle.long_m
     } else {
-        long_m
+        rectangle.short_m
     };
+    match rectangle.side_sensitivity(span_is_long) {
+        Some(sensitivity) if sensitivity <= SPAN_SENSITIVITY_MAX => {}
+        sensitivity => {
+            return Ok(span_unknown(
+                warnings,
+                &format!(
+                    "a {:.0} % error in its conditioned walls' area moves the {span_m:.2} m span \
+                     by {}, more than {:.0} %: the footprint is too near a square for its walls \
+                     to fix the span",
+                    WALL_AREA_TOLERANCE * 100.0,
+                    sensitivity.map_or("an unbounded amount".to_string(), |s| format!(
+                        "{:.0} %",
+                        s * 100.0
+                    )),
+                    SPAN_SENSITIVITY_MAX * 100.0
+                ),
+            ));
+        }
+    }
     let ratio = end_area_m2 / triangle_m2(span_m);
-    if !(GABLE_END_RATIO_MIN..=GABLE_END_RATIO_MAX).contains(&ratio) {
+    let ratio_max = gable_end_ratio_max(span_m);
+    if !(GABLE_END_RATIO_MIN..=ratio_max).contains(&ratio) {
         return Ok(span_unknown(
             warnings,
             &format!(
                 "its {end_area_m2:.1} m2 gable ends are {ratio:.2} times the {:.1} m2 triangle \
                  of the {span_m:.2} m span the walls give, outside {GABLE_END_RATIO_MIN} to \
-                 {GABLE_END_RATIO_MAX}",
+                 {ratio_max:.2}",
                 triangle_m2(span_m)
             ),
         ));
@@ -375,16 +396,23 @@ fn gable_rise_m(
     Ok(Some(span_m / 2.0 * slope))
 }
 
-/// The range of a gable end's area over the triangle of the span the walls
-/// give within which the two describe the same roof. A gable wall is at
-/// least its triangle, less only by rounding; it can be more by the eave
-/// overhang it includes, (1 + 2 overhang / span)², 1.28 for BEopt's 2 ft
-/// eaves on a 30 ft span. 1.5 admits eaves up to 11 % of the span on each
-/// side, 3.3 ft on a 30 ft span. Outside the range the storey's walls and
-/// the gable walls disagree about the span, as when the ceiling height
-/// leaves out the floor depth or the walls do not form one rectangle.
+/// The least a gable end's area may be over the triangle of the span the
+/// walls give. Every committed ResStock and OS-HPXML sample gable attic
+/// whose span the walls determine (eleven homes) has gable ends of 0.9993
+/// to 1.0008 times their triangle: the walls fix the span to rounding.
+/// 0.98 leaves rounding room and rejects a smaller end, which no roof of
+/// the walls' span can have.
 const GABLE_END_RATIO_MIN: f64 = 0.98;
-const GABLE_END_RATIO_MAX: f64 = 1.5;
+
+/// The most a gable end's area may be over the triangle of a `span_m` span:
+/// an end can include the eave overhang, (1 + 2 depth / span)², as
+/// BEopt's do (1.28 for 2 ft eaves on 30 ft), though OS-HPXML's do not.
+/// The deepest eave OS-HPXML's home builder offers is 5 ft
+/// (`BuildResidentialHPXML/resources/options/geometry_eaves.tsv`).
+fn gable_end_ratio_max(span_m: f64) -> f64 {
+    const EAVES_DEPTH_MAX_M: f64 = 5.0 * 0.3048;
+    (1.0 + 2.0 * EAVES_DEPTH_MAX_M / span_m).powi(2)
+}
 
 /// The short and long sides of the rectangle under the attic: area the
 /// roof footprint, perimeter the conditioned walls' gross area (walls whose
@@ -400,7 +428,7 @@ fn storey_rectangle_sides_m(
     footprint_m2: f64,
     storey: Storey,
     warnings: &mut Vec<Warning>,
-) -> Result<Option<(f64, f64)>, HpxmlError> {
+) -> Result<Option<StoreyRectangle>, HpxmlError> {
     let mut attic_floor_m2 = 0.0;
     for (location, floor) in surfaces(details, "Floors", "Floor") {
         let exterior = child_text(floor, "ExteriorAdjacentTo").unwrap_or_default();
@@ -458,8 +486,10 @@ fn storey_rectangle_sides_m(
         }
     }
     let half_perimeter_m = wall_area_m2 / storey_wall_height_m / 2.0;
-    let discriminant = half_perimeter_m * half_perimeter_m - 4.0 * footprint_m2;
-    if wall_area_m2 <= 0.0 || discriminant < 0.0 {
+    let sides = (wall_area_m2 > 0.0)
+        .then(|| rectangle_sides_m(footprint_m2, half_perimeter_m))
+        .flatten();
+    let Some((short_m, long_m)) = sides else {
         return Ok(span_unknown(
             warnings,
             &format!(
@@ -467,13 +497,68 @@ fn storey_rectangle_sides_m(
                  not enclose a {footprint_m2:.1} m2 rectangle"
             ),
         ));
-    }
-    let root = discriminant.sqrt();
-    Ok(Some((
-        (half_perimeter_m - root) / 2.0,
-        (half_perimeter_m + root) / 2.0,
-    )))
+    };
+    Ok(Some(StoreyRectangle {
+        short_m,
+        long_m,
+        half_perimeter_m,
+        footprint_m2,
+    }))
 }
+
+/// The rectangle under a gable attic, with what is needed to test how well
+/// its sides are determined.
+#[derive(Debug, Clone, Copy)]
+struct StoreyRectangle {
+    short_m: f64,
+    long_m: f64,
+    half_perimeter_m: f64,
+    footprint_m2: f64,
+}
+
+impl StoreyRectangle {
+    /// The largest relative change of the side `long` (or the short one)
+    /// over a ±[`WALL_AREA_TOLERANCE`] change of the half perimeter, or
+    /// `None` when such a change leaves no rectangle. Near a square the sides
+    /// come from the small difference of two large numbers, and a small error
+    /// in the wall area moves them far.
+    fn side_sensitivity(&self, long: bool) -> Option<f64> {
+        let side = if long { self.long_m } else { self.short_m };
+        let mut spread: f64 = 0.0;
+        for factor in [1.0 - WALL_AREA_TOLERANCE, 1.0 + WALL_AREA_TOLERANCE] {
+            let (short_m, long_m) =
+                rectangle_sides_m(self.footprint_m2, self.half_perimeter_m * factor)?;
+            let moved = if long { long_m } else { short_m };
+            spread = spread.max((moved - side).abs() / side);
+        }
+        Some(spread)
+    }
+}
+
+/// The short and long sides of the rectangle with this area and half
+/// perimeter, `None` when there is none.
+fn rectangle_sides_m(area_m2: f64, half_perimeter_m: f64) -> Option<(f64, f64)> {
+    let discriminant = half_perimeter_m * half_perimeter_m - 4.0 * area_m2;
+    (discriminant >= 0.0).then(|| {
+        let root = discriminant.sqrt();
+        (
+            (half_perimeter_m - root) / 2.0,
+            (half_perimeter_m + root) / 2.0,
+        )
+    })
+}
+
+/// The error the conditioned wall area may carry as the rectangle's
+/// perimeter: 0.25 %, three times the largest disagreement between the
+/// walls' span and the gable ends seen across the committed homes (0.08 %,
+/// [`GABLE_END_RATIO_MIN`]).
+const WALL_AREA_TOLERANCE: f64 = 0.0025;
+
+/// The largest relative change of the span that tolerance may cause before
+/// the span counts as undetermined: 10 %, the volume's error then. A
+/// 30 x 40 ft footprint (BEopt) moves its span about 3 %; a footprint
+/// within a few percent of a square moves it without bound.
+const SPAN_SENSITIVITY_MAX: f64 = 0.10;
 
 /// Records that a gable attic's span is not determined and that its volume
 /// falls back to OS-HPXML's square hip.

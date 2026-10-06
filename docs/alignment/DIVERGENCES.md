@@ -287,13 +287,21 @@ justification → measured impact → pinning tests.
   side of the rectangle whose area is the roof footprint and whose
   perimeter is the conditioned wall area over the storey wall height. The
   gable wall area picks which pair of sides carries the gables, and must
-  lie within 0.98 to 1.5 times that span's triangle, which admits eaves up
-  to 11 % of the span on each side (`gable_rise_m`,
+  lie from 0.98 to (1 + 2 × 5 ft / span)² times that span's triangle: no
+  smaller than the triangle beyond rounding, and no larger than the
+  deepest eaves OS-HPXML's home builder offers (5 ft,
+  `BuildResidentialHPXML/resources/options/geometry_eaves.tsv`) would make
+  it. Across the committed ResStock and OS-HPXML sample homes, every gable
+  whose span the walls fix has ends of 0.9993 to 1.0008 times its
+  triangle; BEopt's, whose ends include 2 ft eaves, are 1.28. The span must
+  also be well determined: a 0.25 % error in the walls' area (three times
+  that largest disagreement) may move it by at most 10 %, which rejects a
+  footprint near a square (`gable_rise_m`,
   `hares-io/src/hpxml/zone_geometry.rs`). Where the input does not
   determine the span (an attic over a garage, floors that do not match the
   footprint, a smaller upper storey, no floor counts, gable ends that
-  disagree with the span), the attic keeps OS-HPXML's hip, with a warning
-  naming why. The ridge rise is also the attic's height for its leakage:
+  disagree with the span, a footprint near a square), the attic keeps
+  OS-HPXML's hip, with a warning naming why. The ridge rise is also the attic's height for its leakage:
   the stack coefficient grows with it and the wind coefficient takes the
   attic's top above grade (`attic_infiltration_method`,
   `hares-core/src/dwelling/solver_builder.rs`). OS-HPXML feeds its

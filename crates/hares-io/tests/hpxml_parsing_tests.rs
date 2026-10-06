@@ -2904,10 +2904,32 @@ fn a_gable_attic_of_unknown_span_is_a_square_hip_with_a_warning() {
             1509.3,
             "do not enclose",
         ),
-        // Gable ends 1.78 times the 30 ft span's triangle: more than any
-        // eave overhang, so the gable and storey walls disagree on the span.
+        // 1176 ft2 of 8 ft walls round a 1350 ft2 footprint: a 36 x 37.5 ft
+        // rectangle, so near a square that 1 % less wall leaves no rectangle
+        // at all. Its gable ends are made the 36 ft span's triangles, so only
+        // the conditioning can reject it.
         (
-            base_with("<Area>225.0</Area>", "<Area>400.0</Area>"),
+            parse_edited_sample("base.xml", |xml| {
+                let walls = "<Area>1200.0</Area>\n            <Siding>wood siding</Siding>";
+                let gables = "<Area>225.0</Area>";
+                assert!(
+                    xml.contains(walls) && xml.contains(gables),
+                    "base.xml walls"
+                );
+                xml.replacen(
+                    walls,
+                    "<Area>1176.0</Area>\n            <Siding>wood siding</Siding>",
+                    1,
+                )
+                .replacen(gables, "<Area>324.0</Area>", 1)
+            }),
+            1509.3,
+            "near a square",
+        ),
+        // Gable ends 0.89 times the 30 ft span's triangle: smaller than any
+        // gable on that span, so the gable and storey walls disagree on it.
+        (
+            base_with("<Area>225.0</Area>", "<Area>200.0</Area>"),
             1509.3,
             "times the",
         ),
