@@ -4352,7 +4352,7 @@ mod tests {
     }
 
     #[test]
-    fn basement_lighting_auto_created_from_csv_for_finished_basement() {
+    fn basement_lighting_not_auto_created_from_csv_even_for_finished_basement() {
         let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
         let mut specs: Vec<EquipmentSpec> = Vec::new();
 

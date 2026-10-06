@@ -182,9 +182,9 @@ fn checked_in_hpxml_fixtures() -> Vec<PathBuf> {
 /// build failure, never a silent drop, so the dwelling's equipment list
 /// must contain every spec the blueprint resolved for the whole fixture
 /// corpus. The build may add zero-power equipment beyond the blueprint's
-/// spec list (a schedule column with no HPXML declaration injects a spec at
-/// build time), so the pinned contract is containment plus build success,
-/// not exact equality.
+/// spec list (a Microwave column with no HPXML declaration injects a spec at
+/// build time, the only auto-created case), so the pinned contract is
+/// containment plus build success, not exact equality.
 #[test]
 fn every_fixture_builds_every_equipment() {
     let mut problems: Vec<String> = Vec::new();
