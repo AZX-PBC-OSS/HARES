@@ -1221,6 +1221,10 @@ impl Actor for EvDriverActor {
         self.estimate_error.is_none()
     }
 
+    fn health_detail(&self) -> Option<&str> {
+        self.estimate_error.as_deref()
+    }
+
     fn telemetry(&self) -> Option<&Telemetry> {
         Some(&self.telemetry)
     }
@@ -3436,6 +3440,11 @@ mod tests {
         let mut failed = make_actor(strategy.clone(), PlugInPolicy::Always, 42);
         failed.estimate_error = Some("needed-hours estimate failed".to_string());
         assert!(!failed.healthy());
+        assert_eq!(
+            failed.health_detail(),
+            Some("needed-hours estimate failed"),
+            "the step error carries the estimate's cause"
+        );
 
         let mut rebuilt = make_actor(strategy, PlugInPolicy::Always, 42);
         rebuilt.take_over(&failed).expect("take over");

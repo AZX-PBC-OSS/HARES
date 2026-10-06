@@ -105,6 +105,10 @@ impl hares_core::Actor for PyActorWrapper {
         self.last_error.is_none()
     }
 
+    fn health_detail(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         Python::attach(|py| {
             let obj = self.obj.bind(py);
@@ -1656,6 +1660,11 @@ mod tests {
                 "PyActorWrapper should have last_error set after decide() raises"
             );
             let err_msg = wrapper.last_error.as_ref().unwrap();
+            assert_eq!(
+                wrapper.health_detail(),
+                Some(err_msg.as_str()),
+                "the step error carries the Python exception"
+            );
             assert!(
                 err_msg.contains("AttributeError"),
                 "last_error should contain AttributeError, got: {err_msg}"
@@ -1700,6 +1709,11 @@ mod tests {
                 "PyActorWrapper should have last_error set after decide() raises"
             );
             let err_msg = wrapper.last_error.as_ref().unwrap();
+            assert_eq!(
+                wrapper.health_detail(),
+                Some(err_msg.as_str()),
+                "the step error carries the Python exception"
+            );
             assert!(
                 err_msg.contains("AttributeError"),
                 "last_error should contain AttributeError, got: {err_msg}"
