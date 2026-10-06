@@ -189,6 +189,55 @@ fn resstock_golden_home_carries_no_warning() {
 #[test]
 fn resstock_homes_carry_no_schedule_warning() {
     let bldg = project_root().join("tests/fixtures/resstock/2025.1/bldg0176775");
+    let schedule_warnings = bldg0176775_schedule_warnings(&bldg.join("in.schedules.csv"));
+    assert!(
+        schedule_warnings.is_empty(),
+        "the bldg0176775 schedule columns are all known, got {schedule_warnings:?}"
+    );
+}
+
+/// A schedule column for equipment the home does not have, and for which
+/// there is no default energy to create it with, follows no load; the
+/// dwelling's warning list says so, naming the column.
+#[test]
+fn a_column_for_equipment_the_home_lacks_is_a_dwelling_warning() {
+    let bldg = project_root().join("tests/fixtures/resstock/2025.1/bldg0176775");
+    let csv = std::fs::read_to_string(bldg.join("in.schedules.csv")).expect("read the schedule");
+    let with_basement_lighting: Vec<String> = csv
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let lighting_interior = line.split(',').nth(3).expect("lighting_interior");
+            if i == 0 {
+                assert_eq!(lighting_interior, "lighting_interior");
+                format!("{line},lighting_basement")
+            } else {
+                format!("{line},{lighting_interior}")
+            }
+        })
+        .collect();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let schedule_path = dir.path().join("in.schedules.csv");
+    std::fs::write(&schedule_path, with_basement_lighting.join("\n")).expect("write schedule");
+
+    let schedule_warnings = bldg0176775_schedule_warnings(&schedule_path);
+    assert_eq!(
+        schedule_warnings.len(),
+        1,
+        "one warning for the one unused column, got {schedule_warnings:?}"
+    );
+    assert!(
+        schedule_warnings[0].contains("'lighting_basement' is not read")
+            && schedule_warnings[0].contains("Basement Lighting"),
+        "{}",
+        schedule_warnings[0]
+    );
+}
+
+/// The `schedule` warnings of the bldg0176775 home built with
+/// `schedule_path` and stepped once.
+fn bldg0176775_schedule_warnings(schedule_path: &Path) -> Vec<String> {
+    let bldg = project_root().join("tests/fixtures/resstock/2025.1/bldg0176775");
     let sim = SimulationConfig {
         start_time: FixedOffset::west_opt(5 * 3600)
             .expect("UTC-5 offset is valid")
@@ -210,7 +259,7 @@ fn resstock_homes_carry_no_schedule_warning() {
     };
     let config = DwellingConfig {
         hpxml_path: bldg.join("home.xml"),
-        schedule_path: Some(bldg.join("in.schedules.csv")),
+        schedule_path: Some(schedule_path.to_path_buf()),
         weather_path: project_root()
             .join("tests/fixtures/resstock/2025.1/weather/G3400270_2018.csv"),
         defaults_path: Some(project_root().join("defaults")),
@@ -223,13 +272,9 @@ fn resstock_homes_carry_no_schedule_warning() {
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds from bldg0176775");
     dwelling.step().expect("a step of the ResStock home runs");
-    let schedule_warnings: Vec<String> = dwelling
+    dwelling
         .take_warnings()
         .into_iter()
         .filter(|warning| warning.starts_with("schedule: "))
-        .collect();
-    assert!(
-        schedule_warnings.is_empty(),
-        "the bldg0176775 schedule columns are all known, got {schedule_warnings:?}"
-    );
+        .collect()
 }

@@ -678,7 +678,7 @@ pub fn inject_schedule_into_specs(
         }
     }
 
-    ensure_specs_for_csv_columns(specs, &csv_col_map, defaults);
+    ensure_specs_for_csv_columns(specs, &csv_col_map, defaults, warnings);
 
     let profiles = match defaults_path {
         Some(dir) => load_default_profiles(dir)?,
@@ -1589,7 +1589,9 @@ fn normalize_schedule_col_name(name: &str) -> String {
 /// any other equipment the HPXML leaves out (garage or basement lighting in
 /// a building without that space, an appliance the home does not have)
 /// creates nothing: the column is a profile, and with no equipment energy
-/// it would drive a zero-power load.
+/// it would drive a zero-power load. Such a column is reported as a
+/// construction warning, so a declared schedule input does not vanish
+/// from the run unrecorded.
 ///
 /// Specs are constructed through `build_spec`, the path every HPXML-derived
 /// spec takes, so default gain fractions, fuel-type labels and ZIP
@@ -1598,6 +1600,7 @@ fn ensure_specs_for_csv_columns(
     specs: &mut Vec<EquipmentSpec>,
     csv_col_map: &HashMap<String, usize>,
     defaults: &DefaultsStore,
+    warnings: &mut Vec<Warning>,
 ) {
     for mapping in COLUMN_MAPPINGS {
         if matches!(
@@ -1616,12 +1619,13 @@ fn ensure_specs_for_csv_columns(
             continue;
         }
         let Some(annual_kwh) = default_annual_kwh_for_equipment(mapping.equipment_name) else {
-            tracing::debug!(
-                column = mapping.csv_column,
-                equipment = mapping.equipment_name,
-                "schedule column for equipment the building does not have, and no default \
-                 energy to create it with; no load follows the column"
+            let message = format!(
+                "schedule CSV column '{col_name}' is not read: the building declares no {0} \
+                 and there is no default annual energy to create one with, so no {0} is created",
+                mapping.equipment_name
             );
+            warn!(equipment = %mapping.equipment_name, "{message}");
+            warnings.push(Warning::new("schedule", message));
             continue;
         };
         let mut params = Map::new();
@@ -4285,15 +4289,22 @@ mod tests {
             schedule.column_names[0] = column.to_string();
             schedule.column_index = HashMap::from([(column.to_string(), 0)]);
             let mut specs: Vec<EquipmentSpec> = Vec::new();
+            let mut warnings = Vec::new();
             inject_schedule_into_specs(
                 &mut specs,
                 &mut schedule,
                 None,
                 &DefaultsStore::empty(),
-                &mut Vec::new(),
+                &mut warnings,
             )
             .expect("inject_schedule_into_specs should succeed");
             assert!(specs.is_empty(), "{column} created {specs:?}");
+            let reported: Vec<&Warning> = warnings
+                .iter()
+                .filter(|w| w.message.contains(&format!("'{column}' is not read")))
+                .collect();
+            assert_eq!(reported.len(), 1, "{column}: {warnings:?}");
+            assert_eq!(&*reported[0].source, "schedule");
         }
     }
 
@@ -4530,12 +4541,14 @@ mod tests {
 
         let schedule_warnings: Vec<&Warning> = warnings
             .iter()
-            .filter(|w| w.source.as_ref() == "schedule")
+            .filter(|w| {
+                w.source.as_ref() == "schedule" && w.message.contains("no entry in COLUMN_MAPPINGS")
+            })
             .collect();
         assert_eq!(
             schedule_warnings.len(),
             1,
-            "one schedule warning for the one unknown column, got {warnings:?}"
+            "one unknown-column warning for the one unknown column, got {warnings:?}"
         );
         assert!(
             schedule_warnings[0].message.contains("lighting_interor"),
