@@ -8,6 +8,12 @@ master_seed = 0
 
 bldg_id = 1
 
+# The reference is not pinned to HARES's starting temperature (18.083 C):
+# the vendored OCHRE cannot rebuild this fixture, as its heat pump water
+# heater reads an undefined hp_cop when the HPXML gives no HPWH capacity
+# (ochre/Equipment/WaterHeater.py:456), so the reference keeps its own
+# unseeded starting draw (18.525 C).
+
 [property_parity]
 equipment_count = 14
 zone_count = 2

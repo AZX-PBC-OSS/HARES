@@ -31,61 +31,35 @@ const METRIC_PEAK_HVAC_POWER: &str = "peak_hvac_power_relative_percent";
 const METRIC_BATTERY_SOC: &str = "battery_soc_mae_absolute";
 const METRIC_EQUIPMENT_MODE_CYCLES: &str = "equipment_mode_cycle_count_relative_percent";
 
-/// Per-fixture tolerance override for metrics whose residual exceeds the
-/// short-window defaults. The step-0 ideal-capacity back-solve in
-/// `crates/hares-envelope/src/thermal_solver/stepping.rs:24-66` produces a
-/// larger initial demand than OCHRE for some envelopes, which dominates the
-/// 1-hour integrals and instantaneous peak for a handful of fixtures.
-/// Once that back-solve is aligned the overrides should drop back to the
-/// defaults defined in `tolerance.rs`.
+/// Per-fixture tolerance override for a metric whose residual exceeds the
+/// default band of `tolerance.rs` for a cause established with evidence.
+/// OCHRE is a comparison point, not a correctness oracle
+/// (tests/fixtures/parity/README.md); an override stands only on a
+/// measured cause, written beside it.
+///
+/// The comparison itself is fair first: both sides start each window from
+/// the same indoor temperature (each fixture's `[ochre]
+/// initial_temp_setpoint_c`, the generator's pin on OCHRE's unseeded
+/// draw), and HVAC energy counts each fuel once, from the end-use totals
+/// where a frame has them.
 fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
     match (fixture_id, metric) {
-        // ── Accumulated-drift overrides (2026-09-11) ─────────────────────
-        //
-        // These fixtures were never exercised in CI: the reference parquets
-        // were swept up by the global `*.parquet` gitignore, so the corpus
-        // was silently incomplete and the suite vacuously passed. The first
-        // real run showed accumulated model drift vs the OCHRE *ballpark*
-        // references (see tests/fixtures/parity/README.md — OCHRE is a
-        // comparison point, not a correctness oracle; HARES deliberately
-        // targets better-than-OCHRE physics per ASHRAE HoF / E+ Eng. Ref.).
-        // Bands below are sized to the observed residual plus ~1% margin and
-        // exist to LOCK the drift (any worsening fails loudly) while the
-        // underlying conformance items are worked; they are not a judgement
-        // that the current residuals are physically correct. HVAC-energy
-        // residuals come from the step-0 ideal-capacity back-solve noted
-        // above.
-        //
-        // Re-measured after every zone took OS-HPXML's temperature
-        // capacitance multiplier of 7 (OCHRE's too): each conditioned-zone
-        // temperature MAE fell to 0.29-0.50 C, inside the 0.6 C default, so
-        // those overrides are gone, and every HVAC-energy band and the
-        // total-site bands that improved were re-sized to observed + ~1%.
-        // The two January heating windows whose total site energy worsened
-        // (cz5a_minisplit_gas_wh 17.2 % to 28.4 %, cz6b_resistance_res_wh
-        // 19.9 % to 25.4 %) already delivered less heat than OCHRE in their
-        // unwarmed first hour; the heavier zone holds its setpoint with less
-        // still, though their HVAC-energy residuals fell (64.2 % to 40.7 %,
-        // 58.1 % to 46.5 %). The minisplit's peak moved 91.5 % to 92.9 %.
-        ("cz2a_gas_furnace_ac_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(41.8),
-        ("cz2a_pv_ev", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(181.2),
-        ("cz2a_pv_ev", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(37.3),
-        ("cz4a_ashp_hpwh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(146.2),
-        ("cz4a_battery_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(93.1),
-        ("cz4a_pv_battery", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(84.8),
-        ("cz4a_pv_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(135.2),
-        ("cz5a_ev_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(93.1),
-        // cz5a_ev_charging: the charging-EV fixture, the same building as
-        // cz5a_ev_only and so the same HVAC-energy residual. The metric this
-        // fixture exists for, short-window total site energy dominated by the
-        // EV's 11.5 kW charge, passes at the 25% default band.
-        ("cz5a_ev_charging", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(93.1),
-        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(41.8),
-        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(29.5),
-        ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(94.0),
-        ("cz6b_pv_battery_ev", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(84.8),
-        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(47.6),
-        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(26.5),
+        // cz5a_minisplit_gas_wh: a ductless mini-split at -19 C, running on
+        // its backup resistance. OCHRE attaches the building's air
+        // distribution ducts to every HVAC unit whatever the unit
+        // references (ochre/utils/hpxml.py:970-1006; only baseboards and
+        // room ACs are exempt, Equipment/HVAC.py:166-177), so it charges
+        // this unit, which has no DistributionSystem (building.xml:701-725),
+        // a distribution efficiency near 0.64. OS-HPXML treats it as
+        // ductless (hpxml.rb:7078-7087; hvac.rb:5606), and HARES models no
+        // duct loss. Measured: HARES's HVAC energy is 33.6 % and its total
+        // site 32.3 % below this reference; with OCHRE's distribution
+        // efficiency set to 1 HARES is 5 to 8.5 % above it. Class (a),
+        // OCHRE wrong; bands are the measured residuals plus ~1 %.
+        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(34.6),
+        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(33.3),
+        // resstock_bldg0112631_24h: a lock on a 24 h window that predates
+        // this triage, measured 25.4 %; its cause is not yet established.
         ("resstock_bldg0112631_24h", METRIC_PEAK_HVAC_POWER) => Some(25.7),
         _ => None,
     }
@@ -760,26 +734,42 @@ fn annual_energy_for_prefixes(
     columns: &BTreeMap<String, Vec<f64>>,
     prefixes: &[&str],
 ) -> Option<f64> {
-    let mut total_kwh = 0.0;
-    let mut found = false;
+    /// kWh in a therm (ASHRAE HoF 2021 Ch. 38: 100 000 Btu).
+    const KWH_PER_THERM: f64 = 29.307_107;
 
     let is_hvac_query = prefixes.contains(&"heat pump");
-
-    for (name, series) in columns {
-        let lowered = name.to_ascii_lowercase();
-        let is_candidate = lowered.ends_with("electric power (kw)")
-            || lowered.ends_with("gas power (therms/hour)");
-        if !is_candidate {
-            continue;
-        }
-
-        let matched = if is_hvac_query {
-            matches_hvac_prefix(&lowered, prefixes)
-        } else {
-            prefixes.iter().any(|prefix| lowered.contains(prefix))
-        };
-        if matched {
-            total_kwh += integrate_kw_series(series);
+    let mut total_kwh = 0.0;
+    let mut found = false;
+    // Each fuel on its own, in its own unit: electric power in kW, gas in
+    // therms/hour converted to kW. A frame that reports a fuel's HVAC
+    // end-use totals ("HVAC Heating ...", "HVAC Cooling ...") also reports
+    // each HVAC unit's own columns of that fuel, which the totals already
+    // sum, so it counts the totals only, as OCHRE's frame, which has only the
+    // totals, does; a fuel with no total counts the unit columns.
+    for (suffix, kw_per_unit) in [
+        ("electric power (kw)", 1.0),
+        ("gas power (therms/hour)", KWH_PER_THERM),
+    ] {
+        let matched: Vec<(String, &Vec<f64>)> = columns
+            .iter()
+            .filter_map(|(name, series)| {
+                let lowered = name.to_ascii_lowercase();
+                let matched = lowered.ends_with(suffix)
+                    && if is_hvac_query {
+                        matches_hvac_prefix(&lowered, prefixes)
+                    } else {
+                        prefixes.iter().any(|prefix| lowered.contains(prefix))
+                    };
+                matched.then_some((lowered, series))
+            })
+            .collect();
+        let has_end_use_totals =
+            is_hvac_query && matched.iter().any(|(name, _)| name.starts_with("hvac "));
+        for (name, series) in matched {
+            if has_end_use_totals && !name.starts_with("hvac ") {
+                continue;
+            }
+            total_kwh += integrate_kw_series(series) * kw_per_unit;
             found = true;
         }
     }
@@ -913,6 +903,63 @@ mod hvac_prefix_matcher_tests {
         assert!(
             (hvac_total - expected).abs() < 1.0,
             "HVAC total {hvac_total} should equal {expected} (HPWH excluded)"
+        );
+    }
+
+    /// A frame with both a unit's own column and the HVAC end-use total that
+    /// sums it counts the energy once, from the total, as a frame with only
+    /// the total does.
+    #[test]
+    fn hvac_energy_counts_end_use_totals_once() {
+        let minutes = 60;
+        let mut both: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        both.insert(
+            "MSHP Heater Electric Power (kW)".to_string(),
+            vec![3.0; minutes],
+        );
+        both.insert(
+            "HVAC Heating End Use Electric Power (kW)".to_string(),
+            vec![3.0; minutes],
+        );
+        let mut totals_only: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        totals_only.insert(
+            "HVAC Heating Electric Power (kW)".to_string(),
+            vec![3.0; minutes],
+        );
+        let with_units = annual_energy_for_prefixes(&both, HVAC_PREFIXES).expect("total");
+        let reference = annual_energy_for_prefixes(&totals_only, HVAC_PREFIXES).expect("total");
+        assert!(
+            (with_units - reference).abs() < 1e-9 && (reference - 3.0).abs() < 1e-9,
+            "{with_units} kWh against {reference} kWh"
+        );
+
+        // A gas furnace: HARES reports the electric end-use total and the
+        // unit's gas, OCHRE the electric and gas totals. Each fuel counts
+        // once, gas in kWh.
+        let mut hares: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        hares.insert("Gas Furnace Electric Power (kW)".into(), vec![0.2; minutes]);
+        hares.insert(
+            "Gas Furnace Gas Power (therms/hour)".into(),
+            vec![1.0; minutes],
+        );
+        hares.insert(
+            "HVAC Heating End Use Electric Power (kW)".into(),
+            vec![0.2; minutes],
+        );
+        let mut ochre: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        ochre.insert(
+            "HVAC Heating Electric Power (kW)".into(),
+            vec![0.2; minutes],
+        );
+        ochre.insert(
+            "HVAC Heating Gas Power (therms/hour)".into(),
+            vec![1.0; minutes],
+        );
+        let hares_kwh = annual_energy_for_prefixes(&hares, HVAC_PREFIXES).expect("total");
+        let ochre_kwh = annual_energy_for_prefixes(&ochre, HVAC_PREFIXES).expect("total");
+        assert!(
+            (hares_kwh - ochre_kwh).abs() < 1e-9 && (ochre_kwh - (0.2 + 29.307_107)).abs() < 1e-6,
+            "{hares_kwh} kWh against {ochre_kwh} kWh"
         );
     }
 

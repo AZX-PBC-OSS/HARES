@@ -8,6 +8,12 @@ master_seed = 0
 
 bldg_id = 1
 
+# The indoor temperature HARES starts this window from (its seeded draw
+# within half the deadband, master_seed 0), to which the reference
+# generator pins OCHRE's otherwise unseeded starting draw.
+[ochre]
+initial_temp_setpoint_c = 18.083026715940175
+
 [property_parity]
 equipment_count = 14
 zone_count = 2

@@ -103,6 +103,14 @@ def _run_ochre_for_fixture(fixture_dir: Path) -> pd.DataFrame:
     # schedule column consume it — exactly the EV (the fixture's other
     # event loads are schedule-driven).
     extra: dict = {}
+    # OCHRE draws the starting indoor temperature at random within half the
+    # deadband, unseeded (Envelope.py:997-1008), and HARES draws its own,
+    # seeded; a window that starts cold then measures the two draws. A
+    # fixture's [ochre] initial_temp_setpoint_c pins OCHRE to the
+    # temperature HARES starts from.
+    ochre_cfg = tomllib.loads((fixture_dir / "config.toml").read_text()).get("ochre", {})
+    if "initial_temp_setpoint_c" in ochre_cfg:
+        extra["initial_temp_setpoint"] = float(ochre_cfg["initial_temp_setpoint_c"])
     if ev_cfg.get("ochre_event_file"):
         extra["equipment_event_file"] = str(
             (fixture_dir / ev_cfg["ochre_event_file"]).resolve()
