@@ -17,7 +17,7 @@ use hares_types::{
     DomainUpdate, EndUse, EnvironmentState, FuelType, GridState, PortSlots, SCHEDULE_DOMAIN_ID,
     ScheduleSourceConfig, WeatherState, ZoneId, ZoneState,
 };
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use tempfile::tempdir;
 
 fn make_schedule(columns: &[(&str, &[f64])]) -> ScheduleTimeSeries {
@@ -470,14 +470,8 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
 "#;
 
     let building = parse_building(xml).expect("HPXML should parse");
-    let mut specs = resolve_equipment(
-        &building,
-        &DefaultsStore::empty(),
-        &json!({}),
-        None,
-        &mut Vec::new(),
-    )
-    .expect("resolve_equipment should succeed");
+    let mut specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
+        .expect("resolve_equipment should succeed");
 
     let ref_spec = specs.iter().find(|s| s.name == "Refrigerator").expect(
         "resolve_equipment should produce a Refrigerator spec from the HPXML Appliances section",

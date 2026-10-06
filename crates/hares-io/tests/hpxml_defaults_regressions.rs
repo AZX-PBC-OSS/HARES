@@ -1,8 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
-
 use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
 use hares_equipment::hvac::cooling_config::DehumidifierConfig;
 use hares_io::defaults::DefaultsStore;
@@ -220,13 +218,7 @@ fn missing_hvac_type_tags_fail_resolution_instead_of_defaulting() {
     for (label, systems_xml, missing_field) in cases {
         let xml = minimal_hpxml_with_systems(systems_xml);
         let building = parse_building(&xml).expect("minimal fixture should parse");
-        let result = resolve_equipment(
-            &building,
-            &DefaultsStore::empty(),
-            &json!({}),
-            None,
-            &mut Vec::new(),
-        );
+        let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
         match missing_field {
             "HeatingSystemType" | "CoolingSystemType" => {
                 // Empty/missing HVAC type tags are now skipped gracefully
@@ -264,14 +256,8 @@ fn base_fixture_resolves_expected_typed_specs_with_repo_defaults() {
     // without triggering the no-silent-defaults guard.
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
-    let specs = resolve_equipment(
-        &building,
-        &repo_defaults(),
-        &json!({}),
-        None,
-        &mut Vec::new(),
-    )
-    .expect("base fixture equipment should resolve with repo defaults");
+    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
+        .expect("base fixture equipment should resolve with repo defaults");
 
     let furnace = specs
         .iter()
@@ -311,14 +297,8 @@ fn dehumidifier_capacity_pints_to_liters_conversion_uses_correct_factor() {
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
 
-    let specs = resolve_equipment(
-        &building,
-        &repo_defaults(),
-        &json!({}),
-        None,
-        &mut Vec::new(),
-    )
-    .expect("dehumidifier fixture equipment should resolve");
+    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
+        .expect("dehumidifier fixture equipment should resolve");
 
     let dehumidifier_spec = specs
         .iter()
@@ -382,14 +362,8 @@ fn central_ac_seer_18_two_stage_populates_per_stage_data() {
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
 
-    let specs = resolve_equipment(
-        &building,
-        &repo_defaults(),
-        &json!({}),
-        None,
-        &mut Vec::new(),
-    )
-    .expect("AC equipment should resolve");
+    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
+        .expect("AC equipment should resolve");
 
     let ac_spec = specs
         .iter()
@@ -460,14 +434,8 @@ fn central_ac_seer_22_fallback_4_speed_populates_per_stage_data() {
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
 
-    let specs = resolve_equipment(
-        &building,
-        &repo_defaults(),
-        &json!({}),
-        None,
-        &mut Vec::new(),
-    )
-    .expect("AC 4-speed equipment should resolve");
+    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
+        .expect("AC 4-speed equipment should resolve");
 
     let ac_spec = specs
         .iter()

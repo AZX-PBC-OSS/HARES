@@ -8,7 +8,6 @@ use hares_io::{
     epw::DesignConditions, hpxml::resolve_equipment, site_location::resolve_site_location,
 };
 use hares_types::{EndUse, HaresError};
-use serde_json::{Map, Value};
 
 use super::solver_builder::{WeatherAverages, compute_weather_averages};
 use crate::derive_dwelling_rng;
@@ -134,15 +133,12 @@ impl DwellingBlueprint {
             }
         };
 
-        let empty_overrides = Value::Object(Map::new());
-
         // The blueprint's construction-time warnings, in report order: the
         // HPXML parse warnings first, then the equipment resolution warnings.
         let mut equipment_warnings = building.parse_warnings.clone();
         let equipment_specs = resolve_equipment(
             &building,
             &defaults,
-            &empty_overrides,
             config.patches.as_ref(),
             &mut equipment_warnings,
         )

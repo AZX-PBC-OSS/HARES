@@ -7,8 +7,6 @@
 //! the corresponding fix lands. Tests marked "documents the gap" pass today
 //! and must remain passing to prove the gap still exists.
 
-use serde_json::json;
-
 use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
 use hares_equipment::hvac::heating_config::GasBoilerConfig;
 use hares_io::defaults::DefaultsStore;
@@ -47,14 +45,8 @@ fn wrap_systems(systems_xml: &str) -> String {
 
 fn resolve_ok(xml: &str) -> Vec<hares_io::hpxml::EquipmentSpec> {
     let building = parse_building(xml).expect("HPXML must parse");
-    resolve_equipment(
-        &building,
-        &DefaultsStore::empty(),
-        &json!({}),
-        None,
-        &mut Vec::new(),
-    )
-    .expect("resolve_equipment must succeed")
+    resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
+        .expect("resolve_equipment must succeed")
 }
 
 fn find_spec<'a>(

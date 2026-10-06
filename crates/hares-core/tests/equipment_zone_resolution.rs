@@ -211,14 +211,8 @@ fn hvac_and_water_heaters_without_a_zone_fail_init() {
             );
         let building =
             parse_building(&xml).unwrap_or_else(|err| panic!("{sample} parses: {err:?}"));
-        let specs = resolve_equipment(
-            &building,
-            &defaults,
-            &serde_json::json!({}),
-            None,
-            &mut Vec::new(),
-        )
-        .unwrap_or_else(|err| panic!("{sample} resolves: {err:?}"));
+        let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
+            .unwrap_or_else(|err| panic!("{sample} resolves: {err:?}"));
         for spec in specs.iter().filter(|spec| is_zoned_class(spec)) {
             let mut cfg = spec
                 .typed_config

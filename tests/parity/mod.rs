@@ -13,7 +13,6 @@ use hares_io::{SimulationConfig, parse_hpxml, resolve_equipment};
 use hares_io::{defaults::DefaultsStore, hpxml::ZoneType};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
-use serde_json::json;
 use tolerance::{
     ANNUAL_WATER_HEATER_ENERGY_REL_PCT_MAX, BATTERY_SOC_MAE_ABS_MAX,
     EQUIPMENT_MODE_CYCLE_COUNT_REL_PCT_MAX, MetricCheck, PEAK_HVAC_POWER_REL_PCT_MAX,
@@ -319,22 +318,17 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
                 continue;
             }
         };
-        let equipment = match resolve_equipment(
-            &building,
-            &DefaultsStore::empty(),
-            &json!({}),
-            None,
-            &mut Vec::new(),
-        ) {
-            Ok(specs) => specs,
-            Err(err) => {
-                failures.push(format!(
-                    "fixture={} equipment resolution failed: {err}",
-                    fixture_id
-                ));
-                continue;
-            }
-        };
+        let equipment =
+            match resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()) {
+                Ok(specs) => specs,
+                Err(err) => {
+                    failures.push(format!(
+                        "fixture={} equipment resolution failed: {err}",
+                        fixture_id
+                    ));
+                    continue;
+                }
+            };
         let equipment_names: Vec<String> = equipment.iter().map(|spec| spec.name.clone()).collect();
         let conditioned = building
             .zones

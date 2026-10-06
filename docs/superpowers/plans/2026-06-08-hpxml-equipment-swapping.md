@@ -265,7 +265,7 @@ impl DwellingBlueprint {
         // 2. Load weather, schedule from paths in config
         // 3. resolve_site_location, compute_weather_averages, extract design_conditions
         // 4. Build EnvironmentManager from weather, schedule, building, sim_config
-        // 5. resolve_equipment(&building, &defaults, &overrides, patches) -> Vec<EquipmentSpec>
+        // 5. resolve_equipment(&building, &defaults, patches) -> Vec<EquipmentSpec>
         // 6. Return Self — environment, specs, no solvers, no equipment instances, no ports
         todo!("extract from from_preparsed lines 1675-1793")
     }

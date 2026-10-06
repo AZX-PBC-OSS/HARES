@@ -4597,7 +4597,6 @@ mod tests {
         let profiles = super::load_default_profiles(&defaults_dir)
             .expect("the shipped defaults CSV must load");
         let defaults = DefaultsStore::load(&defaults_dir).expect("the shipped defaults load");
-        let overrides = Value::Object(Map::new());
 
         let mut unreachable: Vec<String> = Vec::new();
         let mut unparsed: Vec<String> = Vec::new();
@@ -4618,13 +4617,7 @@ mod tests {
             // the weather site or patches its own test supplies) has no
             // census here: it is counted in `unresolved`, pinned below, so a
             // resolve failure is never silently eaten.
-            let specs = match crate::resolve_equipment(
-                &building,
-                &defaults,
-                &overrides,
-                None,
-                &mut warnings,
-            ) {
+            let specs = match crate::resolve_equipment(&building, &defaults, None, &mut warnings) {
                 Ok(specs) => specs,
                 Err(_) => {
                     unresolved.push(

@@ -2191,14 +2191,8 @@ mod tests {
     /// (the first HVAC spec in the resolved list).
     fn resolve_furnace_spec(xml: &str) -> EquipmentSpec {
         let building = parse_building(xml).expect("HPXML must parse");
-        let specs = resolve_equipment(
-            &building,
-            &DefaultsStore::empty(),
-            &json!({}),
-            None,
-            &mut Vec::new(),
-        )
-        .expect("equipment must resolve");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
+            .expect("equipment must resolve");
         specs
             .into_iter()
             .find(|s| s.name == "Gas Furnace")
