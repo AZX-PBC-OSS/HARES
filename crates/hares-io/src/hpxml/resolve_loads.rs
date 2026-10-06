@@ -319,8 +319,18 @@ pub(super) fn resolve_scheduled_loads(
                             Some(v) => parse_xsd_boolean("Vented", &v)?,
                             None => true,
                         };
-                        params.insert("vented".to_string(), json!(vented));
-
+                        // A fuel-fired dryer conveys its moisture and combustion
+                        // products outside the building (IFGC 614.1).
+                        if !vented && fuel != FuelType::Electric {
+                            return Err(HpxmlError::InvalidField {
+                                path: "ClothesDryer/Vented",
+                                system_kind: "Clothes Dryer",
+                                system_id: element_id(node)
+                                    .unwrap_or_else(|| "unknown".to_string()),
+                                value_received: "false".to_string(),
+                                reason: "a fuel-fired clothes dryer must be vented to outdoors",
+                            });
+                        }
                         let frac_lost = if vented {
                             DRYER_EXHAUST_FRACTION_VENTED
                         } else {
@@ -330,27 +340,6 @@ pub(super) fn resolve_scheduled_loads(
                         let frac_lat = 1.0 - frac_sens - frac_lost;
                         params.insert("sensible_gain_fraction".to_string(), json!(frac_sens));
                         params.insert("latent_gain_fraction".to_string(), json!(frac_lat));
-
-                        // A fuel-fired dryer conveys its moisture and combustion
-                        // products outside the building (IFGC 614.1); an unvented
-                        // one is rejected, not relabelled.
-                        let dryer_type = match (vented, fuel) {
-                            (true, FuelType::Electric) => "vented_electric",
-                            (true, _) => "vented_gas",
-                            (false, FuelType::Electric) => "unvented_condenser",
-                            (false, _) => {
-                                return Err(HpxmlError::InvalidField {
-                                    path: "ClothesDryer/Vented",
-                                    system_kind: "Clothes Dryer",
-                                    system_id: element_id(node)
-                                        .unwrap_or_else(|| "unknown".to_string()),
-                                    value_received: "false".to_string(),
-                                    reason: "a fuel-fired clothes dryer must be vented to \
-                                             outdoors",
-                                });
-                            }
-                        };
-                        params.insert("dryer_type".to_string(), json!(dryer_type));
 
                         // Default annual energy when HPXML doesn't provide it
                         // (OCHRE hpxml.py parse_clothes_dryer). Uses default washer values

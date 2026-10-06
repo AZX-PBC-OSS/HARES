@@ -2610,15 +2610,19 @@ fn every_xsd_boolean_site_uses_parse_xsd_boolean() {
                 assert!(!read(&doc(site, "0")), "{name}: 0 must read as unvented");
             }
             "ClothesDryer/Vented" => {
+                // The venting reaches the model through the dryer's split: a
+                // vented dryer exhausts 0.85 of its input, leaving 0.135
+                // sensible; an unvented one keeps 0.90 sensible.
                 let read = |specs: &[hares_io::EquipmentSpec]| {
-                    specs
+                    let sensible = specs
                         .iter()
                         .find(|s| s.name == "Clothes Dryer")
                         .expect("clothes dryer spec expected")
                         .parameters
-                        .get("vented")
-                        .and_then(serde_json::Value::as_bool)
-                        .expect("vented param expected")
+                        .get("sensible_gain_fraction")
+                        .and_then(serde_json::Value::as_f64)
+                        .expect("sensible_gain_fraction expected");
+                    (sensible - 0.135).abs() < 1e-12
                 };
                 assert!(read(&specs_true), "{name}: 1 must read as vented");
                 assert!(!read(&specs_false), "{name}: 0 must read as unvented");

@@ -48,7 +48,6 @@ const KEY_EVENT_PROBABILITY_CONSTANT: &str = "event_probability_constant";
 
 const KEY_HOT_WATER_DRAW_VOLUME_L: &str = "hot_water_draw_volume_l";
 const KEY_EVENT_POWER_KW_SERIES: &str = "event_power_kw_series";
-const KEY_DRYER_TYPE: &str = "dryer_type";
 
 #[derive(Clone, Debug, PartialEq)]
 struct ExtractedEvent {
@@ -260,16 +259,6 @@ struct CyclePhase {
     has_water_draw: bool,
 }
 
-/// Clothes dryer type, reported in telemetry: vented (exhausts to outdoors)
-/// or unvented electric. Its zone gain is the configured sensible and latent
-/// split, which the venting sets.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-enum DryerType {
-    VentedElectric,
-    VentedGas,
-    UnventedCondenser,
-}
-
 /// Event-based stochastic load with an Idle -> Active -> Cooldown cycle.
 pub struct EventBasedLoad {
     descriptor: EquipmentDescriptor,
@@ -323,8 +312,6 @@ pub struct WetAppliance {
     n_units: f64,
     gains: GainFractions,
     month_multipliers: Option<[f64; 12]>,
-    /// None for non-dryer appliances (washer, dishwasher); `Some` for dryers.
-    dryer_type: Option<DryerType>,
 
     active: bool,
     phase_index: usize,
@@ -915,7 +902,6 @@ impl WetAppliance {
             n_units: 1.0,
             gains: GainFractions::default(),
             month_multipliers: None,
-            dryer_type: None,
             active: false,
             phase_index: 0,
             elapsed_in_phase_s: 0.0,
@@ -1171,21 +1157,6 @@ impl Equipment for WetAppliance {
             env,
         )?;
 
-        self.dryer_type = match config.get_str(KEY_DRYER_TYPE) {
-            None => None,
-            Some(raw) => match raw {
-                "vented_electric" => Some(DryerType::VentedElectric),
-                "vented_gas" => Some(DryerType::VentedGas),
-                "unvented_condenser" => Some(DryerType::UnventedCondenser),
-                other => {
-                    return Err(HaresError::Equipment(format!(
-                        "unrecognised dryer_type '{other}'; expected one of: \
-                         vented_electric, vented_gas, unvented_condenser"
-                    )));
-                }
-            },
-        };
-
         // Resolve the canonical ZIP model (sidecar -> class defaults ->
         // constant power) and validate the coefficient-sum invariants.
         let class_name = config.ochre_class.as_str();
@@ -1269,16 +1240,6 @@ impl Equipment for WetAppliance {
         self.forced_mode = None;
         self.delay_remaining_s = 0.0;
         self.telemetry = default_wet_appliance_telemetry();
-
-        {
-            let dryer_type_ordinal = match self.dryer_type {
-                None => -1.0,
-                Some(DryerType::VentedElectric) => 0.0,
-                Some(DryerType::VentedGas) => 1.0,
-                Some(DryerType::UnventedCondenser) => 2.0,
-            };
-            self.telemetry.set(tk::DRYER_TYPE, dryer_type_ordinal);
-        }
         self.core_output = CoreOutput::default();
 
         self.start_draws = Some(StartDraws::at(
@@ -1822,7 +1783,6 @@ fn default_wet_appliance_telemetry() -> Telemetry {
     telemetry.insert(tk::LATENT_GAIN_W, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::CYCLE_PHASE, 0.0);
-    telemetry.insert(tk::DRYER_TYPE, -1.0);
     telemetry
 }
 
@@ -1892,12 +1852,6 @@ fn wet_appliance_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::CYCLE_PHASE.to_string(),
             unit: "-".to_string(),
             description: "Cycle phase (0=Idle,1..N=phase index + 1)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DRYER_TYPE.to_string(),
-            unit: "-".to_string(),
-            description: "Dryer type: -1=none,0=VentedElectric,1=VentedGas,2=UnventedCondenser"
-                .to_string(),
         },
     ]
 }
@@ -4227,7 +4181,7 @@ mod tests {
         );
     }
 
-    fn dryer_config(name: &str, dryer_type: Option<&str>) -> EquipmentConfig {
+    fn dryer_config(name: &str) -> EquipmentConfig {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
@@ -4238,49 +4192,12 @@ mod tests {
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
         raw.insert("latent_gain_fraction".to_string(), 0.5.into());
-        if let Some(dt) = dryer_type {
-            raw.insert(
-                "dryer_type".to_string(),
-                crate::config::ConfigValue::Text(dt.to_string()),
-            );
-        }
         raw_config(name.to_string(), "Clothes Dryer".to_string(), raw)
-    }
-
-    /// An unvented dryer gives the zone its configured split: the moisture
-    /// it dries out of the clothes stays in the room as latent gain
-    /// (OpenStudio-HPXML: 0.90 sensible, 0.10 latent with nothing exhausted).
-    #[test]
-    fn unvented_dryer_gives_its_configured_split() {
-        let mut env = base_env();
-        let mut config = dryer_config("unvented_dryer", Some("unvented_condenser"));
-        config
-            .test_extras_mut()
-            .insert("sensible_gain_fraction".to_string(), 0.9.into());
-        config
-            .test_extras_mut()
-            .insert("latent_gain_fraction".to_string(), 0.1.into());
-        let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
-        eq.init(&config, &env).unwrap();
-        assert_eq!(eq.telemetry().get(tk::DRYER_TYPE), Some(2.0));
-
-        let mut slots = PortSlots::from_declarations(eq.ports());
-        set_schedule_payload(&mut env, vec![1.0, 1.0]);
-        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-
-        let total_power_w = slots.electrical.load_power_w;
-        assert!(
-            total_power_w > 0.0,
-            "dryer should draw power when triggered"
-        );
-        let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
-        assert!((t.sensible_gain_w - 0.9 * total_power_w).abs() < 1e-6);
-        assert!((t.latent_gain_w - 0.1 * total_power_w).abs() < 1e-6);
     }
 
     fn zoneless_event_loads(sensible: f64) -> Vec<(Box<dyn Equipment>, EquipmentConfig)> {
         let mut range = event_config("Cooking Range", "Cooking Range");
-        let mut dryer = dryer_config("Clothes Dryer", Some("vented_electric"));
+        let mut dryer = dryer_config("Clothes Dryer");
         for config in [&mut range, &mut dryer] {
             config.test_extras_mut().remove("zone_id");
             config
@@ -4344,7 +4261,7 @@ mod tests {
     #[test]
     fn event_load_splits_its_sensible_heat_radiant_and_convective() {
         let mut range = event_config("Cooking Range", "Cooking Range");
-        let mut dryer = dryer_config("Clothes Dryer", Some("vented_electric"));
+        let mut dryer = dryer_config("Clothes Dryer");
         for config in [&mut range, &mut dryer] {
             config
                 .test_extras_mut()
@@ -4403,13 +4320,13 @@ mod tests {
         }
     }
 
+    /// A dryer's venting reaches it only through its configured split.
     #[test]
-    fn vented_dryer_uses_fractions_normally() {
+    fn dryer_uses_its_configured_split() {
         let mut env = base_env();
-        let config = dryer_config("vented_dryer", Some("vented_electric"));
+        let config = dryer_config("vented_dryer");
         let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
         eq.init(&config, &env).unwrap();
-        assert_eq!(eq.telemetry().get(tk::DRYER_TYPE), Some(0.0));
 
         let mut slots = PortSlots::from_declarations(eq.ports());
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
@@ -4432,12 +4349,11 @@ mod tests {
     }
 
     #[test]
-    fn non_dryer_wet_appliance_ignores_dryer_type() {
+    fn washer_uses_its_configured_split() {
         let mut env = base_env();
         let config = wet_config("washer", "Clothes Washer", 1.0);
         let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
         eq.init(&config, &env).unwrap();
-        assert_eq!(eq.telemetry().get(tk::DRYER_TYPE), Some(-1.0));
 
         let mut slots = PortSlots::from_declarations(eq.ports());
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
@@ -4456,46 +4372,6 @@ mod tests {
         assert!(
             (t.latent_gain_w - expected_lat).abs() < 1e-6,
             "non-dryer appliance should use configured fractions"
-        );
-    }
-
-    #[test]
-    fn parse_dryer_type_from_config() {
-        let env = base_env();
-
-        // Valid dryer types
-        for (input, expected_ordinal) in [
-            ("vented_electric", 0.0),
-            ("vented_gas", 1.0),
-            ("unvented_condenser", 2.0),
-        ] {
-            let config = dryer_config(input, Some(input));
-            let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
-            eq.init(&config, &env).unwrap();
-            assert_eq!(
-                eq.telemetry().get(tk::DRYER_TYPE),
-                Some(expected_ordinal),
-                "dryer_type '{input}' should map to ordinal {expected_ordinal}"
-            );
-        }
-
-        // Absent dryer_type (non-dryer appliance)
-        let config = dryer_config("no_dryer", None);
-        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
-        eq.init(&config, &env).unwrap();
-        assert_eq!(
-            eq.telemetry().get(tk::DRYER_TYPE),
-            Some(-1.0),
-            "absent dryer_type should map to -1 (none)"
-        );
-
-        // Invalid dryer_type should error
-        let config = dryer_config("bad_dryer", Some("vented_oil"));
-        let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
-        let err = eq.init(&config, &env).unwrap_err();
-        assert!(
-            err.to_string().contains("unrecognised dryer_type"),
-            "invalid dryer_type should produce error, got: {err}"
         );
     }
 }

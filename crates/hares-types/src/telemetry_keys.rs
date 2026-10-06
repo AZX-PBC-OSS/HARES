@@ -769,15 +769,6 @@ pub const HUMIDITY_SEMI_IMPLICIT_ALPHA: &str = "humidity_semi_implicit_alpha";
 /// scope: internal
 pub const HUMIDITY_SOLVER_TELEMETRY_KEY: &str = "HumiditySolver";
 
-// ── Loads ───────────────────────────────────────────────────────────────────
-
-/// Dryer type name captured at init, or "none" for non-dryer wet appliances.
-/// HPXML 4.2 §3.8.2: ClothesDryer/Vented + ClothesDryer/FuelType determine
-/// whether the dryer is vented-electric, vented-gas, or unvented-condenser.
-///
-/// scope: internal
-pub const DRYER_TYPE: &str = "dryer_type";
-
 // ── Dwelling-level / test equipment ─────────────────────────────────────────
 
 /// scope: internal
@@ -1278,7 +1269,6 @@ mod tests {
             // Dwelling-level
             LAST_POWER_KW,
             LAST_SOC_TARGET,
-            DRYER_TYPE,
             // Protocol bridge
             PROTOCOL_ID,
             PAYLOAD_SIZE_BYTES,
@@ -1538,7 +1528,6 @@ mod tests {
             // Dwelling-level
             LAST_POWER_KW,
             LAST_SOC_TARGET,
-            DRYER_TYPE,
             // Protocol bridge
             PROTOCOL_ID,
             PAYLOAD_SIZE_BYTES,
