@@ -125,10 +125,24 @@ def test_add_actor_by_name_without_params_uses_the_default() -> None:
     must carry that default. Under PyO3 0.29 a parameter without a
     `#[pyo3(signature)]` default is required, so the two-argument call the
     stub invites failed at call time with the stub's own default in place.
+    The Occupant's parameters are all optional, so the two-argument call
+    reaches its factory and attaches: the pin's vehicle. The
+    IdealThermostat's factory requires its target and rejects the same
+    call with the error that names it.
     """
     dwelling = make_dwelling()
     before = dwelling.actor_count()
-    dwelling.add_actor_by_name("IdealThermostat", "t1")
+    dwelling.add_actor_by_name("Occupant", "occupant")
     assert dwelling.actor_count() == before + 1, (
         "the two-argument call must attach the actor, not raise"
     )
+
+
+def test_ideal_thermostat_without_params_is_rejected_naming_target() -> None:
+    """A thermostat bound without its target is the misconfiguration the
+    registry rejects at the boundary: the error names the parameter, it
+    does not route the override to a default equipment name.
+    """
+    dwelling = make_dwelling()
+    with pytest.raises(ValueError, match="target"):
+        dwelling.add_actor_by_name("IdealThermostat", "t1")
