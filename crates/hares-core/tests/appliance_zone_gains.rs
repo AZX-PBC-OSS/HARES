@@ -15,11 +15,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
-use chrono::{DateTime, Duration, FixedOffset};
+use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_equipment::Equipment;
 use hares_io::OutputFormat;
-use hares_io::hpxml::building::parse_building;
+use hares_io::hpxml::building::{ZoneType, parse_building};
 use hares_types::{FuelType, PortSlots, ZoneId};
 
 const TIME_RES_S: i64 = 900;
@@ -620,5 +620,102 @@ fn a_nested_value_for_a_load_parameter_fails_the_build() {
                 if key == "radiant_share_of_sensible"
         ),
         "got {err}"
+    );
+}
+
+/// The dwelling an ochre garage sample builds, its schedule generated: the
+/// sample declares a refrigerator standing in the garage.
+fn garage_dwelling_config(hpxml: &Path) -> DwellingConfig {
+    let tz_offset = FixedOffset::west_opt(7 * 3600).expect("UTC-7 offset is valid");
+    let start_time = tz_offset
+        .with_ymd_and_hms(2023, 1, 15, 10, 0, 0)
+        .single()
+        .expect("valid start time");
+    DwellingConfig {
+        hpxml_path: hpxml.to_path_buf(),
+        schedule_path: None,
+        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        defaults_path: Some(project_root().join("defaults")),
+        sim_config: SimulationConfig {
+            start_time,
+            duration: Duration::hours(6),
+            time_res: Duration::seconds(TIME_RES_S),
+            output_verbosity: 0,
+            write_output: false,
+            output_path: None,
+            output_format: OutputFormat::Csv,
+            output_chunk_size: 1024,
+            setpoint_deadband_c: None,
+            master_seed: 0,
+            civil_timezone: None,
+            site_location: hares_io::SiteLocationOverride::default(),
+            retain_batches: false,
+            rotation: hares_io::RotationPolicy::None,
+        },
+        overrides: None,
+        bldg_id: 1,
+        initialization_duration: None,
+        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
+        patches: None,
+    }
+}
+
+/// A garage refrigerator's heat lands in the garage zone: the dwelling
+/// gives the appliance the garage's zone id, so every thermal gain it
+/// delivers carries the garage's id and none reaches the conditioned zone.
+/// Pins the end-to-end site rule; the hares-io unit tests pin the parse.
+#[test]
+fn a_garage_refrigerators_heat_lands_in_the_garage_zone() {
+    let hpxml = project_root().join("tests/fixtures/hpxml/ochre_samples/base-enclosure-garage.xml");
+    let xml = std::fs::read_to_string(&hpxml).expect("HPXML reads");
+    let building = parse_building(&xml).expect("HPXML parses");
+    let zone_id = |zone_type: ZoneType| -> ZoneId {
+        let idx = building
+            .zones
+            .iter()
+            .position(|zone| zone.zone_type == zone_type)
+            .unwrap_or_else(|| panic!("the fixture models a {zone_type:?} zone"));
+        ZoneId(u16::try_from(idx + 1).expect("zone index fits u16"))
+    };
+    let garage = zone_id(ZoneType::Garage);
+    let conditioned = zone_id(ZoneType::Conditioned);
+
+    let mut dwelling =
+        Dwelling::from_config(garage_dwelling_config(&hpxml)).expect("dwelling builds");
+    let mut refrigerator = dwelling
+        .remove_equipment("Refrigerator")
+        .expect("the garage refrigerator is in the dwelling");
+    let dt = StdDuration::from_secs(TIME_RES_S.unsigned_abs());
+    let steps = (6 * 3600) / TIME_RES_S;
+    let mut input_total = 0.0;
+    let mut garage_gains = 0.0;
+    let mut conditioned_gains = 0.0;
+    for _ in 0..steps {
+        let env = dwelling.latest_env().clone();
+        let mut ports = PortSlots::from_declarations(refrigerator.ports());
+        refrigerator
+            .step(&env, dt, &mut ports)
+            .expect("the refrigerator steps");
+        for thermal in ports.thermal.iter() {
+            let gain_w = thermal.sensible_gain_w + thermal.radiant_gain_w + thermal.latent_gain_w;
+            if thermal.zone == garage {
+                garage_gains += gain_w * DT_H;
+            }
+            if thermal.zone == conditioned {
+                conditioned_gains += gain_w * DT_H;
+            }
+        }
+        input_total += input_wh(&ports, FuelType::Electric);
+        dwelling.step().expect("dwelling steps");
+    }
+    assert!(input_total > 0.0, "the run operates the refrigerator");
+    assert!(
+        (garage_gains - input_total).abs() <= 1e-9 * input_total,
+        "the refrigerator's {garage_gains:.3} Wh of heat must land in the garage zone \
+         ({input_total:.3} Wh input)"
+    );
+    assert_eq!(
+        conditioned_gains, 0.0,
+        "no refrigerator heat reaches the conditioned zone"
     );
 }

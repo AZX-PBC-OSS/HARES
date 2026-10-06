@@ -1160,10 +1160,15 @@ fn appliance_site(
         "attic - vented" | "attic - unvented" => ZoneType::Attic,
         _ => return Err(invalid("not an HPXML appliance location")),
     };
+    // The last zone of the type wins, the dwelling's zone map rule: the
+    // zone map inserts per role while it walks the zone list, so its id for
+    // a role is the last zone of the role's type. Taking the first here
+    // would put an appliance in a different zone than the zone map names
+    // when a building ever carries two zones of one type.
     let idx = building
         .zones
         .iter()
-        .position(|zone| zone.zone_type == zone_type)
+        .rposition(|zone| zone.zone_type == zone_type)
         .ok_or_else(|| invalid("the building models no zone at this location"))?;
     u16::try_from(idx + 1)
         .map(ApplianceSite::Zone)
@@ -1425,6 +1430,26 @@ mod tests {
             "a location whose zone the building does not model is an error"
         );
         assert!(site("kitchen").is_err(), "not an HPXML appliance location");
+    }
+
+    /// Two zones of one type are not constructible from HPXML (the zone map
+    /// keys each type once), but `appliance_site` must still follow the
+    /// dwelling zone map's last-wins rule so the two can never disagree.
+    #[test]
+    fn a_second_zone_of_a_type_takes_the_zone_maps_last_wins_rule() {
+        let mut first_garage = garage_zone();
+        first_garage.floor_area_m2 = Some(20.0);
+        let mut second_garage = garage_zone();
+        second_garage.floor_area_m2 = Some(40.0);
+        let building =
+            appliance_test_building("", vec![conditioned_zone(), first_garage, second_garage]);
+        let node = parse_xml_document("<Freezer/>").expect("parse freezer");
+        let site = appliance_site(&building, "Freezer", &node, "garage").unwrap();
+        assert_eq!(
+            site,
+            ApplianceSite::Zone(3),
+            "the appliance takes the last zone of the type, the zone map's rule"
+        );
     }
 
     fn try_resolve_appliances(

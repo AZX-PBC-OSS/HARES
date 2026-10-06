@@ -2476,7 +2476,10 @@ fn build_from_blueprint_inner(
 
     // Build zone-to-role map for equipment auto-routing.
     // Maps semantic zone roles (Indoor, Garage, Basement, etc.) to concrete
-    // ZoneId values derived from the sorted building zone list.
+    // ZoneId values derived from the sorted building zone list. The last
+    // zone of a role wins: `appliance_site` in hares-io resolves an
+    // appliance's zone by the same rule, so the two never name different
+    // zones for one role.
     let zone_map = {
         let mut map = ZoneMap::new();
         for (idx, zone) in bp.building.zones.iter().enumerate() {
