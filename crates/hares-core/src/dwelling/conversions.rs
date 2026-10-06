@@ -884,9 +884,8 @@ fn land_spec_parameters(
 /// equipment and the offending field when serde's path tracking can see it
 /// (the flattened heat-pump configs' members cannot be pathed; their
 /// failures carry the deserialization problem alone), at the conversion
-/// that applied the override rather than later at `init`; a payload no
-/// override touched is returned
-/// unvalidated, keeping its own init-time semantics.
+/// that applied the override; a payload no override touched is returned
+/// unvalidated and is checked at init, whose rejection fails the build.
 fn spec_config_from_typed(
     typed: &EquipmentConfig,
     spec: &hares_io::EquipmentSpec,
@@ -2234,7 +2233,7 @@ mod tests {
 
         let err = merged_equipment_config(&spec, &overrides).expect_err(
             "a value the typed config's schema rejects must fail at the \
-             override application, not later at init",
+                         override application",
         );
         let msg = err.to_string();
         assert!(

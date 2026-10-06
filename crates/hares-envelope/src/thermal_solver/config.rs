@@ -389,8 +389,8 @@ pub struct InteriorSolarZoneConfig {
 /// absorbed solar between the surface RC node and zone air.
 #[derive(Debug, Clone)]
 pub struct InteriorSolarSurfaceInfo {
-    /// Index into input vector `u` for the surface RC node.
-    /// In production this is always `Some(zone_air_idx)`. Windows are
+    /// Index into input vector `u` for the surface RC node; the builder
+    /// always sets it to the surface's own input. Windows are
     /// excluded from the radiant distribution by `solar_absorptance = 0.0`
     /// (set at construction in solver_builder.rs), not by a `None` index.
     pub input_index: Option<usize>,

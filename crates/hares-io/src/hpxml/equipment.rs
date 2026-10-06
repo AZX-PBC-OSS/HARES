@@ -564,8 +564,8 @@ fn set_spec_equipment_id(spec: &mut EquipmentSpec, id: u32) {
 /// can never collide with one. A *malformed* present id (negative,
 /// fractional, non-numeric) is left untouched — the constructor's reader
 /// maps it to the unassigned sentinel and assembly validation rejects the
-/// build loudly, never a silent substitution. Ids are therefore sparse by
-/// design (the counter jumps past every explicit id); the invariants are
+/// build loudly, never a silent substitution. Ids are sparse wherever a
+/// spec carries an explicit id above the counter; the invariants are
 /// uniqueness, non-zero, and determinism from spec order — never
 /// contiguity.
 pub fn assign_equipment_ids(specs: &mut [EquipmentSpec]) {
