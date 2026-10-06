@@ -1355,21 +1355,14 @@ pub(crate) fn build_default_solvers(
         // These drive terrain-corrected wind coefficients for all ELA infiltration
         // (conditioned zone uses them via aim2_coefficients_from_ach50; attic, garage,
         // and foundation use them via the parameterized convenience functions).
-        //
-        // A missing <SiteType> resolves to suburban: OpenStudio-HPXML's
-        // documented default ("HPXML Site", Workflow Inputs,
-        // https://openstudio-hpxml.readthedocs.io/en/latest/workflow_inputs.html);
-        // the parser rejects any value outside the element's allowed list, so
-        // no silent substitution happens here.
+        // A missing site type or shielding takes OS-HPXML's default;
+        // `conversions::envelope_input_warnings` reports it. The parser
+        // rejects any value outside each element's allowed list.
         let terrain = site_type_to_terrain(building.site.site_type.as_ref());
-        let shielding = shielding_to_class(building.site.shielding_of_home.as_ref());
-
-        if building.site.shielding_of_home.is_none() {
-            tracing::warn!(
-                "building shielding-of-home not specified; defaulting to {:?} for ELA wind correction",
-                shielding
-            );
-        }
+        let shielding = shielding_to_class(
+            building.site.shielding_of_home.as_ref(),
+            building.residential_facility_type.as_deref(),
+        );
 
         for (zone_idx, bz) in building.zones.iter().enumerate() {
             let zone_id = env.zones.get(zone_idx).map(|z| z.id).ok_or_else(|| {
@@ -3047,7 +3040,7 @@ mod tests {
       <BuildingSummary>
         <Site>
           <SiteType>suburban</SiteType>
-          <ShieldingOfHome>normal</ShieldingOfHome>
+          <ShieldingofHome>normal</ShieldingofHome>
         </Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>

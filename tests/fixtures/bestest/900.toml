@@ -43,6 +43,7 @@ ach = 0.5
 [[boundaries]]
 id = "south-wall"
 boundary_type = "Wall"
+outside_material = "wood siding"
 area_m2 = 9.6
 azimuth_deg = 180.0
 tilt_deg = 90.0
@@ -72,6 +73,7 @@ specific_heat_j_kg_k = 1000.0
 [[boundaries]]
 id = "north-wall"
 boundary_type = "Wall"
+outside_material = "wood siding"
 area_m2 = 21.6
 azimuth_deg = 0.0
 tilt_deg = 90.0
@@ -101,6 +103,7 @@ specific_heat_j_kg_k = 1000.0
 [[boundaries]]
 id = "east-wall"
 boundary_type = "Wall"
+outside_material = "wood siding"
 area_m2 = 16.2
 azimuth_deg = 90.0
 tilt_deg = 90.0
@@ -130,6 +133,7 @@ specific_heat_j_kg_k = 1000.0
 [[boundaries]]
 id = "west-wall"
 boundary_type = "Wall"
+outside_material = "wood siding"
 area_m2 = 16.2
 azimuth_deg = 270.0
 tilt_deg = 90.0
@@ -159,6 +163,7 @@ specific_heat_j_kg_k = 1000.0
 [[boundaries]]
 id = "roof"
 boundary_type = "Roof"
+outside_material = "wood shingles or shakes"
 area_m2 = 48.0
 tilt_deg = 0.0
 solar_absorptance = 0.6

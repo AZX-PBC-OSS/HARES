@@ -255,8 +255,9 @@ justification → measured impact → pinning tests.
   and garage leakage use OS-HPXML's `f_t_SG`
   (`sherman_grimsrud_terrain_factor`, `hares-physics/src/infiltration.rs`).
   A file without a `SiteType` is suburban, OS-HPXML's default
-  (`defaults.rb:817-818`); a value outside rural, suburban and urban is
-  a parse error (`parse_site_type`, `hares-io/src/hpxml/building.rs`).
+  (`defaults.rb:817-818`), with a warning in the dwelling's log; a value
+  outside rural, suburban and urban is a parse error (`parse_site_type`,
+  `hares-io/src/hpxml/building.rs`).
   This follows OS-HPXML and departs from OCHRE.
 - **Justification:** the input states the terrain. A suburban house does
   not see open-country wind.
@@ -324,23 +325,65 @@ justification → measured impact → pinning tests.
   `roughness: 'Rough'` and no caller passes another. OCHRE hardcodes 1.67
   for every outside surface, its material lookup commented out
   (`ochre/utils/envelope.py:393`).
-- **HARES behavior:** an outdoor-facing surface takes the roughness class
-  of its HPXML `Siding` or `RoofType` material
-  (`surface_roughness_from_finish_type`,
-  `hares-physics/src/film_coefficients.rs`): the EnergyPlus Engineering
-  Reference's Walton table where it names the material, else the
-  material's record in EnergyPlus v24.2.0's
-  `datasets/ASHRAE_2005_HOF_Materials.idf` or a named analogue, each
-  stated in the function's documentation. Walls, foundation walls, rim
-  joists and roofs read their material; a wall or roof naming none takes
-  OS-HPXML's `Rough`, with a warning, and an unknown value is an error.
-  Doors, floors and slabs, which have no material element in HPXML, take
-  `Rough` without one; glazing takes glass's Very Smooth.
+- **HARES behavior:** an outdoor-facing wall or rim joist takes the
+  roughness class of its HPXML `Siding`, a roof of its `RoofType`, a
+  foundation wall of its `Type` (`MATERIAL_ROUGHNESS` and
+  `outside_layer_roughness`, `hares-physics/src/film_coefficients.rs`).
+  One rule: a material takes the Roughness field of the record that names
+  it in EnergyPlus v24.2.0's `datasets/ASHRAE_2005_HOF_Materials.idf`,
+  searched family by family (the `Siding:` records for a siding, the
+  `Shingles:` and roofing records for a roof, then the exterior finish
+  layers F06-F15, the masonry M01-M09 and the concrete records); a
+  material that is a kind of a named one takes that record, and a green
+  roof, which has none, takes `Material:RoofVegetation`'s default
+  roughness (`idd/Energy+.idd.in:5064-5072`). The table cites each
+  record by name and line:
+
+  | HPXML material | Dataset record (line) | Class |
+  |---|---|---|
+  | wood siding | Siding: Wood - bevel 13 by 200mm - lapped (2047) | Rough |
+  | stucco | F07 25mm stucco (124) | Smooth |
+  | synthetic stucco | F06 EIFS finish (116) | Smooth |
+  | vinyl siding, aluminum siding | Siding: Hollow-backed (2062) | Smooth |
+  | brick veneer | M01 100mm brick (332) | Medium Rough |
+  | stone veneer | F10 25mm stone (148) | Medium Rough |
+  | asbestos siding, fiber cement siding | Siding: Asbestos-cement 6.4mm (2022) | Very Rough |
+  | composite shingle siding | Asphalt shingles (1897) | Very Rough |
+  | masonite siding | Siding: Hardboard 11mm (2037) | Medium Smooth |
+  | asphalt or fiberglass shingles, shingles | Asphalt shingles (1897) | Very Rough |
+  | wood shingles or shakes | Shingles: Wood 400mm - 190-mm exposure (2007) | Medium Rough |
+  | slate or tile shingles | Slate - 13mm (1907) | Very Rough |
+  | concrete tiles | F14 Slate or tile (180) | Very Rough |
+  | metal surfacing | F08 Metal surface (132) | Smooth |
+  | plastic/rubber/synthetic sheeting | Built-up roofing - 10mm (1902) | Very Rough |
+  | expanded polystyrene sheathing | EPS molded beads 16 kg/m3 (810) | Very Rough |
+  | concrete (roof), solid concrete (foundation wall) | Concrete: sand and gravel 2400 kg/m3 (1018) | Medium Rough |
+  | concrete block (all cores) | M05 200mm concrete block (364) | Medium Rough |
+  | double brick | M01 100mm brick (332) | Medium Rough |
+  | wood (foundation wall) | Siding: Wood - plywood 9.5mm - lapped (2057) | Rough |
+  | green roof | Material:RoofVegetation default | Medium Rough |
+
+  The Engineering Reference's Walton table gives stucco and brick as its
+  Very Rough and Rough examples; the dataset's stucco and brick records
+  are Smooth and Medium Rough, and the dataset is followed. An element
+  that names no material (absent, "other", "unknown", "not present",
+  "no one major type", "cool roof") takes the material OS-HPXML defaults
+  it to, with a warning in the dwelling's log: wood siding for a wall or
+  rim joist (`defaults.rb:1338`, `:1379`), asphalt shingles for a roof
+  (`:1268`), solid concrete for a foundation wall (`:1431-1433`). A value
+  outside the element's HPXML enumeration is an error naming the
+  boundary. Doors, floors and slabs, which have no material element in
+  HPXML, take `Rough` without a warning; glazing takes glass's Very
+  Smooth. A synthetic (TOML) building names a boundary's material with
+  `outside_material`; the ASHRAE 140 fixtures name their wood walls wood
+  siding and their wood roof deck wood shingles, the only wood roof
+  material HPXML has.
 - **Justification:** EnergyPlus's DOE-2 and TARP outside convection scale
   forced convection by the roughness of the outside material layer.
   OS-HPXML builds that layer without passing the roughness its material
   has, so a shingle roof and a vinyl wall convect alike. The dataset
-  record for the same material is the evidence for each class.
+  record for the same material is the evidence for each class; every row
+  departs from OS-HPXML's one `Rough`.
 - **Measured impact:** on `data/examples/BEopt_example.xml` (asphalt
   shingle roof, vinyl siding), attic MAE against the OCHRE conditioned
   oracle in the dynamic runs:
@@ -353,12 +396,13 @@ justification → measured impact → pinning tests.
 
   Indoor MAE moves by at most 0.03 °C. The oracle is not evidence for any
   class: the closer summer and spring agreement comes from departing from
-  OCHRE's own 1.67, and the winter cold bias is untouched.
-- **Pinning tests:** `film_coefficients::tests::every_hpxml_material_takes_its_energyplus_roughness`,
-  `film_coefficients::tests::only_an_outdoor_surface_reads_its_material`
-  and `conversions::tests::finish_type_roughness_changes_exterior_film_resistance`.
-  All three fail when every surface takes OS-HPXML's `Rough`.
-  `film_coefficients::tests::a_surface_without_a_material_is_os_hpxml_rough`
-  pins the fallback, and
+  OCHRE's own 1.67. The winter attic cold bias, about −1.2 °C, is not a
+  roughness effect (roughness moves the winter attic by 0.05 °C); its
+  cause is not yet established.
+- **Pinning tests:** `film_coefficients::tests::every_hpxml_material_takes_its_energyplus_roughness`
+  (each row against its record),
+  `film_coefficients::tests::a_layer_without_a_material_takes_os_hpxml_default_material`,
+  `film_coefficients::tests::a_material_outside_the_layer_enumeration_is_an_error`,
   `conversions::tests::only_material_bearing_boundaries_read_their_material`
-  pins which boundaries read a material.
+  and `conversions::tests::finish_type_roughness_changes_exterior_film_resistance`.
+  All but the third fail when every surface takes OS-HPXML's `Rough`.

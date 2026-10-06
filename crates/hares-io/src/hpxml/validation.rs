@@ -649,7 +649,7 @@ mod tests {
         <Site>
           <Elevation units="ft">100</Elevation>
           <SiteType>suburban</SiteType>
-          <ShieldingOfHome>normal</ShieldingOfHome>
+          <ShieldingofHome>normal</ShieldingofHome>
         </Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>

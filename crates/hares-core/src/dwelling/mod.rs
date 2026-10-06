@@ -2262,6 +2262,9 @@ fn build_from_blueprint_inner(
 
     let initial_env = environment.update(&clock, &[])?;
 
+    for warning in conversions::envelope_input_warnings(&bp.building)? {
+        warnings.push_warning(warning);
+    }
     let solvers = build_default_solvers(
         &initial_env,
         &config.sim_config,
@@ -7781,6 +7784,9 @@ fn cfg_gated_helper() {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
         let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
             .expect("build dwelling");
+        // The fixture's construction warnings (its site gives no terrain or
+        // shielding) are not under test.
+        dwelling.take_warnings();
 
         let mut warner = TestWarningEquipment::new("Warner");
         warner
@@ -7831,6 +7837,8 @@ fn cfg_gated_helper() {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
         let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
             .expect("build dwelling");
+        // The fixture's construction warnings are not under test.
+        dwelling.take_warnings();
 
         let tariff = ElectricTariff {
             parse_warnings: vec!["test tariff parse warning".to_string()],

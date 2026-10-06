@@ -91,108 +91,269 @@ impl SurfaceRoughness {
     }
 }
 
-/// The roughness class of an outside surface finished in the HPXML
-/// `<Siding>` or `<RoofType>` material `finish_type`.
-///
-/// The classes and their multipliers are the EnergyPlus Engineering
-/// Reference's (v24.2, Outside Surface Heat Balance, "Surface Roughness
-/// Multipliers (Walton 1981)"). A material the table names as its example
-/// takes that class: stucco Very Rough, brick Rough, concrete Medium Rough.
-/// Any other material takes the roughness of its record in EnergyPlus's
-/// ASHRAE 2005 HOF material dataset (v24.2.0
-/// `datasets/ASHRAE_2005_HOF_Materials.idf`, line of the record's name):
-///
-/// | HPXML material | Dataset record | Class |
-/// |---|---|---|
-/// | asphalt or fiberglass shingles, shingles, composite shingle siding | F12 Asphalt shingles (164) | Very Rough |
-/// | wood shingles or shakes | F15 Wood shingles (188) | Very Rough |
-/// | slate or tile shingles, concrete tiles | F14 Slate or tile (180) | Very Rough |
-/// | expanded polystyrene sheathing | EPS molded beads (810) | Very Rough |
-/// | plastic/rubber/synthetic sheeting | F13 Built-up roofing (172), the dataset's membrane roof | Rough |
-/// | metal surfacing, aluminum siding | F08 Metal surface (132) | Smooth |
-/// | wood siding | F11 Wood siding (156) | Medium Smooth |
-/// | fiber cement siding, asbestos siding | Asbestos-cement board (498) | Smooth |
-/// | masonite siding | Hardboard Medium density (658) | Smooth |
-///
-/// Vinyl siding has no dataset record and is Smooth, as the sheet siding
-/// it replaces (aluminum, metal surface). Stone veneer has none either and
-/// is Rough, as the table's other masonry veneer, brick. A green roof is
-/// EnergyPlus's `Material:RoofVegetation`, whose roughness defaults to
-/// Medium Rough (v24.2.0 `idd/Energy+.idd.in`, lines 5064-5072). The
-/// dataset gives stucco (F07, 124) Smooth and brick (M01, 332) Medium
-/// Rough; the Engineering Reference table, which names them, is followed
-/// instead.
-///
-/// No material ("other", "unknown", "not present", "no one major type",
-/// "cool roof", a coating over a roof the HPXML does not name, "none", the
-/// pre-v4 spelling of "not present", or no element at all) takes OS-HPXML
-/// v1.12.0's class, Rough, which every OS-HPXML surface carries
-/// (`model.rb:49`, `:95`, the `roughness: 'Rough'` default no caller
-/// overrides), with a warning.
-///
-/// # Errors
-///
-/// A `finish_type` outside the HPXML `<Siding>` and `<RoofType>`
-/// enumerations (OS-HPXML v1.12.0's schema and HPXML's current one).
-pub fn surface_roughness_from_finish_type(
-    finish_type: Option<&str>,
-) -> Result<SurfaceRoughness, HaresError> {
-    Ok(match finish_type {
-        Some("stucco" | "synthetic stucco") => SurfaceRoughness::VeryRough,
-        Some("brick veneer" | "stone veneer") => SurfaceRoughness::Rough,
-        Some("concrete" | "green roof") => SurfaceRoughness::MediumRough,
-        Some(
-            "asphalt or fiberglass shingles"
-            | "shingles"
-            | "composite shingle siding"
-            | "wood shingles or shakes"
-            | "slate or tile shingles"
-            | "concrete tiles"
-            | "expanded polystyrene sheathing",
-        ) => SurfaceRoughness::VeryRough,
-        Some("plastic/rubber/synthetic sheeting") => SurfaceRoughness::Rough,
-        Some(
-            "metal surfacing"
-            | "aluminum siding"
-            | "vinyl siding"
-            | "fiber cement siding"
-            | "asbestos siding"
-            | "masonite siding",
-        ) => SurfaceRoughness::Smooth,
-        Some("wood siding") => SurfaceRoughness::MediumSmooth,
-        None
-        | Some("none" | "other" | "unknown" | "not present" | "no one major type" | "cool roof") => {
-            tracing::warn!(
-                finish_type = finish_type.unwrap_or("<absent>"),
-                "outside surface names no material; it takes OS-HPXML's roughness, Rough"
-            );
-            SurfaceRoughness::Rough
-        }
-        Some(unknown) => {
-            return Err(HaresError::Physics(format!(
-                "outside surface material '{unknown}' is not an HPXML Siding or RoofType value"
-            )));
-        }
-    })
+/// The HPXML element whose material an outside surface's roughness comes
+/// from: `Siding` on a wall or rim joist, `RoofType` on a roof, `Type` on a
+/// foundation wall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutsideLayer {
+    Siding,
+    Roof,
+    FoundationWall,
 }
 
-/// The roughness class the outside film of a surface facing `exterior`
-/// takes: its material's ([`surface_roughness_from_finish_type`]) when it
-/// faces outdoors, where forced convection acts; otherwise none applies and
-/// the class is not read, so no material is required.
+impl OutsideLayer {
+    /// The material OS-HPXML v1.12.0 gives this layer when the HPXML names
+    /// none, and where it does so.
+    fn os_hpxml_default(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Siding => ("wood siding", "defaults.rb:1338, :1379"),
+            Self::Roof => ("asphalt or fiberglass shingles", "defaults.rb:1268"),
+            Self::FoundationWall => ("solid concrete", "defaults.rb:1431-1433"),
+        }
+    }
+
+    /// The values of this layer's HPXML element that name no material.
+    fn names_no_material(self, value: &str) -> bool {
+        match self {
+            Self::Siding => matches!(value, "none" | "other" | "unknown" | "not present"),
+            Self::Roof => matches!(value, "other" | "no one major type" | "cool roof"),
+            Self::FoundationWall => false,
+        }
+    }
+}
+
+/// One HPXML outside material and the EnergyPlus record its roughness comes
+/// from.
+#[derive(Debug, Clone, Copy)]
+pub struct MaterialRoughness {
+    pub layer: OutsideLayer,
+    /// The HPXML enumeration value.
+    pub material: &'static str,
+    /// The record's name in EnergyPlus v24.2.0's
+    /// `datasets/ASHRAE_2005_HOF_Materials.idf`, or the source that stands
+    /// in for one.
+    pub record: &'static str,
+    /// The line of the record's name in that file; 0 where the source is
+    /// not a dataset record.
+    pub line: u32,
+    pub class: SurfaceRoughness,
+}
+
+const fn row(
+    layer: OutsideLayer,
+    material: &'static str,
+    record: &'static str,
+    line: u32,
+    class: SurfaceRoughness,
+) -> MaterialRoughness {
+    MaterialRoughness {
+        layer,
+        material,
+        record,
+        line,
+        class,
+    }
+}
+
+/// Every HPXML outside material and its roughness class.
+///
+/// One rule: a material takes the roughness of the record that names it in
+/// EnergyPlus v24.2.0's `datasets/ASHRAE_2005_HOF_Materials.idf`, searched
+/// family by family: the siding records (`Siding:`, lines 2022-2077) for a
+/// siding; the shingle records (`Shingles:`, 2002-2017) and then the roofing
+/// records (1887-1912) for a roof; then the exterior finish layers (F06-F15,
+/// 116-188), the masonry records (M01-M09, 332-396) and the concrete
+/// records (1018-1218). Where the material is a kind of a named one, it
+/// takes that record: vinyl and aluminum siding are the hollow-backed
+/// siding, fiber-cement siding the cement siding, composite shingle siding
+/// and generic shingles the asphalt shingles, a single-ply sheeting the
+/// built-up roofing (the roofing family's only membrane), concrete tiles
+/// the slate or tile layer. A green roof has no record and takes
+/// `Material:RoofVegetation`'s default roughness (v24.2.0
+/// `idd/Energy+.idd.in`, lines 5064-5072).
+///
+/// The Engineering Reference's Walton table lists stucco and brick as its
+/// Very Rough and Rough examples; the dataset's stucco (F07) is Smooth and
+/// its brick (M01) Medium Rough, and the dataset is followed. Every row
+/// departs from OS-HPXML v1.12.0, which gives every surface `Rough`
+/// (`model.rb:49`, `:95`).
+pub const MATERIAL_ROUGHNESS: &[MaterialRoughness] = {
+    use OutsideLayer::{FoundationWall as F, Roof as R, Siding as S};
+    use SurfaceRoughness::*;
+    &[
+        row(
+            S,
+            "wood siding",
+            "Siding: Wood - bevel 13 by 200mm - lapped",
+            2047,
+            Rough,
+        ),
+        row(S, "stucco", "F07 25mm stucco", 124, Smooth),
+        row(S, "synthetic stucco", "F06 EIFS finish", 116, Smooth),
+        row(S, "vinyl siding", "Siding: Hollow-backed", 2062, Smooth),
+        row(S, "aluminum siding", "Siding: Hollow-backed", 2062, Smooth),
+        row(S, "brick veneer", "M01 100mm brick", 332, MediumRough),
+        row(S, "stone veneer", "F10 25mm stone", 148, MediumRough),
+        row(
+            S,
+            "asbestos siding",
+            "Siding: Asbestos-cement 6.4mm",
+            2022,
+            VeryRough,
+        ),
+        row(
+            S,
+            "fiber cement siding",
+            "Siding: Asbestos-cement 6.4mm",
+            2022,
+            VeryRough,
+        ),
+        row(
+            S,
+            "composite shingle siding",
+            "Asphalt shingles",
+            1897,
+            VeryRough,
+        ),
+        row(
+            S,
+            "masonite siding",
+            "Siding: Hardboard 11mm",
+            2037,
+            MediumSmooth,
+        ),
+        row(
+            R,
+            "asphalt or fiberglass shingles",
+            "Asphalt shingles",
+            1897,
+            VeryRough,
+        ),
+        row(R, "shingles", "Asphalt shingles", 1897, VeryRough),
+        row(
+            R,
+            "wood shingles or shakes",
+            "Shingles: Wood 400mm - 190-mm exposure",
+            2007,
+            MediumRough,
+        ),
+        row(R, "slate or tile shingles", "Slate - 13mm", 1907, VeryRough),
+        row(R, "concrete tiles", "F14 Slate or tile", 180, VeryRough),
+        row(R, "metal surfacing", "F08 Metal surface", 132, Smooth),
+        row(
+            R,
+            "plastic/rubber/synthetic sheeting",
+            "Built-up roofing - 10mm",
+            1902,
+            VeryRough,
+        ),
+        row(
+            R,
+            "expanded polystyrene sheathing",
+            "Insulation: Expanded polystyrene - molded beads - 16kg/m3 density",
+            810,
+            VeryRough,
+        ),
+        row(
+            R,
+            "concrete",
+            "Concrete: Sand and gravel or stone aggregate concretes - 2400 kg/m3 - 51mm",
+            1018,
+            MediumRough,
+        ),
+        row(
+            R,
+            "green roof",
+            "Material:RoofVegetation (Energy+.idd.in:5064-5072)",
+            0,
+            MediumRough,
+        ),
+        row(
+            F,
+            "solid concrete",
+            "Concrete: Sand and gravel or stone aggregate concretes - 2400 kg/m3 - 51mm",
+            1018,
+            MediumRough,
+        ),
+        row(
+            F,
+            "concrete block",
+            "M05 200mm concrete block",
+            364,
+            MediumRough,
+        ),
+        row(
+            F,
+            "concrete block foam core",
+            "M05 200mm concrete block",
+            364,
+            MediumRough,
+        ),
+        row(
+            F,
+            "concrete block perlite core",
+            "M05 200mm concrete block",
+            364,
+            MediumRough,
+        ),
+        row(
+            F,
+            "concrete block vermiculite core",
+            "M05 200mm concrete block",
+            364,
+            MediumRough,
+        ),
+        row(
+            F,
+            "concrete block solid core",
+            "M05 200mm concrete block",
+            364,
+            MediumRough,
+        ),
+        row(F, "double brick", "M01 100mm brick", 332, MediumRough),
+        row(
+            F,
+            "wood",
+            "Siding: Wood - plywood 9.5mm - lapped",
+            2057,
+            Rough,
+        ),
+    ]
+};
+
+/// The roughness class of an outside surface whose `layer` is `material`
+/// ([`MATERIAL_ROUGHNESS`]), with a warning when the HPXML names no
+/// material: the layer then takes the material OS-HPXML v1.12.0 defaults
+/// it to (wood siding, asphalt shingles, solid concrete).
 ///
 /// # Errors
 ///
-/// An outdoor surface's unknown material.
-pub fn outside_surface_roughness(
-    exterior: ZoneLabel,
-    finish_type: Option<&str>,
-) -> Result<SurfaceRoughness, HaresError> {
-    if exterior == ZoneLabel::Outdoor {
-        surface_roughness_from_finish_type(finish_type)
-    } else {
-        Ok(SurfaceRoughness::Rough)
-    }
+/// A `material` that is not a value of the layer's HPXML element.
+pub fn outside_layer_roughness(
+    layer: OutsideLayer,
+    material: Option<&str>,
+) -> Result<(SurfaceRoughness, Option<String>), HaresError> {
+    let (default, source) = layer.os_hpxml_default();
+    let (material, warning) = match material {
+        Some(value) if !layer.names_no_material(value) => (value, None),
+        given => (
+            default,
+            Some(format!(
+                "the outside {layer:?} layer names no material ({}); its roughness is that \
+                 of OS-HPXML's default, {default} ({source})",
+                given.unwrap_or("no element")
+            )),
+        ),
+    };
+    let row = MATERIAL_ROUGHNESS
+        .iter()
+        .find(|row| row.layer == layer && row.material == material)
+        .ok_or_else(|| {
+            HaresError::Physics(format!(
+                "outside material '{material}' is not an HPXML value for a {layer:?}"
+            ))
+        })?;
+    Ok((row.class, warning))
 }
 
 /// Typical zone temperatures [°C] for each [`ZoneLabel`] variant.
@@ -576,80 +737,233 @@ mod tests {
         );
     }
 
-    // --- surface_roughness_from_finish_type tests ---
+    // --- outside material roughness tests ---
 
-    /// Every HPXML `<Siding>` and `<RoofType>` value maps to the class of its
-    /// Engineering Reference example or EnergyPlus dataset record.
+    /// Every HPXML siding, roof and foundation wall material takes the
+    /// roughness of its EnergyPlus v24.2.0 `ASHRAE_2005_HOF_Materials.idf`
+    /// record, transcribed here from the dataset (record name, line of the
+    /// name, its Roughness field). Each HPXML enumeration value is listed
+    /// once, so a material the table drops, or a record it changes, fails.
     #[test]
     fn every_hpxml_material_takes_its_energyplus_roughness() {
+        use OutsideLayer::{FoundationWall as F, Roof as R, Siding as S};
         use SurfaceRoughness::*;
-        for (material, class) in [
-            ("stucco", VeryRough),
-            ("synthetic stucco", VeryRough),
-            ("brick veneer", Rough),
-            ("stone veneer", Rough),
-            ("concrete", MediumRough),
-            ("green roof", MediumRough),
-            ("concrete tiles", VeryRough),
-            ("asphalt or fiberglass shingles", VeryRough),
-            ("shingles", VeryRough),
-            ("composite shingle siding", VeryRough),
-            ("wood shingles or shakes", VeryRough),
-            ("slate or tile shingles", VeryRough),
-            ("expanded polystyrene sheathing", VeryRough),
-            ("plastic/rubber/synthetic sheeting", Rough),
-            ("metal surfacing", Smooth),
-            ("aluminum siding", Smooth),
-            ("vinyl siding", Smooth),
-            ("fiber cement siding", Smooth),
-            ("asbestos siding", Smooth),
-            ("masonite siding", Smooth),
-            ("wood siding", MediumSmooth),
-        ] {
-            assert_eq!(
-                surface_roughness_from_finish_type(Some(material)).unwrap(),
-                class,
-                "{material}"
-            );
-        }
-    }
-
-    /// A surface naming no material is OS-HPXML's Rough, not a guess.
-    #[test]
-    fn a_surface_without_a_material_is_os_hpxml_rough() {
-        for finish in [
-            None,
-            Some("none"),
-            Some("other"),
-            Some("unknown"),
-            Some("not present"),
-            Some("no one major type"),
-            Some("cool roof"),
-        ] {
-            assert_eq!(
-                surface_roughness_from_finish_type(finish).unwrap(),
-                SurfaceRoughness::Rough,
-                "{finish:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_material_outside_the_hpxml_enumerations_is_an_error() {
-        let err = surface_roughness_from_finish_type(Some("diamond plate")).unwrap_err();
-        assert!(err.to_string().contains("diamond plate"), "{err}");
-    }
-
-    /// Only an outdoor surface needs a material; an unknown one is still an
-    /// error there.
-    #[test]
-    fn only_an_outdoor_surface_reads_its_material() {
-        assert!(outside_surface_roughness(ZoneLabel::Attic, Some("diamond plate")).is_ok());
-        assert!(outside_surface_roughness(ZoneLabel::Outdoor, Some("diamond plate")).is_err());
+        let expected: &[(OutsideLayer, &str, &str, u32, SurfaceRoughness)] = &[
+            (
+                S,
+                "wood siding",
+                "Siding: Wood - bevel 13 by 200mm - lapped",
+                2047,
+                Rough,
+            ),
+            (S, "stucco", "F07 25mm stucco", 124, Smooth),
+            (S, "synthetic stucco", "F06 EIFS finish", 116, Smooth),
+            (S, "vinyl siding", "Siding: Hollow-backed", 2062, Smooth),
+            (S, "aluminum siding", "Siding: Hollow-backed", 2062, Smooth),
+            (S, "brick veneer", "M01 100mm brick", 332, MediumRough),
+            (S, "stone veneer", "F10 25mm stone", 148, MediumRough),
+            (
+                S,
+                "asbestos siding",
+                "Siding: Asbestos-cement 6.4mm",
+                2022,
+                VeryRough,
+            ),
+            (
+                S,
+                "fiber cement siding",
+                "Siding: Asbestos-cement 6.4mm",
+                2022,
+                VeryRough,
+            ),
+            (
+                S,
+                "composite shingle siding",
+                "Asphalt shingles",
+                1897,
+                VeryRough,
+            ),
+            (
+                S,
+                "masonite siding",
+                "Siding: Hardboard 11mm",
+                2037,
+                MediumSmooth,
+            ),
+            (
+                R,
+                "asphalt or fiberglass shingles",
+                "Asphalt shingles",
+                1897,
+                VeryRough,
+            ),
+            (R, "shingles", "Asphalt shingles", 1897, VeryRough),
+            (
+                R,
+                "wood shingles or shakes",
+                "Shingles: Wood 400mm - 190-mm exposure",
+                2007,
+                MediumRough,
+            ),
+            (R, "slate or tile shingles", "Slate - 13mm", 1907, VeryRough),
+            (R, "concrete tiles", "F14 Slate or tile", 180, VeryRough),
+            (R, "metal surfacing", "F08 Metal surface", 132, Smooth),
+            (
+                R,
+                "plastic/rubber/synthetic sheeting",
+                "Built-up roofing - 10mm",
+                1902,
+                VeryRough,
+            ),
+            (
+                R,
+                "expanded polystyrene sheathing",
+                "Insulation: Expanded polystyrene - molded beads - 16kg/m3 density",
+                810,
+                VeryRough,
+            ),
+            (
+                R,
+                "concrete",
+                "Concrete: Sand and gravel or stone aggregate concretes - 2400 kg/m3 - 51mm",
+                1018,
+                MediumRough,
+            ),
+            (
+                R,
+                "green roof",
+                "Material:RoofVegetation (Energy+.idd.in:5064-5072)",
+                0,
+                MediumRough,
+            ),
+            (
+                F,
+                "solid concrete",
+                "Concrete: Sand and gravel or stone aggregate concretes - 2400 kg/m3 - 51mm",
+                1018,
+                MediumRough,
+            ),
+            (
+                F,
+                "concrete block",
+                "M05 200mm concrete block",
+                364,
+                MediumRough,
+            ),
+            (
+                F,
+                "concrete block foam core",
+                "M05 200mm concrete block",
+                364,
+                MediumRough,
+            ),
+            (
+                F,
+                "concrete block perlite core",
+                "M05 200mm concrete block",
+                364,
+                MediumRough,
+            ),
+            (
+                F,
+                "concrete block vermiculite core",
+                "M05 200mm concrete block",
+                364,
+                MediumRough,
+            ),
+            (
+                F,
+                "concrete block solid core",
+                "M05 200mm concrete block",
+                364,
+                MediumRough,
+            ),
+            (F, "double brick", "M01 100mm brick", 332, MediumRough),
+            (
+                F,
+                "wood",
+                "Siding: Wood - plywood 9.5mm - lapped",
+                2057,
+                Rough,
+            ),
+        ];
         assert_eq!(
-            outside_surface_roughness(ZoneLabel::Outdoor, Some("wood siding")).unwrap(),
-            SurfaceRoughness::MediumSmooth
+            MATERIAL_ROUGHNESS.len(),
+            expected.len(),
+            "one row per material"
         );
+        for &(layer, material, record, line, class) in expected {
+            let row = MATERIAL_ROUGHNESS
+                .iter()
+                .find(|row| row.layer == layer && row.material == material)
+                .unwrap_or_else(|| panic!("{layer:?} '{material}' has no row"));
+            assert_eq!((row.record, row.line), (record, line), "{material}");
+            let (got, warning) = outside_layer_roughness(layer, Some(material)).unwrap();
+            assert_eq!(got, class, "{material}");
+            assert!(warning.is_none(), "{material} names its material");
+        }
+    }
+
+    /// A layer that names no material takes the material OS-HPXML defaults
+    /// it to, with a warning: wood siding (Rough), asphalt shingles (Very
+    /// Rough), solid concrete (Medium Rough). Not a blanket Rough.
+    #[test]
+    fn a_layer_without_a_material_takes_os_hpxml_default_material() {
+        use OutsideLayer::{FoundationWall, Roof, Siding};
+        for (layer, given, class, default) in [
+            (Siding, None, SurfaceRoughness::Rough, "wood siding"),
+            (
+                Siding,
+                Some("not present"),
+                SurfaceRoughness::Rough,
+                "wood siding",
+            ),
+            (
+                Siding,
+                Some("other"),
+                SurfaceRoughness::Rough,
+                "wood siding",
+            ),
+            (Roof, None, SurfaceRoughness::VeryRough, "asphalt"),
+            (
+                Roof,
+                Some("cool roof"),
+                SurfaceRoughness::VeryRough,
+                "asphalt",
+            ),
+            (
+                Roof,
+                Some("no one major type"),
+                SurfaceRoughness::VeryRough,
+                "asphalt",
+            ),
+            (
+                FoundationWall,
+                None,
+                SurfaceRoughness::MediumRough,
+                "solid concrete",
+            ),
+        ] {
+            let (got, warning) = outside_layer_roughness(layer, given).unwrap();
+            assert_eq!(got, class, "{layer:?} {given:?}");
+            let warning = warning.expect("a defaulted material is a warning");
+            assert!(warning.contains(default), "{warning}");
+        }
+    }
+
+    /// A value outside a layer's HPXML enumeration is an error, including a
+    /// material of another layer.
+    #[test]
+    fn a_material_outside_the_layer_enumeration_is_an_error() {
+        for (layer, material) in [
+            (OutsideLayer::Siding, "diamond plate"),
+            (OutsideLayer::Siding, "metal surfacing"),
+            (OutsideLayer::Roof, "wood siding"),
+            (OutsideLayer::FoundationWall, "stucco"),
+        ] {
+            let err = outside_layer_roughness(layer, Some(material)).unwrap_err();
+            assert!(err.to_string().contains(material), "{err}");
+        }
     }
 
     #[test]

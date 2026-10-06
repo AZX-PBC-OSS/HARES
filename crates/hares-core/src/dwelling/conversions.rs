@@ -77,7 +77,7 @@ pub fn building_to_boundary_inputs(
                 avg_wind_m_s,
                 avg_ground_c,
                 avg_ambient_c,
-                boundary_outside_roughness(bd, exterior_label)?,
+                boundary_outside_roughness(bd, exterior_label)?.0,
             );
 
             // fallback_r is material-only R (no film). HPXML AssemblyEffectiveRValue
@@ -1427,33 +1427,40 @@ pub(crate) fn site_type_to_terrain(
     }
 }
 
-/// The convective roughness class of a boundary's outside face. Only an
-/// outdoor face reads it. A boundary whose HPXML element has a material
-/// (`Siding` on walls, foundation walls and rim joists, `RoofType` on
-/// roofs) takes that material's class. Glazing is glass, the Engineering
-/// Reference's Very Smooth example (its films come from the U-factor
-/// decomposition in any case). Doors, floors and slabs have no material
-/// element in HPXML and take OS-HPXML v1.12.0's `Rough` (model.rb:49, :95)
-/// without a warning, since no input is missing.
+/// The convective roughness class of a boundary's outside face, and a
+/// warning when its HPXML names no material. Only an outdoor face reads it
+/// (any other face has no forced convection, and the class returned for it
+/// is never used). Walls and rim joists read their `Siding`, roofs their
+/// `RoofType`, foundation walls their `Type`
+/// ([`hares_physics::film_coefficients::outside_layer_roughness`]). Glazing
+/// is glass, the Engineering Reference's Very Smooth example (its films come
+/// from the U-factor decomposition in any case). Doors, floors and slabs
+/// have no material element in HPXML and take OS-HPXML v1.12.0's `Rough`
+/// (model.rb:49, :95) without a warning, since no input is missing.
 fn boundary_outside_roughness(
     bd: &hares_io::hpxml::Boundary,
     exterior: hares_physics::film_coefficients::ZoneLabel,
-) -> Result<hares_physics::film_coefficients::SurfaceRoughness> {
+) -> Result<(
+    hares_physics::film_coefficients::SurfaceRoughness,
+    Option<String>,
+)> {
     use hares_io::hpxml::BoundaryType;
     use hares_physics::film_coefficients::{
-        SurfaceRoughness, ZoneLabel, outside_surface_roughness,
+        OutsideLayer, SurfaceRoughness, ZoneLabel, outside_layer_roughness,
     };
     if exterior != ZoneLabel::Outdoor {
-        return Ok(SurfaceRoughness::Rough);
+        return Ok((SurfaceRoughness::Rough, None));
     }
-    Ok(match &bd.boundary_type {
-        BoundaryType::Wall
-        | BoundaryType::Roof
-        | BoundaryType::FoundationWall
-        | BoundaryType::RimJoist => outside_surface_roughness(exterior, bd.finish_type.as_deref())
-            .map_err(|e| HaresError::Physics(format!("boundary '{}': {e}", bd.id)))?,
-        BoundaryType::Window | BoundaryType::Skylight => SurfaceRoughness::VerySmooth,
-        BoundaryType::Door | BoundaryType::Floor | BoundaryType::Slab => SurfaceRoughness::Rough,
+    let layer = match &bd.boundary_type {
+        BoundaryType::Wall | BoundaryType::RimJoist => OutsideLayer::Siding,
+        BoundaryType::Roof => OutsideLayer::Roof,
+        BoundaryType::FoundationWall => OutsideLayer::FoundationWall,
+        BoundaryType::Window | BoundaryType::Skylight => {
+            return Ok((SurfaceRoughness::VerySmooth, None));
+        }
+        BoundaryType::Door | BoundaryType::Floor | BoundaryType::Slab => {
+            return Ok((SurfaceRoughness::Rough, None));
+        }
         BoundaryType::Other(kind) => {
             return Err(HaresError::Dwelling(format!(
                 "boundary '{}' of unrecognised type '{kind}' faces outdoors; its outside \
@@ -1461,21 +1468,69 @@ fn boundary_outside_roughness(
                 bd.id
             )));
         }
-    })
+    };
+    let (class, warning) = outside_layer_roughness(layer, bd.finish_type.as_deref())
+        .map_err(|e| HaresError::Physics(format!("boundary '{}': {e}", bd.id)))?;
+    Ok((class, warning.map(|w| format!("boundary '{}': {w}", bd.id))))
 }
 
-/// Map HPXML `<ShieldingOfHome>` to [`ShieldingClass`].
+/// The construction warnings the envelope's inputs raise: each outdoor
+/// boundary whose HPXML names no outside material, a site with no
+/// `SiteType` (suburban, OS-HPXML's default, defaults.rb:817-818) and one
+/// with no `ShieldingofHome` (OS-HPXML's default, defaults.rb:822-830).
+///
+/// # Errors
+///
+/// An outdoor boundary's material that is not an HPXML value.
+pub(crate) fn envelope_input_warnings(building: &Building) -> Result<Vec<hares_types::Warning>> {
+    let mut warnings = Vec::new();
+    for bd in &building.boundaries {
+        let exterior = zone_type_to_label(bd.exterior_zone.as_ref());
+        if let (_, Some(message)) = boundary_outside_roughness(bd, exterior)? {
+            warnings.push(hares_types::Warning::new("envelope", message));
+        }
+    }
+    if building.site.site_type.is_none() {
+        warnings.push(hares_types::Warning::new(
+            "envelope",
+            "the building gives no SiteType; the wind terrain is suburban, OS-HPXML's default \
+             (defaults.rb:817-818)",
+        ));
+    }
+    if building.site.shielding_of_home.is_none() {
+        let shielding = shielding_to_class(None, building.residential_facility_type.as_deref());
+        warnings.push(hares_types::Warning::new(
+            "envelope",
+            format!(
+                "the building gives no ShieldingofHome; the shielding is {shielding:?}, OS-HPXML's \
+                 default for this facility type (defaults.rb:822-830)"
+            ),
+        ));
+    }
+    Ok(warnings)
+}
+
+/// Map HPXML `<ShieldingofHome>` to [`ShieldingClass`].
 ///
 /// Walker & Wilson (1998) Table 3; ResStock `airflow.get_aim2_shelter_coefficient`.
+/// A file without one takes OS-HPXML v1.12.0's default (defaults.rb:822-830):
+/// well-shielded for an apartment unit or single-family attached home,
+/// normal otherwise; [`envelope_input_warnings`] reports it. The parser
+/// rejects any other value.
 pub(crate) fn shielding_to_class(
     shielding: Option<&hares_io::hpxml::ShieldingOfHome>,
+    residential_facility_type: Option<&str>,
 ) -> hares_physics::infiltration::ShieldingClass {
     use hares_io::hpxml::ShieldingOfHome;
     use hares_physics::infiltration::ShieldingClass;
     match shielding {
         Some(ShieldingOfHome::Exposed) => ShieldingClass::Exposed,
         Some(ShieldingOfHome::WellShielded) => ShieldingClass::WellShielded,
-        Some(ShieldingOfHome::Normal) | None => ShieldingClass::Normal,
+        Some(ShieldingOfHome::Normal) => ShieldingClass::Normal,
+        None => match residential_facility_type {
+            Some("apartment unit" | "single-family attached") => ShieldingClass::WellShielded,
+            _ => ShieldingClass::Normal,
+        },
     }
 }
 
@@ -2579,8 +2634,10 @@ mod tests {
 
     /// Only boundaries whose HPXML element carries a material read it: an
     /// outdoor door, floor or window has none to read and takes OS-HPXML's
-    /// Rough or glass's Very Smooth, while an outdoor wall's unknown
-    /// material is an error naming the wall.
+    /// Rough or glass's Very Smooth with no warning. A wall, rim joist,
+    /// roof or foundation wall reads its own element, and one that names
+    /// none takes OS-HPXML's default material with a warning naming the
+    /// boundary. An outdoor wall's unknown material is an error naming it.
     #[test]
     fn only_material_bearing_boundaries_read_their_material() {
         use hares_physics::film_coefficients::{SurfaceRoughness, ZoneLabel};
@@ -2591,30 +2648,70 @@ mod tests {
             finish_type: finish.map(str::to_string),
             ..slab_boundary(None, None)
         };
-        for (boundary_type, class) in [
-            (BoundaryType::Door, SurfaceRoughness::Rough),
-            (BoundaryType::Floor, SurfaceRoughness::Rough),
-            (BoundaryType::Window, SurfaceRoughness::VerySmooth),
-            (BoundaryType::Skylight, SurfaceRoughness::VerySmooth),
+        for (boundary_type, finish, class, warns) in [
+            (
+                BoundaryType::Door,
+                Some("diamond plate"),
+                SurfaceRoughness::Rough,
+                false,
+            ),
+            (
+                BoundaryType::Floor,
+                Some("diamond plate"),
+                SurfaceRoughness::Rough,
+                false,
+            ),
+            (
+                BoundaryType::Window,
+                Some("diamond plate"),
+                SurfaceRoughness::VerySmooth,
+                false,
+            ),
+            (
+                BoundaryType::Skylight,
+                None,
+                SurfaceRoughness::VerySmooth,
+                false,
+            ),
+            (
+                BoundaryType::Roof,
+                Some("asphalt or fiberglass shingles"),
+                SurfaceRoughness::VeryRough,
+                false,
+            ),
+            (BoundaryType::Roof, None, SurfaceRoughness::VeryRough, true),
+            (
+                BoundaryType::Wall,
+                Some("vinyl siding"),
+                SurfaceRoughness::Smooth,
+                false,
+            ),
+            (BoundaryType::Wall, None, SurfaceRoughness::Rough, true),
+            (BoundaryType::RimJoist, None, SurfaceRoughness::Rough, true),
+            (
+                BoundaryType::FoundationWall,
+                Some("double brick"),
+                SurfaceRoughness::MediumRough,
+                false,
+            ),
+            (
+                BoundaryType::FoundationWall,
+                None,
+                SurfaceRoughness::MediumRough,
+                true,
+            ),
         ] {
-            assert_eq!(
-                super::boundary_outside_roughness(
-                    &outdoor(boundary_type.clone(), Some("diamond plate")),
-                    ZoneLabel::Outdoor
-                )
-                .unwrap(),
-                class,
-                "{boundary_type:?}"
-            );
-        }
-        assert_eq!(
-            super::boundary_outside_roughness(
-                &outdoor(BoundaryType::Roof, Some("asphalt or fiberglass shingles")),
-                ZoneLabel::Outdoor
+            let (got, warning) = super::boundary_outside_roughness(
+                &outdoor(boundary_type.clone(), finish),
+                ZoneLabel::Outdoor,
             )
-            .unwrap(),
-            SurfaceRoughness::VeryRough
-        );
+            .unwrap();
+            assert_eq!(got, class, "{boundary_type:?} {finish:?}");
+            assert_eq!(warning.is_some(), warns, "{boundary_type:?} {finish:?}");
+            if let Some(warning) = warning {
+                assert!(warning.contains("b-1"), "{warning}");
+            }
+        }
         let err = super::boundary_outside_roughness(
             &outdoor(BoundaryType::Wall, Some("diamond plate")),
             ZoneLabel::Outdoor,
@@ -2936,10 +3033,11 @@ mod tests {
         }
     }
 
-    /// Exterior film resistance varies with finish_type: stucco (VeryRough)
-    /// must produce lower R_ext than vinyl siding (Smooth) at the same wind speed.
-    /// If the finish type were bypassed, both boundaries would get identical
-    /// R_ext and this test would fail.
+    /// Exterior film resistance varies with finish_type: fiber cement siding
+    /// (Very Rough, the dataset's cement siding record) must produce lower
+    /// R_ext than vinyl siding (Smooth, the hollow-backed siding) at the same
+    /// wind speed. If the finish type were bypassed, both boundaries would
+    /// get identical R_ext and this test would fail.
     #[test]
     fn finish_type_roughness_changes_exterior_film_resistance() {
         let building = hares_io::Building {
@@ -2969,7 +3067,7 @@ mod tests {
                     foundation_depth_m: None,
                 },
                 Boundary {
-                    id: "wall-stucco".to_string(),
+                    id: "wall-fiber-cement".to_string(),
                     boundary_type: BoundaryType::Wall,
                     area_m2: 20.0,
                     azimuth_deg: Some(180.0),
@@ -2980,7 +3078,7 @@ mod tests {
                     material_layers: Vec::new(),
                     framing_factor: None,
                     construction_type: None,
-                    finish_type: Some("stucco".to_string()),
+                    finish_type: Some("fiber cement siding".to_string()),
                     insulation_details: None,
                     has_radiant_barrier: false,
                     solar_absorptance: None,
@@ -3014,11 +3112,11 @@ mod tests {
             .expect("building_to_boundary_inputs");
         assert_eq!(inputs.len(), 2);
         let r_vinyl = inputs[0].r_film_exterior_m2_k_w;
-        let r_stucco = inputs[1].r_film_exterior_m2_k_w;
+        let r_cement = inputs[1].r_film_exterior_m2_k_w;
         assert!(
-            r_stucco < r_vinyl,
-            "stucco (VeryRough, Rf=2.17) R_ext={r_stucco:.5} must be < vinyl siding (Smooth, Rf=1.11) R_ext={r_vinyl:.5}; \
-             hardcoded Rough would give identical values"
+            r_cement < r_vinyl,
+            "fiber cement (VeryRough, Rf=2.17) R_ext={r_cement:.5} must be < vinyl siding \
+             (Smooth, Rf=1.11) R_ext={r_vinyl:.5}; one roughness for both would give identical values"
         );
     }
 

@@ -865,7 +865,7 @@ pub const SHIELDING_NORMAL: f64 = 0.5 / 3.0;
 /// leakage). Shielding and terrain are configurable to match the building site.
 ///
 /// # Parameters
-/// - `shielding`: site shielding class from `<ShieldingOfHome>` in HPXML.
+/// - `shielding`: site shielding class from `<ShieldingofHome>` in HPXML.
 ///   Walker & Wilson (1998) Table 3: `C' = s_g` where `s_g = raw/3`.
 /// - `terrain`: terrain class from `<SiteType>` in HPXML, driving OS-HPXML's
 ///   Sherman-Grimsrud terrain factor ([`sherman_grimsrud_terrain_factor`]).
@@ -909,7 +909,7 @@ pub fn attic_ela_coefficients(
 ///
 /// # Parameters
 /// - `foundation_top_m`: the foundation top above grade.
-/// - `shielding`: site shielding class from `<ShieldingOfHome>` in HPXML.
+/// - `shielding`: site shielding class from `<ShieldingofHome>` in HPXML.
 ///   Walker & Wilson (1998) Table 3: `C' = s_g` where `s_g = raw/3`.
 /// - `terrain`: terrain class from `<SiteType>` in HPXML, driving OS-HPXML's
 ///   Sherman-Grimsrud terrain factor ([`sherman_grimsrud_terrain_factor`]).

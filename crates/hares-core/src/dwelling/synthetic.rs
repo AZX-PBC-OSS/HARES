@@ -339,6 +339,12 @@ pub(crate) struct SyntheticBoundaryConfig {
     pub(crate) material_layers: Vec<SyntheticMaterialLayer>,
     #[serde(default)]
     pub(crate) r_value_m2_k_w: Option<f64>,
+    /// The outside material, as the HPXML value of the boundary's material
+    /// element (a wall's `Siding`, a roof's `RoofType`), which sets its
+    /// outside convective roughness. Omitted, it takes OS-HPXML's default
+    /// material with a warning.
+    #[serde(default)]
+    pub(crate) outside_material: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1105,7 +1111,7 @@ pub(crate) fn build_synthetic_building(
                     exterior_zone: Some(parse_zone_type(&bc.exterior_zone)),
                     material_layers: layers,
                     construction_type: None,
-                    finish_type: None,
+                    finish_type: bc.outside_material.clone(),
                     insulation_details: None,
                     has_radiant_barrier: false,
                     solar_absorptance: bc.solar_absorptance,

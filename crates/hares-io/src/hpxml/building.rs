@@ -29,7 +29,7 @@ pub enum SiteType {
     Urban,
 }
 
-/// HPXML `<ShieldingOfHome>` -- the wind shielding class of the site.
+/// HPXML `<ShieldingofHome>` -- the wind shielding class of the site.
 ///
 /// Allowed values per the HPXML data dictionary: `normal`, `exposed`,
 /// `well-shielded`. A missing element stays `None` for the solver's
@@ -45,7 +45,7 @@ pub enum ShieldingOfHome {
 pub struct Site {
     pub elevation_m: Option<f64>,
     pub site_type: Option<SiteType>,
-    /// HPXML `<ShieldingOfHome>` -- parsed enum value.
+    /// HPXML `<ShieldingofHome>` -- parsed enum value.
     pub shielding_of_home: Option<ShieldingOfHome>,
     pub latitude_deg: Option<f64>,
     pub longitude_deg: Option<f64>,
@@ -114,7 +114,9 @@ pub struct Boundary {
     pub material_layers: Vec<MaterialLayer>,
     /// HPXML construction type (e.g. "WoodStud", "ConcreteMasonryUnit") for LUT matching.
     pub construction_type: Option<String>,
-    /// Exterior finish type (e.g. "vinyl siding", "asphalt or fiberglass shingles").
+    /// Outside material: a wall's or rim joist's `Siding` (e.g. "vinyl
+    /// siding"), a roof's `RoofType` (e.g. "asphalt or fiberglass
+    /// shingles"), a foundation wall's `Type` (e.g. "solid concrete").
     pub finish_type: Option<String>,
     /// Insulation details string (e.g. "R-13", "Uninsulated") for LUT matching.
     pub insulation_details: Option<String>,
@@ -571,7 +573,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         Some(node) => Some(parse_site_type(&node.text)?),
         None => None,
     };
-    let shielding_of_home = match site_node.child("ShieldingOfHome") {
+    // HPXML.xsd spells the element ShieldingofHome.
+    let shielding_of_home = match site_node.child("ShieldingofHome") {
         Some(node) => Some(parse_shielding_of_home(&node.text)?),
         None => None,
     };
@@ -2174,8 +2177,16 @@ fn extract_construction_metadata(
                 .child("WallType")
                 .and_then(|wt| wt.children.first())
                 .map(|child| child.name.clone());
+            // A foundation wall's outside material is its own Type (solid
+            // concrete, concrete block, double brick, wood); HPXML gives
+            // walls and rim joists a Siding.
+            let material_element = if matches!(boundary_type, BoundaryType::FoundationWall) {
+                "Type"
+            } else {
+                "Siding"
+            };
             let finish_type = node
-                .child("Siding")
+                .child(material_element)
                 .map(|n| n.text.trim().to_string())
                 .filter(|s| !s.is_empty());
             (construction_type, finish_type)
@@ -3196,7 +3207,7 @@ fn parse_shielding_of_home(text: &str) -> Result<ShieldingOfHome, HpxmlError> {
         "well-shielded" => Ok(ShieldingOfHome::WellShielded),
         _ => Err(HpxmlError::Parse(
             format!(
-                "invalid ShieldingOfHome value '{}'; allowed values are 'normal', 'exposed' and 'well-shielded'",
+                "invalid ShieldingofHome value '{}'; allowed values are 'normal', 'exposed' and 'well-shielded'",
                 text.trim()
             )
             .into(),
@@ -3486,7 +3497,7 @@ mod tests {
         <Site>
           <Elevation units="ft">5280</Elevation>
           <SiteType>suburban</SiteType>
-          <ShieldingOfHome>normal</ShieldingOfHome>
+          <ShieldingofHome>normal</ShieldingofHome>
         </Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">2152</ConditionedFloorArea>
@@ -3786,11 +3797,22 @@ mod tests {
     /// coordinate lookup rather than assuming a wrong offset.
     #[test]
     fn site_without_timezone_yields_none_utc_offset() {
-        // SAMPLE_XML's Site has Elevation/SiteType/ShieldingOfHome only.
+        // SAMPLE_XML's Site has Elevation/SiteType/ShieldingofHome only.
         let building = parse_building(SAMPLE_XML).expect("parser success");
         assert_eq!(building.site.utc_offset_h, None);
         assert_eq!(building.site.latitude_deg, None);
         assert_eq!(building.site.longitude_deg, None);
+    }
+
+    /// The site's shielding is read from HPXML's `ShieldingofHome` (lower-case
+    /// "of", as the schema spells it, HPXML.xsd:4479).
+    #[test]
+    fn shielding_is_read_from_the_schema_element() {
+        let building = parse_building(SAMPLE_XML).expect("parser success");
+        assert_eq!(
+            building.site.shielding_of_home,
+            Some(super::ShieldingOfHome::Normal)
+        );
     }
 
     #[test]
@@ -7007,13 +7029,13 @@ mod tests {
     #[test]
     fn unknown_shielding_or_site_type_is_a_parse_error() {
         let shielding = SAMPLE_XML.replace(
-            "<ShieldingOfHome>normal</ShieldingOfHome>",
-            "<ShieldingOfHome>windy</ShieldingOfHome>",
+            "<ShieldingofHome>normal</ShieldingofHome>",
+            "<ShieldingofHome>windy</ShieldingofHome>",
         );
         let err = parse_building(&shielding).expect_err("expected parse failure");
         let msg = err.to_string();
         assert!(
-            msg.contains("ShieldingOfHome") && msg.contains("windy"),
+            msg.contains("ShieldingofHome") && msg.contains("windy"),
             "error must name the element and the value, got: {msg}"
         );
         assert!(

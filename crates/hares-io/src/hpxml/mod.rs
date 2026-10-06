@@ -254,7 +254,7 @@ mod tests {
   <Building>
     <BuildingDetails>
       <BuildingSummary>
-        <Site><Elevation>100</Elevation><SiteType>suburban</SiteType><ShieldingOfHome>normal</ShieldingOfHome></Site>
+        <Site><Elevation>100</Elevation><SiteType>suburban</SiteType><ShieldingofHome>normal</ShieldingofHome></Site>
         <BuildingConstruction><ConditionedFloorArea units="m2">5</ConditionedFloorArea><ConditionedBuildingVolume units="m3">12.5</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
