@@ -39,8 +39,8 @@ use hares_equipment::{
 use hares_types::rng::{RngStream, dwelling_seed};
 use hares_types::{
     ControlSignal, CoreCapabilities, CoreOutput, EnvironmentState, EquipmentDescriptor, FuelType,
-    OperatingMode, PortSlots, SurfaceIrradiance, ZoneId, telemetry_keys as tk,
-    validate_core_contract,
+    OperatingMode, PortSlots, SurfaceIrradiance, ThermostatAxes, ThermostatAxis,
+    ThermostatBandClass, ZoneId, telemetry_keys as tk, validate_core_contract,
 };
 
 use common::{default_env, env_with_zone_temp};
@@ -1550,6 +1550,47 @@ fn all_registered_equipment_core_output_matches_capabilities_and_ports() {
             );
         }
     }
+}
+
+/// Every registered type's thermostat band class and setpoint axes agree:
+/// an HVAC thermostat (a cycling or ideal band) declares the setpoints it
+/// serves, a single-purpose unit the one its end use names and only the
+/// ideal unit both; a tank (moved by an absolute setpoint, not a delta)
+/// and a type without a band declare none.
+#[test]
+fn every_registered_thermostat_declares_the_setpoints_it_serves() {
+    let registry = EquipmentRegistry::new();
+    let mut with_axes = Vec::new();
+    for class in registry.known_names() {
+        let cfg = config_for_class(class);
+        let env = env_for_class(class);
+        let mut eq = registry
+            .create(class, cfg.clone())
+            .unwrap_or_else(|e| panic!("create failed for '{class}': {e}"));
+        eq.init(&cfg, &env)
+            .unwrap_or_else(|e| panic!("init failed for '{class}': {e}"));
+        let band = eq.thermostat_band_class();
+        let axes = eq.thermostat_axes();
+        assert_eq!(
+            band.is_some_and(|c| c != ThermostatBandClass::Tank),
+            axes.is_some(),
+            "'{class}': band {band:?}, axes {axes:?}"
+        );
+        match axes {
+            Some(ThermostatAxes::One(axis)) => assert_eq!(
+                ThermostatAxis::of_end_use(&eq.descriptor().end_use),
+                Some(axis),
+                "'{class}' serves the axis its end use names"
+            ),
+            Some(ThermostatAxes::Both) => assert_eq!(band, Some(ThermostatBandClass::Ideal)),
+            None => continue,
+        }
+        with_axes.push(class.to_string());
+    }
+    assert!(
+        with_axes.len() >= 10,
+        "the registry must build its HVAC thermostats: {with_axes:?}"
+    );
 }
 
 #[test]
