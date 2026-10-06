@@ -192,6 +192,7 @@ fn equipment_without_any_schedule_source_is_an_error() {
         Some(dir.path()),
         &DefaultsStore::empty(),
         None,
+        false,
         &mut Vec::new(),
     )
     .expect_err("a Freezer with no schedule source must fail the injection");
