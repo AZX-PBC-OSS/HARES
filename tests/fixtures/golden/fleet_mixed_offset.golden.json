@@ -3,8 +3,8 @@
   "features": [],
   "defaults_dir": "defaults",
   "defaults_digest": "3f9c3a95bd023e9daa0494d64c02e0bb984fa84cf61bc31aad42913ab3a99975",
-  "git_head": "9a32e928f158ffa3b525973ce1aa116fedb86743",
-  "git_dirty": true,
+  "git_head": "61a0b1e04dd193088889f707fe19a3b250896bc4",
+  "git_dirty": false,
   "metrics": [
     {
       "comfort_hours": {
@@ -37,8 +37,8 @@
         "value": 0.0
       },
       "grid_interaction_metrics.peak_import_kw": {
-        "bits": "0x40176a0b8bfa012e",
-        "value": 5.853559672483511
+        "bits": "0x4017e8f3a2348dcb",
+        "value": 5.977491888482699
       },
       "metrics_reliability": "Reliable",
       "nan_step_count": 0,
@@ -48,8 +48,8 @@
           "value": 0.021157193340075067
         },
         "cooking": {
-          "bits": "0x3ff744f3d43d133c",
-          "value": 1.4543340960091902
+          "bits": "0x400174131dac9a2a",
+          "value": 2.181677085714246
         },
         "hvac_cooling": {
           "bits": "0x0000000000000000",
@@ -64,8 +64,8 @@
           "value": 0.20426140444897853
         },
         "other": {
-          "bits": "0x40144720c4035f1e",
-          "value": 5.069460928636344
+          "bits": "0x40136979d394d9b3",
+          "value": 4.853003793678385
         },
         "plug_loads": {
           "bits": "0x3fc9c8c2c8da2cca",
@@ -81,16 +81,16 @@
         }
       },
       "peak_power_kw.rolling.peak_15min_kw": {
-        "bits": "0x40176a0b8bfa012e",
-        "value": 5.853559672483511
+        "bits": "0x4017e8f3a2348dcb",
+        "value": 5.977491888482699
       },
       "peak_power_kw.rolling.peak_30min_kw": {
-        "bits": "0x40176a0b8bfa012e",
-        "value": 5.853559672483511
+        "bits": "0x4017e8f3a2348dcb",
+        "value": 5.977491888482699
       },
       "peak_power_kw.rolling.peak_60min_kw": {
-        "bits": "0x40176a0b8bfa012e",
-        "value": 5.853559672483511
+        "bits": "0x4017e8f3a2348dcb",
+        "value": 5.977491888482699
       },
       "renewable_energy_fraction": {
         "bits": null,
@@ -109,16 +109,16 @@
         "value": 168.0
       },
       "total_energy_kwh.gross_consumption_kwh": {
-        "bits": "0x405e08d10dd0b2ed",
-        "value": 120.1377596414638
+        "bits": "0x405a2e9f08a33686",
+        "value": 104.72845664919632
       },
       "total_energy_kwh.gross_pv_generation_kwh": {
         "bits": "0x0000000000000000",
         "value": 0.0
       },
       "total_energy_kwh.net_energy_kwh": {
-        "bits": "0x405e08d10dd0b2ed",
-        "value": 120.1377596414638
+        "bits": "0x405a2e9f08a33686",
+        "value": 104.72845664919632
       },
       "total_energy_kwh.per_end_use": {
         "ceiling_fan": {
@@ -126,8 +126,8 @@
           "value": 2.519296566065644
         },
         "cooking": {
-          "bits": "0x401fb63413069d11",
-          "value": 7.927933022764834
+          "bits": "0x402fce586e35ef92",
+          "value": 15.903018421253169
         },
         "hvac_cooling": {
           "bits": "0x0000000000000000",
@@ -142,8 +142,8 @@
           "value": 8.373610359747747
         },
         "other": {
-          "bits": "0x404a42f457f25936",
-          "value": 52.523081773122996
+          "bits": "0x403d238168d57043",
+          "value": 29.138693382367148
         },
         "plug_loads": {
           "bits": "0x40375e53041eaea9",
@@ -194,8 +194,8 @@
         "value": 0.0
       },
       "grid_interaction_metrics.peak_import_kw": {
-        "bits": "0x40166a8912ec7308",
-        "value": 5.604038520509455
+        "bits": "0x4016687e97b8c9f0",
+        "value": 5.602045412686934
       },
       "metrics_reliability": "Reliable",
       "nan_step_count": 0,
@@ -205,16 +205,16 @@
           "value": 0.02083018835174992
         },
         "cooking": {
-          "bits": "0x4002785725e826fc",
-          "value": 2.3087599717590574
+          "bits": "0x4003d43bd87fdfe9",
+          "value": 2.478629771616387
         },
         "hvac_cooling": {
           "bits": "0x3fa999999999999a",
           "value": 0.05
         },
         "hvac_heating": {
-          "bits": "0x40129561ab6bc8e1",
-          "value": 4.645880392507224
+          "bits": "0x40127d3d43503976",
+          "value": 4.622304012080681
         },
         "lighting": {
           "bits": "0x3fe50c67f5133cab",
@@ -238,16 +238,16 @@
         }
       },
       "peak_power_kw.rolling.peak_15min_kw": {
-        "bits": "0x40166a8912ec7308",
-        "value": 5.604038520509455
+        "bits": "0x4016687e97b8c9f0",
+        "value": 5.602045412686934
       },
       "peak_power_kw.rolling.peak_30min_kw": {
-        "bits": "0x40166a8912ec7308",
-        "value": 5.604038520509455
+        "bits": "0x4016687e97b8c9f0",
+        "value": 5.602045412686934
       },
       "peak_power_kw.rolling.peak_60min_kw": {
-        "bits": "0x40166a8912ec7308",
-        "value": 5.604038520509455
+        "bits": "0x4016687e97b8c9f0",
+        "value": 5.602045412686934
       },
       "renewable_energy_fraction": {
         "bits": null,
@@ -266,16 +266,16 @@
         "value": 168.0
       },
       "total_energy_kwh.gross_consumption_kwh": {
-        "bits": "0x4068d09c1966c2b1",
-        "value": 198.51905508108533
+        "bits": "0x40693e052f9f8ced",
+        "value": 201.93813306009488
       },
       "total_energy_kwh.gross_pv_generation_kwh": {
         "bits": "0x0000000000000000",
         "value": 0.0
       },
       "total_energy_kwh.net_energy_kwh": {
-        "bits": "0x4068d09c1966c2b1",
-        "value": 198.51905508108533
+        "bits": "0x40693e052f9f8ced",
+        "value": 201.93813306009488
       },
       "total_energy_kwh.per_end_use": {
         "ceiling_fan": {
@@ -283,16 +283,16 @@
           "value": 2.4260465176768053
         },
         "cooking": {
-          "bits": "0x402f4d3713a79b4a",
-          "value": 15.65081082745532
+          "bits": "0x40362fe76a21b1d8",
+          "value": 22.187124856210943
         },
         "hvac_cooling": {
           "bits": "0x401dffffffffffeb",
           "value": 7.499999999999981
         },
         "hvac_heating": {
-          "bits": "0x4054e42fc0cf3e11",
-          "value": 83.5654146217205
+          "bits": "0x40541ad73b3d0d46",
+          "value": 80.41938668214888
         },
         "lighting": {
           "bits": "0x4038c844d024a854",
@@ -311,8 +311,8 @@
           "value": 7.6561529254773175
         },
         "water_heating": {
-          "bits": "0x4039537910a93943",
-          "value": 25.326066056551337
+          "bits": "0x40395ad7f86a69e9",
+          "value": 25.354857946376715
         }
       },
       "unmet_load_hours": {
@@ -347,27 +347,27 @@
         "value": null
       },
       "grid_interaction_metrics.peak_export_kw": {
-        "bits": "0x3ffaa6fd9dfe15d2",
-        "value": 1.6657692119200544
+        "bits": "0x3ffd54402b207346",
+        "value": 1.8330690083159467
       },
       "grid_interaction_metrics.peak_import_kw": {
-        "bits": "0x4005693261bad337",
-        "value": 2.6763656268252833
+        "bits": "0x4005861818cb9006",
+        "value": 2.690475648605573
       },
       "metrics_reliability": "Reliable",
       "nan_step_count": 0,
       "peak_power_kw.per_end_use": {
         "cooking": {
-          "bits": "0x3fe49e376d86de94",
-          "value": 0.6443135394283268
+          "bits": "0x3fe8e7778661624e",
+          "value": 0.778255236112338
         },
         "hvac_cooling": {
           "bits": "0x3fa999999999999a",
           "value": 0.05
         },
         "hvac_heating": {
-          "bits": "0x3fbd74da845bbede",
-          "value": 0.11506429416089811
+          "bits": "0x3fbd906274711c09",
+          "value": 0.11548438399141515
         },
         "lighting": {
           "bits": "0x3fdaf696a15ba5a5",
@@ -391,20 +391,20 @@
         }
       },
       "peak_power_kw.rolling.peak_15min_kw": {
-        "bits": "0x4005693261bad337",
-        "value": 2.6763656268252833
+        "bits": "0x4005861818cb9006",
+        "value": 2.690475648605573
       },
       "peak_power_kw.rolling.peak_30min_kw": {
-        "bits": "0x4005693261bad337",
-        "value": 2.6763656268252833
+        "bits": "0x4005861818cb9006",
+        "value": 2.690475648605573
       },
       "peak_power_kw.rolling.peak_60min_kw": {
-        "bits": "0x4005693261bad337",
-        "value": 2.6763656268252833
+        "bits": "0x4005861818cb9006",
+        "value": 2.690475648605573
       },
       "renewable_energy_fraction": {
-        "bits": "0x3fd7e75267f4cad1",
-        "value": 0.37349376823401054
+        "bits": "0x3fd7aecf0bc21bbc",
+        "value": 0.37004448078408436
       },
       "rows_with_partial_setpoint_data_fraction": {
         "bits": null,
@@ -419,37 +419,37 @@
         "value": 168.0
       },
       "total_energy_kwh.gross_consumption_kwh": {
-        "bits": "0x4064efe3d8994aea",
-        "value": 167.49656324329345
+        "bits": "0x406521d9de4de26d",
+        "value": 169.05784526073276
       },
       "total_energy_kwh.gross_pv_generation_kwh": {
         "bits": "0x404f478ac65bd567",
         "value": 62.558922571983935
       },
       "total_energy_kwh.net_energy_kwh": {
-        "bits": "0x405a3c024e04ab21",
-        "value": 104.93764067130952
+        "bits": "0x405a9fee596dda2e",
+        "value": 106.49892268874893
       },
       "total_energy_kwh.per_end_use": {
         "cooking": {
-          "bits": "0x402b61ad34ae0554",
-          "value": 13.69077458023336
+          "bits": "0x402df57ab7387f1c",
+          "value": 14.97945187153487
         },
         "hvac_cooling": {
           "bits": "0x401699999999998c",
           "value": 5.649999999999988
         },
         "hvac_heating": {
-          "bits": "0x4009f785fd1a8d85",
-          "value": 3.2458610318878436
+          "bits": "0x400a04bf1cfcdf7d",
+          "value": 3.252317644564697
         },
         "lighting": {
           "bits": "0x40335c7522c7c3d3",
           "value": 19.361162351389634
         },
         "other": {
-          "bits": "0x404dc2d1016bf553",
-          "value": 59.522003343309414
+          "bits": "0x404de4e2259d8fd6",
+          "value": 59.78815145677042
         },
         "plug_loads": {
           "bits": "0x405081b677b27b85",
@@ -532,16 +532,16 @@
         },
         {
           "name": "total_energy_kwh",
-          "digest": "3382f8d7271309e434f80bb4d9e529da083ffe208436edfd2c6afca6fd37bb2f",
+          "digest": "36e131399f4cf8c075e25a14d2db0f2b31067cd9e6d77b4bfa87c39980721e70",
           "blocks": [
-            "3382f8d7271309e434f80bb4d9e529da083ffe208436edfd2c6afca6fd37bb2f"
+            "36e131399f4cf8c075e25a14d2db0f2b31067cd9e6d77b4bfa87c39980721e70"
           ]
         },
         {
           "name": "peak_power_kw",
-          "digest": "c0077a0277f65b7df0e040a1fe2bec4878c711c9dba52fc6c74d1240bf76d542",
+          "digest": "cd952e18e0c7a3c3c4dc40c2e98bd817ba999be574b47a0a3b677effdaf1e76c",
           "blocks": [
-            "c0077a0277f65b7df0e040a1fe2bec4878c711c9dba52fc6c74d1240bf76d542"
+            "cd952e18e0c7a3c3c4dc40c2e98bd817ba999be574b47a0a3b677effdaf1e76c"
           ]
         },
         {
