@@ -254,3 +254,64 @@ fn every_fixture_builds_every_equipment() {
         problems.join("\n")
     );
 }
+
+/// Every ochre sample and ResStock home in the corpus, built under one
+/// wildcard override.
+fn wildcard_corpus() -> Vec<PathBuf> {
+    let ochre_root = project_root().join("tests/fixtures/hpxml/ochre_samples");
+    let corpus: Vec<PathBuf> = checked_in_hpxml_fixtures()
+        .into_iter()
+        .filter(|path| {
+            path.starts_with(&ochre_root) || path.file_name().is_some_and(|name| name == "home.xml")
+        })
+        .filter(|path| {
+            !path.file_name().is_some_and(|name| {
+                NOT_BUILDING_FIXTURES.contains(&name.to_string_lossy().as_ref())
+            })
+        })
+        .collect();
+    assert!(
+        corpus.len() >= 20,
+        "the wildcard corpus walk found only {} fixtures",
+        corpus.len()
+    );
+    corpus
+}
+
+/// A wildcard override applied to the whole corpus either builds the
+/// dwelling or fails with the typed parameter error: a value a load reads
+/// must never surface as an untyped error, a panic, or a silent skip, on
+/// any checked-in ochre sample or ResStock home.
+#[test]
+fn a_wildcard_override_builds_every_corpus_fixture_or_fails_typed() {
+    let mut untyped: Vec<String> = Vec::new();
+
+    for fixture_path in wildcard_corpus() {
+        let fixture_name = fixture_path
+            .strip_prefix(project_root())
+            .unwrap_or(&fixture_path)
+            .display()
+            .to_string();
+        let mut cfg = config(&fixture_path);
+        cfg.overrides = Some(json!({ "all": { "sensible_gain_fraction": 0.5 } }));
+        let outcome = match DwellingBlueprint::from_config(cfg) {
+            Ok(blueprint) => blueprint.build().map(|_| ()),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = outcome
+            && !matches!(
+                err,
+                hares_types::HaresError::InvalidEquipmentParameter { .. }
+            )
+        {
+            untyped.push(format!("{fixture_name}: {err}"));
+        }
+    }
+
+    assert!(
+        untyped.is_empty(),
+        "a wildcard override the loads read must build the corpus or fail \
+         only with the typed parameter error:\n{}",
+        untyped.join("\n")
+    );
+}
