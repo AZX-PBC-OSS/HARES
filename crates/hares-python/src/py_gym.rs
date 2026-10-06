@@ -184,6 +184,61 @@ static ACTIONS_CLIPPED: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "observe")]
 static ACTIONS_CLIPPED_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// One finite `(low, high)` pair with `low <= high` per layout column, so
+/// clipping to it is defined.
+fn validate_action_bounds(
+    action_layout: &[(String, String)],
+    action_bounds: &[(f64, f64)],
+) -> Result<(), String> {
+    if action_bounds.len() != action_layout.len() {
+        return Err(format!(
+            "action_bounds length ({}) must match action_layout length ({})",
+            action_bounds.len(),
+            action_layout.len(),
+        ));
+    }
+    for ((equipment, field), &(low, high)) in action_layout.iter().zip(action_bounds) {
+        let fault = if !low.is_finite() || !high.is_finite() {
+            "not finite"
+        } else if low > high {
+            "low above high"
+        } else {
+            continue;
+        };
+        return Err(format!(
+            "action_bounds for {equipment}.{field} are ({low}, {high}): {fault}"
+        ));
+    }
+    Ok(())
+}
+
+/// The bounds of each `deadband_c` column must lie within the band range
+/// of the target's thermostat class in `dwelling`: one bounds list serves
+/// every dwelling of a call, so a dwelling whose unit holds a narrower band
+/// is refused rather than sent a band it rejects.
+fn check_deadband_bounds(
+    dwelling: &PyDwelling,
+    action_layout: &[(String, String)],
+    action_bounds: &[(f64, f64)],
+) -> Result<(), String> {
+    for ((equipment, field), &(low, high)) in action_layout.iter().zip(action_bounds) {
+        if !field.eq_ignore_ascii_case("deadband_c") {
+            continue;
+        }
+        let (min, max) = dwelling.band_range_of(equipment)?.ok_or_else(|| {
+            format!("equipment {equipment:?} has no thermostat band for a deadband_c action")
+        })?;
+        if low < min || high > max {
+            return Err(format!(
+                "action_bounds for {equipment}.{field} are ({low}, {high}), outside the \
+                 ({min}, {max}) band range of its thermostat in this dwelling; bounds are \
+                 per call, so every dwelling's unit must hold them"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Map a flat action vector to per-equipment [`ControlSignal`]s.
 ///
 /// Each action dimension maps to an (equipment, field) pair from `action_layout`.
@@ -204,13 +259,7 @@ fn map_action_to_signals(
             action_layout.len(),
         ));
     }
-    if action_bounds.len() != action_layout.len() {
-        return Err(format!(
-            "action_bounds length ({}) must match action_layout length ({})",
-            action_bounds.len(),
-            action_layout.len(),
-        ));
-    }
+    validate_action_bounds(action_layout, action_bounds)?;
 
     let mut field_values: HashMap<String, HashMap<String, f64>> = HashMap::new();
     #[cfg(feature = "observe")]
@@ -371,9 +420,13 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// (list of str) holds the drained messages; they are consumed here, so a
 /// subsequent `Dwelling.take_warnings()` will not return them again.
 ///
-/// `action_bounds` holds one `(low, high)` per `action_layout` column, which
-/// the environment resolves once from the action space (a deadband by its
-/// target's thermostat class); every action is clipped to it.
+/// `action_bounds` holds one finite `(low, high)` with `low <= high` per
+/// `action_layout` column, which the environment resolves once from the
+/// action space (a deadband by its target's thermostat class); every action
+/// is clipped to it. The bounds are per call, not per dwelling: a dwelling
+/// whose deadband target holds a narrower band than its column's bounds is
+/// refused. Any refusal is a `ValueError` raised before a signal reaches
+/// any dwelling.
 #[pyfunction(name = "batch_step")]
 #[pyo3(signature = (dwellings, actions, observation_fields, action_layout, signal_type_by_equipment, action_bounds))]
 pub fn batch_step_py(
@@ -399,15 +452,19 @@ pub fn batch_step_py(
     let borrows: Vec<PyRef<'_, PyDwelling>> =
         dwellings.iter().map(|d| d.bind(py).borrow()).collect();
 
-    // Map actions to ControlSignals and apply them before entering GIL-free section.
+    // Map every dwelling's actions to ControlSignals before applying any, so
+    // a refused action leaves every dwelling untouched; then apply them
+    // before entering the GIL-free section.
     // Capability validation is enforced by apply_control -> apply_control_validated.
     // NaN/inf guarding is enforced unconditionally in map_action_to_signals
     // and as a defense-in-depth invariant check in build_control_signal.
-    for (i, dwelling_ref) in borrows.iter().enumerate() {
-        let action = &actions[i];
+    let mut mapped = Vec::with_capacity(borrows.len());
+    for (dwelling_ref, action) in borrows.iter().zip(&actions) {
         if action.is_empty() {
             continue;
         }
+        check_deadband_bounds(dwelling_ref, &action_layout, &action_bounds)
+            .map_err(PyValueError::new_err)?;
         let signals = map_action_to_signals(
             action,
             &action_layout,
@@ -415,6 +472,9 @@ pub fn batch_step_py(
             &action_bounds,
         )
         .map_err(PyValueError::new_err)?;
+        mapped.push((dwelling_ref, signals));
+    }
+    for (dwelling_ref, signals) in mapped {
         for (equipment, signal) in &signals {
             let py_signal = PyControlSignal {
                 signal: signal.clone(),
@@ -607,6 +667,27 @@ mod tests {
         let err =
             map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout[..1])).unwrap_err();
         assert!(err.contains("action_bounds length"), "{err}");
+    }
+
+    /// A bounds pair that is not finite or is inverted is a typed error,
+    /// never a clamp panic.
+    #[test]
+    fn a_bad_bounds_pair_is_an_error_not_a_panic() {
+        let (layout, sig_map) = therm_layout();
+        let action = vec![21.0, 25.0];
+        for (pair, reason) in [
+            ((30.0, 10.0), "low above high"),
+            ((f64::NAN, 80.0), "not finite"),
+            ((-50.0, f64::NAN), "not finite"),
+            ((-50.0, f64::INFINITY), "not finite"),
+        ] {
+            let mut action_bounds = bounds(&layout);
+            action_bounds[1] = pair;
+            let err = map_action_to_signals(&action, &layout, &sig_map, &action_bounds)
+                .expect_err("a bad pair");
+            assert!(err.contains("HVAC.cooling_setpoint_c"), "{err}");
+            assert!(err.contains(reason), "{pair:?}: {err}");
+        }
     }
 
     #[test]
