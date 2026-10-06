@@ -40,7 +40,7 @@ fn run_single_case(case: &BestestCase) {
         let status = if check.passed { "PASS" } else { "FAIL" };
         // Signed distance to the band: 0 when inside; otherwise the
         // overshoot beyond the nearest edge. Printed on every run so
-        // conformance work (T-0075/T-0301) always sees the current gap.
+        // conformance work always sees the current gap.
         let band_distance = if check.passed {
             0.0
         } else if check.value < check.min {
@@ -53,20 +53,20 @@ fn run_single_case(case: &BestestCase) {
             status, check.metric, check.value, check.min, check.max, band_distance
         );
         if !check.passed {
-            // Ratchet: out-of-band metrics must sit on their measured
+            // Drift lock: out-of-band metrics must sit on their measured
             // baseline (±1%) — a drift-LOCK, not a conformance claim. Any
             // physics change moves these numbers deliberately and
             // reviewably; silent drift is what the lock exists to prevent.
-            match ratchet_baseline(check.case_id, check.metric) {
+            match drift_baseline(check.case_id, check.metric) {
                 Some(base) => {
                     let tol = 0.01 * base.abs().max(1e-9);
                     if (check.value - base).abs() <= tol {
-                        eprintln!("       RATCHET-OK baseline={base:.6} (±1%) [tracked: T-0075]");
+                        eprintln!("       DRIFT-LOCK-OK baseline={base:.6} (±1%)");
                     } else {
                         failures.push(format!(
                             "case={} metric={} value={:.6} drifted from baseline {:.6} \
                              (tol {:.6}); ASHRAE band [{:.6}, {:.6}]. Deliberate physics \
-                             change? Re-measure and update `ratchet_baseline` with the \
+                             change? Re-measure and update `drift_baseline` with the \
                              measured cause in the comment.",
                             check.case_id,
                             check.metric,
@@ -80,7 +80,7 @@ fn run_single_case(case: &BestestCase) {
                 }
                 None => failures.push(format!(
                     "case={} metric={} value={:.6} outside [{:.6}, {:.6}] and has no \
-                     ratchet baseline",
+                     drift baseline",
                     check.case_id, check.metric, check.value, check.min, check.max
                 )),
             }
@@ -89,7 +89,7 @@ fn run_single_case(case: &BestestCase) {
 
     assert!(
         failures.is_empty(),
-        "BESTEST ratchet violations (drift beyond baseline ±1%; bands remain \
+        "BESTEST drift-lock violations (drift beyond baseline ±1%; bands remain \
          the target — see distances above):\n{}",
         failures.join("\n")
     );
@@ -103,7 +103,7 @@ fn run_single_case(case: &BestestCase) {
 /// These pins are NOT conformance claims: the ASHRAE 140 bands are the
 /// target and the signed distance prints on every run. Update a baseline
 /// only with a measured cause in the commit message.
-fn ratchet_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
+fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
     use BestestMetric::*;
     Some(match (case_id, metric) {
         // 600: heating 3222.6 vs band 4296–5709; cooling 6134.0 vs 6137–7964.
@@ -155,8 +155,8 @@ fn ratchet_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
 // annual_cooling=5892 vs band [6137,7964] kWh (below). Additional physics fixes
 // are needed; the radiant split alone does not account for the gap.
 #[test]
-// Ratchet: band deviations are drift-locked at measured baselines
-// (±1%) — see `ratchet_baseline`. tracked: T-0075.
+// Drift lock: band deviations are locked at measured baselines
+// (±1%), see `drift_baseline`.
 fn bestest_case_600() {
     let case = core_cases().into_iter().find(|c| c.id == "600").unwrap();
     run_single_case(&case);
@@ -181,7 +181,7 @@ fn bestest_case_600() {
 // IGNORED: annual_heating=987 vs band [1170,2041] kWh (below).
 // Annual cooling passes [2132,3415] kWh band.
 #[test]
-// Ratchet: see `ratchet_baseline`. tracked: T-0075.
+// Drift lock: see `drift_baseline`.
 fn bestest_case_900() {
     let case = core_cases().into_iter().find(|c| c.id == "900").unwrap();
     run_single_case(&case);
@@ -205,7 +205,7 @@ fn bestest_case_900() {
 // IGNORED: peak_zone_temp=72.3 vs band [64.9,69.5]°C (above).
 // Min temp (min=-12.0°C vs [-18.8,0.0]) passes.
 #[test]
-// Ratchet: see `ratchet_baseline`. tracked: T-0075.
+// Drift lock: see `drift_baseline`.
 fn bestest_case_600ff() {
     let case = core_cases().into_iter().find(|c| c.id == "600FF").unwrap();
     run_single_case(&case);
@@ -237,7 +237,7 @@ fn bestest_case_600ff() {
 // (S4/S5 warmup refinement, envelope conductance calibration, infiltration
 // model tuning) are needed alongside the applied root-cause corrections.
 #[test]
-// Ratchet: see `ratchet_baseline`. tracked: T-0075.
+// Drift lock: see `drift_baseline`.
 fn bestest_case_900ff() {
     let case = core_cases().into_iter().find(|c| c.id == "900FF").unwrap();
     run_single_case(&case);
@@ -262,7 +262,7 @@ fn bestest_case_900ff() {
 // T-0352: corrected TOML parse bug that silently dropped the radiant fraction.
 // IGNORED: annual_heating_energy=2134 vs band [2751,3803] kWh (below).
 #[test]
-// Ratchet: see `ratchet_baseline`. tracked: T-0075.
+// Drift lock: see `drift_baseline`.
 fn bestest_case_640() {
     let case = core_cases().into_iter().find(|c| c.id == "640").unwrap();
     run_single_case(&case);

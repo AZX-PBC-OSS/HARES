@@ -5,7 +5,7 @@ use std::fmt;
 /// BESTEST envelope conformance uses ±1 °C for annual means; 0.6 °C covers the
 /// observed 0.14–0.55 °C band across all fixtures while still flagging an
 /// order-of-magnitude regression in the thermal solver. Pending upstream
-/// physics fixes tracked in T-0075 (BESTEST conformance) and its dependencies.
+/// physics fixes for BESTEST conformance and its dependencies.
 pub const ZONE_TEMP_CONDITIONED_C_MAE_MAX: f64 = 0.6;
 pub const ZONE_TEMP_UNCONDITIONED_C_MAE_MAX: f64 = 0.5;
 /// Relative HVAC energy tolerance over short (≤1 h) dynamic-cycling windows.
@@ -20,7 +20,7 @@ pub const SHORT_WINDOW_TOTAL_SITE_ENERGY_REL_PCT_MAX: f64 = 25.0;
 /// Peak HVAC power relative tolerance for short-window fixtures.
 ///
 /// The step-0 ideal-capacity back-solve now uses the steady-state DC gain of
-/// the state-space model (T-0123) instead of a one-step back-solve from the
+/// the state-space model instead of a one-step back-solve from the
 /// cold-start state. This eliminates the single-transient overshoot that
 /// previously dominated the instantaneous peak in high-R envelopes, allowing
 /// the tolerance to tighten from 80% to 20%.

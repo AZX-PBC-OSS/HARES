@@ -221,8 +221,9 @@ fn gas_furnace_reports_nonzero_gas_consumption_in_telemetry() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("gas-agg.toml");
     // Cold day: natural gas furnace will heat. Use 3600s (60 steps) because
-    // with 7× interior mass multiplier and τ ≈ 31,000s the zone takes ~32
-    // steps to cool from 21°C to below the 19.2°C heating threshold.
+    // with the 7× temperature capacitance multiplier and τ ≈ 31,000s the
+    // zone takes ~32 steps to cool from 21°C to below the 19.2°C heating
+    // threshold.
     write_synthetic_toml(&path, -10.0, "natural gas", 30.0, 3600);
 
     let mut dwelling =
