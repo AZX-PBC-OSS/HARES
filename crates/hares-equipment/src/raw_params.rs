@@ -377,6 +377,237 @@ mod tests {
         assert!(raw_params_for_class("Gas Furnace").is_none());
     }
 
+    fn raw_load(class: &str, params: &[(&str, ConfigValue)]) -> crate::EquipmentConfig {
+        let data = params
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), value.clone()))
+            .collect();
+        crate::EquipmentConfig::raw(class.to_string(), class.to_string(), data).with_rng_stream(
+            hares_types::rng::RngStream::event_load(hares_types::rng::dwelling_seed(1, 0), class),
+        )
+    }
+
+    fn panic_message(result: std::thread::Result<()>) -> String {
+        let payload = result.expect_err("the read must panic");
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap_or_default()
+    }
+
+    fn one_class_per_kind() -> [(&'static str, &'static RawParams); 3] {
+        [
+            ("Lighting", &SCHEDULED_LOAD),
+            ("Cooking Range", &EVENT_LOAD),
+            ("Clothes Washer", &WET_APPLIANCE),
+        ]
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_read_off_its_list_panics_in_a_debug_build() {
+        for (class, params) in one_class_per_kind() {
+            let config = raw_load(class, &[]);
+            assert!(!params.names("no_such_parameter"));
+            let message = panic_message(std::panic::catch_unwind(|| {
+                let _ = config.get_f64("no_such_parameter");
+            }));
+            assert!(message.contains("does not name"), "{class}: {message}");
+            assert!(message.contains("no_such_parameter"), "{class}: {message}");
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_listed_key_read_as_another_kind_panics_in_a_debug_build() {
+        for (class, params) in one_class_per_kind() {
+            let config = raw_load(class, &[]);
+            assert_eq!(
+                params.named(KEY_ZONE_ID).map(|param| param.kind),
+                Some(ParamKind::Number)
+            );
+            let message = panic_message(std::panic::catch_unwind(|| {
+                let _ = config.get_str(KEY_ZONE_ID);
+            }));
+            assert!(message.contains("does not name"), "{class}: {message}");
+            assert!(message.contains("text"), "{class}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_listed_key_read_as_its_kind_is_answered() {
+        for (class, _) in one_class_per_kind() {
+            let config = raw_load(class, &[(KEY_ZONE_ID, ConfigValue::Float(2.0))]);
+            assert_eq!(config.get_f64(KEY_ZONE_ID), Some(2.0), "{class}");
+            assert_eq!(config.get_f64("month_multiplier_11"), None, "{class}");
+        }
+        let unlisted = raw_load("Not A Load", &[("anything", ConfigValue::Text("x".into()))]);
+        assert_eq!(unlisted.get_str("anything"), Some("x"));
+    }
+
+    fn number(value: f64) -> ConfigValue {
+        ConfigValue::Float(value)
+    }
+
+    fn text(value: &str) -> ConfigValue {
+        ConfigValue::Text(value.to_string())
+    }
+
+    fn numbers(len: usize, value: f64) -> ConfigValue {
+        ConfigValue::FloatArray(vec![value; len])
+    }
+
+    fn months() -> Vec<(String, ConfigValue)> {
+        (0..12)
+            .map(|month| (format!("{KEY_MONTH_MULTIPLIER_PREFIX}{month}"), number(1.0)))
+            .collect()
+    }
+
+    /// The configs that, between them, take every read path a kind's
+    /// loads have: each schedule source, each event window and probability
+    /// source, a phased and an unphased wet cycle.
+    fn configs_reaching_every_read(class: &str, params: &RawParams) -> Vec<crate::EquipmentConfig> {
+        let common: Vec<(&str, ConfigValue)> = vec![
+            (KEY_EQUIPMENT_ID, number(1.0)),
+            (KEY_ZONE_ID, number(1.0)),
+            ("sensible_gain_fraction", number(0.5)),
+            ("latent_gain_fraction", number(0.1)),
+        ];
+        let variants: Vec<Vec<(&str, ConfigValue)>> = if std::ptr::eq(params, &SCHEDULED_LOAD) {
+            let profile = |prefix: &'static str, max: &'static str| {
+                vec![(prefix, text("daily_profile")), (max, number(1.0))]
+            };
+            vec![
+                vec![
+                    ("power_schedule_source", text("column")),
+                    ("power_schedule_col", number(0.0)),
+                    ("gas_schedule_source", text("column")),
+                    ("gas_schedule_col", number(1.0)),
+                    ("gas_schedule_is_w", ConfigValue::Bool(true)),
+                    (KEY_USAGE_MULTIPLIER, number(2.0)),
+                ],
+                [
+                    profile("power_schedule_source", "power_profile_max_kw"),
+                    profile("gas_schedule_source", "gas_profile_max"),
+                    vec![
+                        ("power_profile_weekday", numbers(24, 1.0)),
+                        ("power_profile_weekend", numbers(24, 1.0)),
+                        ("power_profile_month", numbers(12, 1.0)),
+                        ("gas_profile_weekday", numbers(24, 1.0)),
+                        ("gas_profile_weekend", numbers(24, 1.0)),
+                        ("gas_profile_month", numbers(12, 1.0)),
+                    ],
+                ]
+                .concat(),
+                vec![
+                    ("power_schedule_source", text("constant")),
+                    ("power_constant_kw", number(0.1)),
+                    ("gas_schedule_source", text("constant")),
+                    ("gas_constant", number(0.1)),
+                ],
+            ]
+        } else {
+            let column_sources = vec![
+                ("event_window_schedule_col", number(0.0)),
+                ("event_probability_schedule_col", number(1.0)),
+                ("fuel_type", text("electricity")),
+                ("event_power_kw_series", numbers(4, 0.0)),
+            ];
+            let constant_sources = vec![
+                ("event_window_source", text("constant")),
+                ("event_probability_source", text("constant")),
+                ("event_probability_constant", number(0.5)),
+            ];
+            let single_cycle = vec![
+                ("active_power_kw", number(1.0)),
+                ("active_duration_s", number(60.0)),
+                ("cooldown_duration_s", number(60.0)),
+            ];
+            if std::ptr::eq(params, &EVENT_LOAD) {
+                vec![[column_sources, single_cycle].concat(), constant_sources]
+            } else {
+                let phased = vec![
+                    ("n_units", number(1.0)),
+                    ("hot_water_draw_volume_l", number(10.0)),
+                    ("phase_len", number(1.0)),
+                    ("phase_0_power_kw", number(1.0)),
+                    ("phase_0_duration_s", number(60.0)),
+                    ("phase_0_has_water_draw", ConfigValue::Bool(true)),
+                ];
+                vec![
+                    [column_sources, phased].concat(),
+                    [constant_sources, single_cycle].concat(),
+                ]
+            }
+        };
+        let months = months();
+        variants
+            .into_iter()
+            .map(|variant| {
+                let mut all: Vec<(&str, ConfigValue)> = common.clone();
+                all.extend(variant);
+                all.extend(
+                    months
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.clone())),
+                );
+                raw_load(class, &all)
+            })
+            .collect()
+    }
+
+    fn init_env() -> hares_types::EnvironmentState {
+        hares_types::EnvironmentState {
+            zones: vec![hares_types::ZoneState::new(
+                hares_types::ZoneId(1),
+                21.0,
+                0.008,
+                200.0,
+            )],
+            weather: hares_types::WeatherState::default(),
+            grid: hares_types::GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            custom_domains: Vec::new(),
+            schedule_row: Some(0),
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: chrono::DateTime::parse_from_rfc3339("2026-03-18T00:00:00+00:00")
+                .expect("valid time"),
+            time_res: chrono::Duration::minutes(15),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    /// The readers and the lists agree both ways: a read of a key off its
+    /// list panics (above), and every parameter on a list is read by its
+    /// loads, so an override the dwelling admits always reaches a reader.
+    #[test]
+    fn every_listed_parameter_has_a_reader() {
+        let registry = crate::EquipmentRegistry::new();
+        let env = init_env();
+        for (class, params) in one_class_per_kind() {
+            crate::config::RAW_READS.with_borrow_mut(std::collections::HashSet::clear);
+            for config in configs_reaching_every_read(class, params) {
+                let mut load = registry.create(class, config.clone()).expect("registered");
+                load.init(&config, &env)
+                    .unwrap_or_else(|err| panic!("{class} init: {err}"));
+                crate::config::equipment_id_from_config(&config).expect("valid id");
+            }
+            let reads = crate::config::RAW_READS.with_borrow(Clone::clone);
+            let unread: Vec<RawParam> = params
+                .params()
+                .filter(|param| !reads.iter().any(|key| param.may_match(key)))
+                .collect();
+            assert!(unread.is_empty(), "{class}: nothing reads {unread:?}");
+        }
+    }
+
     #[test]
     fn the_description_names_every_parameter() {
         let described = WET_APPLIANCE.describe();

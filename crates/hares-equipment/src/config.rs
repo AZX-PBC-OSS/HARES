@@ -26,6 +26,14 @@ pub struct SetpointReconciliation {
 /// Typed configs carry this as a struct field instead.
 pub const KEY_EQUIPMENT_ID: &str = "equipment_id";
 
+#[cfg(test)]
+thread_local! {
+    /// Every key a raw read on this thread asked for, so a test can show
+    /// that each parameter on a load's list has a reader.
+    pub(crate) static RAW_READS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
 /// Tri-state `equipment_id` resolution from either payload kind — the single
 /// home for equipment-identity config reads.
 ///
@@ -405,6 +413,10 @@ impl EquipmentConfig {
         }
         #[cfg(not(debug_assertions))]
         let _ = kind;
+        #[cfg(test)]
+        RAW_READS.with_borrow_mut(|reads| {
+            reads.insert(key.to_owned());
+        });
         self.raw_data().and_then(|data| data.get(key))
     }
 
