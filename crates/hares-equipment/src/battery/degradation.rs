@@ -309,10 +309,20 @@ pub(crate) struct DegradationState {
     /// SOC at the trough point when max DOD was reached (used for U_neg Tafel correction).
     soc_at_max_dod: f64,
     /// Computed capacity fade fraction — 1 − min(QLi, Qneg) per Eq. 1,
-    /// floored at a 0 usable-capacity lower bound. Negative values mean
-    /// the modeled capacity is (transiently) above the nameplate rating —
-    /// the reference model's BOL state (b0 = 1.07 intercept, capped by the
-    /// negative-electrode branch at ≈ +0.9 %).
+    /// floored at a 0 usable-capacity lower bound and at the previous
+    /// reported state. The model's raw fitted BOL levels sit above
+    /// nameplate (the Li branch's d0·b0 = 1.0711, the negative-electrode
+    /// branch's c0/Ah = 1.009), and the reference implementation absorbs
+    /// that excess: its capacity layer applies the lifetime fraction to
+    /// `qmax_lifetime` only when the result decreases from `qmax_init`
+    /// (SSC `capacity_lithium_ion_t::updateCapacityForLifetime`,
+    /// `shared/lib_battery_capacity.cpp`), and its lifetime layer clamps
+    /// identically (`state->q_relative = fmin(state->q_relative, q_last)`,
+    /// SSC `shared/lib_battery_lifetime_nmc.cpp`, `runLifetimeModels`), so
+    /// the reported capacity starts at the nameplate level and can only
+    /// fall from it. The fade is therefore monotone non-decreasing and
+    /// never negative: a negative fade would mean the modeled capacity
+    /// rose above its rating.
     pub(crate) capacity_fade: f64,
 }
 
@@ -507,7 +517,16 @@ impl DegradationState {
     /// computed internally from the running mean accumulated by `accumulate()`,
     /// eliminating the previous bug where the caller could pass the
     /// first-of-new-day temperature.
-    pub(crate) fn update_daily(&mut self, u_neg_table: &UNegTable, rainflow: &RainflowCounter) {
+    ///
+    /// Errors when the update would leave the reported capacity above its
+    /// rating (a negative fade): the bound is enforced in every build
+    /// profile, so a regression in a loss term or a corrupted checkpoint
+    /// state fails the step instead of simulating an over-rated pack.
+    pub(crate) fn update_daily(
+        &mut self,
+        u_neg_table: &UNegTable,
+        rainflow: &RainflowCounter,
+    ) -> Result<(), HaresError> {
         use deg_const::*;
 
         let t_day = self.daily_mean_temp_k();
@@ -582,7 +601,30 @@ impl DegradationState {
 
         // ---- Usable capacity: min(QLi, Qneg) per Eq. 1, floored at 0 ----
         let q_relative = q_li_rel.min(q_neg_rel).max(0.0);
-        self.capacity_fade = 1.0 - q_relative;
+        // The source's own invariant, at the root: the reported relative
+        // capacity is monotone non-increasing from the nameplate level
+        // (SSC `updateCapacityForLifetime` assigns `qmax_lifetime` only
+        // when it decreases; the lifetime layer's `fmin(q_relative,
+        // q_last)` clamps identically, both cited at the
+        // `capacity_fade` field). The model's raw BOL level exceeds
+        // nameplate (min(q_li_rel, q_neg_rel) = 1.009 at BOL from the
+        // c0/Ah fit), so the raw fade starts negative; flooring at the
+        // previous reported state pins the capacity at its rating while
+        // the raw model level is above it and follows the raw fade once
+        // it turns positive. Every daily loss increment is non-negative,
+        // so the raw level is monotone non-increasing and the fade is
+        // monotone non-decreasing and >= 0 by construction.
+        self.capacity_fade = (1.0 - q_relative).max(self.capacity_fade);
+        // The belt: the invariant holds in every build. A negative fade
+        // (capacity above the rating) is a broken loss term or a corrupted
+        // state, not a regime to simulate.
+        if self.capacity_fade < 0.0 {
+            return Err(HaresError::InvariantViolation {
+                check_name: "battery_capacity_fade_negative".to_string(),
+                value: self.capacity_fade,
+                tolerance: 0.0,
+            });
+        }
 
         // ---- Reset accumulators for next day ----
         self.b1_accum = 0.0;
@@ -593,6 +635,7 @@ impl DegradationState {
         self.n_temp_samples = 0;
         self.day_age += 1;
         // soc extremes and dod_max are reset by the caller via reset_day_tracking().
+        Ok(())
     }
 }
 
@@ -796,7 +839,7 @@ mod tests {
         let rf = RainflowCounter::default();
         for _ in 0..days {
             ds.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
-            ds.update_daily(&u_neg, &rf);
+            ds.update_daily(&u_neg, &rf).unwrap();
             ds.reset_day_tracking(soc);
         }
         ds
@@ -824,7 +867,7 @@ mod tests {
         rf.push(0.2); // completes the reversal → half-cycle of range r
         for _ in 0..days {
             ds.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
-            ds.update_daily(&u_neg, &rf);
+            ds.update_daily(&u_neg, &rf).unwrap();
             ds.reset_day_tracking(soc);
         }
         ds
@@ -975,7 +1018,8 @@ mod tests {
         let mut prev_q_li1 = 0.0_f64;
         for day in 0..3 {
             ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
-            ds.update_daily(&u_neg, &RainflowCounter::default());
+            ds.update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
 
             assert_eq!(
                 ds.day_age,
@@ -984,8 +1028,10 @@ mod tests {
                 day + 1
             );
 
-            // During BOL transient, capacity_fade is negative (q_li3 dominates).
-            // Assert q_li1 (calendar loss) is monotonically increasing instead.
+            // The reported fade floors at the nameplate state during the
+            // BOL transient (the raw model level is above nameplate; see
+            // the capacity_fade field). Assert q_li1 (calendar loss) is
+            // monotonically increasing instead.
             let q_li1 = ds.q_li1;
             assert!(
                 q_li1 >= prev_q_li1,
@@ -1018,8 +1064,9 @@ mod tests {
 
     /// Smith 2017 §II-B: q_li1 (calendar SEI growth) must increase monotonically.
     /// Runs 10 days of pure calendar aging at 25°C.
-    /// capacity_fade is negative during the BOL transient (q_li3 dominates),
-    /// so we assert on q_li1 directly to isolate mechanism 1 behaviour.
+    /// The reported fade floors at the nameplate state while the raw model
+    /// level is above it (the BOL state, see the capacity_fade field), so
+    /// the test asserts on q_li1 directly to isolate mechanism 1 behaviour.
     #[test]
     fn degradation_calendar_aging() {
         let u_neg = make_u_neg_table();
@@ -1029,7 +1076,8 @@ mod tests {
 
         for day in 0..10_u32 {
             ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
-            ds.update_daily(&u_neg, &RainflowCounter::default());
+            ds.update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
             let q_li1 = ds.q_li1;
             assert!(
                 q_li1 >= prev_q_li1,
@@ -1050,12 +1098,14 @@ mod tests {
             "q_li3 must be a positive break-in loss, got {}",
             ds.q_li3
         );
-        // And the BOL usable capacity sits above nameplate (negative fade,
-        // the min(QLi, Qneg) state: Li ≈ +7 %, capped by the negative-
-        // electrode branch at ≈ +0.9 %).
-        assert!(
-            ds.capacity_fade < 0.0,
-            "capacity fade at BOL must be negative (capacity above nameplate), got {}",
+        // And the reported fade never goes negative: the capacity stays at
+        // its rating while the raw min(QLi, Qneg) level is still above
+        // nameplate (Li ≈ +7 %, capped by the negative-electrode branch at
+        // ≈ +0.9 %; the reference implementation's capacity layer absorbs
+        // that excess, see the capacity_fade field).
+        assert_eq!(
+            ds.capacity_fade, 0.0,
+            "capacity fade at BOL must floor at the nameplate state, got {}",
             ds.capacity_fade
         );
     }
@@ -1098,7 +1148,8 @@ mod tests {
 
         // Accumulate day 1 at SOC 0.8 so extremes are non-trivial.
         ds.accumulate(dt_s, T_REF, V_REF, 0.8).unwrap();
-        ds.update_daily(&u_neg, &RainflowCounter::default());
+        ds.update_daily(&u_neg, &RainflowCounter::default())
+            .unwrap();
 
         // Capture lifetime state before crossing the day boundary.
         let fade_after_day1 = ds.capacity_fade_fraction();
@@ -1147,10 +1198,12 @@ mod tests {
         );
 
         // Day 2 aging must continue to accumulate -- q_li1 is monotonically increasing.
-        // (capacity_fade itself is negative during the BOL transient.)
+        // (the reported fade floors at the nameplate state during the BOL
+        // transient, so q_li1 is the quantity that visibly moves.)
         let q_li1_after_day1 = ds.q_li1;
         ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
-        ds.update_daily(&u_neg, &RainflowCounter::default());
+        ds.update_daily(&u_neg, &RainflowCounter::default())
+            .unwrap();
         assert!(
             ds.q_li1 >= q_li1_after_day1,
             "q_li1 after day 2 ({:.10}) must be >= day 1 ({q_li1_after_day1:.10})",
@@ -1226,13 +1279,16 @@ mod tests {
     /// Run 7 days of combined calendar + cycling aging and verify:
     ///   1. Cumulative fade equals the sum of daily increments (bookkeeping
     ///      invariant).
-    ///   2. The usable capacity is min(QLi, Qneg): at BOL the
-    ///      negative-electrode branch binds at ≈ +0.9 % above nameplate, so
-    ///      capacity fade is negative while the Li branch sits higher still
-    ///      (the b0 = 1.07 intercept) — the reference model's BOL state.
+    ///   2. The usable capacity is min(QLi, Qneg) relative to the nameplate
+    ///      state: at BOL the raw model level sits above nameplate (the
+    ///      negative-electrode branch binds at ≈ +0.9 %, the Li branch's
+    ///      b0 = 1.07 intercept higher still), and the reference
+    ///      implementation's capacity layer absorbs that excess, so the
+    ///      reported fade floors at 0 (see the capacity_fade field).
     ///   3. The day-1 Li-branch mechanism increments match Smith 2017
     ///      Eq. 4–7 exactly (checked against the mechanism state directly:
-    ///      the binding branch hides the Li arithmetic from `fade`).
+    ///      the floored fade hides the Li arithmetic while at the nameplate
+    ///      state).
     ///
     /// Each day: one full cycle (DOD = 1.0) at 25 °C, SOC held at 0.5 (the
     /// cycles enter through the rainflow counter, so dod_max_today = 0).
@@ -1259,16 +1315,22 @@ mod tests {
 
         for day in 0..7u32 {
             ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
-            ds.update_daily(&u_neg, &rf);
+            ds.update_daily(&u_neg, &rf).unwrap();
 
             let fade = ds.capacity_fade_fraction();
 
-            // At BOL the negative-electrode branch binds above nameplate.
+            // At BOL the raw model level binds above nameplate and the
+            // reported fade floors at the nameplate state: the capacity
+            // never rises above its rating.
             assert!(
-                fade < 0.0,
-                "day {day}: capacity fade should be negative at BOL (capacity \
-                 above nameplate, the reference model's min(QLi, Qneg) state), \
-                 got {fade:.8}"
+                fade >= 0.0,
+                "day {day}: capacity fade must never be negative (the \
+                 capacity must stay at or below its rating), got {fade:.8}"
+            );
+            assert!(
+                fade >= prev_fade,
+                "day {day}: capacity fade must be monotone non-decreasing, \
+                 got {fade:.8} after {prev_fade:.8}"
             );
 
             // The break-in loss is active — a positive, accumulating loss.
@@ -1334,7 +1396,7 @@ mod tests {
 
         for day in 0..30u32 {
             ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
-            ds.update_daily(&u_neg, &rf);
+            ds.update_daily(&u_neg, &rf).unwrap();
             let dq_li3 = ds.q_li3 - prev_q_li3;
 
             // The loss is positive and its increments are positive but
@@ -1420,7 +1482,8 @@ mod tests {
                 ds.accumulate(dt_s, cell_temp_k, v_oc, 0.5).unwrap();
             }
             let b3_accum_before_update = ds.b3_accum;
-            ds.update_daily(&u_neg, &RainflowCounter::default());
+            ds.update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
 
             // After day 1, the break-in loss is positive and underway.
             if day == 0 {
@@ -1481,7 +1544,8 @@ mod tests {
             for _ in 0..steps_per_day {
                 ds.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
             }
-            ds.update_daily(&u_neg, &RainflowCounter::default());
+            ds.update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
             ds.reset_day_tracking(soc);
         }
         ds
@@ -1566,7 +1630,8 @@ mod tests {
             for _ in 0..steps_per_day {
                 ds.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
             }
-            ds.update_daily(&u_neg, &RainflowCounter::default());
+            ds.update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
             let increment = ds.q_li1 - running_q_li1;
             daily_increments.push(increment);
             running_q_li1 = ds.q_li1;
@@ -1637,6 +1702,163 @@ mod tests {
             "q_li1 HARES ({:.10e}) vs reference ({:.10e}): relative error {rel_err:.2e} must be < 1e-6",
             ds.q_li1,
             ref_q_li1
+        );
+    }
+
+    /// The reported capacity fade never goes negative: the capacity the
+    /// degradation model reports is monotone non-increasing from the
+    /// nameplate level, so a pack's usable capacity can only fall from its
+    /// rating, never rise.
+    ///
+    /// Source: NREL's SSC reference implementation of Smith 2017. Its
+    /// capacity layer applies the lifetime fraction to `qmax_lifetime` only
+    /// when the result DECREASES (`capacity_lithium_ion_t::
+    /// updateCapacityForLifetime`, `shared/lib_battery_capacity.cpp`:
+    /// "if (params->qmax_init * capacity_percent * 0.01 <=
+    /// state->qmax_lifetime) state->qmax_lifetime = ..."), and its lifetime
+    /// layer clamps the same way (`state->q_relative = fmin(state->q_relative,
+    /// q_last)`, `shared/lib_battery_lifetime_nmc.cpp`, runLifetimeModels).
+    /// The model's raw fitted BOL levels sit above nameplate: the Li
+    /// branch's d0·b0 = 1.0711 and the negative-electrode branch's
+    /// c0/Ah = 1.009, so the raw min(QLi, Qneg) exceeds 1.0 until the
+    /// losses burn that margin off; the reference implementation absorbs
+    /// that excess instead of reporting it. Pre-fix, HARES assigned the raw
+    /// `1 − min(QLi, Qneg)` directly, so the first midnight dropped the fade
+    /// to −0.009 and a 60 kWh EV pack's capacity rose to 60.54 kWh.
+    ///
+    /// The reference-curve half of the acceptance: the fade at reference
+    /// points equals the model's own numbers, computed independently from
+    /// the module's fitted constants by an external port of the same
+    /// day-loop (same discrete integrator: one 86400 s accumulate per day,
+    /// the source's monotone guard applied), then pinned here as literals.
+    #[test]
+    fn capacity_fade_never_negative_and_matches_the_reference_curve() {
+        // ---- Scenario 1: a year of pure calendar aging at 25 °C, SOC 0.5.
+        // The raw model level stays above nameplate for years (q_li_rel
+        // ≈ 1.041, q_neg_rel = 1.009 at day 365), so the reported fade
+        // floors at 0 the whole year.
+        let ds = run_calendar_aging(365, T_REF, V_REF, 0.5);
+        assert_eq!(
+            ds.capacity_fade_fraction(),
+            0.0,
+            "a year of calendar aging at 25 °C must report zero fade (the \
+             raw model level is still above nameplate), got {}",
+            ds.capacity_fade_fraction()
+        );
+        // The raw model level, reconstructed from the mechanism state: above
+        // nameplate. The floor, not the raw curve, is what held the
+        // capacity at its rating.
+        let q_li_rel = D0_REL * (B0 - ds.q_li1 - ds.q_li2 - ds.q_li3);
+        let q_neg_rel = (C0_REF_AH / AH_REF) * (1.0 - ds.dq_neg_ah);
+        assert!(
+            (q_li_rel - 1.034_573_588_517_844).abs() < 1e-9,
+            "the raw Li level after 365 calendar days must equal the model's \
+             1.034573588517844, got {q_li_rel}",
+        );
+        assert!(
+            (q_neg_rel - 1.009).abs() < 1e-9,
+            "the raw negative-electrode level with no cycling must equal the \
+             model's c0/Ah = 1.009, got {q_neg_rel}",
+        );
+        assert!(q_li_rel > 1.0 && q_neg_rel > 1.0);
+
+        // ---- Scenario 2: a year of daily full-DOD cycling at 25 °C (the
+        // fastest natural fade path). The fade floors at 0 through day 241,
+        // first goes positive on day 242, and reaches the model's value at
+        // day 365; monotone non-decreasing throughout.
+        let days = 365_u32;
+        let mut ds = DegradationState::default();
+        let dt_s = SECONDS_PER_DAY;
+        let mut rf = RainflowCounter::default();
+        // One half-cycle of range 1.0 per day: Σ count·DOD² = 0.5,
+        // Σ count·DOD^βc2 = 0.5.
+        rf.push(0.2);
+        rf.push(1.2);
+        rf.push(0.2);
+        assert!((rf.sum_squared_dod_daily() - 0.5).abs() < 1e-12);
+        let mut prev_fade = 0.0_f64;
+        for day in 0..days {
+            ds.accumulate(dt_s, T_REF, V_REF, 0.5).unwrap();
+            ds.update_daily(&UNegTable::default_li_nmc(), &rf).unwrap();
+            ds.reset_day_tracking(0.5);
+            let fade = ds.capacity_fade_fraction();
+            assert!(
+                fade >= 0.0,
+                "day {day}: capacity fade must never be negative, got {fade}"
+            );
+            assert!(
+                fade >= prev_fade,
+                "day {day}: capacity fade must be monotone non-decreasing, \
+                 got {fade} after {prev_fade}"
+            );
+            prev_fade = fade;
+        }
+        let fade = ds.capacity_fade_fraction();
+        assert!(
+            (fade - 0.004_610_592_792_274_826).abs() < 1e-9,
+            "the fade after 365 days of daily full-DOD cycling at 25 °C must \
+             equal the model's 0.004610592792274826, got {fade}",
+        );
+        // The floor-to-curve crossover: still at the nameplate state on day
+        // 241, on the model's curve one day later (the negative-electrode
+        // branch's site loss burns through the c0/Ah BOL margin here).
+        let ds_242 = run_cycling_aging(242, T_REF, V_REF, 0.5, 0.5);
+        assert!(
+            (ds_242.capacity_fade_fraction() - 2.373_840_718_006_281_5e-5).abs() < 1e-9,
+            "the fade after 242 days of daily full-DOD cycling at 25 °C must \
+             equal the model's 2.3738407180062815e-5, got {}",
+            ds_242.capacity_fade_fraction()
+        );
+
+        // ---- Scenario 3: the model's temperature dependence over the same
+        // year of 0.6-range daily cycling. At 45 °C the positive-Ea calendar
+        // and break-in terms accelerate the Li branch's losses and bind the
+        // min, ending the year more degraded than at 0 °C, whose cycle
+        // terms (negative activation energies) accelerate only the
+        // negative-electrode branch.
+        let ds_0c = run_cycling_aging(365, 273.15, V_REF, 0.5, 0.18);
+        let ds_45c = run_cycling_aging(365, 318.15, V_REF, 0.5, 0.18);
+        let fade_0c = ds_0c.capacity_fade_fraction();
+        let fade_45c = ds_45c.capacity_fade_fraction();
+        assert!(
+            (fade_0c - 0.016_361_761_397_586_827).abs() < 1e-9,
+            "the fade after 365 days of daily 0.6-range cycling at 0 °C must \
+             equal the model's 0.016361761397586827, got {fade_0c}",
+        );
+        let ds_45c_30 = run_cycling_aging(30, 318.15, V_REF, 0.5, 0.18);
+        let fade_45c_30 = ds_45c_30.capacity_fade_fraction();
+        assert!(
+            (fade_45c_30 - 0.015_396_710_267_635_005).abs() < 1e-9,
+            "the fade after 30 days of daily 0.6-range cycling at 45 °C must \
+             equal the model's 0.015396710267635005, got {fade_45c_30}",
+        );
+        assert!(
+            (ds_45c.capacity_fade_fraction() - 0.036_666_384_230_143_9).abs() < 1e-9,
+            "the fade after 365 days of daily 0.6-range cycling at 45 °C must \
+             equal the model's 0.0366663842301439, got {}",
+            ds_45c.capacity_fade_fraction()
+        );
+        assert!(fade_45c > fade_0c);
+    }
+
+    /// The every-build belt under the by-construction bound: a degradation
+    /// state carrying a negative fade (a corrupted checkpoint, a future
+    /// regression in a loss term) fails the daily update naming the
+    /// invariant, in every build profile. The capacity the model reports
+    /// must never sit above its rating.
+    #[test]
+    fn update_daily_rejects_a_negative_capacity_fade() {
+        let mut ds = DegradationState {
+            capacity_fade: -0.5, // corrupted state: capacity 150 % of rating
+            ..DegradationState::default()
+        };
+        let err = ds
+            .update_daily(&UNegTable::default_li_nmc(), &RainflowCounter::default())
+            .expect_err("a negative capacity fade must fail the daily update");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("battery_capacity_fade_negative"),
+            "the error must name the violated invariant: {msg}"
         );
     }
 

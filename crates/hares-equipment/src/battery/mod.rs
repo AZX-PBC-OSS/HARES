@@ -1452,7 +1452,7 @@ impl Equipment for Battery {
             };
 
             self.degradation
-                .update_daily(&self.u_neg_table, &self.rainflow);
+                .update_daily(&self.u_neg_table, &self.rainflow)?;
 
             #[cfg(feature = "observe")]
             {
@@ -4386,16 +4386,16 @@ mod tests {
             rf.push(0.2);
             rf.push(0.8);
             rf.push(0.2); // completes the reversal → half-cycle range 0.6
-            state.update_daily(&u_neg, &rf);
+            state.update_daily(&u_neg, &rf).unwrap();
             state.reset_day_tracking(soc);
             let _ = day; // suppress lint
         }
 
         // The break-in loss (q_li3, a positive loss relaxing toward ≈ +2.8 %)
         // and the calendar/cycle losses must all be accumulating after a
-        // year; the usable-capacity fade is 1 − min(QLi, Qneg), which starts
-        // negative (capacity above nameplate at BOL, the reference model's
-        // b0 = 1.07 intercept capped by the negative-electrode branch).
+        // year; the usable-capacity fade is 1 − min(QLi, Qneg) floored at
+        // the reported state, which stays at 0 while the raw model level is
+        // above nameplate (see the capacity_fade field).
         assert!(
             state.q_li1 > 0.0,
             "q_li1 (calendar) must be positive after 1 year: got {}",
@@ -4438,7 +4438,9 @@ mod tests {
                 state.accumulate(dt_s, cell_temp_k, v_oc, 0.5).unwrap(); // constant SOC = 0.5
             }
             // No cycles: a fresh, empty counter.
-            state.update_daily(&u_neg, &RainflowCounter::default());
+            state
+                .update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
             state.reset_day_tracking(0.5);
         }
 
@@ -4474,7 +4476,7 @@ mod tests {
                 for _ in 0..steps_per_day {
                     state.accumulate(dt_s, temp_k, v_oc, 0.5).unwrap();
                 }
-                state.update_daily(&u_neg, &rf);
+                state.update_daily(&u_neg, &rf).unwrap();
                 state.reset_day_tracking(0.5);
             }
             state
@@ -4539,8 +4541,11 @@ mod tests {
         );
     }
 
-    /// After several days of cycling, save a checkpoint, load into a fresh Battery,
-    /// and verify `capacity_kwh_nominal` matches the original (non-zero degradation).
+    /// After a capacity fade is in effect, save a checkpoint, load into a fresh
+    /// Battery, and verify `capacity_kwh_nominal` matches the original. The
+    /// fade is injected (7 days of this cycling still floors at the nameplate
+    /// state under the reference model's bound), then set by crossing one
+    /// midnight so the day-boundary update path applies it.
     #[test]
     fn load_state_preserves_nominal_capacity_after_degradation() {
         let config = typed_battery_config(None, None);
@@ -4551,31 +4556,38 @@ mod tests {
         let dt = Duration::from_secs(300);
         let steps_per_day = 288;
 
-        // Run 7 days of cycling to accumulate measurable degradation.
-        for _day in 0..7 {
-            for step in 0..steps_per_day {
-                env.current_time += ChronoDuration::seconds(300);
-                let power = if step < steps_per_day / 2 { 5.0 } else { -5.0 };
-                bat1.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-                    active_power_kw: power,
-                    reactive_power_kvar: None,
-                    min_soc: None,
-                    max_soc: None,
-                })
-                .unwrap();
-                let mut ports = default_ports();
-                bat1.step(&env, dt, &mut ports).unwrap();
-            }
+        // Inject the fade a long-aged pack carries, then run one day of
+        // cycling so the day-boundary update applies it through the same
+        // path a natural fade takes.
+        bat1.degradation.capacity_fade = 0.05;
+        for step in 0..steps_per_day {
+            env.current_time += ChronoDuration::seconds(300);
+            let power = if step < steps_per_day / 2 { 5.0 } else { -5.0 };
+            bat1.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                active_power_kw: power,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+            let mut ports = default_ports();
+            bat1.step(&env, dt, &mut ports).unwrap();
         }
 
         let fade1 = bat1.degradation.capacity_fade_fraction();
         let nominal1 = bat1.capacity_kwh_nominal;
         let rated = bat1.capacity_kwh_rated;
 
-        // Degradation should be non-zero after 7 days.
+        // The injected fade survives the day-boundary update (monotone
+        // non-decreasing) and the nominal capacity moved off rated.
         assert!(
-            fade1.abs() > 0.0,
-            "expected non-zero fade after 7 days, got {fade1}"
+            (fade1 - 0.05).abs() < 1e-9,
+            "the day-boundary update must preserve the injected fade, got {fade1}"
+        );
+        assert!(
+            (nominal1 - rated * (1.0 - fade1)).abs() < 1e-9,
+            "nominal {nominal1} must equal rated·(1−fade) = {}",
+            rated * (1.0 - fade1)
         );
 
         // Save and restore into a fresh battery.
@@ -4627,10 +4639,11 @@ mod tests {
     /// calendar-only aging. This confirms the mechanism produces no fade contribution
     /// The break-in mechanism follows the reference model (Smith 2017 Eq. 4
     /// and 7, NREL SSC): a positive Li LOSS relaxing toward the b3 integral
-    /// over ~τ = 5 days, and the BOL usable capacity sits slightly ABOVE
-    /// the nameplate rating (the b0 = 1.07 Li intercept capped by the
-    /// negative-electrode branch at ≈ +0.9 %) — negative fade at BOL,
-    /// decaying as the losses accumulate.
+    /// over ~τ = 5 days, and the reported capacity stays AT the nameplate
+    /// rating while the raw min(QLi, Qneg) level sits above it (the b0 = 1.07
+    /// Li intercept capped by the negative-electrode branch at ≈ +0.9 %),
+    /// so the reported fade floors at 0, decaying the raw margin as the
+    /// losses accumulate (see the capacity_fade field).
     #[test]
     fn degradation_break_in_loss_and_bol_capacity_follow_reference_model() {
         let u_neg = UNegTable::default_li_nmc();
@@ -4648,7 +4661,9 @@ mod tests {
             for _ in 0..steps_per_day {
                 state_5.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
             }
-            state_5.update_daily(&u_neg, &RainflowCounter::default());
+            state_5
+                .update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
             state_5.reset_day_tracking(soc);
         }
 
@@ -4666,13 +4681,15 @@ mod tests {
              days (~tau): got {}",
             state_5.q_li3
         );
-        // BOL usable capacity above nameplate: negative fade from the
-        // min(QLi, Qneg) structure (Li branch ≈ +7 %, capped by the
-        // negative-electrode branch at ≈ +0.9 %).
+        // BOL usable capacity at nameplate: the reported fade floors at 0
+        // while the raw min(QLi, Qneg) level is above nameplate (Li branch
+        // ≈ +7 %, capped by the negative-electrode branch at ≈ +0.9 %; the
+        // reference implementation's capacity layer absorbs that excess,
+        // see the capacity_fade field).
         assert!(
-            state_5.capacity_fade < 0.0,
-            "capacity fade at BOL must be negative (capacity above \
-             nameplate per the reference model): got {}",
+            state_5.capacity_fade == 0.0,
+            "capacity fade at BOL must floor at the nameplate state (capacity \
+             at its rating), got {}",
             state_5.capacity_fade
         );
 
@@ -4684,7 +4701,9 @@ mod tests {
             for _ in 0..steps_per_day {
                 state_60.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
             }
-            state_60.update_daily(&u_neg, &RainflowCounter::default());
+            state_60
+                .update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
             state_60.reset_day_tracking(soc);
         }
 
@@ -5704,6 +5723,14 @@ mod tests {
             "nominal should equal rated at init"
         );
 
+        // Inject the fade a long-aged pack carries: a year of this cycling
+        // still floors at the nameplate state (the raw model level's BOL
+        // margin, the d0·b0 and c0/Ah intercepts, outlasts 365 days at
+        // this temperature and duty; see the capacity_fade field). The
+        // day-boundary updates must preserve it (monotone non-decreasing)
+        // and keep the SOH→capacity algebra through the year.
+        bat.degradation.capacity_fade = 0.10;
+
         let dt = Duration::from_secs(300);
         let steps_per_day = 288; // 5-min steps
 
@@ -5747,12 +5774,19 @@ mod tests {
             }
         }
 
-        // After 365 days, the algebraic invariant must still hold.
+        // After 365 days, the algebraic invariant must still hold, and the
+        // year of day-boundary updates must have preserved the injected
+        // fade (monotone non-decreasing, never reversed).
         let fade = bat.degradation.capacity_fade_fraction();
         let expected_fade = 1.0 - (bat.capacity_kwh_nominal / rated);
         assert!(
             (fade - expected_fade).abs() < 1e-6,
             "capacity_fade_fraction ({fade}) should match 1 - nominal/rated ({expected_fade})"
+        );
+        assert!(
+            (fade - 0.10).abs() < 1e-6,
+            "the year of day-boundary updates must preserve the injected \
+             fade (monotone non-decreasing), got {fade}"
         );
 
         // Capacity_kwh_nominal should differ from rated (degradation had an effect).
@@ -7283,7 +7317,9 @@ mod tests {
             for _ in 0..steps_per_day {
                 ds_ref.accumulate(dt_s, temp_k_day, v_oc, 0.5).unwrap();
             }
-            ds_ref.update_daily(&u_neg, &RainflowCounter::default());
+            ds_ref
+                .update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
             ds_ref.reset_day_tracking(0.5);
         }
 

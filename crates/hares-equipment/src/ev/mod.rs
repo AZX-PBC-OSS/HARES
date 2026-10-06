@@ -1335,7 +1335,7 @@ impl Ev {
         };
         if current_day != self.last_daily_update_day {
             self.degradation
-                .update_daily(&self.u_neg_table, &self.rainflow);
+                .update_daily(&self.u_neg_table, &self.rainflow)?;
 
             // Feed the aged state of health back into the usable pack
             // capacity so runtime SOC arithmetic (driving, charging, V2L/V2G)

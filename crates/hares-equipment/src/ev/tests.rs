@@ -2351,6 +2351,105 @@ fn usable_capacity_stays_physical_through_daily_cycling() {
     }
 }
 
+/// Acceptance: over a year of daily driving, charging and idle at
+/// several pack temperatures, the EV battery's capacity never exceeds its
+/// rating: the degradation fade never goes negative, the degradation-
+/// adjusted rating (`rated · SOH`, the charging-LUT divisor and the seed's
+/// counterpart of the Battery's `capacity_kwh_nominal`) never rises above
+/// `rated`, and the live usable capacity never exceeds the reversibly
+/// derated rating (`rated · derate`). A capacity above the rating is the
+/// reversible thermal layer's alone, never the degradation model's.
+///
+/// Source: NREL SSC's capacity layer applies the lifetime fraction to
+/// `qmax_lifetime` only when it decreases from `qmax_init`
+/// (`capacity_lithium_ion_t::updateCapacityForLifetime`,
+/// `shared/lib_battery_capacity.cpp`), so the reference battery's capacity
+/// starts at nameplate and can only fall. Pre-fix, HARES's first midnight
+/// degradation update surfaced the model's raw BOL level (min(QLi, Qneg) =
+/// 1.009) as a negative fade and the 60 kWh pack's capacity rose to
+/// 60.54 kWh.
+#[test]
+fn ev_capacity_never_exceeds_its_rating() {
+    for temp_c in [-15.0, 0.0, 25.0, 45.0] {
+        let mut raw = base_raw();
+        raw.insert(KEY_INITIAL_SOC.to_string(), 0.9.into());
+        raw.insert(KEY_BATTERY_TEMP_C.to_string(), temp_c.into());
+        // Hold the pack at its temperature (no thermal coupling) and keep
+        // charging physical at the cold end: the subject is the capacity
+        // invariant, not the cold-charge derating.
+        raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+        raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
+        raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), (-25.0).into());
+        raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), (-15.0).into());
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let mut env = sample_env();
+        ev.init(&config, &env).unwrap();
+
+        let rated = ev.battery_capacity_kwh_rated;
+        let step = |ev: &mut Ev, env: &mut EnvironmentState| {
+            let mut ports = PortSlots::default();
+            ev.step(env, Duration::from_secs(3600), &mut ports).unwrap();
+            env.current_time += ChronoDuration::seconds(3600);
+
+            let fade = ev.degradation.capacity_fade_fraction();
+            assert!(
+                fade >= 0.0,
+                "{temp_c} °C: the degradation fade must never be negative, \
+                 got {fade}"
+            );
+            assert!(
+                rated * (1.0 - fade) <= rated + 1e-9,
+                "{temp_c} °C: the degradation-adjusted rating \
+                 rated·(1−fade) = {} must never exceed rated {rated}",
+                rated * (1.0 - fade)
+            );
+            // The live capacity's excess over the rating must be the
+            // reversible thermal layer's alone, at the pack's live
+            // temperature: the degradation (SOH) factor contributes nothing
+            // above 1.
+            let live_derate = capacity_derate_at(ev.battery_temp_c);
+            assert!(
+                ev.battery_capacity_kwh <= rated * live_derate + 1e-9,
+                "{temp_c} °C: usable capacity {} must never exceed the \
+                 reversibly derated rating {} at the live pack temperature \
+                 {} °C (the excess must be the thermal layer's alone)",
+                ev.battery_capacity_kwh,
+                rated * live_derate,
+                ev.battery_temp_c
+            );
+        };
+
+        for _day in 0..365 {
+            // Overnight at home: plug in and charge toward the target (the
+            // strategy idles the charge once there).
+            ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+                state: EvConnectionState::HomePluggedIn,
+            })
+            .unwrap();
+            for _ in 0..10 {
+                step(&mut ev, &mut env);
+            }
+            // Idle the rest of the evening.
+            for _ in 0..2 {
+                step(&mut ev, &mut env);
+            }
+            // Daily drive: 15 kWh delivered while disconnected.
+            ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+                state: EvConnectionState::Disconnected,
+            })
+            .unwrap();
+            ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 15.0 })
+                .unwrap();
+            step(&mut ev, &mut env);
+            // Idle daytime hours to complete the 24.
+            for _ in 0..11 {
+                step(&mut ev, &mut env);
+            }
+        }
+    }
+}
+
 #[test]
 fn charge_derate_applied_before_taper_limit() {
     // Heater pinned off: the subject is the derate-before-taper ordering,
@@ -7393,14 +7492,11 @@ fn v2l_discharge_respects_deadline_flag_off_bypasses_interlock() {
 }
 
 /// Ages an EV through `days` of pure calendar degradation (disconnected, SOC
-/// held constant) so `capacity_fade_fraction()` becomes non-zero and the
-/// day-boundary SOH→capacity linkage fires. Returns the aged EV.
-///
-/// Under the Smith (2017) model the beginning-of-life transient (`q_li3 < 0`)
-/// keeps SOH slightly above 1.0 for hundreds of days at mid-SOC, so the usable
-/// capacity sits marginally *above* rated here — the linkage is proportional
-/// (`capacity = rated · SOH`), not strictly a reduction. Tests therefore assert
-/// the algebraic relationship, which is universally valid.
+/// held constant). Under the Smith (2017) model the raw level stays above
+/// nameplate at mid-SOC for years, so the reported fade floors at 0 and the
+/// aged pack equals the fresh one here; tests that need a non-zero fade
+/// inject one into `degradation.capacity_fade` (the state is crate-visible,
+/// the pattern the precondition test uses).
 fn aged_ev(days: usize) -> Ev {
     let dt = Duration::from_secs(300);
     let steps_per_day = 288usize;
@@ -7430,19 +7526,34 @@ fn aged_ev(days: usize) -> Ev {
     ev
 }
 
-/// Unit test for the SOH→capacity feedback (T-0421 directive 2): once the
-/// day-boundary degradation update has produced a non-zero capacity fade, the
-/// usable pack capacity must equal `rated · (1 − fade)`. Before the fix the EV
-/// held `battery_capacity_kwh` constant at the rated value, so SOC arithmetic
+/// Unit test for the SOH→capacity feedback: once a capacity fade is in
+/// effect, the day-boundary degradation update must keep
+/// it (the fade is monotone non-decreasing; the reference model's capacity
+/// layer never lets the capacity rise) and the usable pack capacity must
+/// equal `rated · (1 − fade)`. Before the fix the EV held
+/// `battery_capacity_kwh` constant at the rated value, so SOC arithmetic
 /// ignored degradation entirely.
 #[test]
 fn daily_degradation_rescales_usable_capacity() {
-    let ev = aged_ev(30);
-    let fade = ev.degradation.capacity_fade_fraction();
+    let mut ev = aged_ev(30);
+    // Inject the fade the day-boundary update must preserve: 10 %, a state
+    // a long-aged pack reaches, unreachable in 30 idle days.
+    ev.degradation.capacity_fade = 0.10;
+    // Cross one midnight at 5-minute steps so update_degradation's
+    // day-boundary update runs on the injected state.
+    let dt = Duration::from_secs(300);
+    let mut env = sample_env();
+    for _ in 0..288 {
+        let mut ports = PortSlots::default();
+        ev.step(&env, dt, &mut ports).unwrap();
+        env.current_time += ChronoDuration::seconds(300);
+    }
 
+    let fade = ev.degradation.capacity_fade_fraction();
     assert!(
-        fade.abs() > 1e-6,
-        "30 days of aging should produce a non-zero capacity fade, got {fade}"
+        (fade - 0.10).abs() < 1e-9,
+        "the day-boundary update must preserve the injected fade (the fade \
+         is monotone non-decreasing), got {fade}"
     );
 
     let expected = ev.battery_capacity_kwh_rated * (1.0 - fade) * capacity_derate_at(25.0);
@@ -7482,8 +7593,13 @@ fn fixed_drive_soc_swing_scales_with_degraded_capacity() {
         .unwrap();
     let swing_fresh = soc_before_fresh - fresh.soc;
 
-    // Aged pack: SOH ≠ 1, usable capacity = rated·SOH·derate.
+    // Aged pack: SOH ≠ 1, usable capacity = rated·SOH·derate. The fade is
+    // injected (10 %, a state a long-aged pack reaches; 40 idle days at
+    // mid-SOC still floor at the nameplate state) and applied through the
+    // same refresh the day-boundary update uses.
     let mut aged = aged_ev(40);
+    aged.degradation.capacity_fade = 0.10;
+    aged.refresh_usable_capacity();
     aged.soc = 0.9;
     let cap_aged = aged.battery_capacity_kwh;
     let soh = 1.0 - aged.degradation.capacity_fade_fraction();
@@ -7528,10 +7644,14 @@ fn fixed_drive_soc_swing_scales_with_degraded_capacity() {
 /// Checkpoint restore must recompute the degraded usable capacity from the
 /// rated capacity (set by `init`) and the restored SOH — mirroring
 /// `Battery::load_state`. `battery_capacity_kwh_rated` is not serialized; it is
-/// re-established by `init` before `load_state`.
+/// re-established by `init` before `load_state`. The source pack carries an
+/// injected 10 % fade (a state a long-aged pack reaches); the restore must
+/// reproduce its capacity from the restored fade alone.
 #[test]
 fn load_state_recomputes_degraded_capacity_from_rated_and_soh() {
-    let source = aged_ev(40);
+    let mut source = aged_ev(40);
+    source.degradation.capacity_fade = 0.10;
+    source.refresh_usable_capacity();
     let saved = source.save_state().unwrap();
 
     let config = {
