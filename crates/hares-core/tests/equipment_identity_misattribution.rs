@@ -397,8 +397,8 @@ fn equipment_named_total_at_build_time_never_silences_the_aggregate_total() {
             .equipment()
             .iter()
             .any(|eq| eq.descriptor().name == "Total"),
-        "precondition: the equipment named 'Total' must have assembled (a \
-         non-critical init failure would drop it and make this test vacuous)"
+        "precondition: the equipment named 'Total' must have assembled (an \
+         init failure would stop construction and make this test vacuous)"
     );
 
     dwelling.simulate().expect("2-day simulate");

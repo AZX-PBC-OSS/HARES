@@ -740,8 +740,7 @@ pub(crate) fn apply_spec_bag_to_typed_config(spec: &mut hares_io::EquipmentSpec)
     if landed == before {
         // Nothing landed: the payload is the caller's own, unchanged, and
         // keeps the init-time semantics it always had (a payload the init
-        // rejects fails there: fatally for critical equipment, skipped
-        // with a warning for non-critical).
+        // rejects fails there, stopping construction).
         return Ok(());
     }
     if let ConfigPayload::Typed { data, .. } = &mut spec
