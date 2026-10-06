@@ -134,6 +134,13 @@ class _FakeHelicsModule:
         self.raise_on_enter = False
         self.raise_on_max_time = False
 
+    def helicsCreateCore(self, core_type: str, name: str, init_string: str) -> str:
+        self.log.append(("create_core", core_type, name, init_string))
+        return name
+
+    def helicsCoreConnect(self, core: str) -> bool:
+        return True
+
     def helicsCreateValueFederate(self, fed_name: str, fedinfo: Any) -> _FakeFederate:
         self.last_fedinfo = fedinfo
         fed = _FakeFederate(
@@ -318,7 +325,7 @@ def test_helics_fleet_config_and_registration(monkeypatch: pytest.MonkeyPatch):
     # Each federate's core needs a unique name and local port: without them,
     # multiple auto-named/ported cores in the same process can silently
     # deadlock at enterExecutingMode instead of raising a bind error.
-    assert fedinfo.core_name == "core_fleet_1"
+    assert fedinfo.core_name.startswith("core_fleet_1_")
     assert fedinfo.core_init.startswith("--broker_address=tcp://10.0.0.7:23404")
     assert fedinfo.core_init_string.startswith("--broker_address=tcp://10.0.0.7:23404")
     assert "--port=" in fedinfo.core_init

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import builtins
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import importlib
 import importlib.util
 import itertools
@@ -1481,9 +1481,18 @@ def test_multi_federate_fault_propagation_broker_cleanup() -> None:
 @contextmanager
 def _held_port_pair() -> Iterator[int]:
     """A port pair held by this process, as another process's sockets would hold it."""
-    port = allocate_ephemeral_port()
-    with socket.create_server(("127.0.0.1", port)), socket.create_server(("127.0.0.1", port + 1)):
-        yield port
+    with ExitStack() as held:
+        while True:
+            port = allocate_ephemeral_port()
+            try:
+                held.enter_context(socket.create_server(("127.0.0.1", port)))
+                held.enter_context(socket.create_server(("127.0.0.1", port + 1)))
+            except OSError:
+                # Another process took the probed pair first; hold another.
+                held.close()
+                continue
+            yield port
+            return
 
 
 def _drawn_ports(monkeypatch: pytest.MonkeyPatch, first: list[int]) -> list[int]:
@@ -1515,37 +1524,47 @@ def test_a_federate_whose_every_core_port_is_taken_surfaces_the_bind_failure(
 ) -> None:
     with _Federation(n_federates=1, core_type="zmq") as federation, _held_port_pair() as taken:
         draws = _drawn_ports(monkeypatch, [taken] * federate_module._CORE_PORT_ATTEMPTS)
-        with pytest.raises(helics.HelicsException) as raised:
+        with pytest.raises(ConnectionError, match="could not bind a core port"):
             federation.create_federate("house_1", connect_timeout_s=2.0)
 
     assert draws == [taken] * federate_module._CORE_PORT_ATTEMPTS
-    (note,) = raised.value.__notes__
-    assert "a core that could not bind its port" in note
-    assert note.count(f"--port={taken}") == federate_module._CORE_PORT_ATTEMPTS
 
 
-@pytest.mark.parametrize(
-    ("family", "host", "address"),
-    [
-        (socket.AF_INET, "127.0.0.1", "127.0.0.1:{port}"),
-        (socket.AF_INET, "127.0.0.1", "tcp://127.0.0.1:{port}"),
-        (socket.AF_INET6, "::1", "[::1]:{port}"),
-        (socket.AF_INET6, "::1", "tcp://[::1]:{port}"),
-    ],
-    ids=["host-port", "url", "ipv6", "ipv6-url"],
-)
-def test_a_broker_address_is_probed_where_it_points(family: socket.AddressFamily, host: str, address: str) -> None:
-    with socket.create_server((host, 0), family=family) as listener:
-        port = listener.getsockname()[1]
-        assert federate_module._accepts_connections(address.format(port=port))
-    assert not federate_module._accepts_connections(address.format(port=port))
+@pytest.mark.parametrize("core_type", _CORE_TYPES)
+def test_a_duplicate_federate_name_raises_at_once_and_leaves_no_core_behind(
+    core_type: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second "house_1" fails with HELICS's own error; the federation still runs without it."""
+    draws = _drawn_ports(monkeypatch, [])
+    with _Federation(n_federates=2, core_type=core_type) as federation:
+
+        def _run_first(ready: Callable[[], None]) -> None:
+            fed = federation.create_federate("house_1")
+            ready()
+            _enter_exec(fed)
+            fed.disconnect()
+
+        first = federation.start(_run_first, name="first-federate")
+        first.wait_ready()
+        before = len(draws)
+        with pytest.raises(helics.HelicsException, match="duplicate"):
+            federation.create_federate("house_1")
+        ports_drawn = len(draws) - before
+
+        # A failed core left connected would hold the broker waiting for it,
+        # and neither member of the federation would enter executing mode.
+        _enter_exec(federation.value_federate("aggregator_1"))
+        first.result()
+
+    # One core, no retry: an inproc core draws no port, a zmq core one.
+    assert ports_drawn == (0 if core_type == "inproc" else 1)
 
 
 def test_a_federate_whose_broker_is_unreachable_fails_without_retrying(monkeypatch: pytest.MonkeyPatch) -> None:
     draws = _drawn_ports(monkeypatch, [])
     unreachable = allocate_ephemeral_port()
 
-    with pytest.raises(helics.HelicsException):
+    with pytest.raises(helics.HelicsException, match="unable to register"):
         create_value_federate(
             "house_1",
             "zmq",
