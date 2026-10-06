@@ -1039,6 +1039,33 @@ impl PyDwelling {
         self.band_range_of(name).map_err(PyValueError::new_err)
     }
 
+    /// The setpoints the named equipment's thermostat serves, as
+    /// ``["Heating"]``, ``["Cooling"]`` or ``["Heating", "Cooling"]``, or
+    /// ``None`` when it has no setpoint a pre-conditioning event can move.
+    /// A pre-conditioning event on a unit serving both must name its
+    /// direction (``SetpointAdjust:<delta>:PreHeat`` or ``:PreCool``).
+    /// Raises ``ValueError`` for an unknown equipment name.
+    pub fn thermostat_axes(&self, name: &str) -> PyResult<Option<Vec<&'static str>>> {
+        use hares_types::{ThermostatAxes, ThermostatAxis};
+        let axis_name = |axis: ThermostatAxis| match axis {
+            ThermostatAxis::Heating => "Heating",
+            ThermostatAxis::Cooling => "Cooling",
+        };
+        let dwelling = self.acquire()?;
+        let eq = dwelling
+            .equipment()
+            .iter()
+            .find(|e| e.descriptor().name == name)
+            .ok_or_else(|| PyValueError::new_err(format!("equipment '{name}' not found")))?;
+        Ok(eq.thermostat_axes().map(|axes| match axes {
+            ThermostatAxes::One(axis) => vec![axis_name(axis)],
+            ThermostatAxes::Both => vec![
+                axis_name(ThermostatAxis::Heating),
+                axis_name(ThermostatAxis::Cooling),
+            ],
+        }))
+    }
+
     /// The primary resolved ZIP/power-factor model for the named equipment,
     /// as a dict with keys ``zp``/``ip``/``pp``/``zq``/``iq``/``pq``/``pf``/
     /// ``v0``/``real_power_zip_applies``, or ``None`` when the equipment has
