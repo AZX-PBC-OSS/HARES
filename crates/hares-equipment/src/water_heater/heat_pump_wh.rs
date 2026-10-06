@@ -44,12 +44,13 @@ use super::{
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
 };
 
-const HPWH_CHECKPOINT_VERSION: u32 = 2;
+/// v3: the state no longer carries a ramp target setpoint (this type has
+/// no setpoint ramp).
+const HPWH_CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HpwhState {
     setpoint_c: f64,
-    target_setpoint_c: f64,
     deadband_c: f64,
     compressor_on: bool,
     backup_on: bool,
@@ -100,9 +101,9 @@ pub struct HeatPumpWH {
     /// Fractional weights for distributing condenser heat across tank nodes.
     /// Must sum to a positive value; weights are normalized before use.
     condenser_node_weights: Vec<f64>,
+    /// The tank setpoint; a control sets it at once (this type has no
+    /// setpoint ramp).
     setpoint_c: f64,
-    target_setpoint_c: f64,
-    setpoint_ramp_rate_c_per_s: Option<f64>,
     deadband_c: f64,
     /// The configured setpoint and deadband, which the release form restores.
     configured_setpoint_c: f64,
@@ -280,8 +281,6 @@ impl HeatPumpWH {
             condenser_node,
             condenser_node_weights: default_condenser_weights(n_nodes),
             setpoint_c: DEFAULT_SETPOINT_C,
-            target_setpoint_c: DEFAULT_SETPOINT_C,
-            setpoint_ramp_rate_c_per_s: None,
             deadband_c: DEFAULT_DEADBAND_C,
             configured_setpoint_c: DEFAULT_SETPOINT_C,
             configured_deadband_c: DEFAULT_DEADBAND_C,
@@ -413,8 +412,6 @@ impl HeatPumpWH {
         self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
         self.configured_setpoint_c = self.setpoint_c;
         self.configured_deadband_c = self.deadband_c;
-        self.setpoint_ramp_rate_c_per_s = None;
-        self.target_setpoint_c = self.setpoint_c;
 
         let initial_tank_temp_c = c
             .initial_tank_temp_c
@@ -740,12 +737,6 @@ impl Equipment for HeatPumpWH {
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
-
-        // Ramp setpoint toward target.
-        if let Some(rate) = self.setpoint_ramp_rate_c_per_s {
-            self.setpoint_c =
-                super::ramp_limited_setpoint(self.setpoint_c, self.target_setpoint_c, rate, dt_s);
-        }
 
         // Advance DR duration; auto-revert to Normal when expired.
         if let Some(remaining) = self.dr_duration_remaining_s {
@@ -1211,7 +1202,6 @@ impl Equipment for HeatPumpWH {
         try_save_versioned(
             &HpwhState {
                 setpoint_c: self.setpoint_c,
-                target_setpoint_c: self.target_setpoint_c,
                 deadband_c: self.deadband_c,
                 compressor_on: self.compressor_on,
                 backup_on: self.backup_on,
@@ -1260,7 +1250,6 @@ impl Equipment for HeatPumpWH {
             self.descriptor().id,
         )?;
         self.setpoint_c = decoded.setpoint_c;
-        self.target_setpoint_c = decoded.target_setpoint_c;
         self.deadband_c = restored_tank_deadband_c(decoded.deadband_c)?;
         self.compressor_on = decoded.compressor_on;
         self.backup_on = decoded.backup_on;
@@ -1362,11 +1351,8 @@ impl Equipment for HeatPumpWH {
                 let update =
                     tank_thermostat_update(*heating_setpoint_c, *cooling_setpoint_c, *deadband_c)?;
                 if update.changes_setpoint() {
-                    let sp = update.setpoint_c(self.target_setpoint_c, self.configured_setpoint_c);
-                    self.target_setpoint_c = sp;
-                    if self.setpoint_ramp_rate_c_per_s.is_none() {
-                        self.setpoint_c = sp;
-                    }
+                    self.setpoint_c =
+                        update.setpoint_c(self.setpoint_c, self.configured_setpoint_c);
                 }
                 self.deadband_c = update.deadband_c(self.deadband_c, self.configured_deadband_c);
             }
@@ -1716,6 +1702,32 @@ mod tests {
             |e| (e.setpoint_c, e.deadband_c),
             |e, db| e.deadband_c = db,
         );
+    }
+
+    /// A heat pump water heater has no setpoint ramp: a setpoint override
+    /// and its release both take effect at once and hold across control
+    /// updates.
+    #[test]
+    fn a_release_restores_the_configured_setpoint_at_once() {
+        use hares_types::ControlSignal;
+        let mut eq = HeatPumpWH::new(config());
+        let env = env(21.0);
+        eq.init(&config(), &env).unwrap();
+        let configured = eq.setpoint_c;
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(configured + 5.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        assert_eq!(eq.setpoint_c, configured + 5.0);
+        eq.update_control(&env);
+        assert_eq!(eq.setpoint_c, configured + 5.0);
+
+        eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
+        assert_eq!(eq.setpoint_c, configured);
+        eq.update_control(&env);
+        assert_eq!(eq.setpoint_c, configured);
     }
 
     #[test]
