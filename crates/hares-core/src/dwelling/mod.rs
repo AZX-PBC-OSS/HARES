@@ -13698,6 +13698,24 @@ master_seed = 0
         );
     }
 
+    /// The failure streaks are index-aligned with the equipment: a save
+    /// whose streaks do not match the equipment is refused, never zipped
+    /// short (which would drop equipment states from the checkpoint).
+    #[test]
+    fn save_checkpoint_refuses_streaks_misaligned_with_the_equipment() {
+        let (_dir, toml_path) = temp_toml("save_checkpoint_misaligned_streaks");
+        write_minimal_toml(&toml_path);
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        dwelling.step().expect("step succeeds");
+        dwelling.save_checkpoint().expect("aligned streaks save");
+
+        dwelling.consecutive_step_failures.push(0);
+        assert!(matches!(
+            dwelling.save_checkpoint(),
+            Err(HaresError::InvalidState(_))
+        ));
+    }
+
     #[test]
     fn failed_equipment_step_prevents_snapshot_and_surfaces_warning() {
         let base_path =
