@@ -1052,7 +1052,8 @@ fn thermostat_targeting_absent_equipment_fails_the_step() {
 
 // Removing the thermostat's equipment evicts the thermostat with it, as it
 // does every actor bound to one equipment instance, so the dwelling keeps
-// stepping; a thermostat added again for the removed name fails the step.
+// stepping, and the dwelling's warning log reports the lost override; a
+// thermostat added again for the removed name fails the step.
 #[test]
 fn thermostat_is_evicted_with_its_equipment() {
     let path = unique_temp_toml("removed-target");
@@ -1074,11 +1075,19 @@ fn thermostat_is_evicted_with_its_equipment() {
         .step()
         .expect("a thermostat bound to present equipment steps");
 
+    dwelling.take_warnings();
     dwelling.remove_equipment(&heating_name).unwrap();
     assert_eq!(
         dwelling.actor_count(),
         actors_before,
         "the thermostat left with its equipment"
+    );
+    let warnings = dwelling.take_warnings();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("IdealThermostat") && w.contains(&heating_name)),
+        "the removed override is reported, got {warnings:?}"
     );
     dwelling
         .step()

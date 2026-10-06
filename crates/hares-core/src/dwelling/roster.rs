@@ -341,6 +341,29 @@ impl Dwelling {
         if !evicted.is_empty() {
             tracing::info!(actors = ?evicted, built_in = ?built_in_names, "actors evicted");
         }
+        // A user's actor that leaves with the equipment it targets (a
+        // thermostat override, a user-added EV driver) is reported: its
+        // control no longer applies. Built-in actors are rebuilt from the
+        // equipment and need no notice.
+        let user_evictions: Vec<String> = self
+            .actors
+            .iter()
+            .zip(&change.keep)
+            .filter(|(actor, keep)| {
+                !**keep && !self.auto_registered_actor_names.contains(actor.name())
+            })
+            .map(|(actor, _)| match actor.dispatch_target_name() {
+                Some(target) => format!(
+                    "actor '{}' was removed with the equipment it targets, '{target}'; its \
+                     control no longer applies",
+                    actor.name()
+                ),
+                None => format!("actor '{}' was removed", actor.name()),
+            })
+            .collect();
+        for message in user_evictions {
+            self.warnings.push_warning(Warning::new("actors", message));
+        }
         let live = std::mem::take(&mut self.actors);
         self.actors = ActorRosterChange::arrange(
             live.into_iter()
