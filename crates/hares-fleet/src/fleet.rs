@@ -72,10 +72,7 @@ pub enum FleetError {
         count,
         causes.join("; ")
     )]
-    AllSteppableDwellingsFailed {
-        count: usize,
-        causes: Vec<String>,
-    },
+    AllSteppableDwellingsFailed { count: usize, causes: Vec<String> },
     #[error("failed to build local rayon thread pool: {0}")]
     ThreadPoolBuild(String),
     #[error("fleet has no dwelling with positive sample_weight")]
