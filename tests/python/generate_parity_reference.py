@@ -61,11 +61,13 @@ def _load_sim_config(config_path: Path) -> dict:
     duration_s = int(sim["duration"])
     time_res_s = int(sim["time_res"])
     verbosity = int(sim.get("output_verbosity", 3))
+    master_seed = int(sim.get("master_seed", 0))
     return {
         "start_local": start_local,
         "duration": dt.timedelta(seconds=duration_s),
         "time_res": dt.timedelta(seconds=time_res_s),
         "verbosity": verbosity,
+        "master_seed": master_seed,
     }
 
 
@@ -92,12 +94,21 @@ def _load_ev_config(config_path: Path) -> dict:
 
 def _run_ochre_for_fixture(fixture_dir: Path) -> pd.DataFrame:
     """Run OCHRE on a fixture and return the minute-resolution output DataFrame."""
+    import numpy as np
+
     from ochre import Dwelling as OchreDwelling
 
     config_path = fixture_dir / "config.toml"
     sim_cfg = _load_sim_config(config_path)
     ev_cfg = _load_ev_config(config_path)
     ochre_cfg = tomllib.loads(config_path.read_text()).get("ochre", {})
+
+    # OCHRE draws random inputs (its starting indoor temperature,
+    # Envelope.py:997-1008) through numpy's global generator, unseeded; a
+    # seeded run makes the reference reproducible, which the two-pass check
+    # in the fixture's record relies on. The fixture's own master_seed, the
+    # one HARES's draw uses, seeds it.
+    np.random.seed(sim_cfg["master_seed"])
 
     extra: dict = {}
     # OCHRE draws the starting indoor temperature at random within half the
@@ -164,6 +175,13 @@ def _df_to_parquet(df: pd.DataFrame, out_path: Path) -> None:
             pass  # drop columns that cannot be cast to float
 
     out = out[float_cols]
+
+    # Deterministic column order: Time first, the rest sorted. OCHRE's
+    # results DataFrame orders its columns through hashed collections, so
+    # two runs of one fixture write the same values in different orders
+    # otherwise, and no two regenerations are byte-identical.
+    ordered = ["Time"] + sorted(c for c in out.columns if c != "Time")
+    out = out[ordered]
 
     table = pa.Table.from_pandas(out, preserve_index=False)
     pq.write_table(table, out_path, compression="snappy")
