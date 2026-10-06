@@ -324,7 +324,10 @@ pub const MATERIAL_ROUGHNESS: &[MaterialRoughness] = {
 /// The roughness class of an outside surface whose `layer` is `material`
 /// ([`MATERIAL_ROUGHNESS`]), with a warning when the HPXML names no
 /// material: the layer then takes the material OS-HPXML v1.12.0 defaults
-/// it to (wood siding, asphalt shingles, solid concrete).
+/// an absent element to (wood siding, asphalt shingles, solid concrete).
+/// An explicit value that names no material ("other", "unknown", "not
+/// present", "none", "no one major type", "cool roof") is treated as
+/// absent; OS-HPXML itself defaults only an absent element.
 ///
 /// # Errors
 ///
@@ -338,11 +341,17 @@ pub fn outside_layer_roughness(
         Some(value) if !layer.names_no_material(value) => (value, None),
         given => (
             default,
-            Some(format!(
-                "the outside {layer:?} layer names no material ({}); its roughness is that \
-                 of OS-HPXML's default, {default} ({source})",
-                given.unwrap_or("no element")
-            )),
+            Some(match given {
+                None => format!(
+                    "the outside {layer:?} layer names no material; its roughness is that of \
+                     OS-HPXML's default for an absent element, {default} ({source})"
+                ),
+                Some(value) => format!(
+                    "the outside {layer:?} layer's '{value}' names no material; it is treated \
+                     as absent and takes the roughness of OS-HPXML's default for an absent \
+                     element, {default} ({source})"
+                ),
+            }),
         ),
     };
     let row = MATERIAL_ROUGHNESS
@@ -967,11 +976,10 @@ mod tests {
     }
 
     #[test]
-    fn vinyl_siding_smooth_gives_higher_r_ext_than_brick_veneer_rough_at_same_wind() {
-        // Smooth (Rf=1.11) produces less forced convection → higher exterior R
-        // than Rough (Rf=1.67). This confirms the fix: replacing the hardcoded
-        // Rough with the correct finish-type-derived roughness class.
-        let (_, r_vinyl) = film_resistances(
+    fn smooth_gives_higher_r_ext_than_rough_at_same_wind() {
+        // Smooth (Rf=1.11) produces less forced convection, so a higher
+        // exterior R, than Rough (Rf=1.67).
+        let (_, r_smooth) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
             ZoneLabel::Outdoor,
@@ -980,7 +988,7 @@ mod tests {
             10.0,
             SurfaceRoughness::Smooth,
         );
-        let (_, r_brick) = film_resistances(
+        let (_, r_rough) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
             ZoneLabel::Outdoor,
@@ -990,16 +998,16 @@ mod tests {
             SurfaceRoughness::Rough,
         );
         assert!(
-            r_vinyl > r_brick,
-            "Vinyl (Smooth) R_ext={r_vinyl:.6} must exceed Brick (Rough) R_ext={r_brick:.6}"
+            r_smooth > r_rough,
+            "Smooth R_ext={r_smooth:.6} must exceed Rough R_ext={r_rough:.6}"
         );
     }
 
     #[test]
-    fn stucco_very_rough_gives_lower_r_ext_than_brick_veneer_rough_at_same_wind() {
-        // VeryRough (Rf=2.17) produces more forced convection → lower exterior R
-        // than Rough (Rf=1.67).
-        let (_, r_stucco) = film_resistances(
+    fn very_rough_gives_lower_r_ext_than_rough_at_same_wind() {
+        // VeryRough (Rf=2.17) produces more forced convection, so a lower
+        // exterior R, than Rough (Rf=1.67).
+        let (_, r_very_rough) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
             ZoneLabel::Outdoor,
@@ -1008,7 +1016,7 @@ mod tests {
             10.0,
             SurfaceRoughness::VeryRough,
         );
-        let (_, r_brick) = film_resistances(
+        let (_, r_rough) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
             ZoneLabel::Outdoor,
@@ -1018,8 +1026,8 @@ mod tests {
             SurfaceRoughness::Rough,
         );
         assert!(
-            r_stucco < r_brick,
-            "Stucco (VeryRough) R_ext={r_stucco:.6} must be less than Brick (Rough) R_ext={r_brick:.6}"
+            r_very_rough < r_rough,
+            "VeryRough R_ext={r_very_rough:.6} must be less than Rough R_ext={r_rough:.6}"
         );
     }
 

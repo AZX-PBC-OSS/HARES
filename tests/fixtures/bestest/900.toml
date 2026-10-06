@@ -163,6 +163,8 @@ specific_heat_j_kg_k = 1000.0
 [[boundaries]]
 id = "roof"
 boundary_type = "Roof"
+# ASHRAE 140 states no outside roughness; the roof deck is the walls' wood,
+# and HPXML's only wood roof material is wood shingles (register D-010).
 outside_material = "wood shingles or shakes"
 area_m2 = 48.0
 tilt_deg = 0.0

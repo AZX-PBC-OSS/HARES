@@ -390,19 +390,33 @@ justification → measured impact → pinning tests.
 
   The Engineering Reference's Walton table gives stucco and brick as its
   Very Rough and Rough examples; the dataset's stucco and brick records
-  are Smooth and Medium Rough, and the dataset is followed. An element
-  that names no material (absent, "other", "unknown", "not present",
-  "no one major type", "cool roof") takes the material OS-HPXML defaults
-  it to, with a warning in the dwelling's log: wood siding for a wall or
-  rim joist (`defaults.rb:1338`, `:1379`), asphalt shingles for a roof
-  (`:1268`), solid concrete for a foundation wall (`:1431-1433`). A value
-  outside the element's HPXML enumeration is an error naming the
-  boundary. Doors, floors and slabs, which have no material element in
-  HPXML, take `Rough` without a warning; glazing takes glass's Very
-  Smooth. A synthetic (TOML) building names a boundary's material with
-  `outside_material`; the ASHRAE 140 fixtures name their wood walls wood
-  siding and their wood roof deck wood shingles, the only wood roof
-  material HPXML has.
+  are Smooth and Medium Rough, and the dataset is followed. Where two
+  records in the searched families name the same material, the family
+  order decides: wood shingles take `Shingles: Wood 400mm` (2007, Medium
+  Rough) over the roofing family's `Wood shingles - plain and plastic
+  film faced` (1912, Very Rough), and composite shingle siding takes
+  `Asphalt shingles` (1897) over the asphalt siding records `Siding:
+  Asphalt roll` and `Siding: Asphalt insulating` (2027, 2032), which name
+  roll and board sidings, not shingles; all three are Very Rough. An
+  absent element takes the material OS-HPXML defaults it to, with a
+  warning in the dwelling's log: wood siding for a wall or rim joist
+  (`defaults.rb:1338`, `:1379`), asphalt shingles for a roof (`:1268`),
+  solid concrete for a foundation wall (`:1431-1433`). An explicit value
+  that names no material ("other", "unknown", "not present", the pre-v4
+  "none", "no one major type", "cool roof") is treated as absent, a HARES
+  policy (OS-HPXML defaults only an absent element), with a warning that
+  says so. A value outside the element's HPXML enumeration is an error
+  naming the boundary. Doors, floors and slabs, which have no material
+  element in HPXML, take `Rough` without a warning, as OS-HPXML gives
+  them; glazing takes glass's Very Smooth. A synthetic (TOML) building
+  names a boundary's material with `outside_material`. ASHRAE 140 states
+  no outside roughness; its fixtures' walls and roof deck are the same
+  wood (k 0.14 W/m·K, 530 kg/m³), named wood siding (Rough) on the walls
+  and, on the roof, wood shingles (Medium Rough), the only wood material
+  HPXML's `RoofType` has. The plywood record a wood deck would take
+  (`Siding: Wood - plywood`, 2057, Rough) is not a roof material in
+  HPXML; the BESTEST ratchets hold within 1 % with the roof at Medium
+  Rough.
 - **Justification:** EnergyPlus's DOE-2 and TARP outside convection scale
   forced convection by the roughness of the outside material layer.
   OS-HPXML builds that layer without passing the roughness its material
