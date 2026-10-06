@@ -301,8 +301,10 @@ justification → measured impact → pinning tests.
   determine the span (an attic over a garage, floors that do not match the
   footprint, a smaller upper storey, no floor counts, gable ends that
   disagree with the span, a footprint near a square), the attic keeps
-  OS-HPXML's hip, with a warning naming why. The ridge rise is also the attic's height for its leakage:
-  the stack coefficient grows with it and the wind coefficient takes the
+  OS-HPXML's hip, with a warning naming why.
+
+  The ridge rise is also the attic's height for its leakage: the stack
+  coefficient grows with it and the wind coefficient takes the
   attic's top above grade (`attic_infiltration_method`,
   `hares-core/src/dwelling/solver_builder.rs`). OS-HPXML feeds its
   leakage the hip height (`calc_wind_stack_coeffs`,
@@ -415,8 +417,11 @@ justification → measured impact → pinning tests.
   and, on the roof, wood shingles (Medium Rough), the only wood material
   HPXML's `RoofType` has. The plywood record a wood deck would take
   (`Siding: Wood - plywood`, 2057, Rough) is not a roof material in
-  HPXML; the BESTEST ratchets hold within 1 % with the roof at Medium
-  Rough.
+  HPXML, so Medium Rough is a modelling choice. It matters little: with
+  the roof at Rough instead, case 600's annual cooling load is 6086.1
+  against 6110.3 kWh (−0.4 %) and its heating load 3223.2 against 3227.5
+  kWh, and case 900's heating load 952.9 against 952.0 kWh; every BESTEST
+  pinned bound holds either way.
 - **Justification:** EnergyPlus's DOE-2 and TARP outside convection scale
   forced convection by the roughness of the outside material layer.
   OS-HPXML builds that layer without passing the roughness its material

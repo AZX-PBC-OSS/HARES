@@ -2949,7 +2949,7 @@ fn a_gable_attic_of_unknown_span_is_a_square_hip_with_a_warning() {
                 .replacen("<Area>225.0</Area>", "<Area>320.0</Area>", 1)
             }),
             1509.3,
-            "times the",
+            "outside 0.98 to 1.96",
         ),
     ];
     for (building, roof_area_ft2, reason) in cases {
