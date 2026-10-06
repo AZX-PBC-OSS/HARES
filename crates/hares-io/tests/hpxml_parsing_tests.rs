@@ -2848,6 +2848,34 @@ fn eaves_in_the_gable_walls_do_not_raise_the_attic() {
     assert_attic(&building, 1200.0 * 7.5 / 2.0, 7.5);
 }
 
+/// An attached unit's single outside gable wall is one gable end, not both:
+/// its party-side twin is the attic wall the HPXML also lists, so the ends
+/// sit on the party wall's side. base-bldgtype-attached.xml: 979.8 ft2 of
+/// conditioned walls 8 ft high (685.9 outside, 293.9 the party wall) and a
+/// 1006.2 ft2 roof at 6:12 make a 24.49 x 36.74 ft rectangle of 900 ft2;
+/// the 168.7 ft2 wall is the 36.74 ft span's triangle (168.8 ft2), not the
+/// 24.49 ft span's 75.0, which the ends of two equal 84.35 ft2 halves would
+/// suggest. Rise 9.18 ft, 4133 ft3 (117 m3); the half-area reading gave
+/// 78.0 m3 at a 6.12 ft rise. The 2stories and
+/// infil-compartmentalization-test variants share the geometry (the same
+/// 900 ft2 footprint and 61.24 ft half perimeter).
+#[test]
+fn an_attached_unit_s_gable_end_is_its_full_outside_wall() {
+    let slope: f64 = 6.0 / 12.0;
+    let footprint_ft2 = 1006.2 / (1.0 + slope * slope).sqrt();
+    let (_, span_ft) = rectangle_sides(footprint_ft2, 979.8 / 8.0);
+    assert!((span_ft - 36.74).abs() < 0.01, "span {span_ft} ft");
+    let rise_ft = span_ft / 2.0 * slope;
+    for sample in [
+        "base-bldgtype-attached.xml",
+        "base-bldgtype-attached-2stories.xml",
+        "base-bldgtype-attached-infil-compartmentalization-test.xml",
+    ] {
+        let building = parse_vendored_sample(sample);
+        assert_attic(&building, footprint_ft2 * rise_ft / 2.0, rise_ft);
+    }
+}
+
 /// A gable attic whose span the HPXML does not determine is OS-HPXML's
 /// square hip, with a warning naming why: an attic that also covers a
 /// garage is not bounded by the conditioned walls, and without the number

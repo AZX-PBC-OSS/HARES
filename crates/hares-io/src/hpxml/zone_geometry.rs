@@ -279,6 +279,15 @@ pub(super) fn attic_geometry(
 /// one pair of sides, the pair whose triangles, side² tan θ / 4, come
 /// nearer the gable walls' area per end.
 ///
+/// The area per end comes from the walls to the outside. Two or more are
+/// the ends themselves and must be of equal size. The one outside gable
+/// wall of a detached sample covers both ends (base.xml's 225 ft² is two
+/// 112.5 ft² triangles on a 30 ft span), while an attached unit's one
+/// outside gable wall is a single end, its party-side twin the attic
+/// wall the HPXML also lists (`base-bldgtype-attached.xml`'s 168.7 ft²
+/// Wall3, with Wall4 attic to attic); both readings of a single wall are
+/// tried, and the one whose ends agree with a span's triangle wins.
+///
 /// The gable wall area picks that pair and must agree with its triangle,
 /// from [`GABLE_END_RATIO_MIN`] to [`gable_end_ratio_max`] times it. It does
 /// not size the rise: BEopt's gable walls include the eave overhang
@@ -293,18 +302,19 @@ fn gable_rise_m(
     storey: Option<Storey>,
     warnings: &mut Vec<Warning>,
 ) -> Result<Option<f64>, HpxmlError> {
-    let mut gable_area_m2 = 0.0;
+    let mut gable_areas_m2: Vec<f64> = Vec::new();
     for (location, wall) in surfaces(details, "Walls", "Wall") {
         if parse_zone_label(&location) == ZoneType::Attic
             && child_text(wall, "ExteriorAdjacentTo").as_deref() == Some("outside")
         {
-            gable_area_m2 += parse_value_with_units(wall.child("Area"), ValueKind::Area)?
-                .ok_or_else(|| {
+            gable_areas_m2.push(
+                parse_value_with_units(wall.child("Area"), ValueKind::Area)?.ok_or_else(|| {
                     HpxmlError::Parse(format!("wall in '{location}' has no Area").into())
-                })?;
+                })?,
+            );
         }
     }
-    if gable_area_m2 <= 0.0 {
+    if gable_areas_m2.is_empty() {
         return Ok(None);
     }
     let mut pitches = Vec::new();
@@ -335,9 +345,10 @@ fn gable_rise_m(
         warnings.push(Warning::new(
             "hpxml",
             format!(
-                "the attic has {gable_area_m2:.1} m2 of gable walls, but its roofs (pitches \
+                "the attic has {:.1} m2 of gable walls, but its roofs (pitches \
                  {pitches:?}, azimuths {azimuths:?}) are not one gable; its volume is \
-                 OS-HPXML's square hip"
+                 OS-HPXML's square hip",
+                gable_areas_m2.iter().sum::<f64>()
             ),
         ));
         return Ok(None);
@@ -352,21 +363,42 @@ fn gable_rise_m(
     let Some(rectangle) = storey_rectangle_sides_m(details, footprint_m2, storey, warnings)? else {
         return Ok(None);
     };
-    let end_area_m2 = gable_area_m2 / 2.0;
-    let triangle_m2 = |side_m: f64| side_m * side_m * slope / 4.0;
-    let span_is_long = (triangle_m2(rectangle.long_m) - end_area_m2).abs()
-        < (triangle_m2(rectangle.short_m) - end_area_m2).abs();
-    let span_m = if span_is_long {
-        rectangle.long_m
+    let ends_m2: Vec<f64> = if gable_areas_m2.len() == 1 {
+        vec![gable_areas_m2[0] / 2.0, gable_areas_m2[0]]
     } else {
-        rectangle.short_m
-    };
-    match rectangle.side_sensitivity(span_is_long) {
-        Some(sensitivity) if sensitivity <= SPAN_SENSITIVITY_MAX => {}
-        sensitivity => {
+        let mean_m2 = gable_areas_m2.iter().sum::<f64>() / gable_areas_m2.len() as f64;
+        let unequal: Vec<f64> = gable_areas_m2
+            .iter()
+            .filter(|a| (*a - mean_m2).abs() > GABLE_ENDS_EQUAL_MAX * mean_m2)
+            .copied()
+            .collect();
+        if !unequal.is_empty() {
             return Ok(span_unknown(
                 warnings,
                 &format!(
+                    "its {} outside gable walls are not of equal size ({:?})",
+                    gable_areas_m2.len(),
+                    gable_areas_m2
+                ),
+            ));
+        }
+        vec![mean_m2]
+    };
+    let triangle_m2 = |side_m: f64| side_m * side_m * slope / 4.0;
+    let mut best: Option<(f64, f64)> = None;
+    let mut reasons: Vec<String> = Vec::new();
+    for &end_area_m2 in &ends_m2 {
+        let span_is_long = (triangle_m2(rectangle.long_m) - end_area_m2).abs()
+            < (triangle_m2(rectangle.short_m) - end_area_m2).abs();
+        let span_m = if span_is_long {
+            rectangle.long_m
+        } else {
+            rectangle.short_m
+        };
+        match rectangle.side_sensitivity(span_is_long) {
+            Some(sensitivity) if sensitivity <= SPAN_SENSITIVITY_MAX => {}
+            sensitivity => {
+                reasons.push(format!(
                     "a {:.0} % error in its conditioned walls' area moves the {span_m:.2} m span \
                      by {}, more than {:.0} %: the footprint is too near a square for its walls \
                      to fix the span",
@@ -376,32 +408,43 @@ fn gable_rise_m(
                         s * 100.0
                     )),
                     SPAN_SENSITIVITY_MAX * 100.0
-                ),
-            ));
+                ));
+                continue;
+            }
         }
-    }
-    let ratio = end_area_m2 / triangle_m2(span_m);
-    let ratio_max = gable_end_ratio_max(span_m);
-    if !(GABLE_END_RATIO_MIN..=ratio_max).contains(&ratio) {
-        return Ok(span_unknown(
-            warnings,
-            &format!(
+        let ratio = end_area_m2 / triangle_m2(span_m);
+        let ratio_max = gable_end_ratio_max(span_m);
+        if !(GABLE_END_RATIO_MIN..=ratio_max).contains(&ratio) {
+            reasons.push(format!(
                 "its {end_area_m2:.1} m2 gable ends are {ratio:.2} times the {:.1} m2 triangle \
                  of the {span_m:.2} m span the walls give, outside {GABLE_END_RATIO_MIN} to \
                  {ratio_max:.2}",
                 triangle_m2(span_m)
-            ),
-        ));
+            ));
+            continue;
+        }
+        if best.is_none_or(|(apart, _)| (ratio - 1.0).abs() < apart) {
+            best = Some(((ratio - 1.0).abs(), span_m / 2.0 * slope));
+        }
     }
-    Ok(Some(span_m / 2.0 * slope))
+    match best {
+        Some((_, rise_m)) => Ok(Some(rise_m)),
+        None => Ok(span_unknown(warnings, &reasons.join("; "))),
+    }
 }
+
+/// The most a gable end's area may differ from its twin's: 1 %. The two
+/// ends of a gable are the same triangle, and every committed file's gable
+/// walls of one home agree to the tenth of a square foot; a difference the
+/// eave of one end alone would make is far larger.
+const GABLE_ENDS_EQUAL_MAX: f64 = 0.01;
 
 /// The least a gable end's area may be over the triangle of the span the
 /// walls give. Every committed ResStock and OS-HPXML sample gable attic
-/// whose span the walls determine (eleven homes) has gable ends of 0.9993
-/// to 1.0008 times their triangle: the walls fix the span to rounding.
-/// 0.98 leaves rounding room and rejects a smaller end, which no roof of
-/// the walls' span can have.
+/// whose span the walls determine has gable ends of 0.9993 to 1.0008 times
+/// their triangle, the attached units' single outside gable wall included:
+/// the walls fix the span to rounding. 0.98 leaves rounding room and
+/// rejects a smaller end, which no roof of the walls' span can have.
 const GABLE_END_RATIO_MIN: f64 = 0.98;
 
 /// The most a gable end's area may be over the triangle of a `span_m` span:

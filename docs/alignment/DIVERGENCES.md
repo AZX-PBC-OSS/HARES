@@ -286,21 +286,28 @@ justification → measured impact → pinning tests.
   roof footprint times the ridge rise (span / 2) tan(pitch). The span is a
   side of the rectangle whose area is the roof footprint and whose
   perimeter is the conditioned wall area over the storey wall height. The
-  gable wall area picks which pair of sides carries the gables, and must
-  lie from 0.98 to (1 + 2 × 5 ft / span)² times that span's triangle: no
-  smaller than the triangle beyond rounding, and no larger than the
-  deepest eaves OS-HPXML's home builder offers (5 ft,
+  ends' area comes from the outside gable walls: two or more are the ends
+  themselves and must be of equal size, and a single one is read both as
+  one end and as both ends together (a detached sample writes the two ends
+  as one wall, an attached unit's single outside gable wall is one end
+  whose twin is the party-side attic wall), the reading whose ends agree
+  with a span's triangle winning. The end area must lie from 0.98 to
+  (1 + 2 × 5 ft / span)² times that span's triangle: no smaller than the
+  triangle beyond rounding, and no larger than the deepest eaves OS-HPXML's
+  home builder offers (5 ft,
   `BuildResidentialHPXML/resources/options/geometry_eaves.tsv`) would make
   it. Across the committed ResStock and OS-HPXML sample homes, every gable
   whose span the walls fix has ends of 0.9993 to 1.0008 times its
-  triangle; BEopt's, whose ends include 2 ft eaves, are 1.28. The span must
+  triangle, the attached units' single outside wall included;
+  BEopt's, whose ends include 2 ft eaves, are 1.28. The span must
   also be well determined: a 0.25 % error in the walls' area (a heuristic,
   three times that largest disagreement) may move it by at most 10 %, which
   rejects a footprint near a square (`gable_rise_m`,
   `hares-io/src/hpxml/zone_geometry.rs`). Where the input does not
   determine the span (an attic over a garage, floors that do not match the
   footprint, a smaller upper storey, no floor counts, gable ends that
-  disagree with the span, a footprint near a square), the attic keeps
+  disagree with the span or are of different sizes, a footprint near a
+  square), the attic keeps
   OS-HPXML's hip, with a warning naming why.
 
   The ridge rise is also the attic's height for its leakage: the stack
@@ -333,6 +340,7 @@ justification → measured impact → pinning tests.
   (summer 0.894 to 0.886 °C, winter 1.275 to 1.279 °C).
 - **Pinning tests:** `hpxml_parsing_tests::a_gable_attic_takes_its_geometric_volume`,
   `hpxml_parsing_tests::eaves_in_the_gable_walls_do_not_raise_the_attic`,
+  `hpxml_parsing_tests::an_attached_unit_s_gable_end_is_its_full_outside_wall`,
   `hpxml_parsing_tests::a_gable_attic_of_unknown_span_is_a_square_hip_with_a_warning`,
   and `structural_envelope_oracle` (`beopt_building_structure`,
   `beopt_rc_network_topology`, `beopt_ua_parity`). With OS-HPXML's hip,
