@@ -411,10 +411,17 @@ impl Dwelling {
     /// that `run_timestep` can populate `EnvironmentState.price_signal` before
     /// actors run. Billing accumulation happens post-solver each step.
     ///
+    /// Attached after step 0, the tariff bills from the period containing
+    /// the attach step: the period keeps the billing cycle's boundary
+    /// structure and its fixed and demand charges prorate to the span from
+    /// the attach step to the period end. Replacing a tariff closes the
+    /// outgoing open period with its accruals (the bill exists) and opens
+    /// the new one at the switch step.
+    ///
     /// # Errors
     ///
     /// The evaluator's or the roster plan's error. On `Err` the dwelling
-    /// keeps its previous tariff, actors and warning log.
+    /// keeps its previous tariff, actors, billing summaries and warning log.
     pub fn set_tariff(&mut self, tariff: ElectricTariff, tz: Tz) -> Result<()> {
         let parse_warnings = tariff.parse_warnings.clone();
         let start = self.clock.start_time.with_timezone(&tz);
@@ -426,14 +433,32 @@ impl Dwelling {
         for _ in 0..self.clock.current_step {
             evaluator.advance();
         }
+        // The attach instant is the current step's start: the first step the
+        // evaluator will fold is this one.
+        let attach_time = start
+            + chrono::Duration::seconds(self.clock.current_step as i64 * interval_secs as i64);
+        if self.clock.current_step > 0 {
+            evaluator.activate_at(attach_time);
+        }
         let change = self.plan_built_in_actor_rebuild(Some(&evaluator))?;
         let plan =
             self.plan_roster_caches(&self.equipment_refs(), &change.prospective(&self.actors))?;
+        // Replacing a tariff closes the outgoing open period with its
+        // accruals: the bill exists. This commits only after both plans
+        // succeeded, so a rejected set_tariff leaves the billing summaries
+        // as they were.
+        let outgoing_close = match self.tariff_evaluator.take() {
+            Some(mut outgoing) => outgoing.close_open_period(attach_time),
+            None => None,
+        };
         // Parse warnings report in every run the tariff is attached to: a
         // tariff parsed once and attached to many dwellings never warns
         // silently.
         for message in parse_warnings {
             self.warnings.push_warning(Warning::new("tariff", message));
+        }
+        if let Some(summary) = outgoing_close {
+            self.billing_summaries.push(summary);
         }
         self.tariff_evaluator = Some(evaluator);
         self.commit_actor_change(change);

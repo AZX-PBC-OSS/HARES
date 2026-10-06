@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Datelike, Duration, TimeZone};
 use chrono_tz::Tz;
-use hares_types::{BillingCycle, season_contains_month};
+use hares_types::{BillingCycle, HaresError, season_contains_month};
 
+use crate::snapshot::{BillingStateSnapshot, DemandWindowSnapshot, datetime_from_string};
 use crate::types::{RatchetConfig, TieredBlock};
 
 struct DemandWindow {
@@ -70,6 +71,32 @@ impl DemandWindow {
             self.partial_window_skips = 0;
         }
     }
+
+    /// The window's full mutable state, ring buffer contents included: the
+    /// running sum's float history is not reproducible from the samples
+    /// alone, so a resumed window pushes on exactly as the original did.
+    pub(crate) fn snapshot(&self) -> DemandWindowSnapshot {
+        DemandWindowSnapshot {
+            samples: self.samples.to_vec(),
+            head: self.head,
+            count: self.count,
+            running_sum: self.running_sum,
+            push_count: self.push_count,
+        }
+    }
+
+    /// Rebuilds a window from its snapshot. The caller's snapshot must come
+    /// from a window of the same capacity; the samples vector is truncated
+    /// or extended to the capacity this window's configuration computes.
+    pub(crate) fn from_snapshot(snapshot: DemandWindowSnapshot) -> Self {
+        let mut window = Self::new(snapshot.samples.len());
+        window.samples.copy_from_slice(&snapshot.samples);
+        window.head = snapshot.head.min(snapshot.samples.len().saturating_sub(1));
+        window.count = snapshot.count.min(snapshot.samples.len());
+        window.running_sum = snapshot.running_sum;
+        window.push_count = snapshot.push_count;
+        window
+    }
 }
 
 /// One per-step set of billing inputs, grouped to keep the
@@ -96,6 +123,12 @@ pub struct BillingStep {
 pub struct BillingState {
     pub(crate) period_start: DateTime<Tz>,
     pub(crate) period_end: DateTime<Tz>,
+    /// When the tariff became active within the open period: the period
+    /// start for a period opened at its own boundary, or the attach or
+    /// switch instant for the containing period a tariff joins mid-way. A
+    /// period whose `active_since` is later than its start bills its fixed
+    /// and demand charges prorated to the active span.
+    pub(crate) active_since: DateTime<Tz>,
     pub(crate) cumulative_import_kwh: f64,
     pub(crate) cumulative_export_kwh: f64,
     pub(crate) cumulative_energy_cost_usd: f64,
@@ -118,6 +151,10 @@ pub struct BillingState {
     last_cpp_hour: Option<usize>,
     /// Cumulative EV kWh tracked for observer / billing transparency.
     pub(crate) cumulative_ev_kwh: f64,
+    /// Steps folded into the open period since it opened. A period that has
+    /// folded no step holds nothing billable: a tariff replacement over such
+    /// a period closes nothing.
+    pub(crate) steps_in_period: u64,
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
@@ -153,6 +190,29 @@ fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> DateTime<Tz> 
     }
 }
 
+/// The start of the billing period containing `t`, walking the cycle's
+/// boundaries from `anchor`.
+///
+/// The walk follows the same [`compute_period_end`] chain the stepping
+/// evaluator closes on, so the period a mid-run tariff joins is exactly the
+/// one a from-start run holds open at `t`.
+pub(crate) fn containing_period_start(
+    anchor: DateTime<Tz>,
+    t: DateTime<Tz>,
+    cycle: BillingCycle,
+) -> DateTime<Tz> {
+    let mut start = anchor;
+    loop {
+        let end = compute_period_end(start, cycle);
+        // A degenerate cycle whose period end does not advance would loop
+        // forever; treat such a period as its own container.
+        if end <= start || end > t {
+            return start;
+        }
+        start = end;
+    }
+}
+
 impl BillingState {
     pub fn new(
         period_start: DateTime<Tz>,
@@ -183,6 +243,7 @@ impl BillingState {
         Self {
             period_start,
             period_end,
+            active_since: period_start,
             cumulative_import_kwh: 0.0,
             cumulative_export_kwh: 0.0,
             cumulative_energy_cost_usd: 0.0,
@@ -199,6 +260,7 @@ impl BillingState {
             running_cpp_event_hours: 0,
             last_cpp_hour: None,
             cumulative_ev_kwh: 0.0,
+            steps_in_period: 0,
         }
     }
 
@@ -222,6 +284,7 @@ impl BillingState {
         self.cumulative_energy_cost_usd += import_kwh * import_price;
         self.cumulative_export_credit_usd += export_kwh * export_price;
         self.cumulative_ev_kwh += ev_import_kwh;
+        self.steps_in_period += 1;
         self.demand_window.push(net_power_kw.max(0.0));
         if let Some(avg) = self.demand_window.average_full() {
             self.peak_demand_kw = self.peak_demand_kw.max(avg);
@@ -368,6 +431,7 @@ impl BillingState {
         }
         self.period_start = new_period_start;
         self.period_end = compute_period_end(new_period_start, self.billing_cycle);
+        self.active_since = new_period_start;
         self.cumulative_import_kwh = 0.0;
         self.cumulative_export_kwh = 0.0;
         self.cumulative_energy_cost_usd = 0.0;
@@ -376,6 +440,86 @@ impl BillingState {
         self.period_peak_demand_kw.fill(0.0);
         self.demand_window.reset();
         self.cumulative_ev_kwh = 0.0;
+        self.steps_in_period = 0;
+    }
+
+    /// The state's full mutable contents as a serializable snapshot; the
+    /// counterpart of [`BillingState::from_snapshot`].
+    pub(crate) fn snapshot(&self) -> BillingStateSnapshot {
+        BillingStateSnapshot {
+            period_start: self.period_start.to_rfc3339(),
+            period_end: self.period_end.to_rfc3339(),
+            active_since: self.active_since.to_rfc3339(),
+            cumulative_import_kwh: self.cumulative_import_kwh,
+            cumulative_export_kwh: self.cumulative_export_kwh,
+            cumulative_energy_cost_usd: self.cumulative_energy_cost_usd,
+            cumulative_export_credit_usd: self.cumulative_export_credit_usd,
+            peak_demand_kw: self.peak_demand_kw,
+            period_peak_demand_kw: self.period_peak_demand_kw.clone(),
+            prior_peaks_kw: self.prior_peaks_kw.iter().copied().collect(),
+            prior_period_peaks: self
+                .prior_period_peaks
+                .iter()
+                .map(|peaks| peaks.iter().copied().collect())
+                .collect(),
+            demand_window: self.demand_window.snapshot(),
+            billing_cycle: self.billing_cycle,
+            max_prior_periods: self.max_prior_periods,
+            running_cpp_event_hours: self.running_cpp_event_hours,
+            last_cpp_hour: self.last_cpp_hour,
+            cumulative_ev_kwh: self.cumulative_ev_kwh,
+            steps_in_period: self.steps_in_period,
+        }
+    }
+
+    /// Rebuilds a billing state from its snapshot. `tz` is the evaluator's
+    /// time zone; the snapshot's timestamps parse into it. `num_tou_periods`
+    /// is the live period name table's length: the per-period peak vectors
+    /// must match it, or the snapshot was written against a different
+    /// tariff and is rejected.
+    pub(crate) fn from_snapshot(
+        snapshot: BillingStateSnapshot,
+        tz: Tz,
+        num_tou_periods: usize,
+    ) -> Result<Self, HaresError> {
+        let period_start = datetime_from_string(tz, "period_start", &snapshot.period_start)?;
+        let period_end = datetime_from_string(tz, "period_end", &snapshot.period_end)?;
+        let active_since = datetime_from_string(tz, "active_since", &snapshot.active_since)?;
+        if snapshot.period_peak_demand_kw.len() != num_tou_periods
+            || snapshot.prior_period_peaks.len() != num_tou_periods
+        {
+            return Err(HaresError::Tariff(format!(
+                "tariff snapshot peak vectors ({} per-period peaks, {} ratchet histories) \
+                 do not match the tariff's {} TOU periods",
+                snapshot.period_peak_demand_kw.len(),
+                snapshot.prior_period_peaks.len(),
+                num_tou_periods
+            )));
+        }
+        Ok(Self {
+            period_start,
+            period_end,
+            active_since,
+            cumulative_import_kwh: snapshot.cumulative_import_kwh,
+            cumulative_export_kwh: snapshot.cumulative_export_kwh,
+            cumulative_energy_cost_usd: snapshot.cumulative_energy_cost_usd,
+            cumulative_export_credit_usd: snapshot.cumulative_export_credit_usd,
+            peak_demand_kw: snapshot.peak_demand_kw,
+            period_peak_demand_kw: snapshot.period_peak_demand_kw,
+            prior_peaks_kw: snapshot.prior_peaks_kw.into_iter().collect(),
+            prior_period_peaks: snapshot
+                .prior_period_peaks
+                .into_iter()
+                .map(|peaks| peaks.into_iter().collect())
+                .collect(),
+            demand_window: DemandWindow::from_snapshot(snapshot.demand_window),
+            billing_cycle: snapshot.billing_cycle,
+            max_prior_periods: snapshot.max_prior_periods,
+            running_cpp_event_hours: snapshot.running_cpp_event_hours,
+            last_cpp_hour: snapshot.last_cpp_hour,
+            cumulative_ev_kwh: snapshot.cumulative_ev_kwh,
+            steps_in_period: snapshot.steps_in_period,
+        })
     }
 }
 
@@ -766,6 +910,44 @@ mod tests {
         let end = compute_period_end(start, BillingCycle::Monthly);
         assert_eq!(end.month(), 3);
         assert_eq!(end.day(), 29);
+    }
+
+    // The containing-period walk follows the same boundary chain the closes
+    // follow: a mid-run tariff joins exactly the period a from-start run
+    // holds open at the attach instant.
+    #[test]
+    fn containing_period_walks_the_boundary_chain() {
+        let anchor = make_dt(2025, 1, 25);
+        // Inside the first period.
+        assert_eq!(
+            containing_period_start(anchor, make_dt(2025, 1, 30), BillingCycle::Monthly),
+            anchor
+        );
+        // Inside the second.
+        assert_eq!(
+            containing_period_start(anchor, make_dt(2025, 2, 26), BillingCycle::Monthly),
+            make_dt(2025, 2, 25)
+        );
+        // Exactly at a boundary opens the new period, not the old one.
+        assert_eq!(
+            containing_period_start(anchor, make_dt(2025, 2, 25), BillingCycle::Monthly),
+            make_dt(2025, 2, 25)
+        );
+        // The anchor instant sits in the first period.
+        assert_eq!(
+            containing_period_start(anchor, anchor, BillingCycle::Monthly),
+            anchor
+        );
+        // A custom cycle walks its own boundaries.
+        let custom_anchor = make_dt(2025, 1, 1);
+        assert_eq!(
+            containing_period_start(
+                custom_anchor,
+                make_dt(2025, 1, 21),
+                BillingCycle::Custom(14)
+            ),
+            make_dt(2025, 1, 15)
+        );
     }
 
     // H1: Per-period ratchet with populated prior_period_peaks applies correctly.

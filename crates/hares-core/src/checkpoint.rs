@@ -38,7 +38,18 @@ use serde::{Deserialize, Serialize};
 /// v11: `next_ev_driver_stream` carries the built-in EV driver stream
 /// cursor; checkpoints written by v10 builds are rejected by the version
 /// gate.
-pub const CHECKPOINT_VERSION: u32 = 11;
+///
+/// v12: `tariff_state` carries the tariff evaluator's full mutable state
+/// (the tariff, its horizon, the price-index position and the open billing
+/// period with its accruals and demand-window history) as a versioned
+/// JSON payload, for runs with a tariff attached, so a resumed dwelling
+/// prices and bills the post-resume steps exactly as the continuous run;
+/// a mid-run attached or replaced tariff bills from the period containing
+/// the attach or switch step. Checkpoints written by v11 builds are
+/// rejected by the version gate. The payload carries its own schema
+/// version ([`hares_tariff::TARIFF_SNAPSHOT_SCHEMA_VERSION`]), validated
+/// independently of this constant.
+pub const CHECKPOINT_VERSION: u32 = 12;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -123,6 +134,16 @@ pub struct DwellingCheckpoint {
     /// so without this a driver built after the resume could take the
     /// stream of a restored driver.
     pub next_ev_driver_stream: u64,
+    /// The tariff evaluator's complete mutable state, when a tariff is
+    /// attached: the tariff, the horizon, the price-index position, the open
+    /// billing period and its accruals and demand-window history, as a
+    /// versioned JSON payload ([`hares_tariff::TariffSnapshot`]). `None`
+    /// when the run has no tariff, and a dwelling restored from such a
+    /// checkpoint has none either. The payload carries its own schema
+    /// version ([`hares_tariff::TARIFF_SNAPSHOT_SCHEMA_VERSION`]) validated
+    /// on restore, independently of this constant (the [`ThermalSnapshot`]
+    /// pattern).
+    pub tariff_state: Option<Vec<u8>>,
 }
 
 impl DwellingCheckpoint {
@@ -303,6 +324,7 @@ mod tests {
             }],
             prior_electrical_summary: ElectricalSummary::default(),
             next_ev_driver_stream: 0,
+            tariff_state: None,
         }
     }
 
@@ -338,9 +360,9 @@ mod tests {
 
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema`]`::<DwellingCheckpoint>()`.
-    const PINNED_VERSION: u32 = 11;
+    const PINNED_VERSION: u32 = 12;
     const PINNED_SCHEMA_SHA256: &str =
-        "c46f2973a815897b87bf73427e4d24cded36b5c6fee7b34a62d474dc740c8b8c";
+        "18eca1b4cbb5eef906d3a7ee768cd17fb49f97f06e1e60604db28c6f6597725e";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the
@@ -447,6 +469,7 @@ mod tests {
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
             next_ev_driver_stream: 0,
+            tariff_state: None,
         };
 
         let path =
@@ -476,6 +499,7 @@ mod tests {
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
             next_ev_driver_stream: 0,
+            tariff_state: None,
         };
 
         let path =
@@ -600,6 +624,7 @@ mod tests {
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
             next_ev_driver_stream: 0,
+            tariff_state: None,
         };
 
         let path = std::env::temp_dir().join(unique_temp_name(
@@ -650,6 +675,7 @@ mod tests {
             actor_states: vec![],
             prior_electrical_summary: summary.clone(),
             next_ev_driver_stream: 0,
+            tariff_state: None,
         };
 
         let path = std::env::temp_dir().join(unique_temp_name(
@@ -681,6 +707,70 @@ mod tests {
         assert_eq!(loaded.thermal.x[0].to_bits(), state.to_bits());
     }
 
+    /// A checkpoint file's tariff state returns every float bit for bit:
+    /// the blob re-encodes to the same bytes, so a resumed evaluator bills
+    /// with exactly the accruals the interrupted run held.
+    #[test]
+    fn tariff_state_round_trips_through_the_file_bitwise() {
+        use chrono::TimeZone;
+        let start = chrono_tz::America::New_York
+            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .earliest()
+            .expect("start");
+        let mut tariff = hares_tariff::ElectricTariff::default();
+        tariff.fixed_charges.monthly_usd = 10.0;
+        let mut evaluator = hares_tariff::TariffEvaluator::new(
+            tariff,
+            start,
+            start + chrono::Duration::hours(48),
+            3600,
+        )
+        .expect("evaluator");
+        for i in 0..30u32 {
+            let step_end = start + chrono::Duration::hours(i as i64 + 1);
+            evaluator.step(2.5, 0.0, 3600.0, step_end);
+        }
+        let blob = evaluator
+            .snapshot_state()
+            .to_blob()
+            .expect("encode the snapshot");
+
+        let cp = DwellingCheckpoint {
+            format_version: CHECKPOINT_VERSION,
+            bldg_id: 1,
+            timestep_index: 30,
+            equipment_states: vec![],
+            rng_state: [0; 32],
+            thermal: empty_thermal(),
+            humidity_states: vec![],
+            fluid_states: vec![],
+            rng_stream: 0,
+            rng_word_pos: 0,
+            actor_states: vec![],
+            prior_electrical_summary: ElectricalSummary::default(),
+            next_ev_driver_stream: 0,
+            tariff_state: Some(blob),
+        };
+
+        let path = std::env::temp_dir().join(unique_temp_name(
+            "hares_core_checkpoint_tariff_state",
+            "json",
+        ));
+        let _guard = TempFile(path.clone());
+        cp.save(&path).expect("save the checkpoint");
+        let loaded = DwellingCheckpoint::load(&path).expect("load the checkpoint");
+        let saved_blob = cp.tariff_state.as_ref().expect("saved blob");
+        let loaded_blob = loaded.tariff_state.as_ref().expect("loaded blob");
+        assert_eq!(saved_blob, loaded_blob, "the tariff blob is byte-identical");
+        let snapshot =
+            hares_tariff::TariffSnapshot::from_blob(loaded_blob).expect("decode the loaded blob");
+        assert_eq!(
+            hares_tariff::TariffSnapshot::from_blob(saved_blob).expect("decode the saved blob"),
+            snapshot
+        );
+        assert_eq!(snapshot.billing.steps_in_period, 30);
+    }
+
     #[test]
     fn save_returns_err_on_non_writable_path() {
         let cp = DwellingCheckpoint {
@@ -697,6 +787,7 @@ mod tests {
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
             next_ev_driver_stream: 0,
+            tariff_state: None,
         };
 
         let path = std::path::PathBuf::from("/nonexistent-dir-xyz/cp.json");

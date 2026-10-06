@@ -13,6 +13,7 @@ use crate::checkpoint::{
     ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
 };
 use crate::rng::{EV_DRIVER_STREAM_COUNT, RNG_STREAM_EV_DRIVER_BASE};
+use hares_tariff::{TariffEvaluator, TariffSnapshot};
 
 type Result<T> = std::result::Result<T, HaresError>;
 
@@ -80,6 +81,10 @@ impl Dwelling {
                 .collect::<Result<Vec<_>>>()?,
             prior_electrical_summary: self.prior_electrical_summary.clone(),
             next_ev_driver_stream: self.next_ev_driver_stream,
+            tariff_state: match self.tariff_evaluator.as_ref() {
+                Some(evaluator) => Some(evaluator.snapshot_state().to_blob()?),
+                None => None,
+            },
         })
     }
 
@@ -94,6 +99,16 @@ impl Dwelling {
         self.validate_building_state(&cp)?;
         let equipment_blobs = self.matched_equipment_blobs(&cp)?;
         let actor_blobs = self.matched_actor_blobs(&cp)?;
+        // The tariff evaluator rebuilds from its snapshot blob before
+        // anything mutates, so a snapshot that fails to restore leaves the
+        // dwelling as it was.
+        let tariff_evaluator = match &cp.tariff_state {
+            Some(blob) => {
+                let snapshot = TariffSnapshot::from_blob(blob)?;
+                Some(TariffEvaluator::from_snapshot(&snapshot)?)
+            }
+            None => None,
+        };
         let last_step_env = self.last_step_environment(cp.timestep_index)?;
         self.load_component_states(&equipment_blobs, &actor_blobs, |dwelling| {
             dwelling.check_ev_driver_cursor(cp.next_ev_driver_stream)
@@ -110,6 +125,14 @@ impl Dwelling {
         self.rng = restored_rng;
         self.prior_electrical_summary = cp.prior_electrical_summary;
         self.next_ev_driver_stream = cp.next_ev_driver_stream;
+        // The tariff evaluator's state restores exactly: a resumed dwelling
+        // with a tariff prices and bills the post-restore steps as the
+        // continuous run would, open period and accruals included. A
+        // checkpoint without a tariff leaves the dwelling without one. The
+        // prior-segment path (`restore_building_state`) does not restore the
+        // tariff: it resets the clock to step 0 and the segment attaches its
+        // own tariff as assembly does.
+        self.tariff_evaluator = tariff_evaluator;
 
         // Populate latest_env.equipment_core and equipment_telemetry from the
         // restored equipment state so that actors read correct SOC, power flows,
@@ -126,7 +149,9 @@ impl Dwelling {
     /// the segment. The RNG, equipment and actor states are not restored:
     /// the current equipment set was freshly built by
     /// `DwellingBlueprint::build()` and already initialized via
-    /// `Equipment::init()`. The checkpoint is validated before anything
+    /// `Equipment::init()`. The tariff evaluator's state is not restored
+    /// either (the clock resets to step 0; the segment attaches its own
+    /// tariff as assembly does). The checkpoint is validated before anything
     /// changes, so on error the dwelling is left as it was.
     pub fn restore_building_state(&mut self, cp: &DwellingCheckpoint) -> Result<()> {
         self.validate_building_state(cp)?;

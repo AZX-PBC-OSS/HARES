@@ -15054,6 +15054,309 @@ master_seed = 0
         );
     }
 
+    const FLAT_TARIFF_JSON: &str =
+        include_str!("../../../../tests/fixtures/golden/flat_tariff.json");
+
+    /// The golden fixture's flat tariff: one all-hours period at 0.15
+    /// USD/kWh, a 10.00 USD monthly fixed charge, monthly billing.
+    fn flat_tariff() -> ElectricTariff {
+        serde_json::from_str(FLAT_TARIFF_JSON).expect("parse the flat tariff fixture")
+    }
+
+    /// Every field of two billing summaries compared on bits.
+    fn assert_billing_bitwise_equal(a: &BillingPeriodSummary, b: &BillingPeriodSummary) {
+        assert_eq!(a.period_start, b.period_start, "period_start");
+        assert_eq!(a.period_end, b.period_end, "period_end");
+        assert_eq!(
+            a.energy_charge_usd.to_bits(),
+            b.energy_charge_usd.to_bits(),
+            "energy_charge_usd"
+        );
+        assert_eq!(
+            a.demand_charge_usd.to_bits(),
+            b.demand_charge_usd.to_bits(),
+            "demand_charge_usd"
+        );
+        assert_eq!(
+            a.fixed_charge_usd.to_bits(),
+            b.fixed_charge_usd.to_bits(),
+            "fixed_charge_usd"
+        );
+        assert_eq!(
+            a.export_credit_usd.to_bits(),
+            b.export_credit_usd.to_bits(),
+            "export_credit_usd"
+        );
+        assert_eq!(
+            a.net_bill_usd.to_bits(),
+            b.net_bill_usd.to_bits(),
+            "net_bill_usd"
+        );
+        assert_eq!(
+            a.peak_demand_kw.to_bits(),
+            b.peak_demand_kw.to_bits(),
+            "peak_demand_kw"
+        );
+        assert_eq!(
+            a.total_import_kwh.to_bits(),
+            b.total_import_kwh.to_bits(),
+            "total_import_kwh"
+        );
+        assert_eq!(
+            a.total_export_kwh.to_bits(),
+            b.total_export_kwh.to_bits(),
+            "total_export_kwh"
+        );
+    }
+
+    /// The summary whose period starts at `start`, or `None`.
+    fn summary_starting_at(
+        summaries: &[BillingPeriodSummary],
+        start: chrono::DateTime<chrono_tz::Tz>,
+    ) -> Option<&BillingPeriodSummary> {
+        summaries.iter().find(|s| s.period_start == start)
+    }
+
+    /// A tariff attached after step 0 bills from the period containing the
+    /// attach step: no bill exists before the attach, the containing
+    /// period's fixed charge is prorated to the span from the attach step
+    /// to the period end, and every later full period is bitwise the
+    /// from-start run's.
+    #[test]
+    fn a_tariff_attached_mid_run_bills_from_the_attach_period() {
+        let tz = chrono_tz::America::Denver;
+        let mut from_start = bestest_dwelling();
+        from_start
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff from the start");
+        let mut attached_mid_run = bestest_dwelling();
+
+        // Step 300 is Jan 13 12:00, inside the January period.
+        const ATTACH_STEP: usize = 300;
+        net_power_kw(&mut attached_mid_run, ATTACH_STEP);
+        assert!(
+            attached_mid_run.billing_summaries().is_empty(),
+            "no bill exists before the attach"
+        );
+
+        attached_mid_run
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff mid-run");
+
+        // Run both dwellings past the February and March closes (the first
+        // step whose start reaches a period end closes it).
+        const TOTAL_STEPS: usize = 2300;
+        net_power_kw(&mut attached_mid_run, TOTAL_STEPS - ATTACH_STEP);
+        net_power_kw(&mut from_start, TOTAL_STEPS);
+
+        let from_start_bills = from_start.billing_summaries();
+        let mid_run_bills = attached_mid_run.billing_summaries();
+        assert_eq!(
+            mid_run_bills.len(),
+            from_start_bills.len(),
+            "both runs close the same periods"
+        );
+
+        let january_start = attached_mid_run.clock.start_time.with_timezone(&tz);
+        let containing = summary_starting_at(mid_run_bills, january_start)
+            .expect("the first bill is the period containing the attach step");
+        let from_start_january = summary_starting_at(from_start_bills, january_start)
+            .expect("the from-start run closed January");
+        assert_eq!(containing.period_start, from_start_january.period_start);
+        assert_eq!(containing.period_end, from_start_january.period_end);
+        assert!(
+            containing.fixed_charge_usd < from_start_january.fixed_charge_usd,
+            "the first period's fixed charge is prorated: {} < {}",
+            containing.fixed_charge_usd,
+            from_start_january.fixed_charge_usd
+        );
+        // The proration: 18.5 of January's 31 days active.
+        let attach_time = january_start + chrono::Duration::hours(ATTACH_STEP as i64);
+        let fraction = (containing.period_end - attach_time).num_seconds() as f64
+            / (containing.period_end - containing.period_start).num_seconds() as f64;
+        assert_eq!(
+            containing.fixed_charge_usd.to_bits(),
+            (10.0_f64 * fraction).to_bits(),
+            "the fixed charge is the full charge by the active fraction"
+        );
+        assert!(
+            containing.total_import_kwh < from_start_january.total_import_kwh,
+            "only the steps from the attach on accrue to the containing period"
+        );
+
+        // Every later period is bitwise the from-start run's.
+        for bill in &mid_run_bills[1..] {
+            let matching = summary_starting_at(from_start_bills, bill.period_start)
+                .expect("each later period closed in the from-start run too");
+            assert_billing_bitwise_equal(bill, matching);
+        }
+    }
+
+    /// Replacing a tariff closes the outgoing open period with its
+    /// accruals: the bill exists, covering the span the outgoing tariff
+    /// served, and the replacement opens the period containing the switch
+    /// step with its charges prorated from it.
+    #[test]
+    fn replacing_a_tariff_closes_the_outgoing_period() {
+        let tz = chrono_tz::America::Denver;
+        let mut replaced = bestest_dwelling();
+        replaced
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the outgoing tariff");
+
+        // The accruals the outgoing period holds at the switch, read from
+        // a twin that is stepped the same and never replaced.
+        let mut twin = bestest_dwelling();
+        twin.set_tariff(flat_tariff(), tz)
+            .expect("attach the outgoing tariff");
+        const SWITCH_STEP: usize = 300;
+        net_power_kw(&mut replaced, SWITCH_STEP);
+        net_power_kw(&mut twin, SWITCH_STEP);
+        let accruals = twin
+            .tariff_evaluator()
+            .expect("the twin carries the tariff")
+            .current_metrics();
+
+        let mut expensive = flat_tariff();
+        expensive.energy_rates[0].rate_per_kwh = 0.20;
+        expensive.fixed_charges.monthly_usd = 20.0;
+        replaced
+            .set_tariff(expensive, tz)
+            .expect("replace the tariff");
+
+        let bills = replaced.billing_summaries();
+        assert_eq!(bills.len(), 1, "exactly the outgoing period's bill exists");
+        let outgoing = &bills[0];
+        let january_start = replaced.clock.start_time.with_timezone(&tz);
+        let switch_time = january_start + chrono::Duration::hours(SWITCH_STEP as i64);
+        assert_eq!(outgoing.period_start, accruals.period_start);
+        assert_eq!(outgoing.period_end, switch_time);
+        assert_eq!(
+            outgoing.total_import_kwh.to_bits(),
+            accruals.total_import_kwh.to_bits(),
+            "the outgoing bill carries the accruals"
+        );
+        // The served span: 300 of January's 744 hours.
+        let full_month_seconds = (outgoing_end(january_start) - january_start).num_seconds() as f64;
+        let fraction = (switch_time - january_start).num_seconds() as f64 / full_month_seconds;
+        assert_eq!(
+            outgoing.fixed_charge_usd.to_bits(),
+            (10.0_f64 * fraction).to_bits(),
+            "the outgoing fixed charge is prorated to the served span"
+        );
+
+        // The replacement opens the period containing the switch step: its
+        // first bill, at the February boundary, is prorated from the
+        // switch, and it carries the replacement's accruals.
+        net_power_kw(&mut replaced, 500);
+        let bills = replaced.billing_summaries();
+        assert_eq!(bills.len(), 2, "the replacement closed the February period");
+        let replacement_bill = &bills[1];
+        let switch_to_boundary =
+            (replacement_bill.period_end - switch_time).num_seconds() as f64 / full_month_seconds;
+        assert_eq!(
+            replacement_bill.fixed_charge_usd.to_bits(),
+            (20.0_f64 * switch_to_boundary).to_bits(),
+            "the replacement's fixed charge is prorated from the switch step"
+        );
+        assert!(
+            replacement_bill.total_import_kwh > 0.0,
+            "the replacement's accruals carried into its first bill"
+        );
+    }
+
+    /// The end of the billing period that starts at `start` under the
+    /// fixture's monthly cycle: the anniversary day of the next month.
+    fn outgoing_end(start: chrono::DateTime<chrono_tz::Tz>) -> chrono::DateTime<chrono_tz::Tz> {
+        use chrono::{Datelike, TimeZone};
+        let (year, month) = if start.month() == 12 {
+            (start.year() + 1, 1)
+        } else {
+            (start.year(), start.month() + 1)
+        };
+        start
+            .timezone()
+            .with_ymd_and_hms(year, month, start.day(), 0, 0, 0)
+            .earliest()
+            .expect("the next anniversary is a valid instant")
+    }
+
+    /// A dwelling checkpointed mid-run with a tariff attached resumes so
+    /// that every later step result and every later billing summary is
+    /// bitwise the continuous run's.
+    #[test]
+    fn a_resumed_dwelling_with_a_tariff_equals_the_continuous_run() {
+        let tz = chrono_tz::America::Denver;
+        let mut continuous = bestest_dwelling();
+        continuous
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff");
+
+        // Past the January close (the first step whose start reaches
+        // February 1), in the middle of the February period.
+        const CHECKPOINT_AT: usize = 800;
+        net_power_kw(&mut continuous, CHECKPOINT_AT);
+        let checkpoint = continuous.save_checkpoint().expect("checkpoint");
+        assert!(
+            checkpoint.tariff_state.is_some(),
+            "the checkpoint carries the tariff evaluator's state"
+        );
+
+        let mut resumed = bestest_dwelling();
+        resumed.load_checkpoint(checkpoint).expect("restore");
+        assert!(
+            resumed.tariff_evaluator().is_some(),
+            "the restored dwelling carries the tariff"
+        );
+
+        // Continue both runs past the February close (step 1416).
+        const TAIL: usize = 700;
+        let continuous_tail: Vec<StepResult> = (0..TAIL)
+            .map(|_| continuous.step().expect("step"))
+            .collect();
+        let resumed_tail: Vec<StepResult> =
+            (0..TAIL).map(|_| resumed.step().expect("step")).collect();
+
+        for (i, (a, b)) in continuous_tail.iter().zip(resumed_tail.iter()).enumerate() {
+            assert_eq!(a.timestamp, b.timestamp, "step {i} timestamp");
+            assert_eq!(
+                a.net_electric_power_kw.to_bits(),
+                b.net_electric_power_kw.to_bits(),
+                "step {i} net power"
+            );
+            assert_eq!(
+                a.hvac_heating_w.to_bits(),
+                b.hvac_heating_w.to_bits(),
+                "step {i} hvac heating"
+            );
+            assert_eq!(
+                a.hvac_cooling_w.to_bits(),
+                b.hvac_cooling_w.to_bits(),
+                "step {i} hvac cooling"
+            );
+            assert_eq!(
+                a.gas_power_w.to_bits(),
+                b.gas_power_w.to_bits(),
+                "step {i} gas"
+            );
+        }
+
+        // The billing summaries from the checkpoint on are bitwise the
+        // continuous run's; the resumed run lacks only the January bill the
+        // continuous run closed before the checkpoint.
+        let closed_before_checkpoint = 1;
+        let continuous_bills = continuous.billing_summaries();
+        let resumed_bills = resumed.billing_summaries();
+        assert_eq!(
+            resumed_bills.len(),
+            continuous_bills.len() - closed_before_checkpoint,
+            "the resumed run closes the same periods from the checkpoint on"
+        );
+        for (i, bill) in resumed_bills.iter().enumerate() {
+            assert_billing_bitwise_equal(bill, &continuous_bills[closed_before_checkpoint + i]);
+        }
+    }
+
     /// A checkpoint whose stream cursor is not past every restored built-in
     /// driver's stream is rejected: restoring it would let the next driver
     /// share a live driver's stream.
