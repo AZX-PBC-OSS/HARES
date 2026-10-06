@@ -44,23 +44,16 @@ const METRIC_EQUIPMENT_MODE_CYCLES: &str = "equipment_mode_cycle_count_relative_
 /// where a frame has them.
 fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
     match (fixture_id, metric) {
-        // cz5a_minisplit_gas_wh: a ductless mini-split at -19 C, running on
-        // its backup resistance. OCHRE attaches the building's air
-        // distribution ducts to every HVAC unit whatever the unit
-        // references (ochre/utils/hpxml.py:970-1006) and computes an ASHRAE
-        // 152 distribution efficiency for every unit but a "Room AC"
-        // (Equipment/HVAC.py:166-173), so it charges this unit, which has
-        // no DistributionSystem (building.xml:701-725), a distribution
-        // efficiency near 0.64. OS-HPXML treats it as ductless
-        // (hpxml.rb:7078-7087; hvac.rb:5606), and HARES models no duct
-        // loss. Measured: HARES's HVAC energy is 33.6 % and its total site
-        // 32.3 % below this reference. Class (a), OCHRE wrong; bands are the
-        // measured residuals plus ~1 %. With OCHRE's distribution efficiency
-        // forced to 1 (seeded runs, not part of the corpus), HARES is 5 to
-        // 8.5 % above it; that residual is inside the default band and its
-        // cause is not yet established.
-        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(34.6),
-        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(33.3),
+        // cz5a_minisplit_gas_wh: the peak's residual is the pinned-start
+        // recovery minute's maximum electric draw at the -19 C design
+        // temperature: HARES's heat pump draws 17.84 kW there and OCHRE's
+        // 14.81 kW, while the window's HVAC energies agree to 1.2 % (the
+        // fixture's orphan air distribution system is gone from both sides'
+        // inputs, so the old 33.6 % / 32.3 % residuals are closed at 1.2 %
+        // and 1.2 %, inside the default bands). Which side's maximum draw
+        // the reference tools support is not yet established; the defect
+        // ledger carries the open question.
+        ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(21.5),
         // resstock_bldg0112631_24h: a lock on a 24 h window that predates
         // this triage, measured 25.4 %; its cause is not yet established.
         ("resstock_bldg0112631_24h", METRIC_PEAK_HVAC_POWER) => Some(25.7),
@@ -510,6 +503,20 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     }
 
     let checks = compare_metrics(&actual_columns, &reference_columns, &fixture.id);
+
+    // TEMP TRIAGE: keep the harness's HARES output for inspection.
+    if let Some(keep) = std::env::var_os("PARITY_KEEP_OUTPUT") {
+        let dst = Path::new(&keep).join(format!("hares-{}.parquet", fixture.id));
+        if let Some(src) = outcome
+            .timeseries_path
+            .as_deref()
+            .or(Some(output_path.as_path()))
+        {
+            let _ = fs::copy(src, &dst);
+            eprintln!("[parity] kept {}", dst.display());
+        }
+    }
+
     let skipped_metrics = expected_metrics()
         .into_iter()
         .filter(|metric| !checks.iter().any(|check| check.metric == *metric))
