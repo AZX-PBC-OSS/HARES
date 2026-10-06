@@ -412,8 +412,10 @@ pub trait Equipment: Send + Sync {
         None
     }
 
-    /// The setpoints this equipment's thermostat serves, or `None` when it
-    /// has no thermostat setpoint a demand-response event can move.
+    /// The setpoints this equipment's HVAC thermostat serves, the axes a
+    /// `ThermalSetpointDelta` moves, or `None` when it has none. A water
+    /// heater declares none: its tank setpoint is moved by an absolute
+    /// `ThermalSetpoint`, never by a delta.
     fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
         None
     }

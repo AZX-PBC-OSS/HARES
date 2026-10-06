@@ -126,7 +126,15 @@ def _validate_thermal_setpoint_band(
     logger: logging.Logger,
 ) -> int:
     """Flag a ThermalSetpoint deadband outside the thermostat band range or
-    carried without a named setpoint. Returns the count of flagged fields."""
+    carried without a named setpoint. Returns the count of flagged fields.
+
+    A coarse screen: the boundary (here and in the fleet federate) does not
+    know the target's thermostat class, so it holds a band to the widest
+    class's range, a storage tank's. A band inside that range but outside
+    the target's own class (a 20 C band on a furnace) passes here and is
+    refused by the equipment, counted in the dwelling's
+    ``rejected_control_signals``; ``Dwelling.thermostat_band_range`` gives
+    a target's own range."""
     val = signal_body.get("deadband_c")
     if val is None:
         return 0

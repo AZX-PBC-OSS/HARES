@@ -1530,7 +1530,8 @@ fn addressed_by_end_use(eq: &dyn Equipment, end_use: &EndUse) -> bool {
             .is_some_and(|(axis, axes)| axes.serves(axis))
 }
 
-/// What actors read about each equipment when their bindings resolve.
+/// What actors read about each equipment when they check a roster change
+/// and when their bindings resolve.
 fn actor_equipment<'a>(equipment: &[&'a dyn Equipment]) -> Vec<crate::ActorEquipment<'a>> {
     equipment
         .iter()
