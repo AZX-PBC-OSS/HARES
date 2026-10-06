@@ -216,3 +216,29 @@ justification → measured impact → pinning tests.
   fails when the visible part is sent to the zone air in its mode.
   `production_step_injects_shortwave_gain` fails when the production step
   leaves the short-wave gain out.
+
+## D-008: A load's month multipliers scale its schedule
+
+- **Reference behavior:** OCHRE reads a scheduled load's
+  `month_multipliers` only to zero the schedule in the months whose
+  multiplier is exactly 0 (`ochre/Equipment/ScheduledLoad.py:36-40`, "for
+  ceiling fans"); any other value is ignored. An HPXML load's monthly shape
+  is already in the schedule OCHRE builds for it.
+- **HARES behavior:** `month_multiplier_0` to `month_multiplier_11` scale
+  the electric and gas draw of a scheduled load, and the event power of an
+  event load or wet appliance, in their month, whatever the schedule's
+  source; a daily profile's own month factors stay its shape and the
+  multipliers apply on top. A multiplier of 0 turns the month off, as in
+  OCHRE. A negative or non-finite multiplier is a parameter error.
+- **Justification:** the parameter names a scale factor, and an input of
+  0.5 that changes nothing is a silent substitution. Zeroing is the special
+  case of scaling, so every input OCHRE gives meaning to means the same in
+  HARES.
+- **Measured impact:** none on the committed inputs: no resolver writes the
+  keys, so they come only from an equipment's own parameters or an
+  override, and no fixture or golden sets them.
+- **Pinning tests:** `scheduled_load::tests::month_multipliers_scale_a_daily_profile`,
+  `scheduled_load::tests::month_multiplier_zeroes_schedule_in_target_month`,
+  `event_load::tests::month_multiplier_scales_event_output`,
+  `event_load::tests::month_multiplier_zero_suppresses_event_output`,
+  `schedule_helpers::tests::negative_and_non_finite_month_multipliers_are_parameter_errors`.

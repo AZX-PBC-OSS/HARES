@@ -14,7 +14,9 @@ Deterministic power consumption driven by time-indexed schedules (CSV columns or
 - Monthly multipliers (`month_multiplier_0` to `month_multiplier_11`) for
   seasonal variation (e.g., ceiling fans off in winter); they scale the
   electric and gas schedules whatever their source, a daily profile's own
-  month factors included
+  month factors included; a negative or non-finite multiplier is an error
+  (OCHRE only zeroes a month whose multiplier is 0: divergence D-008 in
+  [DIVERGENCES.md](../alignment/DIVERGENCES.md))
 - ZIP voltage-dependent load model (full ZIP with byte-identical arithmetic per [power-factor.md](./power-factor.md)):
   ```
   P = P_base * (zp·V² + ip·V + pp)    where V = voltage_pu / v0

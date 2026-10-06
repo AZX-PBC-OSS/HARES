@@ -142,9 +142,8 @@ pub struct ScheduledLoad {
     /// voltage-dependent real-power polynomial (OCHRE parity), so the
     /// resolved regime is governing.
     zip: hares_types::zip::ResolvedZip,
-    /// Per-month scale factors [0..11] applied after load_fraction.
-    // OCHRE ScheduledLoad.py:38-41: month_multipliers zeros schedule in specified months.
-    // Used for seasonal equipment like ceiling fans (zero in winter months).
+    /// Per-month scale factors [0..11] applied after load_fraction, e.g. a
+    /// ceiling fan off in winter (divergence D-008).
     month_multipliers: Option<[f64; 12]>,
     last_non_zero_power_kw: f64,
     last_non_zero_gas_w: f64,
@@ -243,8 +242,9 @@ impl ScheduledLoad {
             "resolved ZIP coefficients",
         );
         // A daily profile's own month factors are its shape; the load's month
-        // multipliers scale whatever schedule it has on top (OCHRE
-        // ScheduledLoad.py:38-41), the profile included.
+        // multipliers scale whatever schedule it has on top, the profile
+        // included. OCHRE only zeroes a month whose multiplier is 0
+        // (divergence D-008).
         self.month_multipliers = parse_month_multipliers(config)?;
         let usage_multiplier = config
             .get_f64(crate::config::KEY_USAGE_MULTIPLIER)
@@ -419,7 +419,7 @@ impl Equipment for ScheduledLoad {
             if let Some(override_kw) = self.power_setpoint_override.take() {
                 (override_kw, 0.0, 0.0)
             } else {
-                // Apply month multiplier (OCHRE ScheduledLoad.py:38-41). Negative schedule
+                // Apply the month multiplier (D-008). Negative schedule
                 // values are silently clamped to zero -- OCHRE treats them as "no load" rather
                 // than generation; this is intentional for e.g. CSV schedules with placeholder
                 // fill values.
@@ -2849,12 +2849,6 @@ mod tests {
 
     #[test]
     fn non_finite_month_multiplier_fails_loudly_at_init() {
-        // `parse_month_multipliers` previously clamped with `val.max(0.0)`,
-        // which drops a NaN operand: a `nan` month multiplier silently
-        // zeroed that month's draw — the load quietly off for a month with
-        // no signal, the same silent-absorption class every other
-        // schedule-data channel rejects at its boundary. The shared parse
-        // site (scheduled + event loads) must error at init, naming the key.
         let mut extras: Vec<(String, crate::config::ConfigValue)> =
             vec![(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into())];
         extras.push((
@@ -2872,14 +2866,13 @@ mod tests {
         let err = eq
             .init(&config, &env)
             .expect_err("a non-finite month multiplier must fail at init");
-        let message = err.to_string();
         assert!(
-            message.contains("non-finite"),
-            "the rejection must name the defect, got: {message}"
-        );
-        assert!(
-            message.contains("month_multiplier_3"),
-            "the rejection must name the offending key, got: {message}"
+            matches!(
+                &err,
+                hares_types::HaresError::InvalidEquipmentParameter { key, .. }
+                    if key == "month_multiplier_3"
+            ),
+            "the rejection must name the offending key, got: {err}"
         );
     }
 
