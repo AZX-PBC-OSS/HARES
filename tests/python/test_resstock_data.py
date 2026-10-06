@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import io
 import sys
@@ -619,9 +620,9 @@ class TestSharedHttpClient:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """Every download reuses one thread-safe client with the 120 s timeout."""
-        import types
-
+        httpx = pytest.importorskip("httpx")
         from ochre_next.data import resstock
+        from ochre_next.data._cuttable_transport import CuttableTransport
 
         clients: list[dict[str, object]] = []
         streamed: list[str] = []
@@ -650,15 +651,16 @@ class TestSharedHttpClient:
             def close(self) -> None:
                 return None
 
-        fake_httpx = types.ModuleType("httpx")
-        fake_httpx.Client = _Client  # type: ignore[attr-defined]
-
+        monkeypatch.setattr(httpx, "Client", _Client)
         monkeypatch.setattr(resstock, "_shared_client", resstock._SharedClient())
-        with mock.patch.dict(sys.modules, {"httpx": fake_httpx}):
-            resstock._try_download("https://example.com/a.zip", tmp_path / "a.zip")
-            resstock._try_download("https://example.com/b.zip", tmp_path / "b.zip")
+        resstock._try_download("https://example.com/a.zip", tmp_path / "a.zip")
+        resstock._try_download("https://example.com/b.zip", tmp_path / "b.zip")
 
-        assert clients == [{"follow_redirects": True, "timeout": 120.0}]
+        (kwargs,) = clients
+        assert kwargs.pop("follow_redirects") is True
+        assert kwargs.pop("timeout") == 120.0
+        assert isinstance(kwargs.pop("transport"), CuttableTransport)
+        assert kwargs == {}
         assert streamed == ["https://example.com/a.zip", "https://example.com/b.zip"]
 
     def test_the_first_burst_of_downloads_builds_one_client(self, monkeypatch: pytest.MonkeyPatch):
@@ -666,8 +668,8 @@ class TestSharedHttpClient:
         import atexit
         import contextlib
         import threading
-        import types
 
+        httpx = pytest.importorskip("httpx")
         from ochre_next.data import resstock
 
         built: list[object] = []
@@ -685,9 +687,7 @@ class TestSharedHttpClient:
             def close(self) -> None:
                 return None
 
-        fake_httpx = types.ModuleType("httpx")
-        fake_httpx.Client = _Client  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+        monkeypatch.setattr(httpx, "Client", _Client)
         monkeypatch.setattr(atexit, "register", registered.append)
 
         shared = resstock._SharedClient()
@@ -696,8 +696,7 @@ class TestSharedHttpClient:
 
         def first_download() -> None:
             start.wait()
-            client, _ = shared.get()
-            received.append(client)
+            received.append(shared.get())
 
         workers = [threading.Thread(target=first_download) for _ in range(16)]
         for worker in workers:
@@ -709,10 +708,11 @@ class TestSharedHttpClient:
         assert received == built * 16
         assert len(registered) == 1
 
-    def test_aborting_the_client_ends_a_download_blocked_reading(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("stage", ["reading", "tls-handshake", "connecting"])
+    def test_aborting_the_client_ends_a_download_at_any_stage(
+        self, stage: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """A read stalled mid-body ends as soon as the shared client is aborted."""
+        """A download stalled reading, in its TLS handshake or connecting ends once the client is aborted."""
         import threading
 
         pytest.importorskip("httpx")
@@ -720,23 +720,26 @@ class TestSharedHttpClient:
 
         shared = resstock._SharedClient()
         monkeypatch.setattr(resstock, "_shared_client", shared)
+        # The client exists before the download starts, so an abort that
+        # lands before the download connects still cuts it.
+        shared.get()
         failures: list[BaseException] = []
 
-        def download() -> None:
+        def download(url: str) -> None:
             try:
-                resstock._try_download(f"http://127.0.0.1:{server.port}/bldg1.zip", tmp_path / "bldg1.zip")
+                resstock._try_download(url, tmp_path / "bldg1.zip")
             except BaseException as exc:
                 failures.append(exc)
 
-        with _StallingServer() as server:
-            reader = threading.Thread(target=download)
-            reader.start()
-            assert server.wait_for_requests(1)
+        with _stalled_at(stage) as (url, stalled):
+            downloader = threading.Thread(target=download, args=(url,))
+            downloader.start()
+            assert stalled(), f"the download never stalled {stage}"
             shared.abort()
             # The bound only turns a hang into a failure: without the abort
-            # cutting the connection the read waits for the 120 s timeout.
-            reader.join(timeout=30)
-            assert not reader.is_alive(), "the stalled read outlived the abort"
+            # cutting the socket the download waits for the 120 s timeout.
+            downloader.join(timeout=30)
+            assert not downloader.is_alive(), f"the download {stage} outlived the abort"
 
         assert len(failures) == 1
 
@@ -913,6 +916,84 @@ class _StallingServer:
         with contextlib.suppress(OSError):
             self._listener.shutdown(socket.SHUT_RDWR)
         self._listener.close()
+
+
+def _connects_waiting(port: int) -> int:
+    """Loopback sockets the kernel lists as waiting for ``port`` to answer their connect (SYN_SENT)."""
+    target = f"0100007F:{port:04X}"
+    with open("/proc/net/tcp") as table:
+        rows = [line.split() for line in table.readlines()[1:]]
+    return sum(1 for row in rows if row[2] == target and row[3] == "02")
+
+
+def _wait_until(condition, bound_s: float = 60.0) -> bool:
+    """Poll ``condition`` until it holds; the bound only turns a hang into a failure."""
+    import threading
+    import time
+
+    deadline = time.monotonic() + bound_s
+    pause = threading.Event()
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        pause.wait(0.01)
+    return True
+
+
+@contextlib.contextmanager
+def _stalled_at(stage: str):
+    """A loopback URL whose download stalls at ``stage``, and a wait until it has.
+
+    ``reading``: the response body starts and stops. ``tls-handshake``: the
+    server takes the client's hello and never answers. ``connecting``: the
+    server's accept queue is full, so the connect is never answered.
+    """
+    import socket
+    import threading
+
+    if stage == "reading":
+        with _StallingServer() as server:
+            yield f"http://127.0.0.1:{server.port}/bldg1.zip", lambda: server.wait_for_requests(1)
+        return
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(0)
+    port = listener.getsockname()[1]
+    held: list[socket.socket] = []
+    hello = threading.Event()
+    closed = threading.Event()
+    try:
+        if stage == "tls-handshake":
+
+            def take_hello() -> None:
+                conn, _ = listener.accept()
+                held.append(conn)
+                if conn.recv(65536):
+                    hello.set()
+                closed.wait()
+
+            threading.Thread(target=take_hello, daemon=True).start()
+            yield f"https://127.0.0.1:{port}/bldg1.zip", lambda: hello.wait(timeout=60)
+        else:
+            # Connections the server never accepts fill its queue; a further
+            # connect gets no answer.
+            for _ in range(4):
+                filler = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                filler.setblocking(False)
+                with contextlib.suppress(BlockingIOError):
+                    filler.connect(("127.0.0.1", port))
+                held.append(filler)
+            fillers_waiting = _connects_waiting(port)
+            yield (
+                f"http://127.0.0.1:{port}/bldg1.zip",
+                lambda: _wait_until(lambda: _connects_waiting(port) > fillers_waiting),
+            )
+    finally:
+        closed.set()
+        for sock in held:
+            sock.close()
+        listener.close()
 
 
 # A fleet of four buildings on two download workers, every download from the

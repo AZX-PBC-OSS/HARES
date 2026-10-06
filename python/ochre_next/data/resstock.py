@@ -4,19 +4,16 @@ from __future__ import annotations
 
 import atexit
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-import contextlib
 import contextvars
 import dataclasses
 import enum
 import logging
 import os
 import random
-import socket
 import tempfile
 import threading
 import urllib.request
 import warnings
-import weakref
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -32,6 +29,8 @@ from ochre_next.data._checksum import (
 
 if TYPE_CHECKING:
     import httpx
+
+    from ochre_next.data._cuttable_transport import Connections
     import polars as pl
 
 log = logging.getLogger(__name__)
@@ -417,68 +416,36 @@ def _wait_before_retry(delay_s: float) -> None:
         raise _DownloadCancelled
 
 
-def _shut(sock: socket.socket) -> None:
-    with contextlib.suppress(OSError):
-        sock.shutdown(socket.SHUT_RDWR)
-
-
-class _Connections:
-    """The sockets one httpx client connects; cutting them ends every read on them.
-
-    Closing an httpx client does not wake a thread blocked reading from one
-    of its connections; shutting the connection's socket down does. A
-    connection that completes after the cut is shut as soon as it is
-    reported, so none outlives it.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._sockets: weakref.WeakSet[socket.socket] = weakref.WeakSet()
-        self._cut = False
-
-    def trace(self, event: str, info: dict[str, Any]) -> None:
-        """httpcore's ``trace`` request extension: record each socket a connection opens."""
-        if event not in ("connection.connect_tcp.complete", "connection.start_tls.complete"):
-            return
-        sock: socket.socket | None = info["return_value"].get_extra_info("socket")
-        if sock is None:
-            return
-        with self._lock:
-            if not self._cut:
-                self._sockets.add(sock)
-                return
-        _shut(sock)
-
-    def cut(self) -> None:
-        with self._lock:
-            self._cut = True
-            sockets = list(self._sockets)
-        for sock in sockets:
-            _shut(sock)
-
-
 class _SharedClient:
     """The httpx client every download shares, built once and abortable.
 
     One thread-safe client serves single-building and fleet fetches alike, so
     a fleet's concurrent downloads reuse connections instead of paying a TLS
-    handshake each; it is closed at interpreter exit.
+    handshake each; it is closed at interpreter exit. Its transport records
+    every socket it opens, so ``abort`` can end a request at any stage:
+    connecting, in the TLS handshake, or reading.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._current: tuple[httpx.Client, _Connections] | None = None
+        self._current: tuple[httpx.Client, Connections] | None = None
 
-    def get(self) -> tuple[httpx.Client, _Connections]:
-        """The client, and the connections to report its requests' sockets to."""
+    def get(self) -> httpx.Client:
         with self._lock:
             if self._current is None:
                 import httpx
 
-                client = httpx.Client(follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_S)
+                from ochre_next.data._cuttable_transport import Connections, CuttableTransport
+
+                connections = Connections()
+                client = httpx.Client(
+                    follow_redirects=True,
+                    timeout=_DOWNLOAD_TIMEOUT_S,
+                    transport=CuttableTransport(connections),
+                )
                 atexit.register(client.close)
-                self._current = (client, _Connections())
-            return self._current
+                self._current = (client, connections)
+            return self._current[0]
 
     def abort(self) -> None:
         """Close the client and end every request in flight on it.
@@ -500,11 +467,15 @@ _shared_client = _SharedClient()
 
 def _try_download(url: str, dest: Path) -> None:
     try:
-        client, connections = _shared_client.get()
+        client = _shared_client.get()
     except ImportError:
         pass
     else:
-        with client.stream("GET", url, extensions={"trace": connections.trace}) as resp:
+        # An interrupt cancels the fleet before it aborts the client, so a
+        # download that got the client built after the abort stops here; one
+        # that got the aborted client has its connection cut as it opens.
+        _raise_if_cancelled()
+        with client.stream("GET", url) as resp:
             resp.raise_for_status()
             with dest.open("wb") as fh:
                 for chunk in resp.iter_bytes(chunk_size=65536):
@@ -1079,8 +1050,9 @@ def _fetch_fleet(
 
     An interrupt (Ctrl-C) stops the fleet at once: queued buildings never
     start, retries stop, and with httpx installed the downloads in flight are
-    cut. Without httpx, a download in flight on the urllib fallback ends at
-    its read timeout.
+    cut, whether connecting, in the TLS handshake or reading. Without httpx,
+    a download in flight on boto3 or urllib finishes or reaches its timeout
+    first.
     """
     _parse_version(version)
     checksum_failures = {bid: [0] for bid in bldg_ids}

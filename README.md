@@ -117,10 +117,11 @@ print(bldg.hpxml_path, bldg.weather_path)
 bldg = fetch_resstock_building(bldg_id=1, version="2025.1")
 ```
 
-For fleet-scale fetches, `fetch_resstock_fleet` downloads buildings
-concurrently via `httpx` when available. The fetcher tries
-`httpx` -> `boto3` -> `urllib` in order; `httpx` is recommended for async
-fleet downloads.
+For fleet-scale fetches, `fetch_resstock_fleet` downloads up to 16 buildings
+at once on a thread pool, whichever transport is installed. Each download
+tries `httpx` -> `boto3` -> `urllib` in order. With `httpx`, Ctrl-C ends a
+fleet at once, cutting the downloads in flight; on the other transports a
+download already in flight finishes or times out first.
 
 ## Crate layout
 
