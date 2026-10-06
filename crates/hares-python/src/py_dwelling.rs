@@ -921,10 +921,13 @@ impl PyDwelling {
             }
         }
 
+        // Every refusal here is of the caller's input: an unknown type, a
+        // bad parameter, a duplicate name, or an event the dwelling's
+        // equipment cannot serve.
         let mut dwelling = self.acquire()?;
         dwelling
             .add_actor_by_name(&self.registry, config)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            .map_err(|e| HaresConfigError::new_err(e.to_string()))?;
         Ok(())
     }
 

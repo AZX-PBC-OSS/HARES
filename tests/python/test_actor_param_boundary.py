@@ -146,3 +146,33 @@ def test_ideal_thermostat_without_params_is_rejected_naming_target() -> None:
     dwelling = make_dwelling()
     with pytest.raises(ValueError, match="target"):
         dwelling.add_actor_by_name("IdealThermostat", "t1")
+
+
+def test_a_preconditioning_event_its_unit_cannot_serve_is_a_config_error() -> None:
+    """A pre-cool event naming a heating-only unit is refused at
+    registration as a `HaresConfigError` that names both setpoints in
+    plain words, and the dwelling keeps no actor for it.
+    """
+    from ochre_next._hares import HaresConfigError
+
+    dwelling = make_dwelling()
+    heater = next(
+        name
+        for name in dwelling.equipment_names()
+        if dwelling.thermostat_axes(name) == ["Heating"]
+    )
+    before = dwelling.actor_count()
+    with pytest.raises(
+        HaresConfigError,
+        match="serves only the Heating setpoint, not the Cooling setpoint",
+    ):
+        dwelling.add_actor_by_name(
+            "DrCompliance",
+            "DR",
+            {
+                "always_comply": True,
+                "hvac_target": f"name:{heater}",
+                "hvac_action": "SetpointAdjust:2.0:PreCool",
+            },
+        )
+    assert dwelling.actor_count() == before
