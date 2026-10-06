@@ -1019,6 +1019,12 @@ impl Actor for DrCompliance {
         }
     }
 
+    /// v2: the snapshot carries the axis each target's pre-conditioning has
+    /// displaced.
+    fn checkpoint_version(&self) -> u32 {
+        2
+    }
+
     fn save_state(&self) -> Result<Vec<u8>, HaresError> {
         let data = (
             &self.current_dr_level,
@@ -1789,6 +1795,19 @@ mod tests {
                 "released once"
             );
         }
+    }
+
+    /// The snapshot gained the displaced axes, so a blob of the first
+    /// layout does not decode and the schema version has moved past it:
+    /// the dwelling refuses such a blob by version before decoding it.
+    #[test]
+    fn the_snapshot_schema_version_moved_with_the_displaced_axes() {
+        let first_layout =
+            postcard::to_allocvec(&(DRLevel::High, Vec::<(DispatchTarget, DrAction)>::new()))
+                .unwrap();
+        let mut actor = DrCompliance::new("Test");
+        assert!(actor.load_state(&first_layout).is_err());
+        assert_eq!(actor.checkpoint_version(), 2);
     }
 
     /// Relaxation widens the gap on both axes, which is valid for any unit.
