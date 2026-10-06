@@ -94,23 +94,24 @@ def _run_ochre_for_fixture(fixture_dir: Path) -> pd.DataFrame:
     """Run OCHRE on a fixture and return the minute-resolution output DataFrame."""
     from ochre import Dwelling as OchreDwelling
 
-    sim_cfg = _load_sim_config(fixture_dir / "config.toml")
-    ev_cfg = _load_ev_config(fixture_dir / "config.toml")
+    config_path = fixture_dir / "config.toml"
+    sim_cfg = _load_sim_config(config_path)
+    ev_cfg = _load_ev_config(config_path)
+    ochre_cfg = tomllib.loads(config_path.read_text()).get("ochre", {})
 
-    # A charging-EV fixture pins OCHRE's event-driven EV with a fixed
-    # event list (see the fixture's config.toml [ev] section). The kwarg
-    # propagates to every EventBasedLoad, but only event loads WITHOUT a
-    # schedule column consume it — exactly the EV (the fixture's other
-    # event loads are schedule-driven).
     extra: dict = {}
     # OCHRE draws the starting indoor temperature at random within half the
     # deadband, unseeded (Envelope.py:997-1008), and HARES draws its own,
     # seeded; a window that starts cold then measures the two draws. A
     # fixture's [ochre] initial_temp_setpoint_c pins OCHRE to the
-    # temperature HARES starts from.
-    ochre_cfg = tomllib.loads((fixture_dir / "config.toml").read_text()).get("ochre", {})
+    # temperature HARES starts from, which the Rust harness checks.
     if "initial_temp_setpoint_c" in ochre_cfg:
         extra["initial_temp_setpoint"] = float(ochre_cfg["initial_temp_setpoint_c"])
+    # A charging-EV fixture pins OCHRE's event-driven EV with a fixed
+    # event list (see the fixture's config.toml [ev] section). The kwarg
+    # propagates to every EventBasedLoad, but only event loads WITHOUT a
+    # schedule column consume it — exactly the EV (the fixture's other
+    # event loads are schedule-driven).
     if ev_cfg.get("ochre_event_file"):
         extra["equipment_event_file"] = str(
             (fixture_dir / ev_cfg["ochre_event_file"]).resolve()

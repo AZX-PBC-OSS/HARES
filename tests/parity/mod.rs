@@ -47,15 +47,18 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // cz5a_minisplit_gas_wh: a ductless mini-split at -19 C, running on
         // its backup resistance. OCHRE attaches the building's air
         // distribution ducts to every HVAC unit whatever the unit
-        // references (ochre/utils/hpxml.py:970-1006; only baseboards and
-        // room ACs are exempt, Equipment/HVAC.py:166-177), so it charges
-        // this unit, which has no DistributionSystem (building.xml:701-725),
-        // a distribution efficiency near 0.64. OS-HPXML treats it as
-        // ductless (hpxml.rb:7078-7087; hvac.rb:5606), and HARES models no
-        // duct loss. Measured: HARES's HVAC energy is 33.6 % and its total
-        // site 32.3 % below this reference; with OCHRE's distribution
-        // efficiency set to 1 HARES is 5 to 8.5 % above it. Class (a),
-        // OCHRE wrong; bands are the measured residuals plus ~1 %.
+        // references (ochre/utils/hpxml.py:970-1006) and computes an ASHRAE
+        // 152 distribution efficiency for every unit but a "Room AC"
+        // (Equipment/HVAC.py:166-173), so it charges this unit, which has
+        // no DistributionSystem (building.xml:701-725), a distribution
+        // efficiency near 0.64. OS-HPXML treats it as ductless
+        // (hpxml.rb:7078-7087; hvac.rb:5606), and HARES models no duct
+        // loss. Measured: HARES's HVAC energy is 33.6 % and its total site
+        // 32.3 % below this reference. Class (a), OCHRE wrong; bands are the
+        // measured residuals plus ~1 %. With OCHRE's distribution efficiency
+        // forced to 1 (seeded runs, not part of the corpus), HARES is 5 to
+        // 8.5 % above it; that residual is inside the default band and its
+        // cause is not yet established.
         ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(34.6),
         ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(33.3),
         // resstock_bldg0112631_24h: a lock on a 24 h window that predates
@@ -81,6 +84,18 @@ struct FixtureConfig {
     /// deterministically in-window.
     #[serde(default)]
     ev: Option<EvFixturePolicy>,
+    /// The reference generator's pins on OCHRE (see
+    /// `tests/python/generate_parity_reference.py`).
+    #[serde(default)]
+    ochre: Option<OchrePins>,
+}
+
+/// The generator's pins on OCHRE. `initial_temp_setpoint_c` is the indoor
+/// temperature HARES starts the window from, to which OCHRE's unseeded
+/// starting draw is pinned; the harness checks both still hold it.
+#[derive(Debug, Deserialize, Default)]
+struct OchrePins {
+    initial_temp_setpoint_c: Option<f64>,
 }
 
 /// The per-fixture `[ev]` section: keys merged into the `"Electric
@@ -437,6 +452,29 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
         patches: None,
     };
 
+    // A pinned start must still be the temperature HARES starts from, or the
+    // reference no longer starts where HARES does.
+    let pinned_start_c = config
+        .ochre
+        .as_ref()
+        .and_then(|o| o.initial_temp_setpoint_c);
+    if let Some(pinned_c) = pinned_start_c {
+        let dwelling = hares_core::Dwelling::from_config(dwelling_config.clone())
+            .map_err(|err| format!("dwelling for the start check: {err}"))?;
+        let start_c = dwelling
+            .latest_env()
+            .zones
+            .first()
+            .map(|zone| zone.temperature_c)
+            .ok_or("the dwelling has no zone")?;
+        if (start_c - pinned_c).abs() > 1e-9 {
+            return Err(format!(
+                "HARES starts the window at {start_c} C, but the reference is pinned to \
+                 {pinned_c} C: re-pin [ochre] initial_temp_setpoint_c and regenerate the reference"
+            ));
+        }
+    }
+
     let engine = SimulationEngine::new();
     let outcome = engine
         .run(dwelling_config)
@@ -458,6 +496,18 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
             .unwrap_or(output_path.as_path()),
     )?;
     let reference_columns = read_parquet_columns(&fixture.reference_output_parquet)?;
+    if let Some(pinned_c) = pinned_start_c {
+        let reference_start_c = reference_columns
+            .get("Temperature - Indoor (C)")
+            .and_then(|series| series.first().copied())
+            .ok_or("the reference has no indoor temperature")?;
+        if (reference_start_c - pinned_c).abs() > 1e-9 {
+            return Err(format!(
+                "the reference starts at {reference_start_c} C, not the pinned {pinned_c} C: \
+                 regenerate it with tests/python/generate_parity_reference.py"
+            ));
+        }
+    }
 
     let checks = compare_metrics(&actual_columns, &reference_columns, &fixture.id);
     let skipped_metrics = expected_metrics()
@@ -746,7 +796,9 @@ fn annual_energy_for_prefixes(
     // each HVAC unit's own columns of that fuel, which the totals already
     // sum, so it counts the totals only, as OCHRE's frame, which has only the
     // totals, does; a fuel with no total counts the unit columns.
-    for (suffix, kw_per_unit) in [
+    let is_end_use_total =
+        |name: &str| name.starts_with("hvac heating ") || name.starts_with("hvac cooling ");
+    for (suffix, kw_per_column_unit) in [
         ("electric power (kw)", 1.0),
         ("gas power (therms/hour)", KWH_PER_THERM),
     ] {
@@ -764,12 +816,12 @@ fn annual_energy_for_prefixes(
             })
             .collect();
         let has_end_use_totals =
-            is_hvac_query && matched.iter().any(|(name, _)| name.starts_with("hvac "));
+            is_hvac_query && matched.iter().any(|(name, _)| is_end_use_total(name));
         for (name, series) in matched {
-            if has_end_use_totals && !name.starts_with("hvac ") {
+            if has_end_use_totals && !is_end_use_total(&name) {
                 continue;
             }
-            total_kwh += integrate_kw_series(series) * kw_per_unit;
+            total_kwh += integrate_kw_series(series) * kw_per_column_unit;
             found = true;
         }
     }

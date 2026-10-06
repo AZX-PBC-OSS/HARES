@@ -42,6 +42,22 @@ To activate a fixture for numeric ballpark checks, add `schedule.csv`,
 `weather.epw`, and `reference_output.parquet` generated from OCHRE with
 matching inputs.
 
+## Starting temperature
+
+Each window starts cold. OCHRE draws its starting indoor temperature at
+random within half the deadband, unseeded, while HARES draws its own,
+seeded; a 1-hour window then measures the two draws. A fixture's
+`[ochre] initial_temp_setpoint_c` is the temperature HARES starts from,
+and `tests/python/generate_parity_reference.py` pins OCHRE to it. The
+harness fails when HARES no longer starts there or the reference does
+not, so a changed draw forces a re-pin and a regenerated reference.
+
+`cz4a_ashp_hpwh` is not pinned: the vendored OCHRE cannot rebuild it (its
+heat pump water heater reads an undefined `hp_cop` when the HPXML gives
+no HPWH capacity, `ochre/Equipment/WaterHeater.py:456`), so its
+reference keeps OCHRE's own draw, 18.525 °C against HARES's 18.083 °C,
+and its residuals carry that difference.
+
 ## Tolerance bands
 
 The driver at `tests/parity/mod.rs` enforces tolerances configured in
