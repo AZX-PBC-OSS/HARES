@@ -294,9 +294,9 @@ justification → measured impact → pinning tests.
   it. Across the committed ResStock and OS-HPXML sample homes, every gable
   whose span the walls fix has ends of 0.9993 to 1.0008 times its
   triangle; BEopt's, whose ends include 2 ft eaves, are 1.28. The span must
-  also be well determined: a 0.25 % error in the walls' area (three times
-  that largest disagreement) may move it by at most 10 %, which rejects a
-  footprint near a square (`gable_rise_m`,
+  also be well determined: a 0.25 % error in the walls' area (a heuristic,
+  three times that largest disagreement) may move it by at most 10 %, which
+  rejects a footprint near a square (`gable_rise_m`,
   `hares-io/src/hpxml/zone_geometry.rs`). Where the input does not
   determine the span (an attic over a garage, floors that do not match the
   footprint, a smaller upper storey, no floor counts, gable ends that

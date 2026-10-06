@@ -549,14 +549,14 @@ fn rectangle_sides_m(area_m2: f64, half_perimeter_m: f64) -> Option<(f64, f64)> 
 }
 
 /// The error the conditioned wall area may carry as the rectangle's
-/// perimeter: 0.25 %, three times the largest disagreement between the
-/// walls' span and the gable ends seen across the committed homes (0.08 %,
-/// [`GABLE_END_RATIO_MIN`]).
+/// perimeter: 0.25 %. A heuristic, not a measured wall-area error: the
+/// committed homes' gable ends agree with the span the walls give to 0.08 %
+/// in area ([`GABLE_END_RATIO_MIN`]), and 0.25 % is three times that.
 const WALL_AREA_TOLERANCE: f64 = 0.0025;
 
 /// The largest relative change of the span that tolerance may cause before
 /// the span counts as undetermined: 10 %, the volume's error then. A
-/// 30 x 40 ft footprint (BEopt) moves its span about 3 %; a footprint
+/// 30 x 40 ft footprint (BEopt) moves its span 1.6 to 1.9 %; a footprint
 /// within a few percent of a square moves it without bound.
 const SPAN_SENSITIVITY_MAX: f64 = 0.10;
 

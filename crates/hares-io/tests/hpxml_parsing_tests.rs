@@ -2933,6 +2933,24 @@ fn a_gable_attic_of_unknown_span_is_a_square_hip_with_a_warning() {
             1509.3,
             "times the",
         ),
+        // 1264 ft2 of 8 ft walls round the 1350 ft2 footprint: a 25 x 54 ft
+        // rectangle. Gable ends of 160 ft2 are 2.05 times the 25 ft span's
+        // 78.1 ft2 triangle (and nearer it than the 54 ft side's 364.5 ft2),
+        // more than OS-HPXML's deepest 5 ft eaves make on 25 ft, 1.96.
+        (
+            parse_edited_sample("base.xml", |xml| {
+                let walls = "<Area>1200.0</Area>\n            <Siding>wood siding</Siding>";
+                assert!(xml.contains(walls) && xml.contains("<Area>225.0</Area>"));
+                xml.replacen(
+                    walls,
+                    "<Area>1264.0</Area>\n            <Siding>wood siding</Siding>",
+                    1,
+                )
+                .replacen("<Area>225.0</Area>", "<Area>320.0</Area>", 1)
+            }),
+            1509.3,
+            "times the",
+        ),
     ];
     for (building, roof_area_ft2, reason) in cases {
         let (volume, _) = attic_volume_and_height_m(&building);
