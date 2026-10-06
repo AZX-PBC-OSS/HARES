@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import importlib.util
 import time
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, NoReturn
 
 import pytest
 
@@ -225,3 +226,189 @@ def test_validate_timeout_rejects_non_numeric() -> None:
     not_a_number: Any = "soon"
     with pytest.raises(TypeError):
         validate_timeout(not_a_number, "timeout_s")
+
+
+INVALID = "[-3] core object is not valid"
+RELEASE_STEPS = ("disconnect", "wait", "free")
+ALL_INVALID: dict[str, str] = dict.fromkeys(RELEASE_STEPS, INVALID)
+_TAKEN_PORTS = frozenset({30000, 30010, 30020, 30030})
+_FREE_PORT = 31000
+
+
+class _FakeCores:
+    """Stands in for the HELICS core calls ``create_value_federate`` makes.
+
+    ``connects`` gives each created core's connect outcome in order: a bool to
+    return or a message to raise as a ``HelicsException``. ``releases`` maps a
+    release step to the message it raises, and ``register`` is what
+    registering the federate raises.
+    """
+
+    def __init__(
+        self,
+        connects: list[bool | str],
+        releases: Mapping[str, str] | None = None,
+        register: BaseException | None = None,
+    ) -> None:
+        self._connects = iter(connects)
+        self._releases = releases or {}
+        self._register = register
+        self.created: list[str] = []
+        self.released: list[tuple[str, str]] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch, module: Any) -> None:
+        for name in (
+            "helicsCreateCore",
+            "helicsCoreConnect",
+            "helicsCoreDisconnect",
+            "helicsCoreWaitForDisconnect",
+            "helicsCoreFree",
+            "helicsCreateValueFederate",
+        ):
+            monkeypatch.setattr(module.helics, name, getattr(self, name))
+
+    def _raise(self, message: str) -> NoReturn:
+        import helics
+
+        raise helics.HelicsException(message)
+
+    def helicsCreateCore(self, core_type: str, name: str, init: str) -> str:
+        self.created.append(name)
+        return name
+
+    def helicsCoreConnect(self, core: str) -> bool:
+        outcome = next(self._connects)
+        if isinstance(outcome, str):
+            self._raise(outcome)
+        return outcome
+
+    def _release_step(self, step: str, core: str) -> None:
+        self.released.append((step, core))
+        if step in self._releases:
+            self._raise(self._releases[step])
+
+    def helicsCoreDisconnect(self, core: str) -> None:
+        self._release_step("disconnect", core)
+
+    def helicsCoreWaitForDisconnect(self, core: str, timeout_ms: int) -> bool:
+        self._release_step("wait", core)
+        return True
+
+    def helicsCoreFree(self, core: str) -> None:
+        self._release_step("free", core)
+
+    def helicsCreateValueFederate(self, name: str, info: object) -> str:
+        if self._register is not None:
+            raise self._register
+        return f"federate:{name}"
+
+
+@pytest.fixture
+def federate_module(monkeypatch: pytest.MonkeyPatch) -> Any:
+    from ochre_next.helics import federate
+
+    monkeypatch.setattr(federate, "_port_pair_taken", lambda port: port in _TAKEN_PORTS)
+    return federate
+
+
+def _create(module: Any, monkeypatch: pytest.MonkeyPatch, cores: _FakeCores, ports: list[int]) -> Any:
+    cores.install(monkeypatch, module)
+    draws = iter(ports)
+    monkeypatch.setattr(module, "allocate_ephemeral_port", lambda: next(draws))
+    return module.create_value_federate("house_1", "zmq", "127.0.0.1:23404", 2.0, lambda name, init: (name, init))
+
+
+def _released_in_full(cores: _FakeCores, created: list[str]) -> bool:
+    return cores.released == [(step, core) for core in created for step in RELEASE_STEPS]
+
+
+def _fully_released(cores: _FakeCores) -> bool:
+    return _released_in_full(cores, cores.created)
+
+
+def test_a_core_invalidated_by_its_taken_port_is_freed_and_retried_on_a_fresh_port(
+    federate_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cores = _FakeCores(connects=[INVALID, True], releases=ALL_INVALID)
+
+    fed = _create(federate_module, monkeypatch, cores, [30000, _FREE_PORT])
+
+    assert fed == "federate:house_1"
+    assert len(cores.created) == 2
+    assert _released_in_full(cores, cores.created[:1])
+
+
+@pytest.mark.parametrize("step", RELEASE_STEPS)
+def test_an_invalidated_core_at_any_release_step_does_not_stop_the_release(
+    step: str, federate_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cores = _FakeCores(connects=[False, True], releases={step: INVALID})
+
+    fed = _create(federate_module, monkeypatch, cores, [30000, _FREE_PORT])
+
+    assert fed == "federate:house_1"
+    assert _released_in_full(cores, cores.created[:1])
+
+
+def test_cores_invalidated_on_every_taken_port_surface_the_bind_failure(
+    federate_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts = federate_module._CORE_PORT_ATTEMPTS
+    cores = _FakeCores(connects=[INVALID] * attempts, releases=ALL_INVALID)
+
+    with pytest.raises(ConnectionError, match="could not bind a core port"):
+        _create(federate_module, monkeypatch, cores, sorted(_TAKEN_PORTS)[:attempts])
+
+    assert len(cores.created) == attempts
+    assert _fully_released(cores)
+
+
+def test_a_core_invalidated_on_a_free_port_surfaces_the_connect_failure(
+    federate_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import helics
+
+    cores = _FakeCores(connects=[INVALID], releases=ALL_INVALID)
+
+    with pytest.raises(ConnectionError, match="could not connect") as raised:
+        _create(federate_module, monkeypatch, cores, [_FREE_PORT])
+
+    assert isinstance(raised.value.__cause__, helics.HelicsException)
+    assert str(raised.value.__cause__) == INVALID
+    assert _fully_released(cores)
+
+
+@pytest.mark.parametrize("connect", [False, "[-2] connection failure"], ids=["returned-false", "raised"])
+def test_a_release_error_is_reported_with_the_connect_failure_it_followed(
+    connect: bool | str, federate_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cores = _FakeCores(connects=[connect], releases={"disconnect": "[-1] disconnect failure"})
+
+    with pytest.raises(ConnectionError, match=r"could not connect.*releasing it failed: \[-1\]") as raised:
+        _create(federate_module, monkeypatch, cores, [30000])
+
+    cause = str(raised.value.__cause__)
+    assert cause == (connect if isinstance(connect, str) else "[-1] disconnect failure")
+    assert len(cores.created) == 1
+    assert _fully_released(cores)
+
+
+@pytest.mark.parametrize(
+    "helics_error",
+    ["[-4] duplicate federate name", INVALID, None],
+    ids=["duplicate-name", "invalidated", "interrupt"],
+)
+def test_a_release_error_does_not_mask_the_registration_failure(
+    helics_error: str | None, federate_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import helics
+
+    failure = KeyboardInterrupt() if helics_error is None else helics.HelicsException(helics_error)
+    cores = _FakeCores(connects=[True], releases={"disconnect": "[-1] disconnect failure"}, register=failure)
+
+    with pytest.raises(type(failure)) as raised:
+        _create(federate_module, monkeypatch, cores, [_FREE_PORT])
+
+    assert raised.value is failure
+    assert any("[-1] disconnect failure" in note for note in raised.value.__notes__)
+    assert _fully_released(cores)

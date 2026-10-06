@@ -52,6 +52,9 @@ _CORE_PORT_ATTEMPTS = 4
 # How long a failed core may take to leave the broker and release its ports.
 _CORE_RELEASE_TIMEOUT_MS = 5000
 
+# The helics bindings carry an error's code only as its message's prefix.
+_INVALID_OBJECT_PREFIX = f"[{int(helics.HELICS_ERROR_INVALID_OBJECT)}] "
+
 _core_ids = itertools.count()
 
 # Default wall-clock budget for broker registration plus entering executing
@@ -176,19 +179,25 @@ def create_value_federate(
       and HELICS then fails the core's connection. If, once the failed core
       has released its port, the port is still taken, that bind failure is
       proven, and the core is created again on a fresh port, up to
-      ``_CORE_PORT_ATTEMPTS`` times. Any other connection failure is raised
-      at once.
+      ``_CORE_PORT_ATTEMPTS`` times. HELICS reports a failed connection by
+      returning false or, for a core whose comms it has already torn down,
+      by raising; both are the same failure. Any other connection failure is
+      raised at once.
     - The federate cannot register on its connected core: a duplicate name,
       or a broker that does not answer within the connect timeout. HELICS's
       own error is raised at once.
 
     Every failed core is disconnected and freed before the next attempt or
     the raise: a failed core left connected keeps the broker waiting for it,
-    and the rest of the federation never enters executing mode.
+    and the rest of the federation never enters executing mode. An error
+    releasing it never replaces the failure being raised: it is added to a
+    registration failure as a note, and to a connection failure's message.
 
     Raises:
         ConnectionError: The core could not connect, its port taken on every
-            attempt or for a reason other than a taken port.
+            attempt or for a reason other than a taken port, or it could not
+            connect and then could not be released. HELICS's error, when it
+            raised one, is the cause.
         HelicsException: The federate could not register on its core.
     """
     port_attempts = 1 if core_type in _IN_PROCESS_CORE_TYPES else _CORE_PORT_ATTEMPTS
@@ -200,17 +209,30 @@ def create_value_federate(
         port = None if core_type in _IN_PROCESS_CORE_TYPES else allocate_ephemeral_port()
         core_init = _core_init(core_type, broker_address, connect_timeout_s, port)
         core = helics.helicsCreateCore(core_type, core_name, core_init)
+        connect_error: helics.HelicsException | None = None
         try:
-            if helics.helicsCoreConnect(core):
+            try:
+                connected = helics.helicsCoreConnect(core)
+            except helics.HelicsException as exc:
+                # A core whose comms failed to bind can be invalidated before
+                # its connect returns, which then raises instead of failing.
+                connected, connect_error = False, exc
+            if connected:
                 return helics.helicsCreateValueFederate(fed_name, federate_info(core_name, core_init))
-        except BaseException:
-            _release(core)
+        except BaseException as failure:
+            cleanup = _release(core)
+            if cleanup is not None:
+                failure.add_note(f"releasing the failed core {core_name} also failed: {cleanup}")
             raise
-        _release(core)
-        if port is None or not _port_pair_taken(port):
-            raise ConnectionError(
-                f"HELICS core '{core_name}' could not connect to the broker at {broker_address} ({core_init})"
+        not_connected = f"HELICS core '{core_name}' could not connect to the broker at {broker_address} ({core_init})"
+        cleanup = _release(core)
+        if cleanup is not None:
+            # A core that may still hold its port proves no bind failure.
+            raise ConnectionError(f"{not_connected}, and releasing it failed: {cleanup}") from (
+                connect_error or cleanup
             )
+        if port is None or not _port_pair_taken(port):
+            raise ConnectionError(not_connected) from connect_error
         taken.append(port)
         _LOG.warning(
             "HELICS core %s could not bind port %d, which another process holds; retrying on a fresh port",
@@ -223,11 +245,30 @@ def create_value_federate(
     )
 
 
-def _release(core: HelicsCoreLike) -> None:
-    """Disconnect a failed core from the broker and free it, releasing its ports."""
-    helics.helicsCoreDisconnect(core)
-    helics.helicsCoreWaitForDisconnect(core, _CORE_RELEASE_TIMEOUT_MS)
-    helics.helicsCoreFree(core)
+def _release(core: HelicsCoreLike) -> helics.HelicsException | None:
+    """Disconnect a failed core from the broker and free it, releasing its ports.
+
+    Every step runs whatever an earlier one raised, so the core is freed even
+    when its disconnect fails. A core HELICS has already invalidated has
+    nothing left to release, so that error is tolerated; the first other
+    error is returned for the caller to report beside the failure it is
+    cleaning up after.
+    """
+    failures = (
+        _release_step(helics.helicsCoreDisconnect, core),
+        _release_step(helics.helicsCoreWaitForDisconnect, core, _CORE_RELEASE_TIMEOUT_MS),
+        _release_step(helics.helicsCoreFree, core),
+    )
+    return next((failure for failure in failures if failure is not None), None)
+
+
+def _release_step[**P](step: Callable[P, object], *args: P.args, **kwargs: P.kwargs) -> helics.HelicsException | None:
+    try:
+        step(*args, **kwargs)
+    except helics.HelicsException as exc:
+        if not str(exc).startswith(_INVALID_OBJECT_PREFIX):
+            return exc
+    return None
 
 
 def _port_pair_taken(port: int) -> bool:
