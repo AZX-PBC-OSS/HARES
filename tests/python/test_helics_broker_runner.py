@@ -15,7 +15,7 @@ import pytest
 
 # These tests use in-process fakes (no HELICS networking), so any hang is a
 # logic bug; the thread method also catches blocking inside C extensions.
-pytestmark = pytest.mark.timeout(60, method="thread")
+pytestmark = [pytest.mark.timeout(60, method="thread"), pytest.mark.usefixtures("restore_helics_modules")]
 
 
 class _FakeBroker:

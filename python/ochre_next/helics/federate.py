@@ -28,6 +28,7 @@ import socket
 import threading
 import time
 from typing import Any
+import weakref
 
 try:
     import helics
@@ -51,9 +52,6 @@ _CORE_PORT_ATTEMPTS = 4
 
 # How long a failed core may take to leave the broker and release its ports.
 _CORE_RELEASE_TIMEOUT_MS = 5000
-
-# The helics bindings carry an error's code only as its message's prefix.
-_INVALID_OBJECT_PREFIX = f"[{int(helics.HELICS_ERROR_INVALID_OBJECT)}] "
 
 _core_ids = itertools.count()
 
@@ -257,8 +255,24 @@ def _release(core: HelicsCoreLike) -> helics.HelicsException | None:
     failures = (
         _release_step(helics.helicsCoreDisconnect, core),
         _release_step(helics.helicsCoreWaitForDisconnect, core, _CORE_RELEASE_TIMEOUT_MS),
-        _release_step(helics.helicsCoreFree, core),
     )
+    # The helics wrapper frees a core's handle again when its Python object is
+    # collected. After an explicit helicsCoreFree, that second free would land
+    # on whichever core HELICS had since allocated at the same address and
+    # invalidate it, so the core is freed by running the wrapper's own
+    # finalizer now, which frees it once and never again. The wrapper frees
+    # nothing there when PYHELICS_FREE_ON_DESTRUCTION is set empty. The
+    # finalizer is the wrapper's private attribute, so the dependency is
+    # pinned to helics 3.x, and a wrapper without it leaves the handle to the
+    # wrapper to free rather than failing the cleanup of a core that is
+    # already failing.
+    finalizer: weakref.finalize[..., object] | None = getattr(core, "_finalizer", None)
+    if finalizer is None:
+        _LOG.warning(
+            "The helics wrapper exposed no _finalizer for a failed core; leaving its handle to the wrapper to free"
+        )
+    else:
+        finalizer()
     return next((failure for failure in failures if failure is not None), None)
 
 
@@ -266,7 +280,8 @@ def _release_step[**P](step: Callable[P, object], *args: P.args, **kwargs: P.kwa
     try:
         step(*args, **kwargs)
     except helics.HelicsException as exc:
-        if not str(exc).startswith(_INVALID_OBJECT_PREFIX):
+        # The helics bindings carry an error's code only as its message's prefix.
+        if not str(exc).startswith(f"[{int(helics.HELICS_ERROR_INVALID_OBJECT)}] "):
             return exc
     return None
 

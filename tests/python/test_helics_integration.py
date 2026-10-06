@@ -741,6 +741,7 @@ def test_fleet_invalid_dwelling_index() -> None:
         fleet.set_grid_voltage(999, 0.95)
 
 
+@pytest.mark.usefixtures("restore_helics_modules")
 def test_helics_import_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_helics_modules()
     monkeypatch.delitem(sys.modules, "helics", raising=False)

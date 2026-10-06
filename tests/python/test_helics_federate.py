@@ -6,9 +6,13 @@ exercise the timeout/abort paths deterministically and quickly.
 
 from __future__ import annotations
 
+import gc
 import importlib.util
+import logging
 import time
-from collections.abc import Mapping
+import weakref
+from collections import Counter
+from collections.abc import Callable, Mapping
 from typing import Any, NoReturn
 
 import pytest
@@ -230,9 +234,19 @@ def test_validate_timeout_rejects_non_numeric() -> None:
 
 INVALID = "[-3] core object is not valid"
 RELEASE_STEPS = ("disconnect", "wait", "free")
-ALL_INVALID: dict[str, str] = dict.fromkeys(RELEASE_STEPS, INVALID)
+# Freeing a core passes HELICS no error out-parameter, so only these can raise.
+RAISING_RELEASE_STEPS = ("disconnect", "wait")
+ALL_INVALID: dict[str, str] = dict.fromkeys(RAISING_RELEASE_STEPS, INVALID)
 _TAKEN_PORTS = frozenset({30000, 30010, 30020, 30030})
 _FREE_PORT = 31000
+
+
+class _FakeCore:
+    """A core whose object frees it when collected, as ``helics.HelicsCore`` does."""
+
+    def __init__(self, name: str, free: Callable[[str], None]) -> None:
+        self.name = name
+        self._finalizer = weakref.finalize(self, free, name)
 
 
 class _FakeCores:
@@ -241,7 +255,8 @@ class _FakeCores:
     ``connects`` gives each created core's connect outcome in order: a bool to
     return or a message to raise as a ``HelicsException``. ``releases`` maps a
     release step to the message it raises, and ``register`` is what
-    registering the federate raises.
+    registering the federate raises. A core is freed by ``helicsCoreFree`` or
+    by its object's finalizer, and both are recorded as its "free" step.
     """
 
     def __init__(
@@ -272,30 +287,33 @@ class _FakeCores:
 
         raise helics.HelicsException(message)
 
-    def helicsCreateCore(self, core_type: str, name: str, init: str) -> str:
+    def helicsCreateCore(self, core_type: str, name: str, init: str) -> _FakeCore:
         self.created.append(name)
-        return name
+        return _FakeCore(name, self._free)
 
-    def helicsCoreConnect(self, core: str) -> bool:
+    def helicsCoreConnect(self, core: _FakeCore) -> bool:
         outcome = next(self._connects)
         if isinstance(outcome, str):
             self._raise(outcome)
         return outcome
 
-    def _release_step(self, step: str, core: str) -> None:
-        self.released.append((step, core))
+    def _release_step(self, step: str, core: _FakeCore) -> None:
+        self.released.append((step, core.name))
         if step in self._releases:
             self._raise(self._releases[step])
 
-    def helicsCoreDisconnect(self, core: str) -> None:
+    def helicsCoreDisconnect(self, core: _FakeCore) -> None:
         self._release_step("disconnect", core)
 
-    def helicsCoreWaitForDisconnect(self, core: str, timeout_ms: int) -> bool:
+    def helicsCoreWaitForDisconnect(self, core: _FakeCore, timeout_ms: int) -> bool:
         self._release_step("wait", core)
         return True
 
-    def helicsCoreFree(self, core: str) -> None:
-        self._release_step("free", core)
+    def helicsCoreFree(self, core: _FakeCore) -> None:
+        self._free(core.name)
+
+    def _free(self, name: str) -> None:
+        self.released.append(("free", name))
 
     def helicsCreateValueFederate(self, name: str, info: object) -> str:
         if self._register is not None:
@@ -319,7 +337,9 @@ def _create(module: Any, monkeypatch: pytest.MonkeyPatch, cores: _FakeCores, por
 
 
 def _released_in_full(cores: _FakeCores, created: list[str]) -> bool:
-    return cores.released == [(step, core) for core in created for step in RELEASE_STEPS]
+    """Whether exactly ``created`` went through every release step, one core after another."""
+    released = [(step, core) for step, core in cores.released if core in created]
+    return released == [(step, core) for core in created for step in RELEASE_STEPS]
 
 
 def _fully_released(cores: _FakeCores) -> bool:
@@ -338,7 +358,60 @@ def test_a_core_invalidated_by_its_taken_port_is_freed_and_retried_on_a_fresh_po
     assert _released_in_full(cores, cores.created[:1])
 
 
-@pytest.mark.parametrize("step", RELEASE_STEPS)
+def test_every_failed_core_is_freed_once_even_after_its_object_is_collected(
+    federate_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second free would land on any core HELICS has since allocated at the same address."""
+    cores = _FakeCores(connects=[False, INVALID, True])
+
+    fed = _create(federate_module, monkeypatch, cores, [30000, 30010, _FREE_PORT])
+    gc.collect()
+
+    assert fed == "federate:house_1"
+    assert _released_in_full(cores, cores.created[:2])
+    # The federate's own core is freed once too, when its object is collected.
+    assert Counter(core for step, core in cores.released if step == "free") == dict.fromkeys(cores.created, 1)
+
+
+def test_a_released_helics_core_leaves_its_object_nothing_to_free() -> None:
+    import helics
+
+    from ochre_next.helics import federate
+
+    core = helics.helicsCreateCore("inproc", "core_release_probe", "")
+
+    assert federate._release(core) is None
+    assert not core._finalizer.alive
+
+
+def test_a_core_without_the_wrappers_finalizer_is_released_and_left_to_its_wrapper(
+    federate_module: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wrapper lacking its private _finalizer must not fail a failed core's cleanup."""
+    released: list[str] = []
+
+    def _step(name: str) -> Callable[..., object]:
+        return lambda *args: released.append(name)
+
+    monkeypatch.setattr(federate_module.helics, "helicsCoreDisconnect", _step("disconnect"))
+    monkeypatch.setattr(federate_module.helics, "helicsCoreWaitForDisconnect", _step("wait"))
+
+    class _FinalizerlessCore:
+        """A core like a future wrapper's object, carrying no _finalizer."""
+
+        def is_connected(self) -> bool:
+            return False
+
+    core = _FinalizerlessCore()
+
+    with caplog.at_level(logging.WARNING, logger="ochre_next.helics.federate"):
+        assert federate_module._release(core) is None
+
+    assert released == ["disconnect", "wait"]
+    assert any("no _finalizer" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("step", RAISING_RELEASE_STEPS)
 def test_an_invalidated_core_at_any_release_step_does_not_stop_the_release(
     step: str, federate_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1058,7 +1058,7 @@ ochre = [
 requires-dist = [
     { name = "boto3", marker = "extra == 'resstock'", specifier = ">=1.43.107" },
     { name = "gymnasium", marker = "extra == 'rl'", specifier = ">=1.3.0" },
-    { name = "helics", marker = "extra == 'helics'", specifier = ">=3.6.1" },
+    { name = "helics", marker = "extra == 'helics'", specifier = ">=3.6.1,<4" },
     { name = "httpx", marker = "extra == 'resstock'", specifier = ">=0.28.1" },
     { name = "marimo", marker = "extra == 'notebook'", specifier = ">=0.25.1" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.15.0" },

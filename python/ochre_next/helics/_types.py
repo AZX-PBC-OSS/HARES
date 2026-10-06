@@ -1,6 +1,7 @@
 """Shared structural protocols and type guards for HELICS Python bindings."""
 
 from typing import Any, Protocol
+import weakref
 
 from typing_extensions import TypeIs  # typing.TypeIs is Python 3.13+
 
@@ -38,6 +39,10 @@ class HelicsFederateLike(Protocol):
 
 
 class HelicsCoreLike(Protocol):
+    # The wrapper's weakref.finalize that frees the core's handle; calling it
+    # frees the core now and leaves nothing to free on collection.
+    _finalizer: "weakref.finalize[..., object]"
+
     def is_connected(self) -> bool: ...
 
 
