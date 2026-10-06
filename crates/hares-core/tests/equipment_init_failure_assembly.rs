@@ -9,11 +9,14 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{Duration, FixedOffset, TimeZone};
+use chrono::{Duration, TimeZone};
 use hares_core::dwelling::DwellingBlueprint;
 use hares_core::{Dwelling, DwellingConfig};
 use hares_io::OutputFormat;
 use serde_json::{Map, Value, json};
+
+#[path = "../../../tests/support/denver_offset.rs"]
+mod denver_offset;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -26,8 +29,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn config(hpxml: &Path) -> DwellingConfig {
-    let tz_offset = FixedOffset::west_opt(7 * 3600).expect("UTC-7 offset is valid");
-    let start_time = tz_offset
+    let start_time = denver_offset::denver_offset()
         .with_ymd_and_hms(2023, 1, 15, 10, 0, 0)
         .single()
         .expect("valid start time");
