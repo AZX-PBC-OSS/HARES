@@ -1092,10 +1092,11 @@ fn inject_power_schedule(
         let mean_fraction: f64 =
             fraction_series.iter().copied().sum::<f64>() / fraction_series.len() as f64;
 
-        let Some(max_kw) = determine_max_kw(spec, mean_fraction) else {
-            inject_compact_constant_power(spec, 0.0);
-            return Ok(());
-        };
+        let max_kw = resolve_max_kw(
+            spec,
+            mean_fraction,
+            &format!("the schedule column '{col_name}'"),
+        )?;
 
         let kw_series: Vec<f64> = fraction_series.iter().map(|f| f * max_kw).collect();
         let derived_col_idx = schedule
@@ -1123,14 +1124,25 @@ fn inject_power_schedule(
                 "schedule_resolve: no CSV column '{}' for '{}'; using HPXML profile fractions",
                 col_name, mapping.equipment_name
             );
-            let max_kw = determine_max_kw(spec, annual_mean_fraction(&profile)).unwrap_or(0.0);
+            let max_kw = resolve_max_kw(
+                spec,
+                annual_mean_fraction(&profile),
+                "the HPXML schedule fractions on the spec",
+            )?;
             inject_compact_profile_power(spec, &profile, max_kw);
         } else if let Some(profile) = profiles.find(mapping.equipment_name) {
             warn!(
                 "schedule_resolve: no CSV column '{}' for '{}'; using default profile",
                 col_name, mapping.equipment_name
             );
-            let max_kw = determine_max_kw(spec, annual_mean_fraction(profile)).unwrap_or(0.0);
+            let max_kw = resolve_max_kw(
+                spec,
+                annual_mean_fraction(profile),
+                &format!(
+                    "the default schedule profile for '{}'",
+                    mapping.equipment_name
+                ),
+            )?;
             inject_compact_profile_power(spec, profile, max_kw);
         } else {
             return Err(HaresError::Io(format!(
@@ -1366,6 +1378,52 @@ fn determine_max_kw(spec: &EquipmentSpec, mean_fraction: f64) -> Option<f64> {
     Some((annual_kwh / HOURS_PER_YEAR) / mean_fraction)
 }
 
+/// Determine an equipment's peak power from its schedule source, or fail
+/// when the power is undeterminable.
+///
+/// Two zeros are determined, not undeterminable: an all-zero fraction
+/// series (the schedule never runs the equipment, so the spec's annual
+/// energy is never drawn), and a spec that declares its annual energy as
+/// zero (there is no energy to scale). An equipment whose schedule does
+/// run it and which declares neither a rated power (`max_electric_power_w`)
+/// nor annual energy (`annual_electric_kwh`, `annual_gas_therms`) has no
+/// determinable power: the returned error names the equipment and the
+/// missing field.
+fn resolve_max_kw(
+    spec: &EquipmentSpec,
+    mean_fraction: f64,
+    source: &str,
+) -> Result<f64, HaresError> {
+    match determine_max_kw(spec, mean_fraction) {
+        Some(max_kw) => Ok(max_kw),
+        None if mean_fraction <= 0.0 || spec_declares_a_power_field(spec) => Ok(0.0),
+        None => Err(undeterminable_schedule_power_error(spec, source)),
+    }
+}
+
+/// Whether the spec declares any power field at all (even at zero): a
+/// declared zero is a determined power, an absent one is not.
+fn spec_declares_a_power_field(spec: &EquipmentSpec) -> bool {
+    spec.parameters.contains_key("max_electric_power_w")
+        || spec.parameters.contains_key("annual_electric_kwh")
+        || spec.parameters.contains_key("annual_gas_therms")
+}
+
+/// Build the resolve error for an equipment whose schedule power cannot be
+/// determined: the spec carries neither a rated power (`max_electric_power_w`)
+/// nor annual energy (`annual_electric_kwh`, `annual_gas_therms`). Names the
+/// equipment and the missing field.
+fn undeterminable_schedule_power_error(spec: &EquipmentSpec, source: &str) -> HaresError {
+    let msg = format!(
+        "equipment '{}' has a schedule source ({source}) but no \
+         determinable power: the spec carries no 'max_electric_power_w', \
+         no 'annual_electric_kwh' and no 'annual_gas_therms'",
+        spec.name
+    );
+    tracing::error!(equipment = %spec.name, "{msg}");
+    HaresError::Equipment(msg)
+}
+
 fn inject_event_schedule(
     spec: &mut EquipmentSpec,
     mapping: &ColumnMapping,
@@ -1554,10 +1612,22 @@ fn ensure_specs_for_csv_columns(
         if specs.iter().any(|s| s.name == mapping.equipment_name) {
             continue;
         }
+        // An auto-created spec with no annual-energy default could never
+        // resolve a determinable power (that resolve is an error): the home
+        // declares no such equipment, so no spec is created and the column
+        // stays a known, unused column, matching OCHRE, which creates no
+        // equipment from a schedule column alone.
+        let Some(annual_kwh) = default_annual_kwh_for_equipment(mapping.equipment_name) else {
+            warn!(
+                equipment = %mapping.equipment_name,
+                "schedule column '{col_name}' names an equipment the HPXML \
+                 does not declare and no default annual energy exists; no \
+                 spec is auto-created",
+            );
+            continue;
+        };
         let mut params = Map::new();
-        if let Some(annual_kwh) = default_annual_kwh_for_equipment(mapping.equipment_name) {
-            params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
-        }
+        params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
         specs.push(build_spec(
             mapping.equipment_name.to_string(),
             FuelType::Electric,
@@ -1573,14 +1643,7 @@ fn default_annual_kwh_for_equipment(equipment_name: &str) -> Option<f64> {
             // ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default.
             Some(MICROWAVE_DEFAULT_ANNUAL_KWH)
         }
-        _ => {
-            warn!(
-                equipment = %equipment_name,
-                "auto-created spec for unmapped CSV column but no default annual energy; \
-                 schedule will have zero power"
-            );
-            None
-        }
+        _ => None,
     }
 }
 
@@ -2120,12 +2183,120 @@ mod tests {
     }
 
     #[test]
-    fn constant_injects_compact_constant_keys() {
-        // A CSV column whose fractions yield no determinable max kW still
-        // injects a constant: 0.0 kW, the documented degenerate for a spec
-        // with no annual energy.
+    fn schedule_resolve_equipment_with_no_determinable_power_is_an_error() {
+        // A spec with no rated power and no annual energy routed through
+        // each of the three schedule-source branches must fail the resolve
+        // naming the equipment and the missing field, never silently run at
+        // 0 kW.
+
+        // Branch 1: the schedule CSV carries the equipment's fraction
+        // column, so the column is the source and the max kW determination
+        // fails.
         let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
-        let mut specs = vec![make_spec("Indoor Lighting", 0.0)];
+        let mut specs = vec![make_spec_with_power("Indoor Lighting", None, None)];
+        let err = inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+            false,
+            &mut Vec::new(),
+        )
+        .expect_err("a CSV-column source with no determinable power must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("Indoor Lighting"),
+            "the error must name the equipment, got: {message}"
+        );
+        assert!(
+            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            "the error must name the missing fields, got: {message}"
+        );
+        assert!(
+            message.contains("lighting_interior"),
+            "the error must name the schedule source, got: {message}"
+        );
+
+        // Branch 2: no CSV column, but the spec carries HPXML schedule
+        // fractions, so the fractions are the source.
+        let mut hpxml_spec = make_spec_with_power("Indoor Lighting", None, None);
+        hpxml_spec.parameters.insert(
+            "weekday_schedule_fractions".to_string(),
+            Value::Array(
+                (0..24)
+                    .map(|h| Value::from(0.5 + f64::from(h % 12) * 0.01))
+                    .collect(),
+            ),
+        );
+        hpxml_spec.parameters.insert(
+            "weekend_schedule_fractions".to_string(),
+            Value::Array((0..24).map(|_| Value::from(0.4)).collect()),
+        );
+        let mut schedule = make_schedule(24);
+        let mut specs = vec![hpxml_spec];
+        let err = inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+            false,
+            &mut Vec::new(),
+        )
+        .expect_err("an HPXML-fraction source with no determinable power must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("Indoor Lighting"),
+            "the error must name the equipment, got: {message}"
+        );
+        assert!(
+            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            "the error must name the missing fields, got: {message}"
+        );
+        assert!(
+            message.contains("HPXML schedule fractions"),
+            "the error must name the schedule source, got: {message}"
+        );
+
+        // Branch 3: no CSV column and no HPXML fractions, but a default
+        // profile exists for the equipment.
+        let dir = tempdir().expect("create temp dir");
+        write_default_profile_csv(dir.path());
+        let mut schedule = make_schedule(24);
+        let mut specs = vec![make_spec_with_power("Indoor Lighting", None, None)];
+        let err = inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            Some(dir.path()),
+            &DefaultsStore::empty(),
+            None,
+            false,
+            &mut Vec::new(),
+        )
+        .expect_err("a default-profile source with no determinable power must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("Indoor Lighting"),
+            "the error must name the equipment, got: {message}"
+        );
+        assert!(
+            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            "the error must name the missing fields, got: {message}"
+        );
+        assert!(
+            message.contains("default schedule profile"),
+            "the error must name the schedule source, got: {message}"
+        );
+    }
+
+    #[test]
+    fn all_zero_schedule_fractions_are_a_determined_zero_not_an_error() {
+        // A spec WITH annual energy whose schedule fractions are all zero
+        // runs never: its determined power is exactly 0 kW, the schedule's
+        // own claim, not the silent zero-fill of an undeterminable one.
+        let mut schedule = make_schedule_with_lighting_column(&[0.0, 0.0, 0.0]);
+        let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
@@ -2135,21 +2306,75 @@ mod tests {
             false,
             &mut Vec::new(),
         )
-        .expect("inject_schedule_into_specs should succeed with valid config");
+        .expect("an all-zero fraction column resolves to a determined 0 kW");
 
-        assert_eq!(
-            specs[0]
-                .parameters
-                .get("power_schedule_source")
-                .and_then(Value::as_str),
-            Some("constant")
-        );
-        let constant_kw = specs[0]
+        let derived_idx = specs[0]
             .parameters
-            .get("power_constant_kw")
+            .get("power_schedule_col")
+            .and_then(Value::as_u64)
+            .expect("power_schedule_col must be present") as usize;
+        assert!(
+            schedule.columns[derived_idx].iter().all(|kw| *kw == 0.0),
+            "the derived kW column must be all zero"
+        );
+
+        // Same through the HPXML-fraction branch: no CSV column, zero
+        // fractions on the spec, annual energy present.
+        let mut spec = make_spec_with_power("Indoor Lighting", Some(876.0), None);
+        spec.parameters.insert(
+            "weekday_schedule_fractions".to_string(),
+            Value::Array((0..24).map(|_| Value::from(0.0)).collect()),
+        );
+        let mut schedule = make_schedule(24);
+        let mut specs = vec![spec];
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+            false,
+            &mut Vec::new(),
+        )
+        .expect("an all-zero HPXML profile resolves to a determined 0 kW");
+        let max_kw = specs[0]
+            .parameters
+            .get("power_profile_max_kw")
             .and_then(Value::as_f64)
-            .expect("power_constant_kw should be present");
-        assert_eq!(constant_kw, 0.0);
+            .expect("power_profile_max_kw must be present");
+        assert_eq!(max_kw, 0.0);
+    }
+
+    #[test]
+    fn declared_zero_annual_energy_is_a_determined_zero_not_an_error() {
+        // A spec whose annual energy is DECLARED as zero has a determined
+        // power: exactly 0 kW. Only a spec that declares no power field at
+        // all is undeterminable.
+        let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
+        let mut spec = make_spec_with_power("Indoor Lighting", None, None);
+        spec.parameters
+            .insert("annual_electric_kwh".to_string(), Value::from(0.0));
+        let mut specs = vec![spec];
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            None,
+            false,
+            &mut Vec::new(),
+        )
+        .expect("a declared zero annual energy resolves to a determined 0 kW");
+
+        let derived_idx = specs[0]
+            .parameters
+            .get("power_schedule_col")
+            .and_then(Value::as_u64)
+            .expect("power_schedule_col must be present") as usize;
+        assert!(
+            schedule.columns[derived_idx].iter().all(|kw| *kw == 0.0),
+            "the derived kW column must be all zero"
+        );
     }
 
     #[test]
@@ -4131,6 +4356,10 @@ mod tests {
         let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
         let mut specs: Vec<EquipmentSpec> = Vec::new();
 
+        // A CSV column alone does not create equipment the home does not
+        // declare: an auto-created spec with no annual-energy default could
+        // never resolve a determinable power, so no spec is created and the
+        // resolve succeeds without one.
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
@@ -4140,15 +4369,13 @@ mod tests {
             false,
             &mut Vec::new(),
         )
-        .expect("inject_schedule_into_specs should succeed");
+        .expect("a declared-in-CSV-only column is not an error");
 
-        let basement = specs.iter().find(|s| s.name == "Basement Lighting");
         assert!(
-            basement.is_some(),
-            "Basement Lighting must be auto-created from CSV column when foundation is Finished Basement"
+            !specs.iter().any(|s| s.name == "Basement Lighting"),
+            "no Basement Lighting spec is auto-created without an \
+             annual-energy default"
         );
-        let spec = basement.unwrap();
-        assert_eq!(spec.fuel_type, FuelType::Electric);
     }
 
     #[test]
@@ -4180,7 +4407,13 @@ mod tests {
     #[test]
     fn basement_lighting_uses_interior_csv_column_when_basement_column_absent() {
         let mut schedule = make_schedule_with_lighting_column(&[0.02, 0.01, 0.005]);
-        let mut specs = vec![make_spec("Basement Lighting", 100.0)];
+        // Powered specs: the subject here is the column copy, not the
+        // power determination, and an auto-created Indoor Lighting spec
+        // would carry no annual energy and fail the resolve.
+        let mut specs = vec![
+            make_spec("Indoor Lighting", 100.0),
+            make_spec("Basement Lighting", 100.0),
+        ];
 
         inject_schedule_into_specs(
             &mut specs,
@@ -4267,7 +4500,12 @@ mod tests {
             ],
         };
         let basement_original = schedule.columns[1].clone();
-        let mut specs = vec![make_spec("Basement Lighting", 100.0)];
+        // Powered specs: the subject here is column preservation, not the
+        // power determination.
+        let mut specs = vec![
+            make_spec("Indoor Lighting", 100.0),
+            make_spec("Basement Lighting", 100.0),
+        ];
 
         inject_schedule_into_specs(
             &mut specs,
