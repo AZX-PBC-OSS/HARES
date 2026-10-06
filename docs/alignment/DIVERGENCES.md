@@ -431,3 +431,33 @@ justification → measured impact → pinning tests.
   `conversions::tests::only_material_bearing_boundaries_read_their_material`
   and `conversions::tests::finish_type_roughness_changes_exterior_film_resistance`.
   All but the third fail when every surface takes OS-HPXML's `Rough`.
+
+## D-011: The equivalent battery holds the multiplied zone capacitance
+
+- **Reference behavior:** OS-HPXML v1.12.0 multiplies every zone's air
+  capacitance by one temperature capacitance multiplier, 7 by default
+  (`simcontrols.rb:27-28`, `defaults.rb:219-221`); it has no equivalent
+  battery. OCHRE's equivalent battery reads its zone's capacitance, which
+  carries the same 7 (`ochre/Equipment/HVAC.py:625-640`,
+  `Models/Envelope.py:443-446`).
+- **HARES behavior:** every zone's air node takes the building's
+  multiplier, and the dwelling hands the conditioned zone's capacitance,
+  multiplier included, to each HVAC unit's equivalent battery, whose
+  energy and its minimum and maximum scale with it
+  (`hares-equipment/src/hvac/equivalent_battery.rs`). This is a
+  consequence of the multiplier, not a departure from either reference:
+  HPXML homes with furniture boundaries previously took 1 on the
+  conditioned zone.
+- **Justification:** the battery describes the storage the thermal
+  solver integrates; with the multiplier on the zone, the same
+  capacitance belongs in the battery.
+- **Measured impact:** the conditioned zone's capacitance on the golden
+  `consumer_shape_900s` home (`bldg0176227`, 749.8 m³) is 1.7644 kWh/K
+  against 0.2521 kWh/K before, and on `BEopt_example.xml` (271.8 m³)
+  0.6403 against 0.0915 kWh/K. A calibration reading the equivalent
+  battery's energy, minimum and maximum sees seven times the storage on
+  such homes, and the zone recovers its thermostat band seven times more
+  slowly.
+- **Pinning tests:** `equipment_zone_resolution::the_equivalent_battery_holds_the_multiplied_zone_capacitance`
+  (a unit's largest maximum energy at the default 7 is seven times its
+  value at 1) and `boundary_rc::tests::zone_capacitance_requires_a_positive_multiplier`.

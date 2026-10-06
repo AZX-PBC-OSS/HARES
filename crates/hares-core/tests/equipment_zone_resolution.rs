@@ -274,8 +274,9 @@ fn hvac_and_water_heaters_without_a_zone_fail_init() {
 
 /// Each HVAC unit's equivalent-battery maximum energy over the run, by unit
 /// name, with the HVAC zone_ids cleared from the resolved specs when
-/// `clear_zone_ids` is set.
-fn hvac_ebm_max_energy(clear_zone_ids: bool) -> Vec<(String, Vec<f64>)> {
+/// `clear_zone_ids` is set, and the building's temperature capacitance
+/// multiplier replaced by `multiplier` when given.
+fn hvac_ebm_max_energy(clear_zone_ids: bool, multiplier: Option<f64>) -> Vec<(String, Vec<f64>)> {
     // A Connecticut home with a gas boiler, in January: the boiler heats.
     let fixture_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0000002");
     let mut config = bldg0000007_config();
@@ -292,6 +293,24 @@ fn hvac_ebm_max_energy(clear_zone_ids: bool) -> Vec<(String, Vec<f64>)> {
     // mode, where the equivalent battery reports the zone's energy bounds.
     config.sim_config.duration = Duration::hours(2);
     config.sim_config.time_res = Duration::seconds(60);
+    // The fixture states OS-HPXML's 7.0; a replaced multiplier goes into a
+    // copy of its HPXML.
+    let edited = tempfile::tempdir().expect("temp dir");
+    if let Some(multiplier) = multiplier {
+        let xml = std::fs::read_to_string(&config.hpxml_path).expect("HPXML readable");
+        let stated = "<TemperatureCapacitanceMultiplier>7.0</TemperatureCapacitanceMultiplier>";
+        assert!(xml.contains(stated), "the fixture states its multiplier");
+        config.hpxml_path = edited.path().join("home.xml");
+        std::fs::write(
+            &config.hpxml_path,
+            xml.replacen(
+                stated,
+                &format!("<TemperatureCapacitanceMultiplier>{multiplier}</TemperatureCapacitanceMultiplier>"),
+                1,
+            ),
+        )
+        .expect("write HPXML");
+    }
     let mut blueprint =
         hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
     let mut cleared = 0;
@@ -362,8 +381,8 @@ fn hvac_ebm_max_energy(clear_zone_ids: bool) -> Vec<(String, Vec<f64>)> {
 /// nonzero (a missing capacitance leaves them at 0).
 #[test]
 fn hvac_without_a_zone_id_takes_the_conditioned_zone_capacitance() {
-    let explicit = hvac_ebm_max_energy(false);
-    let implicit = hvac_ebm_max_energy(true);
+    let explicit = hvac_ebm_max_energy(false, None);
+    let implicit = hvac_ebm_max_energy(true, None);
     assert!(!explicit.is_empty(), "the fixture must carry HVAC");
     assert!(
         explicit
@@ -374,6 +393,28 @@ fn hvac_without_a_zone_id_takes_the_conditioned_zone_capacitance() {
     assert_eq!(
         implicit, explicit,
         "a unit with no zone_id must carry the conditioned zone's capacitance"
+    );
+}
+
+/// The equivalent battery holds the conditioned zone's capacitance with its
+/// temperature capacitance multiplier, the capacitance the thermal solver
+/// integrates (OCHRE's reads the same, `ochre/Equipment/HVAC.py:625-640`):
+/// a unit's largest maximum energy over the run at OS-HPXML's default 7 is
+/// seven times its value at 1.
+#[test]
+fn the_equivalent_battery_holds_the_multiplied_zone_capacitance() {
+    let peak = |series: &[(String, Vec<f64>)]| -> f64 {
+        series
+            .iter()
+            .flat_map(|(_, values)| values.iter().copied())
+            .fold(0.0, f64::max)
+    };
+    let at_one = peak(&hvac_ebm_max_energy(false, Some(1.0)));
+    let at_default = peak(&hvac_ebm_max_energy(false, None));
+    assert!(at_one > 0.0, "a unit must reach a heating or cooling mode");
+    assert!(
+        (at_default / at_one - 7.0).abs() < 1e-9,
+        "{at_default} kWh at the default against {at_one} kWh at 1"
     );
 }
 
