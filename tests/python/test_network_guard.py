@@ -13,6 +13,7 @@ import os
 import socket
 import subprocess
 import sys
+from pathlib import Path
 from collections.abc import Callable
 
 import offline_guard
@@ -139,6 +140,22 @@ def test_a_python_child_given_an_environment_without_the_refusal_is_not_started(
     bare = {key: value for key, value in os.environ.items() if key != offline_guard.ENV_FLAG}
     attempts = _refused(lambda: subprocess.run([sys.executable, "-c", "pass"], env=bare, check=False))
     assert len(attempts) == 1
+
+
+def test_the_standard_librarys_processor_lookup_runs() -> None:
+    with offline_guard.scope(allow_network=False) as attempts:
+        subprocess.run(["uname", "-p"], check=False, capture_output=True)
+    assert attempts == []
+
+
+def test_another_program_under_the_allowed_command_line_is_not_started(tmp_path: Path) -> None:
+    impostor = tmp_path / "uname"
+    impostor.write_text("#!/bin/sh\n")
+    impostor.chmod(0o755)
+    path_first = {**os.environ, "PATH": os.pathsep.join([str(tmp_path), os.environ.get("PATH", "")])}
+
+    assert len(_refused(lambda: subprocess.run(["uname", "-p"], executable="/bin/echo", check=False))) == 1
+    assert len(_refused(lambda: subprocess.run(["uname", "-p"], env=path_first, check=False))) == 1
 
 
 def test_any_other_subprocess_is_not_started() -> None:

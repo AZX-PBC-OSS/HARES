@@ -45,6 +45,7 @@ from __future__ import annotations
 import functools
 import ipaddress
 import os
+import shutil
 import socket
 import sys
 from collections.abc import Iterator, Mapping
@@ -64,8 +65,9 @@ _SPAWN_EVENTS = frozenset({"subprocess.Popen", "os.posix_spawn", "os.spawn", "os
 _GUARDED_EVENTS = _SOCKET_EVENTS | _RESOLVER_EVENTS | _SPAWN_EVENTS
 _INET_FAMILIES = (2, 10)  # AF_INET, AF_INET6
 # Commands the standard library itself runs that cannot reach the network:
-# ``platform.processor()``, which every xdist worker calls at startup.
-_LOCAL_COMMANDS = frozenset({("uname", "-p")})
+# ``platform.processor()``, which every xdist worker calls at startup. Each is
+# allowed only when the program that would run is the system's own binary.
+_LOCAL_COMMANDS: dict[tuple[str, ...], tuple[str, ...]] = {("uname", "-p"): ("/usr/bin/uname", "/bin/uname")}
 
 
 class NetworkRefused(ConnectionRefusedError):
@@ -149,8 +151,21 @@ def _guarded_python_child(executable: object, argv: object, env: Mapping[str, st
     return environment.get(ENV_FLAG) == "1" and str(SITE_DIR) in environment.get("PYTHONPATH", "")
 
 
-def _local_command(argv: object) -> bool:
-    return isinstance(argv, (list, tuple)) and tuple(_text(a) for a in argv) in _LOCAL_COMMANDS
+def _local_command(executable: object, argv: object, env: Mapping[str, str] | None) -> bool:
+    """Whether ``argv`` is an allowed command and the program it would run is that command's binary."""
+    if not isinstance(argv, (list, tuple)):
+        return False
+    binaries = _LOCAL_COMMANDS.get(tuple(_text(a) for a in argv))
+    if binaries is None:
+        return False
+    program = _text(executable) or _text(argv[0])
+    if os.sep not in program:
+        search_path = (os.environ if env is None else env).get("PATH", os.defpath)
+        found = shutil.which(program, path=search_path)
+        if found is None:
+            return False
+        program = found
+    return os.path.realpath(program) in {os.path.realpath(binary) for binary in binaries}
 
 
 def _violation(event: str, args: tuple[Any, ...]) -> str | None:
@@ -168,7 +183,7 @@ def _violation(event: str, args: tuple[Any, ...]) -> str | None:
         "subprocess.Popen": lambda: (args[0], args[1], args[3]),
         "os.spawn": lambda: (args[1], args[2], args[3]),
     }.get(event, lambda: (args[0], args[1], args[2]))()
-    if _guarded_python_child(executable, argv, env) or _local_command(argv):
+    if _guarded_python_child(executable, argv, env) or _local_command(executable, argv, env):
         return None
     return f"{event}({argv!r}) without the offline guard"
 
