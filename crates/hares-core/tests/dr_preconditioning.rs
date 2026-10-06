@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -316,6 +317,58 @@ fn an_end_use_event_on_a_dual_mode_unit_moves_only_its_axis() {
     }
 }
 
+/// A unit serving both setpoints and labelled as heating, as a dual-mode
+/// unit is while it heats, under a DR event on the cooling end use: a
+/// turn-off acts on the whole unit and never reaches it, while a cooling
+/// setpoint delta moves only the cooling axis and does reach it.
+#[test]
+fn a_cooling_event_reaches_a_heating_dual_mode_unit_only_to_move_its_cooling_setpoint() {
+    let cooling = DispatchTarget::ByEndUse(EndUse::HVAC_COOLING);
+    for (action, expect_reached) in [
+        (DrAction::off(), false),
+        (DrAction::setpoint_delta(PRECONDITION_DELTA_C), true),
+    ] {
+        let mut dwelling = bestest_600();
+        let mut probe = ThermostatProbe::boxed("Dual Unit", Some(ThermostatAxes::Both));
+        probe.descriptor.end_use = EndUse::HVAC_HEATING;
+        probe.descriptor.control_capabilities =
+            ControlCapabilities::MODE_OVERRIDE | ControlCapabilities::THERMAL_SETPOINT_DELTA;
+        let received = Arc::clone(&probe.received);
+        dwelling.add_equipment(probe).expect("add the probe");
+        let mut actor = DrCompliance::new("DR")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(cooling.clone())
+            .with_hvac_action(action.clone());
+        actor.set_dr_level(DRLevel::Moderate);
+        dwelling
+            .add_actor(Box::new(actor))
+            .expect("register the DR actor");
+        for _ in 0..4 {
+            dwelling.step().expect("step");
+        }
+
+        let received = received.lock().expect("probe signals");
+        if expect_reached {
+            assert!(!received.is_empty(), "{action:?} never reached the unit");
+            assert!(
+                received.iter().all(|s| matches!(
+                    s,
+                    ControlSignal::ThermalSetpointDelta {
+                        heating_delta_c: None,
+                        cooling_delta_c: Some(_),
+                    }
+                )),
+                "{action:?}: {received:?}"
+            );
+        } else {
+            assert!(
+                received.is_empty(),
+                "{action:?} reached the unit: {received:?}"
+            );
+        }
+    }
+}
+
 /// An event that names no direction for a unit serving both setpoints is
 /// refused when the actor is registered.
 #[test]
@@ -366,6 +419,7 @@ struct ThermostatProbe {
     axes: Option<ThermostatAxes>,
     telemetry: Telemetry,
     core_output: CoreOutput,
+    received: Arc<Mutex<Vec<ControlSignal>>>,
 }
 
 impl ThermostatProbe {
@@ -387,6 +441,7 @@ impl ThermostatProbe {
             axes,
             telemetry: Telemetry::with_capacity(0),
             core_output: CoreOutput::default(),
+            received: Arc::default(),
         })
     }
 }
@@ -445,7 +500,11 @@ impl Equipment for ThermostatProbe {
         Ok(())
     }
 
-    fn apply_signal(&mut self, _: &ControlSignal) -> Result<(), HaresError> {
+    fn apply_signal(&mut self, signal: &ControlSignal) -> Result<(), HaresError> {
+        self.received
+            .lock()
+            .expect("probe signals")
+            .push(signal.clone());
         Ok(())
     }
 }

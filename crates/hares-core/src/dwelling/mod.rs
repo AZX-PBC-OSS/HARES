@@ -1146,20 +1146,33 @@ struct ControlDispatcher {
 /// pre-expansion queue entries where cross-variant calls are expected.
 #[cfg(feature = "observe")]
 fn targets_conflict(
-    a: &DispatchTarget,
-    b: &DispatchTarget,
+    a: &DispatchRequest,
+    b: &DispatchRequest,
     equipment: &[Box<dyn Equipment>],
 ) -> bool {
-    match (a, b) {
+    match (&a.target, &b.target) {
         (DispatchTarget::ByName(an), DispatchTarget::ByName(bn)) => an == bn,
         (DispatchTarget::ByEndUse(ae), DispatchTarget::ByEndUse(be)) => ae == be,
-        (DispatchTarget::ByName(name), DispatchTarget::ByEndUse(end_use))
-        | (DispatchTarget::ByEndUse(end_use), DispatchTarget::ByName(name)) => {
-            equipment.iter().any(|eq| {
-                eq.descriptor().name.as_str() == &**name && addressed_by_end_use(&**eq, end_use)
-            })
+        (DispatchTarget::ByName(name), DispatchTarget::ByEndUse(end_use)) => {
+            named_unit_addressed_by_end_use(equipment, name, end_use, &b.signal)
+        }
+        (DispatchTarget::ByEndUse(end_use), DispatchTarget::ByName(name)) => {
+            named_unit_addressed_by_end_use(equipment, name, end_use, &a.signal)
         }
     }
+}
+
+#[cfg(feature = "observe")]
+fn named_unit_addressed_by_end_use(
+    equipment: &[Box<dyn Equipment>],
+    name: &str,
+    end_use: &EndUse,
+    end_use_signal: &ControlSignal,
+) -> bool {
+    let reach = EndUseReach::of(end_use_signal);
+    equipment.iter().any(|eq| {
+        eq.descriptor().name.as_str() == name && addressed_by_end_use(&**eq, end_use, reach)
+    })
 }
 
 impl Default for ControlDispatcher {
@@ -1208,28 +1221,24 @@ impl ControlDispatcher {
         for (tier_idx, tier_que) in self.by_tier.iter().enumerate() {
             let (head, tail) = tier_que.as_slices();
             let requests: Vec<&DispatchRequest> = head.iter().chain(tail.iter()).collect();
+            let mut recorded_from: Vec<usize> = Vec::new();
             for i in 0..requests.len() {
                 for j in (i + 1)..requests.len() {
-                    if targets_conflict(&requests[i].target, &requests[j].target, equipment) {
+                    if targets_conflict(requests[i], requests[j], equipment) {
                         let tier = PriorityTier::from_index(tier_idx);
-                        let already_recorded =
-                            same_tier_conflicts.iter().any(|c: &SameTierConflict| {
-                                c.tier == tier
-                                    && targets_conflict(&c.target, &requests[i].target, equipment)
-                            });
+                        let already_recorded = recorded_from
+                            .iter()
+                            .any(|&k| targets_conflict(requests[k], requests[i], equipment));
                         if !already_recorded {
                             let signals: Vec<_> = requests
                                 .iter()
                                 .filter(|r| {
                                     r.priority == tier
-                                        && targets_conflict(
-                                            &r.target,
-                                            &requests[i].target,
-                                            equipment,
-                                        )
+                                        && targets_conflict(r, requests[i], equipment)
                                 })
                                 .map(|r| r.signal.clone())
                                 .collect();
+                            recorded_from.push(i);
                             same_tier_conflicts.push(SameTierConflict {
                                 tier,
                                 target: requests[i].target.clone(),
@@ -1316,9 +1325,10 @@ impl ControlDispatcher {
                         let mut any_delivered = false;
                         let mut any_overwrote = false;
                         let mut any_skipped = false;
+                        let reach = EndUseReach::of(&request.signal);
 
                         for eq in equipment.iter_mut() {
-                            if !addressed_by_end_use(&**eq, end_use) {
+                            if !addressed_by_end_use(&**eq, end_use, reach) {
                                 continue;
                             }
                             // Matched: the signal was routed at a real target.
@@ -1439,7 +1449,7 @@ fn route_request(
                 &request.signal,
                 warnings,
                 rejected_control_signals,
-                |eq| addressed_by_end_use(eq, end_use),
+                |eq| addressed_by_end_use(eq, end_use, EndUseReach::of(&request.signal)),
             );
             if !delivered {
                 *rejected_control_signals += 1;
@@ -1519,15 +1529,42 @@ fn build_hvac_thermal_consistency(
         .collect()
 }
 
-/// Whether a `ByEndUse(end_use)` target addresses `eq`: its own end use,
-/// or, for a thermostat end use, a unit whose thermostat serves that axis.
-/// A unit serving both relabels its end use by its mode, and would
-/// otherwise be addressed only while in that mode.
-fn addressed_by_end_use(eq: &dyn Equipment, end_use: &EndUse) -> bool {
+/// Which units a `ByEndUse` target reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EndUseReach {
+    /// Units whose current end use is the target's.
+    Label,
+    /// Also every unit whose thermostat serves the target end use's
+    /// setpoint, whatever its current mode.
+    ThermostatAxis,
+}
+
+impl EndUseReach {
+    /// A thermostat-setpoint signal (an override, a delta or the release)
+    /// moves only the axis its end use names, so it reaches a unit serving
+    /// both setpoints in any mode. Every other signal (a mode override, a
+    /// power limit, a DR level) acts on the whole unit, so it reaches a unit
+    /// only while its current end use is the target's: a cooling
+    /// curtailment must never switch off a unit that is heating.
+    fn of(signal: &ControlSignal) -> Self {
+        match signal {
+            ControlSignal::ThermalSetpoint { .. } | ControlSignal::ThermalSetpointDelta { .. } => {
+                Self::ThermostatAxis
+            }
+            _ => Self::Label,
+        }
+    }
+}
+
+/// Whether a `ByEndUse(end_use)` target with `reach` addresses `eq`. A unit
+/// serving both setpoints relabels its end use by its mode, so the label
+/// alone reaches it only while it is in that mode.
+fn addressed_by_end_use(eq: &dyn Equipment, end_use: &EndUse, reach: EndUseReach) -> bool {
     eq.descriptor().end_use == *end_use
-        || ThermostatAxis::of_end_use(end_use)
-            .zip(eq.thermostat_axes())
-            .is_some_and(|(axis, axes)| axes.serves(axis))
+        || (reach == EndUseReach::ThermostatAxis
+            && ThermostatAxis::of_end_use(end_use)
+                .zip(eq.thermostat_axes())
+                .is_some_and(|(axis, axes)| axes.serves(axis)))
 }
 
 /// What actors read about each equipment when they check a roster change
@@ -4268,8 +4305,10 @@ impl Dwelling {
                 current != prev
             }
             DispatchTarget::ByEndUse(end_use) => {
+                // The widest reach, so a dual-mode unit's flip out of the
+                // target's mode wakes the actor as well as its flip into it.
                 for eq in equipment {
-                    if addressed_by_end_use(&**eq, end_use) {
+                    if addressed_by_end_use(&**eq, end_use, EndUseReach::ThermostatAxis) {
                         let desc = eq.descriptor();
                         let Some(&id) = equipment_id_by_name.get(&desc.name) else {
                             continue;

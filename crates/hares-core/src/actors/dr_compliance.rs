@@ -233,7 +233,9 @@ pub enum DrAction {
         heating_c: Option<f64>,
         cooling_c: Option<f64>,
     },
-    /// Turn equipment off.
+    /// Turn equipment off. Like every whole-unit action (a power limit, a
+    /// curtailment, a DR level), on an end-use target it reaches a unit
+    /// serving both setpoints only while that unit's mode is the end use's.
     TurnOff,
     /// Limit power draw to a maximum.
     PowerLimit { max_kw: f64 },
