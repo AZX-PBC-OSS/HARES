@@ -225,6 +225,11 @@ pub struct DwellingConfig {
     /// occupancy and loads.
     pub schedule_path: Option<PathBuf>,
     pub weather_path: PathBuf,
+    /// The directory the default schedule profiles load from. `None` means
+    /// no default profiles: an equipment with no schedule column and no
+    /// HPXML schedule fractions is a construction error naming this field,
+    /// and a generated schedule cannot be built. The profiles never come
+    /// from a working-directory guess.
     pub defaults_path: Option<PathBuf>,
     pub sim_config: SimulationConfig,
     pub overrides: Option<serde_json::Value>,
@@ -2704,7 +2709,7 @@ fn build_from_blueprint_inner(
     validate_equipment_zones(&declarations, &env_zone_ids)?;
     environment.set_ambient_locations(equipment.iter().filter_map(|eq| eq.ambient_location()))?;
 
-    let mut allocated_loop_ids = loop_allocator::collect_allocated_loop_ids(&equipment_specs);
+    let mut allocated_loop_ids = loop_allocator::collect_allocated_loop_ids(&equipment_specs)?;
     // Sentinel loop IDs always valid — well-known addresses used by
     // equipment as sentinels when no typed config is available (0) or
     // for the shared DHW demand loop (u16::MAX - 1).

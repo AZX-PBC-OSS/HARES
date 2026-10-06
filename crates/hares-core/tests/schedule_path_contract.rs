@@ -284,6 +284,41 @@ fn generated_schedule_requires_a_defaults_directory() {
     );
 }
 
+/// A schedule file that omits a column an equipment maps to, with no
+/// defaults directory, fails construction naming the equipment and the
+/// `defaults_path` setting: the default profiles come only from the
+/// directory the config names, never from a working-directory guess. The
+/// BEopt example schedule has no lighting or plug-load columns.
+#[test]
+fn schedule_file_missing_a_column_needs_a_defaults_directory() {
+    let mut config = generated_schedule_config(Some(
+        project_root().join("data/examples/BEopt_example_schedule.csv"),
+    ));
+    config.defaults_path = None;
+
+    let err = match Dwelling::from_config(config.clone()) {
+        Err(err) => err,
+        Ok(_) => panic!(
+            "an equipment with no schedule column and no defaults directory must fail construction"
+        ),
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("has no schedule source"),
+        "the error must name the equipment without a schedule source, got: {message}"
+    );
+    assert!(
+        message.contains("no defaults directory is configured")
+            && message.contains("defaults_path"),
+        "the error must name the missing defaults directory and the setting, got: {message}"
+    );
+
+    config.defaults_path = Some(project_root().join("defaults"));
+    if let Err(err) = Dwelling::from_config(config) {
+        panic!("the same config with the shipped defaults directory must build, got: {err}");
+    }
+}
+
 /// Copy the shipped defaults CSV into a temporary directory: the only file
 /// the schedule generator reads.
 fn copy_shipped_defaults_csv() -> TempDir {

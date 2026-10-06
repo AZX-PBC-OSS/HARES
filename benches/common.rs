@@ -30,6 +30,12 @@ pub fn fixture_hpxml_path() -> PathBuf {
         .join("../../tests/fixtures/hpxml/ochre_samples/base.xml")
 }
 
+/// The shipped defaults directory: the benchmark schedule has no lighting or
+/// plug-load columns, so those loads take their default profiles from here.
+pub fn repo_defaults_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+}
+
 pub fn write_schedule_csv(path: &PathBuf) {
     let rows = [
         "Time,Clothes Washer (kW),HVAC Heating (C),HVAC Cooling (C)",
@@ -112,6 +118,7 @@ pub fn build_dwelling_config(
     bldg_id: i64,
     schedule_path: PathBuf,
     weather_path: PathBuf,
+    defaults_path: Option<PathBuf>,
     duration: Duration,
 ) -> DwellingConfig {
     DwellingConfig {
@@ -134,7 +141,7 @@ pub fn build_dwelling_config(
             rotation: hares_io::RotationPolicy::default(),
             site_location: hares_io::SiteLocationOverride::default(),
         },
-        defaults_path: None,
+        defaults_path,
         overrides: None,
         bldg_id,
         initialization_duration: None,

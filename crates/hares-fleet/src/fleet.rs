@@ -142,6 +142,10 @@ impl Fleet {
     /// `resstock_version` defaults to the latest known schema when `None`.
     /// `duration` overrides the default 24-hour simulation duration;
     /// when `None`, the default of 24 hours is used for backward compatibility.
+    /// `defaults_path` becomes every dwelling's
+    /// [`DwellingConfig::defaults_path`], with the same meaning: `None` means
+    /// no default schedule profiles, so a building whose schedule lacks a
+    /// column an equipment maps to fails construction naming the setting.
     pub fn from_resstock(
         metadata_path: &Path,
         hpxml_dir: &Path,
@@ -149,6 +153,7 @@ impl Fleet {
         resstock_version: Option<ResStockVersion>,
         filter: Option<HashMap<String, String>>,
         duration: Option<chrono::Duration>,
+        defaults_path: Option<&Path>,
     ) -> Result<Self> {
         let version = resstock_version.unwrap_or(DEFAULT_RESSTOCK_VERSION);
         let buildings = parse_resstock_metadata(metadata_path, version, hpxml_dir)
@@ -201,7 +206,7 @@ impl Fleet {
                         hpxml_path: building.hpxml_path,
                         schedule_path: Some(building.schedule_path),
                         weather_path,
-                        defaults_path: None,
+                        defaults_path: defaults_path.map(Path::to_path_buf),
                         sim_config: sim_config.clone(),
                         overrides: None,
                         bldg_id: building.bldg_id,
@@ -2180,6 +2185,7 @@ mod tests {
             Some(ResStockVersion::V2025_1),
             None,
             None,
+            None,
         )
         .expect("fleet construction");
 
@@ -2192,6 +2198,68 @@ mod tests {
                 entry.config.sim_config.duration,
                 Duration::hours(24),
                 "default duration should be 24 hours"
+            );
+        }
+    }
+
+    /// The ResStock constructor's `defaults_path` reaches every dwelling it
+    /// configures. The BEopt example schedule has no lighting or plug-load
+    /// columns, so its dwelling builds with the defaults directory and fails
+    /// naming `defaults_path` without one. The constructor points each
+    /// building at its dataset zip archive, which construction does not
+    /// unpack, so the test points the entries at unpacked files.
+    #[test]
+    fn from_resstock_passes_the_defaults_directory_to_each_dwelling() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("test.parquet");
+        write_resstock_parquet_v2025(&pq);
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let configs_with = |defaults_path: Option<&Path>| -> Vec<DwellingConfig> {
+            Fleet::from_resstock(
+                &pq,
+                tmp.path(),
+                tmp.path(),
+                Some(ResStockVersion::V2025_1),
+                None,
+                None,
+                defaults_path,
+            )
+            .expect("fleet construction")
+            .entries
+            .into_iter()
+            .map(|entry| DwellingConfig {
+                hpxml_path: fixture_hpxml_path(),
+                schedule_path: Some(root.join("data/examples/BEopt_example_schedule.csv")),
+                weather_path: root.join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+                initialization_duration: None,
+                ..entry.config
+            })
+            .collect()
+        };
+
+        let defaults = repo_defaults_path();
+        let with_defaults = configs_with(Some(&defaults));
+        assert!(!with_defaults.is_empty(), "the fleet must have an entry");
+        for config in with_defaults {
+            assert_eq!(config.defaults_path.as_deref(), Some(defaults.as_path()));
+            if let Err(err) = Dwelling::from_config(config) {
+                panic!("a dwelling given the defaults directory must build, got: {err}");
+            }
+        }
+
+        let without_defaults = configs_with(None);
+        assert!(!without_defaults.is_empty(), "the fleet must have an entry");
+        for config in without_defaults {
+            let message = match Dwelling::from_config(config) {
+                Err(err) => err.to_string(),
+                Ok(_) => panic!(
+                    "a schedule missing a mapped column must fail without a defaults directory"
+                ),
+            };
+            assert!(
+                message.contains("defaults_path"),
+                "the error must name the defaults_path setting, got: {message}"
             );
         }
     }
@@ -2209,6 +2277,7 @@ mod tests {
             Some(ResStockVersion::V2025_1),
             None,
             Some(Duration::days(365)),
+            None,
         )
         .expect("fleet construction");
 

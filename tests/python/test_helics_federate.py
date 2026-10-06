@@ -205,5 +205,6 @@ def test_validate_timeout_rejects_non_positive_and_non_finite(bad: float) -> Non
 def test_validate_timeout_rejects_non_numeric() -> None:
     from ochre_next.helics.federate import validate_timeout
 
+    not_a_number: Any = "soon"
     with pytest.raises(TypeError):
-        validate_timeout("soon", "timeout_s")  # type: ignore[arg-type]
+        validate_timeout(not_a_number, "timeout_s")

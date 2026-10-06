@@ -280,7 +280,7 @@ def _select_stratified_ids(
         # Prefer an unselected building ID when one is available.
         unselected = matches.filter(~pl.col(id_col).is_in(list(selected)))
         source = unselected if len(unselected) > 0 else matches
-        row = source.row(0, named=True)  # type: ignore[arg-type]
+        row = source.row(0, named=True)
         bid = int(row[id_col])
         _add_ids([bid], dim_values)
 

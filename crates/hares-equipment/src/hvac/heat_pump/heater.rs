@@ -508,17 +508,6 @@ impl HeatPumpHeaterCore {
             HeaterVariant::Wshp => HvacEquipmentType::WshpHeatPumpHeating,
         };
 
-        // A combustion backup (dual-fuel heat pump) burns fuel while the
-        // burner runs and the step publishes that flow in
-        // `flows.fuel_w`; the FUEL capability must be declared exactly when
-        // the flow can appear, so the contract holds in both directions.
-        // An electric backup draws no fuel and declares none.
-        let declares_fuel = config
-            .typed::<HeatPumpHeaterConfig>()
-            .ok()
-            .and_then(|cfg| fuel_type_from_backup_fuel(cfg.common.backup_fuel))
-            .is_some();
-
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(constructor_equipment_id(&config)),
@@ -543,12 +532,7 @@ impl HeatPumpHeaterCore {
                     | CoreCapabilities::HAS_SPEED
                     | CoreCapabilities::HAS_SETPOINT
                     | CoreCapabilities::HAS_COP
-                    | CoreCapabilities::REACTIVE
-                    | (if declares_fuel {
-                        CoreCapabilities::FUEL
-                    } else {
-                        CoreCapabilities::empty()
-                    }),
+                    | CoreCapabilities::REACTIVE,
                 telemetry_fields: heater_telemetry_fields(),
                 zone_type: None,
             },
@@ -979,6 +963,14 @@ impl HeatPumpHeaterCore {
             .unwrap_or_else(|| eir_from_backup_fuel(cfg.common.backup_fuel))
             .max(0.0);
         self.backup_fuel_type = fuel_type_from_backup_fuel(cfg.common.backup_fuel);
+        // A combustion backup (dual-fuel heat pump) burns fuel while the
+        // burner runs and the step publishes that flow in `flows.fuel_w`;
+        // the FUEL capability is declared exactly when the flow can appear,
+        // so the contract holds in both directions. It follows the config
+        // init applies, which is the override-merged one at assembly.
+        self.descriptor
+            .core_capabilities
+            .set(CoreCapabilities::FUEL, self.backup_fuel_type.is_some());
         self.er_stages = cfg.common.er_stages;
         self.er_stage_capacity_w = if self.er_stages > 0 && self.backup_capacity_w > 0.0 {
             self.backup_capacity_w / self.er_stages as f64
@@ -3556,6 +3548,40 @@ mod tests {
         );
         hares_types::validate_core_contract(eq.descriptor(), idle_co)
             .expect("idle step's core output must satisfy the contract with FUEL declared");
+    }
+
+    /// The FUEL capability follows the config `init` applies, not the one
+    /// the constructor saw: assembly re-initialises equipment with the
+    /// override-merged config, so a backup fuel changed by an override
+    /// must change the declaration in both directions.
+    #[test]
+    fn fuel_capability_follows_the_config_init_applies() {
+        let electric = heater_config_with(|typed| {
+            typed.common.backup_fuel = Some(hares_types::FuelType::Electric);
+        });
+        let gas = heater_config_with(|typed| {
+            typed.common.backup_fuel = Some(hares_types::FuelType::Gas);
+        });
+        let cold = env(18.0, 0.0, 0.003);
+        let declares_fuel = |eq: &ASHPHeater| {
+            eq.descriptor()
+                .core_capabilities
+                .contains(hares_types::CoreCapabilities::FUEL)
+        };
+
+        let mut to_gas = ASHPHeater::new(electric.clone());
+        to_gas.init(&gas, &cold).unwrap();
+        assert!(
+            declares_fuel(&to_gas),
+            "a gas backup applied at init must declare FUEL"
+        );
+
+        let mut to_electric = ASHPHeater::new(gas);
+        to_electric.init(&electric, &cold).unwrap();
+        assert!(
+            !declares_fuel(&to_electric),
+            "an electric backup applied at init must not declare FUEL"
+        );
     }
 
     /// An electric-backup heat pump never publishes a fuel flow and declares

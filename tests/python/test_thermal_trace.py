@@ -231,7 +231,7 @@ def _divergence_detector(ochre_df: pd.DataFrame, hares_df: pl.DataFrame) -> None
 @pytest.fixture(scope="module")
 def ochre_48h() -> pd.DataFrame:
     """Run OCHRE for 48h and return the per-step pandas DataFrame."""
-    from ochre import Dwelling as OchreDwelling  # type: ignore[import]
+    from ochre import Dwelling as OchreDwelling
 
     dwelling = OchreDwelling(
         name="thermal_trace",
@@ -256,7 +256,7 @@ def ochre_48h() -> pd.DataFrame:
 @pytest.fixture(scope="module")
 def hares_48h() -> pl.DataFrame:
     """Run HARES for 48h and return the per-step polars DataFrame."""
-    from ochre_next import Dwelling as HaresDwelling  # type: ignore[import]
+    from ochre_next import Dwelling as HaresDwelling
 
     dwelling = HaresDwelling.from_hpxml(
         HPXML,

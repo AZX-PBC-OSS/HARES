@@ -12,10 +12,13 @@ is even looked up, and no generation run ever writes the fixtures.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GENERATOR = _REPO_ROOT / "tests" / "python" / "generate_pvlib_solar_override.py"
@@ -54,6 +57,7 @@ def test_pvlib_generator_requires_an_output_directory(tmp_path: Path) -> None:
     assert _fixture_digests() == before, "the run touched tests/fixtures/freefloat/"
 
 
+@pytest.mark.ochre
 def test_pvlib_generator_fails_loudly_when_pvlib_call_fails(tmp_path: Path) -> None:
     """A failing pvlib call must exit non-zero, never fall back to zeros.
 
@@ -62,7 +66,14 @@ def test_pvlib_generator_fails_loudly_when_pvlib_call_fails(tmp_path: Path) -> N
     fixture could be silently replaced with zeros when the pvlib API moved
     under it. The rule now: a pvlib failure propagates, the run exits
     non-zero, and no CSV is written.
+
+    The shim patches pvlib itself, so the test needs the ochre dependency
+    group: the marker keeps it out of the dev-only default run, and a run
+    that selects it without pvlib fails naming the group, never skips.
     """
+    assert importlib.util.find_spec("pvlib") is not None, (
+        "this test needs pvlib from the ochre dependency group (uv sync --group ochre)"
+    )
     blocker = tmp_path / "shim"
     blocker.mkdir()
     (blocker / "sitecustomize.py").write_text(

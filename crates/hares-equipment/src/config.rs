@@ -576,8 +576,7 @@ impl EquipmentConfig {
 /// [`RejectUnknownKeys`] catcher, every other config through
 /// `deny_unknown_fields`), and a value the struct's schema cannot read
 /// errors naming the field path and the type problem, at the merge that
-/// applied the override, not at an `init` that non-critical equipment
-/// survives by being skipped.
+/// applied the override rather than later at `init`.
 ///
 /// The error's field path is present only when serde's path tracking can
 /// see the failing field: the flattened heat-pump configs' members are

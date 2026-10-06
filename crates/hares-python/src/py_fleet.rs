@@ -117,7 +117,8 @@ impl PyFleet {
     }
 
     #[classmethod]
-    #[pyo3(signature = (metadata_path, hpxml_dir, weather_dir, filter=None, resstock_version=None, duration_s=None))]
+    #[pyo3(signature = (metadata_path, hpxml_dir, weather_dir, filter=None, resstock_version=None, duration_s=None, defaults_path=None))]
+    #[allow(clippy::too_many_arguments)]
     pub fn from_resstock(
         _cls: &Bound<'_, PyType>,
         metadata_path: String,
@@ -126,6 +127,7 @@ impl PyFleet {
         filter: Option<&Bound<'_, PyDict>>,
         resstock_version: Option<Bound<'_, PyAny>>,
         duration_s: Option<i64>,
+        defaults_path: Option<String>,
     ) -> PyResult<Self> {
         let parsed_filter = filter
             .map(dict_to_filter)
@@ -159,6 +161,7 @@ impl PyFleet {
             parsed_version,
             parsed_filter,
             duration,
+            defaults_path.as_deref().map(Path::new),
         )
         .map_err(to_py_err)?;
 

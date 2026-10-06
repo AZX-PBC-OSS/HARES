@@ -25,6 +25,7 @@ fn bench_fleet(c: &mut Criterion) {
                                 idx as i64 + 1,
                                 schedule_path.clone(),
                                 weather_path.clone(),
+                                Some(common::repo_defaults_path()),
                                 chrono::Duration::days(1),
                             )
                         })

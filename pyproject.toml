@@ -90,6 +90,9 @@ include = [
 # has no per-environment typeCheckingMode, so the environment below lists
 # every rule strict promotes over standard, re-levelled to "error".
 typeCheckingMode = "standard"
+# The lowest supported Python (requires-python), so an import that exists
+# only in a later release fails the check instead of the 3.12 test run.
+pythonVersion = "3.12"
 include = ["python", "scripts", "tests", "typings"]
 exclude = ["tests/fixtures"]
 

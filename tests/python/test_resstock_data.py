@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import sys
 import zipfile
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import polars as pl
@@ -140,8 +142,11 @@ class TestResStockBuilding:
             schedule_path=Path("/b.csv"),
             weather_path=Path("/c.csv"),
         )
-        with pytest.raises(dataclasses.FrozenInstanceError if False else Exception):
-            b.bldg_id = 99  # type: ignore[misc]
+        # Typed as Any: the static checker rejects an assignment to a frozen
+        # field, and the runtime rejection is what this test pins.
+        mutable_view: Any = b
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            mutable_view.bldg_id = 99
 
     def test_fields_accessible(self):
         from ochre_next.data.resstock import ResStockBuilding
@@ -149,18 +154,6 @@ class TestResStockBuilding:
         b = ResStockBuilding(1, 2.5, Path("/h.xml"), Path("/s.csv"), Path("/w.csv"))
         assert b.bldg_id == 1
         assert b.sample_weight == 2.5
-
-
-import dataclasses
-
-
-class TestResStockBuildingFrozen:
-    def test_mutation_raises(self):
-        from ochre_next.data.resstock import ResStockBuilding
-
-        b = ResStockBuilding(1, 1.0, Path("/a"), Path("/b"), Path("/c"))
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            b.bldg_id = 2  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -1085,7 +1078,7 @@ class TestFleetResilience:
 
         cfg = resstock._version_config("2024.2")
 
-        fake_httpx = types.ModuleType("httpx")
+        fake_httpx: Any = types.ModuleType("httpx")
 
         class _FakeAC:
             def __init__(self, **kwargs) -> None:
@@ -1097,7 +1090,7 @@ class TestFleetResilience:
             async def __aexit__(self, *exc):
                 return False
 
-        fake_httpx.AsyncClient = _FakeAC  # type: ignore[attr-defined]
+        fake_httpx.AsyncClient = _FakeAC
 
         async def fake_download(client, cfg_, bid, upgrade, bdir, **kwargs) -> None:
             if bid == 2:

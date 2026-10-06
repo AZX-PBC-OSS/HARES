@@ -84,7 +84,7 @@ pub struct ElectricBoiler {
     hvac: HvacEquipment,
     rated_capacity_w: f64,
     eir: f64,
-    loop_id: LoopId,
+    loop_id: Option<LoopId>,
     fluid_type: FluidType,
     flow_rate_kg_s: f64,
     default_return_temp_c: f64,
@@ -116,7 +116,7 @@ pub struct GasBoiler {
     core_output: CoreOutput,
     hvac: HvacEquipment,
     rated_capacity_w: f64,
-    loop_id: LoopId,
+    loop_id: Option<LoopId>,
     fluid_type: FluidType,
     flow_rate_kg_s: f64,
     default_return_temp_c: f64,
@@ -163,11 +163,7 @@ impl ElectricBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let zone = zone_id_from_config(&config);
-        // The unassigned placeholder stands in until init applies the typed
-        // config's loop id; a boiler whose config carries no loop id fails
-        // init, so the placeholder never runs a step.
-        let loop_id =
-            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or(LoopId(0));
+        let loop_id = loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
@@ -192,10 +188,7 @@ impl ElectricBoiler {
 
         Self {
             descriptor,
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::fluid(loop_id, FluidType::Water),
-            ],
+            ports: vec![PortDeclaration::electrical(), declared_fluid_port(loop_id)],
             telemetry: electric_boiler_default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::Other, zone),
@@ -238,14 +231,11 @@ impl Equipment for ElectricBoiler {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         let typed = config.require_typed::<ElectricBoilerConfig>("Electric Boiler")?;
-        self.loop_id = LoopId(typed.loop_id.ok_or_else(|| {
-            HaresError::Equipment(format!(
-                "Electric Boiler '{}': its config carries no fluid loop id. Every \
-                 resolved boiler carries the loop id its wiring or loop allocation \
-                 assigned, and a boiler without one cannot declare its hydronic loop",
-                config.name
-            ))
-        })?);
+        self.loop_id = Some(require_loop_id(
+            typed.loop_id,
+            "Electric Boiler",
+            &config.name,
+        )?);
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         // The circulation pump is a secondary motor component (pf 0.84); the
@@ -276,7 +266,7 @@ impl Equipment for ElectricBoiler {
         // loop with a water port is the conflicting-type construction error.
         for port in &mut self.ports {
             if port.port_type == hares_types::PortType::Fluid {
-                port.loop_id = Some(self.loop_id);
+                port.loop_id = self.loop_id;
                 port.fluid_type = Some(self.fluid_type);
             }
         }
@@ -333,8 +323,8 @@ impl Equipment for ElectricBoiler {
         };
         let electric_kw = element_kw + pump_kw;
 
-        let return_temp_c =
-            loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
+        let loop_id = bound_loop_id(self.loop_id, "Electric Boiler", &self.descriptor.name)?;
+        let return_temp_c = loop_return_temp_c(env, loop_id).unwrap_or(self.default_return_temp_c);
         let cp_used = cp_j_kg_k(self.fluid_type);
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
             return_temp_c + thermal_output_w / (self.flow_rate_kg_s * cp_used)
@@ -360,7 +350,7 @@ impl Equipment for ElectricBoiler {
 
         if thermal_output_w > 0.0 {
             ports.accumulate(&PortContribution::Fluid {
-                loop_id: self.loop_id,
+                loop_id,
                 flow_rate_kg_s: self.flow_rate_kg_s,
                 supply_temp_c,
                 return_temp_c,
@@ -547,11 +537,7 @@ impl GasBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let zone = zone_id_from_config(&config);
-        // The unassigned placeholder stands in until init applies the typed
-        // config's loop id; a boiler whose config carries no loop id fails
-        // init, so the placeholder never runs a step.
-        let loop_id =
-            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or(LoopId(0));
+        let loop_id = loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
@@ -583,7 +569,7 @@ impl GasBoiler {
                 false,
             )
             .into_iter()
-            .chain([PortDeclaration::fluid(loop_id, FluidType::Water)])
+            .chain([declared_fluid_port(loop_id)])
             .collect(),
             telemetry: gas_boiler_default_telemetry(),
             core_output: CoreOutput::default(),
@@ -660,14 +646,7 @@ impl Equipment for GasBoiler {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         let typed = config.require_typed::<GasBoilerConfig>("Gas Boiler")?;
-        self.loop_id = LoopId(typed.loop_id.ok_or_else(|| {
-            HaresError::Equipment(format!(
-                "Gas Boiler '{}': its config carries no fluid loop id. Every \
-                 resolved boiler carries the loop id its wiring or loop allocation \
-                 assigned, and a boiler without one cannot declare its hydronic loop",
-                config.name
-            ))
-        })?);
+        self.loop_id = Some(require_loop_id(typed.loop_id, "Gas Boiler", &config.name)?);
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         typed.validate()?;
@@ -702,7 +681,7 @@ impl Equipment for GasBoiler {
         // loop with a water port is the conflicting-type construction error.
         for port in &mut self.ports {
             if port.port_type == hares_types::PortType::Fluid {
-                port.loop_id = Some(self.loop_id);
+                port.loop_id = self.loop_id;
                 port.fluid_type = Some(self.fluid_type);
             }
         }
@@ -748,8 +727,8 @@ impl Equipment for GasBoiler {
         let plr = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * plr * sf;
-        let return_temp_c =
-            loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
+        let loop_id = bound_loop_id(self.loop_id, "Gas Boiler", &self.descriptor.name)?;
+        let return_temp_c = loop_return_temp_c(env, loop_id).unwrap_or(self.default_return_temp_c);
         // Condensing EIR polynomial uses zone air temperature (OCHRE HVAC.py:651:
         // t_in = self.zone.temperature), not return water temperature.
         let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
@@ -790,7 +769,7 @@ impl Equipment for GasBoiler {
         }
         if thermal_output_w > 0.0 {
             ports.accumulate(&PortContribution::Fluid {
-                loop_id: self.loop_id,
+                loop_id,
                 flow_rate_kg_s: self.flow_rate_kg_s,
                 supply_temp_c,
                 return_temp_c,
@@ -1006,6 +985,41 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         "Gas Boiler",
         Box::new(|config| Box::new(GasBoiler::new(config))),
     );
+}
+
+/// A boiler's water-side port as `new` declares it: bound to the config's
+/// loop id when the config carries one, and unbound otherwise until `init`
+/// binds it or fails.
+fn declared_fluid_port(loop_id: Option<LoopId>) -> PortDeclaration {
+    PortDeclaration {
+        port_type: hares_types::PortType::Fluid,
+        zone: None,
+        loop_id,
+        domain_id: None,
+        fluid_type: Some(FluidType::Water),
+        fluid_node_id: None,
+    }
+}
+
+/// The typed config's loop id, or the construction error naming the boiler.
+fn require_loop_id(loop_id: Option<u16>, kind: &str, name: &str) -> crate::Result<LoopId> {
+    loop_id.map(LoopId).ok_or_else(|| {
+        HaresError::Equipment(format!(
+            "{kind} '{name}': its config carries no fluid loop id. Every resolved \
+             boiler carries the loop id its wiring or loop allocation assigned, and \
+             a boiler without one cannot declare its hydronic loop"
+        ))
+    })
+}
+
+/// The loop `init` bound; stepping a boiler whose init did not bind one is
+/// an error rather than a step on a stand-in loop.
+fn bound_loop_id(loop_id: Option<LoopId>, kind: &str, name: &str) -> crate::Result<LoopId> {
+    loop_id.ok_or_else(|| {
+        HaresError::Equipment(format!(
+            "{kind} '{name}' stepped with no fluid loop bound: init did not run or failed"
+        ))
+    })
 }
 
 fn loop_return_temp_c(env: &EnvironmentState, loop_id: LoopId) -> Option<f64> {
@@ -1390,6 +1404,94 @@ mod tests {
             gas_err.to_string().contains("Gas Boiler"),
             "the error names the boiler: {gas_err}"
         );
+    }
+
+    /// Before init, a boiler whose config carries no loop id declares its
+    /// fluid port with no loop: no placeholder loop stands in for the
+    /// missing id, so nothing can plan or step against a loop the input
+    /// never named.
+    #[test]
+    fn boiler_without_loop_id_declares_no_placeholder_loop() {
+        let electric = ElectricBoiler::new(
+            EquipmentConfig::from_typed(
+                "Electric Boiler".to_string(),
+                "Electric Boiler".to_string(),
+                ElectricBoilerConfig {
+                    zone_id: Some(1),
+                    loop_id: None,
+                    ..ElectricBoilerConfig::default()
+                },
+            )
+            .expect("the config builds"),
+        );
+        let gas = GasBoiler::new(
+            EquipmentConfig::from_typed(
+                "Gas Boiler".to_string(),
+                "Gas Boiler".to_string(),
+                GasBoilerConfig {
+                    zone_id: Some(1),
+                    loop_id: None,
+                    ..GasBoilerConfig::default()
+                },
+            )
+            .expect("the config builds"),
+        );
+        for (name, ports) in [("electric", electric.ports()), ("gas", gas.ports())] {
+            let fluid: Vec<_> = ports
+                .iter()
+                .filter(|port| port.port_type == hares_types::PortType::Fluid)
+                .collect();
+            assert_eq!(fluid.len(), 1, "the {name} boiler declares one fluid port");
+            assert_eq!(
+                fluid[0].loop_id, None,
+                "the {name} boiler's fluid port has no loop before init binds one"
+            );
+        }
+    }
+
+    /// A boiler stepped with no loop bound is an error naming it, never a
+    /// step on a stand-in loop.
+    #[test]
+    fn boiler_stepped_with_no_loop_bound_is_an_error() {
+        let env = env(18.0);
+        let mut electric = ElectricBoiler::new(
+            EquipmentConfig::from_typed(
+                "EB".to_string(),
+                "Electric Boiler".to_string(),
+                ElectricBoilerConfig {
+                    zone_id: Some(1),
+                    loop_id: None,
+                    ..ElectricBoilerConfig::default()
+                },
+            )
+            .expect("the config builds"),
+        );
+        let mut gas = GasBoiler::new(
+            EquipmentConfig::from_typed(
+                "GB".to_string(),
+                "Gas Boiler".to_string(),
+                GasBoilerConfig {
+                    zone_id: Some(1),
+                    loop_id: None,
+                    ..GasBoilerConfig::default()
+                },
+            )
+            .expect("the config builds"),
+        );
+        let errors = [
+            electric
+                .step(&env, Duration::from_secs(60), &mut PortSlots::default())
+                .expect_err("an electric boiler with no loop cannot step"),
+            gas.step(&env, Duration::from_secs(60), &mut PortSlots::default())
+                .expect_err("a gas boiler with no loop cannot step"),
+        ];
+        for (err, name) in errors.iter().zip(["EB", "GB"]) {
+            let msg = err.to_string();
+            assert!(
+                msg.contains(name) && msg.contains("no fluid loop"),
+                "the error names the boiler and the missing loop, got: {msg}"
+            );
+        }
     }
 
     #[test]

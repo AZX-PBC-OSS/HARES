@@ -5,8 +5,8 @@
   ],
   "defaults_dir": "defaults",
   "defaults_digest": "3f9c3a95bd023e9daa0494d64c02e0bb984fa84cf61bc31aad42913ab3a99975",
-  "git_head": "1b708ccb013a5e9b37e134f96b6ae47c2c40c2bd",
-  "git_dirty": true,
+  "git_head": "21c6f8942d20deeb717594534204a1965934af0b",
+  "git_dirty": false,
   "metrics": [
     {
       "comfort_hours": {

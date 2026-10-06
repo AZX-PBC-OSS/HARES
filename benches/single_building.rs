@@ -29,6 +29,7 @@ fn bench_single_building(c: &mut Criterion) {
                         1,
                         schedule_path.clone(),
                         weather_path.clone(),
+                        Some(common::repo_defaults_path()),
                         *duration,
                     );
                     let _ = engine.run(cfg).expect("single building benchmark run");

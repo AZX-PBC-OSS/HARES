@@ -545,7 +545,7 @@ fn malformed_equipment_id_in_the_typed_payload_fails_the_build_loudly() {
 /// which must pass the check, so the reported failure is the init's, not
 /// the unassigned-id rejection.
 #[test]
-fn noncritical_init_failure_is_fatal_after_the_identity_checks() {
+fn non_identity_init_failure_is_fatal_after_the_identity_checks() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
     let config = dwelling_config(&hpxml, sim_config(Duration::days(1), None, 0));

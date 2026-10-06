@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 from unittest import mock
 
 import numpy as np
@@ -427,10 +427,11 @@ class TestPybammBatteryEfficiencyLut:
     def test_power_range_kw_is_required_keyword(self) -> None:
         from ochre_next.adapters import pybamm_battery
 
+        # Typed as Any: the call passes power_range_kw positionally on
+        # purpose, which the signature rejects statically and at runtime.
+        generate: Any = pybamm_battery.generate_efficiency_lut
         with pytest.raises(TypeError):
-            pybamm_battery.generate_efficiency_lut(
-                "NMC", 50, 14, 4, (0, 45), (0.1, 0.95), (-5, 5), 0  # type: ignore[misc]
-            )
+            generate("NMC", 50, 14, 4, (0, 45), (0.1, 0.95), (-5, 5), 0)
 
     def test_without_pybamm_returns_defaults(self) -> None:
         from ochre_next.adapters import pybamm_battery

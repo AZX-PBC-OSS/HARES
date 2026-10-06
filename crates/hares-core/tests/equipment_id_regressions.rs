@@ -524,7 +524,7 @@ fn assembly_equipment_ids_are_distinct_and_nonzero() {
 
 /// Determinism: the same config built twice yields an identical name→id
 /// mapping. The mapping is asserted — never contiguity, which the design
-/// does not promise (dropped non-critical equipment leaves gaps).
+/// does not promise (the counter jumps past every explicit id).
 #[test]
 fn same_config_builds_identical_name_to_id_mapping() {
     let first = id_map(&build_fixture_dwelling(&fixture_dir(), true, None));

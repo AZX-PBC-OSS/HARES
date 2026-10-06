@@ -1326,37 +1326,48 @@ pub(crate) fn build_default_solvers(
         // CFM50/ELA → ACH50 conversion below and the AIM-2 coefficients in
         // the conditioned-zone branch -- are reached only when a blower-door
         // leakage input (ACH50, CFM50, or ELA) is present and the leakage is
-        // not a constant ACH, so the volume is resolved once here and a
-        // missing value is an error naming the element.
-        let volume_needed = building.infiltration_constant_ach.is_none()
-            && (building.infiltration_ach50.is_some()
-                || building.infiltration_cfm50.is_some()
-                || building.infiltration_ela_cm2.is_some());
-        let conditioned_volume_m3: f64 = if volume_needed {
-            building.conditioned_volume_m3.ok_or_else(|| {
-                HaresError::Dwelling(
-                    "HPXML is missing required field \
-                     `BuildingSummary/BuildingConstruction/ConditionedBuildingVolume` on Building \
-                     `conditioned` -- conditioned volume (m³) is required for infiltration set-up \
-                     (CFM50/ELA to ACH50 conversion and AIM-2 coefficients); no silent default \
-                     permitted"
-                        .to_string(),
-                )
-            })?
-        } else {
-            building.conditioned_volume_m3.unwrap_or(0.0)
-        };
-
-        let resolved_ach50: Option<f64> = building.infiltration_ach50.or_else(|| {
-            let cfm50 = building.infiltration_cfm50.or_else(|| {
-                building
-                    .infiltration_ela_cm2
-                    .map(|ela_cm2| ela_cm2 * 0.0524 * 50.0_f64.powf(N_I_DEFAULT))
-            })?;
-            // 1 ft³ = 0.0283168 m³  →  volume_ft3 = volume_m3 / 0.0283168 = volume_m3 × 35.3147
-            let volume_ft3 = conditioned_volume_m3 * 35.3147;
-            Some((cfm50 * 60.0) / volume_ft3)
+        // not a constant ACH, so the volume is resolved there alone, and a
+        // missing value is an error naming the element. `blower_door` holds
+        // the ACH50 and the volume together so no other path can read a
+        // volume the input did not supply.
+        enum Leakage {
+            Ach50(f64),
+            Cfm50(f64),
+        }
+        let leakage = building.infiltration_ach50.map(Leakage::Ach50).or_else(|| {
+            building
+                .infiltration_cfm50
+                .or_else(|| {
+                    building
+                        .infiltration_ela_cm2
+                        .map(|ela_cm2| ela_cm2 * 0.0524 * 50.0_f64.powf(N_I_DEFAULT))
+                })
+                .map(Leakage::Cfm50)
         });
+        let blower_door: Option<(f64, f64)> = match leakage {
+            Some(leakage) if building.infiltration_constant_ach.is_none() => {
+                let volume_m3 = building.conditioned_volume_m3.ok_or_else(|| {
+                    HaresError::Dwelling(
+                        hares_io::hpxml::HpxmlError::MissingField {
+                            path: "BuildingSummary/BuildingConstruction/ConditionedBuildingVolume",
+                            system_kind: "Building",
+                            system_id: "conditioned".to_string(),
+                            reason: "conditioned volume (m³) is required for infiltration \
+                                     set-up (CFM50/ELA to ACH50 conversion and AIM-2 \
+                                     coefficients); no silent default permitted",
+                        }
+                        .to_string(),
+                    )
+                })?;
+                let ach50 = match leakage {
+                    Leakage::Ach50(ach50) => ach50,
+                    // 1 ft³ = 0.0283168 m³  →  volume_ft3 = volume_m3 × 35.3147
+                    Leakage::Cfm50(cfm50) => (cfm50 * 60.0) / (volume_m3 * 35.3147),
+                };
+                Some((ach50, volume_m3))
+            }
+            _ => None,
+        };
 
         let default_ceiling_height_m = building.ceiling_height_m;
         let building_height_m = default_ceiling_height_m
@@ -1407,7 +1418,7 @@ pub(crate) fn build_default_solvers(
                 ZoneType::Conditioned => {
                     if let Some(ach) = building.infiltration_constant_ach {
                         InfiltrationMethod::Ach { ach }
-                    } else if let Some(ach50) = resolved_ach50 {
+                    } else if let Some((ach50, volume_m3)) = blower_door {
                         let foundation = if has_vented_crawlspace(building) {
                             FoundationLeakageClass::VentedCrawlspace
                         } else {
@@ -1418,7 +1429,7 @@ pub(crate) fn build_default_solvers(
                             .unwrap_or(default_ceiling_height_m * building.floors_above_grade);
                         let coeffs = aim2_coefficients_from_ach50(&Aim2Params {
                             ach50,
-                            volume_m3: conditioned_volume_m3,
+                            volume_m3,
                             infiltration_height_m: h,
                             foundation,
                             shielding,
@@ -2079,6 +2090,13 @@ mod tests {
             msg.contains("ConditionedBuildingVolume"),
             "error must name the element, got: {msg}"
         );
+
+        // A constant ACH reads no volume: the same building without one
+        // builds.
+        building.infiltration_constant_ach = Some(0.5);
+        if let Err(err) = build(&building) {
+            panic!("a constant-ACH building needs no conditioned volume, got: {err}");
+        }
     }
 
     /// A building zone with no matching environment zone fails solver

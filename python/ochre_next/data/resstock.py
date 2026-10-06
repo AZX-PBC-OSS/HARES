@@ -17,7 +17,9 @@ import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Coroutine
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypeIs
+from typing import TYPE_CHECKING, Any, Protocol
+
+from typing_extensions import TypeIs  # typing.TypeIs is Python 3.13+
 
 from ochre_next.data._checksum import (
     remove_cache_with_sidecar as _remove_cache_with_sidecar,

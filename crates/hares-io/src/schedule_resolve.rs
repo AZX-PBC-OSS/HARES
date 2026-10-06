@@ -345,23 +345,22 @@ pub struct DefaultScheduleProfile {
 }
 
 /// The default schedule profiles parsed from `Default Schedule Parameters.csv`
-/// in the configured defaults directory.
+/// in the configured defaults directory. The `Default` value is the empty
+/// set a config with no defaults directory resolves against: it has no
+/// file, and every lookup names the `defaults_path` setting.
 #[derive(Debug, Clone, Default)]
 pub struct DefaultProfiles {
     profiles: HashMap<String, DefaultScheduleProfile>,
-    csv_path: PathBuf,
+    csv_path: Option<PathBuf>,
 }
 
 impl DefaultProfiles {
     /// The profile named `name`, or an error naming the missing profile and
     /// the file it was expected in.
     pub fn get(&self, name: &str) -> Result<&DefaultScheduleProfile, HaresError> {
-        self.profiles.get(name).ok_or_else(|| {
-            let location = self.location_description();
-            HaresError::Io(format!(
-                "no default schedule profile '{name}' in {location}"
-            ))
-        })
+        self.profiles
+            .get(name)
+            .ok_or_else(|| HaresError::Io(self.missing_profile(name)))
     }
 
     /// The profile named `name`, if present: the probe for fallback chains
@@ -370,18 +369,52 @@ impl DefaultProfiles {
         self.profiles.get(name)
     }
 
-    /// Where the profiles were loaded from, for error messages: the CSV path
-    /// in quotes, or the note that no defaults directory was configured.
-    pub(crate) fn location_description(&self) -> String {
-        if self.csv_path.as_os_str().is_empty() {
-            "no defaults directory is configured".to_string()
-        } else {
-            format!("'{}'", self.csv_path.display())
+    /// Why no profile named `name` is available, for error messages: the
+    /// file it is missing from, or the unset defaults directory.
+    pub(crate) fn missing_profile(&self, name: &str) -> String {
+        match &self.csv_path {
+            Some(path) => format!("no '{name}' profile in '{}'", path.display()),
+            None => format!(
+                "no '{name}' profile, because no defaults directory is configured to \
+                 load '{DEFAULT_SCHEDULES_CSV}' from; set defaults_path"
+            ),
         }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.profiles.is_empty()
+    }
+}
+
+/// One parsed row of the default schedule profiles file, for the error a
+/// second row of the same profile and element raises.
+struct ProfileRow<'a> {
+    csv_path: &'a Path,
+    profile: &'a str,
+    element: &'a str,
+    line_no: usize,
+}
+
+impl ProfileRow<'_> {
+    fn insert_into<const N: usize>(
+        &self,
+        map: &mut HashMap<String, (usize, [f64; N])>,
+        values: [f64; N],
+    ) -> Result<(), HaresError> {
+        match map.entry(self.profile.to_string()) {
+            std::collections::hash_map::Entry::Occupied(first) => Err(HaresError::Io(format!(
+                "'{}' line {}: profile '{}' element '{}' repeats the row at line {}",
+                self.csv_path.display(),
+                self.line_no,
+                self.profile,
+                self.element,
+                first.get().0,
+            ))),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert((self.line_no, values));
+                Ok(())
+            }
+        }
     }
 }
 
@@ -391,7 +424,8 @@ impl DefaultProfiles {
 ///
 /// Strict: an unreadable file, a row with fewer than five fields, a value
 /// that does not parse, a value count other than 24 (fractions) or 12
-/// (monthly multipliers), and a profile missing any of its
+/// (monthly multipliers), a second row for the same profile and element,
+/// and a profile missing any of its
 /// `weekday_fractions` / `weekend_fractions` / `month_multipliers` rows are
 /// all errors naming the file, the line, the profile and the element.
 pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, HaresError> {
@@ -403,10 +437,10 @@ pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, Har
         ))
     })?;
 
-    // Intermediate: collect raw vectors per (ochre_name, element_kind)
-    let mut weekday_map: HashMap<String, [f64; 24]> = HashMap::new();
-    let mut weekend_map: HashMap<String, [f64; 24]> = HashMap::new();
-    let mut month_map: HashMap<String, [f64; 12]> = HashMap::new();
+    // Intermediate: the values and source line per (ochre_name, element_kind)
+    let mut weekday_map: HashMap<String, (usize, [f64; 24])> = HashMap::new();
+    let mut weekend_map: HashMap<String, (usize, [f64; 24])> = HashMap::new();
+    let mut month_map: HashMap<String, (usize, [f64; 12])> = HashMap::new();
 
     for (idx, line) in content.lines().enumerate().skip(1) {
         let line_no = idx + 1;
@@ -449,18 +483,24 @@ pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, Har
                 csv_path.display(),
             ))
         };
+        let row = ProfileRow {
+            csv_path: &csv_path,
+            profile: profile_name,
+            element,
+            line_no,
+        };
         match element {
             "weekday_fractions" => {
                 let arr: [f64; 24] = values.try_into().map_err(|_| wrong_count(24))?;
-                weekday_map.insert(profile_name.to_string(), arr);
+                row.insert_into(&mut weekday_map, arr)?;
             }
             "weekend_fractions" => {
                 let arr: [f64; 24] = values.try_into().map_err(|_| wrong_count(24))?;
-                weekend_map.insert(profile_name.to_string(), arr);
+                row.insert_into(&mut weekend_map, arr)?;
             }
             "month_multipliers" => {
                 let arr: [f64; 12] = values.try_into().map_err(|_| wrong_count(12))?;
-                month_map.insert(profile_name.to_string(), arr);
+                row.insert_into(&mut month_map, arr)?;
             }
             other => {
                 return Err(HaresError::Io(format!(
@@ -482,24 +522,21 @@ pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, Har
     names.extend(month_map.keys().cloned());
     let mut profiles = HashMap::new();
     for name in &names {
-        let weekday = weekday_map.get(name).ok_or_else(|| {
+        let missing = |element: &str| {
             HaresError::Io(format!(
-                "'{}': profile '{name}' has no weekday_fractions row",
+                "'{}': profile '{name}' has no {element} row",
                 csv_path.display(),
             ))
-        })?;
-        let weekend = weekend_map.get(name).ok_or_else(|| {
-            HaresError::Io(format!(
-                "'{}': profile '{name}' has no weekend_fractions row",
-                csv_path.display(),
-            ))
-        })?;
-        let months = month_map.get(name).ok_or_else(|| {
-            HaresError::Io(format!(
-                "'{}': profile '{name}' has no month_multipliers row",
-                csv_path.display(),
-            ))
-        })?;
+        };
+        let (_, weekday) = weekday_map
+            .get(name)
+            .ok_or_else(|| missing("weekday_fractions"))?;
+        let (_, weekend) = weekend_map
+            .get(name)
+            .ok_or_else(|| missing("weekend_fractions"))?;
+        let (_, months) = month_map
+            .get(name)
+            .ok_or_else(|| missing("month_multipliers"))?;
         profiles.insert(
             name.clone(),
             DefaultScheduleProfile {
@@ -528,7 +565,10 @@ pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, Har
     // was imported verbatim from the ANSI 301 source without weekend
     // derivation; the shipped default schedule CSV is pinned by the unit
     // test `shipped_default_occupancy_has_distinct_weekend`.
-    Ok(DefaultProfiles { profiles, csv_path })
+    Ok(DefaultProfiles {
+        profiles,
+        csv_path: Some(csv_path),
+    })
 }
 
 /// Parse a single CSV line, respecting double-quoted fields.
@@ -648,9 +688,11 @@ pub fn inject_schedule_into_specs(
     ensure_specs_for_csv_columns(
         specs,
         &csv_col_map,
+        &schedule.columns,
         defaults,
         foundation_name,
         garage_modeled,
+        warnings,
     );
 
     let profiles = match defaults_path {
@@ -1147,12 +1189,10 @@ fn inject_power_schedule(
         } else {
             return Err(HaresError::Io(format!(
                 "equipment '{}' has no schedule source: no '{}' column in the \
-                 schedule file, no HPXML schedule fractions on the spec, and no \
-                 '{}' profile in {}",
+                 schedule file, no HPXML schedule fractions on the spec, and {}",
                 spec.name,
                 col_name,
-                mapping.equipment_name,
-                profiles.location_description(),
+                profiles.missing_profile(mapping.equipment_name),
             )));
         }
     }
@@ -1577,9 +1617,11 @@ fn normalize_schedule_col_name(name: &str) -> String {
 fn ensure_specs_for_csv_columns(
     specs: &mut Vec<EquipmentSpec>,
     csv_col_map: &HashMap<String, usize>,
+    columns: &[Vec<f64>],
     defaults: &DefaultsStore,
     foundation_name: Option<&str>,
     garage_modeled: bool,
+    warnings: &mut Vec<Warning>,
 ) {
     for mapping in COLUMN_MAPPINGS {
         if matches!(
@@ -1591,23 +1633,43 @@ fn ensure_specs_for_csv_columns(
         ) {
             continue;
         }
-        if mapping.equipment_name == "Basement Lighting"
-            && foundation_name != Some("Finished Basement")
-        {
-            continue;
-        }
-        // Same OCHRE rule the HPXML lighting resolver applies
-        // (hpxml.py:1703-1709, resolve_loads.rs): garage lighting is created
-        // only when a garage is modeled. A `lighting_garage` column in the
-        // schedule template must not resurrect garage lighting for a
-        // dwelling without a garage: that spec gives zone heat to a Garage
-        // zone that does not exist and cannot join the dwelling.
-        if mapping.equipment_name == "Garage Lighting" && !garage_modeled {
-            continue;
-        }
         let col_name = normalize_schedule_col_name(mapping.csv_column);
-        if !csv_col_map.contains_key(&col_name) {
+        let Some(&col_idx) = csv_col_map.get(&col_name) else {
             continue;
+        };
+        // The zone gates follow the OCHRE rules the HPXML lighting resolver
+        // applies (hpxml.py:1695-1709, resolve_loads.rs): basement lighting
+        // exists only for a finished basement and garage lighting only when
+        // a garage is modeled. A spec here would give zone heat to a zone
+        // that does not exist, so the column is not read.
+        //
+        // An unread `lighting_garage` is not a warning, as in OS-HPXML
+        // v1.12.0: its simulation reads the column only when garage lighting
+        // exists (HPXMLtoOpenStudio/resources/lighting.rb:113-122) and warns
+        // only for column names it does not know (schedules.rb:1098-1101),
+        // and the ResStock 2024 schedule files carry the column for every
+        // home, garage or not.
+        //
+        // `lighting_basement` is OCHRE's column, which no schedule generator
+        // writes for a home without a finished basement: a non-zero one
+        // describes a load for a space the dwelling lacks, which the input
+        // should correct. An all-zero one carries no load.
+        match mapping.equipment_name {
+            "Garage Lighting" if !garage_modeled => continue,
+            "Basement Lighting" if foundation_name != Some("Finished Basement") => {
+                if columns[col_idx].iter().any(|&value| value != 0.0) {
+                    warnings.push(Warning::new(
+                        "schedule",
+                        format!(
+                            "schedule CSV column '{col_name}' carries a basement lighting \
+                             load, but the foundation is not a Finished Basement, so no \
+                             Basement Lighting is created and the column is not read"
+                        ),
+                    ));
+                }
+                continue;
+            }
+            _ => {}
         }
         if specs.iter().any(|s| s.name == mapping.equipment_name) {
             continue;
@@ -3167,6 +3229,31 @@ mod tests {
             .expect("write defaults csv with setpoints");
     }
 
+    /// A second row for the same profile and element is an error naming
+    /// both lines, never a silent override by the later row.
+    #[test]
+    fn load_default_profiles_rejects_a_duplicate_profile_row() {
+        let dir = tempdir().expect("create temp dir");
+        write_defaults_csv_with_setpoints(dir.path());
+        let path = dir.path().join("Default Schedule Parameters.csv");
+        let mut csv = std::fs::read_to_string(&path).expect("read the written csv");
+        csv.push_str(
+            "Schedules,Lighting,Indoor Lighting,month_multipliers,\"1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0\"\n",
+        );
+        std::fs::write(&path, csv).expect("rewrite the csv");
+
+        let err = super::load_default_profiles(dir.path())
+            .expect_err("a duplicate profile row must not override the first");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Indoor Lighting")
+                && msg.contains("month_multipliers")
+                && msg.contains("line 4")
+                && msg.contains("line 11"),
+            "the error names the profile, the element and both lines, got: {msg}"
+        );
+    }
+
     // ── Setpoint default profile tests ──
 
     #[test]
@@ -4289,6 +4376,10 @@ mod tests {
     }
 
     fn make_schedule_with_basement_lighting_column(values: &[f64]) -> ScheduleTimeSeries {
+        make_schedule_with_column("lighting_basement", values)
+    }
+
+    fn make_schedule_with_column(name: &str, values: &[f64]) -> ScheduleTimeSeries {
         let start =
             DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
         let timestamps = (0..values.len())
@@ -4296,10 +4387,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut column_index = HashMap::new();
-        column_index.insert("lighting_basement".to_string(), 0);
+        column_index.insert(name.to_string(), 0);
         ScheduleTimeSeries {
             timestamps,
-            column_names: vec!["lighting_basement".to_string()],
+            column_names: vec![name.to_string()],
             columns: vec![values.to_vec()],
             column_index,
             source_step_secs: 3600,
@@ -4397,6 +4488,90 @@ mod tests {
         assert!(
             !specs.iter().any(|s| s.name == "Basement Lighting"),
             "Basement Lighting must not be auto-created from CSV column when foundation is Crawlspace"
+        );
+    }
+
+    fn unread_column_warnings<'a>(warnings: &'a [Warning], column: &str) -> Vec<&'a Warning> {
+        warnings
+            .iter()
+            .filter(|w| w.message.contains(&format!("'{column}'")))
+            .collect()
+    }
+
+    /// Injects a one-column schedule into a dwelling with no specs, a
+    /// crawlspace foundation and no garage, returning the specs created and
+    /// the warnings raised.
+    fn inject_into_crawlspace_home(
+        column: &str,
+        values: &[f64],
+    ) -> (Vec<EquipmentSpec>, Vec<Warning>) {
+        let mut schedule = make_schedule_with_column(column, values);
+        let mut specs: Vec<EquipmentSpec> = Vec::new();
+        let mut warnings = Vec::new();
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            Some("Crawlspace"),
+            false,
+            &mut warnings,
+        )
+        .expect("inject_schedule_into_specs should succeed");
+        (specs, warnings)
+    }
+
+    #[test]
+    fn basement_lighting_load_without_finished_basement_is_a_warning() {
+        let (specs, warnings) =
+            inject_into_crawlspace_home("lighting_basement", &[0.0, 0.01, 0.005]);
+
+        assert!(
+            !specs.iter().any(|s| s.name == "Basement Lighting"),
+            "Basement Lighting must not be auto-created without a finished basement"
+        );
+        let matching = unread_column_warnings(&warnings, "lighting_basement");
+        assert_eq!(
+            matching.len(),
+            1,
+            "the unread lighting_basement load must be reported once, got {warnings:?}"
+        );
+        assert!(
+            matching[0].message.contains("Finished Basement"),
+            "the warning must name the foundation rule, got: {}",
+            matching[0].message
+        );
+    }
+
+    #[test]
+    fn all_zero_basement_lighting_column_without_finished_basement_is_not_a_warning() {
+        let (specs, warnings) = inject_into_crawlspace_home("lighting_basement", &[0.0; 3]);
+
+        assert!(
+            !specs.iter().any(|s| s.name == "Basement Lighting"),
+            "Basement Lighting must not be auto-created without a finished basement"
+        );
+        assert!(
+            unread_column_warnings(&warnings, "lighting_basement").is_empty(),
+            "a column with no load needs no action, got {warnings:?}"
+        );
+    }
+
+    /// OS-HPXML reads `lighting_garage` only when garage lighting exists and
+    /// does not warn otherwise; the ResStock 2024 schedules carry a non-zero
+    /// column for every home.
+    #[test]
+    fn garage_lighting_column_without_a_garage_is_not_a_warning() {
+        let (specs, warnings) =
+            inject_into_crawlspace_home("lighting_garage", &[0.02, 0.01, 0.005]);
+
+        assert!(
+            !specs.iter().any(|s| s.name == "Garage Lighting"),
+            "Garage Lighting must not be auto-created for a dwelling with no garage"
+        );
+        assert!(
+            unread_column_warnings(&warnings, "lighting_garage").is_empty(),
+            "an unread lighting_garage column is not a warning, got {warnings:?}"
         );
     }
 

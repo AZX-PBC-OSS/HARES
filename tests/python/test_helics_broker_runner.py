@@ -151,8 +151,9 @@ def test_create_broker_ephemeral_port_path(monkeypatch: pytest.MonkeyPatch) -> N
 def test_create_broker_rejects_non_int_federate_count(monkeypatch: pytest.MonkeyPatch) -> None:
     broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
 
+    not_an_int: Any = 1.5
     with pytest.raises(TypeError, match="must be an int"):
-        broker_module.create_broker(n_federates=1.5)  # type: ignore[arg-type]
+        broker_module.create_broker(n_federates=not_an_int)
 
 
 def test_get_broker_port_can_parse_address(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -165,10 +166,10 @@ def test_get_broker_port_can_parse_address(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_get_broker_port_raises_when_unresolvable(monkeypatch: pytest.MonkeyPatch) -> None:
     broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
-    broker = object()
+    broker: Any = object()
 
     with pytest.raises(RuntimeError, match="Unable to determine broker port"):
-        broker_module.get_broker_port(broker)  # type: ignore[arg-type]
+        broker_module.get_broker_port(broker)
 
 
 def test_wait_for_broker_times_out(monkeypatch: pytest.MonkeyPatch) -> None:

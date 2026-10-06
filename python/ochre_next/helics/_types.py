@@ -1,6 +1,8 @@
 """Shared structural protocols and type guards for HELICS Python bindings."""
 
-from typing import Any, Protocol, TypeIs
+from typing import Any, Protocol
+
+from typing_extensions import TypeIs  # typing.TypeIs is Python 3.13+
 
 
 def is_json_object(value: object) -> TypeIs[dict[str, Any]]:

@@ -478,7 +478,7 @@ fn set_spec_equipment_id(spec: &mut EquipmentSpec, id: u32) {
 /// fractional, non-numeric) is left untouched — the constructor's reader
 /// maps it to the unassigned sentinel and assembly validation rejects the
 /// build loudly, never a silent substitution. Ids are therefore sparse by
-/// design (dropped non-critical equipment leaves gaps); the invariants are
+/// design (the counter jumps past every explicit id); the invariants are
 /// uniqueness, non-zero, and determinism from spec order — never
 /// contiguity.
 pub fn assign_equipment_ids(specs: &mut [EquipmentSpec]) {

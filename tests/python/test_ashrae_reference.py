@@ -26,14 +26,13 @@ pytestmark = pytest.mark.ochre
 # Import the reference script as a module.
 _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
-from gen_ashrae_reference import (  # noqa: E402  (path insert above)  # type: ignore[import-not-found]
+from gen_ashrae_reference import (
     MIN_DELTA_T_TARP_NATURAL_K,
     FilmInputs,
     ashrae_simple_interior_h_conv,
     film_resistances,
     tarp_h_natural,
 )
-
 
 # ---------------------------------------------------------------------------
 # Orientation boundary angles derived from:

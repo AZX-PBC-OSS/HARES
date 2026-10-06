@@ -83,11 +83,10 @@ def _run_ochre() -> tuple[dict[str, float], float, float]:
     """Run OCHRE with PV + Battery for 120 days."""
     if str(VENDOR_OCHRE) not in sys.path:
         sys.path.insert(0, str(VENDOR_OCHRE))
-    from ochre import Dwelling as OchreDwelling  # type: ignore[import-not-found]
-
     # OCHRE's infiltration model converts with a unit name pint 0.25 removed
     # from the default registry; re-register it before any dwelling is built.
-    import ochre.utils.units  # type: ignore[import-not-found]  # noqa: E402
+    import ochre.utils.units
+    from ochre import Dwelling as OchreDwelling
 
     register_removed_units(ochre.utils.units.ureg)
 
@@ -144,7 +143,8 @@ def _run_ochre() -> tuple[dict[str, float], float, float]:
 
 def _run_hares() -> tuple[dict[str, float], float, float]:
     """Run HARES with PV + Battery for 120 days."""
-    from ochre_next import Battery, Dwelling as HaresDwelling, PV  # type: ignore[import-not-found]
+    from ochre_next import PV, Battery
+    from ochre_next import Dwelling as HaresDwelling
 
     t0 = time.perf_counter()
     dwelling = HaresDwelling.from_hpxml(

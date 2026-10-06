@@ -292,6 +292,33 @@ def test_from_resstock_default_version_is_2025_1(tmp_path: Path) -> None:
     assert len(fleet) == 1
 
 
+def test_from_resstock_accepts_a_defaults_path(tmp_path: Path) -> None:
+    """The binding takes the defaults_path keyword its stub declares."""
+    py_fleet = _pyfleet_class()[0]
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+
+    metadata = tmp_path / "metadata.parquet"
+    table = pa.table(
+        {
+            "building_id": [12345],
+            "upgrade_id": [0],
+            "weight": [1.0],
+            "in.state": ["CO"],
+        }
+    )
+    pq.write_table(table, metadata)
+
+    fleet = py_fleet.from_resstock(
+        str(metadata),
+        str(tmp_path),
+        str(tmp_path),
+        defaults_path=str(HARES_DEFAULTS),
+    )
+
+    assert len(fleet) == 1
+
+
 def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
     """Verify from_resstock rejects invalid version string."""
     py_fleet = _pyfleet_class()[0]

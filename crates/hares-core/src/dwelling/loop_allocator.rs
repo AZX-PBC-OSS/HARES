@@ -26,33 +26,51 @@ use hares_equipment::{
 use hares_io::EquipmentSpec;
 use hares_types::HaresError;
 
-/// Iterate over all allocated loop IDs across equipment typed configs.
+/// All allocated loop IDs across equipment typed configs.
 ///
-/// Yields the `loop_id` (or `boiler_loop_id` for indirect tanks) from every
-/// equipment spec whose typed config carries a `Some` value.  This is the
+/// Collects the `loop_id` (or `boiler_loop_id` for indirect tanks) from every
+/// equipment spec whose typed config carries a `Some` value; a typed config
+/// that does not read as its spec's config type is an error naming the
+/// spec, not a spec without a loop id.  This is the
 /// single source of truth for which equipment types carry loop IDs — both
 /// `max_wired_loop_id` and `collect_allocated_loop_ids` derive from it,
 /// guaranteeing that adding a new equipment type to this match arm
 /// automatically covers allocation, validation, and max-finding.
-fn iter_allocated_loop_ids(specs: &[EquipmentSpec]) -> impl Iterator<Item = u16> + '_ {
-    specs.iter().filter_map(|spec| {
-        let cfg = spec.typed_config.as_ref()?;
-        match spec.name.as_str() {
-            "Gas Boiler" => cfg.typed::<GasBoilerConfig>().ok()?.loop_id,
-            "Electric Boiler" => cfg.typed::<ElectricBoilerConfig>().ok()?.loop_id,
-            "Gas Water Heater" => cfg.typed::<GasWaterHeaterConfig>().ok()?.loop_id,
+fn allocated_loop_ids(specs: &[EquipmentSpec]) -> Result<Vec<u16>, HaresError> {
+    let mut ids = Vec::new();
+    for spec in specs {
+        let Some(cfg) = spec.typed_config.as_ref() else {
+            continue;
+        };
+        let label = spec.name.as_str();
+        let id = match label {
+            "Gas Boiler" => cfg.require_typed::<GasBoilerConfig>(label)?.loop_id,
+            "Electric Boiler" => cfg.require_typed::<ElectricBoilerConfig>(label)?.loop_id,
+            "Gas Water Heater" => cfg.require_typed::<GasWaterHeaterConfig>(label)?.loop_id,
             "Electric Resistance Water Heater" => {
-                cfg.typed::<ElectricResistanceWaterHeaterConfig>()
-                    .ok()?
+                cfg.require_typed::<ElectricResistanceWaterHeaterConfig>(label)?
                     .loop_id
             }
-            "Tankless Water Heater" => cfg.typed::<TanklessWaterHeaterConfig>().ok()?.loop_id,
-            "Heat Pump Water Heater" => cfg.typed::<HeatPumpWaterHeaterConfig>().ok()?.loop_id,
-            "Indirect Tank" => cfg.typed::<IndirectTankConfig>().ok()?.boiler_loop_id,
-            "Gas Generator" | "Gas Fuel Cell" => cfg.typed::<GeneratorConfig>().ok()?.loop_id,
+            "Tankless Water Heater" => {
+                cfg.require_typed::<TanklessWaterHeaterConfig>(label)?
+                    .loop_id
+            }
+            "Heat Pump Water Heater" => {
+                cfg.require_typed::<HeatPumpWaterHeaterConfig>(label)?
+                    .loop_id
+            }
+            "Indirect Tank" => {
+                cfg.require_typed::<IndirectTankConfig>(label)?
+                    .boiler_loop_id
+            }
+            "Gas Generator" | "Gas Fuel Cell" => {
+                cfg.require_typed::<GeneratorConfig>(label)?.loop_id
+            }
             _ => None,
-        }
-    })
+        };
+        ids.extend(id);
+    }
+    Ok(ids)
 }
 
 /// Scan all equipment typed configs and find the maximum assigned loop ID.
@@ -60,30 +78,45 @@ fn iter_allocated_loop_ids(specs: &[EquipmentSpec]) -> impl Iterator<Item = u16>
 /// Loop ID 0 (the `Default` for `LoopId`) is never explicitly assigned by
 /// `resolve_loop_wiring` (which starts from 1).  Returning 0 when no IDs are
 /// wired produces the correct `max_wired + 1 = 1` start for the allocator.
-fn max_wired_loop_id(specs: &[EquipmentSpec]) -> u16 {
-    iter_allocated_loop_ids(specs).max().unwrap_or(0)
+fn max_wired_loop_id(specs: &[EquipmentSpec]) -> Result<u16, HaresError> {
+    Ok(allocated_loop_ids(specs)?.into_iter().max().unwrap_or(0))
 }
 
-/// Patch a typed config in-place when `loop_id` field is `None`.
+/// Hands out the next free loop id for `spec_name`. Ids stop below the
+/// shared DHW demand loop's reserved id: running out is an error naming
+/// the spec left without one, never a repeat of an id already in use.
+fn take_loop_id(next_id: &mut u32, spec_name: &str) -> Result<u16, HaresError> {
+    let reserved = hares_equipment::DHW_DEMAND_LOOP.0;
+    let id = u16::try_from(*next_id)
+        .ok()
+        .filter(|id| *id < reserved)
+        .ok_or_else(|| {
+            HaresError::Dwelling(format!(
+                "no fluid loop id remains for '{spec_name}': allocated ids stop below \
+                 the reserved DHW demand loop id {reserved}"
+            ))
+        })?;
+    *next_id += 1;
+    Ok(id)
+}
+
+/// Patches a typed config in place when its loop id is `None`, and returns
+/// the loop id the config carries afterwards.
 fn replace_typed<T: EquipmentTypedConfig>(
-    cfg: &mut Option<EquipmentConfig>,
-    next_id: &mut u16,
-    setter: impl FnOnce(&mut T, u16),
-    assign: impl FnOnce(&T) -> bool,
-) -> Result<(), HaresError> {
-    let Some(eq_cfg) = cfg else {
-        return Ok(());
-    };
-    let Ok(mut typed) = eq_cfg.typed::<T>() else {
-        return Ok(());
-    };
-    if !assign(&typed) {
-        return Ok(());
+    cfg: &mut EquipmentConfig,
+    spec_name: &str,
+    next_id: &mut u32,
+    set: impl FnOnce(&mut T, u16),
+    get: impl Fn(&T) -> Option<u16>,
+) -> Result<u16, HaresError> {
+    let mut typed = cfg.require_typed::<T>(spec_name)?;
+    if let Some(id) = get(&typed) {
+        return Ok(id);
     }
-    setter(&mut typed, *next_id);
-    *next_id = next_id.saturating_add(1);
-    *eq_cfg = EquipmentConfig::from_typed(eq_cfg.name.clone(), eq_cfg.ochre_class.clone(), typed)?;
-    Ok(())
+    let id = take_loop_id(next_id, spec_name)?;
+    set(&mut typed, id);
+    *cfg = EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
+    Ok(id)
 }
 
 /// Collect every loop ID currently assigned across all equipment typed configs.
@@ -93,17 +126,29 @@ fn replace_typed<T: EquipmentTypedConfig>(
 /// constructors that hardcode a loop ID instead of using their typed config.
 pub(crate) fn collect_allocated_loop_ids(
     specs: &[EquipmentSpec],
-) -> std::collections::HashSet<u16> {
-    iter_allocated_loop_ids(specs).collect()
+) -> Result<std::collections::HashSet<u16>, HaresError> {
+    Ok(allocated_loop_ids(specs)?.into_iter().collect())
 }
 
 /// The loop id a spec's raw parameters carry under `key` (written there by
 /// the wiring pass, or by this allocator for equipment pending autosizing).
-fn param_loop_id(spec: &EquipmentSpec, key: &str) -> Option<u16> {
-    spec.parameters
-        .get(key)
-        .and_then(serde_json::Value::as_u64)
+/// A present value that is not a u16 is an error naming it.
+fn param_loop_id(spec: &EquipmentSpec, key: &str) -> Result<Option<u16>, HaresError> {
+    let Some(value) = spec.parameters.get(key) else {
+        return Ok(None);
+    };
+    value
+        .as_u64()
         .and_then(|v| u16::try_from(v).ok())
+        .map(Some)
+        .ok_or_else(|| {
+            HaresError::Dwelling(format!(
+                "equipment '{}' carries {key} = {value} in its parameters, which is not a \
+                 loop id (an integer from 0 to {})",
+                spec.name,
+                u16::MAX
+            ))
+        })
 }
 
 /// Allocate one spec's loop id under `param_key`. The id travels in the
@@ -115,28 +160,19 @@ fn param_loop_id(spec: &EquipmentSpec, key: &str) -> Option<u16> {
 fn allocate_loop_id<T: EquipmentTypedConfig>(
     spec: &mut EquipmentSpec,
     param_key: &str,
-    next_id: &mut u16,
+    next_id: &mut u32,
     set: impl FnOnce(&mut T, u16),
     get: impl Fn(&T) -> Option<u16>,
 ) -> Result<(), HaresError> {
-    if spec.typed_config.is_none() {
-        if param_loop_id(spec, param_key).is_none() {
-            spec.parameters
-                .insert(param_key.to_string(), serde_json::json!(*next_id));
-            *next_id = next_id.saturating_add(1);
-        }
-        return Ok(());
-    }
-    replace_typed::<T>(&mut spec.typed_config, next_id, set, |c| get(c).is_none())?;
-    if let Some(id) = spec
-        .typed_config
-        .as_ref()
-        .and_then(|cfg| cfg.typed::<T>().ok())
-        .and_then(|typed| get(&typed))
-    {
-        spec.parameters
-            .insert(param_key.to_string(), serde_json::json!(id));
-    }
+    let id = match spec.typed_config.as_mut() {
+        Some(cfg) => replace_typed::<T>(cfg, &spec.name, next_id, set, get)?,
+        None => match param_loop_id(spec, param_key)? {
+            Some(_) => return Ok(()),
+            None => take_loop_id(next_id, &spec.name)?,
+        },
+    };
+    spec.parameters
+        .insert(param_key.to_string(), serde_json::json!(id));
     Ok(())
 }
 
@@ -150,12 +186,7 @@ fn allocate_loop_id<T: EquipmentTypedConfig>(
 /// Standalone equipment that shares a fluid loop domain will receive
 /// distinct IDs, eliminating collision with wired combi-pair IDs.
 pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) -> Result<(), HaresError> {
-    let max_wired = max_wired_loop_id(specs);
-    // When max_wired == u16::MAX (extremely unlikely), saturating_add
-    // keeps it at u16::MAX to avoid wrap; every further saturating_add
-    // will stay there.  In practice, the allocator will have assigned
-    // every loop ID long before this point.
-    let mut next_id: u16 = max_wired.saturating_add(1);
+    let mut next_id = u32::from(max_wired_loop_id(specs)?) + 1;
 
     for spec in specs.iter_mut() {
         match spec.name.as_str() {
@@ -223,12 +254,15 @@ pub(crate) fn allocate_loop_ids(specs: &mut [EquipmentSpec]) -> Result<(), Hares
                 )?;
             }
             "Gas Generator" | "Gas Fuel Cell" => {
-                replace_typed::<GeneratorConfig>(
-                    &mut spec.typed_config,
-                    &mut next_id,
-                    |c, id| c.loop_id = Some(id),
-                    |c| c.loop_id.is_none(),
-                )?;
+                if let Some(cfg) = spec.typed_config.as_mut() {
+                    replace_typed::<GeneratorConfig>(
+                        cfg,
+                        &spec.name,
+                        &mut next_id,
+                        |c, id| c.loop_id = Some(id),
+                        |c| c.loop_id,
+                    )?;
+                }
             }
             _ => {}
         }
@@ -459,7 +493,7 @@ mod tests {
     #[test]
     fn empty_specs_produce_zero_max_wired() {
         let specs: Vec<EquipmentSpec> = vec![];
-        assert_eq!(max_wired_loop_id(&specs), 0);
+        assert_eq!(max_wired_loop_id(&specs).unwrap(), 0);
     }
 
     #[test]
@@ -1136,5 +1170,60 @@ mod tests {
         );
         // Sequential starting from 1
         assert_eq!(sorted, vec![1, 2, 3, 4]);
+    }
+
+    /// A loop id already in a pending spec's parameters that is not a u16
+    /// is an error naming the spec, the key and the value, never read as
+    /// absent and overwritten with a fresh id.
+    #[test]
+    fn malformed_loop_id_in_params_is_an_error() {
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!(70_000),
+            serde_json::json!("two"),
+        ] {
+            let mut specs = vec![pending_spec(
+                "Gas Boiler",
+                spec_params(&[("loop_id", bad.clone())]),
+            )];
+            let err = allocate_loop_ids(&mut specs)
+                .expect_err("a malformed loop id must not be replaced");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Gas Boiler")
+                    && msg.contains("loop_id")
+                    && msg.contains(&bad.to_string()),
+                "the error names the spec, the key and the value, got: {msg}"
+            );
+            assert_eq!(specs[0].parameters.get("loop_id"), Some(&bad));
+        }
+    }
+
+    /// A typed config that does not read as its spec's config type is an
+    /// error naming the spec, never skipped as if it carried no loop id.
+    #[test]
+    fn unreadable_typed_config_is_an_error() {
+        let mut specs = vec![typed_spec("Gas Boiler", gas_water_heater_config(Some(1)))];
+        let err = allocate_loop_ids(&mut specs)
+            .expect_err("a config that does not read as a Gas Boiler config must fail");
+        assert!(
+            err.to_string().contains("Gas Boiler"),
+            "the error names the spec, got: {err}"
+        );
+    }
+
+    /// Ids past u16::MAX are an error, never a repeat of the last id.
+    #[test]
+    fn exhausted_loop_ids_are_an_error() {
+        let mut specs = vec![
+            typed_spec("Indirect Tank", indirect_tank_config(Some(u16::MAX))),
+            pending_spec("Gas Boiler", spec_params(&[])),
+        ];
+        let err = allocate_loop_ids(&mut specs).expect_err("no id remains above the wired maximum");
+        assert!(
+            err.to_string().contains("Gas Boiler"),
+            "the error names the spec left without an id, got: {err}"
+        );
+        assert!(specs[1].parameters.get("loop_id").is_none());
     }
 }
