@@ -1244,7 +1244,7 @@ impl PyDwelling {
         seed: u64,
     ) -> PyResult<()> {
         use hares_core::actors::ev_driver::EvDriverActor;
-        use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId};
+        use hares_equipment::ev::catalog::{EvArchetypeId, L1_CAP_KW, VehicleId};
 
         let rust_vid: VehicleId = vehicle_id.into();
         let rust_aid: EvArchetypeId = archetype_id.into();
@@ -1252,7 +1252,7 @@ impl PyDwelling {
         let preset = rust_aid.preset();
 
         let max_power = match preset.charging_level {
-            hares_types::ChargingLevel::L1 => spec.max_l2_power_kw.min(1.8),
+            hares_types::ChargingLevel::L1 => spec.max_l2_power_kw.min(L1_CAP_KW),
             hares_types::ChargingLevel::L2 => spec.max_l2_power_kw,
         };
 
@@ -1312,7 +1312,6 @@ impl PyDwelling {
         let mut dwelling = self.acquire()?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
 
-        let fuel_economy = spec.capacity_kwh / spec.range_miles;
         let seed_bytes = {
             let mut bytes = [0u8; 32];
             bytes[..8].copy_from_slice(&seed.to_le_bytes());
@@ -1325,22 +1324,7 @@ impl PyDwelling {
         let actor = EvDriverActor::new(
             &format!("EvDriver:{}", spec.label),
             spec.label,
-            hares_core::actors::EvDriverParams {
-                strategy: preset.strategy.clone(),
-                plug_in_policy: preset.plug_in_policy.clone(),
-                daily_drive_miles: preset.build_miles_schedule(seed_bytes),
-                departure_time: preset.build_departure_schedule(seed_bytes),
-                trip_duration: preset.build_duration_schedule(seed_bytes),
-                arrival_time: preset.build_arrival_schedule(seed_bytes),
-                event_day_ratio: preset.event_day_ratio,
-                fuel_economy_kwh_per_mi: fuel_economy,
-                capacity_kwh: spec.capacity_kwh,
-                max_charge_kw: max_power,
-                average_speed_mph: 30.0,
-                range_anxiety_miles: 20.0,
-                away_charge_fraction: 0.0,
-                away_charge_power_kw: 0.0,
-            },
+            ev_driver_params(spec, preset, seed_bytes, max_power),
             hares_core::ChaCha8Rng::from_seed(seed_bytes),
         );
 
@@ -2013,6 +1997,35 @@ impl PyDwelling {
             .collect::<PyResult<_>>()?;
         dict.set_item("zones", zones)?;
         Ok(dict.into())
+    }
+}
+
+/// The driver params an EV added through `add_ev_with_driver` is built
+/// with: every behavioural field comes from the archetype preset or the
+/// vehicle spec, never a local re-derivation. Free-standing so the
+/// agreement tests below can pin the construction to the catalogue's fuel
+/// economy and the seed path's away-charge power.
+fn ev_driver_params(
+    spec: &hares_equipment::ev::catalog::VehicleSpec,
+    preset: &hares_equipment::ev::catalog::ArchetypePreset,
+    seed_bytes: [u8; 32],
+    max_power: f64,
+) -> hares_core::actors::EvDriverParams {
+    hares_core::actors::EvDriverParams {
+        strategy: preset.strategy.clone(),
+        plug_in_policy: preset.plug_in_policy.clone(),
+        daily_drive_miles: preset.build_miles_schedule(seed_bytes),
+        departure_time: preset.build_departure_schedule(seed_bytes),
+        trip_duration: preset.build_duration_schedule(seed_bytes),
+        arrival_time: preset.build_arrival_schedule(seed_bytes),
+        event_day_ratio: preset.event_day_ratio,
+        fuel_economy_kwh_per_mi: spec.fuel_economy_kwh_per_mi,
+        capacity_kwh: spec.capacity_kwh,
+        max_charge_kw: max_power,
+        average_speed_mph: 30.0,
+        range_anxiety_miles: 20.0,
+        away_charge_fraction: 0.0,
+        away_charge_power_kw: preset.away_charge_power_kw,
     }
 }
 
@@ -3680,6 +3693,129 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// The seed path's away-charge default: `actor_registry` builds an
+    /// EvDriver whose `away_charge_power_kw` falls back to this when the
+    /// config carries no override.
+    const SEED_PATH_AWAY_CHARGE_POWER_KW: f64 = 6.6;
+
+    #[test]
+    fn add_ev_with_driver_away_charge_power_matches_the_seed_path() {
+        use hares_control::DispatchRequest;
+        use hares_core::Actor;
+        use hares_core::actors::ev_driver::EvDriverActor;
+        use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId};
+        use hares_types::{ControlSignal, ScheduleSource};
+        use rand::SeedableRng;
+
+        let spec = VehicleId::ChevyBoltEv.spec();
+        for aid in EvArchetypeId::ALL {
+            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7.2);
+            assert_eq!(
+                params.away_charge_power_kw, SEED_PATH_AWAY_CHARGE_POWER_KW,
+                "{aid}: the Python-built driver's away-charge power must be the seed path's default"
+            );
+        }
+
+        // Behavioral half: with `away_charge_fraction` set above 0.0 (the
+        // condition the two paths disagree under), the driver built from
+        // `add_ev_with_driver`'s params dispatches its away session at the
+        // preset's power, which the equipment mirrors as
+        // `away_charge_power_kw` telemetry. Constant schedules pin the
+        // trip to departure minute 0, 600 driven minutes, arrival at 600.
+        let mut params = super::ev_driver_params(
+            spec,
+            EvArchetypeId::DailyCommuterL2.preset(),
+            [7u8; 32],
+            7.2,
+        );
+        params.away_charge_fraction = 0.3;
+        params.event_day_ratio = 1.0;
+        params.daily_drive_miles = ScheduleSource::Constant(30.0);
+        params.departure_time = ScheduleSource::Constant(0.0);
+        params.trip_duration = ScheduleSource::Constant(600.0);
+        params.arrival_time = None;
+        let mut actor = EvDriverActor::new(
+            "EvDriver:EV1",
+            "EV1",
+            params,
+            hares_core::ChaCha8Rng::from_seed([7u8; 32]),
+        );
+
+        let start = FixedOffset::east_opt(0)
+            .expect("UTC offset")
+            .with_ymd_and_hms(2026, 6, 21, 0, 0, 0)
+            .single()
+            .expect("valid start");
+        let mut away_powers: Vec<f64> = Vec::new();
+        for minute in 0..=1440i64 {
+            let mut env = pv_env(30.0, 180.0);
+            env.current_time = start + ChronoDuration::minutes(minute);
+            let mut out: Vec<DispatchRequest> = Vec::new();
+            actor.decide(&env, &mut out);
+            for req in out {
+                if let ControlSignal::EvAwayCharge { power_kw } = req.signal {
+                    away_powers.push(power_kw);
+                }
+            }
+        }
+        assert!(
+            !away_powers.is_empty(),
+            "the pinned trip must produce an away-charging session"
+        );
+        assert!(
+            away_powers
+                .iter()
+                .all(|p| (*p - SEED_PATH_AWAY_CHARGE_POWER_KW).abs() < 1e-9),
+            "every away-charge dispatch must carry the seed path's 6.6 kW, got {away_powers:?}"
+        );
+    }
+
+    #[test]
+    fn add_ev_with_driver_fuel_economy_matches_the_catalogue() {
+        use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId};
+
+        let spec = VehicleId::ChevyBoltEv.spec();
+        let quotient = spec.capacity_kwh / spec.range_miles;
+        for aid in EvArchetypeId::ALL {
+            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7.2);
+            assert_eq!(
+                params.fuel_economy_kwh_per_mi, spec.fuel_economy_kwh_per_mi,
+                "{aid}: the Python-built driver's fuel economy must be the catalogue's"
+            );
+            assert_ne!(
+                params.fuel_economy_kwh_per_mi, quotient,
+                "{aid}: the catalogue figure must not be the capacity/range quotient"
+            );
+        }
+    }
+
+    #[test]
+    fn l1_cap_is_one_constant() {
+        use hares_equipment::ev::catalog::L1_CAP_KW;
+
+        assert_eq!(L1_CAP_KW, 1.8);
+        // Both Python call sites resolve through the catalogue's constant,
+        // and neither re-derives the cap from a literal. The needle is
+        // assembled from parts so this assertion's own source text cannot
+        // match it.
+        let literal_cap = format!(".min({}.{})", 1, 8);
+        let dwelling_src = include_str!("py_dwelling.rs");
+        let equipment_src = include_str!("py_equipment.rs");
+        for (file, src) in [
+            ("py_dwelling.rs", dwelling_src),
+            ("py_equipment.rs", equipment_src),
+        ] {
+            assert!(
+                src.contains("L1_CAP_KW"),
+                "{file} must resolve its L1 cap through L1_CAP_KW"
+            );
+            assert!(
+                !src.contains(&literal_cap),
+                "{file} must not re-derive the L1 cap from a literal"
+            );
+        }
     }
 }
 

@@ -490,7 +490,16 @@ pub struct ArchetypePreset {
     /// `None` means fall back to the current departure+duration derivation.
     pub arrival_minute_mean: Option<f64>,
     pub arrival_minute_stddev: Option<f64>,
+    /// Power an EV of this archetype charges at while plugged in away from
+    /// home (kW). Every existing archetype carries the seed path's default
+    /// (`actor_registry`'s `away_charge_power_kw` fallback), so a driver
+    /// built through the Python binding behaves like a config-seeded one.
+    pub away_charge_power_kw: f64,
 }
+
+/// Level 1 charging's power cap (kW): an L1 session draws at the vehicle's
+/// L2 rating only up to this ceiling.
+pub const L1_CAP_KW: f64 = 1.8;
 
 impl ArchetypePreset {
     /// Build the runtime `ScheduleSource` for daily miles from this preset.
@@ -671,6 +680,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         // old 67-min effective stddev from departure+duration independent draws.
         arrival_minute_mean: Some(1020.0),
         arrival_minute_stddev: Some(30.0),
+        away_charge_power_kw: 6.6,
     },
     ArchetypePreset {
         id: EvArchetypeId::DailyCommuterL1,
@@ -693,6 +703,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         // NHTS 2017: arrival peak 17:00-17:30.
         arrival_minute_mean: Some(1020.0),
         arrival_minute_stddev: Some(30.0),
+        away_charge_power_kw: 6.6,
     },
     ArchetypePreset {
         id: EvArchetypeId::LongCommuterL2,
@@ -716,6 +727,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         // NHTS 2017: long commuters arrive slightly later ~17:30, wider spread.
         arrival_minute_mean: Some(1050.0),
         arrival_minute_stddev: Some(45.0),
+        away_charge_power_kw: 6.6,
     },
     ArchetypePreset {
         id: EvArchetypeId::WfhOccasional,
@@ -743,6 +755,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         duration_minutes_stddev: 45.0,
         arrival_minute_mean: None,
         arrival_minute_stddev: None,
+        away_charge_power_kw: 6.6,
     },
     ArchetypePreset {
         id: EvArchetypeId::WfhL1Minimal,
@@ -765,6 +778,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         duration_minutes_stddev: 30.0,
         arrival_minute_mean: None,
         arrival_minute_stddev: None,
+        away_charge_power_kw: 6.6,
     },
     ArchetypePreset {
         id: EvArchetypeId::HeavyUseSuv,
@@ -792,6 +806,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         // NHTS 2017: heavy-use commuter arrival ~17:00, wider spread.
         arrival_minute_mean: Some(1020.0),
         arrival_minute_stddev: Some(45.0),
+        away_charge_power_kw: 6.6,
     },
     ArchetypePreset {
         id: EvArchetypeId::ShiftWorker,
@@ -816,6 +831,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         duration_minutes_stddev: 60.0,
         arrival_minute_mean: None,
         arrival_minute_stddev: None,
+        away_charge_power_kw: 6.6,
     },
     ArchetypePreset {
         id: EvArchetypeId::WeekendWarrior,
@@ -841,6 +857,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         duration_minutes_stddev: 90.0,
         arrival_minute_mean: None,
         arrival_minute_stddev: None,
+        away_charge_power_kw: 6.6,
     },
     ArchetypePreset {
         id: EvArchetypeId::WorkplaceCharger,
@@ -862,6 +879,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         duration_minutes_stddev: 60.0,
         arrival_minute_mean: None,
         arrival_minute_stddev: None,
+        away_charge_power_kw: 6.6,
     },
     ArchetypePreset {
         id: EvArchetypeId::RetireeL1,
@@ -884,6 +902,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         duration_minutes_stddev: 60.0,
         arrival_minute_mean: None,
         arrival_minute_stddev: None,
+        away_charge_power_kw: 6.6,
     },
     ArchetypePreset {
         id: EvArchetypeId::PhevCommuter,
@@ -910,6 +929,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         // NHTS 2017: PHEV commuter arrival ~17:00.
         arrival_minute_mean: Some(1020.0),
         arrival_minute_stddev: Some(30.0),
+        away_charge_power_kw: 6.6,
     },
     ArchetypePreset {
         id: EvArchetypeId::TouOptimizerCa,
@@ -936,6 +956,7 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         // NHTS 2017: TOU-optimizer commuter arrival ~17:00.
         arrival_minute_mean: Some(1020.0),
         arrival_minute_stddev: Some(30.0),
+        away_charge_power_kw: 6.6,
     },
 ];
 

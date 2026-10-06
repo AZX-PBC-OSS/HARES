@@ -772,7 +772,9 @@ impl PyEv {
         let spec = rust_vid.spec();
         let preset = rust_aid.preset();
         let max_power = match preset.charging_level {
-            hares_types::ChargingLevel::L1 => spec.max_l2_power_kw.min(1.8),
+            hares_types::ChargingLevel::L1 => spec
+                .max_l2_power_kw
+                .min(hares_equipment::ev::catalog::L1_CAP_KW),
             hares_types::ChargingLevel::L2 => spec.max_l2_power_kw,
         };
         Self {
