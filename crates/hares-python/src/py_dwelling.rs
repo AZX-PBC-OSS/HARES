@@ -904,6 +904,7 @@ impl PyDwelling {
     /// * `actor_type` - Registered actor type name (e.g., "IdealThermostat", "Occupant", "DrCompliance")
     /// * `name` - Actor instance name
     /// * `params` - Configuration parameters as a dictionary
+    #[pyo3(signature = (actor_type, name, params=None))]
     pub fn add_actor_by_name(
         &self,
         actor_type: String,

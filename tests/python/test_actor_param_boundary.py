@@ -116,3 +116,17 @@ def test_finite_list_element_param_still_attaches_and_simulates(tmp_path) -> Non
     )
     df = dwelling.simulate()
     assert df is not None and len(df) > 0, "the finite occupancy column must simulate"
+
+
+def test_add_actor_by_name_without_params_uses_the_default() -> None:
+    """The stub claims `params: dict[str, Any] | None = None`; the binding
+    must carry that default. Under PyO3 0.29 a parameter without a
+    `#[pyo3(signature)]` default is required, so the two-argument call the
+    stub invites failed at call time with the stub's own default in place.
+    """
+    dwelling = make_dwelling()
+    before = dwelling.actor_count()
+    dwelling.add_actor_by_name("IdealThermostat", "t1")
+    assert dwelling.actor_count() == before + 1, (
+        "the two-argument call must attach the actor, not raise"
+    )
