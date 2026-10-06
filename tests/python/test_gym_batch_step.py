@@ -21,6 +21,7 @@ def test_batch_step_clips_a_deadband_to_the_bounds_it_is_given():
 
     dwelling = make_dwelling(duration_s=600)
     band = dwelling.thermostat_band_range("Gas Furnace")
+    assert band is not None
     results = batch_step(
         [dwelling],
         [[30.0, 21.0]],
@@ -76,7 +77,9 @@ def test_batch_step_refuses_deadband_bounds_wider_than_a_dwellings_band():
     from ochre_next._hares import MAX_TANK_THERMOSTAT_BAND_C, batch_step
 
     dwelling = make_dwelling(duration_s=600)
-    low, _ = dwelling.thermostat_band_range("Gas Furnace")
+    band = dwelling.thermostat_band_range("Gas Furnace")
+    assert band is not None
+    low, _ = band
     with pytest.raises(ValueError, match="band range of its thermostat"):
         batch_step(
             [dwelling],

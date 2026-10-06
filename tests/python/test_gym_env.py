@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 import math
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -126,11 +127,11 @@ def test_deadband_action_bounds_follow_the_target_thermostat_class():
         reward_fn=lambda ctx: -ctx["total_power_kw"],
         episode_length=timedelta(minutes=5),
     )
+    space = env.action_space
+    assert isinstance(space, spaces.Box)
     bounds = {
         (equipment, field): (low, high)
-        for (equipment, field), low, high in zip(
-            env._action_layout, env.action_space.low, env.action_space.high
-        )
+        for (equipment, field), low, high in zip(env._action_layout, space.low, space.high)
     }
     assert bounds[("Gas Furnace", "deadband_c")] == (
         MIN_THERMOSTAT_BAND_C,
@@ -171,9 +172,12 @@ def test_a_deadband_action_on_equipment_without_a_band_is_rejected():
 
 
 def test_band_range_and_zip_each_carry_their_own_doc():
-    assert "deadband" in PyDwelling.thermostat_band_range.__doc__
-    assert "ZIP" in PyDwelling.equipment_zip.__doc__
-    assert "deadband" not in PyDwelling.equipment_zip.__doc__
+    band_doc = PyDwelling.thermostat_band_range.__doc__
+    zip_doc = PyDwelling.equipment_zip.__doc__
+    assert band_doc is not None and zip_doc is not None
+    assert "deadband" in band_doc
+    assert "ZIP" in zip_doc
+    assert "deadband" not in zip_doc
 
 
 def test_vec_env_bounds_a_deadband_by_each_dwelling_s_target_class():
@@ -215,7 +219,7 @@ def test_vec_env_refuses_a_fleet_whose_deadband_bounds_differ():
     )
     with pytest.raises(ValueError, match="different bounds across the dwellings"):
         VecDwellingGymEnv(
-            dwellings=[_make_dwelling(seed=0), other_class],
+            dwellings=[_make_dwelling(seed=0), cast(PyDwelling, other_class)],
             observation_fields=_OBS_FIELDS,
             action_space_config={"Gas Furnace": ["heat_c", "deadband_c"]},
             reward_fn=lambda ctx: -ctx["total_power_kw"],
