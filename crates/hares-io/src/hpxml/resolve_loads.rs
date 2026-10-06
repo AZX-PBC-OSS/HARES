@@ -13,8 +13,8 @@ use super::building::{Building, XmlNode, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec, build_typed_spec, canonical_instance_namer};
 use super::resolve_pool::resolve_pool_and_spa_loads;
 use super::xml_helpers::{
-    capitalize, child_f64, child_load_kwh, child_load_therms, child_text, element_id, parse_fuel,
-    parse_schedule_extension_params, parse_xsd_boolean,
+    capitalize, child_bool, child_f64, child_load_kwh, child_load_therms, child_text, element_id,
+    parse_fuel, parse_schedule_extension_params,
 };
 use hares_physics::units as conv;
 
@@ -315,10 +315,9 @@ pub(super) fn resolve_scheduled_loads(
                         } else if let Some(ef) = child_f64(node, "EnergyFactor") {
                             params.insert("energy_factor".to_string(), json!(ef));
                         }
-                        let vented = match child_text(node, "Vented") {
-                            Some(v) => parse_xsd_boolean("Vented", &v)?,
-                            None => true,
-                        };
+                        let vented =
+                            child_bool(node, "Vented", "ClothesDryer/Vented", "Clothes Dryer")?
+                                .unwrap_or(true);
                         // A fuel-fired dryer conveys its moisture and combustion
                         // products outside the building (IFGC 614.1).
                         if !vented && fuel != FuelType::Electric {
@@ -452,10 +451,13 @@ pub(super) fn resolve_scheduled_loads(
                             && !params.contains_key("annual_gas_therms") =>
                     {
                         // OCHRE hpxml.py parse_cooking_range:1451-1461.
-                        let is_induction = match child_text(node, "IsInduction") {
-                            Some(v) => parse_xsd_boolean("IsInduction", &v)?,
-                            None => false,
-                        };
+                        let is_induction = child_bool(
+                            node,
+                            "IsInduction",
+                            "CookingRange/IsInduction",
+                            "Cooking Range",
+                        )?
+                        .unwrap_or(false);
                         let multiplier = node
                             .child("extension")
                             .and_then(|e| child_f64(e, "UsageMultiplier"))
@@ -580,10 +582,13 @@ pub(super) fn resolve_scheduled_loads(
                 }
 
                 let is_non_primary_fridge = tag == "Refrigerator"
-                    && !match child_text(node, "PrimaryIndicator") {
-                        Some(v) => parse_xsd_boolean("PrimaryIndicator", &v)?,
-                        None => true,
-                    };
+                    && !child_bool(
+                        node,
+                        "PrimaryIndicator",
+                        "Refrigerator/PrimaryIndicator",
+                        "Refrigerator",
+                    )?
+                    .unwrap_or(true);
                 if tag != "Dehumidifier" {
                     let location = child_text(node, "Location").unwrap_or_else(|| {
                         default_appliance_location(
@@ -962,14 +967,20 @@ pub(super) fn resolve_ventilation(
 
     for fan in vent_fans.children_named("VentilationFan") {
         // Only include fans used for whole-building or seasonal cooling ventilation.
-        let is_whole_building = match child_text(fan, "UsedForWholeBuildingVentilation") {
-            Some(v) => parse_xsd_boolean("UsedForWholeBuildingVentilation", &v)?,
-            None => false,
-        };
-        let is_seasonal_cooling = match child_text(fan, "UsedForSeasonalCoolingLoadReduction") {
-            Some(v) => parse_xsd_boolean("UsedForSeasonalCoolingLoadReduction", &v)?,
-            None => false,
-        };
+        let is_whole_building = child_bool(
+            fan,
+            "UsedForWholeBuildingVentilation",
+            "VentilationFan/UsedForWholeBuildingVentilation",
+            "Ventilation Fan",
+        )?
+        .unwrap_or(false);
+        let is_seasonal_cooling = child_bool(
+            fan,
+            "UsedForSeasonalCoolingLoadReduction",
+            "VentilationFan/UsedForSeasonalCoolingLoadReduction",
+            "Ventilation Fan",
+        )?
+        .unwrap_or(false);
         if !is_whole_building && !is_seasonal_cooling {
             continue;
         }
@@ -1349,6 +1360,7 @@ fn has_garage_zone(building: &Building) -> bool {
 #[cfg(test)]
 mod tests {
     use super::super::building::{Site, Zone, ZoneType, parse_building, parse_xml_document};
+    use super::super::xml_helpers::assert_reads_xs_boolean;
     use super::*;
     use crate::defaults::DefaultsStore;
 
@@ -1415,12 +1427,29 @@ mod tests {
         assert!(site("kitchen").is_err(), "not an HPXML appliance location");
     }
 
-    fn resolve_appliances(appliances: &str, zones: Vec<Zone>) -> Vec<EquipmentSpec> {
+    fn try_resolve_appliances(
+        appliances: &str,
+        zones: Vec<Zone>,
+    ) -> Result<Vec<EquipmentSpec>, HpxmlError> {
         let building = appliance_test_building(appliances, zones);
         let mut specs = Vec::new();
-        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
-            .expect("appliances resolve");
-        specs
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)?;
+        Ok(specs)
+    }
+
+    fn resolve_appliances(appliances: &str, zones: Vec<Zone>) -> Vec<EquipmentSpec> {
+        try_resolve_appliances(appliances, zones).expect("appliances resolve")
+    }
+
+    fn appliance_param(
+        appliances: &str,
+        zones: Vec<Zone>,
+        name: &str,
+        key: &str,
+    ) -> Result<Option<f64>, HpxmlError> {
+        let specs = try_resolve_appliances(appliances, zones)?;
+        let spec = specs.iter().find(|s| s.name == name).expect(name);
+        Ok(param(spec, key))
     }
 
     fn param(spec: &EquipmentSpec, key: &str) -> Option<f64> {
@@ -1549,6 +1578,78 @@ mod tests {
             ),
             "got: {err:?}"
         );
+    }
+
+    #[test]
+    fn dryer_vented_is_an_xs_boolean() {
+        let dryer = |fuel: &str, vented: &str| {
+            appliance_param(
+                &format!(
+                    "<ClothesDryer><FuelType>{fuel}</FuelType><Vented>{vented}</Vented></ClothesDryer>"
+                ),
+                vec![conditioned_zone()],
+                "Clothes Dryer",
+                "sensible_gain_fraction",
+            )
+        };
+        assert_reads_xs_boolean("ClothesDryer/Vented", |v| dryer("electricity", v));
+        assert_eq!(
+            dryer("natural gas", "1").expect("a vented gas dryer"),
+            dryer("electricity", "true").expect("a vented electric dryer")
+        );
+    }
+
+    #[test]
+    fn range_induction_is_an_xs_boolean() {
+        assert_reads_xs_boolean("CookingRange/IsInduction", |v| {
+            appliance_param(
+                &format!(
+                    "<CookingRange><FuelType>electricity</FuelType><IsInduction>{v}</IsInduction></CookingRange>"
+                ),
+                vec![conditioned_zone()],
+                "Cooking Range",
+                "annual_electric_kwh",
+            )
+        });
+    }
+
+    #[test]
+    fn refrigerator_primary_indicator_is_an_xs_boolean() {
+        assert_reads_xs_boolean("Refrigerator/PrimaryIndicator", |v| {
+            appliance_param(
+                &format!("<Refrigerator><PrimaryIndicator>{v}</PrimaryIndicator></Refrigerator>"),
+                vec![conditioned_zone(), garage_zone()],
+                "Refrigerator",
+                "zone_id",
+            )
+        });
+    }
+
+    #[test]
+    fn ventilation_fan_uses_are_xs_booleans() {
+        for (element, path) in [
+            (
+                "UsedForWholeBuildingVentilation",
+                "VentilationFan/UsedForWholeBuildingVentilation",
+            ),
+            (
+                "UsedForSeasonalCoolingLoadReduction",
+                "VentilationFan/UsedForSeasonalCoolingLoadReduction",
+            ),
+        ] {
+            assert_reads_xs_boolean(path, |v| {
+                let details = parse_xml_document(&format!(
+                    "<BuildingDetails><Systems><MechanicalVentilation><VentilationFans>\
+                     <VentilationFan><{element}>{v}</{element}><FanType>exhaust only</FanType>\
+                     <RatedFlowRate>50</RatedFlowRate><FanPower>10</FanPower></VentilationFan>\
+                     </VentilationFans></MechanicalVentilation></Systems></BuildingDetails>"
+                ))
+                .expect("xml");
+                let mut specs = Vec::new();
+                resolve_ventilation(&details, &DefaultsStore::empty(), &mut specs)?;
+                Ok(specs.len())
+            });
+        }
     }
 
     #[test]

@@ -14,8 +14,7 @@ use hares_physics::units as conv;
 
 use super::HpxmlError;
 use super::ParseError;
-use super::xml_helpers::element_id;
-use super::xml_helpers::parse_xsd_boolean;
+use super::xml_helpers::{element_id, xs_boolean};
 
 /// HPXML `<SiteType>` -- the terrain class of the building's surroundings.
 ///
@@ -669,13 +668,17 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             "deprecated element <HasFlueOrChimney>; rename it to <HasFlueOrChimneyInConditionedSpace>".into(),
         ));
     }
-    let has_flue_or_chimney = match details.first_descendant("HasFlueOrChimneyInConditionedSpace") {
-        Some(node) => Some(parse_xsd_boolean(
-            "HasFlueOrChimneyInConditionedSpace",
-            &node.text,
-        )?),
-        None => None,
-    };
+    let has_flue_or_chimney = details
+        .first_descendant("HasFlueOrChimneyInConditionedSpace")
+        .map(|n| {
+            xs_boolean(
+                n,
+                "extension/HasFlueOrChimneyInConditionedSpace",
+                "Building",
+                "building",
+            )
+        })
+        .transpose()?;
     // Foundation type name for LUT matching of foundation wall boundaries.
     // OCHRE hpxml.py:276-286: FoundationType child tag → "Crawlspace" | "Unfinished Basement" | "Finished Basement".
     //
@@ -699,10 +702,16 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         // Prefer HPXML 4.x <Conditioned> element if present.
                         // Fall back to OCHRE heuristic: total_floors > floors_above_grade
                         // means basement is conditioned (finished).
-                        let explicit = match child.child("Conditioned") {
-                            Some(n) => Some(parse_xsd_boolean("Conditioned", &n.text)?),
-                            None => None,
-                        };
+                        let foundation_id = details
+                            .path(&["Enclosure", "Foundations", "Foundation"])
+                            .and_then(element_id)
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let explicit = child
+                            .child("Conditioned")
+                            .map(|n| {
+                                xs_boolean(n, "Basement/Conditioned", "Foundation", &foundation_id)
+                            })
+                            .transpose()?;
                         let inferred = match total_conditioned_floors {
                             Some(total) => total > floors_above_grade,
                             None => false,
@@ -1651,10 +1660,11 @@ fn parse_boundary(
     let assembly_r_value_m2_k_w = assembly_r_value_primary.or(assembly_r_value_fallback);
     let material_layers = parse_material_layers(node, area_m2)?;
 
-    let has_radiant_barrier = match node.first_descendant("RadiantBarrier") {
-        Some(n) => parse_xsd_boolean("RadiantBarrier", &n.text)?,
-        None => false,
-    };
+    let has_radiant_barrier = node
+        .first_descendant("RadiantBarrier")
+        .map(|n| xs_boolean(n, "RadiantBarrier", "Envelope Surface", &id))
+        .transpose()?
+        .unwrap_or(false);
 
     // Solar absorptance and emittance from HPXML, validated to [0, 1].
     // Ref: OCHRE hpxml.py:155-158, OCHRE Envelope.py:222.
@@ -2170,11 +2180,18 @@ fn extract_slab_insulation(node: &XmlNode) -> Result<Option<String>, HpxmlError>
         let r = r_perimeter.round() as i32;
         format!("{d}ft R{r} Perimeter")
     } else if r_perimeter <= 0.0 && r_under > 0.0 {
-        let full_width =
-            match node.path(&["UnderSlabInsulation", "Layer", "InsulationSpansEntireSlab"]) {
-                Some(n) => parse_xsd_boolean("InsulationSpansEntireSlab", &n.text)?,
-                None => false,
-            };
+        let full_width = node
+            .path(&["UnderSlabInsulation", "Layer", "InsulationSpansEntireSlab"])
+            .map(|n| {
+                xs_boolean(
+                    n,
+                    "UnderSlabInsulation/Layer/InsulationSpansEntireSlab",
+                    "Slab",
+                    &element_id(node).unwrap_or_else(|| "unknown".to_string()),
+                )
+            })
+            .transpose()?
+            .unwrap_or(false);
         let r = r_under.round() as i32;
         if full_width {
             format!("R{r} Whole Slab")
@@ -2386,10 +2403,18 @@ fn build_zone_map(
                     parse_value_with_units(node.child("FloorArea"), ValueKind::Area)?;
 
                 // Parse vented status from <AtticType><Attic><Vented>
-                let vented = match attic_type_child.and_then(|child| child.child("Vented")) {
-                    Some(v) => parse_xsd_boolean("Vented", &v.text)?,
-                    None => true, // default vented for attics
-                };
+                let vented = attic_type_child
+                    .and_then(|child| child.child("Vented"))
+                    .map(|v| {
+                        xs_boolean(
+                            v,
+                            "Attic/AtticType/Attic/Vented",
+                            "Attic",
+                            &element_id(node).unwrap_or_else(|| "unknown".to_string()),
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or(true); // default vented for attics
 
                 let (ventilation_ach, ventilation_sla) = parse_ventilation_rate(node);
 
@@ -2441,10 +2466,17 @@ fn build_zone_map(
                     .child("FoundationType")
                     .and_then(|ft| ft.children.first());
                 let foundation_type = ft_child.map(|child| child.name.as_str());
-                let vented_explicit = match ft_child.and_then(|child| child.child("Vented")) {
-                    Some(v) => Some(parse_xsd_boolean("Vented", &v.text)?),
-                    None => None,
-                };
+                let vented_explicit = ft_child
+                    .and_then(|child| child.child("Vented"))
+                    .map(|v| {
+                        xs_boolean(
+                            v,
+                            "Foundation/FoundationType/Vented",
+                            "Foundation",
+                            &element_id(node).unwrap_or_else(|| "unknown".to_string()),
+                        )
+                    })
+                    .transpose()?;
                 let vented = match foundation_type {
                     Some("Crawlspace") => vented_explicit.unwrap_or(true),
                     Some("Basement") => vented_explicit.unwrap_or(false),
@@ -3765,6 +3797,7 @@ mod tests {
         BoundaryType, DuctType, HpxmlError, ZoneType, assembly_framing_factor, parse_building,
         parse_xml_document,
     };
+    use crate::hpxml::xml_helpers::assert_reads_xs_boolean;
 
     const SAMPLE_XML: &str = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
@@ -8176,5 +8209,123 @@ mod tests {
             msg.contains("HasFlueOrChimneyInConditionedSpace"),
             "error must name the current element, got: {msg}"
         );
+    }
+
+    fn parse_sample_with(from: &str, to: &str) -> Result<super::Building, HpxmlError> {
+        assert!(SAMPLE_XML.contains(from), "SAMPLE_XML lacks {from}");
+        parse_building(&SAMPLE_XML.replace(from, to))
+    }
+
+    fn zone_vented(building: &super::Building, zone_type: ZoneType) -> bool {
+        building
+            .zones
+            .iter()
+            .find(|z| z.zone_type == zone_type)
+            .expect("zone")
+            .vented
+    }
+
+    const EMPTY_FOUNDATION: &str = "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>";
+    const EMPTY_ATTIC: &str =
+        "<Attic>\n            <FloorArea units=\"ft2\">500</FloorArea>\n          </Attic>";
+    const BARE_SLAB: &str = "<Area units=\"ft2\">80</Area>\n          </Slab>";
+    const BARE_ROOF: &str = "<Area units=\"ft2\">120</Area>\n          </Roof>";
+
+    #[test]
+    fn flue_or_chimney_is_an_xs_boolean() {
+        assert_reads_xs_boolean("extension/HasFlueOrChimneyInConditionedSpace", |v| {
+            parse_sample_with(
+                "<Enclosure>",
+                &format!(
+                    "<extension><HasFlueOrChimneyInConditionedSpace>{v}\
+                     </HasFlueOrChimneyInConditionedSpace></extension><Enclosure>"
+                ),
+            )
+            .map(|b| b.has_flue_or_chimney)
+        });
+    }
+
+    #[test]
+    fn basement_conditioned_is_an_xs_boolean() {
+        assert_reads_xs_boolean("Basement/Conditioned", |v| {
+            parse_sample_with(
+                EMPTY_FOUNDATION,
+                &format!(
+                    "<Foundation><FoundationType><Basement><Conditioned>{v}</Conditioned>\
+                     </Basement></FoundationType><FloorArea units=\"ft2\">800</FloorArea></Foundation>"
+                ),
+            )
+            .map(|b| b.foundation_name)
+        });
+    }
+
+    #[test]
+    fn radiant_barrier_is_an_xs_boolean() {
+        assert_reads_xs_boolean("RadiantBarrier", |v| {
+            parse_sample_with(
+                BARE_ROOF,
+                &format!(
+                    "<Area units=\"ft2\">120</Area><RadiantBarrier>{v}</RadiantBarrier></Roof>"
+                ),
+            )
+            .map(|b| {
+                b.boundaries
+                    .iter()
+                    .find(|r| r.boundary_type == BoundaryType::Roof)
+                    .expect("roof")
+                    .has_radiant_barrier
+            })
+        });
+    }
+
+    #[test]
+    fn slab_spans_entire_slab_is_an_xs_boolean() {
+        assert_reads_xs_boolean("UnderSlabInsulation/Layer/InsulationSpansEntireSlab", |v| {
+            parse_sample_with(
+                BARE_SLAB,
+                &format!(
+                    "<Area units=\"ft2\">80</Area><UnderSlabInsulation><Layer>\
+                     <NominalRValue>10</NominalRValue>\
+                     <InsulationSpansEntireSlab>{v}</InsulationSpansEntireSlab>\
+                     </Layer></UnderSlabInsulation></Slab>"
+                ),
+            )
+            .map(|b| {
+                b.boundaries
+                    .iter()
+                    .find(|s| s.boundary_type == BoundaryType::Slab)
+                    .expect("slab")
+                    .insulation_details
+                    .clone()
+            })
+        });
+    }
+
+    #[test]
+    fn attic_vented_is_an_xs_boolean() {
+        assert_reads_xs_boolean("Attic/AtticType/Attic/Vented", |v| {
+            parse_sample_with(
+                EMPTY_ATTIC,
+                &format!(
+                    "<Attic><AtticType><Attic><Vented>{v}</Vented></Attic></AtticType>\
+                     <FloorArea units=\"ft2\">500</FloorArea></Attic>"
+                ),
+            )
+            .map(|b| zone_vented(&b, ZoneType::Attic))
+        });
+    }
+
+    #[test]
+    fn foundation_vented_is_an_xs_boolean() {
+        assert_reads_xs_boolean("Foundation/FoundationType/Vented", |v| {
+            parse_sample_with(
+                EMPTY_FOUNDATION,
+                &format!(
+                    "<Foundation><FoundationType><Crawlspace><Vented>{v}</Vented></Crawlspace>\
+                     </FoundationType><FloorArea units=\"ft2\">800</FloorArea></Foundation>"
+                ),
+            )
+            .map(|b| zone_vented(&b, ZoneType::Foundation))
+        });
     }
 }

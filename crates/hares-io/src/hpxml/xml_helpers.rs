@@ -62,23 +62,40 @@ pub(crate) fn child_text(node: &XmlNode, child_name: &str) -> Option<String> {
     node.child(child_name).map(|n| n.text.trim().to_string())
 }
 
-/// Parse an `xsd:boolean` element's text.
-///
-/// The `xsd:boolean` lexical space is exactly `true`, `false`, `1` and `0`
-/// (after whitespace collapse); anything else, including the case-variant
-/// `True` and the word `yes`, is rejected with the element name and the
-/// offending value instead of being silently read as `false`.
-pub(crate) fn parse_xsd_boolean(element: &str, text: &str) -> Result<bool, super::HpxmlError> {
-    match text.trim() {
+/// Reads an `xs:boolean` element, whose lexical forms are `true`, `false`,
+/// `1` and `0` (XML Schema Part 2, 3.2.2). Any other text is an error.
+pub(crate) fn xs_boolean(
+    node: &XmlNode,
+    path: &'static str,
+    system_kind: &'static str,
+    system_id: &str,
+) -> Result<bool, super::HpxmlError> {
+    match node.text.trim() {
         "true" | "1" => Ok(true),
         "false" | "0" => Ok(false),
-        other => Err(super::HpxmlError::Parse(
-            format!(
-                "invalid {element} value '{other}'; allowed values are 'true', 'false', '1' and '0'"
-            )
-            .into(),
-        )),
+        other => Err(super::HpxmlError::InvalidField {
+            path,
+            system_kind,
+            system_id: system_id.to_string(),
+            value_received: other.to_string(),
+            reason: "an xs:boolean is one of true, false, 1 or 0",
+        }),
     }
+}
+
+/// [`xs_boolean`] for the child `child_name`, `None` when it is absent.
+pub(crate) fn child_bool(
+    node: &XmlNode,
+    child_name: &str,
+    path: &'static str,
+    system_kind: &'static str,
+) -> Result<Option<bool>, super::HpxmlError> {
+    node.child(child_name)
+        .map(|child| {
+            let id = element_id(node).unwrap_or_else(|| "unknown".to_string());
+            xs_boolean(child, path, system_kind, &id)
+        })
+        .transpose()
 }
 
 pub(crate) fn child_f64(node: &XmlNode, child_name: &str) -> Option<f64> {
@@ -395,6 +412,36 @@ pub(crate) fn parse_schedule_extension_params(
     }
 
     out
+}
+
+/// Asserts that the element at `path` is read as an `xs:boolean`: `1` and
+/// `0` mean the same as `true` and `false`, which differ, and other text is
+/// an `InvalidField` naming `path`. `read` parses a document holding `text`
+/// in that element and returns what the element decides.
+#[cfg(test)]
+pub(crate) fn assert_reads_xs_boolean<T: PartialEq + std::fmt::Debug>(
+    path: &'static str,
+    read: impl Fn(&str) -> Result<T, super::HpxmlError>,
+) {
+    let yes = read("true").unwrap_or_else(|e| panic!("{path} true: {e:?}"));
+    let no = read("false").unwrap_or_else(|e| panic!("{path} false: {e:?}"));
+    assert_ne!(yes, no, "{path}: true and false must differ");
+    assert_eq!(
+        read("1").unwrap_or_else(|e| panic!("{path} 1: {e:?}")),
+        yes,
+        "{path}: 1"
+    );
+    assert_eq!(
+        read(" 0 ").unwrap_or_else(|e| panic!("{path} 0: {e:?}")),
+        no,
+        "{path}: 0"
+    );
+    for bad in ["yes", "True1", ""] {
+        match read(bad) {
+            Err(super::HpxmlError::InvalidField { path: got, .. }) if got == path => {}
+            other => panic!("{path} {bad:?}: expected InvalidField, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]

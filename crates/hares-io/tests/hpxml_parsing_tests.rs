@@ -2437,13 +2437,13 @@ fn parse_other_exterior_wh_carries_ambient_location() {
 // xsd:boolean parsing at every boolean element
 // ===========================================================================
 
-/// Every boolean element the parser reads goes through
-/// `parse_xsd_boolean`: each of the twelve census sites parses `1` as
-/// true and `0` as false through its own parse path, so a site that
-/// regresses to the old case-insensitive `true`-only test fails here
-/// instead of only at the single flue site.
+/// Every boolean element the parser reads goes through the one xs:boolean
+/// reader: each of the twelve census sites parses `1` as true and `0` as
+/// false through its own parse path, so a site that regresses to the old
+/// case-insensitive `true`-only test fails here instead of only at the
+/// single flue site.
 #[test]
-fn every_xsd_boolean_site_uses_parse_xsd_boolean() {
+fn every_xsd_boolean_site_uses_the_xs_boolean_reader() {
     // (site, value) -> the XML system/enclosure fragment under test.
     let fragment = |site: usize, v: &str| match site {
         0 => format!(

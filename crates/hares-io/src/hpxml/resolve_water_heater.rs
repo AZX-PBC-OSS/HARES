@@ -15,7 +15,7 @@ use super::data_patches::HpxmlDataPatches;
 use super::equipment::EquipmentSpec;
 use super::water_heater_ua::{UaInputs, WhCategory, ua_from_energy_factor};
 use super::xml_helpers::{
-    child_f64, child_temperature_c, child_text, descendants_named, element_id, parse_xsd_boolean,
+    child_bool, child_f64, child_temperature_c, child_text, descendants_named, element_id,
 };
 use hares_physics::units as conv;
 
@@ -548,7 +548,8 @@ pub(super) fn resolve_water_heaters(
 /// `<WaterHeating>/<WaterFixture>/<LowFlow>`, the `<WaterFixturesUsageMultiplier>` extension,
 /// and `<HotWaterDistribution>` to compute the OCHRE/ANSI-RESNET 301 draw estimate.
 ///
-/// Returns `(None, None)` when bedroom count is absent (required for both outputs).
+/// A missing bedroom count falls back to [`resolve_bedroom_count`], so both
+/// outputs are always present.
 fn parse_avg_water_draw_and_bedrooms(
     details: &XmlNode,
     data_patches: Option<&HpxmlDataPatches>,
@@ -585,18 +586,15 @@ fn parse_avg_water_draw_and_bedrooms(
     };
 
     // Fixture efficiency: low-flow if any WaterFixture has <LowFlow>true</LowFlow>.
-    let mut has_low_flow_fixture = false;
+    let mut any_low_flow = false;
     if let Some(wh_section) = details.path(&["WaterHeating"]) {
         for fixture in descendants_named(wh_section, "WaterFixture") {
-            if let Some(v) = child_text(fixture, "LowFlow")
-                && parse_xsd_boolean("LowFlow", &v)?
-            {
-                has_low_flow_fixture = true;
-                break;
-            }
+            any_low_flow |=
+                child_bool(fixture, "LowFlow", "WaterFixture/LowFlow", "Water Fixture")?
+                    .unwrap_or(false);
         }
     }
-    let fixture_efficiency = if has_low_flow_fixture {
+    let fixture_efficiency = if any_low_flow {
         FixtureEfficiency::LowFlow
     } else {
         FixtureEfficiency::Standard
@@ -2835,5 +2833,19 @@ mod tests {
             "water heater in garage must have zone_id=2"
         );
         assert_eq!(cfg.zone_type.as_deref(), Some("garage"));
+    }
+
+    #[test]
+    fn fixture_low_flow_is_an_xs_boolean() {
+        crate::hpxml::xml_helpers::assert_reads_xs_boolean("WaterFixture/LowFlow", |v| {
+            let details = parse_xml_document(&format!(
+                "<BuildingDetails><BuildingSummary><BuildingConstruction>\
+                 <NumberofBedrooms>3</NumberofBedrooms></BuildingConstruction></BuildingSummary>\
+                 <WaterHeating><WaterFixture><WaterFixtureType>shower head</WaterFixtureType>\
+                 <LowFlow>{v}</LowFlow></WaterFixture></WaterHeating></BuildingDetails>"
+            ))
+            .expect("xml");
+            parse_avg_water_draw_and_bedrooms(&details, None).map(|(draw, _)| draw)
+        });
     }
 }
