@@ -3262,6 +3262,23 @@ impl Dwelling {
         });
     }
 
+    /// Checks, changing nothing, that the named equipment exists and accepts
+    /// `signal` in its current state: the whole of what
+    /// [`Self::apply_control_validated`] checks before it queues a signal
+    /// that is not an immediate state update.
+    ///
+    /// # Errors
+    ///
+    /// `HaresError::Equipment` when no equipment has the name; the
+    /// equipment's refusal of the signal otherwise.
+    pub fn check_control(&self, name: &str, signal: &ControlSignal) -> Result<()> {
+        self.equipment
+            .iter()
+            .find(|e| e.descriptor().name == name)
+            .ok_or_else(|| HaresError::Equipment(format!("equipment '{name}' not found")))?
+            .validate_signal(signal)
+    }
+
     /// Validates a control signal against the named equipment's current state
     /// and queues it on success.
     ///
@@ -3294,12 +3311,7 @@ impl Dwelling {
                 .ok_or_else(|| HaresError::Equipment(format!("equipment '{name}' not found")))?;
             eq.apply_control(&signal)?;
         } else {
-            let eq = self
-                .equipment
-                .iter()
-                .find(|e| e.descriptor().name == name)
-                .ok_or_else(|| HaresError::Equipment(format!("equipment '{name}' not found")))?;
-            eq.validate_signal(&signal)?;
+            self.check_control(name, &signal)?;
         }
         let priority = priority.unwrap_or_else(|| PriorityTier::from(&signal));
         if matches!(priority, PriorityTier::Safety | PriorityTier::Grid) {

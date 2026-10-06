@@ -2817,9 +2817,10 @@ class Dwelling:
 # ---------------------------------------------------------------------------
 
 # action_bounds: one finite (low, high), low <= high, per action_layout
-# column, shared by every dwelling of the call. A bad pair, or a dwelling
-# whose deadband target holds a narrower band, raises ValueError before any
-# signal reaches any dwelling.
+# column, shared by every dwelling of the call. A bad pair, a dwelling
+# whose deadband target holds a narrower band, or a dwelling whose
+# equipment is missing or would reject its signal raises ValueError before
+# any signal reaches any dwelling.
 def batch_step(
     dwellings: list[Dwelling],
     actions: list[list[float]],

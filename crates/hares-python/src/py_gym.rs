@@ -239,6 +239,24 @@ fn check_deadband_bounds(
     Ok(())
 }
 
+/// Refuses, changing nothing, a signal the dwelling's equipment would
+/// refuse when it is applied: the equipment is missing, lacks the
+/// capability, or its state rejects it. No action maps to an immediate
+/// state update, so the apply that follows only queues what passed here.
+fn check_signals_accepted(
+    dwelling: &PyDwelling,
+    signals: &[(String, ControlSignal)],
+) -> Result<(), String> {
+    let dwelling = dwelling.acquire_string()?;
+    for (equipment, signal) in signals {
+        debug_assert!(!signal.is_immediate_state_update());
+        dwelling
+            .check_control(equipment, signal)
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
 /// Map a flat action vector to per-equipment [`ControlSignal`]s.
 ///
 /// Each action dimension maps to an (equipment, field) pair from `action_layout`.
@@ -425,8 +443,9 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// action space (a deadband by its target's thermostat class); every action
 /// is clipped to it. The bounds are per call, not per dwelling: a dwelling
 /// whose deadband target holds a narrower band than its column's bounds is
-/// refused. Any refusal is a `ValueError` raised before a signal reaches
-/// any dwelling.
+/// refused. Any refusal (a bound, a mapping, or equipment that is missing
+/// or would reject its signal) is a `ValueError` raised before a signal
+/// reaches any dwelling.
 #[pyfunction(name = "batch_step")]
 #[pyo3(signature = (dwellings, actions, observation_fields, action_layout, signal_type_by_equipment, action_bounds))]
 pub fn batch_step_py(
@@ -455,7 +474,8 @@ pub fn batch_step_py(
     // Map every dwelling's actions to ControlSignals before applying any, so
     // a refused action leaves every dwelling untouched; then apply them
     // before entering the GIL-free section.
-    // Capability validation is enforced by apply_control -> apply_control_validated.
+    // Equipment presence, capability and state are checked by
+    // check_signals_accepted with the rest, so the apply below cannot refuse.
     // NaN/inf guarding is enforced unconditionally in map_action_to_signals
     // and as a defense-in-depth invariant check in build_control_signal.
     let mut mapped = Vec::with_capacity(borrows.len());
@@ -472,6 +492,7 @@ pub fn batch_step_py(
             &action_bounds,
         )
         .map_err(PyValueError::new_err)?;
+        check_signals_accepted(dwelling_ref, &signals).map_err(PyValueError::new_err)?;
         mapped.push((dwelling_ref, signals));
     }
     for (dwelling_ref, signals) in mapped {

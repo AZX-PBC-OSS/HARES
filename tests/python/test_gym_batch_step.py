@@ -111,6 +111,34 @@ def test_batch_step_refusal_reaches_no_dwelling():
     assert not any("control apply failed" in w for w in first.take_warnings())
 
 
+def _furnace_heating_setpoint(dwelling) -> float:
+    furnace = next(eq for eq in dwelling.equipment() if eq.name == "Gas Furnace")
+    return furnace.telemetry()["heating_setpoint_c"]
+
+
+def test_batch_step_refuses_a_missing_unit_before_any_dwelling_changes():
+    """The second home has no furnace, so its action is refused, and the
+    first home's furnace never takes the 27 C setpoint: after a step it
+    heats to the same setpoint as a home that was never sent anything."""
+    from ochre_next._hares import batch_step
+
+    first, second, untouched = (make_dwelling(duration_s=600) for _ in range(3))
+    second.remove_equipment("Gas Furnace")
+    with pytest.raises(ValueError, match="not found"):
+        batch_step(
+            [first, second],
+            [[27.0], [27.0]],
+            _OBS_FIELDS,
+            [("Gas Furnace", "heat_c")],
+            {"Gas Furnace": "ThermalSetpoint"},
+            _SETPOINT_BOUNDS,
+        )
+    first.step()
+    untouched.step()
+    assert _furnace_heating_setpoint(first) == _furnace_heating_setpoint(untouched)
+    assert _furnace_heating_setpoint(first) != 27.0
+
+
 def test_batch_step_with_no_actions_steps_every_dwelling():
     from ochre_next._hares import batch_step
 
