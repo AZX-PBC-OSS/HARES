@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 from ochre_records import RECORD_REL_MARGIN, record_holds
 
@@ -25,3 +27,27 @@ def test_a_value_just_past_the_margin_fails(recorded: float) -> None:
 
 def test_the_recorded_value_itself_holds() -> None:
     assert record_holds(0.8776, 0.8776)
+
+
+def test_a_zero_record_holds_only_an_exact_zero() -> None:
+    assert record_holds(0.0, 0.0)
+    assert record_holds(-0.0, 0.0)
+    assert not record_holds(1e-300, 0.0)
+    assert not record_holds(-1e-300, 0.0)
+
+
+@pytest.mark.parametrize(
+    ("measured", "recorded"),
+    [
+        (math.nan, 1.0),
+        (1.0, math.nan),
+        (math.nan, math.nan),
+        (math.inf, 1.0),
+        (-math.inf, 1.0),
+        (1.0, math.inf),
+        (math.inf, math.inf),
+        (-math.inf, -math.inf),
+    ],
+)
+def test_a_non_finite_value_never_holds(measured: float, recorded: float) -> None:
+    assert not record_holds(measured, recorded)

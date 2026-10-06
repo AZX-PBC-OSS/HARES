@@ -4,10 +4,13 @@ A test that records a measured divergence checks the new measurement first:
 the record holds while ``|measured - recorded| <= RECORD_REL_MARGIN *
 |recorded|``, the edge included, and fails as soon as the difference exceeds
 it. Only the floating-point rounding of a value exactly at the edge can tip it
-either way.
+either way. A zero record therefore holds only an exact zero, and a NaN or
+infinite measurement or record never holds.
 """
 
 from __future__ import annotations
+
+import math
 
 import pytest
 
@@ -15,6 +18,8 @@ RECORD_REL_MARGIN = 0.02
 
 
 def record_holds(measured: float, recorded: float) -> bool:
+    if not (math.isfinite(measured) and math.isfinite(recorded)):
+        return False
     return abs(measured - recorded) <= RECORD_REL_MARGIN * abs(recorded)
 
 
