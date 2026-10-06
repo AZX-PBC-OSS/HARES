@@ -564,6 +564,30 @@ fn csv_writer_finish_on_read_only_path_propagates_io_error() {
 // 8. hvac_coefficients split
 // ===========================================================================
 
+/// Fixture helper: a defaults tree whose EV mapping is not the subject of
+/// the test still needs a complete one, because a missing or malformed
+/// vehicle mapping CSV fails the defaults load.
+fn write_complete_ev_mapping(dir: &std::path::Path) {
+    let ev_dir = dir.join("ev");
+    std::fs::create_dir_all(&ev_dir).unwrap();
+    let mut csv_content = String::from(
+        "profile_column,vehicle_type,profile_file,capacity_kwh,charger_power_kw,efficiency\n",
+    );
+    for i in 1..=35 {
+        csv_content.push_str(&format!(
+            "Vehicle {i},MY2030_BEV_SUV,pdf_Veh{},117.6,10.26,0.9\n",
+            ((i - 1) % 4) + 1
+        ));
+    }
+    for i in 36..=50 {
+        csv_content.push_str(&format!(
+            "Vehicle {i},MY2030_PHEV_SUV,pdf_Veh{},14.8,7.2,0.9\n",
+            ((i - 1) % 4) + 1
+        ));
+    }
+    std::fs::write(ev_dir.join("vehicle_mapping.csv"), csv_content).unwrap();
+}
+
 #[test]
 fn hvac_cooling_and_heating_coefficients_return_independent_results() {
     let dir = tempfile::tempdir().unwrap();
@@ -637,6 +661,7 @@ tdb_bounds = [-20.0, 30.0]
         std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
     }
     // The generator efficiency curve is mandatory at load.
+    write_complete_ev_mapping(dir.path());
     std::fs::write(
         dir.path().join("generator").join("efficiency_curve.toml"),
         "[[points]]\ncapacity_ratio = 0.0\nefficiency_ratio = 0.0\n\
@@ -742,6 +767,7 @@ tdb_bounds = [-25.0, 25.0]
         std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
     }
     // The generator efficiency curve is mandatory at load.
+    write_complete_ev_mapping(dir.path());
     std::fs::write(
         dir.path().join("generator").join("efficiency_curve.toml"),
         "[[points]]\ncapacity_ratio = 0.0\nefficiency_ratio = 0.0\n\
