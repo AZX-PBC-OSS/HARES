@@ -206,7 +206,7 @@ NodeId(u32::MAX)                 → GROUND_NODE (external driving input)
 ### Zone Air Node Capacitance
 
 ```
-C_zone = rho_air * Cp_air * Volume * INTERIOR_MASS_MULTIPLIER
+C_zone = rho_air * Cp_air * Volume * temperature_capacitance_multiplier
        = 1.2 * 1006 * V * 7.0  [J/K]
 ```
 
@@ -214,7 +214,7 @@ C_zone = rho_air * Cp_air * Volume * INTERIOR_MASS_MULTIPLIER
 |----------|-------|---------|
 | `AIR_DENSITY_KG_M3` | 1.2 | Standard air density |
 | `AIR_CP_J_KG_K` | 1006 | Air specific heat |
-| `INTERIOR_MASS_MULTIPLIER` | 7.0 | Accounts for furnishings, structure, contents |
+| `TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT` | 7.0 | OS-HPXML's default zone air temperature capacitance multiplier (`defaults.rb:219-221`), applied to every zone's air node as EnergyPlus's `ZoneCapacitanceMultiplier:ResearchSpecial`; furniture and partition mass are separate nodes |
 | `MIN_CAPACITANCE_J_K` | 1000 | Floor to prevent near-singularity |
 | `DEFAULT_VOLUME_M3` | 200 | Fallback if zone volume unavailable |
 | `DEFAULT_HEIGHT_M` | 2.5 | Derives volume from floor area |

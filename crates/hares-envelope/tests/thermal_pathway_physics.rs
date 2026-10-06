@@ -363,7 +363,7 @@ fn rc_network_exposes_ground_column() {
     let zones = vec![ZoneInput {
         floor_area_m2: Some(48.0),
         volume_m3: Some(129.6),
-        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
     }];
     let zone_caps =
         derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA).unwrap();
@@ -892,7 +892,7 @@ fn ground_coupled_rc_steady_state_is_isothermal_at_kusuda_temperature() {
     let zones = vec![ZoneInput {
         floor_area_m2: Some(48.0),
         volume_m3: Some(129.6),
-        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
     }];
     let zone_caps =
         derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA).unwrap();

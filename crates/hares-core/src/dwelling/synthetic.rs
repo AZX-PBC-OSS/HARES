@@ -484,6 +484,19 @@ pub(crate) fn build_synthetic_building(
     // get clear error messages referencing their TOML fields rather than
     // cryptic downstream errors (e.g. NonPositiveResistance in RC network).
 
+    // The geometry sizes the zone: a floor area and a volume, each finite and
+    // positive, give its ceiling height; there is no assumed one.
+    for (field, value) in [
+        ("geometry.floor_area_m2", config.geometry.floor_area_m2),
+        ("geometry.zone_volume_m3", config.geometry.zone_volume_m3),
+    ] {
+        if !(value.is_finite() && value > 0.0) {
+            return Err(HaresError::Dwelling(format!(
+                "{field} must be finite and positive, got {value}"
+            )));
+        }
+    }
+
     // wall_r_value_m2_k_w > 0.0 — reject 0, negative, NaN
     {
         let r_value = config.materials.wall_r_value_m2_k_w;
@@ -616,11 +629,7 @@ pub(crate) fn build_synthetic_building(
         .hvac
         .heating_capacity_kbtu_h
         .map(|kbtu| kbtu * 1000.0);
-    let floor_area = if config.geometry.floor_area_m2 > 0.0 {
-        config.geometry.floor_area_m2
-    } else {
-        config.geometry.zone_volume_m3 / 2.5
-    };
+    let floor_area = config.geometry.floor_area_m2;
     let fuel = config
         .hvac
         .fuel
@@ -1133,16 +1142,9 @@ pub(crate) fn build_synthetic_building(
         // outdoor (walls + roof) or ground (floor).
         //
         // Footprint is square (aspect ratio 1.0).  Ceiling height is
-        // inferred from zone volume / floor area.  This replaces the
-        // pre-T-0226 single-wall default which produced a non-physical
-        // open envelope with one vertical surface.
-        let ceiling_height_m = if config.geometry.floor_area_m2 > 0.0 {
-            config.geometry.zone_volume_m3 / config.geometry.floor_area_m2
-        } else {
-            // Fallback to a reasonable ceiling height when floor area
-            // is zero (should not occur in normal configs).
-            2.5
-        };
+        // inferred from zone volume / floor area, both validated positive
+        // above.
+        let ceiling_height_m = config.geometry.zone_volume_m3 / config.geometry.floor_area_m2;
         let side_length_m = config.geometry.floor_area_m2.sqrt();
         let wall_area_m2 = side_length_m * ceiling_height_m;
         let r_value = config.materials.wall_r_value_m2_k_w;
@@ -1523,7 +1525,8 @@ pub(crate) fn build_synthetic_building(
         battery_round_trip_efficiency: None,
         pv_tilt_deg: None,
         conditioned_volume_m3: config.geometry.zone_volume_m3,
-        ceiling_height_m: 2.5,
+        // The synthetic house is one conditioned zone on one storey.
+        ceiling_height_m: config.geometry.zone_volume_m3 / config.geometry.floor_area_m2,
         infiltration_height_m: None,
         floors_above_grade: 1.0,
         has_flue_or_chimney: None,
@@ -1532,7 +1535,7 @@ pub(crate) fn build_synthetic_building(
         temperature_capacitance_multiplier: config
             .geometry
             .mass_multiplier
-            .unwrap_or(hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER),
+            .unwrap_or(hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT),
         hvac_deadband_c: config.hvac.deadband_c,
         climate_zone_iecc: None,
         details_xml,
@@ -3292,6 +3295,25 @@ attached_to_wall_id = "south-wall"
     /// envelope: a typed Dwelling error naming the zone's face categories,
     /// in every build profile.
     #[test]
+    fn synthetic_building_requires_a_floor_area_and_volume() {
+        for (floor_area, volume, field) in [
+            ("0.0", "120.0", "geometry.floor_area_m2"),
+            ("48.0", "-1.0", "geometry.zone_volume_m3"),
+        ] {
+            let toml = format!(
+                "building_id = 1\n[simulation]\nstart_time = \"2024-01-01T00:00:00Z\"\n\
+                 time_res_s = 3600\nduration_s = 3600\n[geometry]\nfloor_area_m2 = {floor_area}\n\
+                 zone_volume_m3 = {volume}\n[materials]\nwall_r_value_m2_k_w = 2.0\n[hvac]\n\
+                 equipment_name = \"None\"\n"
+            );
+            let config: SyntheticTomlConfig = toml::from_str(&toml).expect("parse");
+            let err = build_synthetic_building(&config, None, None)
+                .expect_err("a zone with no floor area or volume has no ceiling height");
+            assert!(err.to_string().contains(field), "{err}");
+        }
+    }
+
+    #[test]
     fn synthetic_building_rejects_open_envelope() {
         let toml = r#"
 building_id = 1
@@ -3868,7 +3890,8 @@ equipment_name = "None"
         let zone_inputs = vec![hares_envelope::ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(120.0),
-            mass_multiplier: hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier:
+                hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let zone_caps = hares_envelope::derive_zone_capacitances(
             &zone_inputs,
@@ -3963,7 +3986,8 @@ equipment_name = "None"
         let zone_inputs = vec![hares_envelope::ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(120.0),
-            mass_multiplier: hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier:
+                hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let zone_caps = hares_envelope::derive_zone_capacitances(
             &zone_inputs,
@@ -4061,7 +4085,8 @@ master_seed = 0
         let zone_inputs = vec![hares_envelope::ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(120.0),
-            mass_multiplier: hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier:
+                hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let zone_caps = hares_envelope::derive_zone_capacitances(
             &zone_inputs,

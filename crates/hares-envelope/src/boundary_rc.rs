@@ -26,7 +26,7 @@ pub const AIR_CP_J_KG_K: f64 = hares_physics::constants::CP_DRY_AIR_J_KG_K;
 /// `TemperatureCapacitanceMultiplier` (defaults.rb:219-221), applied to all
 /// zones through `ZoneCapacitanceMultiplier:ResearchSpecial`
 /// (simcontrols.rb:27-28).
-pub const INTERIOR_MASS_MULTIPLIER: f64 = 7.0;
+pub const TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT: f64 = 7.0;
 /// Floor capacitance for any RC node [J/K].
 pub const MIN_CAPACITANCE_J_K: f64 = 1_000.0;
 /// Default aggregate UA when no boundary data is available [W/K].
@@ -493,6 +493,12 @@ pub enum BoundaryRcError {
         zone_idx: usize,
         volume_m3: Option<f64>,
     },
+    /// A zone whose temperature capacitance multiplier is not finite and
+    /// positive: its air capacitance would be clamped to the floor silently.
+    #[error(
+        "zone {zone_idx} has a temperature capacitance multiplier of {multiplier}; it must be finite and positive"
+    )]
+    CapacitanceMultiplier { zone_idx: usize, multiplier: f64 },
     /// Non-positive site atmospheric pressure [Pa] supplied to zone capacitance derivation.
     /// Site pressure must be physically positive; zero or negative indicates
     /// missing or corrupted weather/configuration data.
@@ -543,6 +549,12 @@ pub fn derive_zone_capacitances(
                     volume_m3: z.volume_m3,
                 },
             )?;
+            if !(z.mass_multiplier.is_finite() && z.mass_multiplier > 0.0) {
+                return Err(BoundaryRcError::CapacitanceMultiplier {
+                    zone_idx,
+                    multiplier: z.mass_multiplier,
+                });
+            }
             Ok((rho * AIR_CP_J_KG_K * volume * z.mass_multiplier).max(MIN_CAPACITANCE_J_K))
         })
         .collect()
@@ -2114,14 +2126,14 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(300.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
         let caps = derive_zone_capacitances(&zones, p_pa).unwrap();
         assert_eq!(caps.len(), 1);
         // ρ computed from ideal gas law at 20 °C, not the 1.2041 constant.
         let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
-        let expected = rho * AIR_CP_J_KG_K * 300.0 * INTERIOR_MASS_MULTIPLIER;
+        let expected = rho * AIR_CP_J_KG_K * 300.0 * TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT;
         assert!((caps[0] - expected).abs() < 1e-6);
     }
 
@@ -2134,12 +2146,12 @@ mod tests {
                 ZoneInput {
                     floor_area_m2: Some(100.0),
                     volume_m3: Some(250.0),
-                    mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                    mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
                 },
                 ZoneInput {
                     floor_area_m2: Some(100.0),
                     volume_m3,
-                    mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                    mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
                 },
             ];
             let err =
@@ -2152,13 +2164,36 @@ mod tests {
         }
     }
 
+    /// A temperature capacitance multiplier that is zero, negative or NaN is
+    /// an error naming the zone, not a capacitance clamped to the floor.
+    #[test]
+    fn zone_capacitance_requires_a_positive_multiplier() {
+        for multiplier in [0.0, -7.0, f64::NAN, f64::INFINITY] {
+            let zones = vec![ZoneInput {
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                mass_multiplier: multiplier,
+            }];
+            let err =
+                derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                    .expect_err("a non-positive multiplier must fail");
+            assert!(
+                matches!(
+                    err,
+                    BoundaryRcError::CapacitanceMultiplier { zone_idx: 0, .. }
+                ),
+                "{multiplier}: got {err}"
+            );
+        }
+    }
+
     #[test]
     fn zone_capacitance_respects_minimum() {
         // Tiny volume → capacitance should be clamped to MIN_CAPACITANCE_J_K.
         let zones = vec![ZoneInput {
             floor_area_m2: Some(1e-12),
             volume_m3: Some(2.5e-12),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2173,7 +2208,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let p_sea = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
         let p_denver = hares_physics::air_properties::standard_pressure_pa(1609.0);
@@ -2191,7 +2226,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let result = derive_zone_capacitances(&zones, 0.0);
         assert!(result.is_err());
@@ -2207,7 +2242,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let result = derive_zone_capacitances(&zones, -1.0);
         assert!(result.is_err());
@@ -2225,7 +2260,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2255,7 +2290,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2296,12 +2331,12 @@ mod tests {
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
                 volume_m3: Some(200.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -2329,7 +2364,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2373,12 +2408,12 @@ mod tests {
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
                 volume_m3: Some(200.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -2489,7 +2524,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2547,7 +2582,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2583,7 +2618,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2603,7 +2638,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2633,7 +2668,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2669,7 +2704,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2699,7 +2734,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2768,7 +2803,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2882,7 +2917,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3019,7 +3054,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3062,12 +3097,12 @@ mod tests {
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(50.0),
                 volume_m3: Some(125.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -3091,7 +3126,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3110,12 +3145,12 @@ mod tests {
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
                 volume_m3: Some(200.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -3140,12 +3175,12 @@ mod tests {
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
                 volume_m3: Some(200.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -3170,7 +3205,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3196,7 +3231,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3239,7 +3274,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3273,7 +3308,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3312,7 +3347,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3351,7 +3386,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3394,12 +3429,12 @@ mod tests {
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -3442,7 +3477,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3478,7 +3513,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3521,7 +3556,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3616,7 +3651,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3695,7 +3730,7 @@ mod tests {
                 &[ZoneInput {
                     floor_area_m2: Some(100.0),
                     volume_m3: Some(250.0),
-                    mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                    mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
                 }],
                 hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
             )
@@ -3964,7 +3999,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(120.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4011,7 +4046,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(120.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4059,7 +4094,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4110,7 +4145,7 @@ mod tests {
             &[ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             }],
             hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
         )
@@ -4155,7 +4190,7 @@ mod tests {
             &[ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             }],
             hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
         )
@@ -4201,7 +4236,7 @@ mod tests {
             &[ZoneInput {
                 floor_area_m2: Some(48.0),
                 volume_m3: Some(129.6),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             }],
             hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
         )
@@ -4262,7 +4297,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(120.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4440,7 +4475,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4476,7 +4511,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4524,7 +4559,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4547,7 +4582,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4594,7 +4629,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4619,7 +4654,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4640,7 +4675,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4656,7 +4691,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            mass_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)

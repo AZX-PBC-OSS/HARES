@@ -2739,7 +2739,7 @@ fn temperature_capacitance_multiplier(
 ) -> Result<f64, HpxmlError> {
     const ELEMENT: &str = "TemperatureCapacitanceMultiplier";
     let Some(control) = root.path(&["SoftwareInfo", "extension", "SimulationControl"]) else {
-        return Ok(hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER);
+        return Ok(hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT);
     };
     if let Some(legacy) = control.child(ELEMENT) {
         parse_warnings.push(Warning::new(
@@ -2752,7 +2752,7 @@ fn temperature_capacitance_multiplier(
         ));
     }
     let Some(node) = control.path(&["AdvancedResearchFeatures", ELEMENT]) else {
-        return Ok(hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER);
+        return Ok(hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT);
     };
     match node.text_as_f64() {
         Some(value) if value.is_finite() && value > 0.0 => Ok(value),

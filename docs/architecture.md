@@ -471,7 +471,7 @@ graph LR
 ```
 
 **Key construction details:**
-- Zone air capacitance includes a 7x interior mass multiplier for thermal storage
+- Every zone's air capacitance takes the building's temperature capacitance multiplier (OS-HPXML's default 7), as EnergyPlus's `ZoneCapacitanceMultiplier:ResearchSpecial` does; furniture and partition mass are separate nodes
 - Minimum capacitance floor of 1000 J/K prevents near-singularity
 - Parallel resistances are combined: `R_parallel = (R₁·R₂)/(R₁+R₂)`
 - Minimum capacitance clamping (`MIN_CAPACITANCE_J_K = 1000 J/K`) prevents degenerate nodes

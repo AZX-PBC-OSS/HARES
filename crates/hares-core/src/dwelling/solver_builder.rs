@@ -1348,7 +1348,7 @@ pub(crate) fn build_default_solvers(
         let height_above_grade = |height: std::result::Result<f64, hares_io::hpxml::HpxmlError>| {
             height.map_err(|err| HaresError::Dwelling(format!("height above grade: {err}")))
         };
-        let default_ceiling_height_m = building.ceiling_height_m;
+        let ceiling_height_m = building_ceiling_height_m(building)?;
 
         // --- Site-level terrain and shielding ---
         // Extracted once before the zone loop to avoid recomputation per-zone.
@@ -1385,7 +1385,7 @@ pub(crate) fn build_default_solvers(
                         };
                         let h = building
                             .infiltration_height_m
-                            .unwrap_or(default_ceiling_height_m * building.floors_above_grade);
+                            .unwrap_or(ceiling_height_m * building.floors_above_grade);
                         let coeffs = aim2_coefficients_from_ach50(&Aim2Params {
                             ach50,
                             volume_m3: building.conditioned_volume_m3,
@@ -1544,7 +1544,7 @@ pub(crate) fn build_default_solvers(
     // Cw from compute_natural_ventilation_cw (T-0452).
     {
         use hares_envelope::NaturalVentilationConfig;
-        let default_ceiling_height_m = building.ceiling_height_m;
+        let default_ceiling_height_m = building_ceiling_height_m(building)?;
         let n_conditioned = building
             .zones
             .iter()
@@ -1672,6 +1672,21 @@ fn foundation_infiltration_method(
     );
 
     Ok(InfiltrationMethod::Ach { ach })
+}
+
+/// The conditioned space's ceiling height: an HPXML home's comes from its
+/// conditioned volume over its floor area (or OS-HPXML's derivation), a
+/// synthetic building's from its zone's volume over its floor area. A
+/// height that is not finite and positive is an error, not an assumed 2.5 m.
+fn building_ceiling_height_m(building: &Building) -> Result<f64> {
+    let height_m = building.ceiling_height_m;
+    if height_m.is_finite() && height_m > 0.0 {
+        Ok(height_m)
+    } else {
+        Err(HaresError::Dwelling(format!(
+            "the building gives no usable ceiling height ({height_m} m)"
+        )))
+    }
 }
 
 /// An attic's air exchange as OS-HPXML's (airflow.rb:1666-1712): a vented
