@@ -3,14 +3,21 @@
 //! shoulder-season evening (the outdoor air below the zone, the home still
 //! in cooling), a furnace pre-heats in January, and no signal is rejected.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
+use std::time::Duration as StdDuration;
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_control::DispatchTarget;
 use hares_core::actors::{AlwaysComply, DrAction, DrCompliance};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
+use hares_equipment::{Equipment, EquipmentConfig};
 use hares_types::telemetry_keys as tk;
-use hares_types::{DRLevel, EndUse, HaresError, OperatingMode, ThermostatAxes};
+use hares_types::{
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, DRLevel, EndUse,
+    EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError,
+    OperatingMode, PortDeclaration, PortSlots, Telemetry, ThermostatAxes, ThermostatAxis,
+};
 
 const PRECONDITION_DELTA_C: f64 = 2.0;
 
@@ -269,6 +276,217 @@ fn an_event_without_a_direction_on_a_dual_mode_unit_is_refused() {
         "{err}"
     );
     assert_eq!(dwelling.actor_count(), 0);
+}
+
+fn equipment_names(dwelling: &Dwelling) -> Vec<String> {
+    dwelling
+        .equipment()
+        .iter()
+        .map(|eq| eq.descriptor().name.clone())
+        .collect()
+}
+
+fn dr_actor(target: &str, action: DrAction) -> Box<DrCompliance> {
+    let mut actor = DrCompliance::new("DR")
+        .with_compliance_model(AlwaysComply)
+        .with_hvac_target(DispatchTarget::ByName(target.into()))
+        .with_hvac_action(action);
+    actor.set_dr_level(DRLevel::Moderate);
+    Box::new(actor)
+}
+
+fn is_preconditioning_refusal(err: &HaresError) -> bool {
+    match err {
+        HaresError::PreconditioningAxis { .. } => true,
+        HaresError::RejectedEquipment { reason, .. } => is_preconditioning_refusal(reason),
+        _ => false,
+    }
+}
+
+/// A unit with no ports whose thermostat serves `axes`.
+struct ThermostatProbe {
+    descriptor: EquipmentDescriptor,
+    axes: Option<ThermostatAxes>,
+    telemetry: Telemetry,
+    core_output: CoreOutput,
+}
+
+impl ThermostatProbe {
+    fn boxed(name: &str, axes: Option<ThermostatAxes>) -> Box<Self> {
+        Box::new(Self {
+            descriptor: EquipmentDescriptor {
+                id: EquipmentId(0),
+                name: name.to_string(),
+                end_use: EndUse::OTHER,
+                equipment_type: Cow::Borrowed("ThermostatProbe"),
+                zone: None,
+                fuel: FuelType::Electric,
+                stage: ExecutionStage::Independent,
+                control_capabilities: ControlCapabilities::empty(),
+                core_capabilities: CoreCapabilities::empty(),
+                telemetry_fields: Vec::new(),
+                zone_type: None,
+            },
+            axes,
+            telemetry: Telemetry::with_capacity(0),
+            core_output: CoreOutput::default(),
+        })
+    }
+}
+
+impl Equipment for ThermostatProbe {
+    fn descriptor(&self) -> &EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(&mut self, id: EquipmentId) -> Result<(), HaresError> {
+        hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+    }
+
+    fn thermostat_axes(&self) -> Option<ThermostatAxes> {
+        self.axes
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &[]
+    }
+
+    fn init(&mut self, _: &EquipmentConfig, _: &EnvironmentState) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    fn update_control(&mut self, _: &EnvironmentState) -> OperatingMode {
+        OperatingMode::Off
+    }
+
+    fn step(
+        &mut self,
+        _: &EnvironmentState,
+        _: StdDuration,
+        _: &mut PortSlots,
+    ) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
+    }
+
+    fn save_state(&self) -> Result<Vec<u8>, HaresError> {
+        Ok(Vec::new())
+    }
+
+    fn load_state(&mut self, _: &[u8]) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    fn apply_signal(&mut self, _: &ControlSignal) -> Result<(), HaresError> {
+        Ok(())
+    }
+}
+
+/// A named target that is not in the dwelling is refused, so the actor is
+/// added after its equipment: a misspelt name, and a unit removed before
+/// the actor arrives, which is accepted once the unit is back.
+#[test]
+fn an_event_naming_a_unit_not_in_the_dwelling_is_refused() {
+    let mut dwelling = bestest_600();
+    let unit = ideal_unit(&dwelling);
+    let err = dwelling
+        .add_actor(dr_actor(
+            "Idael HVAC",
+            DrAction::precool(PRECONDITION_DELTA_C),
+        ))
+        .expect_err("a misspelt target");
+    assert!(is_preconditioning_refusal(&err), "{err}");
+
+    let removed = dwelling.remove_equipment(&unit).expect("remove the unit");
+    let err = dwelling
+        .add_actor(dr_actor(&unit, DrAction::precool(PRECONDITION_DELTA_C)))
+        .expect_err("the unit is not in the dwelling");
+    assert!(is_preconditioning_refusal(&err), "{err}");
+    assert_eq!(dwelling.actor_count(), 0);
+
+    dwelling.add_equipment(removed).expect("re-add the unit");
+    dwelling
+        .add_actor(dr_actor(&unit, DrAction::precool(PRECONDITION_DELTA_C)))
+        .expect("the unit is back");
+    assert_eq!(dwelling.actor_count(), 1);
+}
+
+/// An actor supplied with its equipment is checked against it: the pair
+/// is refused whole when the event names no axis for the unit.
+#[test]
+fn an_actor_supplied_with_a_unit_it_cannot_serve_is_refused_with_it() {
+    let mut dwelling = bestest_600();
+    let before = equipment_names(&dwelling);
+    let err = dwelling
+        .add_equipment_with_actors(
+            ThermostatProbe::boxed("Second Unit", Some(ThermostatAxes::Both)),
+            vec![dr_actor(
+                "Second Unit",
+                DrAction::setpoint_delta(PRECONDITION_DELTA_C),
+            )],
+        )
+        .expect_err("no direction for a unit serving both");
+    assert!(is_preconditioning_refusal(&err), "{err}");
+    assert_eq!(equipment_names(&dwelling), before);
+    assert_eq!(dwelling.actor_count(), 0);
+}
+
+/// A replacement under the target's name that cannot serve the event, and
+/// a removal of the target, are refused with the dwelling untouched; the
+/// event goes on pre-cooling the unit.
+#[test]
+fn replacing_or_removing_a_preconditioning_target_it_cannot_lose_is_refused() {
+    let mut dwelling = bestest_600();
+    let unit = ideal_unit(&dwelling);
+    dwelling
+        .add_actor(dr_actor(&unit, DrAction::precool(PRECONDITION_DELTA_C)))
+        .expect("register the DR actor");
+    let before = equipment_names(&dwelling);
+    for axes in [None, Some(ThermostatAxes::One(ThermostatAxis::Heating))] {
+        let err = dwelling
+            .replace_equipment(&unit, ThermostatProbe::boxed(&unit, axes))
+            .err()
+            .expect("the replacement cannot pre-cool");
+        assert!(is_preconditioning_refusal(&err), "{axes:?}: {err}");
+    }
+    let err = dwelling
+        .remove_equipment(&unit)
+        .err()
+        .expect("the event names the unit");
+    assert!(is_preconditioning_refusal(&err), "{err}");
+    assert_eq!(equipment_names(&dwelling), before);
+    assert_eq!(ideal_unit(&dwelling), unit);
+    assert_eq!(dwelling.actor_count(), 1);
+
+    dwelling.step().expect("first step");
+    for _ in 0..24 {
+        dwelling.step().expect("step");
+        let eq = dwelling
+            .equipment()
+            .iter()
+            .find(|eq| eq.descriptor().name == unit)
+            .expect("the unit");
+        let t = eq.telemetry();
+        let get = |key| t.get(key).expect("setpoint telemetry");
+        assert!(
+            (get(tk::COOLING_SETPOINT_C)
+                - (get(tk::SCHEDULE_COOLING_SETPOINT_C) - PRECONDITION_DELTA_C))
+                .abs()
+                < 1e-9
+        );
+    }
+    assert_eq!(dwelling.health().rejected_control_signals, 0);
 }
 
 /// Massachusetts gas-furnace home at a constant 70/76 °F in January: the

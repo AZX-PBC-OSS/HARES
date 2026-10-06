@@ -202,13 +202,12 @@ impl Dwelling {
     /// # Errors
     ///
     /// `HaresError::Control` when an actor with the same name is already
-    /// registered; the actor's own error when it cannot act on its targets
-    /// ([`Actor::validate_equipment`]); the roster plan's error otherwise.
-    /// On `Err` the actor roster and schedule are exactly as before the
-    /// call.
+    /// registered; the roster plan's error otherwise, which includes the
+    /// actor's own when it cannot act on its targets
+    /// ([`Actor::validate_equipment`]). On `Err` the actor roster and
+    /// schedule are exactly as before the call.
     pub fn add_actor(&mut self, actor: Box<dyn Actor>) -> Result<()> {
         self.ensure_actor_names_free(std::slice::from_ref(&actor))?;
-        actor.validate_equipment(&actor_equipment(&self.equipment_refs()))?;
         let mut change = self.actor_change(vec![true; self.actors.len()]);
         change.supplied.push(actor);
         let plan =
@@ -781,7 +780,9 @@ impl Dwelling {
     /// # Errors
     ///
     /// `HaresError::Dwelling` when no equipment has the name; the roster
-    /// plan's error otherwise. On `Err` the equipment and actor rosters are
+    /// plan's error otherwise, which includes a surviving actor's refusal
+    /// to lose its target ([`Actor::validate_equipment`]: a pre-conditioning
+    /// event naming it). On `Err` the equipment and actor rosters are
     /// exactly as before the call.
     pub fn remove_equipment(&mut self, name: &str) -> Result<Box<dyn Equipment>> {
         let pos = self
@@ -1066,7 +1067,8 @@ impl Dwelling {
 
     /// Derives every roster cache from the prospective `equipment` and
     /// `actors` without touching `self`. Every fallible decision of a
-    /// roster change happens here: an output-schema drift, a fluid-loop
+    /// roster change happens here: an actor that cannot act on the
+    /// prospective equipment, an output-schema drift, a fluid-loop
     /// conflict, and the creation of the output recorder (which creates
     /// the output file).
     fn plan_roster_caches(
@@ -1074,6 +1076,10 @@ impl Dwelling {
         equipment: &[&dyn Equipment],
         actors: &[&dyn Actor],
     ) -> Result<RosterPlan> {
+        let prospective = actor_equipment(equipment);
+        for actor in actors {
+            actor.validate_equipment(&prospective)?;
+        }
         let equipment_id_by_name: HashMap<String, EquipmentId> = equipment
             .iter()
             .map(|eq| {

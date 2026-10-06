@@ -139,8 +139,10 @@ pub trait Actor: Send + Sync + 'static {
     /// by name have nothing to resolve.
     fn resolve_equipment_id(&mut self, _equipment_id_by_name: &HashMap<String, EquipmentId>) {}
 
-    /// Checks the actor's targets against the dwelling's equipment when the
-    /// actor is registered, so a target it cannot act on is refused there.
+    /// Checks the actor's targets against the prospective equipment of
+    /// every roster change (an actor registered or supplied, equipment
+    /// added, removed or replaced), so the dwelling refuses a change that
+    /// would leave the actor a target it cannot act on.
     ///
     /// Default: accepts. Actors that do not depend on what their targets
     /// are have nothing to check.
