@@ -64,10 +64,24 @@ _RESOLVER_EVENTS = frozenset(
 _SPAWN_EVENTS = frozenset({"subprocess.Popen", "os.posix_spawn", "os.spawn", "os.system", "os.exec"})
 _GUARDED_EVENTS = _SOCKET_EVENTS | _RESOLVER_EVENTS | _SPAWN_EVENTS
 _INET_FAMILIES = (2, 10)  # AF_INET, AF_INET6
-# Commands the standard library itself runs that cannot reach the network:
-# ``platform.processor()``, which every xdist worker calls at startup. Each is
-# allowed only when the program that would run is the system's own binary.
-_LOCAL_COMMANDS: dict[tuple[str, ...], tuple[str, ...]] = {("uname", "-p"): ("/usr/bin/uname", "/bin/uname")}
+
+
+@dataclass(frozen=True)
+class _LocalCommand:
+    binaries: tuple[str, ...]
+    operands: int
+
+
+# Commands that cannot reach the network: ``uname -p``, which
+# ``platform.processor()`` runs in every xdist worker at startup, and
+# ``readelf -d`` of one file, which the helics wheel canary reads. A command
+# line is its fixed leading arguments followed by exactly ``operands`` more,
+# and it is allowed only when the program that would run is the system's own
+# binary.
+_LOCAL_COMMANDS: dict[tuple[str, ...], _LocalCommand] = {
+    ("uname", "-p"): _LocalCommand(("/usr/bin/uname", "/bin/uname"), operands=0),
+    ("readelf", "-d"): _LocalCommand(("/usr/bin/readelf", "/bin/readelf"), operands=1),
+}
 
 
 class NetworkRefused(ConnectionRefusedError):
@@ -155,8 +169,16 @@ def _local_command(executable: object, argv: object, env: Mapping[str, str] | No
     """Whether ``argv`` is an allowed command and the program it would run is that command's binary."""
     if not isinstance(argv, (list, tuple)):
         return False
-    binaries = _LOCAL_COMMANDS.get(tuple(_text(a) for a in argv))
-    if binaries is None:
+    words = tuple(_text(a) for a in argv)
+    command = next(
+        (
+            command
+            for prefix, command in _LOCAL_COMMANDS.items()
+            if words[: len(prefix)] == prefix and len(words) == len(prefix) + command.operands
+        ),
+        None,
+    )
+    if command is None:
         return False
     program = _text(executable) or _text(argv[0])
     if os.sep not in program:
@@ -165,7 +187,7 @@ def _local_command(executable: object, argv: object, env: Mapping[str, str] | No
         if found is None:
             return False
         program = found
-    return os.path.realpath(program) in {os.path.realpath(binary) for binary in binaries}
+    return os.path.realpath(program) in {os.path.realpath(binary) for binary in command.binaries}
 
 
 def _violation(event: str, args: tuple[Any, ...]) -> str | None:

@@ -142,20 +142,33 @@ def test_a_python_child_given_an_environment_without_the_refusal_is_not_started(
     assert len(attempts) == 1
 
 
-def test_the_standard_librarys_processor_lookup_runs() -> None:
+LOCAL_COMMAND_LINES = [
+    pytest.param(["uname", "-p"], id="processor-lookup"),
+    pytest.param(["readelf", "-d", sys.executable], id="dynamic-section"),
+]
+
+
+@pytest.mark.parametrize("argv", LOCAL_COMMAND_LINES)
+def test_a_local_command_runs(argv: list[str]) -> None:
     with offline_guard.scope(allow_network=False) as attempts:
-        subprocess.run(["uname", "-p"], check=False, capture_output=True)
+        subprocess.run(argv, check=False, capture_output=True)
     assert attempts == []
 
 
-def test_another_program_under_the_allowed_command_line_is_not_started(tmp_path: Path) -> None:
-    impostor = tmp_path / "uname"
+@pytest.mark.parametrize("argv", LOCAL_COMMAND_LINES)
+def test_another_program_under_a_local_command_line_is_not_started(argv: list[str], tmp_path: Path) -> None:
+    impostor = tmp_path / argv[0]
     impostor.write_text("#!/bin/sh\n")
     impostor.chmod(0o755)
     path_first = {**os.environ, "PATH": os.pathsep.join([str(tmp_path), os.environ.get("PATH", "")])}
 
-    assert len(_refused(lambda: subprocess.run(["uname", "-p"], executable="/bin/echo", check=False))) == 1
-    assert len(_refused(lambda: subprocess.run(["uname", "-p"], env=path_first, check=False))) == 1
+    assert len(_refused(lambda: subprocess.run(argv, executable="/bin/echo", check=False))) == 1
+    assert len(_refused(lambda: subprocess.run(argv, env=path_first, check=False))) == 1
+
+
+def test_a_dynamic_section_read_of_more_than_one_file_is_not_started() -> None:
+    argv = ["readelf", "-d", sys.executable, sys.executable]
+    assert len(_refused(lambda: subprocess.run(argv, check=False, capture_output=True))) == 1
 
 
 def test_any_other_subprocess_is_not_started() -> None:
