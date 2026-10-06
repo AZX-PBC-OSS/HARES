@@ -924,10 +924,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // is present. OCHRE: indoor_floor_area = conditioned_floor_area - first_floor_area * below_grade_floors.
     // If foundation floor area is missing, fall back to the floor-count ratio split.
     let total = conditioned_floor_area_m2;
-    let indoor_floor_area_m2 = match (
-        total_conditioned_floors,
-        foundation_floor_area_m2,
-    ) {
+    let indoor_floor_area_m2 = match (total_conditioned_floors, foundation_floor_area_m2) {
         (Some(n_total), Some(foundation_area))
             if n_total > 0.0 && floors_above_grade >= 0.0 && floors_above_grade < n_total =>
         {
