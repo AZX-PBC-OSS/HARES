@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
-import tempfile
 
 import pytest
 
@@ -102,7 +101,7 @@ def test_vec_rust_path_preserves_warning_count_key():
 # ---------------------------------------------------------------------------
 
 
-def _make_gym_env(action_config: dict[str, list[str]]):
+def _make_gym_env(action_config: dict[str, list[str]], output_dir: Path):
     pytest.importorskip("gymnasium")
     from ochre_next.rl.gym_env import DwellingGymEnv
 
@@ -116,8 +115,8 @@ def _make_gym_env(action_config: dict[str, list[str]]):
             "duration_s": 600,
             "time_res_s": 60,
             # The gym env's dict path cannot disable write_output; the recorder
-            # at least lands here instead of the working tree.
-            "output_path": str(Path(tempfile.mkdtemp()) / "dwelling_0.csv"),
+            # lands in the test's own directory.
+            "output_path": str(output_dir / "dwelling_0.csv"),
         },
         observation_fields=_OBS_FIELDS,
         action_space_config=action_config,
@@ -126,9 +125,9 @@ def _make_gym_env(action_config: dict[str, list[str]]):
     )
 
 
-def test_gym_env_clean_step_reports_zero_warnings():
+def test_gym_env_clean_step_reports_zero_warnings(tmp_path: Path):
     """A clean DwellingGymEnv step surfaces warning_count == 0.0, no list."""
-    env = _make_gym_env(_CLEAN_ACTION_CONFIG)
+    env = _make_gym_env(_CLEAN_ACTION_CONFIG, tmp_path)
     env.reset(seed=42)
 
     _, _, _, _, info = env.step(np.array([21.0], dtype=np.float64))
@@ -137,10 +136,10 @@ def test_gym_env_clean_step_reports_zero_warnings():
     assert "warnings" not in info
 
 
-def test_gym_env_surfaces_rejected_control_signal():
+def test_gym_env_surfaces_rejected_control_signal(tmp_path: Path):
     """A dispatch-time control rejection shows up in DwellingGymEnv step info,
     and the messages are drained exactly once."""
-    env = _make_gym_env(_REJECTED_ACTION_CONFIG)
+    env = _make_gym_env(_REJECTED_ACTION_CONFIG, tmp_path)
     env.reset(seed=42)
 
     _, _, _, _, info = env.step(np.array([70.0], dtype=np.float64))

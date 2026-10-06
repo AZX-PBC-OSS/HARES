@@ -420,8 +420,8 @@ fn oracle_pv_24h_lut_parity() {
     // Build a synthetic Parquet LUT with one entry matching the weather
     // conditions. The LUT's AC output is set to the analytically expected
     // AC power so the LUT correction is identity (SAM and HARES match).
-    let lut_path =
-        std::env::temp_dir().join(format!("pv_lut_oracle_{}.parquet", std::process::id()));
+    let lut_dir = tempfile::tempdir().expect("temp dir");
+    let lut_path = lut_dir.path().join("pv_lut_oracle.parquet");
     {
         let schema = Schema::new(vec![
             Field::new("solar_zenith_deg", DataType::Float64, false),

@@ -130,14 +130,16 @@ pub fn run_aggregation_check() -> Result<(), Vec<String>> {
 // ---------------------------------------------------------------------------
 
 fn run_fleet_integration(failures: &mut Vec<String>) {
-    let schedule_path = helpers::unique_temp_path("hares-regr-agg-sched", "csv");
-    let weather_path = helpers::unique_temp_path("hares-regr-agg-weather", "epw");
+    let scratch = tempfile::tempdir().expect("create scratch directory");
+    let schedule_path = scratch.path().join("schedule.csv");
+    let weather_path = scratch.path().join("weather.epw");
     helpers::write_schedule_csv(&schedule_path);
     helpers::write_weather_epw(&weather_path);
 
     let configs: Vec<_> = (0..3)
         .map(|idx| {
             helpers::build_dwelling_config(
+                scratch.path(),
                 idx as i64 + 1,
                 schedule_path.clone(),
                 weather_path.clone(),
@@ -209,8 +211,6 @@ fn run_fleet_integration(failures: &mut Vec<String>) {
             failures.push("aggregate_timeseries is empty".to_string());
         }
     }
-
-    helpers::cleanup_paths(&[schedule_path, weather_path]);
 }
 
 // ---------------------------------------------------------------------------

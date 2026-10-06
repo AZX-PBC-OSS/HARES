@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, Float64Array};
 use corpus::{DiscoveredFixture, ParityFixture, discover_fixtures};
@@ -462,7 +461,9 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     let config = parse_fixture_config(&config_contents)?;
 
     let mut sim_config = parse_simulation_config(&config_contents, &config)?;
-    let output_path = unique_temp_path(&fixture.id, "parquet");
+    let output_dir =
+        tempfile::tempdir().map_err(|err| format!("failed to create output directory: {err}"))?;
+    let output_path = output_dir.path().join(format!("{}.parquet", fixture.id));
     sim_config.output_format = hares_io::OutputFormat::Parquet;
     sim_config.output_path = Some(output_path.clone());
 
@@ -517,8 +518,6 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
         .into_iter()
         .filter(|metric| !checks.iter().any(|check| check.metric == *metric))
         .collect::<Vec<_>>();
-
-    let _ = fs::remove_file(output_path);
 
     Ok(FixtureRunResult {
         fixture_id: fixture.id.clone(),
@@ -883,16 +882,6 @@ fn count_mode_cycles(series: &[f64]) -> u64 {
 fn integrate_kw_series(series: &[f64]) -> f64 {
     const MINUTE_STEP_HOURS: f64 = 1.0 / 60.0;
     series.iter().sum::<f64>() * MINUTE_STEP_HOURS
-}
-
-fn unique_temp_path(fixture_id: &str, extension: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before unix epoch")
-        .as_nanos();
-    path.push(format!("hares-parity-{fixture_id}-{nanos}.{extension}"));
-    path
 }
 
 #[cfg(test)]

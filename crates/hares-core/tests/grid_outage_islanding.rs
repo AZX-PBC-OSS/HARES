@@ -15,8 +15,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 use hares_core::Dwelling;
 use hares_equipment::battery::Battery;
@@ -25,26 +24,7 @@ use hares_equipment::scheduled_load::ScheduledLoad;
 use hares_equipment::{BatteryConfig, Equipment, EquipmentConfig};
 use hares_types::EndUse;
 
-fn nanos_suffix() -> String {
-    // Uniqueness by construction: pid + monotonic counter + nanos
-    // (see hares-core/tests/engine.rs).
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{nanos}-{seq}", std::process::id())
-}
-
-fn unique_temp_toml(tag: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("hares-outage-island-{tag}-{}.toml", nanos_suffix()));
-    path
-}
-
-fn write_minimal_toml(path: &PathBuf) {
+fn write_minimal_toml(path: &Path) {
     let content = r#"building_id = 9401
 
 [simulation]
@@ -83,10 +63,10 @@ master_seed = 0
 
 /// Dwelling with a 1.5 kW constant-power scheduled load.
 fn build_dwelling_with_base_load(tag: &str) -> Dwelling {
-    let toml_path = unique_temp_toml(tag);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let toml_path = dir.path().join(format!("{tag}.toml"));
     write_minimal_toml(&toml_path);
     let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
-    let _ = fs::remove_file(&toml_path);
 
     let env = dwelling.latest_env().clone();
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();

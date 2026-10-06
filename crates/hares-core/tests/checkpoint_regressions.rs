@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, Float64Array, RecordBatch};
 use arrow::compute::concat_batches;
@@ -18,21 +17,8 @@ use hares_equipment::{Equipment, EquipmentConfig};
 use hares_io::OutputFormat;
 use hares_types::EndUse;
 
-fn nanos_suffix() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos()
-}
-
-fn unique_temp_toml(tag: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("hares-checkpoint-{tag}-{}.toml", nanos_suffix()));
-    path
-}
-
 /// Write a minimal synthetic-TOML dwelling (no equipment, just envelope).
-fn write_minimal_toml(path: &PathBuf) {
+fn write_minimal_toml(path: &Path) {
     let content = r#"building_id = 9001
 
 [simulation]
@@ -69,8 +55,10 @@ master_seed = 0
     fs::write(path, content).expect("failed to write synthetic TOML");
 }
 
-fn build_dwelling_with_base_load(tag: &str) -> (PathBuf, Dwelling) {
-    let toml_path = unique_temp_toml(tag);
+/// Builds the dwelling from a TOML written into `dir`; the path is returned so
+/// the test can build the restore target from the same definition.
+fn build_dwelling_with_base_load(dir: &Path) -> (PathBuf, Dwelling) {
+    let toml_path = dir.join("dwelling.toml");
     write_minimal_toml(&toml_path);
 
     let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
@@ -100,7 +88,8 @@ fn build_dwelling_with_base_load(tag: &str) -> (PathBuf, Dwelling) {
 /// it into a fresh dwelling, and verifies the summary survives the round-trip.
 #[test]
 fn prior_electrical_summary_survives_checkpoint_restart() {
-    let (toml_path, mut dwelling_a) = build_dwelling_with_base_load("elec-summary-survives");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (toml_path, mut dwelling_a) = build_dwelling_with_base_load(dir.path());
 
     // Run 3 steps to populate prior_electrical_summary.
     for _ in 0..3 {
@@ -146,8 +135,6 @@ fn prior_electrical_summary_survives_checkpoint_restart() {
         checkpoint_b.prior_electrical_summary, checkpoint.prior_electrical_summary,
         "prior_electrical_summary must survive checkpoint round-trip unchanged",
     );
-
-    let _ = fs::remove_file(&toml_path);
 }
 
 /// Verifies that after `load_checkpoint`, `latest_env.equipment_core`
@@ -155,7 +142,8 @@ fn prior_electrical_summary_survives_checkpoint_restart() {
 /// was before the fix.
 #[test]
 fn equipment_core_populated_after_checkpoint_restore() {
-    let (toml_path, mut dwelling_a) = build_dwelling_with_base_load("core-populated");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (toml_path, mut dwelling_a) = build_dwelling_with_base_load(dir.path());
 
     for _ in 0..3 {
         dwelling_a.step().expect("step in dwelling A");
@@ -218,15 +206,14 @@ fn equipment_core_populated_after_checkpoint_restore() {
         core_equipment_count > 0,
         "equipment_core must have at least one entry after checkpoint restore"
     );
-
-    let _ = fs::remove_file(&toml_path);
 }
 
 /// Verifies that after `load_checkpoint`, the equipment_core keys
 /// match those present at the time `save_checkpoint` was called.
 #[test]
 fn equipment_core_keys_match_after_checkpoint_restore() {
-    let (toml_path, mut dwelling_a) = build_dwelling_with_base_load("core-keys-match");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (toml_path, mut dwelling_a) = build_dwelling_with_base_load(dir.path());
 
     // Add a second equipment so key matching is non-trivial.
     let env_a = dwelling_a.latest_env().clone();
@@ -301,8 +288,6 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
         pre_save_core_keys, post_restore_core_keys,
         "equipment_core keys must survive checkpoint round-trip unchanged"
     );
-
-    let _ = fs::remove_file(&toml_path);
 }
 
 /// Verifies that after checkpoint restore, stepping succeeds and produces
@@ -310,7 +295,8 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
 /// the snapshot was complete and actors read correct equipment outputs.
 #[test]
 fn first_post_restore_step_produces_valid_equipment_output() {
-    let (toml_path, mut dwelling_a) = build_dwelling_with_base_load("core-output-valid");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (toml_path, mut dwelling_a) = build_dwelling_with_base_load(dir.path());
 
     for _ in 0..3 {
         dwelling_a.step().expect("step in dwelling A");
@@ -356,8 +342,6 @@ fn first_post_restore_step_produces_valid_equipment_output() {
         has_power,
         "equipment_core must contain entries with non-zero power after first post-restore step"
     );
-
-    let _ = fs::remove_file(&toml_path);
 }
 
 fn add_ev_to_dwelling(dwelling: &mut Dwelling) {
@@ -421,7 +405,8 @@ fn add_ev_to_dwelling(dwelling: &mut Dwelling) {
 /// before snapshot_equipment_state() captures it.
 #[test]
 fn equipment_core_restores_ev_soc_after_checkpoint() {
-    let (toml_path, mut dwelling_a) = build_dwelling_with_base_load("ev-soc-A");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (toml_path, mut dwelling_a) = build_dwelling_with_base_load(dir.path());
     add_ev_to_dwelling(&mut dwelling_a);
 
     // Run steps so the EV charges and SOC moves from initial 0.65.
@@ -500,8 +485,6 @@ fn equipment_core_restores_ev_soc_after_checkpoint() {
             "SOC value at index {i} diverged after checkpoint round-trip: pre={pre}, post={post}, delta={delta}",
         );
     }
-
-    let _ = fs::remove_file(&toml_path);
 }
 
 const RESUME_TOTAL_STEPS: usize = 96;

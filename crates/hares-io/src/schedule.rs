@@ -710,7 +710,6 @@ fn parse_csv_line(line: &str) -> Result<Vec<String>, ScheduleError> {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::{DateTime, FixedOffset};
 
@@ -720,15 +719,13 @@ mod tests {
     };
     use crate::weather::WeatherMeta;
 
-    fn write_temp_csv(csv_contents: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before UNIX_EPOCH")
-            .as_nanos();
-        path.push(format!("hares-io-schedule-test-{nanos}.csv"));
+    /// Writes the CSV into a directory removed when the returned `TempDir`
+    /// drops (panics included).
+    fn write_temp_csv(csv_contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("schedule.csv");
         fs::write(&path, csv_contents).expect("failed to write temporary schedule CSV");
-        path
+        (dir, path)
     }
 
     fn schedule_csv_15min_with_tz() -> String {
@@ -1000,10 +997,9 @@ mod tests {
     #[test]
     fn parse_schedule_csv_reads_from_path() {
         let csv = schedule_csv_15min_with_tz();
-        let path = write_temp_csv(&csv);
+        let (_dir, path) = write_temp_csv(&csv);
 
         let result = parse_schedule_csv(&path, &[], None, None);
-        let _ = fs::remove_file(path);
 
         assert!(result.is_ok());
     }

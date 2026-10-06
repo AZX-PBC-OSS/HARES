@@ -272,20 +272,8 @@ mod tests {
         }
     }
 
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let tid = std::thread::current().id();
-        format!("{base}_{nanos}_{tid:?}.{ext}")
-    }
-
-    struct TempFile(std::path::PathBuf);
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
+    fn checkpoint_path() -> (tempfile::TempDir, std::path::PathBuf) {
+        crate::temp_file::temp_file("checkpoint.json")
     }
 
     /// A checkpoint with every field holding a distinct, non-default value.
@@ -439,9 +427,7 @@ mod tests {
     fn save_then_load_round_trip() {
         let cp = populated_checkpoint();
 
-        let path =
-            std::env::temp_dir().join(unique_temp_name("hares_core_checkpoint_roundtrip", "json"));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded, cp);
@@ -472,9 +458,7 @@ mod tests {
             tariff_state: None,
         };
 
-        let path =
-            std::env::temp_dir().join(unique_temp_name("hares_core_checkpoint_multizone", "json"));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded.humidity_states.len(), 3);
@@ -502,9 +486,7 @@ mod tests {
             tariff_state: None,
         };
 
-        let path =
-            std::env::temp_dir().join(unique_temp_name("hares_core_checkpoint_version", "json"));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).unwrap();
 
         let err = DwellingCheckpoint::load(&path).unwrap_err();
@@ -551,11 +533,7 @@ mod tests {
         let json_bytes = serde_json::to_vec(&body).expect("serialize test fixture");
         let file_bytes = crate::checksum::write_with_sha256(&json_bytes);
 
-        let path = std::env::temp_dir().join(unique_temp_name(
-            "hares_core_checkpoint_old_version",
-            "json",
-        ));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         std::fs::write(&path, &file_bytes).expect("write test fixture");
 
         let err = DwellingCheckpoint::load(&path).unwrap_err();
@@ -627,11 +605,7 @@ mod tests {
             tariff_state: None,
         };
 
-        let path = std::env::temp_dir().join(unique_temp_name(
-            "hares_core_checkpoint_sha256_corrupt",
-            "json",
-        ));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).unwrap();
 
         // Corrupt one byte in the JSON body (after the `sha256:` prefix line)
@@ -678,11 +652,7 @@ mod tests {
             tariff_state: None,
         };
 
-        let path = std::env::temp_dir().join(unique_temp_name(
-            "hares_core_checkpoint_electrical_summary",
-            "json",
-        ));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded.prior_electrical_summary, summary);
@@ -697,11 +667,7 @@ mod tests {
         let mut cp = populated_checkpoint();
         cp.thermal.x = vec![state];
 
-        let path = std::env::temp_dir().join(unique_temp_name(
-            "hares_core_checkpoint_float_round_trip",
-            "json",
-        ));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded.thermal.x[0].to_bits(), state.to_bits());
@@ -752,11 +718,7 @@ mod tests {
             tariff_state: Some(blob),
         };
 
-        let path = std::env::temp_dir().join(unique_temp_name(
-            "hares_core_checkpoint_tariff_state",
-            "json",
-        ));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).expect("save the checkpoint");
         let loaded = DwellingCheckpoint::load(&path).expect("load the checkpoint");
         let saved_blob = cp.tariff_state.as_ref().expect("saved blob");

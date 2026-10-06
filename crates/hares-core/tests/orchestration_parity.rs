@@ -29,8 +29,7 @@
 //!    when the outdoor temp differs from the initial indoor temp.
 
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 use hares_core::Dwelling;
 use hares_core::actors::IdealThermostat;
@@ -39,32 +38,13 @@ use hares_core::actors::IdealThermostat;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn nanos_suffix() -> String {
-    // Uniqueness by construction: pid + monotonic counter + nanos
-    // (see hares-core/tests/engine.rs).
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{nanos}-{seq}", std::process::id())
-}
-
-fn unique_temp_toml(tag: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("hares-orchestration-{tag}-{}.toml", nanos_suffix()));
-    path
-}
-
-/// Write a minimal synthetic-TOML dwelling config to a temp file and return its path.
+/// Write a minimal synthetic-TOML dwelling config to `path`.
 ///
 /// `outdoor_temp_c` controls whether the furnace fires (below heating setpoint → heats).
 /// `fuel` is `"electricity"` or `"natural gas"`.
 /// `heating_capacity_kbtu_h` controls furnace output power.
 fn write_synthetic_toml(
-    path: &PathBuf,
+    path: &Path,
     outdoor_temp_c: f64,
     fuel: &str,
     heating_capacity_kbtu_h: f64,
@@ -121,14 +101,14 @@ master_seed = 0
 
 #[test]
 fn zone_temperatures_evolve_across_multiple_steps() {
-    let path = unique_temp_toml("zt-evolve");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("zt-evolve.toml");
     // Cold outdoor (-10 C): furnace will try to heat; conduction to outdoors
     // acts as a sink. Either way zone temp must change within 10 steps.
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
     let mut dwelling = Dwelling::from_toml_config(&path)
         .expect("Dwelling::from_toml_config must succeed for valid synthetic TOML");
-    let _ = fs::remove_file(&path);
 
     let first_step = dwelling.step().expect("step 1 must succeed");
     let (_, first_temp) = first_step
@@ -179,14 +159,14 @@ fn zone_temperatures_evolve_across_multiple_steps() {
 
 #[test]
 fn net_electric_power_is_positive_with_active_electric_furnace() {
-    let path = unique_temp_toml("elec-agg");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("elec-agg.toml");
     // -10 C outdoor with 3600s (60 steps): furnace fires after ~32 steps as
     // the zone cools from 21°C to below the 19.2°C heating threshold.
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 3600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     let mut ever_positive = false;
     for _ in 0..60 {
@@ -218,7 +198,8 @@ fn net_electric_power_is_positive_with_active_electric_furnace() {
 
 #[test]
 fn gas_furnace_reports_nonzero_gas_consumption_in_telemetry() {
-    let path = unique_temp_toml("gas-agg");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("gas-agg.toml");
     // Cold day: natural gas furnace will heat. Use 3600s (60 steps) because
     // with 7× interior mass multiplier and τ ≈ 31,000s the zone takes ~32
     // steps to cool from 21°C to below the 19.2°C heating threshold.
@@ -226,7 +207,6 @@ fn gas_furnace_reports_nonzero_gas_consumption_in_telemetry() {
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     // GasFurnace telemetry exposes "fuel_input_w" (watts of fuel consumed).
     let mut ever_nonzero_gas = false;
@@ -264,12 +244,12 @@ fn zone_temperatures_stay_within_physical_bounds_over_10_steps() {
     const SANITY_LOW_C: f64 = -50.0;
     const SANITY_HIGH_C: f64 = 80.0;
 
-    let path = unique_temp_toml("phys-bounds");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("phys-bounds.toml");
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     for step_idx in 1..=10u32 {
         let result = dwelling.step().expect("step must succeed");
@@ -302,12 +282,12 @@ fn zone_temperatures_stay_within_physical_bounds_over_10_steps() {
 
 #[test]
 fn port_slots_are_zeroed_between_steps() {
-    let path = unique_temp_toml("port-zero");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("port-zero.toml");
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     for step_idx in 1..=5u32 {
         dwelling.step().expect("step must succeed");
@@ -366,8 +346,9 @@ fn port_slots_are_zeroed_between_steps() {
 
 #[test]
 fn stale_zone_temp_regression_occupancy_gain_raises_mean_zone_temperature() {
-    let path_a = unique_temp_toml("stale-a");
-    let path_b = unique_temp_toml("stale-b");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path_a = dir.path().join("stale-a.toml");
+    let path_b = dir.path().join("stale-b.toml");
 
     // Dwelling A: occupancy = 1.0 → apply_occupancy_gains deposits 75 W sensible
     // (plus latent) into the zone thermal port every step.
@@ -457,8 +438,6 @@ master_seed = 0
         Dwelling::from_toml_config(&path_a).expect("Dwelling A from_toml_config must succeed");
     let mut dwelling_b =
         Dwelling::from_toml_config(&path_b).expect("Dwelling B from_toml_config must succeed");
-    let _ = fs::remove_file(&path_a);
-    let _ = fs::remove_file(&path_b);
 
     const STEPS: usize = 360;
     const SANITY_LOW_C: f64 = -50.0;
@@ -575,8 +554,9 @@ master_seed = 0
 
 #[test]
 fn ideal_hvac_occupancy_gain_reduces_cumulative_heating_energy() {
-    let path_a = unique_temp_toml("ideal-occ-a");
-    let path_b = unique_temp_toml("ideal-occ-b");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path_a = dir.path().join("ideal-occ-a.toml");
+    let path_b = dir.path().join("ideal-occ-b.toml");
 
     // time_res_s = 300 is the threshold at which IdealHvac auto-mode switches
     // from bang-bang to ideal (back-solved) capacity.  duration_s = 18000
@@ -673,8 +653,6 @@ master_seed = 0
         Dwelling::from_toml_config(&path_a).expect("Dwelling A from_toml_config must succeed");
     let mut dwelling_b =
         Dwelling::from_toml_config(&path_b).expect("Dwelling B from_toml_config must succeed");
-    let _ = fs::remove_file(&path_a);
-    let _ = fs::remove_file(&path_b);
 
     const STEPS: usize = 60;
     const TIMESTEP_H: f64 = 300.0 / 3600.0; // 300-second steps → 1/12 h
@@ -743,12 +721,12 @@ master_seed = 0
 
 #[test]
 fn step_result_zone_temperatures_are_sorted_by_zone_id() {
-    let path = unique_temp_toml("zone-sort");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("zone-sort.toml");
     write_synthetic_toml(&path, 5.0, "electricity", 20.0, 600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     for step_idx in 1..=5u32 {
         let result = dwelling.step().expect("step must succeed");
@@ -775,12 +753,12 @@ fn step_result_zone_temperatures_are_sorted_by_zone_id() {
 
 #[test]
 fn step_result_timestamps_advance_monotonically() {
-    let path = unique_temp_toml("ts-mono");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("ts-mono.toml");
     write_synthetic_toml(&path, 5.0, "electricity", 20.0, 600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     let mut prev_ts = dwelling.step().expect("step 1").timestamp;
     for step_idx in 2..=10u32 {
@@ -807,8 +785,9 @@ fn step_result_timestamps_advance_monotonically() {
 
 #[test]
 fn hvac_heating_energy_reaches_thermal_solver() {
-    let path_heated = unique_temp_toml("hvac-reach-heated");
-    let path_unheated = unique_temp_toml("hvac-reach-unheated");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path_heated = dir.path().join("hvac-reach-heated.toml");
+    let path_unheated = dir.path().join("hvac-reach-unheated.toml");
 
     // 3600s (60 steps): furnace fires after ~32 steps once zone cools below threshold.
     write_synthetic_toml(&path_heated, -10.0, "electricity", 30.0, 3600);
@@ -818,8 +797,6 @@ fn hvac_heating_energy_reaches_thermal_solver() {
         Dwelling::from_toml_config(&path_heated).expect("heated dwelling must load");
     let mut dwelling_unheated =
         Dwelling::from_toml_config(&path_unheated).expect("unheated dwelling must load");
-    let _ = fs::remove_file(&path_heated);
-    let _ = fs::remove_file(&path_unheated);
 
     // Remove all equipment from unheated dwelling to isolate the envelope
     dwelling_unheated
@@ -859,12 +836,12 @@ fn hvac_heating_energy_reaches_thermal_solver() {
 
 #[test]
 fn step_result_hvac_heating_w_positive_when_furnace_fires() {
-    let path = unique_temp_toml("hvac-heat-w");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("hvac-heat-w.toml");
     // 3600s (60 steps): furnace fires after ~32 steps once zone cools below threshold.
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 3600);
 
     let mut dwelling = Dwelling::from_toml_config(&path).expect("must load");
-    let _ = fs::remove_file(&path);
 
     let mut ever_heating = false;
     for _ in 0..60 {
@@ -890,11 +867,11 @@ fn step_result_hvac_heating_w_positive_when_furnace_fires() {
 
 #[test]
 fn normal_operation_produces_no_dispatch_warnings() {
-    let path = unique_temp_toml("no-warnings");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("no-warnings.toml");
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
     let mut dwelling = Dwelling::from_toml_config(&path).expect("must load");
-    let _ = fs::remove_file(&path);
 
     for _ in 0..10 {
         dwelling.step().expect("step");
@@ -926,7 +903,8 @@ fn normal_operation_produces_no_dispatch_warnings() {
 fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
     use std::collections::HashMap;
 
-    let path = unique_temp_toml("deadband-osc");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("deadband-osc.toml");
     // Outdoor at 20 C — warm enough that equipment would normally be in
     // Deadband. The thermostat pushes heat=21, cool=22 with default
     // hysteresis_c=1.0: gap = 1.0 < required 2.0 — deadband violation.
@@ -934,7 +912,6 @@ fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     // Discover the HVAC equipment name so the thermostat targets it.
     let hvac_names: Vec<String> = dwelling

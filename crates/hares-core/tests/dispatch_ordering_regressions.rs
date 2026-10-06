@@ -11,9 +11,9 @@
 
 use std::borrow::Cow;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_core::Dwelling;
@@ -30,21 +30,8 @@ use hares_types::{
 // Synthetic dwelling setup
 // ---------------------------------------------------------------------------
 
-fn nanos_suffix() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos()
-}
-
-fn unique_temp_toml(tag: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("hares-dispatch-{tag}-{}.toml", nanos_suffix()));
-    path
-}
-
 /// Write a minimal synthetic-TOML dwelling that loads deterministically.
-fn write_minimal_toml(path: &PathBuf) {
+fn write_minimal_toml(path: &Path) {
     let content = r#"building_id = 4242
 
 [simulation]
@@ -82,11 +69,10 @@ master_seed = 0
 }
 
 fn build_dwelling(tag: &str) -> Dwelling {
-    let path = unique_temp_toml(tag);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(format!("{tag}.toml"));
     write_minimal_toml(&path);
-    let dwelling = Dwelling::from_toml_config(&path).expect("synthetic TOML must load");
-    let _ = fs::remove_file(&path);
-    dwelling
+    Dwelling::from_toml_config(&path).expect("synthetic TOML must load")
 }
 
 // ---------------------------------------------------------------------------

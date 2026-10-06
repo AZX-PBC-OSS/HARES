@@ -35,9 +35,12 @@ use hares_types::FuelType;
 // Test helpers
 // ---------------------------------------------------------------------------
 
+#[path = "../../../tests/support/fixture_start.rs"]
+mod fixture_start;
+
 fn test_config(deadband: Option<f64>) -> SimulationConfig {
     SimulationConfig {
-        start_time: chrono::Utc::now().fixed_offset(),
+        start_time: fixture_start::fixture_start(),
         duration: Duration::hours(1),
         time_res: Duration::hours(1),
         output_verbosity: 0,

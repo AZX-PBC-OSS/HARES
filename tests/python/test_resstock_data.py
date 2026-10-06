@@ -880,33 +880,6 @@ class _FakeHTTPStatusError(Exception):
         self.response = type("_Resp", (), {"status_code": status_code})()
 
 
-class _FakeAsyncResponse:
-    def __init__(
-        self, *, content: bytes = b"", status_error: Exception | None = None
-    ) -> None:
-        self.content = content
-        self._status_error = status_error
-
-    def raise_for_status(self) -> None:
-        if self._status_error is not None:
-            raise self._status_error
-
-
-class _FakeAsyncClient:
-    """Async client whose ``get`` replays a queued list of responses/exceptions."""
-
-    def __init__(self, responses: list) -> None:
-        self._responses = list(responses)
-        self.get_calls = 0
-
-    async def get(self, url: str):
-        self.get_calls += 1
-        item = self._responses.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-
 class TestDownloadRetry:
     def test_download_retry_on_503(self, tmp_path: Path):
         """A 503 on the first two attempts followed by a 200 succeeds."""
@@ -977,59 +950,6 @@ class TestDownloadRetry:
         assert sleep.call_count == 0
         assert not dest.exists()
 
-    def test_async_download_retries_then_succeeds(self, tmp_path: Path):
-        """The async path retries a transient 503 and extracts on success."""
-        import asyncio
-
-        from ochre_next.data import resstock
-
-        zip_bytes = _make_zip()
-        cfg = resstock._version_config("2024.2")
-        bldg_dir = tmp_path / "bldg0000001"
-        client = _FakeAsyncClient(
-            [
-                _FakeAsyncResponse(status_error=_FakeHTTPStatusError(503)),
-                _FakeAsyncResponse(status_error=_FakeHTTPStatusError(503)),
-                _FakeAsyncResponse(content=zip_bytes),
-            ]
-        )
-
-        with mock.patch(
-            "asyncio.sleep", new_callable=mock.AsyncMock
-        ) as sleep:
-            asyncio.run(resstock._download_building_async(client, cfg, 1, 0, bldg_dir))
-
-        assert (bldg_dir / "home.xml").exists()
-        assert (bldg_dir / "in.schedules.csv").exists()
-        assert client.get_calls == 3
-        assert sleep.await_count == 2
-
-    def test_async_download_no_retry_on_404(self, tmp_path: Path):
-        """The async path fails fast on a permanent 404."""
-        import asyncio
-
-        from ochre_next.data import resstock
-
-        cfg = resstock._version_config("2024.2")
-        bldg_dir = tmp_path / "bldg0000001"
-        client = _FakeAsyncClient(
-            [
-                _FakeAsyncResponse(status_error=_FakeHTTPStatusError(404)),
-            ]
-        )
-
-        with (
-            mock.patch(
-                "asyncio.sleep", new_callable=mock.AsyncMock
-            ) as sleep,
-            pytest.raises(_FakeHTTPStatusError),
-        ):
-            asyncio.run(resstock._download_building_async(client, cfg, 1, 0, bldg_dir))
-
-        assert client.get_calls == 1
-        assert sleep.await_count == 0
-
-
 class TestFleetResilience:
     def _metadata_file(self, tmp_path: Path, bldg_ids: list[int], **kwargs) -> Path:
         data = _make_metadata_parquet(bldg_ids, **kwargs)
@@ -1038,12 +958,7 @@ class TestFleetResilience:
         return p
 
     def test_fleet_download_continues_after_building_failure(self, tmp_path: Path):
-        """One failed building is skipped; the rest of the fleet is returned.
-
-        Forces the httpx-absent synchronous fallback so the behaviour is
-        deterministic regardless of whether the optional httpx dependency is
-        installed in the test environment.
-        """
+        """One failed building is skipped; the rest of the fleet is returned in order."""
         from ochre_next.data import resstock
 
         meta = self._metadata_file(tmp_path, [1, 2, 3])
@@ -1054,73 +969,41 @@ class TestFleetResilience:
                 raise ConnectionError("network down for bldg 2")
             return good(bldg_id, **kwargs)
 
-        with (
-            mock.patch.dict(sys.modules, {"httpx": None, "boto3": None}),
-            mock.patch.object(resstock, "fetch_resstock_building", side_effect=flaky),
-        ):
+        with mock.patch.object(resstock, "fetch_resstock_building", side_effect=flaky):
             results = resstock.fetch_resstock_fleet(
                 meta,
                 bldg_ids=[1, 2, 3],
                 cache_dir=tmp_path,
             )
 
-        returned_ids = {r.bldg_id for r in results}
-        assert returned_ids == {1, 3}
+        assert [r.bldg_id for r in results] == [1, 3]
 
-    def test_fleet_async_download_continues_after_building_failure(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("httpx_installed", [True, False])
+    def test_fleet_fetches_every_building_through_fetch_resstock_building(
+        self, tmp_path: Path, httpx_installed: bool
     ):
-        """The async gather tolerates one building's exhausted-retry failure."""
-        import asyncio
+        """The fleet has one download path, with or without the optional httpx."""
         import types
 
         from ochre_next.data import resstock
 
-        cfg = resstock._version_config("2024.2")
+        meta = self._metadata_file(tmp_path, [1, 2, 3])
+        fetched: list[int] = []
+        good = _fake_fleet_building(tmp_path)
 
-        fake_httpx: Any = types.ModuleType("httpx")
+        def recording(bldg_id: int, **kwargs):
+            fetched.append(bldg_id)
+            return good(bldg_id, **kwargs)
 
-        class _FakeAC:
-            def __init__(self, **kwargs) -> None:
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *exc):
-                return False
-
-        fake_httpx.AsyncClient = _FakeAC
-
-        async def fake_download(client, cfg_, bid, upgrade, bdir, **kwargs) -> None:
-            if bid == 2:
-                raise ConnectionError("boom for bldg 2")
-            bdir.mkdir(parents=True, exist_ok=True)
-            (bdir / "home.xml").write_text(_minimal_hpxml("G0800130"))
-            (bdir / "in.schedules.csv").write_text("hour,val\n0,1\n")
-
+        httpx_module = types.ModuleType("httpx") if httpx_installed else None
         with (
-            mock.patch.dict(sys.modules, {"httpx": fake_httpx}),
-            mock.patch.object(
-                resstock, "_download_building_async", side_effect=fake_download
-            ),
-            mock.patch.object(
-                resstock, "_fetch_weather", return_value=tmp_path / "w.csv"
-            ),
+            mock.patch.dict(sys.modules, {"httpx": httpx_module}),
+            mock.patch.object(resstock, "fetch_resstock_building", side_effect=recording),
         ):
-            results = asyncio.run(
-                resstock._fetch_fleet_async(
-                    [1, 2, 3],
-                    cfg,
-                    "2024.2",
-                    tmp_path,
-                    0,
-                    {1: 1.0, 2: 1.0, 3: 1.0},
-                )
-            )
+            results = resstock.fetch_resstock_fleet(meta, bldg_ids=[1, 2, 3], cache_dir=tmp_path)
 
-        returned_ids = {r.bldg_id for r in results}
-        assert returned_ids == {1, 3}
+        assert sorted(fetched) == [1, 2, 3]
+        assert [r.bldg_id for r in results] == [1, 2, 3]
 
 
 # ---------------------------------------------------------------------------
@@ -1205,48 +1088,6 @@ class TestZipIntegrity:
 
         assert (dest_dir / "home.xml").exists()
         assert call_count[0] == 2
-
-    def test_async_download_retries_on_corrupt_zip(self, tmp_path: Path):
-        """_download_building_async retries on ZIP corruption."""
-        import asyncio
-
-        from ochre_next.data import resstock
-
-        zip_bytes = _make_zip()
-        cfg = resstock._version_config("2024.2")
-        bldg_dir = tmp_path / "bldg0000001"
-        truncated = zip_bytes[: len(zip_bytes) // 2]
-
-        # Return truncated data first, then valid ZIP
-        call_count = [0]
-
-        async def flaky_download(client, url, *, max_attempts=3):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return truncated
-            return zip_bytes
-
-        with (
-            mock.patch.object(
-                resstock, "_download_bytes_async", side_effect=flaky_download
-            ),
-            mock.patch(
-                "asyncio.sleep", new_callable=mock.AsyncMock
-            ) as sleep_mock,
-        ):
-            asyncio.run(
-                resstock._download_building_async(
-                    _FakeAsyncClient([]),
-                    cfg,
-                    1,
-                    0,
-                    bldg_dir,  # client unused when _download_bytes_async is mocked
-                )
-            )
-
-        assert (bldg_dir / "home.xml").exists()
-        assert call_count[0] == 2
-        assert sleep_mock.await_count >= 1
 
 
 # ---------------------------------------------------------------------------

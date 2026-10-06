@@ -35,32 +35,13 @@ fn envelope_component_gains_has_port_radiant_w() {
 // forwarded through capture_solvers().
 // ---------------------------------------------------------------------------
 
-fn unique_nanos_suffix() -> String {
-    // Uniqueness by construction: pid + monotonic counter + nanos
-    // (see hares-core/tests/engine.rs).
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock before epoch")
-        .as_nanos();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{nanos}-{seq}", std::process::id())
-}
-
 #[cfg(feature = "observe")]
 #[test]
 fn observer_post_solvers_forwards_port_radiant_w() {
     use std::fs;
 
-    let path = {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "hares-port-radiant-obs-{}.toml",
-            unique_nanos_suffix()
-        ));
-        p
-    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("port-radiant-obs.toml");
 
     let content = r#"building_id = 4242
 
@@ -99,7 +80,6 @@ master_seed = 0
 
     let mut dwelling =
         hares_core::Dwelling::from_toml_config(&path).expect("synthetic TOML must load");
-    let _ = fs::remove_file(&path);
 
     let n_steps = 5;
     dwelling.enable_observer(n_steps);
@@ -141,16 +121,11 @@ master_seed = 0
 fn diagnostic_csv_contains_all_envelope_diag_columns() {
     use std::fs;
 
-    let toml_path = {
-        let mut p = std::env::temp_dir();
-        p.push(format!("hares-diag-csv-{}.toml", unique_nanos_suffix()));
-        p
-    };
-    let csv_path = {
-        let mut p = std::env::temp_dir();
-        p.push(format!("hares-diag-csv-{}.csv", unique_nanos_suffix()));
-        p
-    };
+    // The output and its `_diagnostics.csv` sibling go in a directory removed
+    // when the test ends.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let toml_path = dir.path().join("diag-csv.toml");
+    let csv_path = dir.path().join("diag-csv.csv");
 
     // output_verbosity = 4 triggers diagnostic CSV creation in from_preparsed.
     let content = format!(
@@ -194,7 +169,6 @@ master_seed = 0
 
     let mut dwelling =
         hares_core::Dwelling::from_toml_config(&toml_path).expect("synthetic TOML must load");
-    let _ = fs::remove_file(&toml_path);
 
     // Reconstruct the diagnostic CSV path the same way from_preparsed does.
     let stem = csv_path
@@ -208,8 +182,6 @@ master_seed = 0
         .expect("simulation must complete without errors");
 
     let diag_content = fs::read_to_string(&diag_path).expect("diagnostic CSV must exist");
-    let _ = fs::remove_file(&diag_path);
-    let _ = fs::remove_file(&csv_path);
 
     // Header must contain all six scalar EnvelopeDiag columns.
     let header = diag_content

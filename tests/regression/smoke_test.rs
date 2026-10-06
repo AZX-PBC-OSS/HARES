@@ -25,22 +25,6 @@ mod tests {
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
 
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let tid = std::thread::current().id();
-        format!("{base}_{nanos}_{tid:?}.{ext}")
-    }
-
-    struct TempFile(std::path::PathBuf);
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
     /// Parse a CSV into column-name -> Vec<f64> map.
     /// Non-numeric cells (headers, timestamps) are silently skipped per-cell.
     fn parse_csv_columns(path: &PathBuf) -> BTreeMap<String, Vec<f64>> {
@@ -329,9 +313,8 @@ mod tests {
     /// `tests/conditioned_oracle.rs::conditioned_dynamic_spring_72h`.
     #[test]
     fn smoke_beopt_1h() {
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_smoke_beopt_1h", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("create output directory");
+        let output_path = output_dir.path().join("smoke_beopt_1h.csv");
 
         let engine = SimulationEngine::new();
         let result = engine
@@ -457,9 +440,8 @@ mod tests {
     /// (building 0112631, gas furnace + gas water heater, Denver TMY3).
     #[test]
     fn smoke_resstock_1h_runs_to_completion() {
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_smoke_resstock_1h", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("create output directory");
+        let output_path = output_dir.path().join("smoke_resstock_1h.csv");
 
         let engine = SimulationEngine::new();
         let config = DwellingConfig {
@@ -699,8 +681,8 @@ mod tests {
     /// column, which `discover_end_use_columns` maps to key `"hvac_heating"`.
     #[test]
     fn beopt_smoke_end_use_aggregates_by_category() {
-        let output_path = std::env::temp_dir().join(unique_temp_name("hares_beopt_enduse", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("create output directory");
+        let output_path = output_dir.path().join("beopt_enduse.csv");
 
         let engine = SimulationEngine::new();
         let result = engine

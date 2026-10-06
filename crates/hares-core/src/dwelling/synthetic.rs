@@ -2446,17 +2446,8 @@ clear_sky_solar = false
         use crate::dwelling::Dwelling;
         use std::fs;
 
-        let toml_path = {
-            let mut path = std::env::temp_dir();
-            path.push(format!(
-                "hares-t0188-solar-{}.toml",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("solar.toml");
         // Minimum BESTEST-600-like config with no EPW path (synthetic weather),
         // start time at solar noon UTC (~19:00) for Denver longitude (-104.86°).
         let content = r#"building_id = 600
@@ -2499,8 +2490,6 @@ master_seed = 0
         let ghi = env.weather.ghi_w_m2;
         let dni = env.weather.dni_w_m2;
         let dhi = env.weather.dhi_w_m2;
-
-        let _ = fs::remove_file(&toml_path);
 
         // At Denver lat 39.76° N on July 21, 19:00 UTC ≈ solar noon → GHI >> 0.
         assert!(

@@ -3233,14 +3233,15 @@ mod tests {
 
     #[test]
     fn pypv_invalid_sam_lut_path_fails_init() {
-        let bad_lut_path = "/tmp/hares_bad_pv_lut.txt";
-        fs::write(bad_lut_path, "not,a,valid,lut\n1,2,3,4").expect("write test file");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bad_lut_path = dir.path().join("bad_pv_lut.txt");
+        fs::write(&bad_lut_path, "not,a,valid,lut\n1,2,3,4").expect("write test file");
         let pv = PyPv {
             name: "PV Bad LUT".to_string(),
             capacity_kw: 5.0,
             tilt: 30.0,
             azimuth: 180.0,
-            sam_lut_path: Some(bad_lut_path.to_string()),
+            sam_lut_path: Some(bad_lut_path.to_string_lossy().into_owned()),
             soiling: None,
         };
         let config = pv_config_from_py(&pv).expect("PV config");

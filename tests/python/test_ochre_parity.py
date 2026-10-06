@@ -11,7 +11,6 @@ pytest pythonpath.
 from __future__ import annotations
 
 import datetime as dt
-import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -89,7 +88,7 @@ def _run_ochre() -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
-def _run_hares_simulate() -> dict[str, float]:
+def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
     """Run HARES via simulate() and parse the DataFrame for column kWh."""
     pytest.importorskip("polars")
     from ochre_next import Dwelling as HaresDwelling
@@ -106,7 +105,7 @@ def _run_hares_simulate() -> dict[str, float]:
         master_seed=42,
         resample_overrides=OCHRE_COMPAT_RESAMPLE,
         write_output=True,
-        output_path=str(Path(tempfile.mkdtemp()) / "hares_parity.csv"),
+        output_path=str(output_dir / "hares_parity.csv"),
     )
     dwelling.initialize()
     df = dwelling.simulate()
@@ -144,8 +143,8 @@ def ochre_results() -> dict[str, float]:
 
 
 @pytest.fixture(scope="module")
-def hares_results() -> dict[str, float]:
-    return _run_hares_simulate()
+def hares_results(tmp_path_factory: pytest.TempPathFactory) -> dict[str, float]:
+    return _run_hares_simulate(tmp_path_factory.mktemp("hares_parity"))
 
 
 # Tolerances per THERMAL-008 / ASHRAE 140-2023 §5.2.

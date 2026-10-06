@@ -4,27 +4,23 @@ These tests verify BEHAVIOR, not just structure. Each test asserts something
 that would fail if the underlying physics or actor logic were broken.
 """
 
-import tempfile
-from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 import pytest
-from conftest import make_dwelling
+from conftest import make_dwelling, output_in_test_dir
 
 pl = pytest.importorskip("polars")
 
 
 class _OutputKwargs(TypedDict):
     write_output: bool
-    output_path: str
+    output_path: NotRequired[str]
 
 
 # Tests that consume simulate() DataFrame columns need the output pipeline
-# (write_output=True); the CSV lands under a per-call temp dir, never the tree.
-OUTPUT: _OutputKwargs = {
-    "write_output": True,
-    "output_path": str(Path(tempfile.mkdtemp()) / "dwelling_42.csv"),
-}
+# (write_output=True).
+OUTPUT: _OutputKwargs = {"write_output": True}
+_output_in_test_dir = output_in_test_dir(OUTPUT, "dwelling_42.csv")
 
 
 def _scalar(value: object, what: str) -> float:

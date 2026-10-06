@@ -10,33 +10,22 @@
 //! must both recover as finite positive resistances.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
 use hares_io::OutputFormat;
+use tempfile::TempDir;
 
-fn unique_temp_path(suffix: &str) -> PathBuf {
-    // See engine.rs: pid + monotonic counter + nanos for uniqueness by
-    // construction across processes, threads, and runs.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let mut path = std::env::temp_dir();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    path.push(format!(
-        "hares-wiring-props-{}-{nanos}-{seq}.{suffix}",
-        std::process::id()
-    ));
-    path
-}
-
-fn write_temp_file(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("failed to write temp file");
+/// Writes the schedule and weather inputs into a directory removed on drop
+/// (panics included) and returns it with their paths.
+fn write_inputs() -> (TempDir, PathBuf, PathBuf) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let schedule_path = dir.path().join("schedule.csv");
+    let weather_path = dir.path().join("weather.epw");
+    fs::write(&schedule_path, build_schedule_csv()).expect("write schedule");
+    fs::write(&weather_path, build_epw_8760()).expect("write weather");
+    (dir, schedule_path, weather_path)
 }
 
 /// The repo's defaults directory: equipment whose schedule source is missing
@@ -122,10 +111,7 @@ fn build_epw_8760() -> String {
 /// regardless of building. Returns the surface count for context in
 /// failure messages.
 fn assert_wiring_invariants(label: &str, config_path: &str) {
-    let schedule_path = unique_temp_path("csv");
-    let weather_path = unique_temp_path("epw");
-    write_temp_file(&schedule_path, &build_schedule_csv());
-    write_temp_file(&weather_path, &build_epw_8760());
+    let (_inputs, schedule_path, weather_path) = write_inputs();
 
     let config = DwellingConfig {
         hpxml_path: PathBuf::from(config_path),
@@ -272,9 +258,6 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
     // config-visible invariants (uniqueness, ranges, coupling
     // self-consistency, routing contracts) and cites the construction
     // check for the wiring-dependent one.
-
-    let _ = fs::remove_file(schedule_path);
-    let _ = fs::remove_file(weather_path);
 }
 
 #[test]
@@ -300,10 +283,7 @@ fn wiring_properties_hold_on_ochre_sample_building() {
 /// wiring (surface list membership + tilt copy) the unit seam cannot see.
 #[test]
 fn indoor_zone_has_exactly_one_beam_receiving_floor_on_ochre_base() {
-    let schedule_path = unique_temp_path("csv");
-    let weather_path = unique_temp_path("epw");
-    write_temp_file(&schedule_path, &build_schedule_csv());
-    write_temp_file(&weather_path, &build_epw_8760());
+    let (_inputs, schedule_path, weather_path) = write_inputs();
 
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/hpxml/ochre_samples/base.xml");
@@ -420,9 +400,6 @@ fn indoor_zone_has_exactly_one_beam_receiving_floor_on_ochre_base() {
         "exactly one tilt-180 face must exist across all zones (the ground \
          slab, presented to its own zone) — floors by zone: {floors_by_zone:?}"
     );
-
-    let _ = fs::remove_file(schedule_path);
-    let _ = fs::remove_file(weather_path);
 }
 
 /// The landed attic-floor fix (interior-face tilt 0 via `FloorOrCeiling`)
@@ -438,10 +415,7 @@ fn indoor_zone_has_exactly_one_beam_receiving_floor_on_ochre_base() {
 /// LWR with the sky temperature THROUGH the attic — this must fail then.
 #[test]
 fn attic_floor_never_takes_the_exterior_sky_exposed_path() {
-    let schedule_path = unique_temp_path("csv");
-    let weather_path = unique_temp_path("epw");
-    write_temp_file(&schedule_path, &build_schedule_csv());
-    write_temp_file(&weather_path, &build_epw_8760());
+    let (_inputs, schedule_path, weather_path) = write_inputs();
 
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/hpxml/ochre_samples/base.xml");
@@ -515,9 +489,6 @@ fn attic_floor_never_takes_the_exterior_sky_exposed_path() {
          sky-exposed surface list — found exterior surfaces with its area: \
          {leaked:?}"
     );
-
-    let _ = fs::remove_file(schedule_path);
-    let _ = fs::remove_file(weather_path);
 }
 
 #[test]

@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import dataclasses
 import enum
-import io
 import logging
 import os
 import random
 import tempfile
+import threading
 import time
 import urllib.request
 import warnings
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Coroutine
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from typing_extensions import TypeIs  # typing.TypeIs is Python 3.13+
 
@@ -31,6 +30,13 @@ if TYPE_CHECKING:
     import polars as pl
 
 log = logging.getLogger(__name__)
+
+_WEATHER_LOCK = threading.Lock()
+
+# Buildings a fleet fetch downloads at once. Downloads are I/O bound, so
+# threads overlap them; the bound keeps a large fleet from opening thousands
+# of connections at the same time.
+_FLEET_DOWNLOAD_WORKERS = 16
 
 _OEDI_BASE = (
     "https://oedi-data-lake.s3.amazonaws.com/"
@@ -282,24 +288,6 @@ def _next_retry_delay(
 
 class ZipIntegrityError(ValueError):
     """ZIP file failed integrity check — ``testzip()`` found a bad member."""
-
-
-class _AsyncGetResponse(Protocol):
-    """The httpx response surface the async downloader consumes."""
-
-    @property
-    def content(self) -> bytes: ...
-
-    def raise_for_status(self) -> object: ...
-
-
-class _AsyncGetClient(Protocol):
-    """The httpx client surface the async downloader consumes.
-
-    Test doubles satisfy this instead of constructing a real AsyncClient.
-    """
-
-    async def get(self, url: str) -> _AsyncGetResponse: ...
 
 
 def _verify_zip(zip_path: Path) -> None:
@@ -725,6 +713,23 @@ def _fetch_weather(
     if station is None:
         return Path("")
 
+    # Buildings of a fleet are fetched concurrently and share weather caches
+    # (one EPW archive, one CSV per county); one fetch at a time keeps two
+    # buildings from writing the same cache file.
+    with _WEATHER_LOCK:
+        return _fetch_weather_for_station(
+            cfg, hpxml_path, cache_dir, version, station, weather_format
+        )
+
+
+def _fetch_weather_for_station(
+    cfg: _VersionConfig,
+    hpxml_path: Path,
+    cache_dir: Path,
+    version: str,
+    station: tuple[str, str],
+    weather_format: WeatherFormat | None,
+) -> Path:
     building_zone = _parse_climate_zone(hpxml_path)
     state, fips = station
 
@@ -920,224 +925,56 @@ def fetch_resstock_building(
     )
 
 
-async def _noop() -> None:
-    pass
-
-
-async def _download_building_async(
-    client: _AsyncGetClient,
-    cfg: _VersionConfig,
-    bldg_id: int,
-    upgrade_id: int,
-    bldg_dir: Path,
-    *,
-    max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS,
-) -> None:
-    """Download and extract a single building ZIP using an async httpx client.
-
-    Transient network failures are handled by ``_download_bytes_async``
-    (inner retries).  ZIP CRC corruption detected by ``testzip()`` triggers
-    a full re-download (outer retries) because the corruption is at the
-    content level, not the transport level.
-    """
-    url = _zip_url(cfg, bldg_id, upgrade_id)
-    bldg_dir.mkdir(parents=True, exist_ok=True)
-    for attempt in range(max_attempts):
-        data = await _download_bytes_async(client, url, max_attempts=max_attempts)
-        try:
-            with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                bad = zf.testzip()
-                if bad is not None:
-                    raise ZipIntegrityError(
-                        f"Corrupted building ZIP for bldg {bldg_id}: bad member {bad!r}"
-                    )
-                _extract_zip_members(zf, bldg_dir)
-            for member_name in ("home.xml", "in.schedules.csv"):
-                member_path = bldg_dir / member_name
-                if member_path.exists():
-                    _write_sha256_sidecar(member_path)
-            return
-        except (ZipIntegrityError, zipfile.BadZipFile) as exc:
-            if not isinstance(exc, ZipIntegrityError):
-                exc = ZipIntegrityError(
-                    f"Corrupted building ZIP for bldg {bldg_id}: {exc}"
-                )
-            if attempt < max_attempts - 1:
-                delay = _backoff_delay(attempt)
-                log.warning(
-                    "ZIP integrity check failed attempt %d/%d for bldg %d, "
-                    "retrying in %.1fs: %s",
-                    attempt + 1,
-                    max_attempts,
-                    bldg_id,
-                    delay,
-                    exc,
-                )
-                await asyncio.sleep(delay)
-                continue
-            raise
-
-
-async def _download_bytes_async(
-    client: _AsyncGetClient,
-    url: str,
-    *,
-    max_attempts: int = _MAX_DOWNLOAD_ATTEMPTS,
-) -> bytes:
-    """GET *url* into memory with exponential-backoff retries on transient errors."""
-    for attempt in range(max_attempts):
-        try:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return resp.content
-        except Exception as exc:
-            await asyncio.sleep(_next_retry_delay(exc, attempt, max_attempts, url))
-    # Unreachable for max_attempts >= 1: the final iteration either returns the
-    # body or re-raises via _next_retry_delay.  Guard the degenerate input.
-    raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
-
-
-async def _fetch_fleet_async(
+def _fetch_fleet(
     bldg_ids: list[int],
-    cfg: _VersionConfig,
     version: str,
     base_cache: Path,
     upgrade_id: int,
     weights: dict[int, float],
     weather_format: WeatherFormat | None = None,
 ) -> list[ResStockBuilding]:
+    """Fetch every building through ``fetch_resstock_building``, concurrently.
+
+    ``fetch_resstock_building`` is the one download path for a single building
+    and for a fleet alike, so a stand-in for it covers both. A building whose
+    fetch fails is logged and skipped; the rest of the fleet is returned in
+    request order.
+    """
+    cfg = _version_config(version)
+    checksum_failures = {bid: [0] for bid in bldg_ids}
+
+    def fetch(bid: int) -> ResStockBuilding:
+        return fetch_resstock_building(
+            bid,
+            version=version,
+            upgrade_id=upgrade_id,
+            cache_dir=base_cache,
+            weather_format=weather_format,
+            sample_weight=weights.get(bid, 1.0),
+            _checksum_failures=checksum_failures[bid],
+        )
+
     results: list[ResStockBuilding] = []
-    checksum_failure_count = 0
-
-    try:
-        import httpx
-
-        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
-            tasks: list[Coroutine[Any, Any, None]] = []
-            for bid in bldg_ids:
-                bldg_dir = _building_cache_dir(base_cache, version, bid)
-                hpxml_path = bldg_dir / "home.xml"
-                schedule_path = bldg_dir / "in.schedules.csv"
-                if (
-                    hpxml_path.exists()
-                    and hpxml_path.stat().st_size > 0
-                    and schedule_path.exists()
-                    and schedule_path.stat().st_size > 0
-                ):
-                    if _validate_cache_integrity(
-                        hpxml_path
-                    ) and _validate_cache_integrity(schedule_path):
-                        tasks.append(_noop())
-                    else:
-                        checksum_failure_count += 1
-                        _remove_cache_with_sidecar(hpxml_path)
-                        _remove_cache_with_sidecar(schedule_path)
-                        tasks.append(
-                            _download_building_async(
-                                client,
-                                cfg,
-                                bid,
-                                upgrade_id,
-                                bldg_dir,
-                            )
-                        )
-                else:
-                    tasks.append(
-                        _download_building_async(client, cfg, bid, upgrade_id, bldg_dir)
-                    )
-
-            # return_exceptions=True so one building's exhausted-retry failure
-            # does not abort the entire fleet download.
-            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-
-        failed_ids: set[int] = set()
-        for bid, outcome in zip(bldg_ids, outcomes):
-            if isinstance(outcome, BaseException):
-                failed_ids.add(bid)
+    workers = max(1, min(_FLEET_DOWNLOAD_WORKERS, len(bldg_ids)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(fetch, bid) for bid in bldg_ids]
+        for bid, future in zip(bldg_ids, futures):
+            try:
+                results.append(future.result())
+            except Exception as exc:
                 log.error(
                     "ResStock building %d download failed, skipping: url=%s error=%s",
                     bid,
                     _zip_url(cfg, bid, upgrade_id),
-                    outcome,
-                )
-
-        for bid in bldg_ids:
-            if bid in failed_ids:
-                continue
-            try:
-                bldg_dir = _building_cache_dir(base_cache, version, bid)
-                hpxml_path = bldg_dir / "home.xml"
-                schedule_path = bldg_dir / "in.schedules.csv"
-                weather_path = _fetch_weather(
-                    cfg,
-                    hpxml_path,
-                    base_cache,
-                    version,
-                    weather_format=weather_format,
-                )
-                results.append(
-                    ResStockBuilding(
-                        bldg_id=bid,
-                        sample_weight=weights.get(bid, 1.0),
-                        hpxml_path=hpxml_path,
-                        schedule_path=schedule_path,
-                        weather_path=weather_path,
-                    )
-                )
-            except Exception as exc:
-                # A post-download failure (e.g. weather fetch) for one building
-                # must not sink the rest of the fleet either.
-                log.error(
-                    "ResStock building %d post-download processing failed, skipping: error=%s",
-                    bid,
                     exc,
                 )
 
-        n_failed = len(bldg_ids) - len(results)
-        log.info(
-            "ResStock fleet download complete: %d succeeded, %d failed, "
-            "%d checksum failures (of %d requested)",
-            len(results),
-            n_failed,
-            checksum_failure_count,
-            len(bldg_ids),
-        )
-        return results
-
-    except ImportError:
-        pass
-
-    # Synchronous fallback when httpx is not available -- resilient per building
-    # so a single failure does not abort the whole fleet.
-    n_checksum_failures: list[int] = [0]
-    for bid in bldg_ids:
-        try:
-            b = fetch_resstock_building(
-                bid,
-                version=version,
-                upgrade_id=upgrade_id,
-                cache_dir=base_cache,
-                weather_format=weather_format,
-                sample_weight=weights.get(bid, 1.0),
-                _checksum_failures=n_checksum_failures,
-            )
-        except Exception as exc:
-            log.error(
-                "ResStock building %d download failed, skipping: url=%s error=%s",
-                bid,
-                _zip_url(cfg, bid, upgrade_id),
-                exc,
-            )
-            continue
-        results.append(b)
-
-    n_failed = len(bldg_ids) - len(results)
     log.info(
         "ResStock fleet download complete: %d succeeded, %d failed, "
         "%d checksum failures (of %d requested)",
         len(results),
-        n_failed,
-        n_checksum_failures[0],
+        len(bldg_ids) - len(results),
+        sum(count[0] for count in checksum_failures.values()),
         len(bldg_ids),
     )
     return results
@@ -1205,18 +1042,14 @@ def fetch_resstock_fleet(
             weights[int(bid)] = float(w)
 
     base_cache = cache_dir if cache_dir is not None else _default_cache_dir()
-    cfg = _version_config(version)
 
-    return asyncio.run(
-        _fetch_fleet_async(
-            [int(i) for i in selected_ids],
-            cfg,
-            version,
-            base_cache,
-            upgrade_id,
-            weights,
-            weather_format=weather_format,
-        )
+    return _fetch_fleet(
+        [int(i) for i in selected_ids],
+        version,
+        base_cache,
+        upgrade_id,
+        weights,
+        weather_format=weather_format,
     )
 
 

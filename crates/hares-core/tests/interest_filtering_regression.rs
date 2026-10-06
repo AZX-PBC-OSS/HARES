@@ -6,10 +6,10 @@
 
 use std::borrow::Cow;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
+use std::time::Duration as StdDuration;
 
 use hares_control::DispatchRequest;
 use hares_control::DispatchTarget;
@@ -26,17 +26,13 @@ use hares_types::{
 // Test helpers
 // ---------------------------------------------------------------------------
 
-fn nanos_suffix() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos()
-}
-
-fn unique_temp_toml(tag: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("hares-interest-{tag}-{}.toml", nanos_suffix()));
-    path
+/// Loads a dwelling from the synthetic TOML `write` puts in a directory that
+/// is removed when this returns.
+fn load_dwelling(tag: &str, write: impl FnOnce(&Path)) -> Dwelling {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(format!("{tag}.toml"));
+    write(&path);
+    Dwelling::from_toml_config(&path).expect("synthetic TOML must load")
 }
 
 /// Field values for [`write_synthetic_toml`], grouped so the writer takes
@@ -51,7 +47,7 @@ struct SyntheticTomlSpec<'a> {
     dew_point_c: f64,
 }
 
-fn write_synthetic_toml(path: &PathBuf, spec: SyntheticTomlSpec<'_>) {
+fn write_synthetic_toml(path: &Path, spec: SyntheticTomlSpec<'_>) {
     let SyntheticTomlSpec {
         start_time,
         duration_s,
@@ -102,41 +98,37 @@ master_seed = 0
 }
 
 fn build_dwelling(tag: &str, start_time: &str, duration_s: i64) -> Dwelling {
-    let path = unique_temp_toml(tag);
-    write_synthetic_toml(
-        &path,
-        SyntheticTomlSpec {
-            start_time,
-            duration_s,
-            hvac_equipment: "none",
-            hvac_fuel: "",
-            heating_capacity_kbtu_h: 0.0,
-            outdoor_temp_c: 20.0,
-            dew_point_c: 10.0,
-        },
-    );
-    let dwelling = Dwelling::from_toml_config(&path).expect("synthetic TOML must load");
-    let _ = fs::remove_file(&path);
-    dwelling
+    load_dwelling(tag, |path| {
+        write_synthetic_toml(
+            path,
+            SyntheticTomlSpec {
+                start_time,
+                duration_s,
+                hvac_equipment: "none",
+                hvac_fuel: "",
+                heating_capacity_kbtu_h: 0.0,
+                outdoor_temp_c: 20.0,
+                dew_point_c: 10.0,
+            },
+        );
+    })
 }
 
 fn build_furnace_dwelling(tag: &str) -> Dwelling {
-    let path = unique_temp_toml(tag);
-    write_synthetic_toml(
-        &path,
-        SyntheticTomlSpec {
-            start_time: "2024-01-15T00:00:00Z",
-            duration_s: 36000,
-            hvac_equipment: "Furnace",
-            hvac_fuel: "electricity",
-            heating_capacity_kbtu_h: 500.0,
-            outdoor_temp_c: -20.0,
-            dew_point_c: -25.0,
-        },
-    );
-    let dwelling = Dwelling::from_toml_config(&path).expect("synthetic TOML must load");
-    let _ = fs::remove_file(&path);
-    dwelling
+    load_dwelling(tag, |path| {
+        write_synthetic_toml(
+            path,
+            SyntheticTomlSpec {
+                start_time: "2024-01-15T00:00:00Z",
+                duration_s: 36000,
+                hvac_equipment: "Furnace",
+                hvac_fuel: "electricity",
+                heating_capacity_kbtu_h: 500.0,
+                outdoor_temp_c: -20.0,
+                dew_point_c: -25.0,
+            },
+        );
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -461,10 +453,7 @@ master_seed = 0
 /// watcher at step t+1, and only then.
 #[test]
 fn equipment_mode_change_interest_wakes_the_changed_equipments_watcher() {
-    let path = unique_temp_toml("mode_attribution");
-    write_mode_toml(&path);
-    let mut dwelling = Dwelling::from_toml_config(&path).expect("synthetic TOML must load");
-    let _ = fs::remove_file(&path);
+    let mut dwelling = load_dwelling("mode_attribution", write_mode_toml);
 
     // Discover the two equipment by end-use rather than hard-coding instance
     // names: the mode-transitioning furnace and the mode-invariant event load.

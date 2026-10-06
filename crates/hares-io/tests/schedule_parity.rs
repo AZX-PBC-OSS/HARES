@@ -281,16 +281,11 @@ fn missing_required_column_returns_typed_error_not_silent_fallback() {
                        2007-01-01T00:00:00+00:00,0.1\n\
                        2007-01-01T01:00:00+00:00,0.2\n";
 
-    let mut path = std::env::temp_dir();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before UNIX_EPOCH")
-        .as_nanos();
-    path.push(format!("hares-schedule-parity-missing-{nanos}.csv"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("schedule.csv");
     std::fs::write(&path, csv_content).expect("write temp csv");
 
     let result = parse_schedule_csv(&path, &["lighting_interior"], None, None);
-    let _ = std::fs::remove_file(path);
 
     match result {
         Err(ScheduleError::MissingRequiredColumns { missing }) => {

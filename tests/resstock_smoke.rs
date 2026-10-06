@@ -88,22 +88,6 @@ mod tests {
         panic!("could not find FIPS weather station in HPXML");
     }
 
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let tid = std::thread::current().id();
-        format!("{base}_{nanos}_{tid:?}.{ext}")
-    }
-
-    struct TempFile(std::path::PathBuf);
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
     fn parse_csv_columns(path: &Path) -> BTreeMap<String, Vec<f64>> {
         let contents = fs::read_to_string(path).expect("read CSV");
         let mut lines = contents.lines();
@@ -174,9 +158,8 @@ mod tests {
     fn run_resstock_smoke(version: &str, bldg_dir: &Path) {
         let hpxml_path = bldg_dir.join("home.xml");
         let weather_path = weather_path(version, bldg_dir);
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_resstock_smoke", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("create output directory");
+        let output_path = output_dir.path().join("resstock_smoke.csv");
 
         let bldg_name = bldg_dir.file_name().unwrap().to_str().unwrap();
         // The bldg0527060 fixture carries no in.schedules.csv, so it runs the
@@ -378,9 +361,8 @@ mod tests {
             .into_iter()
             .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000002"))
             .expect("2024.2 bldg0000002 fixture must exist");
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_winter_crankcase_pin", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("create output directory");
+        let output_path = output_dir.path().join("winter_crankcase_pin.csv");
 
         let config = DwellingConfig {
             hpxml_path: bldg_dir.join("home.xml"),
@@ -523,9 +505,8 @@ mod tests {
             .into_iter()
             .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000004"))
             .expect("bldg0000004 fixture must exist");
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_resstock_summer_72h", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("create output directory");
+        let output_path = output_dir.path().join("resstock_summer_72h.csv");
 
         let config = seasonal_72h_config(version, &bldg_dir, 7, 15, &output_path);
         let engine = SimulationEngine::new();
@@ -557,9 +538,8 @@ mod tests {
             .into_iter()
             .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000002"))
             .expect("bldg0000002 fixture must exist");
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_resstock_winter_72h", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("create output directory");
+        let output_path = output_dir.path().join("resstock_winter_72h.csv");
 
         let config = seasonal_72h_config(version, &bldg_dir, 1, 15, &output_path);
         let engine = SimulationEngine::new();

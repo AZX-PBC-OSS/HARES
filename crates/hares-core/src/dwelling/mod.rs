@@ -6927,11 +6927,10 @@ mod tests {
     };
     use std::borrow::Cow;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
     use std::time::Duration;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use syn::spanned::Spanned;
     use syn::visit::Visit;
 
@@ -8599,9 +8598,8 @@ fn cfg_gated_helper() {
         use hares_equipment::scheduled_load::ScheduledLoad;
         use std::collections::HashMap;
 
-        let toml_path = unique_temp_toml("base_load_ev_discharge");
+        let (_dir, toml_path) = temp_toml("base_load_ev_discharge");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
         let env = dwelling.latest_env().clone();
@@ -8918,15 +8916,8 @@ fn cfg_gated_helper() {
 
     #[test]
     fn simulate_accumulates_steps_when_write_output_disabled() {
-        let toml_path = {
-            let mut path = std::env::temp_dir();
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-write-output-off-{nanos}.toml"));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("write-output-off.toml");
 
         fs::write(
             &toml_path,
@@ -8969,7 +8960,6 @@ master_seed = 0
         .expect("write synthetic TOML");
 
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
-        let _ = fs::remove_file(&toml_path);
         let results = dwelling.simulate().expect("simulate");
 
         assert_eq!(
@@ -8985,15 +8975,8 @@ master_seed = 0
 
     #[test]
     fn unregistered_critical_equipment_returns_err_with_equipment_name() {
-        let toml_path = {
-            let mut path = std::env::temp_dir();
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-unregistered-critical-{nanos}.toml"));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("unregistered-critical.toml");
 
         fs::write(
             &toml_path,
@@ -9029,7 +9012,6 @@ occupancy = 1.0
         .expect("write synthetic TOML");
 
         let result = Dwelling::from_toml_config(&toml_path);
-        let _ = fs::remove_file(&toml_path);
 
         let err = match result {
             Ok(_) => panic!("unknown HVAC class must fail dwelling construction"),
@@ -10899,9 +10881,8 @@ occupancy = 1.0
     #[cfg(test)]
     #[test]
     fn run_timestep_panics_on_unhealthy_actor() {
-        let toml_path = unique_temp_toml("unhealthy_actor");
+        let (_dir, toml_path) = temp_toml("unhealthy_actor");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
         let unhealthy = UnhealthyStubActor {
@@ -11021,9 +11002,8 @@ occupancy = 1.0
         // Two same-named actors would both dispatch every step — mirroring
         // add_equipment's duplicate guard, the second registration is a loud
         // error, not a silent double-driver.
-        let toml_path = unique_temp_toml("dup_actor");
+        let (_dir, toml_path) = temp_toml("dup_actor");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
 
         dwelling
@@ -12177,15 +12157,8 @@ occupancy = 1.0
     /// propagation from solar model through dwelling construction.
     #[test]
     fn dwelling_construction_with_corrupted_window_u_returns_physics_error() {
-        let toml_path = {
-            let mut path = std::env::temp_dir();
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-corrupt-window-{nanos}.toml"));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("corrupt-window.toml");
 
         fs::write(
             &toml_path,
@@ -12234,7 +12207,6 @@ master_seed = 0
         .expect("write synthetic TOML");
 
         let result = Dwelling::from_toml_config(&toml_path);
-        let _ = fs::remove_file(&toml_path);
 
         let err = match result {
             Err(e) => e,
@@ -12261,15 +12233,8 @@ master_seed = 0
     /// instead of `HaresConfigError` (a `ValueError`).
     #[test]
     fn run_timestep_past_end_returns_simulation_error() {
-        let toml_path = {
-            let mut path = std::env::temp_dir();
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-step-overflow-{nanos}.toml"));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("step-overflow.toml");
 
         fs::write(
             &toml_path,
@@ -12311,7 +12276,6 @@ master_seed = 0
         .expect("write synthetic TOML");
 
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
-        let _ = fs::remove_file(&toml_path);
 
         let total = dwelling.clock.total_steps();
         for _ in 0..total {
@@ -12612,9 +12576,8 @@ master_seed = 0
     fn save_checkpoint_does_not_panic_on_minimal_dwelling() {
         // Build a minimal dwelling via TOML, step once, and verify
         // save_checkpoint() returns a Result (not a panic).
-        let toml_path = unique_temp_toml("save_checkpoint_no_panic");
+        let (_dir, toml_path) = temp_toml("save_checkpoint_no_panic");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
         dwelling.step().expect("step succeeds");
@@ -12630,9 +12593,8 @@ master_seed = 0
         // An actor's mutable decision-state must survive a dwelling
         // checkpoint round-trip, and the checkpoint must record the actor's
         // snapshot schema version beside the blob so restore can gate on it.
-        let toml_path = unique_temp_toml("actor_state_round_trip");
+        let (_dir, toml_path) = temp_toml("actor_state_round_trip");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
         dwelling_a
@@ -12681,9 +12643,8 @@ master_seed = 0
         // rejected at the checkpoint boundary with a version-mismatch error
         // naming the actor and both versions — not surface as a postcard
         // decode failure from inside the actor's load_state.
-        let toml_path = unique_temp_toml("actor_version_mismatch");
+        let (_dir, toml_path) = temp_toml("actor_version_mismatch");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
         dwelling_a
@@ -12734,9 +12695,8 @@ master_seed = 0
         // state while the restore reports success — the checkpoint's state
         // is silently discarded and the resumed run diverges from the
         // original with no error naming the loss.
-        let toml_path = unique_temp_toml("actor_blob_truncated");
+        let (_dir, toml_path) = temp_toml("actor_blob_truncated");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
         dwelling_a
@@ -12780,9 +12740,8 @@ master_seed = 0
         // stateless actor (trait-default `save_state` → empty blob, default
         // `load_state` → no-op) must round-trip through the dwelling
         // checkpoint unchanged.
-        let toml_path = unique_temp_toml("actor_stateless_round_trip");
+        let (_dir, toml_path) = temp_toml("actor_stateless_round_trip");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
         dwelling_a
@@ -12846,9 +12805,8 @@ master_seed = 0
         // unwrap/panic or a silent pass. (Saved with a stateless stub of
         // the same name so the checkpoint legitimately carries an empty
         // blob; the load side substitutes the failing-probe actor.)
-        let toml_path = unique_temp_toml("actor_blob_probe_failure");
+        let (_dir, toml_path) = temp_toml("actor_blob_probe_failure");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
         dwelling_a
@@ -12956,9 +12914,8 @@ master_seed = 0
         // drained. Whatever the resolution (reject, or restore the drained
         // state), the restore must not report success while the actor
         // carries state the checkpoint says it does not have.
-        let toml_path = unique_temp_toml("actor_drained_state");
+        let (_dir, toml_path) = temp_toml("actor_drained_state");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let mut dwelling_a = Dwelling::from_toml_config(&toml_path).expect("build dwelling A");
         dwelling_a
@@ -13019,9 +12976,8 @@ master_seed = 0
         // mechanism but would still pass if this actor's
         // `checkpoint_version()` override were dropped back to the trait
         // default of 1; this test pins the real actor's participation.
-        let toml_path = unique_temp_toml("ev_driver_earlier_schema_blob");
+        let (_dir, toml_path) = temp_toml("ev_driver_earlier_schema_blob");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let make_driver = || {
             Box::new(EvDriverActor::new(
@@ -13090,9 +13046,8 @@ master_seed = 0
     fn save_checkpoint_propagates_equipment_error() {
         // Build a minimal dwelling, inject equipment whose save_state() always
         // fails, and verify save_checkpoint() returns Err rather than panicking.
-        let toml_path = unique_temp_toml("save_checkpoint_failure");
+        let (_dir, toml_path) = temp_toml("save_checkpoint_failure");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
         dwelling.step().expect("step succeeds");
@@ -13187,21 +13142,11 @@ master_seed = 0
         );
     }
 
-    // Helpers for save_checkpoint tests
-    fn nanos_suffix() -> u128 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_nanos()
+    fn temp_toml(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        crate::temp_file::temp_file(&format!("{tag}.toml"))
     }
 
-    fn unique_temp_toml(tag: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!("hares-checkpoint-{tag}-{}.toml", nanos_suffix()));
-        path
-    }
-
-    fn write_minimal_toml(path: &PathBuf) {
+    fn write_minimal_toml(path: &Path) {
         let content = r#"building_id = 9001
 
 [simulation]
@@ -13236,13 +13181,6 @@ write_output = false
 master_seed = 0
 "#;
         fs::write(path, content).expect("failed to write synthetic TOML");
-    }
-
-    struct TempFile(PathBuf);
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
     }
 
     // --- Port rollback test equipment ---
@@ -16639,24 +16577,9 @@ master_seed = 42
     /// produce identical step results — verifying deterministic reproducibility.
     #[test]
     fn same_seed_produces_identical_simulation_with_warmup() {
-        let toml_path_a = {
-            let mut path = std::env::temp_dir();
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-core-repro-a-{nanos}.toml"));
-            path
-        };
-        let toml_path_b = {
-            let mut path = std::env::temp_dir();
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-core-repro-b-{nanos}.toml"));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path_a = dir.path().join("repro-a.toml");
+        let toml_path_b = dir.path().join("repro-b.toml");
 
         let toml_content = r#"building_id = 2002
 
@@ -16705,9 +16628,6 @@ master_seed = 42
             Dwelling::from_toml_config_with_write_output(&toml_path_b, Some(false))
                 .expect("build dwelling B");
 
-        let _ = fs::remove_file(&toml_path_a);
-        let _ = fs::remove_file(&toml_path_b);
-
         let results_a = dwelling_a.simulate().expect("simulate A");
         let results_b = dwelling_b.simulate().expect("simulate B");
 
@@ -16734,24 +16654,9 @@ master_seed = 42
     /// restoration code must not break the no-warmup path.
     #[test]
     fn same_seed_produces_identical_simulation_without_warmup() {
-        let toml_path_a = {
-            let mut path = std::env::temp_dir();
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-core-nowu-repro-a-{nanos}.toml"));
-            path
-        };
-        let toml_path_b = {
-            let mut path = std::env::temp_dir();
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-core-nowu-repro-b-{nanos}.toml"));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path_a = dir.path().join("nowu-repro-a.toml");
+        let toml_path_b = dir.path().join("nowu-repro-b.toml");
 
         let toml_content = r#"building_id = 2003
 
@@ -16798,9 +16703,6 @@ master_seed = 7
         let mut dwelling_b =
             Dwelling::from_toml_config_with_write_output(&toml_path_b, Some(false))
                 .expect("build dwelling B");
-
-        let _ = fs::remove_file(&toml_path_a);
-        let _ = fs::remove_file(&toml_path_b);
 
         let results_a = dwelling_a.simulate().expect("simulate A");
         let results_b = dwelling_b.simulate().expect("simulate B");
@@ -16853,15 +16755,8 @@ master_seed = 7
             }
         }
 
-        let toml_path = {
-            let mut path = std::env::temp_dir();
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-custom-solver-capture-{nanos}.toml"));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("custom-solver-capture.toml");
 
         std::fs::write(
             &toml_path,
@@ -16906,7 +16801,6 @@ master_seed = 0
         .expect("write synthetic TOML");
 
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
-        let _ = std::fs::remove_file(&toml_path);
 
         dwelling
             .custom_update_bufs
@@ -16961,15 +16855,8 @@ master_seed = 0
             }
         }
 
-        let toml_path = {
-            let mut path = std::env::temp_dir();
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-coexist-capture-{nanos}.toml"));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("coexist-capture.toml");
 
         std::fs::write(
             &toml_path,
@@ -17014,7 +16901,6 @@ master_seed = 0
         .expect("write synthetic TOML");
 
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
-        let _ = std::fs::remove_file(&toml_path);
 
         dwelling
             .custom_update_bufs
@@ -17061,9 +16947,8 @@ master_seed = 0
     /// the timestep).  This verifies the core fix for T-0213.
     #[test]
     fn dwelling_rng_is_advanced_during_timestep() {
-        let toml_path = unique_temp_toml("rng_advance");
+        let (_dir, toml_path) = temp_toml("rng_advance");
         write_minimal_toml(&toml_path);
-        let _guard = TempFile(toml_path.clone());
 
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
         let pos_before = dwelling.rng.get_word_pos();
@@ -17082,12 +16967,10 @@ master_seed = 0
     /// of the underlying review finding.
     #[test]
     fn identical_dwellings_produce_reproducible_results() {
-        let toml_path_a = unique_temp_toml("rng_repro_a");
+        let (_dir_a, toml_path_a) = temp_toml("rng_repro_a");
         write_minimal_toml(&toml_path_a);
-        let toml_path_b = unique_temp_toml("rng_repro_b");
+        let (_dir_b, toml_path_b) = temp_toml("rng_repro_b");
         fs::copy(&toml_path_a, &toml_path_b).expect("copy TOML");
-        let _guard_a = TempFile(toml_path_a.clone());
-        let _guard_b = TempFile(toml_path_b.clone());
 
         let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A");
         let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B");
@@ -17207,12 +17090,10 @@ latent_gain_fraction = 0.08
     /// floating-point order-of-operations in stochastic code paths.
     #[test]
     fn identical_dwellings_with_stochastic_load_produce_reproducible_results() {
-        let toml_path_a = unique_temp_toml("rng_stoch_repro_a");
+        let (_dir_a, toml_path_a) = temp_toml("rng_stoch_repro_a");
         write_event_load_toml(&toml_path_a, 42);
-        let toml_path_b = unique_temp_toml("rng_stoch_repro_b");
+        let (_dir_b, toml_path_b) = temp_toml("rng_stoch_repro_b");
         fs::copy(&toml_path_a, &toml_path_b).expect("copy TOML");
-        let _guard_a = TempFile(toml_path_a.clone());
-        let _guard_b = TempFile(toml_path_b.clone());
 
         let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A");
         let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B");
@@ -17284,12 +17165,10 @@ latent_gain_fraction = 0.08
     /// fixed sequence) and that the stochastic pipeline is live.
     #[test]
     fn different_master_seeds_produce_different_event_load_outputs() {
-        let toml_path_a = unique_temp_toml("rng_smoke_seed_a");
+        let (_dir_a, toml_path_a) = temp_toml("rng_smoke_seed_a");
         write_event_load_toml(&toml_path_a, 42);
-        let toml_path_b = unique_temp_toml("rng_smoke_seed_b");
+        let (_dir_b, toml_path_b) = temp_toml("rng_smoke_seed_b");
         write_event_load_toml(&toml_path_b, 99);
-        let _guard_a = TempFile(toml_path_a.clone());
-        let _guard_b = TempFile(toml_path_b.clone());
 
         let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A (seed 42)");
         let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B (seed 99)");
@@ -17385,12 +17264,10 @@ event_probability_schedule = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 
     /// given the same master seed.
     #[test]
     fn identical_dwellings_with_schedule_based_stochastic_load_produce_reproducible_results() {
-        let toml_path_a = unique_temp_toml("rng_sched_repro_a");
+        let (_dir_a, toml_path_a) = temp_toml("rng_sched_repro_a");
         write_event_load_schedule_toml(&toml_path_a, 42);
-        let toml_path_b = unique_temp_toml("rng_sched_repro_b");
+        let (_dir_b, toml_path_b) = temp_toml("rng_sched_repro_b");
         fs::copy(&toml_path_a, &toml_path_b).expect("copy TOML");
-        let _guard_a = TempFile(toml_path_a.clone());
-        let _guard_b = TempFile(toml_path_b.clone());
 
         let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A");
         let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B");
@@ -17454,7 +17331,7 @@ event_probability_schedule = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 
     /// for all remaining timesteps.
     #[test]
     fn checkpoint_restart_produces_identical_continuation() {
-        let toml_path_a = unique_temp_toml("rng_ckpt_a");
+        let (_dir_a, toml_path_a) = temp_toml("rng_ckpt_a");
         {
             let toml = format!(
                 r#"building_id = 9001
@@ -17495,7 +17372,6 @@ master_seed = 42
             );
             fs::write(&toml_path_a, toml).expect("write TOML A");
         }
-        let _guard_a = TempFile(toml_path_a.clone());
 
         const CHECKPOINT_AT_STEP: u64 = 3;
 
@@ -17511,8 +17387,7 @@ master_seed = 42
         }
         let checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
 
-        let cp_path = unique_temp_toml("rng_ckpt_json");
-        let _cp_guard = TempFile(cp_path.clone());
+        let (_cp_dir, cp_path) = temp_toml("rng_ckpt");
         checkpoint.save(&cp_path).expect("write checkpoint file");
         let loaded_cp = DwellingCheckpoint::load(&cp_path).expect("load checkpoint");
 
@@ -18128,15 +18003,8 @@ master_seed = 42
     /// `build_from_blueprint` → the id-injection pass), not hand-injected ids.
     #[test]
     fn prev_equipment_modes_has_one_entry_per_equipment_after_step() {
-        let toml_path = {
-            let mut path = std::env::temp_dir();
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-test-modes-{nanos}.toml"));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("modes.toml");
         fs::write(
             &toml_path,
             r#"building_id = 998
@@ -18173,7 +18041,6 @@ master_seed = 0
         )
         .expect("write synthetic TOML");
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
-        let _ = fs::remove_file(&toml_path);
 
         assert!(
             dwelling.equipment.len() >= 2,
@@ -18198,15 +18065,8 @@ master_seed = 0
 
     #[test]
     fn add_equipment_rejects_direct_lut_mutation_via_trait_reference() {
-        let toml_path = {
-            let mut path = std::env::temp_dir();
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before UNIX_EPOCH")
-                .as_nanos();
-            path.push(format!("hares-test-lut-guard-{nanos}.toml"));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("lut-guard.toml");
         fs::write(
             &toml_path,
             r#"building_id = 999
@@ -18241,7 +18101,6 @@ master_seed = 0
         .expect("write synthetic TOML");
 
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
-        let _ = fs::remove_file(&toml_path);
 
         let eq = Box::new(TestEquipment::new(
             "GuardTest",

@@ -1,11 +1,12 @@
 """Tests for Python-side simulation metrics exposure."""
 
 import math
-import tempfile
 
 import pytest
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
+
+from conftest import output_in_test_dir
 
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
@@ -20,15 +21,13 @@ from ochre_next import Dwelling, SimulationMetrics
 
 class _OutputKwargs(TypedDict):
     write_output: bool
-    output_path: str
+    output_path: NotRequired[str]
 
 
 # metrics() and the simulate() DataFrame read the output pipeline, so these
-# tests run with write_output=True; the CSV lands in a temp dir, never the tree.
-_OUTPUT: _OutputKwargs = {
-    "write_output": True,
-    "output_path": str(Path(tempfile.mkdtemp()) / "dwelling_0.csv"),
-}
+# tests run with write_output=True.
+_OUTPUT: _OutputKwargs = {"write_output": True}
+_output_in_test_dir = output_in_test_dir(_OUTPUT, "dwelling_0.csv")
 
 
 class TestMetrics:

@@ -12,7 +12,6 @@
 //! unconditionally in every build profile.
 #![cfg(debug_assertions)]
 
-use std::env;
 use std::fs;
 
 use hares_core::Dwelling;
@@ -91,15 +90,11 @@ master_seed = 0
 "#;
 
 /// Builds a synthetic dwelling with RC envelope from the shared TOML fixture.
-fn rc_dwelling() -> (std::path::PathBuf, Dwelling) {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock before epoch")
-        .as_nanos();
-    let tmp = env::temp_dir().join(format!("hares_thermal_invariant_rc_test_{nanos}.toml"));
-    fs::write(&tmp, SYNTHETIC_RC_DWELLING_TOML).expect("write toml");
-    let dwelling = Dwelling::from_toml_config(&tmp).expect("create dwelling");
-    (tmp, dwelling)
+fn rc_dwelling() -> Dwelling {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("dwelling.toml");
+    fs::write(&path, SYNTHETIC_RC_DWELLING_TOML).expect("write toml");
+    Dwelling::from_toml_config(&path).expect("create dwelling")
 }
 
 /// Verifies that a correctly-functioning RC dwelling steps cleanly through
@@ -110,10 +105,9 @@ fn rc_dwelling() -> (std::path::PathBuf, Dwelling) {
 /// returns non-empty, correct results when `node_capacitances` is populated.
 #[test]
 fn dwelling_step_thermal_invariant_wired() {
-    let (tmp, mut dwelling) = rc_dwelling();
+    let mut dwelling = rc_dwelling();
 
     let result = dwelling.step();
-    let _ = fs::remove_file(&tmp);
 
     assert!(
         result.is_ok(),
@@ -137,7 +131,7 @@ fn dwelling_step_thermal_invariant_wired() {
 /// return `Ok`.
 #[test]
 fn thermal_invariant_catches_broken_gain() {
-    let (tmp, mut dwelling) = rc_dwelling();
+    let mut dwelling = rc_dwelling();
 
     // Step once: confirm the invariant passes for the correct solver.
     dwelling
@@ -149,7 +143,6 @@ fn thermal_invariant_catches_broken_gain() {
 
     // This step must fail with thermal_balance invariant violation.
     let result = dwelling.step();
-    let _ = fs::remove_file(&tmp);
 
     match result {
         Err(HaresError::InvariantViolation { ref check_name, .. })

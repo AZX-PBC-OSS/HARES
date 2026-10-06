@@ -20,6 +20,9 @@ mod observer_capture;
 pub mod rng;
 pub mod scheduler;
 pub mod telemetry;
+#[cfg(test)]
+#[path = "../../../tests/support/temp_file.rs"]
+mod temp_file;
 
 pub use actor::{Actor, ActorInterest};
 pub use actor_registry::{ActorConfig, ActorFactory, ActorRegistry};

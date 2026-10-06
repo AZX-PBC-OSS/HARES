@@ -10,7 +10,6 @@ pytest pythonpath.
 from __future__ import annotations
 
 import datetime as dt
-import tempfile
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -254,7 +253,7 @@ def ochre_48h() -> pd.DataFrame:
 
 
 @pytest.fixture(scope="module")
-def hares_48h() -> pl.DataFrame:
+def hares_48h(tmp_path_factory: pytest.TempPathFactory) -> pl.DataFrame:
     """Run HARES for 48h and return the per-step polars DataFrame."""
     from ochre_next import Dwelling as HaresDwelling
 
@@ -269,7 +268,7 @@ def hares_48h() -> pl.DataFrame:
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
         write_output=True,
-        output_path=str(Path(tempfile.mkdtemp()) / "hares_thermal_trace.csv"),
+        output_path=str(tmp_path_factory.mktemp("thermal_trace") / "hares_thermal_trace.csv"),
     )
     dwelling.initialize()
     return dwelling.simulate()

@@ -5,10 +5,9 @@ use std::path::PathBuf;
 
 use hares_core::Dwelling;
 
-use super::helpers;
-
 pub fn run_multi_instance_check() -> Result<(), Vec<String>> {
-    let toml_path = helpers::unique_temp_path("hares-regr-multi", "toml");
+    let scratch = tempfile::tempdir().expect("create scratch directory");
+    let toml_path = scratch.path().join("multi_instance.toml");
     write_multi_instance_toml(&toml_path);
 
     let mut failures = Vec::new();
@@ -16,7 +15,6 @@ pub fn run_multi_instance_check() -> Result<(), Vec<String>> {
     let mut dwelling = match Dwelling::from_toml_config(&toml_path) {
         Ok(d) => d,
         Err(err) => {
-            helpers::cleanup_paths(&[toml_path]);
             return Err(vec![format!(
                 "multi-instance dwelling construction failed: {err}"
             )]);
@@ -38,8 +36,6 @@ pub fn run_multi_instance_check() -> Result<(), Vec<String>> {
             failures.push(format!("multi-instance simulation failed: {err}"));
         }
     }
-
-    helpers::cleanup_paths(&[toml_path]);
 
     if failures.is_empty() {
         Ok(())

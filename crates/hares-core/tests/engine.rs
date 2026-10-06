@@ -1,34 +1,34 @@
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
 use hares_io::OutputFormat;
+use tempfile::TempDir;
 
-fn unique_temp_path(suffix: &str) -> PathBuf {
-    // Nanosecond timestamps alone are not unique: parallel test threads (and
-    // nextest-run sibling processes) can allocate within the same nanosecond,
-    // colliding on schedule/output paths and corrupting runs. Uniqueness by
-    // construction: pid separates processes, a monotonic counter separates
-    // same-nanosecond allocations, nanos keep names distinct across runs.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let mut path = std::env::temp_dir();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    path.push(format!(
-        "hares-core-engine-{}-{nanos}-{seq}.{suffix}",
-        std::process::id()
-    ));
-    path
-}
+/// The test's own directory, removed on drop (panics included), holding the
+/// schedule and weather inputs the runs read and the outputs they write.
+struct Scratch(TempDir);
 
-fn write_temp_file(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("failed to write temp file");
+impl Scratch {
+    fn with_inputs() -> Self {
+        let scratch = Scratch(tempfile::tempdir().expect("temp dir"));
+        fs::write(scratch.schedule(), build_schedule_csv()).expect("write schedule");
+        fs::write(scratch.weather(), build_epw_8760()).expect("write weather");
+        scratch
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.path().join(name)
+    }
+
+    fn schedule(&self) -> PathBuf {
+        self.path("schedule.csv")
+    }
+
+    fn weather(&self) -> PathBuf {
+        self.path("weather.epw")
+    }
 }
 
 fn build_schedule_csv() -> String {
@@ -151,16 +151,13 @@ fn simulation_config_with_flags(
 
 #[test]
 fn run_success_produces_metrics_elapsed_and_output_path() {
-    let schedule_path = unique_temp_path("csv");
-    let weather_path = unique_temp_path("epw");
-    let output_path = unique_temp_path("csv");
-    write_temp_file(&schedule_path, &build_schedule_csv());
-    write_temp_file(&weather_path, &build_epw_8760());
+    let scratch = Scratch::with_inputs();
+    let output_path = scratch.path("output.csv");
 
     let config = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(schedule_path.clone()),
-        weather_path: weather_path.clone(),
+        schedule_path: Some(scratch.schedule()),
+        weather_path: scratch.weather(),
         sim_config: simulation_config(output_path.clone()),
         defaults_path: Some(repo_defaults_path()),
         overrides: None,
@@ -192,30 +189,22 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
     assert!(!result.timeseries.unwrap().is_empty());
     assert_eq!(result.timeseries_path, Some(output_path.clone()));
     assert!(output_path.exists());
-
-    let _ = fs::remove_file(schedule_path);
-    let _ = fs::remove_file(weather_path);
-    let _ = fs::remove_file(output_path);
 }
 
 #[test]
 fn run_with_zero_duration_reports_zero_step() {
     // The genuine zero-step edge case (duration == 0) stays distinguishable
     // from the not-retained case.
-    let schedule_path = unique_temp_path("csv");
-    let weather_path = unique_temp_path("epw");
-    let output_path = unique_temp_path("csv");
-    write_temp_file(&schedule_path, &build_schedule_csv());
-    write_temp_file(&weather_path, &build_epw_8760());
+    let scratch = Scratch::with_inputs();
 
-    let mut sim_config = simulation_config(output_path.clone());
+    let mut sim_config = simulation_config(scratch.path("output.csv"));
     sim_config.duration = Duration::zero();
     sim_config.retain_batches = true;
 
     let config = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(schedule_path.clone()),
-        weather_path: weather_path.clone(),
+        schedule_path: Some(scratch.schedule()),
+        weather_path: scratch.weather(),
         sim_config,
         defaults_path: Some(repo_defaults_path()),
         overrides: None,
@@ -235,19 +224,16 @@ fn run_with_zero_duration_reports_zero_step() {
         ),
         other => panic!("expected Flagged status, got: {other:?}"),
     }
-
-    let _ = fs::remove_file(schedule_path);
-    let _ = fs::remove_file(weather_path);
-    let _ = fs::remove_file(output_path);
 }
 
 #[test]
 fn run_returns_err_for_missing_hpxml_path() {
+    let scratch = Scratch::with_inputs();
     let config = DwellingConfig {
-        hpxml_path: PathBuf::from("/tmp/does-not-exist-hpxml.xml"),
-        schedule_path: Some(PathBuf::from("/tmp/schedule.csv")),
-        weather_path: PathBuf::from("/tmp/weather.epw"),
-        sim_config: simulation_config(unique_temp_path("csv")),
+        hpxml_path: scratch.path("does-not-exist.xml"),
+        schedule_path: Some(scratch.schedule()),
+        weather_path: scratch.weather(),
+        sim_config: simulation_config(scratch.path("output.csv")),
         defaults_path: None,
         overrides: None,
         bldg_id: 1,
@@ -266,12 +252,12 @@ fn run_returns_err_for_missing_hpxml_path() {
 #[test]
 fn run_returns_err_for_missing_weather_path() {
     let engine = SimulationEngine::new();
-    let schedule_path = unique_temp_path("csv");
+    let scratch = Scratch::with_inputs();
     let weather_missing = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(schedule_path.clone()),
-        weather_path: PathBuf::from("/tmp/does-not-exist-weather.epw"),
-        sim_config: simulation_config(unique_temp_path("csv")),
+        schedule_path: Some(scratch.schedule()),
+        weather_path: scratch.path("does-not-exist.epw"),
+        sim_config: simulation_config(scratch.path("output.csv")),
         defaults_path: None,
         overrides: None,
         bldg_id: 2,
@@ -279,13 +265,10 @@ fn run_returns_err_for_missing_weather_path() {
         resample_overrides: None,
         patches: None,
     };
-    fs::write(&schedule_path, build_schedule_csv()).expect("failed to write temp schedule");
     let weather_err = engine
-        .run(weather_missing.clone())
+        .run(weather_missing)
         .expect_err("missing weather path should return error");
     assert!(weather_err.to_string().contains("weather_path"));
-
-    let _ = fs::remove_file(schedule_path);
 }
 
 /// A streaming run (retain_batches=false, the default configuration shape)
@@ -294,16 +277,17 @@ fn run_returns_err_for_missing_weather_path() {
 /// "zero-step" flag for every non-retaining run.
 #[test]
 fn run_with_streaming_output_computes_metrics() {
-    let schedule_path = unique_temp_path("csv");
-    let weather_path = unique_temp_path("epw");
-    write_temp_file(&schedule_path, &build_schedule_csv());
-    write_temp_file(&weather_path, &build_epw_8760());
+    let scratch = Scratch::with_inputs();
 
-    let build_config = |output_path: PathBuf, retain: bool| DwellingConfig {
+    let build_config = |retain: bool| DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(schedule_path.clone()),
-        weather_path: weather_path.clone(),
-        sim_config: simulation_config_with_flags(output_path, retain, true),
+        schedule_path: Some(scratch.schedule()),
+        weather_path: scratch.weather(),
+        sim_config: simulation_config_with_flags(
+            scratch.path(&format!("retain_{retain}.csv")),
+            retain,
+            true,
+        ),
         defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 123,
@@ -314,10 +298,10 @@ fn run_with_streaming_output_computes_metrics() {
 
     let engine = SimulationEngine::new();
     let retained = engine
-        .run(build_config(unique_temp_path("csv"), true))
+        .run(build_config(true))
         .expect("retained run should succeed");
     let streamed = engine
-        .run(build_config(unique_temp_path("csv"), false))
+        .run(build_config(false))
         .expect("streaming run should succeed");
 
     // Nothing is retained in memory on the streaming run -- the honest
@@ -348,9 +332,6 @@ fn run_with_streaming_output_computes_metrics() {
         streamed.metrics, retained.metrics,
         "streaming (incremental) metrics must equal retained-batch metrics"
     );
-
-    let _ = fs::remove_file(schedule_path);
-    let _ = fs::remove_file(weather_path);
 }
 
 /// Streaming (incremental recorder-fed) metrics must equal batch (retained-
@@ -361,20 +342,13 @@ fn run_with_streaming_output_computes_metrics() {
 /// energy identity exposed during I-02).
 #[test]
 fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
-    let schedule_path = unique_temp_path("csv");
-    let weather_path = unique_temp_path("epw");
-    write_temp_file(&schedule_path, &build_schedule_csv());
-    write_temp_file(&weather_path, &build_epw_8760());
-
-    // Both runs' output files and their `_diagnostics.csv` siblings go in a
-    // directory removed when the test ends.
-    let output_dir = tempfile::tempdir().expect("temp dir");
+    let scratch = Scratch::with_inputs();
     let build_config = |retain: bool| DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(schedule_path.clone()),
-        weather_path: weather_path.clone(),
+        schedule_path: Some(scratch.schedule()),
+        weather_path: scratch.weather(),
         sim_config: {
-            let output_path = output_dir.path().join(format!("retain_{retain}.csv"));
+            let output_path = scratch.path(&format!("retain_{retain}.csv"));
             let mut cfg = simulation_config_with_flags(output_path, retain, true);
             cfg.output_verbosity = 6;
             cfg
@@ -409,27 +383,21 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
         "streaming (incremental) metrics must equal retained-batch metrics \
          field-for-field, including energy totals"
     );
-
-    let _ = fs::remove_file(schedule_path);
-    let _ = fs::remove_file(weather_path);
 }
 
 /// A run with no timesteps must be flagged as a true zero-step run -- not
 /// reported as Ok with zeroed metrics.
 #[test]
 fn run_with_zero_duration_flags_zero_step() {
-    let schedule_path = unique_temp_path("csv");
-    let weather_path = unique_temp_path("epw");
-    write_temp_file(&schedule_path, &build_schedule_csv());
-    write_temp_file(&weather_path, &build_epw_8760());
+    let scratch = Scratch::with_inputs();
 
-    let mut sim_config = simulation_config_with_flags(unique_temp_path("csv"), false, true);
+    let mut sim_config = simulation_config_with_flags(scratch.path("output.csv"), false, true);
     sim_config.duration = Duration::zero();
 
     let config = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(schedule_path.clone()),
-        weather_path: weather_path.clone(),
+        schedule_path: Some(scratch.schedule()),
+        weather_path: scratch.weather(),
         sim_config,
         defaults_path: Some(repo_defaults_path()),
         overrides: None,
@@ -453,25 +421,19 @@ fn run_with_zero_duration_flags_zero_step() {
         result.metrics.simulation_duration_hours, 0.0,
         "zero-step run must report zero duration"
     );
-
-    let _ = fs::remove_file(schedule_path);
-    let _ = fs::remove_file(weather_path);
 }
 
 /// A run with output disabled has nothing to compute metrics from; the
 /// status must say so honestly instead of misreporting a zero-step run.
 #[test]
 fn run_without_output_recorder_reports_metrics_unavailable() {
-    let schedule_path = unique_temp_path("csv");
-    let weather_path = unique_temp_path("epw");
-    write_temp_file(&schedule_path, &build_schedule_csv());
-    write_temp_file(&weather_path, &build_epw_8760());
+    let scratch = Scratch::with_inputs();
 
     let config = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(schedule_path.clone()),
-        weather_path: weather_path.clone(),
-        sim_config: simulation_config_with_flags(unique_temp_path("csv"), false, false),
+        schedule_path: Some(scratch.schedule()),
+        weather_path: scratch.weather(),
+        sim_config: simulation_config_with_flags(scratch.path("output.csv"), false, false),
         defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 123,
@@ -494,7 +456,4 @@ fn run_without_output_recorder_reports_metrics_unavailable() {
         result.metrics.simulation_duration_hours, 0.0,
         "output-disabled run has no metrics source"
     );
-
-    let _ = fs::remove_file(schedule_path);
-    let _ = fs::remove_file(weather_path);
 }

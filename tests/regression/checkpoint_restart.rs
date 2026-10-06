@@ -16,12 +16,14 @@ const CHECKPOINT_AT_STEP: u64 = 30;
 const TOTAL_STEPS: i64 = 60;
 
 pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
-    let schedule_path = helpers::unique_temp_path("hares-regr-ckpt-sched", "csv");
-    let weather_path = helpers::unique_temp_path("hares-regr-ckpt-weather", "epw");
+    let scratch = tempfile::tempdir().expect("create scratch directory");
+    let schedule_path = scratch.path().join("schedule.csv");
+    let weather_path = scratch.path().join("weather.epw");
     helpers::write_schedule_csv(&schedule_path);
     helpers::write_weather_epw(&weather_path);
 
     let config = helpers::build_dwelling_config(
+        scratch.path(),
         1,
         schedule_path.clone(),
         weather_path.clone(),
@@ -35,7 +37,6 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     let mut dwelling_ref = match Dwelling::from_config(config.clone()) {
         Ok(d) => d,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path]);
             return Err(vec![format!(
                 "reference dwelling construction failed: {err}"
             )]);
@@ -45,7 +46,6 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     let ref_results = match dwelling_ref.simulate() {
         Ok(r) => r,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path]);
             return Err(vec![format!("reference simulation failed: {err}")]);
         }
     };
@@ -54,7 +54,6 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     let mut dwelling_a = match Dwelling::from_config(config.clone()) {
         Ok(d) => d,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path]);
             return Err(vec![format!(
                 "checkpoint dwelling construction failed: {err}"
             )]);
@@ -64,7 +63,6 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     for _ in 0..CHECKPOINT_AT_STEP {
         if let Err(err) = dwelling_a.step() {
             failures.push(format!("step before checkpoint failed: {err}"));
-            helpers::cleanup_paths(&[schedule_path, weather_path]);
             return Err(failures);
         }
     }
@@ -73,16 +71,14 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
         .save_checkpoint()
         .map_err(|e| vec![e.to_string()])?;
 
-    let cp_path = helpers::unique_temp_path("hares-regr-ckpt", "json");
+    let cp_path = scratch.path().join("checkpoint.json");
     if let Err(err) = checkpoint.save(&cp_path) {
-        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
         return Err(vec![format!("checkpoint save failed: {err}")]);
     }
 
     let loaded_cp = match hares_core::DwellingCheckpoint::load(&cp_path) {
         Ok(cp) => cp,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
             return Err(vec![format!("checkpoint load failed: {err}")]);
         }
     };
@@ -90,7 +86,6 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     let mut dwelling_b = match Dwelling::from_config(config) {
         Ok(d) => d,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
             return Err(vec![format!(
                 "restarted dwelling construction failed: {err}"
             )]);
@@ -98,7 +93,6 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     };
 
     if let Err(err) = dwelling_b.load_checkpoint(loaded_cp) {
-        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
         return Err(vec![format!("checkpoint restore failed: {err}")]);
     }
 
@@ -132,8 +126,6 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
             }
         }
     }
-
-    helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
 
     if failures.is_empty() {
         eprintln!("[checkpoint_restart] PASS -- {compare_len} steps identical after restore");
@@ -179,12 +171,14 @@ pub fn run_per_equipment_version_rejection_regression() -> Result<(), Vec<String
 /// Regression: a checkpoint with CRC32 and SHA-256 enabled round-trips
 /// correctly through save/load and the restored state is identical.
 pub fn run_checkpoint_integrity_roundtrip() -> Result<(), Vec<String>> {
-    let schedule_path = helpers::unique_temp_path("hares-regr-ckpt-int-sched", "csv");
-    let weather_path = helpers::unique_temp_path("hares-regr-ckpt-int-weather", "epw");
+    let scratch = tempfile::tempdir().expect("create scratch directory");
+    let schedule_path = scratch.path().join("schedule.csv");
+    let weather_path = scratch.path().join("weather.epw");
     helpers::write_schedule_csv(&schedule_path);
     helpers::write_weather_epw(&weather_path);
 
     let config = helpers::build_dwelling_config(
+        scratch.path(),
         1,
         schedule_path.clone(),
         weather_path.clone(),
@@ -195,7 +189,6 @@ pub fn run_checkpoint_integrity_roundtrip() -> Result<(), Vec<String>> {
     let mut dwelling = match Dwelling::from_config(config) {
         Ok(d) => d,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path]);
             return Err(vec![format!("dwelling construction failed: {err}")]);
         }
     };
@@ -203,7 +196,6 @@ pub fn run_checkpoint_integrity_roundtrip() -> Result<(), Vec<String>> {
     // Step a few times to produce non-trivial checkpoint state
     for _ in 0..5 {
         if let Err(err) = dwelling.step() {
-            helpers::cleanup_paths(&[schedule_path, weather_path]);
             return Err(vec![format!("step before checkpoint failed: {err}")]);
         }
     }
@@ -211,37 +203,31 @@ pub fn run_checkpoint_integrity_roundtrip() -> Result<(), Vec<String>> {
     let checkpoint = dwelling
         .save_checkpoint()
         .map_err(|e| vec![e.to_string()])?;
-    let cp_path = helpers::unique_temp_path("hares-regr-ckpt-int", "json");
+    let cp_path = scratch.path().join("checkpoint.json");
     if let Err(err) = checkpoint.save(&cp_path) {
-        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
         return Err(vec![format!("checkpoint save failed: {err}")]);
     }
 
     let loaded_cp = match DwellingCheckpoint::load(&cp_path) {
         Ok(cp) => cp,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
             return Err(vec![format!("checkpoint load failed: {err}")]);
         }
     };
 
     // Verify the loaded checkpoint matches the original
     if loaded_cp.format_version != checkpoint.format_version {
-        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
         return Err(vec![format!(
             "format_version mismatch: saved={} loaded={}",
             checkpoint.format_version, loaded_cp.format_version
         )]);
     }
     if loaded_cp.timestep_index != checkpoint.timestep_index {
-        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
         return Err(vec![format!(
             "timestep_index mismatch: saved={} loaded={}",
             checkpoint.timestep_index, loaded_cp.timestep_index
         )]);
     }
-
-    helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
     eprintln!("[checkpoint_integrity_roundtrip] PASS");
     Ok(())
 }
@@ -249,12 +235,14 @@ pub fn run_checkpoint_integrity_roundtrip() -> Result<(), Vec<String>> {
 /// Regression: corrupt one byte in a checkpoint file's JSON body and verify
 /// that `load()` rejects it with a checksum error.
 pub fn run_checkpoint_sha256_corruption_regression() -> Result<(), Vec<String>> {
-    let schedule_path = helpers::unique_temp_path("hares-regr-ckpt-sha-corrupt-sched", "csv");
-    let weather_path = helpers::unique_temp_path("hares-regr-ckpt-sha-corrupt-weather", "epw");
+    let scratch = tempfile::tempdir().expect("create scratch directory");
+    let schedule_path = scratch.path().join("schedule.csv");
+    let weather_path = scratch.path().join("weather.epw");
     helpers::write_schedule_csv(&schedule_path);
     helpers::write_weather_epw(&weather_path);
 
     let config = helpers::build_dwelling_config(
+        scratch.path(),
         1,
         schedule_path.clone(),
         weather_path.clone(),
@@ -265,22 +253,19 @@ pub fn run_checkpoint_sha256_corruption_regression() -> Result<(), Vec<String>> 
     let mut dwelling = match Dwelling::from_config(config) {
         Ok(d) => d,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path]);
             return Err(vec![format!("dwelling construction failed: {err}")]);
         }
     };
 
     if let Err(err) = dwelling.step() {
-        helpers::cleanup_paths(&[schedule_path, weather_path]);
         return Err(vec![format!("step failed: {err}")]);
     }
 
     let checkpoint = dwelling
         .save_checkpoint()
         .map_err(|e| vec![e.to_string()])?;
-    let cp_path = helpers::unique_temp_path("hares-regr-ckpt-sha-corrupt", "json");
+    let cp_path = scratch.path().join("checkpoint.json");
     if let Err(err) = checkpoint.save(&cp_path) {
-        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
         return Err(vec![format!("checkpoint save failed: {err}")]);
     }
 
@@ -301,22 +286,17 @@ pub fn run_checkpoint_sha256_corruption_regression() -> Result<(), Vec<String>> 
             let msg = e.to_string();
             if msg.contains("SHA-256") || msg.contains("checksum") {
                 eprintln!("[checkpoint_sha256_corruption] PASS — load rejected with: {msg}");
-                helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
                 Ok(())
             } else {
-                helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
                 Err(vec![format!(
                     "error message missing checksum indication; got: {msg}"
                 )])
             }
         }
-        Ok(_) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
-            Err(vec![
-                "corrupted checkpoint should have been rejected by SHA-256, but load succeeded"
-                    .to_string(),
-            ])
-        }
+        Ok(_) => Err(vec![
+            "corrupted checkpoint should have been rejected by SHA-256, but load succeeded"
+                .to_string(),
+        ]),
     }
 }
 
@@ -367,12 +347,14 @@ pub fn run_equipment_crc_corruption_regression() -> Result<(), Vec<String>> {
 pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     use hares_core::actors::{self, BmsParams, Occupant, Presence};
 
-    let schedule_path = helpers::unique_temp_path("hares-regr-actor-ckpt-sched", "csv");
-    let weather_path = helpers::unique_temp_path("hares-regr-actor-ckpt-weather", "epw");
+    let scratch = tempfile::tempdir().expect("create scratch directory");
+    let schedule_path = scratch.path().join("schedule.csv");
+    let weather_path = scratch.path().join("weather.epw");
     helpers::write_schedule_csv(&schedule_path);
     helpers::write_weather_epw(&weather_path);
 
     let config = helpers::build_dwelling_config(
+        scratch.path(),
         1,
         schedule_path.clone(),
         weather_path.clone(),
@@ -386,7 +368,6 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     let mut dwelling_ref = match Dwelling::from_config(config.clone()) {
         Ok(d) => d,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path]);
             return Err(vec![format!(
                 "reference dwelling construction failed: {err}"
             )]);
@@ -450,7 +431,6 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     let ref_results = match dwelling_ref.simulate() {
         Ok(r) => r,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path]);
             return Err(vec![format!("reference simulation failed: {err}")]);
         }
     };
@@ -461,7 +441,6 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     let mut dwelling_a = match Dwelling::from_config(config.clone()) {
         Ok(d) => d,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path]);
             return Err(vec![format!(
                 "checkpoint dwelling construction failed: {err}"
             )]);
@@ -525,7 +504,6 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     for _ in 0..CHECKPOINT_AT_STEP {
         if let Err(err) = dwelling_a.step() {
             failures.push(format!("step before checkpoint failed: {err}"));
-            helpers::cleanup_paths(&[schedule_path, weather_path]);
             return Err(failures);
         }
     }
@@ -554,20 +532,17 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
             .push("checkpoint missing BatteryManagementActor:TestBattery actor state".to_string());
     }
     if !failures.is_empty() {
-        helpers::cleanup_paths(&[schedule_path, weather_path]);
         return Err(failures);
     }
 
-    let cp_path = helpers::unique_temp_path("hares-regr-actor-ckpt", "json");
+    let cp_path = scratch.path().join("checkpoint.json");
     if let Err(err) = checkpoint.save(&cp_path) {
-        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
         return Err(vec![format!("checkpoint save failed: {err}")]);
     }
 
     let loaded_cp = match DwellingCheckpoint::load(&cp_path) {
         Ok(cp) => cp,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
             return Err(vec![format!("checkpoint load failed: {err}")]);
         }
     };
@@ -575,7 +550,6 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     let mut dwelling_b = match Dwelling::from_config(config) {
         Ok(d) => d,
         Err(err) => {
-            helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
             return Err(vec![format!("restore dwelling construction failed: {err}")]);
         }
     };
@@ -631,7 +605,6 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         .unwrap();
 
     if let Err(err) = dwelling_b.load_checkpoint(loaded_cp) {
-        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
         return Err(vec![format!("checkpoint restore failed: {err}")]);
     }
 
@@ -662,8 +635,6 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
             }
         }
     }
-
-    helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
 
     if failures.is_empty() {
         eprintln!(

@@ -1595,6 +1595,10 @@ fn telemetry_fields() -> Vec<TelemetryField> {
 }
 
 #[cfg(test)]
+#[path = "../../../../tests/support/temp_file.rs"]
+mod temp_file;
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1716,22 +1720,8 @@ mod tests {
         assert!((a - b).abs() < 1e-9, "left={a}, right={b}");
     }
 
-    fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
-        // See hares-core/tests/engine.rs: pid + monotonic counter + nanos for
-        // uniqueness by construction (the pid alone does not separate threads
-        // allocating within the same nanosecond).
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "{prefix}_{}_{}_{seq}.{ext}",
-            std::process::id(),
-            nanos
-        ))
+    fn temp_lut_path(prefix: &str, ext: &str) -> (tempfile::TempDir, PathBuf) {
+        super::temp_file::temp_file(&format!("{prefix}.{ext}"))
     }
 
     fn write_pv_lut_csv(path: &Path, ac_power_kw: f64) {
@@ -2809,7 +2799,7 @@ mod tests {
         );
         env.weather.solar_altitude_deg = 60.0;
         env.weather.solar_azimuth_deg = 180.0;
-        let path = unique_temp_path("pv_lut", "csv");
+        let (_dir, path) = temp_lut_path("pv_lut", "csv");
         write_pv_lut_csv(&path, 2.75);
 
         let mut typed = base_pv_typed_config();
@@ -2840,7 +2830,7 @@ mod tests {
         );
         env.weather.solar_altitude_deg = 60.0;
         env.weather.solar_azimuth_deg = 180.0;
-        let path = unique_temp_path("pv_lut", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut", "parquet");
         write_pv_lut_parquet(&path, 3.10);
 
         let mut typed = base_pv_typed_config();
@@ -3044,7 +3034,7 @@ mod tests {
         // the telemetry method is set to 1.0 and the fallback count
         // increments.
 
-        let path = unique_temp_path("pv_lut_nn_telemetry", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_nn_telemetry", "parquet");
         // Write a sparse Parquet LUT with only 2 entries in a 6-element grid.
         let schema = Arc::new(Schema::new(vec![
             Field::new("solar_zenith_deg", DataType::Float64, false),
@@ -4072,7 +4062,7 @@ mod tests {
     /// lat=lon=0.0, which the invariant check emits a warning for.
     #[test]
     fn lut_csv_defaults_location_to_zero() {
-        let path = unique_temp_path("pv_lut_no_meta", "csv");
+        let (_dir, path) = temp_lut_path("pv_lut_no_meta", "csv");
         write_pv_lut_csv(&path, 2.5);
         let lut = PvLut::from_path(&path).expect("load csv lut");
         approx_eq(lut.latitude_deg(), 0.0);
@@ -4092,7 +4082,7 @@ mod tests {
         // so AC power = 0.0. Use a single entry for simplicity.
         // The correction math: AC_corrected = AC_lut / inv_eff / (1-losses) * (1-losses) * inv_eff
         // When SAM and HARES values match, this simplifies to AC_lut.
-        let path = unique_temp_path("pv_lut_t0086_match", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0086_match", "parquet");
         let lut_ac = 3.80;
         write_pv_lut_parquet_with_meta(&path, lut_ac, 0.96, 0.14);
 
@@ -4140,7 +4130,7 @@ mod tests {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
 
         let lu_ac = 3.80;
-        let path = unique_temp_path("pv_lut_t0086_diff", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0086_diff", "parquet");
         write_pv_lut_parquet_with_meta(&path, lu_ac, 0.96, 0.14);
 
         let mut typed = base_pv_typed_config();
@@ -4186,7 +4176,7 @@ mod tests {
     fn legacy_lut_no_metadata_falls_back_to_old_behavior() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
 
-        let path = unique_temp_path("pv_lut_t0086_legacy", "csv");
+        let (_dir, path) = temp_lut_path("pv_lut_t0086_legacy", "csv");
         write_pv_lut_csv(&path, 2.75);
 
         let mut typed = base_pv_typed_config();
@@ -4225,7 +4215,7 @@ mod tests {
     /// Parquet file written with SAM configuration embedded.
     #[test]
     fn lut_parquet_reads_sam_metadata() {
-        let path = unique_temp_path("pv_lut_t0086_read_meta", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0086_read_meta", "parquet");
         write_pv_lut_parquet_with_meta(&path, 2.5, 0.92, 0.12);
         let lut = PvLut::from_path(&path).expect("load lut");
         approx_eq(lut.sam_inv_eff(), 0.92);
@@ -4236,7 +4226,7 @@ mod tests {
     /// metadata support in CSV format).
     #[test]
     fn lut_csv_defaults_sam_metadata_to_zero() {
-        let path = unique_temp_path("pv_lut_t0086_csv", "csv");
+        let (_dir, path) = temp_lut_path("pv_lut_t0086_csv", "csv");
         write_pv_lut_csv(&path, 1.0);
         let lut = PvLut::from_path(&path).expect("load csv lut");
         approx_eq(lut.sam_inv_eff(), 0.0);
@@ -4450,7 +4440,7 @@ mod tests {
         env.weather.solar_azimuth_deg = 180.0;
         env.weather.wind_speed_m_s = 1.0;
 
-        let path = unique_temp_path("pv_lut", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut", "parquet");
         write_pv_lut_parquet_with_array_type(&path, 3.0, 0.96, 0.14, 1);
 
         let mut cfg = base_pv_typed_config();
@@ -4576,7 +4566,7 @@ mod tests {
 
         // LUT AC output at the matching coordinates: set to expected_ac so
         // the LUT correction is identity.
-        let path = unique_temp_path("pv_lut_t0107_parity", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0107_parity", "parquet");
         write_pv_lut_parquet_with_meta(&path, expected_ac, sam_inv_eff, sam_losses);
 
         // Non-LUT PV: no LUT path, confirms baseline.
@@ -4691,7 +4681,7 @@ mod tests {
         // HARES DC = dc_true * (1 - hares_losses) = dc_no_losses * (1 - 0.05)
         // This should exactly match the non-LUT path.
 
-        let path = unique_temp_path("pv_lut_t0107_custom", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0107_custom", "parquet");
         write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
 
         // LUT PV.
@@ -4781,7 +4771,7 @@ mod tests {
         let sam_losses = DEFAULT_SYSTEM_LOSSES_FRACTION;
         let sam_inv_eff = DEFAULT_INVERTER_EFFICIENCY;
         let ac_lut = expected_dc_no_losses * (1.0 - sam_losses) * sam_inv_eff;
-        let path = unique_temp_path("pv_lut_before_losses", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_before_losses", "parquet");
         write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
 
         let mut cfg_lut = base_pv_typed_config();
@@ -5018,7 +5008,7 @@ mod tests {
         // SAM would produce AC = dc_no_losses * (1 - sam_losses) * sam_inv_eff
         let ac_lut = dc_no_losses_expected * (1.0 - sam_losses) * sam_inv_eff;
 
-        let path = unique_temp_path("pv_lut_t0422_soiling_dc", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0422_soiling_dc", "parquet");
         write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
 
         let mut cfg = base_pv_typed_config();
@@ -5178,7 +5168,7 @@ mod tests {
         let derate_soiled = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell_soiled - 25.0);
         let target_dc_no_losses = capacity_kw * (1000.0 / 1000.0) * derate_soiled;
         let ac_lut = target_dc_no_losses * (1.0 - sam_losses) * sam_inv_eff;
-        let path = unique_temp_path("pv_lut_t0422_parity", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0422_parity", "parquet");
         write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
 
         let mut cfg_lut = base_pv_typed_config();
@@ -5260,7 +5250,7 @@ mod tests {
         let hares_inv_eff = 0.97;
         let hares_losses = 0.14;
 
-        let path = unique_temp_path("pv_lut_t0556_nondefault", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0556_nondefault", "parquet");
         write_pv_lut_parquet_with_meta(&path, lut_ac, sam_inv_eff, sam_losses);
 
         let mut typed = base_pv_typed_config();

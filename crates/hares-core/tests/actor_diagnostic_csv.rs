@@ -7,40 +7,12 @@
 
 use std::fs;
 use std::path::Path;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use hares_core::Dwelling;
 use hares_core::actors::Occupant;
 use hares_core::actors::Presence;
 
-fn nanos_suffix() -> String {
-    // Uniqueness by construction: pid separates test processes, a monotonic
-    // counter separates same-nanosecond allocations across parallel test
-    // threads, nanos keep names distinct across runs.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{nanos}-{seq}", std::process::id())
-}
-
-fn unique_temp_toml(tag: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("hares-actor-diag-{tag}-{}.toml", nanos_suffix()));
-    path
-}
-
-fn unique_temp_csv(tag: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("hares-actor-diag-{tag}-{}.csv", nanos_suffix()));
-    path
-}
-
-fn write_minimal_toml_with_output(path: &PathBuf, csv_path: &Path) {
+fn write_minimal_toml_with_output(path: &Path, csv_path: &Path) {
     let content = format!(
         r#"building_id = 4242
 
@@ -83,12 +55,12 @@ master_seed = 0
 
 #[test]
 fn actor_telemetry_columns_in_csv_output_after_multi_step_simulation() {
-    let csv_path = unique_temp_csv("actor_csv");
-    let toml_path = unique_temp_toml("actor_csv");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let csv_path = dir.path().join("actor_csv.csv");
+    let toml_path = dir.path().join("actor_csv.toml");
     write_minimal_toml_with_output(&toml_path, &csv_path);
 
     let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("synthetic TOML must load");
-    let _ = fs::remove_file(&toml_path);
 
     // Add an Occupant actor with telemetry keys. Schedule covers all 10 steps
     // (600s / 60s = 10 steps). Pattern: Home, Home, Away, Away, Home, Home,
@@ -118,7 +90,6 @@ fn actor_telemetry_columns_in_csv_output_after_multi_step_simulation() {
 
     // Read the CSV output and verify it contains actor telemetry columns.
     let csv_content = fs::read_to_string(&csv_path).expect("CSV output must exist and be readable");
-    let _ = fs::remove_file(&csv_path);
 
     // The header line must contain actor telemetry column names.
     let header = csv_content

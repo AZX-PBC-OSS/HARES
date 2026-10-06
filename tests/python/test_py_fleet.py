@@ -66,10 +66,9 @@ def _ochre_fixtures_available() -> bool:
     return (EXAMPLES / "BEopt_example.xml").exists() and (EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw").exists()
 
 
-def _build_simulatable_fleet(n: int = 1):
+def _build_simulatable_fleet(output_dir: Path, n: int = 1):
     """Build a fleet from real OCHRE fixtures that can actually simulate."""
     PyFleet, DwellingConfig = _pyfleet_class()
-    import tempfile
 
     from ochre_next import SimulationConfig
 
@@ -88,7 +87,7 @@ def _build_simulatable_fleet(n: int = 1):
                     duration_s=3600,
                     time_res_s=60,
                     write_output=True,
-                    output_path=str(Path(tempfile.mkdtemp()) / f"fleet_{i + 1}.csv"),
+                    output_path=str(output_dir / f"fleet_{i + 1}.csv"),
                 ),
                 bldg_id=i + 1,
             )
@@ -351,27 +350,27 @@ def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_simulate_resolution_enum_works() -> None:
+def test_simulate_resolution_enum_works(tmp_path: Path) -> None:
     """Verify simulate(resolution=AggregationResolution.Hourly) works."""
     from ochre_next import AggregationResolution
 
-    fleet = _build_simulatable_fleet(1)
+    fleet = _build_simulatable_fleet(tmp_path, 1)
     results = fleet.simulate(resolution=AggregationResolution.Hourly)
     assert results.n_succeeded == 1
 
 
 @pytest.mark.slow
-def test_simulate_resolution_string_works() -> None:
+def test_simulate_resolution_string_works(tmp_path: Path) -> None:
     """Verify simulate(resolution="hourly") string convenience works."""
-    fleet = _build_simulatable_fleet(1)
+    fleet = _build_simulatable_fleet(tmp_path, 1)
     results = fleet.simulate(resolution="hourly")
     assert results.n_succeeded == 1
 
 
 @pytest.mark.slow
-def test_simulate_default_resolution() -> None:
+def test_simulate_default_resolution(tmp_path: Path) -> None:
     """Verify simulate() default uses FifteenMin."""
-    fleet = _build_simulatable_fleet(1)
+    fleet = _build_simulatable_fleet(tmp_path, 1)
     results = fleet.simulate()
     assert results.n_succeeded == 1
     # Default is FifteenMin; aggregate_timeseries should have data
@@ -380,26 +379,26 @@ def test_simulate_default_resolution() -> None:
 
 
 @pytest.mark.slow
-def test_failures_property_empty_on_success() -> None:
+def test_failures_property_empty_on_success(tmp_path: Path) -> None:
     """Verify failures property is empty list on all-success runs."""
-    fleet = _build_simulatable_fleet(1)
+    fleet = _build_simulatable_fleet(tmp_path, 1)
     results = fleet.simulate()
     assert results.failures == []
 
 
 @pytest.mark.slow
-def test_n_succeeded_and_n_failed_properties() -> None:
+def test_n_succeeded_and_n_failed_properties(tmp_path: Path) -> None:
     """Verify n_succeeded and n_failed properties."""
-    fleet = _build_simulatable_fleet(2)
+    fleet = _build_simulatable_fleet(tmp_path, 2)
     results = fleet.simulate()
     assert results.n_succeeded == 2
     assert results.n_failed == 0
 
 
 @pytest.mark.slow
-def test_progress_callback_invoked() -> None:
+def test_progress_callback_invoked(tmp_path: Path) -> None:
     """Verify progress callback is invoked with (completed, total)."""
-    fleet = _build_simulatable_fleet(2)
+    fleet = _build_simulatable_fleet(tmp_path, 2)
     calls = []
 
     def on_progress(completed: int, total: int) -> None:

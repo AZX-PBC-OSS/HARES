@@ -5,8 +5,10 @@ use hares_fleet::Fleet;
 use std::time::Duration;
 
 fn bench_fleet(c: &mut Criterion) {
-    let schedule_path = common::unique_temp_path("hares-bench-fleet-schedule", "csv");
-    let weather_path = common::unique_temp_path("hares-bench-fleet-weather", "epw");
+    let temp = tempfile::tempdir().expect("benchmark directory");
+    let dir = temp.path();
+    let schedule_path = common::numbered_path(dir, "hares-bench-fleet-schedule", "csv");
+    let weather_path = common::numbered_path(dir, "hares-bench-fleet-weather", "epw");
     common::write_schedule_csv(&schedule_path);
     common::write_weather_epw(&weather_path);
 
@@ -22,6 +24,7 @@ fn bench_fleet(c: &mut Criterion) {
                     let configs = (0..n)
                         .map(|idx| {
                             common::build_dwelling_config(
+                                dir,
                                 idx as i64 + 1,
                                 schedule_path.clone(),
                                 weather_path.clone(),

@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 import socket
 import sys
-import tempfile
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -332,17 +331,12 @@ def test_run_cosimulation_dict_writes_temp_json(monkeypatch: pytest.MonkeyPatch)
     assert fake_helics.cli.loaded_configs[0]["name"] == "hares-cosim"
 
 
-def test_run_cosimulation_path_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_cosimulation_path_passthrough(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _, runner_module, fake_helics = _import_broker_runner_modules(monkeypatch)
+    path = tmp_path / "cosim.json"
+    path.write_text(json.dumps({"name": "existing", "broker": False, "federates": []}), encoding="utf-8")
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
-        json.dump({"name": "existing", "broker": False, "federates": []}, handle)
-        path = Path(handle.name)
-
-    try:
-        runner_module.run_cosimulation(path)
-    finally:
-        path.unlink(missing_ok=True)
+    runner_module.run_cosimulation(path)
 
     assert fake_helics.cli.calls == [str(path)]
 

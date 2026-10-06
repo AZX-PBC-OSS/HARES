@@ -309,20 +309,6 @@ fn no_violations_when_everything_is_in_range() {
 
 // ── Integration test: end-to-end wiring of post-hoc checks in Dwelling ───────
 
-fn unique_nanos_suffix() -> String {
-    // Uniqueness by construction: pid + monotonic counter + nanos
-    // (see hares-core/tests/engine.rs).
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock before epoch")
-        .as_nanos();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{nanos}-{seq}", std::process::id())
-}
-
 /// Verifies that when an observer is enabled on a dwelling with HVAC equipment,
 /// the post-hoc diagnostic checks are wired into simulate() and produce summary
 /// output in the diagnostic CSV when output_verbosity >= 4.
@@ -330,16 +316,11 @@ fn unique_nanos_suffix() -> String {
 fn observer_enabled_simulation_appends_posthoc_summary_to_diagnostic_csv() {
     use std::fs;
 
-    let toml_path = {
-        let mut p = std::env::temp_dir();
-        p.push(format!("hares-posthoc-{}.toml", unique_nanos_suffix()));
-        p
-    };
-    let csv_path = {
-        let mut p = std::env::temp_dir();
-        p.push(format!("hares-posthoc-{}.csv", unique_nanos_suffix()));
-        p
-    };
+    // The output and its `_diagnostics.csv` sibling go in a directory removed
+    // when the test ends.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let toml_path = dir.path().join("posthoc.toml");
+    let csv_path = dir.path().join("posthoc.csv");
 
     // Synthetic TOML with a gas furnace in very cold weather.  The furnace
     // capacity is 5 kBtu/h (≈ 1.47 kW), outdoor temp is -20°C, and the
@@ -388,7 +369,6 @@ master_seed = 0
 
     let mut dwelling =
         hares_core::Dwelling::from_toml_config(&toml_path).expect("synthetic TOML must load");
-    let _ = fs::remove_file(&toml_path);
 
     // Enable observer so post-hoc checks are wired.
     dwelling.enable_observer(100);
@@ -406,8 +386,6 @@ master_seed = 0
 
     let diag_content =
         fs::read_to_string(&diag_path).expect("diagnostic CSV must exist and be readable");
-    let _ = fs::remove_file(&diag_path);
-    let _ = fs::remove_file(&csv_path);
 
     // The diagnostic CSV should contain at least one data row (per-step rows
     // are always written when output_verbosity >= 4) AND

@@ -9,9 +9,6 @@ import importlib.util
 import itertools
 import json
 import os
-import re
-import socket
-import subprocess
 import sys
 import threading
 from typing import Any, Self, TYPE_CHECKING
@@ -46,7 +43,6 @@ pytestmark = [
     # Last-resort backstop: raw HELICS calls block inside the C library where
     # SIGALRM cannot interrupt them, so use pytest-timeout's thread method.
     pytest.mark.timeout(120, method="thread"),
-    pytest.mark.usefixtures("helics_environment_guard"),
 ]
 
 
@@ -59,121 +55,9 @@ _DURATION_S = int(_TIME_RES_S * _TOTAL_STEPS)
 _CONNECT_TIMEOUT_S = 20.0
 _GRANT_TIMEOUT_S = 30.0
 
-# Default HELICS broker ports (zmq broker port and its priority channel).
-# Tests never use these (ephemeral ports only), but a leftover process bound
-# to them is the signature of stale HELICS state on this machine.
-_HELICS_DEFAULT_PORTS = (23404, 23405)
-
-_STALE_PROCESS_PATTERN = re.compile(
-    r"helics[-_]broker"  # standalone broker binary
-    r"|python[0-9.]*\S*\s+\S*helics\S*\.py",  # e.g. `python /tmp/helics_debug_test16.py`
-    re.IGNORECASE,
-)
-
-
-def _listening_process(port: int) -> str | None:
-    """Return ``'PID <pid> (<command>)'`` for a listener on ``port``, else ``None``."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.25)
-        if sock.connect_ex(("127.0.0.1", port)) != 0:
-            return None
-    try:
-        out = subprocess.run(
-            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpc"],
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-        ).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return "an unidentified process (lsof unavailable)"
-    pid: str | None = None
-    command: str | None = None
-    for line in out.splitlines():
-        if line.startswith("p"):
-            pid = line[1:]
-        elif line.startswith("c") and command is None:
-            command = line[1:]
-    if pid is None:
-        return "an unidentified process"
-    return f"PID {pid} ({command or 'unknown command'})"
-
-
-def _process_table() -> list[tuple[int, int, str]]:
-    """Return ``(pid, ppid, command)`` rows from ``ps``; empty list on failure."""
-    try:
-        out = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,command="],
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-        ).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    rows: list[tuple[int, int, str]] = []
-    for line in out.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) < 3:
-            continue
-        try:
-            rows.append((int(parts[0]), int(parts[1]), parts[2]))
-        except ValueError:
-            continue
-    return rows
-
-
-def _stale_helics_processes() -> list[str]:
-    """Find pre-existing HELICS broker/federate processes, excluding this session.
-
-    Our own process tree (pytest, uv, xdist controller) is excluded because its
-    command lines legitimately mention HELICS test file paths.
-    """
-    rows = _process_table()
-    parent_by_pid = {pid: ppid for pid, ppid, _ in rows}
-    own_tree = {os.getpid()}
-    cursor = os.getpid()
-    for _ in range(64):
-        cursor = parent_by_pid.get(cursor, 0)
-        if cursor <= 1:
-            break
-        own_tree.add(cursor)
-
-    offenders: list[str] = []
-    for pid, _, command in rows:
-        if pid in own_tree:
-            continue
-        if _STALE_PROCESS_PATTERN.search(command):
-            offenders.append(f"PID {pid} ({command.strip()})")
-    return offenders
-
-
-@pytest.fixture(scope="session")
-def helics_environment_guard() -> None:
-    """Fail fast when leftover HELICS state would make these tests hang.
-
-    A stale broker or federate process (e.g. a forgotten debug script) holds
-    HELICS federation state; tests that join it block indefinitely with no
-    output.  Detect that state up front and fail with the offending PID/port
-    instead of hanging.
-    """
-    problems: list[str] = []
-    for port in _HELICS_DEFAULT_PORTS:
-        holder = _listening_process(port)
-        if holder is not None:
-            problems.append(f"HELICS default port {port} is held by {holder}")
-    for offender in _stale_helics_processes():
-        problems.append(f"pre-existing HELICS process: {offender}")
-
-    if problems:
-        pytest.fail(
-            "Stale HELICS state detected before running HELICS tests:\n  - "
-            + "\n  - ".join(problems)
-            + "\nLeftover HELICS broker/federate processes make these tests hang "
-            "indefinitely with no output. Kill the offending process(es) "
-            "(e.g. `kill <PID>`) and re-run. If another HELICS test session is "
-            "running concurrently, wait for it to finish.",
-            pytrace=False,
-        )
-
+# In-process isolates each test; zmq is the transport users run, including the
+# per-core local port that core_init_string adds.
+_CORE_TYPES = ("inproc", "zmq")
 
 class _FederateThread:
     """A federate driven on a thread of its own.
@@ -183,20 +67,43 @@ class _FederateThread:
     ``requestTime``) on the thread that created it, or the exec-mode barrier
     deadlocks. Construct and run ``HELICSDwelling``/``HELICSFleet`` inside the
     target.
+
+    The target receives a ``ready`` callback to call once its federate is
+    registered. ``wait_ready`` returns then, or raises as soon as the target
+    ends without calling it: a federate that fails while starting up fails
+    the test with its own exception instead of leaving it waiting.
     """
 
-    def __init__(self, target: Callable[[], None], name: str) -> None:
+    def __init__(self, target: Callable[[Callable[[], None]], None], name: str) -> None:
         self.completed = False
         self.exception: BaseException | None = None
+        self._ready = False
+        self._ready_or_ended = threading.Event()
         self._thread = threading.Thread(target=self._run, args=(target,), name=name, daemon=True)
         self._thread.start()
 
-    def _run(self, target: Callable[[], None]) -> None:
+    def _mark_ready(self) -> None:
+        self._ready = True
+        self._ready_or_ended.set()
+
+    def _run(self, target: Callable[[Callable[[], None]], None]) -> None:
         try:
-            target()
+            target(self._mark_ready)
             self.completed = True
         except BaseException as exc:
             self.exception = exc
+        finally:
+            self._ready_or_ended.set()
+
+    def wait_ready(self) -> None:
+        """Wait until the federate is ready, re-raising its error if it ended first."""
+        self._ready_or_ended.wait()
+        if self._ready:
+            return
+        self.join()
+        if self.exception is not None:
+            raise self.exception
+        raise AssertionError(f"federate {self._thread.name} ended before it was ready")
 
     def join(self) -> None:
         """Wait for the federate to leave the federation.
@@ -242,16 +149,27 @@ class _Federation:
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *_exc: object) -> None:
-        try:
-            for fed in self._federates:
+    def __exit__(self, exc_type: type[BaseException] | None, *_exc: object) -> None:
+        # A failure in teardown is raised only when the test itself passed, so
+        # it never replaces the test's own error.
+        disconnect_errors: list[Exception] = []
+        for fed in self._federates:
+            try:
                 fed.disconnect()
-        finally:
-            self._broker.disconnect()
-            for thread in self._threads:
-                thread.join()
-            assert wait_for_pending_aborts(), "a timed-out federate is still inside HELICS"
-            helics.helicsCleanupLibrary()
+            except Exception as exc:
+                disconnect_errors.append(exc)
+        self._broker.disconnect()
+        for thread in self._threads:
+            thread.join()
+        if not wait_for_pending_aborts():
+            # Freeing the library under a federate still inside it is a
+            # use-after-free; leave it for the process to reclaim.
+            if exc_type is None:
+                raise AssertionError("a timed-out federate is still inside HELICS")
+            return
+        helics.helicsCleanupLibrary()
+        if disconnect_errors and exc_type is None:
+            raise disconnect_errors[0]
 
     def federate_info(self, core_name: str, time_res_s: float = _TIME_RES_S) -> Any:
         fedinfo = helics.helicsCreateFederateInfo()
@@ -275,7 +193,7 @@ class _Federation:
     def helics_fleet(self, fleet: SteppableFleet, fed_name: str, **kwargs: Any) -> HELICSFleet:
         return HELICSFleet(fleet=fleet, fed_name=fed_name, **self._federate_kwargs(kwargs))
 
-    def start(self, target: Callable[[], None], name: str) -> _FederateThread:
+    def start(self, target: Callable[[Callable[[], None]], None], name: str) -> _FederateThread:
         thread = _FederateThread(target, name)
         self._threads.append(thread)
         return thread
@@ -441,7 +359,7 @@ class _FaultyAggregator:
         self._fed: Any = None
         self.granted_times: list[float] = []
 
-    def run(self) -> None:
+    def run(self, ready: Callable[[], None]) -> None:
         fedinfo = self._federation.federate_info(self._fed_name)
         self._fed = helics.helicsCreateValueFederate(self._fed_name, fedinfo)
         helics.helicsFederateSetFlagOption(
@@ -449,6 +367,7 @@ class _FaultyAggregator:
         )
         _pub_voltage = self._fed.register_global_publication("grid/voltage", "double")
         _sub_power = self._fed.register_subscription("house_1/total_power_kw", "double")
+        ready()
 
         try:
             _enter_exec(self._fed)
@@ -525,17 +444,16 @@ def _request(fed: Any, requested_time_s: float) -> float:
 def _run_single_dwelling_exchange(voltage_pu: float) -> list[float]:
     with _Federation(n_federates=2) as federation:
         dwelling = _new_dwelling()
-        federate_ready = threading.Event()
 
-        def _run_federate() -> None:
+        def _run_federate(ready: Callable[[], None]) -> None:
             helics_dwelling = federation.helics_dwelling(dwelling, "house_1")
             helics_dwelling.register_publications()
             helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
-            federate_ready.set()
+            ready()
             helics_dwelling.run()
 
         thread = federation.start(_run_federate, name="dwelling-federate")
-        federate_ready.wait()
+        thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
         sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
@@ -569,6 +487,60 @@ def _clear_helics_modules() -> None:
     sys.modules.pop("ochre_next.helics.runner", None)
 
 
+def test_a_federate_that_fails_before_it_is_ready_fails_the_test_with_its_own_error() -> None:
+    with pytest.raises(ValueError, match="connect_timeout_s"), _Federation(n_federates=2) as federation:
+
+        def _run_federate(ready: Callable[[], None]) -> None:
+            federation.helics_dwelling(object(), "house_1", connect_timeout_s=-1.0)
+            ready()
+
+        federation.start(_run_federate, name="dwelling-federate").wait_ready()
+
+
+def test_a_federate_that_ends_without_becoming_ready_fails_the_test() -> None:
+    with pytest.raises(AssertionError, match="ended before it was ready"), _Federation(n_federates=1) as federation:
+        federation.start(lambda ready: None, name="dwelling-federate").wait_ready()
+
+
+class _RecordingFederate:
+    def __init__(self, name: str, disconnected: list[str], *, fails: bool = False) -> None:
+        self._name = name
+        self._disconnected = disconnected
+        self._fails = fails
+
+    def disconnect(self) -> None:
+        self._disconnected.append(self._name)
+        if self._fails:
+            raise RuntimeError(f"{self._name} failed to disconnect")
+
+
+def test_federation_teardown_disconnects_every_federate_and_keeps_the_tests_own_error() -> None:
+    disconnected: list[str] = []
+    with pytest.raises(ValueError, match="the test's own failure"), _Federation(n_federates=1) as federation:
+        federation._federates += [
+            _RecordingFederate("first", disconnected, fails=True),
+            _RecordingFederate("second", disconnected),
+        ]
+        raise ValueError("the test's own failure")
+    assert disconnected == ["first", "second"]
+
+
+def test_federation_teardown_with_a_stuck_federate_keeps_the_tests_own_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "wait_for_pending_aborts", lambda: False)
+    with pytest.raises(ValueError, match="the test's own failure"), _Federation(n_federates=1):
+        raise ValueError("the test's own failure")
+
+
+def test_federation_teardown_with_a_stuck_federate_fails_a_passing_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "wait_for_pending_aborts", lambda: False)
+    with pytest.raises(AssertionError, match="still inside HELICS"), _Federation(n_federates=1):
+        pass
+
+
 def test_single_dwelling_cosim_with_mock_aggregator() -> None:
     nominal_power = _run_single_dwelling_exchange(voltage_pu=1.0)
     low_voltage_power = _run_single_dwelling_exchange(voltage_pu=0.95)
@@ -585,17 +557,16 @@ def test_single_dwelling_cosim_with_mock_aggregator() -> None:
 def test_fleet_cosim_with_mock_aggregator() -> None:
     with _Federation(n_federates=2) as federation:
         fleet = _new_fleet(n_dwellings=3)
-        federate_ready = threading.Event()
 
-        def _run_federate() -> None:
+        def _run_federate(ready: Callable[[], None]) -> None:
             helics_fleet = federation.helics_fleet(fleet, "fleet_1")
             helics_fleet.register_publications()
             helics_fleet.register_subscriptions(voltage_topic="grid/voltage")
-            federate_ready.set()
+            ready()
             helics_fleet.run()
 
         thread = federation.start(_run_federate, name="fleet-federate")
-        federate_ready.wait()
+        thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
         sub_aggregate = aggregator.register_subscription("fleet_1/aggregate_power_kw", "double")
@@ -639,17 +610,16 @@ def test_control_signal_via_helics() -> None:
         baseline._dwelling.add_battery(
             Battery("Battery", 13.5, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.4)
         )
-        baseline_ready = threading.Event()
 
-        def _run_federate() -> None:
+        def _run_federate(ready: Callable[[], None]) -> None:
             baseline_orchestrator = federation.helics_dwelling(baseline, "house_base")
             baseline_orchestrator.register_publications()
             baseline_orchestrator.register_subscriptions(control_topic="grid/control")
-            baseline_ready.set()
+            ready()
             baseline_orchestrator.run()
 
         baseline_thread = federation.start(_run_federate, name="dwelling-baseline")
-        baseline_ready.wait()
+        baseline_thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_base")
         pub_control = aggregator.register_global_publication("grid/control", "string")
@@ -720,17 +690,16 @@ def test_malformed_control_payload_does_not_crash_federate(
 ) -> None:
     with _Federation(n_federates=2) as federation:
         dwelling = _new_dwelling()
-        federate_ready = threading.Event()
 
-        def _run_federate() -> None:
+        def _run_federate(ready: Callable[[], None]) -> None:
             helics_dwelling = federation.helics_dwelling(dwelling, "house_1")
             helics_dwelling.register_publications()
             helics_dwelling.register_subscriptions(control_topic="grid/control")
-            federate_ready.set()
+            ready()
             helics_dwelling.run()
 
         thread = federation.start(_run_federate, name="dwelling-malformed-control")
-        federate_ready.wait()
+        thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
         sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
@@ -819,17 +788,16 @@ def test_multi_rate_dwelling_steps_only_at_own_period() -> None:
         )
         dwelling_raw.initialize()
         recording = _RecordingDwelling(dwelling_raw)
-        federate_ready = threading.Event()
 
-        def _run_federate() -> None:
+        def _run_federate(ready: Callable[[], None]) -> None:
             helics_dwelling = federation.helics_dwelling(recording, "house_mr")
             helics_dwelling.register_publications()
             helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
-            federate_ready.set()
+            ready()
             helics_dwelling.run()
 
         thread = federation.start(_run_federate, name="dwelling-mr")
-        federate_ready.wait()
+        thread.wait_ready()
 
         aggregator = federation.value_federate("agg_mr", time_res_s=float(AGG_TIME_RES_S))
         sub_power = aggregator.register_subscription("house_mr/total_power_kw", "double")
@@ -858,7 +826,8 @@ def test_multi_rate_dwelling_steps_only_at_own_period() -> None:
         assert any(abs(p) > 1e-6 for p in power_trace), "published dwelling power should be non-zero"
 
 
-def test_single_dwelling_completion_signal_unblocks_aggregator() -> None:
+@pytest.mark.parametrize("core_type", _CORE_TYPES)
+def test_single_dwelling_completion_signal_unblocks_aggregator(core_type: str) -> None:
     """After dwelling signals completion, the co-simulation completes cleanly.
 
     A ``_FederateProbe`` records the dwelling's ``request_time`` calls during
@@ -871,12 +840,11 @@ def test_single_dwelling_completion_signal_unblocks_aggregator() -> None:
     dwelling's blocked ``request_time(HELICS_TIME_MAXTIME)`` is granted after
     the last remaining peer leaves the federation.
     """
-    with _Federation(n_federates=2) as federation:
+    with _Federation(n_federates=2, core_type=core_type) as federation:
         dwelling = _new_dwelling()
-        federate_ready = threading.Event()
         probe_times: list[float] = []
 
-        def _run_federate() -> None:
+        def _run_federate(ready: Callable[[], None]) -> None:
             helics_dwelling = federation.helics_dwelling(dwelling, "house_1")
             helics_dwelling.register_publications()
             helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
@@ -884,13 +852,13 @@ def test_single_dwelling_completion_signal_unblocks_aggregator() -> None:
             probe = _FederateProbe(helics_dwelling._fed)
             helics_dwelling._fed = probe
 
-            federate_ready.set()
+            ready()
             helics_dwelling.run()
 
             probe_times.extend(probe.requested_times)
 
         thread = federation.start(_run_federate, name="dwelling-federate")
-        federate_ready.wait()
+        thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
         sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
@@ -916,7 +884,8 @@ def test_single_dwelling_completion_signal_unblocks_aggregator() -> None:
         )
 
 
-def test_fleet_completion_signal_unblocks_aggregator() -> None:
+@pytest.mark.parametrize("core_type", _CORE_TYPES)
+def test_fleet_completion_signal_unblocks_aggregator(core_type: str) -> None:
     """After fleet signals completion, the co-simulation completes cleanly.
 
     Mirrors ``test_single_dwelling_completion_signal_unblocks_aggregator``
@@ -924,12 +893,11 @@ def test_fleet_completion_signal_unblocks_aggregator() -> None:
     ``request_time(HELICS_TIME_MAXTIME)`` is the final call in a 2-federate
     co-simulation.
     """
-    with _Federation(n_federates=2) as federation:
+    with _Federation(n_federates=2, core_type=core_type) as federation:
         fleet = _new_fleet(n_dwellings=3)
-        federate_ready = threading.Event()
         probe_times: list[float] = []
 
-        def _run_federate() -> None:
+        def _run_federate(ready: Callable[[], None]) -> None:
             helics_fleet = federation.helics_fleet(fleet, "fleet_1")
             helics_fleet.register_publications()
             helics_fleet.register_subscriptions(voltage_topic="grid/voltage")
@@ -937,13 +905,13 @@ def test_fleet_completion_signal_unblocks_aggregator() -> None:
             probe = _FederateProbe(helics_fleet._fed)
             helics_fleet._fed = probe
 
-            federate_ready.set()
+            ready()
             helics_fleet.run()
 
             probe_times.extend(probe.requested_times)
 
         thread = federation.start(_run_federate, name="fleet-federate")
-        federate_ready.wait()
+        thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
         sub_aggregate = aggregator.register_subscription("fleet_1/aggregate_power_kw", "double")
@@ -1017,19 +985,18 @@ def test_voltage_in_volts_triggers_out_of_range_warning() -> None:
             write_output=False,
         )
         dwelling_raw.initialize()
-        federate_ready = threading.Event()
         orchestrator_ref: list[HELICSDwelling] = []
 
-        def _run_federate() -> None:
+        def _run_federate(ready: Callable[[], None]) -> None:
             helics_dwelling = federation.helics_dwelling(dwelling_raw, "house_240v")
             orchestrator_ref.append(helics_dwelling)
             helics_dwelling.register_publications()
             helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
-            federate_ready.set()
+            ready()
             helics_dwelling.run()
 
         thread = federation.start(_run_federate, name="dwelling-240v")
-        federate_ready.wait()
+        thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_240v", time_res_s=60.0)
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
@@ -1058,17 +1025,16 @@ def test_zone_temperature_publication_subscribed_by_aggregator() -> None:
     """
     with _Federation(n_federates=2) as federation:
         dwelling = _new_dwelling()
-        federate_ready = threading.Event()
 
-        def _run_federate() -> None:
+        def _run_federate(ready: Callable[[], None]) -> None:
             helics_dwelling = federation.helics_dwelling(dwelling, "house_zt")
             helics_dwelling.register_publications()
             helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
-            federate_ready.set()
+            ready()
             helics_dwelling.run()
 
         thread = federation.start(_run_federate, name="dwelling-zt")
-        federate_ready.wait()
+        thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_zt")
         sub_zone_temp = aggregator.register_subscription("house_zt/zone_0/temp_air_c", "double")
@@ -1101,20 +1067,19 @@ def test_mismatched_subscription_topic_logs_stale_warning() -> None:
     """
     with _Federation(n_federates=2) as federation:
         dwelling = _new_dwelling(bldg_id=88)
-        federate_ready = threading.Event()
         orchestrator_ref: list[HELICSDwelling] = []
 
-        def _run_federate() -> None:
+        def _run_federate(ready: Callable[[], None]) -> None:
             helics_dwelling = federation.helics_dwelling(dwelling, "house_stale")
             orchestrator_ref.append(helics_dwelling)
             helics_dwelling.register_publications()
             # Subscribe to a topic the aggregator does NOT publish to
             helics_dwelling.register_subscriptions(voltage_topic="grid/voltage_typo")
-            federate_ready.set()
+            ready()
             helics_dwelling.run()
 
         thread = federation.start(_run_federate, name="dwelling-stale")
-        federate_ready.wait()
+        thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_stale")
         sub_power = aggregator.register_subscription("house_stale/total_power_kw", "double")
@@ -1241,11 +1206,10 @@ def test_year_scale_time_drift_multi_federate() -> None:
     """
     with _Federation(n_federates=2) as federation:
         dwelling = _new_year_dwelling()
-        federate_ready = threading.Event()
         shared_probe: list[_FederateProbe] = []
         shared_dwelling: list[HELICSDwelling] = []
 
-        def _run_federate() -> None:
+        def _run_federate(ready: Callable[[], None]) -> None:
             helics_dwelling = federation.helics_dwelling(
                 dwelling, "year_house_2", max_time_drift_tolerance_s=_YEAR_DRIFT_TOLERANCE_S
             )
@@ -1257,11 +1221,11 @@ def test_year_scale_time_drift_multi_federate() -> None:
             shared_probe.append(probe)
             shared_dwelling.append(helics_dwelling)
 
-            federate_ready.set()
+            ready()
             helics_dwelling.run()
 
         thread = federation.start(_run_federate, name="year-dwelling")
-        federate_ready.wait()
+        thread.wait_ready()
 
         aggregator = federation.value_federate("year_agg", time_res_s=_YEAR_TIME_RES_S)
         sub_power = aggregator.register_subscription("year_house_2/total_power_kw", "double")
@@ -1400,10 +1364,9 @@ def test_multi_federate_fault_propagation() -> None:
     """
     with _Federation(n_federates=2) as federation:
         dwelling = _new_dwelling()
-        federate_ready = threading.Event()
         probe_ref: list[_FederateProbe] = []
 
-        def _run_dwelling() -> None:
+        def _run_dwelling(ready: Callable[[], None]) -> None:
             helics_dwelling = federation.helics_dwelling(dwelling, "house_1")
             helics_dwelling.register_publications()
             helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
@@ -1412,15 +1375,14 @@ def test_multi_federate_fault_propagation() -> None:
             helics_dwelling._fed = probe
             probe_ref.append(probe)
 
-            federate_ready.set()
+            ready()
             helics_dwelling.run()
 
         dwelling_result = federation.start(_run_dwelling, name="dwelling-federate")
-        federate_ready.wait()
+        dwelling_result.wait_ready()
 
-        def _run_aggregator() -> None:
-            aggregator = _FaultyAggregator(federation, "aggregator_1", fail_step=5)
-            aggregator.run()
+        def _run_aggregator(ready: Callable[[], None]) -> None:
+            _FaultyAggregator(federation, "aggregator_1", fail_step=5).run(ready)
 
         agg_result = federation.start(_run_aggregator, name="aggregator-federate")
 
@@ -1476,21 +1438,19 @@ def test_multi_federate_fault_propagation_broker_cleanup() -> None:
     with _Federation(n_federates=2, core_type="zmq") as federation:
         broker_port = federation.port
         dwelling = _new_dwelling()
-        federate_ready = threading.Event()
 
-        def _run_dwelling() -> None:
+        def _run_dwelling(ready: Callable[[], None]) -> None:
             helics_dwelling = federation.helics_dwelling(dwelling, "house_1")
             helics_dwelling.register_publications()
             helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
-            federate_ready.set()
+            ready()
             helics_dwelling.run()
 
         dwelling_result = federation.start(_run_dwelling, name="dwelling-federate")
-        federate_ready.wait()
+        dwelling_result.wait_ready()
 
-        def _run_aggregator() -> None:
-            aggregator = _FaultyAggregator(federation, "aggregator_1", fail_step=5)
-            aggregator.run()
+        def _run_aggregator(ready: Callable[[], None]) -> None:
+            _FaultyAggregator(federation, "aggregator_1", fail_step=5).run(ready)
 
         agg_result = federation.start(_run_aggregator, name="aggregator-federate")
 

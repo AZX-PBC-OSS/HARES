@@ -1045,6 +1045,10 @@ fn validate_fleet_building_zone(
 }
 
 #[cfg(test)]
+#[path = "../../../tests/support/fixture_start.rs"]
+mod fixture_start;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
@@ -1052,7 +1056,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -1061,23 +1064,9 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    fn unique_temp_path(suffix: &str) -> PathBuf {
-        // See hares-core/tests/engine.rs: pid + monotonic counter + nanos for
-        // uniqueness by construction across processes, threads, and runs.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let mut path = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        path.push(format!(
-            "hares-fleet-{}-{nanos}-{seq}.{suffix}",
-            std::process::id()
-        ));
-        path
-    }
+    /// A root no test creates and a non-root user cannot: every path under it
+    /// is missing, and nothing can be written there.
+    const MISSING_ROOT: &str = "/nonexistent-hares-fleet-test";
 
     fn write_temp_file(path: &Path, contents: &str) {
         fs::write(path, contents).expect("failed to write temp file");
@@ -1174,7 +1163,7 @@ mod tests {
 
     fn simulation_config(output_path: PathBuf) -> SimulationConfig {
         SimulationConfig {
-            start_time: chrono::Utc::now().fixed_offset(),
+            start_time: fixture_start::fixture_start(),
             duration: Duration::hours(1),
             time_res: Duration::minutes(1),
             output_verbosity: 0,
@@ -1191,9 +1180,10 @@ mod tests {
         }
     }
 
-    fn build_valid_configs(count: usize) -> Vec<DwellingConfig> {
-        let schedule_path = unique_temp_path("csv");
-        let weather_path = unique_temp_path("epw");
+    /// Configs whose inputs and outputs all live in `dir`.
+    fn build_valid_configs(dir: &Path, count: usize) -> Vec<DwellingConfig> {
+        let schedule_path = dir.join("schedule.csv");
+        let weather_path = dir.join("weather.epw");
         write_temp_file(&schedule_path, &build_schedule_csv());
         write_temp_file(&weather_path, &build_epw_8760());
 
@@ -1202,7 +1192,7 @@ mod tests {
                 hpxml_path: fixture_hpxml_path(),
                 schedule_path: Some(schedule_path.clone()),
                 weather_path: weather_path.clone(),
-                sim_config: simulation_config(unique_temp_path("csv")),
+                sim_config: simulation_config(dir.join(format!("output-{idx}.csv"))),
                 defaults_path: Some(repo_defaults_path()),
                 overrides: None,
                 bldg_id: idx as i64 + 1,
@@ -1216,10 +1206,10 @@ mod tests {
     fn build_missing_configs(count: usize) -> Vec<DwellingConfig> {
         (0..count)
             .map(|idx| DwellingConfig {
-                hpxml_path: PathBuf::from("/tmp/missing-hpxml.xml"),
-                schedule_path: Some(PathBuf::from("/tmp/missing-schedule.csv")),
-                weather_path: PathBuf::from("/tmp/missing-weather.epw"),
-                sim_config: simulation_config(unique_temp_path("csv")),
+                hpxml_path: Path::new(MISSING_ROOT).join("hpxml.xml"),
+                schedule_path: Some(Path::new(MISSING_ROOT).join("schedule.csv")),
+                weather_path: Path::new(MISSING_ROOT).join("weather.epw"),
+                sim_config: simulation_config(Path::new(MISSING_ROOT).join("output.csv")),
                 defaults_path: None,
                 overrides: None,
                 bldg_id: idx as i64 + 1,
@@ -1232,7 +1222,8 @@ mod tests {
 
     #[test]
     fn simulate_runs_three_dwellings() {
-        let fleet = Fleet::from_buildings(build_valid_configs(3));
+        let dir = tempdir().expect("temp dir");
+        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3));
         let results = fleet.simulate(1);
 
         assert_eq!(results.len(), 3);
@@ -1322,13 +1313,15 @@ mod tests {
 
     #[test]
     fn panic_in_callback_is_isolated_to_one_result() {
+        let dir = tempdir().expect("temp dir");
         let panic_on = 2usize;
-        let fleet =
-            Fleet::from_buildings(build_valid_configs(3)).with_progress(move |done, _total| {
+        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3)).with_progress(
+            move |done, _total| {
                 if done == panic_on {
                     panic!("injected callback panic");
                 }
-            });
+            },
+        );
 
         let results = fleet.simulate(3);
         assert_eq!(results.len(), 3);
@@ -1345,13 +1338,15 @@ mod tests {
 
     #[test]
     fn panic_error_message_includes_file_and_line() {
+        let dir = tempdir().expect("temp dir");
         let panic_on = 2usize;
-        let fleet =
-            Fleet::from_buildings(build_valid_configs(3)).with_progress(move |done, _total| {
+        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3)).with_progress(
+            move |done, _total| {
                 if done == panic_on {
                     panic!("injected callback panic");
                 }
-            });
+            },
+        );
 
         let results = fleet.simulate(3);
         assert_eq!(results.len(), 3);
@@ -1610,8 +1605,10 @@ mod tests {
 
     #[test]
     fn steppable_fleet_steps_and_finishes() {
+        let dir = tempdir().expect("temp dir");
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
         assert!(!fleet.is_finished());
@@ -1648,7 +1645,8 @@ mod tests {
 
     #[test]
     fn steppable_fleet_from_configs_returns_partial_success() {
-        let mut configs = build_valid_configs(2);
+        let dir = tempdir().expect("temp dir");
+        let mut configs = build_valid_configs(dir.path(), 2);
         let mut bad = build_missing_configs(1);
         bad[0].bldg_id = 999;
         configs.extend(bad);
@@ -1689,8 +1687,10 @@ mod tests {
 
     #[test]
     fn steppable_fleet_skips_failed_dwelling() {
+        let dir = tempdir().expect("temp dir");
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
 
@@ -1732,10 +1732,12 @@ mod tests {
 
     #[test]
     fn steppable_fleet_ipc_isolation_after_failure() {
+        let dir = tempdir().expect("temp dir");
         // Integration test: verify that a failed dwelling does not prevent
         // other dwellings from producing valid results over a full simulation.
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
 
@@ -1787,12 +1789,13 @@ mod tests {
 
     #[test]
     fn construction_panic_is_not_a_runtime_failure() {
+        let dir = tempdir().expect("temp dir");
         // Regression test: a dwelling that fails during from_config is
         // never added to the fleet, so it cannot be marked as a runtime
         // failure.  The AssertUnwindSafe wrapping at from_configs line 343
         // is sound because construction failure (whether error or panic)
         // prevents fleet inclusion.
-        let mut configs = build_valid_configs(2);
+        let mut configs = build_valid_configs(dir.path(), 2);
         let mut bad = build_missing_configs(1);
         bad[0].bldg_id = 999;
         configs.extend(bad);
@@ -1825,6 +1828,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn dwelling_panic_during_step_is_caught_and_marks_dwelling_failed() {
+        let dir = tempdir().expect("temp dir");
         // End-to-end test of the panic→failed→skipped path in
         // step_dwellings_parallel.  A dwelling configured to panic during
         // step() must:
@@ -1834,7 +1838,8 @@ mod tests {
         // The invariant check in SteppableFleet::step() must NOT misfire
         // when the dwelling becomes failed during this step.
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
 
@@ -1898,13 +1903,15 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn assert_panic_from_dwelling_step_includes_file_and_line() {
+        let dir = tempdir().expect("temp dir");
         // Verifies the end-to-end chain when equipment/dwelling code panics
         // via assert! (as opposed to panic!()). The hook must capture
         // PanicHookInfo::location() from the assert's expansion site
         // (the dwelling source file), not from the catch_unwind call site
         // in fleet code.
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
 
@@ -1946,13 +1953,15 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn single_panic_does_not_abort_fleet_and_other_dwellings_intact() {
+        let dir = tempdir().expect("temp dir");
         // Integration test: verify that when one dwelling panics in a
         // steppable fleet, the process does not abort and the other
         // dwellings produce valid results for every remaining step.
         // This validates that the outer catch_unwind in step_dwellings_parallel
         // correctly isolates per-dwelling panics at fleet scale.
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
 
@@ -2075,12 +2084,11 @@ mod tests {
 
     #[test]
     fn test_remap_weather_path_zone_validation() {
-        let hpxml_dir = unique_temp_path("hpxml_dir");
-        fs::create_dir_all(&hpxml_dir).expect("create temp hpxml dir");
-        let hpxml_path = hpxml_dir.join("home.xml");
+        let dir = tempdir().expect("temp dir");
+        let hpxml_path = dir.path().join("home.xml");
         write_temp_file(&hpxml_path, &build_hpxml_with_zone("5B"));
 
-        let epw_path = unique_temp_path("epw");
+        let epw_path = dir.path().join("weather.epw");
         write_temp_file(
             &epw_path,
             "LOCATION,USA_CO_Denver.Intl.AP.725650_TMY3,CO,USA,TMY3,725650,39.83,-104.65,-7.0,1609.0",
@@ -2141,7 +2149,7 @@ mod tests {
         );
 
         // Non-EPW extension -> skipped (state parse returns None)
-        let csv_path = unique_temp_path("csv");
+        let csv_path = dir.path().join("weather.csv");
         write_temp_file(&csv_path, "not,an,epw");
         assert_eq!(
             validate_fleet_building_zone(&hpxml_path, &csv_path, 4),

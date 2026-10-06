@@ -1,7 +1,5 @@
 """Tests for solar override API in PyDwelling."""
 
-import os
-import tempfile
 import numpy as np
 import polars as pl
 import pytest
@@ -188,7 +186,7 @@ class TestSolarOverrideDataFrame:
 
 
 class TestSolarOverrideParquet:
-    def test_set_solar_override_from_parquet_file(self):
+    def test_set_solar_override_from_parquet_file(self, tmp_path: Path):
         from ochre_next import Dwelling
 
         dw = Dwelling.from_hpxml(
@@ -208,20 +206,15 @@ class TestSolarOverrideParquet:
         df = pl.read_csv(PVLIB_SOLAR_CSV)
         df = df.head(10)
 
-        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
-            temp_path = f.name
+        override_path = tmp_path / "solar_override.parquet"
+        df.write_parquet(override_path)
 
-        try:
-            df.write_parquet(temp_path)
+        dw.set_solar_override(str(override_path))
 
-            dw.set_solar_override(temp_path)
+        assert dw.has_solar_override(), "has_solar_override() should be True"
 
-            assert dw.has_solar_override(), "has_solar_override() should be True"
-
-            dw.step()
-            dw.step()
-        finally:
-            os.unlink(temp_path)
+        dw.step()
+        dw.step()
 
 
 class TestSolarOverrideClear:

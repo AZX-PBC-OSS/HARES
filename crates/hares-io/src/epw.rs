@@ -1195,7 +1195,6 @@ fn parse_cooling_design_db(fields: &[&str]) -> Option<f64> {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use tracing_subscriber;
 
@@ -1208,15 +1207,13 @@ mod tests {
         sky_temp_from_emissivity, walton_cloud_correction,
     };
 
-    fn write_temp_epw(epw_contents: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before UNIX_EPOCH")
-            .as_nanos();
-        path.push(format!("hares-io-epw-test-{nanos}.epw"));
+    /// Writes the EPW into a directory removed when the returned `TempDir`
+    /// drops (panics included).
+    fn write_temp_epw(epw_contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("weather.epw");
         fs::write(&path, epw_contents).expect("failed to write temporary EPW");
-        path
+        (dir, path)
     }
 
     fn build_synthetic_epw(
@@ -1417,9 +1414,8 @@ mod tests {
     #[test]
     fn parse_epw_reads_from_path() {
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
-        let path = write_temp_epw(&epw);
+        let (_dir, path) = write_temp_epw(&epw);
         let result = parse_epw(&path);
-        let _ = fs::remove_file(path);
         assert!(result.is_ok());
     }
 
@@ -2234,7 +2230,7 @@ mod tests {
 
         // Build a synthetic EPW whose LOCATION header embeds Denver, CO (39.74, -104.99).
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
-        let path = write_temp_epw(&epw);
+        let (_dir, path) = write_temp_epw(&epw);
 
         // Supply Phoenix, AZ coordinates — differ by ~6.3° lat and ~7.1° lon.
         let caller_lat = 33.45_f64;
@@ -2249,7 +2245,6 @@ mod tests {
             caller_lon,
             caller_tz,
         );
-        let _ = fs::remove_file(path);
         let weather = result.expect("EPW should parse without error");
 
         // File's embedded location remains authoritative — the caller coordinates
@@ -2271,11 +2266,10 @@ mod tests {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
-        let path = write_temp_epw(&epw);
+        let (_dir, path) = write_temp_epw(&epw);
 
         // All-zero caller coordinates (no HPXML site data).
         let result = crate::weather::parse_weather_with_location(&path, 0.0, 0.0, 0.0, 0.0);
-        let _ = fs::remove_file(path);
         let weather = result.expect("EPW should parse without error");
 
         // File coords are used since caller provided no location.
@@ -2286,7 +2280,7 @@ mod tests {
     #[test]
     fn epw_override_location_replaces_all_meta_fields() {
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
-        let path = write_temp_epw(&epw);
+        let (_dir, path) = write_temp_epw(&epw);
 
         // Override with Phoenix, AZ coordinates and elevation.
         let override_lat = 33.45_f64;
@@ -2301,7 +2295,6 @@ mod tests {
             override_elev,
             override_tz,
         );
-        let _ = fs::remove_file(path);
         let weather = result.expect("EPW should parse without error");
 
         // All four meta fields must match the caller-provided override values exactly.
