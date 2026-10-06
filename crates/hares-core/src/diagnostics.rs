@@ -854,13 +854,28 @@ mod tests {
     #[cfg(feature = "observe")]
     #[test]
     fn record_from_state_returns_the_same_scratch_buffers_with_the_steps_values() {
-        let mut acc = DiagnosticAccumulator::new(&[ZoneId(1), ZoneId(2)], &[true, true], &[], &[]);
+        // One equipment slot so the equipment scratch vectors own an
+        // allocation too (the step itself passes no equipment).
+        let mut acc = DiagnosticAccumulator::new(
+            &[ZoneId(1), ZoneId(2)],
+            &[true, true],
+            &["Heater".to_owned()],
+            &[Some(ZoneId(1))],
+        );
         let buffers = |acc: &DiagnosticAccumulator| {
             let s = &acc.scratch;
             [
                 (s.zone_temps.as_ptr() as usize, s.zone_temps.capacity()),
                 (s.heating_sps.as_ptr() as usize, s.heating_sps.capacity()),
                 (s.cooling_sps.as_ptr() as usize, s.cooling_sps.capacity()),
+                (
+                    s.equipment_modes.as_ptr() as usize,
+                    s.equipment_modes.capacity(),
+                ),
+                (
+                    s.equipment_zone_indices.as_ptr() as usize,
+                    s.equipment_zone_indices.capacity(),
+                ),
             ]
         };
         let before = buffers(&acc);
