@@ -2297,17 +2297,8 @@ fn build_from_blueprint_inner(
     // before equipment creation (it sets capacities on equipment specs).
     // ACCA Manual S-2017 oversizing factors applied: 1.4x heating, 1.15x cooling.
     {
-        let duct_params = match hares_io::hpxml::resolve_hvac::compute_duct_dse_params(&bp.building)
-        {
-            Ok(dp) => dp,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "autosizing: duct DSE params unavailable; using defaults"
-                );
-                hares_io::hpxml::resolve_hvac::DuctDseParams::default()
-            }
-        };
+        let duct_params = hares_io::hpxml::resolve_hvac::compute_duct_dse_params(&bp.building)
+            .map_err(|e| HaresError::Dwelling(format!("autosizing: duct DSE parameters: {e}")))?;
 
         let indoor_zone = solvers.thermal.config().indoor_zone_id;
 
@@ -2366,8 +2357,6 @@ fn build_from_blueprint_inner(
         environment.schedule_mut(),
         bp.defaults_path.as_deref(),
         &defaults,
-        bp.building.foundation_name.as_deref(),
-        bp.building.models_garage(),
         &mut schedule_warnings,
     )?;
     for warning in schedule_warnings.drain(..) {

@@ -130,9 +130,10 @@ justification → measured impact → pinning tests.
   20.1 % to 21.8 %, site energy 5.14 % to 5.26 %.
 - **Pinning tests:** `crates/hares-core/tests/appliance_zone_gains.rs`
   (`hpxml_appliance_gains_reach_the_conditioned_zone`,
-  `resstock_event_load_replay_delivers_its_gains`),
+  `resstock_event_load_replay_delivers_its_gains`,
+  `overridden_sensible_fraction_keeps_the_radiant_and_visible_shares`),
   `gain_fractions::tests::radiant_part_of_sensible_leaves_the_rest_convective`,
-  `resolve_loads::tests::radiant_part_follows_the_sensible_fraction`. With
+  `resolve_loads::tests::resolver_carries_the_radiant_share`. With
   the heat made all convective, the resolver test fails when the resolver
   gives no radiant share and the others fail when the load drops its radiant
   part.
@@ -165,10 +166,11 @@ justification → measured impact → pinning tests.
   cz5a_minisplit_gas_wh short-window HVAC energy 64.25 % to 64.15 % and site
   energy 17.15 % to 17.19 %.
 - **Pinning tests:** `appliance_zone_gains.rs`
-  (`hpxml_lighting_splits_convective_radiant_and_visible`),
+  (`hpxml_lighting_splits_convective_radiant_and_visible`,
+  `overridden_sensible_fraction_keeps_the_radiant_and_visible_shares`),
   `gain_fractions::tests::visible_part_takes_the_short_wave_path`,
   `resolve_loads::tests::lighting_carries_a_visible_part`,
-  `resolve_loads::tests::radiant_part_follows_the_sensible_fraction`. Each
+  `resolve_loads::tests::resolver_carries_the_radiant_share`. Each
   fails when lighting is made all convective, at the resolver or at the
   equipment.
 

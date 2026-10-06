@@ -623,8 +623,6 @@ pub fn inject_schedule_into_specs(
     schedule: &mut ScheduleTimeSeries,
     defaults_path: Option<&Path>,
     defaults: &DefaultsStore,
-    foundation_name: Option<&str>,
-    garage_modeled: bool,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
     let mut csv_col_map: HashMap<String, usize> = schedule
@@ -637,9 +635,9 @@ pub fn inject_schedule_into_specs(
     // OCHRE schedule.py:390-391: copy zone-specific schedules when the
     // schedule file lacks them — Basement Lighting follows the interior
     // lighting column when `lighting_basement` is absent but
-    // `lighting_interior` is present. A Basement Lighting spec can only
-    // exist for a Finished Basement foundation (gated in resolve_loads and
-    // ensure_specs_for_csv_columns), so no extra foundation check is needed.
+    // `lighting_interior` is present. A Basement Lighting spec exists only
+    // for a Finished Basement foundation (gated in resolve_loads), so no
+    // extra foundation check is needed.
     if specs.iter().any(|s| s.name == "Basement Lighting")
         && !csv_col_map.contains_key("lighting_basement")
         && let Some(&interior_idx) = csv_col_map.get("lighting_interior")
@@ -650,19 +648,16 @@ pub fn inject_schedule_into_specs(
             .get(interior_idx)
             .copied()
             .unwrap_or(ColumnAggregation::Mean);
-        match schedule.add_column("lighting_basement", values, aggregation) {
-            Ok(()) => {
-                if let Some(&idx) = schedule.column_index.get("lighting_basement") {
-                    csv_col_map.insert("lighting_basement".to_string(), idx);
-                }
-            }
-            Err(error) => {
-                warn!(
-                    %error,
-                    "failed to copy lighting_interior column to lighting_basement; \
-                         Basement Lighting will fall back to other schedule sources"
-                );
-            }
+        schedule
+            .add_column("lighting_basement", values, aggregation)
+            .map_err(|error| {
+                HaresError::Io(format!(
+                    "copying lighting_interior to lighting_basement for Basement Lighting \
+                     failed: {error}"
+                ))
+            })?;
+        if let Some(&idx) = schedule.column_index.get("lighting_basement") {
+            csv_col_map.insert("lighting_basement".to_string(), idx);
         }
     }
 
@@ -683,17 +678,7 @@ pub fn inject_schedule_into_specs(
         }
     }
 
-    // Ensure specs exist for CSV columns that have column mappings but
-    // no corresponding spec from HPXML parsing (e.g. microwave).
-    ensure_specs_for_csv_columns(
-        specs,
-        &csv_col_map,
-        &schedule.columns,
-        defaults,
-        foundation_name,
-        garage_modeled,
-        warnings,
-    );
+    ensure_specs_for_csv_columns(specs, &csv_col_map, defaults);
 
     let profiles = match defaults_path {
         Some(dir) => load_default_profiles(dir)?,
@@ -1598,30 +1583,21 @@ fn normalize_schedule_col_name(name: &str) -> String {
     normalize_ascii(name).replace([' ', '-'], "_")
 }
 
-/// Auto-create EquipmentSpecs for CSV columns that have COLUMN_MAPPINGS entries
-/// but no corresponding spec from HPXML parsing (e.g. microwave, which is a
-/// separate schedule CSV column not produced by the HPXML appliance parser).
+/// Create an EquipmentSpec for a CSV column whose equipment the HPXML does
+/// not describe, when that equipment has a default annual energy to scale
+/// the column by (a microwave, which no HPXML element carries). A column for
+/// any other equipment the HPXML leaves out (garage or basement lighting in
+/// a building without that space, an appliance the home does not have)
+/// creates nothing: the column is a profile, and with no equipment energy
+/// it would drive a zero-power load.
 ///
-/// Basement Lighting is gated on `foundation_name == "Finished Basement"` to
-/// match the HPXML-resolution gate in `resolve_loads.rs` and OCHRE's behaviour
-/// (hpxml.py:1695-1698). Without this check, a schedule CSV with a
-/// `lighting_basement` column would silently create basement lighting equipment
-/// for unconditioned foundations, reintroducing the exact regression class the
-/// `check_basement_lighting_foundation` invariant was written to catch.
-///
-/// Specs are constructed through `build_spec` — the same path every HPXML-derived
-/// spec takes — so default gain fractions, fuel-type labels, and ZIP parameters
-/// are injected consistently.  This prevents the class of bug where an
-/// auto-created spec is missing a required parameter that `build_spec` would
-/// have supplied.
+/// Specs are constructed through `build_spec`, the path every HPXML-derived
+/// spec takes, so default gain fractions, fuel-type labels and ZIP
+/// parameters are injected consistently.
 fn ensure_specs_for_csv_columns(
     specs: &mut Vec<EquipmentSpec>,
     csv_col_map: &HashMap<String, usize>,
-    columns: &[Vec<f64>],
     defaults: &DefaultsStore,
-    foundation_name: Option<&str>,
-    garage_modeled: bool,
-    warnings: &mut Vec<Warning>,
 ) {
     for mapping in COLUMN_MAPPINGS {
         if matches!(
@@ -1634,57 +1610,17 @@ fn ensure_specs_for_csv_columns(
             continue;
         }
         let col_name = normalize_schedule_col_name(mapping.csv_column);
-        let Some(&col_idx) = csv_col_map.get(&col_name) else {
-            continue;
-        };
-        // The zone gates follow the OCHRE rules the HPXML lighting resolver
-        // applies (hpxml.py:1695-1709, resolve_loads.rs): basement lighting
-        // exists only for a finished basement and garage lighting only when
-        // a garage is modeled. A spec here would give zone heat to a zone
-        // that does not exist, so the column is not read.
-        //
-        // An unread `lighting_garage` is not a warning, as in OS-HPXML
-        // v1.12.0: its simulation reads the column only when garage lighting
-        // exists (HPXMLtoOpenStudio/resources/lighting.rb:113-122) and warns
-        // only for column names it does not know (schedules.rb:1098-1101),
-        // and the ResStock 2024 schedule files carry the column for every
-        // home, garage or not.
-        //
-        // `lighting_basement` is OCHRE's column, which no schedule generator
-        // writes for a home without a finished basement: a non-zero one
-        // describes a load for a space the dwelling lacks, which the input
-        // should correct. An all-zero one carries no load.
-        match mapping.equipment_name {
-            "Garage Lighting" if !garage_modeled => continue,
-            "Basement Lighting" if foundation_name != Some("Finished Basement") => {
-                if columns[col_idx].iter().any(|&value| value != 0.0) {
-                    warnings.push(Warning::new(
-                        "schedule",
-                        format!(
-                            "schedule CSV column '{col_name}' carries a basement lighting \
-                             load, but the foundation is not a Finished Basement, so no \
-                             Basement Lighting is created and the column is not read"
-                        ),
-                    ));
-                }
-                continue;
-            }
-            _ => {}
-        }
-        if specs.iter().any(|s| s.name == mapping.equipment_name) {
+        if !csv_col_map.contains_key(&col_name)
+            || specs.iter().any(|s| s.name == mapping.equipment_name)
+        {
             continue;
         }
-        // An auto-created spec with no annual-energy default could never
-        // resolve a determinable power (that resolve is an error): the home
-        // declares no such equipment, so no spec is created and the column
-        // stays a known, unused column, matching OCHRE, which creates no
-        // equipment from a schedule column alone.
         let Some(annual_kwh) = default_annual_kwh_for_equipment(mapping.equipment_name) else {
-            warn!(
-                equipment = %mapping.equipment_name,
-                "schedule column '{col_name}' names an equipment the HPXML \
-                 does not declare and no default annual energy exists; no \
-                 spec is auto-created",
+            tracing::debug!(
+                column = mapping.csv_column,
+                equipment = mapping.equipment_name,
+                "schedule column for equipment the building does not have, and no default \
+                 energy to create it with; no load follows the column"
             );
             continue;
         };
@@ -1701,10 +1637,8 @@ fn ensure_specs_for_csv_columns(
 
 fn default_annual_kwh_for_equipment(equipment_name: &str) -> Option<f64> {
     match equipment_name {
-        "Microwave" => {
-            // ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default.
-            Some(MICROWAVE_DEFAULT_ANNUAL_KWH)
-        }
+        // ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default.
+        "Microwave" => Some(MICROWAVE_DEFAULT_ANNUAL_KWH),
         _ => None,
     }
 }
@@ -2011,8 +1945,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2051,8 +1983,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect_err("an equipment with no schedule source must fail the injection");
@@ -2088,8 +2018,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2116,8 +2044,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2160,8 +2086,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2180,8 +2104,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2208,8 +2130,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2261,8 +2181,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect_err("a CSV-column source with no determinable power must fail");
@@ -2302,8 +2220,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect_err("an HPXML-fraction source with no determinable power must fail");
@@ -2332,8 +2248,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect_err("a default-profile source with no determinable power must fail");
@@ -2364,8 +2278,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("an all-zero fraction column resolves to a determined 0 kW");
@@ -2394,8 +2306,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("an all-zero HPXML profile resolves to a determined 0 kW");
@@ -2422,8 +2332,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("a declared zero annual energy resolves to a determined 0 kW");
@@ -2449,8 +2357,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2475,8 +2381,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2592,8 +2496,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2841,8 +2743,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2933,8 +2833,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -2984,8 +2882,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         );
         assert!(result.is_err(), "expected Err, got Ok");
@@ -3064,8 +2960,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         );
         assert!(result.is_err(), "expected Err, got Ok");
@@ -3121,8 +3015,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3359,8 +3251,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3525,8 +3415,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3753,8 +3641,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3817,8 +3703,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3878,8 +3762,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3924,8 +3806,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -3960,8 +3840,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -4022,8 +3900,6 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -4091,8 +3967,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
@@ -4186,8 +4060,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject should succeed");
@@ -4335,8 +4207,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -4401,181 +4271,29 @@ mod tests {
         }
     }
 
+    /// A schedule column for equipment the HPXML leaves out creates no
+    /// equipment unless that equipment has a default energy: basement and
+    /// garage lighting columns in a building without those lights, and a
+    /// clothes dryer column in a home without a dryer, would otherwise
+    /// become zero-power loads, the garage lights with no zone for their
+    /// heat and the dryer with no gain split.
     #[test]
-    fn basement_lighting_not_auto_created_from_csv_for_unfinished_foundation() {
-        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
-        let mut specs: Vec<EquipmentSpec> = Vec::new();
-
-        inject_schedule_into_specs(
-            &mut specs,
-            &mut schedule,
-            None,
-            &DefaultsStore::empty(),
-            None,
-            false,
-            &mut Vec::new(),
-        )
-        .expect("inject_schedule_into_specs should succeed");
-
-        assert!(
-            !specs.iter().any(|s| s.name == "Basement Lighting"),
-            "Basement Lighting must not be auto-created from CSV column when foundation is not Finished Basement"
-        );
-    }
-
-    #[test]
-    fn basement_lighting_not_auto_created_from_csv_for_unfinished_basement() {
-        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
-        let mut specs: Vec<EquipmentSpec> = Vec::new();
-
-        inject_schedule_into_specs(
-            &mut specs,
-            &mut schedule,
-            None,
-            &DefaultsStore::empty(),
-            Some("Unfinished Basement"),
-            false,
-            &mut Vec::new(),
-        )
-        .expect("inject_schedule_into_specs should succeed");
-
-        assert!(
-            !specs.iter().any(|s| s.name == "Basement Lighting"),
-            "Basement Lighting must not be auto-created from CSV column when foundation is Unfinished Basement"
-        );
-    }
-
-    #[test]
-    fn basement_lighting_not_auto_created_from_csv_even_for_finished_basement() {
-        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
-        let mut specs: Vec<EquipmentSpec> = Vec::new();
-
-        // A CSV column alone does not create equipment the home does not
-        // declare: an auto-created spec with no annual-energy default could
-        // never resolve a determinable power, so no spec is created and the
-        // resolve succeeds without one.
-        inject_schedule_into_specs(
-            &mut specs,
-            &mut schedule,
-            None,
-            &DefaultsStore::empty(),
-            Some("Finished Basement"),
-            false,
-            &mut Vec::new(),
-        )
-        .expect("a declared-in-CSV-only column is not an error");
-
-        assert!(
-            !specs.iter().any(|s| s.name == "Basement Lighting"),
-            "no Basement Lighting spec is auto-created without an \
-             annual-energy default"
-        );
-    }
-
-    #[test]
-    fn basement_lighting_not_auto_created_from_csv_for_crawlspace() {
-        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
-        let mut specs: Vec<EquipmentSpec> = Vec::new();
-
-        inject_schedule_into_specs(
-            &mut specs,
-            &mut schedule,
-            None,
-            &DefaultsStore::empty(),
-            Some("Crawlspace"),
-            false,
-            &mut Vec::new(),
-        )
-        .expect("inject_schedule_into_specs should succeed");
-
-        assert!(
-            !specs.iter().any(|s| s.name == "Basement Lighting"),
-            "Basement Lighting must not be auto-created from CSV column when foundation is Crawlspace"
-        );
-    }
-
-    fn unread_column_warnings<'a>(warnings: &'a [Warning], column: &str) -> Vec<&'a Warning> {
-        warnings
-            .iter()
-            .filter(|w| w.message.contains(&format!("'{column}'")))
-            .collect()
-    }
-
-    /// Injects a one-column schedule into a dwelling with no specs, a
-    /// crawlspace foundation and no garage, returning the specs created and
-    /// the warnings raised.
-    fn inject_into_crawlspace_home(
-        column: &str,
-        values: &[f64],
-    ) -> (Vec<EquipmentSpec>, Vec<Warning>) {
-        let mut schedule = make_schedule_with_column(column, values);
-        let mut specs: Vec<EquipmentSpec> = Vec::new();
-        let mut warnings = Vec::new();
-        inject_schedule_into_specs(
-            &mut specs,
-            &mut schedule,
-            None,
-            &DefaultsStore::empty(),
-            Some("Crawlspace"),
-            false,
-            &mut warnings,
-        )
-        .expect("inject_schedule_into_specs should succeed");
-        (specs, warnings)
-    }
-
-    #[test]
-    fn basement_lighting_load_without_finished_basement_is_a_warning() {
-        let (specs, warnings) =
-            inject_into_crawlspace_home("lighting_basement", &[0.0, 0.01, 0.005]);
-
-        assert!(
-            !specs.iter().any(|s| s.name == "Basement Lighting"),
-            "Basement Lighting must not be auto-created without a finished basement"
-        );
-        let matching = unread_column_warnings(&warnings, "lighting_basement");
-        assert_eq!(
-            matching.len(),
-            1,
-            "the unread lighting_basement load must be reported once, got {warnings:?}"
-        );
-        assert!(
-            matching[0].message.contains("Finished Basement"),
-            "the warning must name the foundation rule, got: {}",
-            matching[0].message
-        );
-    }
-
-    #[test]
-    fn all_zero_basement_lighting_column_without_finished_basement_is_not_a_warning() {
-        let (specs, warnings) = inject_into_crawlspace_home("lighting_basement", &[0.0; 3]);
-
-        assert!(
-            !specs.iter().any(|s| s.name == "Basement Lighting"),
-            "Basement Lighting must not be auto-created without a finished basement"
-        );
-        assert!(
-            unread_column_warnings(&warnings, "lighting_basement").is_empty(),
-            "a column with no load needs no action, got {warnings:?}"
-        );
-    }
-
-    /// OS-HPXML reads `lighting_garage` only when garage lighting exists and
-    /// does not warn otherwise; the ResStock 2024 schedules carry a non-zero
-    /// column for every home.
-    #[test]
-    fn garage_lighting_column_without_a_garage_is_not_a_warning() {
-        let (specs, warnings) =
-            inject_into_crawlspace_home("lighting_garage", &[0.02, 0.01, 0.005]);
-
-        assert!(
-            !specs.iter().any(|s| s.name == "Garage Lighting"),
-            "Garage Lighting must not be auto-created for a dwelling with no garage"
-        );
-        assert!(
-            unread_column_warnings(&warnings, "lighting_garage").is_empty(),
-            "an unread lighting_garage column is not a warning, got {warnings:?}"
-        );
+    fn columns_for_equipment_without_energy_create_no_equipment() {
+        for column in ["lighting_basement", "lighting_garage", "clothes_dryer"] {
+            let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
+            schedule.column_names[0] = column.to_string();
+            schedule.column_index = HashMap::from([(column.to_string(), 0)]);
+            let mut specs: Vec<EquipmentSpec> = Vec::new();
+            inject_schedule_into_specs(
+                &mut specs,
+                &mut schedule,
+                None,
+                &DefaultsStore::empty(),
+                &mut Vec::new(),
+            )
+            .expect("inject_schedule_into_specs should succeed");
+            assert!(specs.is_empty(), "{column} created {specs:?}");
+        }
     }
 
     /// OCHRE schedule.py:390-391: when Basement Lighting equipment exists and
@@ -4598,8 +4316,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            Some("Finished Basement"),
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -4639,8 +4355,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            Some("Finished Basement"),
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -4690,8 +4404,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            Some("Finished Basement"),
-            false,
             &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
@@ -4811,8 +4523,6 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
-            false,
             &mut warnings,
         )
         .expect("an unknown column is a warning, not an error");

@@ -129,20 +129,17 @@ pub(crate) fn build_spec(
             parameters.insert("latent_gain_fraction".to_string(), json!(latent));
         }
     }
-    // The radiant and visible parts follow the sensible fraction the load
-    // will read, `sensible_gain_fraction` before its HPXML spelling.
-    let sensible = parameters
-        .get("sensible_gain_fraction")
-        .or_else(|| parameters.get("frac_sensible"))
-        .and_then(Value::as_f64);
+    // The radiant and visible parts are shares of the sensible fraction; the
+    // load resolves them against its final sensible fraction, after every
+    // override, so an overridden sensible fraction keeps the split.
     for (key, share) in [
-        ("radiative_gain_fraction", default_radiant_share(&name)),
-        ("visible_gain_fraction", default_visible_share(&name)),
+        ("radiant_share_of_sensible", default_radiant_share(&name)),
+        ("visible_share_of_sensible", default_visible_share(&name)),
     ] {
-        if !parameters.contains_key(key)
-            && let (Some(share), Some(sensible)) = (share, sensible)
+        if let Some(share) = share
+            && !parameters.contains_key(key)
         {
-            parameters.insert(key.to_string(), json!(share * sensible));
+            parameters.insert(key.to_string(), json!(share));
         }
     }
 

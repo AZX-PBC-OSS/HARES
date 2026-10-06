@@ -1171,7 +1171,7 @@ fn appliance_site(
 /// freezers all sensible (924-926); `defaults.rb` gives other plug loads
 /// `frac_lost` 0.10 and 0.95 sensible (7524-7526) and televisions all
 /// sensible (4797-4803); `hvac.rb` puts all ceiling fan power into
-/// conditioned space as sensible heat (1629-1638). A declared dryer's split
+/// conditioned space as sensible heat (1629-1638). The dryer's split
 /// depends on its venting and is set where the dryer is resolved.
 pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<(f64, f64)> {
     match name {
@@ -1183,17 +1183,6 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
             }
         }
         "Clothes Washer" => Some((0.27, 0.03)),
-        // OCHRE parse_clothes_dryer vented-electric derivation: (1 - 0.85
-        // exhaust) * 0.90 sensible = 0.135, latent = 1 - 0.135 - 0.85 = 0.015.
-        // Reached only by a spec the dryer resolver did not build (a
-        // schedule-injected dryer with no HPXML declaration); a declared
-        // dryer carries its vented/gas-aware fractions from the resolver and
-        // never reaches this default.
-        "Clothes Dryer" => Some((
-            (1.0 - DRYER_EXHAUST_FRACTION_VENTED) * DRYER_SENSIBLE_SHARE,
-            1.0 - (1.0 - DRYER_EXHAUST_FRACTION_VENTED) * DRYER_SENSIBLE_SHARE
-                - DRYER_EXHAUST_FRACTION_VENTED,
-        )),
         "Dishwasher" => Some((0.30, 0.30)),
         "Refrigerator" | "Freezer" => Some((1.00, 0.00)),
         "MELs" | "Plug Loads" => Some((0.855, 0.045)),
@@ -1492,11 +1481,11 @@ mod tests {
         }
     }
 
-    /// The radiant part is the OpenStudio-HPXML share of whichever sensible
-    /// fraction the load reads: a resolved default, an HPXML `FracSensible`,
-    /// or zero for an appliance outside the unit.
+    /// The resolver carries the OpenStudio-HPXML radiant share of sensible
+    /// heat, which the load applies to its final sensible fraction; a share
+    /// already given is kept.
     #[test]
-    fn radiant_part_follows_the_sensible_fraction() {
+    fn resolver_carries_the_radiant_share() {
         let radiant = |name: &str, params: Map<String, Value>| {
             param(
                 &build_spec(
@@ -1505,21 +1494,16 @@ mod tests {
                     params,
                     &DefaultsStore::empty(),
                 ),
-                "radiative_gain_fraction",
+                "radiant_share_of_sensible",
             )
         };
-        assert_eq!(radiant("Clothes Washer", Map::new()), Some(0.6 * 0.27));
+        for name in ["Clothes Washer", "TV", "Refrigerator", "Indoor Lighting"] {
+            assert_eq!(radiant(name, Map::new()), Some(0.6), "{name}");
+        }
         assert_eq!(radiant("Ceiling Fan", Map::new()), Some(0.558));
-        let mut tv = Map::new();
-        tv.insert("frac_sensible".to_string(), json!(0.9));
-        assert_eq!(radiant("TV", tv), Some(0.6 * 0.9));
-        let mut outside = Map::new();
-        outside.insert("sensible_gain_fraction".to_string(), json!(0.0));
-        assert_eq!(radiant("Refrigerator", outside), Some(0.0));
         let mut explicit = Map::new();
-        explicit.insert("radiative_gain_fraction".to_string(), json!(0.1));
+        explicit.insert("radiant_share_of_sensible".to_string(), json!(0.1));
         assert_eq!(radiant("Dishwasher", explicit), Some(0.1));
-        assert_eq!(radiant("Indoor Lighting", Map::new()), Some(0.6));
         assert_eq!(radiant("Exterior Lighting", Map::new()), None);
     }
 
@@ -1535,7 +1519,7 @@ mod tests {
                     Map::new(),
                     &DefaultsStore::empty(),
                 ),
-                "visible_gain_fraction",
+                "visible_share_of_sensible",
             )
         };
         for name in ["Indoor Lighting", "Basement Lighting", "Garage Lighting"] {

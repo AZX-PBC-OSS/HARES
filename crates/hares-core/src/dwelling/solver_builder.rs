@@ -1521,10 +1521,9 @@ pub(crate) fn build_default_solvers(
                     true
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "ventilation typed config deserialization failed: {e}; falling back to raw params"
-                    );
-                    false
+                    return Err(HaresError::Dwelling(format!(
+                        "Ventilation Fan typed config could not be read: {e}"
+                    )));
                 }
             }
         } else {

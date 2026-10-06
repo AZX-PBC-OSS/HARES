@@ -70,6 +70,7 @@ struct Run {
     start: &'static str,
     days: i64,
     bldg_id: i64,
+    overrides: Option<serde_json::Value>,
 }
 
 fn project_root() -> PathBuf {
@@ -99,7 +100,7 @@ fn dwelling_config(run: &Run) -> DwellingConfig {
             retain_batches: false,
             rotation: hares_io::RotationPolicy::None,
         },
-        overrides: None,
+        overrides: run.overrides.clone(),
         bldg_id: run.bldg_id,
         initialization_duration: None,
         resample_overrides: None,
@@ -218,6 +219,7 @@ fn hpxml_appliance_gains_reach_the_conditioned_zone() {
         start: "2023-01-01T00:00:00-07:00",
         days: 9,
         bldg_id: 1,
+        overrides: None,
     };
     assert_appliance_gains_reach_conditioned_zone(
         &run,
@@ -240,6 +242,7 @@ fn resstock_event_load_replay_delivers_its_gains() {
         start: "2018-01-01T00:00:00-08:00",
         days: 1,
         bldg_id: 176_227,
+        overrides: None,
     };
     assert_appliance_gains_reach_conditioned_zone(&run, FuelType::Gas, &CONDITIONED_SPACE_SPLITS);
 }
@@ -263,6 +266,7 @@ fn daily_replay_wh(start: &'static str, days: i64) -> Vec<[f64; 4]> {
         start,
         days,
         bldg_id: 1,
+        overrides: None,
     };
     let mut daily = vec![[0.0; 4]; usize::try_from(days).expect("days fit usize")];
     step_appliances(&run, &REPLAYED, |step, idx, ports| {
@@ -324,13 +328,10 @@ fn event_replay_wraps_at_the_year_end() {
     assert_ne!(across[0], jan_1, "31 December must not replay 1 January");
 }
 
-/// Indoor lighting of an HPXML building gives the conditioned zone all of
-/// its power: 0.2 convective, 0.6 long-wave radiant and 0.2 visible
-/// short-wave (OpenStudio-HPXML `model.rb` 249-250, `add_lights`).
-#[test]
-fn hpxml_lighting_splits_convective_radiant_and_visible() {
+/// One day of the cz2a parity building with `overrides` applied.
+fn cz2a_day(overrides: Option<serde_json::Value>) -> Run {
     let fixture = project_root().join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
-    let run = Run {
+    Run {
         weather: fixture.join("weather.epw"),
         fixture,
         hpxml: "building.xml",
@@ -338,31 +339,79 @@ fn hpxml_lighting_splits_convective_radiant_and_visible() {
         start: "2023-01-01T00:00:00-07:00",
         days: 1,
         bldg_id: 1,
-    };
+        overrides,
+    }
+}
+
+/// Checks that `name`, stepped through `run`, gives the conditioned zone
+/// `[convective, radiant, visible, latent]` fractions of its input.
+fn assert_zone_split(run: &Run, name: &str, fractions: [f64; 4]) {
     let zone = conditioned_zone(&run.fixture.join(run.hpxml));
-    let mut totals = Totals::default();
-    let mut shortwave_wh = 0.0;
-    step_appliances(&run, &["Indoor Lighting"], |_, _, ports| {
-        totals.input_wh += input_wh(ports, FuelType::Electric);
+    let mut input = 0.0;
+    let mut delivered = [0.0; 4];
+    step_appliances(run, &[name], |_, _, ports| {
+        input += input_wh(ports, FuelType::Electric);
         for thermal in ports.thermal.iter().filter(|t| t.zone == zone) {
-            totals.convective_wh += thermal.sensible_gain_w * DT_H;
-            totals.radiant_wh += thermal.radiant_gain_w * DT_H;
-            shortwave_wh += thermal.shortwave_gain_w * DT_H;
-            totals.latent_wh += thermal.latent_gain_w * DT_H;
+            delivered[0] += thermal.sensible_gain_w * DT_H;
+            delivered[1] += thermal.radiant_gain_w * DT_H;
+            delivered[2] += thermal.shortwave_gain_w * DT_H;
+            delivered[3] += thermal.latent_gain_w * DT_H;
         }
     });
-    assert!(totals.input_wh > 0.0, "the lights run");
-    let tolerance = 1e-9 * totals.input_wh;
-    for (kind, delivered, fraction) in [
-        ("convective", totals.convective_wh, 0.2),
-        ("radiant", totals.radiant_wh, 0.6),
-        ("visible", shortwave_wh, 0.2),
-        ("latent", totals.latent_wh, 0.0),
-    ] {
-        let want = totals.input_wh * fraction;
+    assert!(input > 0.0, "{name} runs");
+    for ((kind, got), fraction) in ["convective", "radiant", "visible", "latent"]
+        .iter()
+        .zip(delivered)
+        .zip(fractions)
+    {
+        let want = input * fraction;
         assert!(
-            (delivered - want).abs() <= tolerance,
-            "{kind}: {delivered:.3} Wh, expected {want:.3} Wh"
+            (got - want).abs() <= 1e-9 * input,
+            "{name} {kind}: {got:.3} Wh, expected {want:.3} Wh ({fraction} of {input:.3} Wh)"
         );
     }
+}
+
+/// Indoor lighting of an HPXML building gives the conditioned zone all of
+/// its power: 0.2 convective, 0.6 long-wave radiant and 0.2 visible
+/// short-wave (OpenStudio-HPXML `model.rb` 249-250, `add_lights`).
+#[test]
+fn hpxml_lighting_splits_convective_radiant_and_visible() {
+    assert_zone_split(&cz2a_day(None), "Indoor Lighting", [0.2, 0.6, 0.2, 0.0]);
+}
+
+/// The radiant and visible parts are shares of whatever sensible fraction
+/// the load ends up with: an override below or above the default keeps the
+/// appliance in the dwelling and scales its split.
+#[test]
+fn overridden_sensible_fraction_keeps_the_radiant_and_visible_shares() {
+    for (name, sensible, latent, visible_share) in [
+        ("Cooking Range", 0.3, 0.08, 0.0),
+        ("Cooking Range", 0.9, 0.08, 0.0),
+        ("Indoor Lighting", 0.5, 0.0, 0.2),
+    ] {
+        let overrides = serde_json::json!({ name: { "sensible_gain_fraction": sensible } });
+        let radiant = 0.6 * sensible;
+        let visible = visible_share * sensible;
+        assert_zone_split(
+            &cz2a_day(Some(overrides)),
+            name,
+            [sensible - radiant - visible, radiant, visible, latent],
+        );
+    }
+}
+
+/// Equipment whose init fails is a construction error naming it, not a
+/// load the dwelling quietly runs without.
+#[test]
+fn equipment_init_failure_fails_the_dwelling() {
+    let overrides = serde_json::json!({ "Cooking Range": { "sensible_gain_fraction": 1.5 } });
+    let err = Dwelling::from_config(dwelling_config(&cz2a_day(Some(overrides))))
+        .err()
+        .expect("an impossible sensible fraction must fail construction");
+    let message = err.to_string();
+    assert!(
+        message.contains("Cooking Range") && message.contains("sensible_gain_fraction"),
+        "the error names the equipment and the cause, got: {message}"
+    );
 }

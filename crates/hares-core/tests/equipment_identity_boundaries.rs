@@ -597,4 +597,8 @@ fn non_identity_init_failure_is_fatal_after_the_identity_checks() {
         msg.contains("not a number"),
         "the error must carry the init failure's received value, got: {msg}"
     );
+    assert!(
+        !msg.contains("equipment id"),
+        "the identity check must not claim a non-identity failure, got: {msg}"
+    );
 }

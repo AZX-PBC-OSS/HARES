@@ -191,8 +191,6 @@ fn equipment_without_any_schedule_source_is_an_error() {
         &mut schedule,
         Some(dir.path()),
         &DefaultsStore::empty(),
-        None,
-        false,
         &mut Vec::new(),
     )
     .expect_err("a Freezer with no schedule source must fail the injection");
@@ -225,8 +223,6 @@ fn io_injection_to_scheduled_load_step_column_source() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
-        false,
         &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
@@ -272,8 +268,6 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
         &mut schedule,
         Some(defaults_dir.path()),
         &DefaultsStore::empty(),
-        None,
-        false,
         &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
@@ -336,8 +330,6 @@ fn io_injection_to_scheduled_load_step_constant_source() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
-        false,
         &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
@@ -383,8 +375,6 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
-        false,
         &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
@@ -428,8 +418,6 @@ fn missing_column_index_errors_at_init_not_step() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
-        false,
         &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
@@ -512,8 +500,6 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
-        false,
         &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
@@ -633,8 +619,6 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
         &mut schedule,
         Some(&defaults_dir),
         &DefaultsStore::empty(),
-        None,
-        false,
         &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
@@ -736,8 +720,6 @@ fn daily_profile_produces_different_weekday_vs_weekend_power_at_noon() {
         &mut schedule,
         Some(dir.path()),
         &DefaultsStore::empty(),
-        None,
-        false,
         &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
