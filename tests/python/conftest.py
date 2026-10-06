@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import sys
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
-from _pytest.mark.expression import Expression
-from skip_gate import pytest_addoption, pytest_sessionfinish  # noqa: F401  (hooks)
+from skip_gate import pytest_addoption, pytest_configure  # noqa: F401  (hooks)
 
 # Every test runs off the network unless marked ``network`` (offline_guard).
 pytest_plugins = ["offline_guard_plugin", "pytester"]
@@ -33,34 +33,63 @@ HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
-# Modules marked ochre import OCHRE (or its group's xmltodict) at module level
-# with no skip guard. Marker selection applies after collection, so they are
-# kept out of collection unless the run's -m expression can select an ochre
-# test; a run that does select them errors on a broken OCHRE install.
+# The modules marked ochre import OCHRE (or its group's xmltodict) at module
+# level, with no skip guard, and marker selection applies only after a module
+# is imported. The rule:
+# - Found by directory collection, they are left out unless the -m expression
+#   can select a test marked ochre, alone or also slow (selects_ochre). The
+#   default "not slow and not ochre" leaves them out; "ochre", "not slow" or
+#   no expression collects them.
+# - Named on the command line, a module is always collected (pytest does not
+#   consult pytest_ignore_collect for its own arguments).
+# A collected module imports OCHRE, so without the ochre dependency group the
+# run fails with a collection error: it never skips.
 OCHRE_MODULES = frozenset(
     {"test_ochre_parity.py", "test_thermal_trace.py", "test_ashrae_reference.py"}
 )
 
 
+class _NotPlainMarkerLogic(Exception):
+    pass
+
+
+def _matches(node: ast.expr, marks: frozenset[str]) -> bool:
+    match node:
+        case ast.Name(id=name):
+            return name in marks
+        case ast.UnaryOp(op=ast.Not(), operand=operand):
+            return not _matches(operand, marks)
+        case ast.BoolOp(op=ast.And(), values=values):
+            return all(_matches(v, marks) for v in values)
+        case ast.BoolOp(op=ast.Or(), values=values):
+            return any(_matches(v, marks) for v in values)
+        case _:
+            raise _NotPlainMarkerLogic
+
+
 def selects_ochre(markexpr: str) -> bool:
-    """Whether a -m expression selects a test marked ochre (alone or also slow)."""
-    if not markexpr:
+    """Whether a -m expression can select a test marked ochre (alone or also slow).
+
+    Marker names joined by and, or, not and parentheses are evaluated here;
+    any other expression (marker keyword arguments, or one pytest itself will
+    reject) counts as selecting, so the modules are collected and fail loudly
+    rather than being left out.
+    """
+    if not markexpr.strip():
         return True
-    expr = Expression.compile(markexpr)
-
-    def matcher(marks: frozenset[str]):
-        return lambda name, /, **_: name in marks
-
-    return any(
-        expr.evaluate(matcher(marks))
-        for marks in (frozenset({"ochre"}), frozenset({"ochre", "slow"}))
-    )
+    try:
+        tree = ast.parse(markexpr, mode="eval")
+        return any(
+            _matches(tree.body, marks)
+            for marks in (frozenset({"ochre"}), frozenset({"ochre", "slow"}))
+        )
+    except (SyntaxError, _NotPlainMarkerLogic):
+        return True
 
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
-    if collection_path.name in OCHRE_MODULES and not selects_ochre(
-        config.option.markexpr
-    ):
+    markexpr: str = config.getoption("markexpr") or ""
+    if collection_path.name in OCHRE_MODULES and not selects_ochre(markexpr):
         return True
     return None
 
