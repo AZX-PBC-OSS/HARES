@@ -259,6 +259,63 @@ fn a_dual_mode_unit_displaces_only_the_named_axis_for_a_year() {
     assert_eq!(dwelling.health().rejected_control_signals, 0);
 }
 
+/// An end-use event reaches a unit serving both setpoints whatever mode
+/// the unit is in, moves only the end use's axis, and no signal is
+/// rejected.
+#[test]
+fn an_end_use_event_on_a_dual_mode_unit_moves_only_its_axis() {
+    for (end_use, moved_key, moved_schedule_key, still_key, still_schedule_key, delta_c) in [
+        (
+            EndUse::HVAC_COOLING,
+            tk::COOLING_SETPOINT_C,
+            tk::SCHEDULE_COOLING_SETPOINT_C,
+            tk::HEATING_SETPOINT_C,
+            tk::SCHEDULE_HEATING_SETPOINT_C,
+            -PRECONDITION_DELTA_C,
+        ),
+        (
+            EndUse::HVAC_HEATING,
+            tk::HEATING_SETPOINT_C,
+            tk::SCHEDULE_HEATING_SETPOINT_C,
+            tk::COOLING_SETPOINT_C,
+            tk::SCHEDULE_COOLING_SETPOINT_C,
+            PRECONDITION_DELTA_C,
+        ),
+    ] {
+        let mut dwelling = bestest_600();
+        let unit = ideal_unit(&dwelling);
+        let mut actor = DrCompliance::new("DR")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByEndUse(end_use.clone()))
+            .with_hvac_action(DrAction::setpoint_delta(PRECONDITION_DELTA_C));
+        actor.set_dr_level(DRLevel::Moderate);
+        dwelling
+            .add_actor(Box::new(actor))
+            .expect("register the DR actor");
+        dwelling.step().expect("first step");
+        for step in 1..2000 {
+            dwelling.step().expect("step");
+            let eq = dwelling
+                .equipment()
+                .iter()
+                .find(|eq| eq.descriptor().name == unit)
+                .expect("the unit");
+            let t = eq.telemetry();
+            let get = |key| t.get(key).expect("setpoint telemetry");
+            assert!(
+                (get(moved_key) - (get(moved_schedule_key) + delta_c)).abs() < 1e-9,
+                "{end_use:?} step {step}: the end use's setpoint is not displaced"
+            );
+            assert_eq!(
+                get(still_key),
+                get(still_schedule_key),
+                "{end_use:?} step {step}: the other setpoint left its schedule"
+            );
+        }
+        assert_eq!(dwelling.health().rejected_control_signals, 0, "{end_use:?}");
+    }
+}
+
 /// An event that names no direction for a unit serving both setpoints is
 /// refused when the actor is registered.
 #[test]

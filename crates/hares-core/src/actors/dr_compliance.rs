@@ -208,7 +208,9 @@ pub enum DrAction {
     /// A positive delta pre-conditions: it moves one setpoint, since moving
     /// both would narrow the gap and be rejected. The axis is never guessed:
     /// an end-use target and a single-purpose unit name it, and a unit
-    /// serving both takes it from `direction` (pre-heat or pre-cool).
+    /// serving both takes it from `direction` (pre-heat or pre-cool). An
+    /// end-use target reaches every unit serving that end use, a unit
+    /// serving both included, whatever mode the unit is in.
     ///
     /// A dwelling refuses, with [`HaresError::PreconditioningAxis`] and
     /// itself untouched, every roster change that would leave an event it

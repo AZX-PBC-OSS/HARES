@@ -71,8 +71,8 @@ use hares_types::{
     ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary,
     EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource,
-    ThermalAccumulator, ThermalCategory, Warning, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
-    validate_core_contract,
+    ThermalAccumulator, ThermalCategory, ThermostatAxis, Warning, ZoneId, ZoneMap, ZoneRole,
+    telemetry_keys as tk, validate_core_contract,
 };
 use hares_types::{ControlCapabilities, CoreOutput, validate_port_core_electrical_consistency};
 use rand::SeedableRng;
@@ -1156,7 +1156,7 @@ fn targets_conflict(
         (DispatchTarget::ByName(name), DispatchTarget::ByEndUse(end_use))
         | (DispatchTarget::ByEndUse(end_use), DispatchTarget::ByName(name)) => {
             equipment.iter().any(|eq| {
-                eq.descriptor().name.as_str() == &**name && eq.descriptor().end_use == *end_use
+                eq.descriptor().name.as_str() == &**name && addressed_by_end_use(&**eq, end_use)
             })
         }
     }
@@ -1318,7 +1318,7 @@ impl ControlDispatcher {
                         let mut any_skipped = false;
 
                         for eq in equipment.iter_mut() {
-                            if eq.descriptor().end_use != *end_use {
+                            if !addressed_by_end_use(&**eq, end_use) {
                                 continue;
                             }
                             // Matched: the signal was routed at a real target.
@@ -1439,7 +1439,7 @@ fn route_request(
                 &request.signal,
                 warnings,
                 rejected_control_signals,
-                |eq| eq.descriptor().end_use == *end_use,
+                |eq| addressed_by_end_use(eq, end_use),
             );
             if !delivered {
                 *rejected_control_signals += 1;
@@ -1517,6 +1517,17 @@ fn build_hvac_thermal_consistency(
                 .collect()
         })
         .collect()
+}
+
+/// Whether a `ByEndUse(end_use)` target addresses `eq`: its own end use,
+/// or, for a thermostat end use, a unit whose thermostat serves that axis.
+/// A unit serving both relabels its end use by its mode, and would
+/// otherwise be addressed only while in that mode.
+fn addressed_by_end_use(eq: &dyn Equipment, end_use: &EndUse) -> bool {
+    eq.descriptor().end_use == *end_use
+        || ThermostatAxis::of_end_use(end_use)
+            .zip(eq.thermostat_axes())
+            .is_some_and(|(axis, axes)| axes.serves(axis))
 }
 
 /// What actors read about each equipment when their bindings resolve.
@@ -4257,7 +4268,7 @@ impl Dwelling {
             }
             DispatchTarget::ByEndUse(end_use) => {
                 for eq in equipment {
-                    if eq.descriptor().end_use == *end_use {
+                    if addressed_by_end_use(&**eq, end_use) {
                         let desc = eq.descriptor();
                         let Some(&id) = equipment_id_by_name.get(&desc.name) else {
                             continue;

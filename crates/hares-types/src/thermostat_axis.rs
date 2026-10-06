@@ -51,6 +51,12 @@ impl ThermostatAxes {
             (Self::Both, named) => named,
         }
     }
+
+    /// Whether this unit's thermostat serves `axis`.
+    #[must_use]
+    pub fn serves(self, axis: ThermostatAxis) -> bool {
+        self == Self::Both || self == Self::One(axis)
+    }
 }
 
 #[cfg(test)]
@@ -66,5 +72,14 @@ mod tests {
         assert_eq!(furnace.select(Some(Cooling)), None);
         assert_eq!(ThermostatAxes::Both.select(Some(Cooling)), Some(Cooling));
         assert_eq!(ThermostatAxes::Both.select(None), None);
+    }
+
+    #[test]
+    fn a_unit_serves_its_axes() {
+        use ThermostatAxis::{Cooling, Heating};
+        assert!(ThermostatAxes::One(Heating).serves(Heating));
+        assert!(!ThermostatAxes::One(Heating).serves(Cooling));
+        assert!(ThermostatAxes::Both.serves(Heating));
+        assert!(ThermostatAxes::Both.serves(Cooling));
     }
 }
