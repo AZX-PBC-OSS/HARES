@@ -58,7 +58,11 @@ pub struct BillingStateSnapshot {
     pub steps_in_period: u64,
 }
 
-/// A tariff evaluator's complete mutable state.
+/// A tariff evaluator's complete billing state: every field the stepping
+/// and billing arithmetic reads or writes, so a resumed run's prices and
+/// bills are bitwise the original run's. The observe feature's counters are
+/// deliberately excluded: they report on the run, they do not feed it, and
+/// a resumed run starts them at zero.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TariffSnapshot {
     pub schema_version: u32,

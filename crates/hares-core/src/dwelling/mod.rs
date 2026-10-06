@@ -14725,6 +14725,31 @@ master_seed = 0
             .collect()
     }
 
+    /// The billing summaries as a bit-level digest: a rejected set_tariff
+    /// must leave them, the outgoing period's close included, bitwise
+    /// unchanged.
+    fn billing_summary_digest(dwelling: &Dwelling) -> String {
+        use std::fmt::Write as _;
+        let mut digest = String::new();
+        for summary in dwelling.billing_summaries() {
+            let _ = write!(
+                digest,
+                "{}..{}|{:x}|{:x}|{:x}|{:x}|{:x}|{:x}|{:x}|{:x};",
+                summary.period_start,
+                summary.period_end,
+                summary.energy_charge_usd.to_bits(),
+                summary.demand_charge_usd.to_bits(),
+                summary.fixed_charge_usd.to_bits(),
+                summary.export_credit_usd.to_bits(),
+                summary.net_bill_usd.to_bits(),
+                summary.peak_demand_kw.to_bits(),
+                summary.total_import_kwh.to_bits(),
+                summary.total_export_kwh.to_bits(),
+            );
+        }
+        digest
+    }
+
     /// Everything a rejected roster change must leave as it was.
     fn roster_fingerprint(dwelling: &Dwelling) -> String {
         let equipment: Vec<(String, EquipmentId)> = dwelling
@@ -14745,7 +14770,7 @@ master_seed = 0
         column_index.sort();
         format!(
             "{equipment:?}|{:?}|{auto_names:?}|{:?}|{}|{}|{core_ids:?}|{telemetry_names:?}|\
-             {:?}|{column_index:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
+             {:?}|{column_index:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{}",
             actor_names(dwelling),
             dwelling.scheduler.plan(),
             dwelling.next_equipment_id,
@@ -14762,6 +14787,7 @@ master_seed = 0
                 .as_ref()
                 .map(|r| (r.total_rows(), r.schema().fields().len())),
             dwelling.tariff_evaluator.is_some(),
+            billing_summary_digest(dwelling),
         )
     }
 
@@ -14825,6 +14851,41 @@ master_seed = 0
             assert!(result.is_err(), "{entrance} must be rejected");
         }
         assert_eq!(roster_fingerprint(&dwelling), before);
+    }
+
+    /// A set_tariff rejected at the roster plan leaves the billing
+    /// summaries bitwise unchanged: no outgoing close, no accrued-charge
+    /// loss, nothing appended.
+    #[test]
+    fn a_rejected_set_tariff_leaves_the_billing_summaries_unchanged() {
+        let tz = chrono_tz::America::Denver;
+        let mut dwelling = bestest_dwelling();
+        dwelling
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff");
+        // Past the January close (step 744): one summary exists, and the
+        // open February period holds accruals.
+        net_power_kw(&mut dwelling, 800);
+        assert!(
+            !dwelling.billing_summaries().is_empty(),
+            "the January close produced a summary"
+        );
+
+        // The next roster plan fails at the recorder: the summary digest
+        // before and after the rejected set_tariff must match on bits.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        dwelling.write_output = true;
+        dwelling.output_path = tmp.path().join("missing").join("out.csv");
+        let fingerprint_before = roster_fingerprint(&dwelling);
+        let digest_before = billing_summary_digest(&dwelling);
+
+        let err = dwelling
+            .set_tariff(flat_tariff(), tz)
+            .expect_err("the recorder plan fails");
+
+        assert!(err.to_string().contains("recorder"), "got: {err}");
+        assert_eq!(roster_fingerprint(&dwelling), fingerprint_before);
+        assert_eq!(billing_summary_digest(&dwelling), digest_before);
     }
 
     /// Two EVs added after assembly drive on distinct RNG streams: the
@@ -15063,6 +15124,129 @@ master_seed = 0
         serde_json::from_str(FLAT_TARIFF_JSON).expect("parse the flat tariff fixture")
     }
 
+    /// A TOU tariff whose demand charges make the demand-window and
+    /// ratchet state load-bearing: a coincident rate and a peak-period
+    /// rate, both with a two-month ratchet, over a 30 minute demand
+    /// window.
+    fn tou_demand_tariff() -> ElectricTariff {
+        use hares_tariff::types::{DemandRate, EnergyRate, FixedCharges, RatchetConfig};
+        use hares_types::{DayFilter, SeasonFilter, TimeWindow, TouPeriod};
+
+        let ratchet = RatchetConfig {
+            lookback_months: 2,
+            minimum_fraction: 0.6,
+        };
+        ElectricTariff {
+            name: Some("tou-demand-ratchet".into()),
+            tou_schedule: vec![
+                TouPeriod {
+                    name: "peak".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 960, 1260, 0.0)],
+                    season: SeasonFilter::All,
+                },
+                TouPeriod {
+                    name: "off-peak".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::All,
+                },
+            ],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "peak".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.25,
+                },
+                EnergyRate {
+                    period_name: "off-peak".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.08,
+                },
+            ],
+            demand_rates: vec![
+                DemandRate {
+                    period_name: None,
+                    season: SeasonFilter::All,
+                    rate_per_kw: 5.0,
+                    ratchet: Some(ratchet.clone()),
+                },
+                DemandRate {
+                    period_name: Some("peak".into()),
+                    season: SeasonFilter::All,
+                    rate_per_kw: 12.0,
+                    ratchet: Some(ratchet),
+                },
+            ],
+            fixed_charges: FixedCharges {
+                monthly_usd: 10.0,
+                daily_usd: 0.0,
+            },
+            demand_window_minutes: 30,
+            ..Default::default()
+        }
+    }
+
+    /// The synthetic dwelling whose TOML the 900 s pins step: 5800 steps
+    /// at 900 s cover January and February 2024, so the January close and
+    /// the February close both fall inside the run. A stochastic event
+    /// load (3 kW spikes at a quarter of steps) makes the demand window's
+    /// averages non-stationary, so the window state is load-bearing.
+    fn dwelling_at_900s() -> Dwelling {
+        const STEPS: usize = 5800;
+        let toml = format!(
+            r#"building_id = 2005
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 900
+duration_s = {duration}
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 1.0
+
+[event_load]
+active_power_kw = 3.0
+active_duration_s = 900.0
+cooldown_duration_s = 900.0
+event_probability = 0.25
+sensible_gain_fraction = 0.72
+latent_gain_fraction = 0.08
+
+[output]
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 42
+"#,
+            duration = STEPS * 900,
+        );
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let toml_path = tmp.path().join("dwelling_900s.toml");
+        fs::write(&toml_path, toml).expect("write the 900 s TOML");
+        let dwelling = Dwelling::from_toml_config_with_write_output(&toml_path, Some(false))
+            .expect("build the 900 s dwelling");
+        drop(tmp);
+        dwelling
+    }
+
     /// Every field of two billing summaries compared on bits.
     fn assert_billing_bitwise_equal(a: &BillingPeriodSummary, b: &BillingPeriodSummary) {
         assert_eq!(a.period_start, b.period_start, "period_start");
@@ -15190,6 +15374,75 @@ master_seed = 0
                 .expect("each later period closed in the from-start run too");
             assert_billing_bitwise_equal(bill, matching);
         }
+    }
+
+    /// A tariff attached exactly at a period boundary opens the new
+    /// period, and the boundary step's energy books to it; a from-start
+    /// run folds that step into the old period (its close fires on the
+    /// fold whose time reaches the boundary, after the fold books). One
+    /// step's attribution differs by design; every kWh is billed exactly
+    /// once.
+    #[test]
+    fn a_tariff_attached_at_a_period_boundary_books_the_boundary_step_to_the_new_period() {
+        let tz = chrono_tz::America::Denver;
+        let mut from_start = bestest_dwelling();
+        from_start
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff from the start");
+
+        // Hourly steps: the boundary is Feb 1 00:00, the start of step
+        // 744, so the 745th fold is the boundary step.
+        const BOUNDARY_STEP: usize = 744;
+        let mut powers = net_power_kw(&mut from_start, BOUNDARY_STEP + 1);
+        let boundary_step_kwh = powers.pop().expect("the boundary step's power").max(0.0);
+
+        let mut at_boundary = bestest_dwelling();
+        net_power_kw(&mut at_boundary, BOUNDARY_STEP);
+        at_boundary
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach exactly at the boundary");
+
+        // Past the February close (step 1416) on both runs.
+        net_power_kw(&mut from_start, 1500 - BOUNDARY_STEP - 1);
+        net_power_kw(&mut at_boundary, 1500 - BOUNDARY_STEP);
+
+        let from_start_bills = from_start.billing_summaries();
+        let at_boundary_bills = at_boundary.billing_summaries();
+
+        // The attached run has no January bill: the attach opened
+        // February.
+        let january_start = at_boundary.clock.start_time.with_timezone(&tz);
+        assert!(
+            summary_starting_at(at_boundary_bills, january_start).is_none(),
+            "an attach at the boundary opens the new period: no January bill exists"
+        );
+        let february_start = outgoing_end(january_start);
+        let attached_february = summary_starting_at(at_boundary_bills, february_start)
+            .expect("the attached run closes February");
+        let from_start_february = summary_starting_at(from_start_bills, february_start)
+            .expect("the from-start run closes February");
+
+        // The boundary step's energy books to the attached run's February,
+        // not to the from-start run's.
+        assert!(
+            (attached_february.total_import_kwh
+                - from_start_february.total_import_kwh
+                - boundary_step_kwh)
+                .abs()
+                < 1e-9,
+            "the boundary step's energy books to the new period: {} - {} must be {}",
+            attached_february.total_import_kwh,
+            from_start_february.total_import_kwh,
+            boundary_step_kwh
+        );
+
+        // February is a period opened at its own boundary on both runs: no
+        // proration at a boundary attach, the fixed charges bitwise equal.
+        assert_eq!(
+            attached_february.fixed_charge_usd.to_bits(),
+            from_start_february.fixed_charge_usd.to_bits(),
+            "a boundary attach bills the new period in full"
+        );
     }
 
     /// Replacing a tariff closes the outgoing open period with its
@@ -15355,6 +15608,208 @@ master_seed = 0
         for (i, bill) in resumed_bills.iter().enumerate() {
             assert_billing_bitwise_equal(bill, &continuous_bills[closed_before_checkpoint + i]);
         }
+    }
+
+    /// A dwelling checkpointed mid-run over a demand/ratchet tariff
+    /// resumes so its post-resume billing summaries are bitwise the
+    /// continuous run's: a 30 minute demand window at 900 s steps (two
+    /// samples, the ring head rotating), a TOU tariff with a coincident
+    /// and a peak-period demand rate, a two-month ratchet whose prior
+    /// peaks the January close populated, and the window's running sum,
+    /// count and push cadence (a re-sum falls inside the resumed tail)
+    /// all restore exactly. The checkpoint sits so the February period's
+    /// unique window-average maximum falls inside the resumed span: a
+    /// dropped running sum or a lost ratchet history moves the February
+    /// summary off the continuous run's bits.
+    #[test]
+    fn a_resumed_dwelling_restores_the_demand_window_ratchet_and_tou_peaks() {
+        let tz = chrono_tz::UTC;
+        let mut continuous = dwelling_at_900s();
+        continuous
+            .set_tariff(tou_demand_tariff(), tz)
+            .expect("attach the tariff");
+
+        // The checkpoint sits after the January close (the step whose
+        // start is Feb 1 00:00 UTC), with the open February period holding
+        // accruals, the window's push count off a re-sum boundary, and the
+        // ring head on the window's second slot (the push count is odd).
+        const CHECKPOINT_AT: usize = 3051;
+        net_power_kw(&mut continuous, CHECKPOINT_AT);
+        assert_eq!(
+            continuous.billing_summaries().len(),
+            1,
+            "January closed before the checkpoint"
+        );
+        let checkpoint = continuous.save_checkpoint().expect("checkpoint");
+        assert!(
+            checkpoint.tariff_state.is_some(),
+            "the checkpoint carries the tariff evaluator's state"
+        );
+
+        let mut resumed = dwelling_at_900s();
+        resumed.load_checkpoint(checkpoint).expect("restore");
+        assert!(
+            resumed.tariff_evaluator().is_some(),
+            "the restored dwelling carries the tariff"
+        );
+
+        // The tail crosses the February close (the step whose start is
+        // Mar 1 00:00 UTC) and the window's re-sum cadence (the push count
+        // passes a multiple of 1000 well inside the tail).
+        const TAIL: usize = 2749;
+        for i in 0..TAIL {
+            let continuous_step = continuous.step().expect("step");
+            let resumed_step = resumed.step().expect("step");
+            assert_eq!(
+                continuous_step.net_electric_power_kw.to_bits(),
+                resumed_step.net_electric_power_kw.to_bits(),
+                "step {i} net power"
+            );
+        }
+
+        // The February bill is bitwise the continuous run's: its demand
+        // charges ratchet against January's restored peaks, built from the
+        // restored window's averages.
+        let continuous_bills = continuous.billing_summaries();
+        let resumed_bills = resumed.billing_summaries();
+        assert_eq!(
+            resumed_bills.len(),
+            continuous_bills.len() - 1,
+            "the resumed run closes February, the continuous run January and February"
+        );
+        let continuous_february = continuous_bills.last().expect("February closed");
+        let resumed_february = resumed_bills.last().expect("February closed");
+        assert_billing_bitwise_equal(resumed_february, continuous_february);
+        assert!(
+            resumed_february.demand_charge_usd > 0.0,
+            "the February demand charge is nonzero: the restored window and ratchet state are load-bearing"
+        );
+    }
+
+    /// The switch step the replacement-across-a-resume pins share: Jan 13
+    /// 12:00, inside the January period.
+    const REPLACEMENT_SWITCH_STEP: usize = 300;
+
+    /// The two runs the post-resume replacement pins compare: a continuous
+    /// run that replaces its tariff at the switch step, and a run that
+    /// checkpoints at the switch step, restores onto a fresh dwelling and
+    /// replaces there. Returned after the replacement's outgoing bill has
+    /// closed on both.
+    fn replacement_across_a_resume() -> (Dwelling, Dwelling) {
+        let tz = chrono_tz::America::Denver;
+        let mut expensive = flat_tariff();
+        expensive.energy_rates[0].rate_per_kwh = 0.20;
+        expensive.fixed_charges.monthly_usd = 20.0;
+
+        let mut continuous = bestest_dwelling();
+        continuous
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff");
+        net_power_kw(&mut continuous, REPLACEMENT_SWITCH_STEP);
+        continuous
+            .set_tariff(expensive.clone(), tz)
+            .expect("replace the tariff");
+
+        let mut checkpointed = bestest_dwelling();
+        checkpointed
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff");
+        net_power_kw(&mut checkpointed, REPLACEMENT_SWITCH_STEP);
+        let checkpoint = checkpointed.save_checkpoint().expect("checkpoint");
+        let mut resumed = bestest_dwelling();
+        resumed.load_checkpoint(checkpoint).expect("restore");
+        resumed
+            .set_tariff(expensive, tz)
+            .expect("replace the tariff after the resume");
+
+        (continuous, resumed)
+    }
+
+    /// A fresh tariff attached to a restored dwelling bills exactly as the
+    /// continuous analogue's replacement does: the fresh attach runs
+    /// activate_at over the restored billing state, the outgoing period
+    /// closes on the restored accruals, and every later bill is bitwise
+    /// the continuous run's.
+    #[test]
+    fn a_tariff_attached_after_a_resume_bills_like_the_continuous_run() {
+        let (mut continuous, mut resumed) = replacement_across_a_resume();
+
+        // Past the February close (step 1416).
+        net_power_kw(&mut continuous, 1200);
+        net_power_kw(&mut resumed, 1200);
+
+        let continuous_bills = continuous.billing_summaries();
+        let resumed_bills = resumed.billing_summaries();
+        assert_eq!(
+            resumed_bills.len(),
+            continuous_bills.len(),
+            "both runs close the outgoing period and February"
+        );
+        for (a, b) in resumed_bills.iter().zip(continuous_bills.iter()) {
+            assert_billing_bitwise_equal(a, b);
+        }
+    }
+
+    /// A replacement across a resume closes the outgoing period with the
+    /// accruals the restored evaluator held, and opens the replacement's
+    /// period at the switch step: its first bill, at the February
+    /// boundary, is prorated from the switch instant.
+    #[test]
+    fn a_replacement_across_a_resume_closes_the_outgoing_period_with_its_accruals() {
+        let tz = chrono_tz::America::Denver;
+        let (mut continuous, mut resumed) = replacement_across_a_resume();
+
+        // The outgoing bill the replacement closed, on both runs.
+        assert_eq!(
+            continuous.billing_summaries().len(),
+            1,
+            "exactly the outgoing period's bill exists on the continuous run"
+        );
+        assert_eq!(
+            resumed.billing_summaries().len(),
+            1,
+            "exactly the outgoing period's bill exists on the resumed run"
+        );
+        let continuous_outgoing = &continuous.billing_summaries()[0];
+        let resumed_outgoing = &resumed.billing_summaries()[0];
+        assert_billing_bitwise_equal(resumed_outgoing, continuous_outgoing);
+
+        // The outgoing period closed at the switch step, carrying the
+        // accruals.
+        let january_start = resumed.clock.start_time.with_timezone(&tz);
+        let switch_time = january_start + chrono::Duration::hours(REPLACEMENT_SWITCH_STEP as i64);
+        assert_eq!(resumed_outgoing.period_end, switch_time);
+        assert!(
+            resumed_outgoing.total_import_kwh > 0.0,
+            "the outgoing bill carries the accruals"
+        );
+
+        // The replacement's period opens at the switch step: its first
+        // bill, at the February boundary (step 744), is prorated from the
+        // switch, and the tail stops before the March close.
+        net_power_kw(&mut continuous, 500);
+        net_power_kw(&mut resumed, 500);
+        let continuous_bills = continuous.billing_summaries();
+        let resumed_bills = resumed.billing_summaries();
+        assert_eq!(
+            resumed_bills.len(),
+            2,
+            "the replacement closed the February period"
+        );
+        let replacement_bill = &resumed_bills[1];
+        assert_eq!(
+            replacement_bill.period_start, january_start,
+            "the replacement opens the period containing the switch step"
+        );
+        let full_month_seconds = (outgoing_end(january_start) - january_start).num_seconds() as f64;
+        let switch_to_boundary =
+            (replacement_bill.period_end - switch_time).num_seconds() as f64 / full_month_seconds;
+        assert_eq!(
+            replacement_bill.fixed_charge_usd.to_bits(),
+            (20.0_f64 * switch_to_boundary).to_bits(),
+            "the replacement's fixed charge is prorated from the switch step"
+        );
+        assert_billing_bitwise_equal(replacement_bill, &continuous_bills[1]);
     }
 
     /// A checkpoint whose stream cursor is not past every restored built-in

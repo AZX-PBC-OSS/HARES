@@ -85,9 +85,12 @@ impl DemandWindow {
         }
     }
 
-    /// Rebuilds a window from its snapshot. The caller's snapshot must come
-    /// from a window of the same capacity; the samples vector is truncated
-    /// or extended to the capacity this window's configuration computes.
+    /// Rebuilds a window from its snapshot. The rebuilt window is sized
+    /// from the snapshot itself: the samples vector's length is the
+    /// capacity the window's configuration computes, and the caller's
+    /// snapshot must come from a window of that capacity. The samples, the
+    /// ring position, the count, the running sum and the push count restore
+    /// as they were.
     pub(crate) fn from_snapshot(snapshot: DemandWindowSnapshot) -> Self {
         let mut window = Self::new(snapshot.samples.len());
         window.samples.copy_from_slice(&snapshot.samples);
@@ -194,8 +197,11 @@ fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> DateTime<Tz> 
 /// boundaries from `anchor`.
 ///
 /// The walk follows the same [`compute_period_end`] chain the stepping
-/// evaluator closes on, so the period a mid-run tariff joins is exactly the
-/// one a from-start run holds open at `t`.
+/// evaluator closes on: for an attach strictly inside a period, the period
+/// a mid-run tariff joins is the one a from-start run holds open at `t`.
+/// At an exact boundary the walk opens the new period, while a from-start
+/// run folds the boundary step into the old one; one step's attribution
+/// differs by design, every kWh billed exactly once.
 pub(crate) fn containing_period_start(
     anchor: DateTime<Tz>,
     t: DateTime<Tz>,
