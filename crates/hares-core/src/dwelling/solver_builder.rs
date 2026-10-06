@@ -2778,6 +2778,67 @@ mod tests {
         assert_eq!((stack_coeff, wind_coeff), (expected_stack, expected_wind));
     }
 
+    /// A gable attic leaks by its geometric ridge rise, not OS-HPXML's hip
+    /// height: the stack coefficient grows with the attic's height and the
+    /// wind coefficient with its top above grade (airflow.rb:2749-2771,
+    /// which OS-HPXML feeds the hip height of geometry.rb:1362). BEopt's
+    /// 30 x 40 ft gable at 6:12 rises 7.5 ft; its hip would be 7.746 ft.
+    #[test]
+    fn a_gable_attic_leaks_by_its_geometric_rise() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/examples/BEopt_example.xml");
+        let building = hares_io::parse_hpxml(&path).expect("BEopt example parses");
+        let attic = building
+            .zones
+            .iter()
+            .find(|z| z.zone_type == ZoneType::Attic)
+            .expect("an attic");
+        let rise_m = hares_physics::units::length_ft_to_m(7.5);
+        let hip_m =
+            hares_physics::units::length_ft_to_m(0.5 * (0.5_f64).atan().sin() * 1200.0_f64.sqrt());
+        let walls_top_m = 2.44;
+        let method = attic_infiltration_method(
+            attic,
+            || Ok(walls_top_m),
+            None,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+            0,
+        )
+        .expect("vented attic");
+        let InfiltrationMethod::Ela {
+            stack_coeff,
+            wind_coeff,
+            ..
+        } = method
+        else {
+            panic!("a vented attic leaks through its ELA, got {method:?}");
+        };
+        let coefficients = |height_m| {
+            attic_ela_coefficients(
+                height_m,
+                walls_top_m,
+                ShieldingClass::Normal,
+                TerrainClass::Suburban,
+            )
+            .expect("coefficients")
+        };
+        let (rise_stack, rise_wind) = coefficients(rise_m);
+        assert!(
+            (stack_coeff - rise_stack).abs() < 1e-6 * rise_stack,
+            "{stack_coeff} against the rise's {rise_stack}"
+        );
+        assert!(
+            (wind_coeff - rise_wind).abs() < 1e-6 * rise_wind,
+            "{wind_coeff}"
+        );
+        let (hip_stack, _) = coefficients(hip_m);
+        assert!(
+            (stack_coeff - hip_stack).abs() > 0.01 * hip_stack,
+            "the gable's stack coefficient must not be the hip's"
+        );
+    }
+
     /// An attic with no ventilation rate is unvented: 0.1 ACH.
     #[test]
     fn attic_without_a_rate_is_unvented() {

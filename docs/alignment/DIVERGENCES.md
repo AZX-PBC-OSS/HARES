@@ -293,13 +293,23 @@ justification → measured impact → pinning tests.
   determine the span (an attic over a garage, floors that do not match the
   footprint, a smaller upper storey, no floor counts, gable ends that
   disagree with the span), the attic keeps OS-HPXML's hip, with a warning
-  naming why.
+  naming why. The ridge rise is also the attic's height for its leakage:
+  the stack coefficient grows with it and the wind coefficient takes the
+  attic's top above grade (`attic_infiltration_method`,
+  `hares-core/src/dwelling/solver_builder.rs`). OS-HPXML feeds its
+  leakage the hip height (`calc_wind_stack_coeffs`,
+  `airflow.rb:2749-2771`, with `calculate_zone_height`,
+  `geometry.rb:1362`), so a gable attic's leakage departs from OS-HPXML's
+  too: on `base.xml` the rise is 7.5 ft against the hip's 8.216 ft, a 9 %
+  lower stack coefficient.
 - **Justification:** the hip rule undercounts a gable attic's air:
   OS-HPXML's `base.xml` gable holds 143.4 m³ and the hip gives 104.7 m³
   (−27 %). OCHRE's gable-wall formula inherits whatever the gable walls
   include. BEopt's include the eave overhang: 144.5 ft² per end on a
   30 ft span, whose 6:12 triangle is 112.5 ft². That raises the ridge
-  from 7.5 to 8.5 ft and the volume by 13 %.
+  from 7.5 to 8.5 ft and the volume by 13 %. The stack effect is driven by
+  the height of the air column the attic actually holds, which is the
+  ridge rise of the geometry whose volume it takes.
 - **Measured impact:** on `data/examples/BEopt_example.xml` the attic is
   127.4 m³ at a 2.29 m rise. OS-HPXML's hip gives 87.7 m³ and OCHRE 144.4
   m³. Attic MAE against the OCHRE conditioned oracle, from the hip to this
@@ -307,6 +317,10 @@ justification → measured impact → pinning tests.
   1.77 °C (dynamic), spring 1.76 to 1.47 °C, winter 1.55 to 1.44 °C.
   OCHRE's eave-inflated volume would give 1.55, 1.30 and 1.39 °C; that
   closer agreement is not taken. Indoor MAE is unchanged within 0.01 °C.
+  The leakage height alone moves little: with the hip height (2.36 m)
+  in place of the rise (2.29 m) for the leakage only, at the current
+  roughness, the attic MAE moves by at most 0.008 °C in any scenario
+  (summer 0.894 to 0.886 °C, winter 1.275 to 1.279 °C).
 - **Pinning tests:** `hpxml_parsing_tests::a_gable_attic_takes_its_geometric_volume`,
   `hpxml_parsing_tests::eaves_in_the_gable_walls_do_not_raise_the_attic`,
   `hpxml_parsing_tests::a_gable_attic_of_unknown_span_is_a_square_hip_with_a_warning`,
@@ -317,6 +331,9 @@ justification → measured impact → pinning tests.
   `a_gable_attic_takes_its_geometric_volume` does not discriminate it,
   since `base.xml`'s gable walls are exactly their triangles and both
   rules give 7.5 ft there.
+  `solver_builder::tests::a_gable_attic_leaks_by_its_geometric_rise`
+  pins the leakage coefficients to the rise and fails with the hip
+  height.
 
 ## D-010: Outside convective roughness from the surface's material
 
