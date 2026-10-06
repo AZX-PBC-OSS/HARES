@@ -3890,7 +3890,7 @@ equipment_name = "None"
         let zone_inputs = vec![hares_envelope::ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(120.0),
-            mass_multiplier:
+            temperature_capacitance_multiplier:
                 hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let zone_caps = hares_envelope::derive_zone_capacitances(
@@ -3986,7 +3986,7 @@ equipment_name = "None"
         let zone_inputs = vec![hares_envelope::ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(120.0),
-            mass_multiplier:
+            temperature_capacitance_multiplier:
                 hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let zone_caps = hares_envelope::derive_zone_capacitances(
@@ -4085,7 +4085,7 @@ master_seed = 0
         let zone_inputs = vec![hares_envelope::ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(120.0),
-            mass_multiplier:
+            temperature_capacitance_multiplier:
                 hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let zone_caps = hares_envelope::derive_zone_capacitances(

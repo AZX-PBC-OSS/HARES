@@ -32,7 +32,7 @@ pub fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneI
             ZoneInput {
                 floor_area_m2: zone.and_then(|z| z.floor_area_m2),
                 volume_m3: zone.and_then(|z| z.volume_m3),
-                mass_multiplier: building.temperature_capacitance_multiplier,
+                temperature_capacitance_multiplier: building.temperature_capacitance_multiplier,
             }
         })
         .collect()
@@ -1696,7 +1696,10 @@ mod tests {
         building.temperature_capacitance_multiplier = 5.0;
         let zone_inputs = building_to_zone_inputs(&building, zone_types.len());
         for (zone_type, input) in zone_types.iter().zip(&zone_inputs) {
-            assert_eq!(input.mass_multiplier, 5.0, "{zone_type:?}");
+            assert_eq!(
+                input.temperature_capacitance_multiplier, 5.0,
+                "{zone_type:?}"
+            );
         }
     }
 

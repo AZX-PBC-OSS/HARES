@@ -187,7 +187,7 @@ fn run_to_steady_state(
         &[ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(129.6),
-            mass_multiplier: 1.0,
+            temperature_capacitance_multiplier: 1.0,
         }],
         101_325.0,
     )
@@ -343,7 +343,7 @@ fn skin_solve_is_timestep_independent_across_dt() {
             &[ZoneInput {
                 floor_area_m2: Some(48.0),
                 volume_m3: Some(129.6),
-                mass_multiplier: 1.0,
+                temperature_capacitance_multiplier: 1.0,
             }],
             101_325.0,
         )
@@ -607,7 +607,7 @@ fn fallback_r_exterior_wall_steady_state_matches_exact_skin_balance() {
         &[ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(129.6),
-            mass_multiplier: 1.0,
+            temperature_capacitance_multiplier: 1.0,
         }],
         101_325.0,
     )

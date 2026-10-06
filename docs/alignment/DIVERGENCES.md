@@ -462,9 +462,12 @@ justification → measured impact → pinning tests.
   consequence of the multiplier, not a departure from either reference:
   HPXML homes with furniture boundaries previously took 1 on the
   conditioned zone.
-- **Justification:** the battery describes the storage the thermal
-  solver integrates; with the multiplier on the zone, the same
-  capacitance belongs in the battery.
+- **Justification:** a design decision, not a reference's: neither
+  OS-HPXML nor EnergyPlus defines an equivalent battery. HARES makes the
+  battery describe the storage its thermal solver integrates, so with the
+  multiplier on the zone, the same capacitance is in the battery, as in
+  OCHRE's. A battery defined on the air alone would report a seventh of
+  the storage the simulated zone shows.
 - **Measured impact:** the conditioned zone's capacitance on the golden
   `consumer_shape_900s` home (`bldg0176227`, 749.8 m³) is 1.7644 kWh/K
   against 0.2521 kWh/K before, and on `BEopt_example.xml` (271.8 m³)
