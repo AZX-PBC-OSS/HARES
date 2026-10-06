@@ -14,7 +14,7 @@ use hares_types::{
     EquipmentId, GridExportRule, HaresError, StormWatchTrigger, Telemetry,
 };
 
-use crate::Actor;
+use crate::{Actor, ActorTarget};
 
 /// BMS configuration parameters for the `BatteryManagementActor`
 /// constructors, grouped so the constructors read as identity + config.
@@ -40,7 +40,7 @@ struct SelfConsumptionPolicy {
 
 pub struct BatteryManagementActor {
     name: String,
-    dispatch_target: DispatchTarget,
+    battery: ActorTarget,
     equipment_id: Option<EquipmentId>,
     bms_mode: BmsMode,
     grid_export_rule: GridExportRule,
@@ -114,7 +114,14 @@ impl BatteryManagementActor {
         telemetry.insert("bms_dwell_blocked", 0.0);
         Self {
             name: name.to_string(),
-            dispatch_target: DispatchTarget::ByName(Arc::from(battery_name)),
+            battery: ActorTarget {
+                target: DispatchTarget::ByName(Arc::from(battery_name)),
+                required: ControlCapabilities::POWER_SETPOINT
+                    | ControlCapabilities::SOC_TARGET
+                    | ControlCapabilities::POWER_LIMIT
+                    | ControlCapabilities::GRID_CONNECT
+                    | ControlCapabilities::SELF_CONSUMPTION,
+            },
             equipment_id: None,
             bms_mode,
             grid_export_rule,
@@ -162,7 +169,7 @@ impl BatteryManagementActor {
         // `PowerLimit` is a charge-rate cap within a scheduled mode, not a
         // grid-imposed power constraint.
         out.push(DispatchRequest {
-            target: self.dispatch_target.clone(),
+            target: self.battery.target.clone(),
             signal,
             priority: PriorityTier::Schedule,
         });
@@ -1025,23 +1032,12 @@ impl Actor for BatteryManagementActor {
         Some(&self.telemetry)
     }
 
-    fn dispatch_target_name(&self) -> Option<&str> {
-        match &self.dispatch_target {
-            DispatchTarget::ByName(n) => Some(n.as_ref()),
-            DispatchTarget::ByEndUse(_) => None,
-        }
-    }
-
-    fn required_control_capabilities(&self) -> ControlCapabilities {
-        ControlCapabilities::POWER_SETPOINT
-            | ControlCapabilities::SOC_TARGET
-            | ControlCapabilities::POWER_LIMIT
-            | ControlCapabilities::GRID_CONNECT
-            | ControlCapabilities::SELF_CONSUMPTION
+    fn dispatch_targets(&self) -> &[ActorTarget] {
+        std::slice::from_ref(&self.battery)
     }
 
     fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
-        let battery_name = match &self.dispatch_target {
+        let battery_name = match &self.battery.target {
             DispatchTarget::ByName(n) => n.as_ref(),
             DispatchTarget::ByEndUse(_) => return,
         };

@@ -11834,6 +11834,7 @@
   "health": {
     "clamped_actions": 0,
     "curve_index_clamps": 0,
+    "evicted_actors": 0,
     "port_rollbacks": 0,
     "rejected_control_signals": 0,
     "warmup": {

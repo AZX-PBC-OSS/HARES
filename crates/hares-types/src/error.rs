@@ -45,10 +45,13 @@ pub enum HaresError {
         value_c: f64,
         class: crate::ThermostatBandClass,
     },
-    /// A demand-response pre-conditioning event whose target has no single
-    /// thermostat axis for it: a unit serving both setpoints with no
-    /// direction named, a direction the unit does not serve, or a target
-    /// without a thermostat.
+    /// A demand-response pre-conditioning event the dwelling cannot serve,
+    /// refused when the actor is registered or supplied, or when a
+    /// replacement under the target's name would leave it so: a unit
+    /// serving both setpoints with no direction named, a direction the unit
+    /// does not serve, a target without a thermostat, a named target not in
+    /// the dwelling, or a direction on a delta that relaxes or is not
+    /// finite.
     #[error("DR actor '{actor}' cannot pre-condition '{target}': {reason}")]
     PreconditioningAxis {
         actor: String,

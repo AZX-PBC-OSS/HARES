@@ -28,7 +28,7 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::Actor;
+use crate::{Actor, ActorTarget};
 
 /// Thermostat override state.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -141,7 +141,7 @@ pub struct IdealThermostat {
     /// Current override state.
     override_state: OverrideState,
     /// Pre-allocated dispatch target (avoids per-step Arc construction).
-    dispatch_target: DispatchTarget,
+    unit: ActorTarget,
     /// Actor telemetry: observable decision state for diagnostics.
     telemetry: Telemetry,
     /// Equipment hysteresis/deadband half-width (°C), used by `decide()` to
@@ -172,7 +172,10 @@ impl IdealThermostat {
         telemetry.insert("setpoint_inversion_rejected", 0.0);
         Self {
             name: format!("IdealThermostat({})", target_name),
-            dispatch_target: DispatchTarget::ByName(target_name.into()),
+            unit: ActorTarget {
+                target: DispatchTarget::ByName(target_name.into()),
+                required: ControlCapabilities::THERMAL_SETPOINT,
+            },
             override_state: OverrideState::default(),
             telemetry,
             hysteresis_c: 1.0,
@@ -276,7 +279,7 @@ impl IdealThermostat {
 
     /// Returns the target equipment name.
     pub fn target_name(&self) -> &str {
-        match &self.dispatch_target {
+        match &self.unit.target {
             DispatchTarget::ByName(n) => n,
             DispatchTarget::ByEndUse(_) => unreachable!("IdealThermostat always targets by name"),
         }
@@ -288,12 +291,8 @@ impl Actor for IdealThermostat {
         &self.name
     }
 
-    fn dispatch_target_name(&self) -> Option<&str> {
-        Some(self.target_name())
-    }
-
-    fn required_control_capabilities(&self) -> ControlCapabilities {
-        ControlCapabilities::THERMAL_SETPOINT
+    fn dispatch_targets(&self) -> &[ActorTarget] {
+        std::slice::from_ref(&self.unit)
     }
 
     fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
@@ -398,7 +397,7 @@ impl Actor for IdealThermostat {
         // user action (hold mode, away setback, DR pre-conditioning)
         // and must take precedence over schedule-level setpoints.
         out.push(DispatchRequest {
-            target: self.dispatch_target.clone(),
+            target: self.unit.target.clone(),
             signal,
             priority: PriorityTier::UserOverride,
         });

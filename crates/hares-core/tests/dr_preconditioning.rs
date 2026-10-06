@@ -558,11 +558,20 @@ fn an_actor_supplied_with_a_unit_it_cannot_serve_is_refused_with_it() {
     assert_eq!(dwelling.actor_count(), 0);
 }
 
-/// A replacement under the target's name that cannot serve the event, and
-/// a removal of the target, are refused with the dwelling untouched; the
+/// A unit with no ports that accepts setpoint signals and whose thermostat
+/// serves `axes`.
+fn setpoint_probe(name: &str, axes: Option<ThermostatAxes>) -> Box<ThermostatProbe> {
+    let mut probe = ThermostatProbe::boxed(name, axes);
+    probe.descriptor.control_capabilities =
+        ControlCapabilities::THERMAL_SETPOINT | ControlCapabilities::THERMAL_SETPOINT_DELTA;
+    probe
+}
+
+/// A replacement under the target's name that accepts the event's signals
+/// but cannot serve its axis is refused with the dwelling untouched; the
 /// event goes on pre-cooling the unit.
 #[test]
-fn replacing_or_removing_a_preconditioning_target_it_cannot_lose_is_refused() {
+fn replacing_a_preconditioning_target_with_a_unit_it_cannot_serve_is_refused() {
     let mut dwelling = bestest_600();
     let unit = ideal_unit(&dwelling);
     dwelling
@@ -571,16 +580,11 @@ fn replacing_or_removing_a_preconditioning_target_it_cannot_lose_is_refused() {
     let before = equipment_names(&dwelling);
     for axes in [None, Some(ThermostatAxes::One(ThermostatAxis::Heating))] {
         let err = dwelling
-            .replace_equipment(&unit, ThermostatProbe::boxed(&unit, axes))
+            .replace_equipment(&unit, setpoint_probe(&unit, axes))
             .err()
             .expect("the replacement cannot pre-cool");
         assert!(is_preconditioning_refusal(&err), "{axes:?}: {err}");
     }
-    let err = dwelling
-        .remove_equipment(&unit)
-        .err()
-        .expect("the event names the unit");
-    assert!(is_preconditioning_refusal(&err), "{err}");
     assert_eq!(equipment_names(&dwelling), before);
     assert_eq!(ideal_unit(&dwelling), unit);
     assert_eq!(dwelling.actor_count(), 1);
@@ -603,6 +607,150 @@ fn replacing_or_removing_a_preconditioning_target_it_cannot_lose_is_refused() {
         );
     }
     assert_eq!(dwelling.health().rejected_control_signals, 0);
+}
+
+/// The ways a unit leaves a dwelling.
+#[derive(Clone, Copy, Debug)]
+enum Removal {
+    ByName,
+    Clear,
+    ByEndUse,
+}
+
+impl Removal {
+    const ALL: [Self; 3] = [Self::ByName, Self::Clear, Self::ByEndUse];
+
+    fn apply(self, dwelling: &mut Dwelling, unit: &str) {
+        match self {
+            Self::ByName => {
+                dwelling.remove_equipment(unit).expect("remove the unit");
+            }
+            Self::Clear => dwelling.clear_equipment().expect("clear the equipment"),
+            Self::ByEndUse => {
+                let removed = dwelling
+                    .remove_equipment_by_end_use(&[EndUse::HVAC_HEATING, EndUse::HVAC_COOLING])
+                    .expect("remove the HVAC end uses");
+                assert!(removed >= 1, "the unit is removed by its end use");
+            }
+        }
+    }
+}
+
+/// Steps a few times and asserts no signal was rejected.
+fn steps_without_rejections(dwelling: &mut Dwelling, context: &str) {
+    for _ in 0..6 {
+        dwelling.step().expect("step");
+    }
+    assert_eq!(
+        dwelling.health().rejected_control_signals,
+        0,
+        "{context}: an orphan kept dispatching"
+    );
+}
+
+/// Taking away the unit an actor targets, by name or by end use, evicts
+/// the actor however the unit leaves; a removal is never refused for the
+/// actor's sake, and the eviction is a dwelling warning counted in the
+/// run health, so no orphan is left rejecting signals.
+#[test]
+fn removing_an_actors_unit_evicts_it_with_a_counted_warning() {
+    let cases = [
+        (
+            "a named pre-cool",
+            true,
+            DrAction::precool(PRECONDITION_DELTA_C),
+        ),
+        ("a named turn-off", true, DrAction::off()),
+        (
+            "an end-use delta",
+            false,
+            DrAction::setpoint_delta(PRECONDITION_DELTA_C),
+        ),
+    ];
+    for (event, by_name, action) in &cases {
+        for removal in Removal::ALL {
+            let context = format!("{event}, {removal:?}");
+            let mut dwelling = bestest_600();
+            let unit = ideal_unit(&dwelling);
+            let target = if *by_name {
+                DispatchTarget::ByName(unit.as_str().into())
+            } else {
+                DispatchTarget::ByEndUse(EndUse::HVAC_HEATING)
+            };
+            let mut actor = DrCompliance::new("DR")
+                .with_compliance_model(AlwaysComply)
+                .with_hvac_target(target)
+                .with_hvac_action(action.clone());
+            actor.set_dr_level(DRLevel::Moderate);
+            dwelling
+                .add_actor(Box::new(actor))
+                .expect("register the DR actor");
+            dwelling.take_warnings();
+
+            removal.apply(&mut dwelling, &unit);
+
+            assert_eq!(dwelling.actor_count(), 0, "{context}");
+            assert_eq!(dwelling.health().evicted_actors, 1, "{context}");
+            let warnings = dwelling.take_warnings();
+            assert_eq!(
+                warnings
+                    .iter()
+                    .filter(|w| w.contains("actor 'DR' is evicted"))
+                    .count(),
+                1,
+                "{context}: {warnings:?}"
+            );
+            steps_without_rejections(&mut dwelling, &context);
+        }
+    }
+}
+
+/// An actor with several targets is evicted when it loses any one of
+/// them, and an end-use actor stays while another unit still serves its
+/// end use's setpoint.
+#[test]
+fn an_actor_is_evicted_only_when_a_target_loses_its_last_unit() {
+    let mut dwelling = bestest_600();
+    let unit = ideal_unit(&dwelling);
+    dwelling
+        .add_equipment(setpoint_probe(
+            "Backup Heat",
+            Some(ThermostatAxes::One(ThermostatAxis::Heating)),
+        ))
+        .expect("add a second heating unit");
+    let mut end_use = DrCompliance::new("End Use DR")
+        .with_compliance_model(AlwaysComply)
+        .with_hvac_target(DispatchTarget::ByEndUse(EndUse::HVAC_HEATING))
+        .with_hvac_action(DrAction::setpoint_delta(PRECONDITION_DELTA_C));
+    end_use.set_dr_level(DRLevel::Moderate);
+    let mut two_targets = DrCompliance::new("Two Target DR")
+        .with_compliance_model(AlwaysComply)
+        .with_hvac_target(DispatchTarget::ByName(unit.as_str().into()))
+        .with_hvac_action(DrAction::precool(PRECONDITION_DELTA_C))
+        .with_load_target(
+            DispatchTarget::ByName("Backup Heat".into()),
+            DrAction::setpoint_delta(PRECONDITION_DELTA_C),
+        );
+    two_targets.set_dr_level(DRLevel::Moderate);
+    dwelling
+        .add_actor(Box::new(end_use))
+        .expect("register the end-use actor");
+    dwelling
+        .add_actor(Box::new(two_targets))
+        .expect("register the two-target actor");
+
+    dwelling.remove_equipment(&unit).expect("remove the unit");
+
+    assert_eq!(dwelling.actor_count(), 1);
+    assert_eq!(dwelling.health().evicted_actors, 1);
+    let warnings = dwelling.take_warnings();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("actor 'Two Target DR' is evicted")),
+        "{warnings:?}"
+    );
+    steps_without_rejections(&mut dwelling, "the end-use actor heats the backup unit");
 }
 
 /// Massachusetts gas-furnace home at a constant 70/76 °F in January: the

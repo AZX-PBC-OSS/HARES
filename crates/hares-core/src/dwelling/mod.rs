@@ -1567,6 +1567,45 @@ fn addressed_by_end_use(eq: &dyn Equipment, end_use: &EndUse, reach: EndUseReach
                 .is_some_and(|(axis, axes)| axes.serves(axis)))
 }
 
+/// Whether a change of the equipment from `before` to `after` takes away
+/// a target's equipment: every unit it addresses, or every unit it
+/// addresses that declares the capabilities it requires. An end-use
+/// target takes its widest reach: a unit serving both setpoints serves
+/// either end use.
+fn target_lost(
+    target: &crate::ActorTarget,
+    before: &[&dyn Equipment],
+    after: &[&dyn Equipment],
+) -> bool {
+    let reached = |equipment: &[&dyn Equipment], with_capabilities: bool| {
+        equipment.iter().any(|eq| {
+            let addressed = match &target.target {
+                DispatchTarget::ByName(name) => eq.descriptor().name.as_str() == &**name,
+                DispatchTarget::ByEndUse(end_use) => {
+                    addressed_by_end_use(*eq, end_use, EndUseReach::ThermostatAxis)
+                }
+            };
+            addressed
+                && (!with_capabilities
+                    || eq
+                        .descriptor()
+                        .control_capabilities
+                        .contains(target.required))
+        })
+    };
+    [false, true].into_iter().any(|with_capabilities| {
+        reached(before, with_capabilities) && !reached(after, with_capabilities)
+    })
+}
+
+/// A target as a warning names it.
+fn describe_target(target: &DispatchTarget) -> String {
+    match target {
+        DispatchTarget::ByName(name) => format!("'{name}'"),
+        DispatchTarget::ByEndUse(end_use) => format!("end use '{}'", end_use.as_str()),
+    }
+}
+
 /// What actors read about each equipment when they check a roster change
 /// and when their bindings resolve.
 fn actor_equipment<'a>(equipment: &[&'a dyn Equipment]) -> Vec<crate::ActorEquipment<'a>> {
@@ -15248,16 +15287,24 @@ master_seed = 0
         }
     }
 
+    /// A target by `name` that requires no capability.
+    fn bound_to(name: &str) -> [crate::ActorTarget; 1] {
+        [crate::ActorTarget {
+            target: DispatchTarget::ByName(Arc::from(name)),
+            required: ControlCapabilities::empty(),
+        }]
+    }
+
     struct TargetingStubActor {
         name: String,
-        target: String,
+        target: [crate::ActorTarget; 1],
     }
     impl crate::Actor for TargetingStubActor {
         fn name(&self) -> &str {
             &self.name
         }
-        fn dispatch_target_name(&self) -> Option<&str> {
-            Some(&self.target)
+        fn dispatch_targets(&self) -> &[crate::ActorTarget] {
+            &self.target
         }
         fn decide(
             &mut self,
@@ -15311,7 +15358,7 @@ master_seed = 0
         dwelling
             .add_actor(Box::new(TargetingStubActor {
                 name: "Scheduler".to_string(),
-                target: "Battery1".to_string(),
+                target: bound_to("Battery1"),
             }))
             .expect("add a user actor targeting the battery");
 
@@ -16583,6 +16630,7 @@ master_seed = 42
     struct Undeclared {
         from_pv: bool,
         to_other: bool,
+        target: [crate::ActorTarget; 1],
     }
 
     impl Undeclared {
@@ -16606,8 +16654,8 @@ master_seed = 42
         fn name(&self) -> &str {
             "Undeclared"
         }
-        fn dispatch_target_name(&self) -> Option<&str> {
-            Some("Target")
+        fn dispatch_targets(&self) -> &[crate::ActorTarget] {
+            &self.target
         }
         fn decide(
             &mut self,
@@ -16651,6 +16699,7 @@ master_seed = 42
         let err = step_with_undeclared(Undeclared {
             from_pv: true,
             to_other: false,
+            target: bound_to("Target"),
         })
         .expect_err("an undeclared signal fails the step");
         assert!(err.to_string().contains("Undeclared"), "got: {err}");
@@ -16663,6 +16712,7 @@ master_seed = 42
         step_with_undeclared(Undeclared {
             from_pv: false,
             to_other: true,
+            target: bound_to("Target"),
         })
         .expect("a signal to another equipment is not held to the declaration");
     }
@@ -16673,13 +16723,13 @@ master_seed = 42
     /// sends.
     #[test]
     fn a_bound_actor_sending_an_undeclared_signal_fails_the_step() {
-        struct Undeclared;
+        struct Undeclared([crate::ActorTarget; 1]);
         impl crate::Actor for Undeclared {
             fn name(&self) -> &str {
                 "Undeclared"
             }
-            fn dispatch_target_name(&self) -> Option<&str> {
-                Some("Target")
+            fn dispatch_targets(&self) -> &[crate::ActorTarget] {
+                &self.0
             }
             fn decide(
                 &mut self,
@@ -16707,7 +16757,7 @@ master_seed = 42
             )))
             .expect("add the target");
         dwelling
-            .add_actor(Box::new(Undeclared))
+            .add_actor(Box::new(Undeclared(bound_to("Target"))))
             .expect("add the actor");
 
         let err = dwelling

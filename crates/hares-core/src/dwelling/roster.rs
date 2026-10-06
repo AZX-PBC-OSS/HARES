@@ -34,9 +34,9 @@ use super::{
     actor_equipment, build_actor_column_map, build_actors_from_seeds,
     build_end_use_aggregate_indices, build_equipment_column_map, build_hvac_thermal_consistency,
     build_zone_column_caches, compute_equipment_dispatch_targets,
-    compute_equipment_execution_order, enrich_schema_with_telemetry_units,
-    equipment_descriptor_specs, extend_schema_with_actor_columns, validate_equipment_stage,
-    validate_equipment_zones, zone_display_name,
+    compute_equipment_execution_order, describe_target, enrich_schema_with_telemetry_units,
+    equipment_descriptor_specs, extend_schema_with_actor_columns, target_lost,
+    validate_equipment_stage, validate_equipment_zones, zone_display_name,
 };
 
 /// The values the per-step path reads that derive from the equipment and
@@ -135,6 +135,9 @@ struct RosterPlan {
 /// order; caller-supplied actors are appended as user actors.
 struct ActorRosterChange {
     keep: Vec<bool>,
+    /// The warning for each live actor the change evicts because it leaves
+    /// one of the actor's targets with no equipment to act on.
+    orphaned: Vec<String>,
     insert_at: usize,
     built_in: Vec<Box<dyn Actor>>,
     supplied: Vec<Box<dyn Actor>>,
@@ -282,11 +285,51 @@ impl Dwelling {
             .count();
         ActorRosterChange {
             keep,
+            orphaned: Vec::new(),
             insert_at,
             built_in: Vec::new(),
             supplied: Vec::new(),
             next_ev_driver_stream: self.next_ev_driver_stream,
         }
+    }
+
+    /// An actor roster change for the equipment becoming `after`: a live
+    /// actor stays when `keep` selects it, unless the change takes away
+    /// the equipment of one of its targets ([`Actor::dispatch_targets`]);
+    /// such an actor is evicted with a warning.
+    fn equipment_change_actors(
+        &self,
+        after: &[&dyn Equipment],
+        keep: impl Fn(&dyn Actor) -> bool,
+    ) -> ActorRosterChange {
+        let before = self.equipment_refs();
+        let mut orphaned = Vec::new();
+        let keep_mask = self
+            .actors
+            .iter()
+            .map(|actor| {
+                let lost = actor
+                    .dispatch_targets()
+                    .iter()
+                    .find(|t| target_lost(t, &before, after));
+                match lost {
+                    Some(lost) => {
+                        orphaned.push(format!(
+                            "actor '{}' is evicted: the roster change leaves its target {} \
+                             with no equipment that accepts its signals ({:?})",
+                            actor.name(),
+                            describe_target(&lost.target),
+                            lost.required
+                        ));
+                        false
+                    }
+                    None => keep(actor.as_ref()),
+                }
+            })
+            .collect();
+        let mut change = self.actor_change(keep_mask);
+        change.orphaned = orphaned;
+        change
     }
 
     /// Adds to `change` the built-in actors the actor seeds of `equipment`
@@ -344,28 +387,12 @@ impl Dwelling {
         if !evicted.is_empty() {
             tracing::info!(actors = ?evicted, built_in = ?built_in_names, "actors evicted");
         }
-        // A user's actor that leaves with the equipment it targets (a
-        // thermostat override, a user-added EV driver) is reported: its
-        // control no longer applies. Built-in actors are rebuilt from the
-        // equipment and need no notice.
-        let user_evictions: Vec<String> = self
-            .actors
-            .iter()
-            .zip(&change.keep)
-            .filter(|(actor, keep)| {
-                !**keep && !self.auto_registered_actor_names.contains(actor.name())
-            })
-            .map(|(actor, _)| match actor.dispatch_target_name() {
-                Some(target) => format!(
-                    "actor '{}' was removed with the equipment it targets, '{target}'; its \
-                     control no longer applies",
-                    actor.name()
-                ),
-                None => format!("actor '{}' was removed", actor.name()),
-            })
-            .collect();
-        for message in user_evictions {
-            self.warnings.push_warning(Warning::new("actors", message));
+        // An actor the change leaves without a target is evicted with a
+        // warning naming it and the target it lost; the eviction is counted
+        // in the run's health.
+        for warning in change.orphaned {
+            self.health.evicted_actors += 1;
+            self.warnings.push(warning);
         }
         let live = std::mem::take(&mut self.actors);
         self.actors = ActorRosterChange::arrange(
@@ -750,20 +777,15 @@ impl Dwelling {
         })
     }
 
-    /// Removes all equipment. Actors bound to any equipment are evicted
-    /// with it (see [`Self::remove_equipment`]).
+    /// Removes all equipment. Every actor with a target the equipment
+    /// served is evicted with it (see [`Self::remove_equipment`]).
     ///
     /// # Errors
     ///
     /// The roster plan's error; on `Err` the equipment and actor rosters
     /// are exactly as before the call.
     pub fn clear_equipment(&mut self) -> Result<()> {
-        let change = self.actor_change(
-            self.actors
-                .iter()
-                .map(|a| a.dispatch_target_name().is_none())
-                .collect(),
-        );
+        let change = self.equipment_change_actors(&[], |_| true);
         let plan = self.plan_roster_caches(&[], &change.prospective(&self.actors))?;
         self.equipment.clear();
         self.commit_actor_change(change);
@@ -773,16 +795,19 @@ impl Dwelling {
 
     /// Removes equipment by name and returns it.
     ///
-    /// Actors targeting the removed equipment are evicted: a controller
-    /// without its equipment is an orphan, and its survival would block
-    /// re-adding a same-named replacement (see [`Self::add_actor`]).
+    /// Every actor the removal leaves with a target no remaining equipment
+    /// serves ([`Actor::dispatch_targets`]: a unit it names, or the last
+    /// unit of an end use it addresses) is evicted, with a dwelling warning
+    /// counted in [`crate::RunHealth::evicted_actors`]: a controller without
+    /// its equipment is an orphan whose every signal would be rejected, and
+    /// its survival would block re-adding a same-named replacement (see
+    /// [`Self::add_actor`]). A removal is never refused for an actor's
+    /// sake.
     ///
     /// # Errors
     ///
     /// `HaresError::Dwelling` when no equipment has the name; the roster
-    /// plan's error otherwise, which includes a surviving actor's refusal
-    /// to lose its target ([`Actor::validate_equipment`]: a pre-conditioning
-    /// event naming it). On `Err` the equipment and actor rosters are
+    /// plan's error otherwise. On `Err` the equipment and actor rosters are
     /// exactly as before the call.
     pub fn remove_equipment(&mut self, name: &str) -> Result<Box<dyn Equipment>> {
         let pos = self
@@ -790,16 +815,12 @@ impl Dwelling {
             .iter()
             .position(|e| e.descriptor().name == name)
             .ok_or_else(|| HaresError::Dwelling(format!("equipment '{}' not found", name)))?;
-        let change = self.actor_change(
-            self.actors
-                .iter()
-                .map(|a| a.dispatch_target_name() != Some(name))
-                .collect(),
-        );
-        let plan = {
+        let (change, plan) = {
             let mut equipment = self.equipment_refs();
             equipment.remove(pos);
-            self.plan_roster_caches(&equipment, &change.prospective(&self.actors))?
+            let change = self.equipment_change_actors(&equipment, |_| true);
+            let plan = self.plan_roster_caches(&equipment, &change.prospective(&self.actors))?;
+            (change, plan)
         };
         let removed = self.equipment.remove(pos);
         self.commit_actor_change(change);
@@ -808,8 +829,8 @@ impl Dwelling {
     }
 
     /// Removes all equipment whose end use is one of `end_uses`, returning
-    /// how many were removed. Actors targeting removed equipment are
-    /// evicted (see [`Self::remove_equipment`]).
+    /// how many were removed. Actors left without a target are evicted
+    /// (see [`Self::remove_equipment`]).
     ///
     /// # Errors
     ///
@@ -825,29 +846,16 @@ impl Dwelling {
         if removed_count == 0 {
             return Ok(0);
         }
-        let removed_names: Vec<&str> = self
-            .equipment
-            .iter()
-            .zip(&removed)
-            .filter_map(|(e, &r)| r.then_some(e.descriptor().name.as_str()))
-            .collect();
-        let change = self.actor_change(
-            self.actors
-                .iter()
-                .map(|a| {
-                    a.dispatch_target_name()
-                        .is_none_or(|target| !removed_names.contains(&target))
-                })
-                .collect(),
-        );
-        let plan = {
+        let (change, plan) = {
             let equipment: Vec<&dyn Equipment> = self
                 .equipment
                 .iter()
                 .zip(&removed)
                 .filter_map(|(e, &r)| (!r).then_some(e.as_ref()))
                 .collect();
-            self.plan_roster_caches(&equipment, &change.prospective(&self.actors))?
+            let change = self.equipment_change_actors(&equipment, |_| true);
+            let plan = self.plan_roster_caches(&equipment, &change.prospective(&self.actors))?;
+            (change, plan)
         };
         self.equipment
             .retain(|e| !end_uses.contains(&e.descriptor().end_use));
@@ -870,15 +878,18 @@ impl Dwelling {
     /// Actors follow the name while the replacement accepts their signals:
     /// when the replacement keeps the replaced name, the actors targeting
     /// it stay and re-bind to the replacement unless the replacement lacks
-    /// a control capability they require
-    /// ([`Actor::required_control_capabilities`]), in which case they are
-    /// evicted. A built-in actor also stays only when the replacement's
+    /// a control capability they require ([`Actor::dispatch_targets`]), in
+    /// which case they are evicted with a warning, as on removal. An actor
+    /// that stays is checked against the replacement
+    /// ([`Actor::validate_equipment`]) and refuses it when it cannot act on
+    /// it; removing the unit and adding the replacement instead evicts that
+    /// actor. A built-in actor also stays only when the replacement's
     /// actor seed equals the replaced equipment's, since the seed carries
     /// the parameters the actor was built with (an EV's capacity, a
     /// battery's mode); otherwise it is evicted and the replacement's seed
     /// builds a fresh one, as if the equipment had been removed and the
     /// replacement added. When the replacement takes another name, every
-    /// actor targeting the old name is evicted, as on removal. The
+    /// actor left without a target is evicted, as on removal. The
     /// replacement's actor seed builds its built-in actor unless an actor
     /// already holds that actor's name.
     ///
@@ -904,30 +915,23 @@ impl Dwelling {
                 Ok((pos, next_equipment_id))
             })
             .and_then(|(pos, next_equipment_id)| {
-                let replacement = new_equipment.descriptor();
-                let renamed = replacement.name != name;
-                let accepted = replacement.control_capabilities;
                 let seed_unchanged = self.equipment[pos].actor_seed() == new_equipment.actor_seed();
-                let mut change = self.actor_change(
-                    self.actors
-                        .iter()
-                        .map(|a| {
-                            a.dispatch_target_name() != Some(name)
-                                || (!renamed
-                                    && accepted.contains(a.required_control_capabilities())
-                                    && (seed_unchanged
-                                        || !self.auto_registered_actor_names.contains(a.name())))
-                        })
-                        .collect(),
-                );
+                let mut equipment = self.equipment_refs();
+                equipment[pos] = new_equipment.as_ref();
+                let mut change = self.equipment_change_actors(&equipment, |a| {
+                    seed_unchanged
+                        || !self.auto_registered_actor_names.contains(a.name())
+                        || !a
+                            .dispatch_targets()
+                            .iter()
+                            .any(|t| matches!(&t.target, DispatchTarget::ByName(n) if **n == *name))
+                });
                 self.seed_built_in_actors(
                     &mut change,
                     std::slice::from_ref(&new_equipment),
                     self.tariff_evaluator.as_ref(),
                     &[],
                 )?;
-                let mut equipment = self.equipment_refs();
-                equipment[pos] = new_equipment.as_ref();
                 let plan =
                     self.plan_roster_caches(&equipment, &change.prospective(&self.actors))?;
                 Ok((pos, next_equipment_id, change, plan))

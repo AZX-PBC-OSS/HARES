@@ -29,6 +29,9 @@ pub struct RunHealth {
     /// the run: an out-of-bounds curve index was evaluated and clamped to
     /// the last same-type curve.
     pub curve_index_clamps: u64,
+    /// Actors evicted because a roster change left one of their targets
+    /// with no equipment to act on; each is also a dwelling warning.
+    pub evicted_actors: u64,
     /// Outcome of the warm-up convergence loop (Disabled until warm-up runs).
     pub warmup: WarmupOutcome,
 }
@@ -40,6 +43,7 @@ impl Default for RunHealth {
             rejected_control_signals: 0,
             clamped_actions: 0,
             curve_index_clamps: 0,
+            evicted_actors: 0,
             warmup: WarmupOutcome::Disabled,
         }
     }
@@ -169,6 +173,7 @@ mod tests {
         assert_eq!(health.rejected_control_signals, 0);
         assert_eq!(health.clamped_actions, 0);
         assert_eq!(health.curve_index_clamps, 0);
+        assert_eq!(health.evicted_actors, 0);
         assert_eq!(health.warmup, WarmupOutcome::Disabled);
     }
 
@@ -179,6 +184,7 @@ mod tests {
             rejected_control_signals: 2,
             clamped_actions: 3,
             curve_index_clamps: 4,
+            evicted_actors: 5,
             warmup: WarmupOutcome::Ran {
                 days_run: 3,
                 converged: false,

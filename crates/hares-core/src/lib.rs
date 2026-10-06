@@ -24,7 +24,7 @@ pub mod telemetry;
 #[path = "../../../tests/support/temp_file.rs"]
 mod temp_file;
 
-pub use actor::{Actor, ActorEquipment, ActorInterest};
+pub use actor::{Actor, ActorEquipment, ActorInterest, ActorTarget};
 pub use actor_registry::{ActorConfig, ActorFactory, ActorRegistry};
 pub use checkpoint::DwellingCheckpoint;
 pub use clock::SimClock;

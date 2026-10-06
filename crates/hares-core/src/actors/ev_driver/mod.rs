@@ -66,7 +66,7 @@ use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-use crate::Actor;
+use crate::{Actor, ActorTarget};
 
 use self::composer::ChargingComposer;
 use self::departure::DepartureDeadline;
@@ -301,7 +301,7 @@ pub struct EvDriverParams {
 /// to the target EV equipment.
 pub struct EvDriverActor {
     name: Arc<str>,
-    dispatch_target: DispatchTarget,
+    vehicle: ActorTarget,
     equipment_id: Option<EquipmentId>,
 
     // Behavioral config
@@ -429,7 +429,15 @@ impl EvDriverActor {
 
         Self {
             name: Arc::from(name),
-            dispatch_target: DispatchTarget::ByName(target.into()),
+            vehicle: ActorTarget {
+                target: DispatchTarget::ByName(target.into()),
+                required: ControlCapabilities::POWER_SETPOINT
+                    | ControlCapabilities::SOC_TARGET
+                    | ControlCapabilities::EV_PLUG_IN
+                    | ControlCapabilities::EV_DRIVE
+                    | ControlCapabilities::EV_AWAY_CHARGE
+                    | ControlCapabilities::EV_SET_READY_BY,
+            },
             equipment_id: None,
             strategy,
             plug_in_policy,
@@ -605,7 +613,7 @@ impl EvDriverActor {
 
     /// Returns the target equipment name.
     pub fn target_name(&self) -> &str {
-        match &self.dispatch_target {
+        match &self.vehicle.target {
             DispatchTarget::ByName(n) => n,
             DispatchTarget::ByEndUse(_) => unreachable!("EvDriverActor always targets by name"),
         }
@@ -1040,7 +1048,7 @@ impl EvDriverActor {
             }
         }
         Some(DispatchRequest {
-            target: self.dispatch_target.clone(),
+            target: self.vehicle.target.clone(),
             signal: ControlSignal::SOCTarget {
                 target_soc: anxiety_soc.clamp(0.0, 1.0),
                 min_soc: None,
@@ -1229,17 +1237,8 @@ impl Actor for EvDriverActor {
         Some(&self.telemetry)
     }
 
-    fn dispatch_target_name(&self) -> Option<&str> {
-        Some(self.target_name())
-    }
-
-    fn required_control_capabilities(&self) -> ControlCapabilities {
-        ControlCapabilities::POWER_SETPOINT
-            | ControlCapabilities::SOC_TARGET
-            | ControlCapabilities::EV_PLUG_IN
-            | ControlCapabilities::EV_DRIVE
-            | ControlCapabilities::EV_AWAY_CHARGE
-            | ControlCapabilities::EV_SET_READY_BY
+    fn dispatch_targets(&self) -> &[ActorTarget] {
+        std::slice::from_ref(&self.vehicle)
     }
 
     fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
@@ -1352,7 +1351,7 @@ impl Actor for EvDriverActor {
 
                     // Departure: disconnect
                     out.push(DispatchRequest {
-                        target: self.dispatch_target.clone(),
+                        target: self.vehicle.target.clone(),
                         signal: ControlSignal::EvPlugIn {
                             state: EvConnectionState::Disconnected,
                         },
@@ -1405,7 +1404,7 @@ impl Actor for EvDriverActor {
                 let kwh_this_step = remaining_kwh / steps_left as f64;
 
                 out.push(DispatchRequest {
-                    target: self.dispatch_target.clone(),
+                    target: self.vehicle.target.clone(),
                     signal: ControlSignal::EvDrive { kwh: kwh_this_step },
                     priority: PriorityTier::Schedule,
                 });
@@ -1453,7 +1452,7 @@ impl Actor for EvDriverActor {
                 if self.needs_away_charge {
                     self.needs_away_charge = false;
                     out.push(DispatchRequest {
-                        target: self.dispatch_target.clone(),
+                        target: self.vehicle.target.clone(),
                         signal: ControlSignal::EvPlugIn {
                             state: EvConnectionState::AwayPluggedIn,
                         },
@@ -1465,7 +1464,7 @@ impl Actor for EvDriverActor {
                     // cleared again on the away disconnect, so it never
                     // leaks into the next home session.
                     out.push(DispatchRequest {
-                        target: self.dispatch_target.clone(),
+                        target: self.vehicle.target.clone(),
                         signal: ControlSignal::SOCTarget {
                             target_soc: self.usual_target_soc(),
                             min_soc: None,
@@ -1474,7 +1473,7 @@ impl Actor for EvDriverActor {
                         priority: PriorityTier::Schedule,
                     });
                     out.push(DispatchRequest {
-                        target: self.dispatch_target.clone(),
+                        target: self.vehicle.target.clone(),
                         signal: ControlSignal::EvAwayCharge {
                             power_kw: self.away_charge_power_kw,
                         },
@@ -1487,7 +1486,7 @@ impl Actor for EvDriverActor {
                     // Disconnected before HomePluggedIn per EV transition rules)
                     if self.away_charge_fraction > 0.0 {
                         out.push(DispatchRequest {
-                            target: self.dispatch_target.clone(),
+                            target: self.vehicle.target.clone(),
                             signal: ControlSignal::EvPlugIn {
                                 state: EvConnectionState::Disconnected,
                             },
@@ -1498,7 +1497,7 @@ impl Actor for EvDriverActor {
                     let doing_plugin = self.should_plug_in();
                     if doing_plugin {
                         out.push(DispatchRequest {
-                            target: self.dispatch_target.clone(),
+                            target: self.vehicle.target.clone(),
                             signal: ControlSignal::EvPlugIn {
                                 state: EvConnectionState::HomePluggedIn,
                             },

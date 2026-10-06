@@ -29,6 +29,15 @@ pub struct ActorEquipment<'a> {
     pub thermostat_axes: Option<ThermostatAxes>,
 }
 
+/// One target an actor dispatches to, with the control capabilities the
+/// equipment it addresses must declare to accept every signal the actor
+/// sends it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActorTarget {
+    pub target: DispatchTarget,
+    pub required: ControlCapabilities,
+}
+
 /// What state changes an actor subscribes to. Empty = polled every step.
 ///
 /// Dwelling can use these to skip actors whose interests haven't fired,
@@ -52,11 +61,10 @@ pub enum ActorInterest {
 /// Implementations must be `Send + Sync` for thread-safe simulation.
 /// The `decide()` method receives a pre-allocated output buffer to avoid
 /// per-step allocations in the hot loop.
-/// Holds the requests an actor bound to one equipment just emitted to its
-/// declaration: every request addressed to the bound target must require
-/// only capabilities in [`Actor::required_control_capabilities`], the set
-/// a replacement of that target is checked against. Requests to other
-/// equipment, and every request of an unbound actor, are not its to
+/// Holds the requests an actor just emitted to its declaration: every
+/// request addressed to one of its [`Actor::dispatch_targets`] must require
+/// only capabilities that target declares, the set every roster change
+/// checks the target against. Requests to other targets are not its to
 /// declare.
 ///
 /// The dwelling calls this after every decision and fails the step on
@@ -70,52 +78,49 @@ pub(crate) fn check_declared_signals(
     actor: &dyn Actor,
     requests: &[DispatchRequest],
 ) -> Result<(), HaresError> {
-    let Some(target) = actor.dispatch_target_name() else {
+    let targets = actor.dispatch_targets();
+    if targets.is_empty() {
         return Ok(());
-    };
-    let declared = actor.required_control_capabilities();
-    let undeclared = requests
-        .iter()
-        .filter(
-            |request| matches!(&request.target, DispatchTarget::ByName(name) if **name == *target),
-        )
-        .map(|request| request.signal.required_capability())
-        .find(|required| !declared.contains(*required));
-    match undeclared {
-        None => Ok(()),
-        Some(required) => Err(HaresError::Control(format!(
-            "actor '{}' sent '{target}' a signal requiring {required:?}, which its declared \
-             control capabilities {declared:?} omit",
-            actor.name()
-        ))),
     }
+    for request in requests {
+        let required = request.signal.required_capability();
+        let mut declared = targets
+            .iter()
+            .filter(|t| t.target == request.target)
+            .peekable();
+        if declared.peek().is_some() && !declared.any(|t| t.required.contains(required)) {
+            return Err(HaresError::Control(format!(
+                "actor '{}' sent {:?} a signal requiring {required:?}, which its declared \
+                 control capabilities omit",
+                actor.name(),
+                request.target,
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub trait Actor: Send + Sync + 'static {
     /// Returns the actor's name for logging and diagnostics.
     fn name(&self) -> &str;
 
-    /// The equipment name this actor dispatches to, when the actor is bound
-    /// to exactly one equipment instance. `None` for actors that dispatch
-    /// broadly, by end-use, or not to equipment at all.
+    /// Every target this actor dispatches to, each with the control
+    /// capabilities it requires.
     ///
-    /// The dwelling uses this to evict the actor when its target equipment
-    /// is removed — a controller without its equipment is an orphan whose
-    /// dispatches degrade to no-ops, and whose survival blocks re-adding a
-    /// same-named replacement.
-    fn dispatch_target_name(&self) -> Option<&str> {
-        None
-    }
-
-    /// The control capabilities the equipment named by
-    /// [`Self::dispatch_target_name`] must declare to accept every signal
-    /// this actor sends it. The dwelling evicts the actor when a
-    /// replacement under that name lacks one, and fails the step when a
-    /// bound actor sends a signal whose capability this set omits, so the
-    /// declaration always covers what the actor sends. Default: none, for
-    /// actors with no bound target.
-    fn required_control_capabilities(&self) -> ControlCapabilities {
-        ControlCapabilities::empty()
+    /// A roster change (equipment removed, cleared or replaced) that takes
+    /// away every unit a target addresses (by name, or by end use including
+    /// a unit whose thermostat serves that end use's setpoint), or every
+    /// such unit that declares those capabilities, evicts the actor and
+    /// records a dwelling warning counted in
+    /// [`crate::RunHealth::evicted_actors`]: an actor without its
+    /// equipment is an orphan whose every signal would be rejected, and
+    /// whose survival would block re-adding a same-named replacement. The
+    /// dwelling also fails the step when the actor sends a target a signal
+    /// whose capability its declaration omits, so the declaration always
+    /// covers what the actor sends. Default: none, for actors that dispatch
+    /// to no fixed equipment.
+    fn dispatch_targets(&self) -> &[ActorTarget] {
+        &[]
     }
 
     /// Re-resolve this actor's equipment binding against the dwelling's
@@ -140,9 +145,12 @@ pub trait Actor: Send + Sync + 'static {
     fn resolve_equipment_id(&mut self, _equipment_id_by_name: &HashMap<String, EquipmentId>) {}
 
     /// Checks the actor's targets against the prospective equipment of
-    /// every roster change (an actor registered or supplied, equipment
-    /// added, removed or replaced), so the dwelling refuses a change that
-    /// would leave the actor a target it cannot act on.
+    /// every roster change it survives (an actor registered or supplied,
+    /// equipment added, removed or replaced), so the dwelling refuses a
+    /// change that would leave the actor a target it cannot act on. A
+    /// change that takes a target's equipment away evicts the actor before
+    /// this check (see [`Self::dispatch_targets`]), so a removal is never
+    /// refused here.
     ///
     /// Default: accepts. Actors that do not depend on what their targets
     /// are have nothing to check.

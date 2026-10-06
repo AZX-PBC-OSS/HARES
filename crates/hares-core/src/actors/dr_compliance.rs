@@ -47,11 +47,11 @@ use serde::{Deserialize, Serialize};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
-    ControlSignal, DRLevel, EnvironmentState, HaresError, OperatingMode, Telemetry, ThermostatAxes,
-    ThermostatAxis,
+    ControlCapabilities, ControlSignal, DRLevel, EnvironmentState, HaresError, OperatingMode,
+    Telemetry, ThermostatAxes, ThermostatAxis,
 };
 
-use crate::{Actor, ActorEquipment};
+use crate::{Actor, ActorEquipment, ActorTarget};
 
 use super::constants::DEFAULT_FREEZE_THRESHOLD_C;
 
@@ -213,13 +213,15 @@ pub enum DrAction {
     /// serving both included, whatever mode the unit is in.
     ///
     /// A dwelling refuses, with [`HaresError::PreconditioningAxis`] and
-    /// itself untouched, every roster change that would leave an event it
-    /// cannot serve: an event naming no axis for a unit serving both, a
-    /// direction the unit does not serve, a target without a thermostat, a
-    /// named target not in the dwelling (the actor is registered after its
-    /// equipment), and the removal or a replacement of a named target that
-    /// leaves it so. An actor no dwelling holds sends nothing for such a
-    /// target and counts it in its `preconditioning_unserved` telemetry.
+    /// itself untouched, registering or supplying an actor with an event
+    /// it cannot serve: an event naming no axis for a unit serving both, a
+    /// direction the unit does not serve, a target without a thermostat, or
+    /// a named target not in the dwelling (the actor is registered after
+    /// its equipment). It also refuses a replacement under the target's
+    /// name that leaves it so. Removing the target evicts the actor instead
+    /// (see [`Actor::dispatch_targets`]). An actor no dwelling holds sends
+    /// nothing for such a target and counts it in its
+    /// `preconditioning_unserved` telemetry.
     ///
     /// A negative delta relaxes: it lowers heating and raises cooling, which
     /// widens the gap for any unit, so it takes no direction (one is
@@ -314,6 +316,23 @@ impl DrAction {
         )
     }
 
+    /// The capabilities a target must declare to accept every signal this
+    /// action sends it: the action's own and, for a setpoint action, the
+    /// release that ends it.
+    fn required_capabilities(&self) -> ControlCapabilities {
+        match self {
+            Self::LoadCurtailment { .. } => ControlCapabilities::LOAD_FRACTION,
+            Self::SetpointAdjust { .. } => {
+                ControlCapabilities::THERMAL_SETPOINT_DELTA | ControlCapabilities::THERMAL_SETPOINT
+            }
+            Self::AbsoluteSetpoint { .. } => ControlCapabilities::THERMAL_SETPOINT,
+            Self::TurnOff => ControlCapabilities::MODE_OVERRIDE,
+            Self::PowerLimit { .. } => ControlCapabilities::POWER_LIMIT,
+            Self::DemandResponse { .. } => ControlCapabilities::DEMAND_RESPONSE,
+            Self::None => ControlCapabilities::empty(),
+        }
+    }
+
     /// Creates a turn-off action.
     pub fn off() -> Self {
         Self::TurnOff
@@ -366,6 +385,9 @@ pub struct DrCompliance {
     hvac_action: DrAction,
     /// Additional equipment targets for load curtailment.
     load_targets: Vec<(DispatchTarget, DrAction)>,
+    /// Every target with the capabilities its action sends, the HVAC
+    /// target first.
+    declared_targets: Vec<ActorTarget>,
     /// Current DR level. `Normal` means no DR event is active.
     current_dr_level: DRLevel,
     /// Freeze-risk threshold in °C. When any zone temperature is below this
@@ -430,6 +452,7 @@ impl DrCompliance {
             hvac_target: None,
             hvac_action: DrAction::None,
             load_targets: Vec::new(),
+            declared_targets: Vec::new(),
             current_dr_level: DRLevel::Normal,
             freeze_risk_threshold_c: DEFAULT_FREEZE_THRESHOLD_C,
             telemetry,
@@ -458,6 +481,7 @@ impl DrCompliance {
         self.telemetry
             .set("targets_configured", self.load_targets.len() as f64 + 1.0);
         self.resolve_axes(&[]);
+        self.declare_targets();
         self
     }
 
@@ -465,6 +489,7 @@ impl DrCompliance {
     pub fn with_hvac_action(mut self, action: DrAction) -> Self {
         self.hvac_action = action;
         self.resolve_axes(&[]);
+        self.declare_targets();
         self
     }
 
@@ -476,7 +501,35 @@ impl DrCompliance {
             self.hvac_target.is_some() as u8 as f64 + self.load_targets.len() as f64,
         );
         self.resolve_axes(&[]);
+        self.declare_targets();
         self
+    }
+
+    /// Rebuilds [`Actor::dispatch_targets`] from the configured targets. A
+    /// turn-off the freeze guard can downgrade (on the HVAC target, or on
+    /// an HVAC end-use load target) also sends a heating setpoint.
+    fn declare_targets(&mut self) {
+        let hvac = self
+            .hvac_target
+            .iter()
+            .map(|target| (target, &self.hvac_action, true));
+        let loads = self.load_targets.iter().map(|(target, action)| {
+            let hvac_end_use = matches!(target, DispatchTarget::ByEndUse(eu) if eu.is_hvac());
+            (target, action, hvac_end_use)
+        });
+        self.declared_targets = hvac
+            .chain(loads)
+            .map(|(target, action, freeze_guarded)| {
+                let mut required = action.required_capabilities();
+                if freeze_guarded && matches!(action, DrAction::TurnOff) {
+                    required |= ControlCapabilities::THERMAL_SETPOINT;
+                }
+                ActorTarget {
+                    target: target.clone(),
+                    required,
+                }
+            })
+            .collect();
     }
 
     /// Each configured target with its action, the HVAC target first.
@@ -752,6 +805,10 @@ impl Actor for DrCompliance {
 
     fn telemetry(&self) -> Option<&Telemetry> {
         Some(&self.telemetry)
+    }
+
+    fn dispatch_targets(&self) -> &[ActorTarget] {
+        &self.declared_targets
     }
 
     fn validate_equipment(&self, equipment: &[ActorEquipment<'_>]) -> Result<(), HaresError> {
@@ -1094,7 +1151,7 @@ fn preconditioning_axis(
             .ok_or_else(|| {
                 format!(
                     "no equipment named '{name}' is in the dwelling; \
-                     the actor is registered after its equipment"
+                     register the actor after the equipment it names"
                 )
             })?
             .thermostat_axes
@@ -1107,8 +1164,11 @@ fn preconditioning_axis(
              (DrAction::preheat or DrAction::precool)"
                 .to_string(),
         ),
-        (None, ThermostatAxes::One(serves), named) => Err(format!(
-            "it serves only the {serves:?} setpoint, not the {named:?} the event names"
+        (None, ThermostatAxes::One(serves), Some(named)) => Err(format!(
+            "it serves only the {serves:?} setpoint, not the {named:?} setpoint the event names"
+        )),
+        (None, ThermostatAxes::One(serves), None) => Err(format!(
+            "it serves only the {serves:?} setpoint, which the event does not name"
         )),
     }
 }
