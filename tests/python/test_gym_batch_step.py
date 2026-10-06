@@ -16,6 +16,9 @@ def test_batch_step_info_reports_zero_warnings_on_clean_step():
     from ochre_next._hares import batch_step
 
     dwelling = make_dwelling(duration_s=600)
+    # The fixture's construction notices (base.xml gives no ShieldingofHome,
+    # which takes OS-HPXML's default) are not a step's warnings.
+    dwelling.take_warnings()
     results = batch_step(
         [dwelling],
         [[21.0]],

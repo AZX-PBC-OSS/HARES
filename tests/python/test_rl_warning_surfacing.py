@@ -42,6 +42,10 @@ _REJECTED_ACTION_CONFIG = {"Gas Furnace": ["cool_c"]}
 
 def _make_vec_env(action_config: dict[str, list[str]]) -> tuple[VecDwellingGymEnv, list]:
     dwellings = [make_dwelling(duration_s=600)]
+    # The fixture's construction notices (base.xml gives no ShieldingofHome,
+    # which takes OS-HPXML's default) are not a step's warnings.
+    for dwelling in dwellings:
+        dwelling.take_warnings()
     env = VecDwellingGymEnv(
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
@@ -128,6 +132,10 @@ def test_gym_env_clean_step_reports_zero_warnings(tmp_path: Path):
     """A clean DwellingGymEnv step surfaces warning_count == 0.0, no list."""
     env = _make_gym_env(_CLEAN_ACTION_CONFIG, tmp_path)
     env.reset(seed=42)
+    # The first step's info carries the fixture's construction notices
+    # (base.xml gives no ShieldingofHome); the next clean step has none.
+    _, _, _, _, first = env.step(np.array([21.0], dtype=np.float64))
+    assert all("ShieldingofHome" in w for w in first.get("warnings", []))
 
     _, _, _, _, info = env.step(np.array([21.0], dtype=np.float64))
 
