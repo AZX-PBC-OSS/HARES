@@ -1,11 +1,11 @@
-"""Warning-surfacing contract tests for the pure-Python RL step paths.
+"""Warning-surfacing contract tests for the RL step paths.
 
-The Rust ``batch_step`` fast path (covered in test_gym_batch_step.py) drains
+The Rust ``batch_step`` entrypoint (covered in test_gym_batch_step.py) drains
 ``Dwelling.take_warnings()`` into ``info["warning_count"]`` (float, always
 present) and ``info["warnings"]`` (list[str], only when non-zero). These tests
-pin the identical contract onto the two pure-Python paths:
-``DwellingGymEnv.step`` and the ``VecDwellingGymEnv`` fallback used when the
-Rust entrypoint is unavailable.
+pin that contract onto ``VecDwellingGymEnv.step``, which runs on the extension's
+``batch_step`` alone, and onto ``DwellingGymEnv.step``, which drives one
+dwelling from Python.
 
 ``VecDwellingGymEnv`` imports without gymnasium (numpy only), so its tests run
 everywhere. ``DwellingGymEnv`` requires gymnasium at construction time and its
@@ -36,7 +36,7 @@ _REJECTED_ACTION_CONFIG = {"Gas Furnace": ["cool_c"]}
 
 
 # ---------------------------------------------------------------------------
-# VecDwellingGymEnv — pure-Python fallback (rust_batch_step forced to None)
+# VecDwellingGymEnv -- the extension's batch_step
 # ---------------------------------------------------------------------------
 
 
@@ -56,39 +56,11 @@ def _make_vec_env(action_config: dict[str, list[str]]) -> tuple[VecDwellingGymEn
     return env, dwellings
 
 
-def test_vec_fallback_clean_step_reports_zero_warnings(monkeypatch: pytest.MonkeyPatch):
-    """A clean fallback step surfaces warning_count == 0.0 and omits the list."""
-    monkeypatch.setattr(vec_env_module, "rust_batch_step", None)
-    env, _ = _make_vec_env(_CLEAN_ACTION_CONFIG)
-
-    _, _, _, _, infos = env.step(np.full((1, 1), 21.0, dtype=np.float64))
-
-    info = infos[0]
-    assert info["warning_count"] == 0.0
-    assert "warnings" not in info
-
-
-def test_vec_fallback_surfaces_rejected_control_signal(monkeypatch: pytest.MonkeyPatch):
-    """A dispatch-time control rejection shows up in the fallback step info,
-    and the messages are drained exactly once."""
-    monkeypatch.setattr(vec_env_module, "rust_batch_step", None)
-    env, dwellings = _make_vec_env(_REJECTED_ACTION_CONFIG)
-
-    _, _, _, _, infos = env.step(np.full((1, 1), 70.0, dtype=np.float64))
-
-    info = infos[0]
-    assert info["warning_count"] >= 1.0
-    assert any("control apply failed" in w for w in info["warnings"])
-    assert any("Gas Furnace" in w for w in info["warnings"])
-    # The messages were drained into info — a subsequent poll is empty.
-    assert dwellings[0].take_warnings() == []
-
-
 def test_vec_rust_path_preserves_warning_count_key():
-    """The Rust fast path plumbs warning_count through VecDwellingGymEnv infos,
-    so downstream code sees the same contract regardless of path."""
+    """The extension's batch_step plumbs warning_count through
+    VecDwellingGymEnv infos."""
     assert vec_env_module.rust_batch_step is not None, (
-        "the extension registers batch_step; without it this test would exercise the Python fallback"
+        "the extension registers batch_step; without it the module does not import"
     )
     env, _ = _make_vec_env(_CLEAN_ACTION_CONFIG)
 
@@ -97,6 +69,39 @@ def test_vec_rust_path_preserves_warning_count_key():
     info = infos[0]
     assert info["warning_count"] == 0.0
     assert "warnings" not in info
+
+
+def test_vec_env_refuses_to_import_without_the_extension_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A missing ``batch_step`` is an import error, not a silent Python
+    fallback: an extension that does not register the entrypoint fails the
+    module's import."""
+    import importlib
+    import importlib.util
+    import sys
+    import types
+
+    from ochre_next import _hares as real_extension
+
+    stub = types.ModuleType("ochre_next._hares")
+    for name in dir(real_extension):
+        if name != "batch_step" and not name.startswith("__"):
+            setattr(stub, name, getattr(real_extension, name))
+
+    real_module = importlib.import_module("ochre_next.rl.vec_env")
+    module_file = real_module.__file__
+    assert module_file is not None, "the vec env module is loaded from a file"
+    spec = importlib.util.spec_from_file_location(
+        "ochre_next.rl.vec_env_without_entrypoint",
+        Path(module_file),
+    )
+    assert spec is not None and spec.loader is not None
+    probe = importlib.util.module_from_spec(spec)
+
+    monkeypatch.setitem(sys.modules, "ochre_next._hares", stub)
+    with pytest.raises(ImportError, match="batch_step"):
+        spec.loader.exec_module(probe)
 
 
 # ---------------------------------------------------------------------------

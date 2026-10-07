@@ -14,11 +14,7 @@ import warnings
 import numpy as np
 
 from ochre_next._hares import Dwelling as PyDwelling
-
-try:
-    from ochre_next._hares import batch_step as rust_batch_step
-except ImportError:  # pragma: no cover - only when extension lacks RL entrypoint
-    rust_batch_step = None
+from ochre_next._hares import batch_step as rust_batch_step
 
 try:
     from gymnasium import spaces
@@ -111,8 +107,8 @@ class VecDwellingGymEnv:
                 override = field_bounds_overrides.get(field)
                 if override is not None:
                     bounds[idx] = (float(override[0]), float(override[1]))
-        # The bounds are kept directly on the instance so _apply_controls()
-        # and step() need no gymnastics over the optional Gymnasium space
+        # The bounds are kept directly on the instance so step() needs no
+        # gymnastics over the optional Gymnasium space
         # objects (absent when gymnasium is not installed).
         self._action_low = action_low_arr
         self._action_high = action_high_arr
@@ -188,18 +184,6 @@ class VecDwellingGymEnv:
             self.num_envs,
         )
 
-    def _apply_controls(self, dwelling: PyDwelling, action_row: np.ndarray) -> None:
-        action_row = np.clip(action_row, self._action_low, self._action_high)
-        action_values: dict[str, dict[str, float]] = {}
-        for idx, (equipment, field) in enumerate(self._action_layout):
-            action_values.setdefault(equipment, {})[field] = float(action_row[idx])
-        for equipment in sorted(action_values):
-            signal = build_control_signal(
-                self._signal_type_by_equipment[equipment],
-                action_values[equipment],
-            )
-            dwelling.apply_control(equipment, signal)
-
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         del options
         seeds: list[int] = []
@@ -235,9 +219,8 @@ class VecDwellingGymEnv:
         Each entry of ``infos`` carries ``"warning_count"`` (float, always
         present) and ``"warnings"`` (list[str], present only when the count is
         non-zero) — the warnings drained from that dwelling during the step
-        (e.g. control signals rejected at dispatch time). The contract is
-        identical on the Rust ``batch_step`` fast path and the pure-Python
-        fallback; warnings are drained exactly once per step.
+        (e.g. control signals rejected at dispatch time). Actions are
+        clipped to the declared bounds by the extension's ``batch_step``.
         """
         arr = np.asarray(actions, dtype=np.float64)
         arr = np.ascontiguousarray(arr)
@@ -245,72 +228,41 @@ class VecDwellingGymEnv:
         if arr.shape != expected:
             raise ValueError(f"expected actions shape {expected}, got {arr.shape}")
 
-        if rust_batch_step is not None:
-            actions_list = arr.tolist()
-            raw = rust_batch_step(
-                self._dwellings,
-                actions_list,
-                self._observation_fields,
-                self._action_layout,
-                self._signal_type_by_equipment,
-                self._action_bounds,
-            )
-            obs = np.asarray([row["obs"] for row in raw], dtype=np.float64)
-            rewards = np.asarray([float(row["reward"]) for row in raw], dtype=np.float64)
-            dones = np.asarray([bool(row["terminated"]) for row in raw], dtype=np.bool_)
-            truncs = np.asarray([bool(row["truncated"]) for row in raw], dtype=np.bool_)
-            infos = [dict(row.get("info", {})) for row in raw]
+        actions_list = arr.tolist()
+        raw = rust_batch_step(
+            self._dwellings,
+            actions_list,
+            self._observation_fields,
+            self._action_layout,
+            self._signal_type_by_equipment,
+            self._action_bounds,
+        )
+        obs = np.asarray([row["obs"] for row in raw], dtype=np.float64)
+        rewards = np.asarray([float(row["reward"]) for row in raw], dtype=np.float64)
+        dones = np.asarray([bool(row["terminated"]) for row in raw], dtype=np.bool_)
+        truncs = np.asarray([bool(row["truncated"]) for row in raw], dtype=np.bool_)
+        infos = [dict(row.get("info", {})) for row in raw]
 
-            if self._verify_observation_equivalence:
-                for i, dwelling in enumerate(self._dwellings):
-                    py_obs = telemetry_to_observation(dwelling.telemetry(), self._observation_fields)
-                    py_obs = np.asarray(py_obs, dtype=np.float64)
-                    if not np.allclose(obs[i], py_obs, atol=1e-9, rtol=1e-5, equal_nan=True):
-                        raw_diff = np.abs(obs[i] - py_obs)
-                        nan_mismatch = np.isnan(obs[i]) != np.isnan(py_obs)
-                        diff = np.where(nan_mismatch, np.inf, raw_diff)
-                        max_idx = int(np.argmax(diff))
-                        max_diff = float(diff[max_idx])
-                        max_diff_str = (
-                            "NaN mismatch" if np.isinf(max_diff) else f"{max_diff:.9g}"
-                        )
-                        warnings.warn(
-                            f"Rust-Python observation mismatch for dwelling {i} at field "
-                            f"{self._observation_fields[max_idx]!r}: "
-                            f"Rust={obs[i][max_idx]:.9g}, Python={py_obs[max_idx]:.9g}, "
-                            f"max absolute diff={max_diff_str}",
-                            stacklevel=2,
-                        )
-        else:
-            for idx, dwelling in enumerate(self._dwellings):
-                self._apply_controls(dwelling, arr[idx])
-            obs_rows: list[np.ndarray] = []
-            reward_rows: list[float] = []
-            done_rows: list[bool] = []
-            trunc_rows: list[bool] = []
-            infos: list[dict[str, Any]] = []
-            for dwelling in self._dwellings:
-                step_data = dwelling.step()
-                telemetry = dwelling.telemetry()
-                obs_rows.append(telemetry_to_observation(telemetry, self._observation_fields))
-                ctx = RewardContext(
-                    step=step_data,
-                    telemetry_zone=telemetry.zone(),
-                    telemetry_equipment=telemetry.equipment(),
-                    total_power_kw=float(telemetry.total_power_kw),
-                )
-                reward_rows.append(float(self._reward_fn(ctx)))
-                done_rows.append(False)
-                trunc_rows.append(False)
-                warning_count, warning_messages = drain_step_warnings(dwelling)
-                info: dict[str, Any] = {"step": step_data, "warning_count": warning_count}
-                if warning_messages:
-                    info["warnings"] = warning_messages
-                infos.append(info)
-            obs = np.asarray(obs_rows, dtype=np.float64)
-            rewards = np.asarray(reward_rows, dtype=np.float64)
-            dones = np.asarray(done_rows, dtype=np.bool_)
-            truncs = np.asarray(trunc_rows, dtype=np.bool_)
+        if self._verify_observation_equivalence:
+            for i, dwelling in enumerate(self._dwellings):
+                py_obs = telemetry_to_observation(dwelling.telemetry(), self._observation_fields)
+                py_obs = np.asarray(py_obs, dtype=np.float64)
+                if not np.allclose(obs[i], py_obs, atol=1e-9, rtol=1e-5, equal_nan=True):
+                    raw_diff = np.abs(obs[i] - py_obs)
+                    nan_mismatch = np.isnan(obs[i]) != np.isnan(py_obs)
+                    diff = np.where(nan_mismatch, np.inf, raw_diff)
+                    max_idx = int(np.argmax(diff))
+                    max_diff = float(diff[max_idx])
+                    max_diff_str = (
+                        "NaN mismatch" if np.isinf(max_diff) else f"{max_diff:.9g}"
+                    )
+                    warnings.warn(
+                        f"Rust-Python observation mismatch for dwelling {i} at field "
+                        f"{self._observation_fields[max_idx]!r}: "
+                        f"Rust={obs[i][max_idx]:.9g}, Python={py_obs[max_idx]:.9g}, "
+                        f"max absolute diff={max_diff_str}",
+                        stacklevel=2,
+                    )
 
         for info in infos:
             for field, (low, high) in self._observation_bounds.items():
