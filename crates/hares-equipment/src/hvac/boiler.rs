@@ -382,6 +382,11 @@ impl Equipment for ElectricBoiler {
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
+        // The runtime fraction and the part-load ratio coincide for a
+        // resistance element (EnergyPlus HeatingCoils.cc:1873: `ElecUseLoad
+        // *= PartLoadRatio`).
+        self.telemetry.set(tk::RUNTIME_FRACTION, duty);
+        self.telemetry.set(tk::PART_LOAD_RATIO, duty);
         self.telemetry.set(tk::BOILER_CP_USED_J_KG_K, cp_used);
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
@@ -834,6 +839,11 @@ impl Equipment for GasBoiler {
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry.set(tk::JACKET_LOSS_W, jacket_loss_w);
         self.telemetry.set(tk::EIR, eir);
+        // The runtime fraction and the part-load ratio coincide for a fuel
+        // boiler: it delivers `plr` of rated for the whole step and burns for
+        // that fraction (EnergyPlus HeatingCoils.cc:1873).
+        self.telemetry.set(tk::RUNTIME_FRACTION, plr);
+        self.telemetry.set(tk::PART_LOAD_RATIO, plr);
         self.telemetry.set(tk::BOILER_CP_USED_J_KG_K, cp_used);
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
@@ -1069,6 +1079,8 @@ fn electric_boiler_default_telemetry() -> Telemetry {
     telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::PUMP_POWER_KW, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
+    telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::BOILER_CP_USED_J_KG_K, cp_j_kg_k(FluidType::Water));
     telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
     telemetry.insert(tk::RETURN_TEMP_C, 0.0);
@@ -1084,6 +1096,8 @@ fn gas_boiler_default_telemetry() -> Telemetry {
     telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
+    telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::JACKET_LOSS_W, 0.0);
     telemetry.insert(tk::EIR, 0.0);
     telemetry.insert(tk::BOILER_CP_USED_J_KG_K, cp_j_kg_k(FluidType::Water));
@@ -1127,6 +1141,17 @@ fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::PUMP_POWER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Hydronic circulation pump electric draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "Fraction of the step the element runs (equals the part-load ratio)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Delivered capacity as a fraction of rated".to_string(),
         },
         TelemetryField {
             name: tk::THERMAL_OUTPUT_W.to_string(),
@@ -1205,6 +1230,17 @@ fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Gas boiler fuel input power".to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "Fraction of the step the burner runs (equals the part-load ratio)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Delivered capacity as a fraction of rated".to_string(),
         },
         TelemetryField {
             name: tk::THERMAL_OUTPUT_W.to_string(),

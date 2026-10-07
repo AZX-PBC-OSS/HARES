@@ -20,8 +20,8 @@ use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     ac_config::HeatPumpHeaterConfig,
     helpers::{
-        lookup_zone, outage_forces_off, register_ebm_telemetry_keys, served_zone_ports,
-        step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
+        cycling_load_fraction, lookup_zone, outage_forces_off, register_ebm_telemetry_keys,
+        served_zone_ports, step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
     },
 };
 use super::constants::{
@@ -1431,9 +1431,16 @@ impl HeatPumpHeaterCore {
             });
         }
         self.telemetry.set(tk::COP, cop);
-        // Runtime fraction = duty cycle (PLR) when on, 0 when off.
+        // Runtime fraction = PLR / PLF (EnergyPlus DXCoils.cc:9859): the
+        // compressor runs that fraction of the step at full draw, which the
+        // PLF-penalised power above already prices in.
         let rtf = if self.operating_mode != OperatingMode::Off {
-            self.hvac.runtime.duty_cycle.clamp(0.0, 1.0)
+            let plf = self.hvac.runtime.plf_state;
+            if plf > 0.0 {
+                (self.hvac.runtime.duty_cycle / plf).clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
         } else {
             0.0
         };
@@ -2310,13 +2317,13 @@ impl HeatPumpHeaterCore {
             // Set load_ratio=1.0 as placeholder; actual PLR derived from
             // biquadratic-corrected capacity in compute_step.
             1.0
-        } else if self.hvac.config.speed_control_mode == SpeedControlMode::SingleSpeed {
-            // Single-speed compressor physics: thermostat Heating call implies
-            // full-stage runtime for the step (on/off cycling only).
-            1.0
         } else {
-            let load_ratio_raw = (setpoint - zone.temperature_c) / deadband;
-            load_ratio_raw.clamp(0.0, 1.0)
+            // One runtime-fraction path for every cycling unit, single-speed
+            // included: deliver the fraction of capacity the zone needs; the
+            // compressor's electric draw follows the runtime fraction with
+            // the part-load degradation (EnergyPlus DXCoils.cc:9859).
+            let ((heat_on, heat_off), _) = self.hvac.thermostat_fsm.band_edges();
+            cycling_load_fraction(zone.temperature_c, heat_off, heat_on)
         };
         let speed =
             self.hvac
@@ -8139,7 +8146,7 @@ mod ideal_capacity_tests {
     }
 
     #[test]
-    fn single_speed_heating_call_uses_full_duty_cycle_while_mode_is_heating() {
+    fn single_speed_heating_call_uses_the_zone_needed_runtime_fraction_while_mode_is_heating() {
         let cfg = heater_config();
         let mut eq = ASHPHeater::new(cfg.clone());
         // Step 1: force entry into Heating mode.
@@ -8150,23 +8157,30 @@ mod ideal_capacity_tests {
             .unwrap();
 
         // Step 2: keep zone between turn-on and turn-off thresholds so FSM
-        // remains in Heating hold; single-speed runtime must stay at full duty.
+        // remains in Heating hold; the runtime fraction is the zone's
+        // position between the setpoint and the turn-on (OD-38's one
+        // runtime-fraction path, single-speed included).
         let env_hold = make_env(20.9, 60);
         eq.update_control(&env_hold);
         eq.step(&env_hold, Duration::from_secs(60), &mut make_ports())
             .unwrap();
 
         let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
+        // The setpoint is 21 C; the turn-off is 21 + 0.2 = 21.2 and the
+        // turn-on 21 - 0.8 = 20.2: the fraction = (21.2 - 20.9)/1.0 = 0.3,
+        // with the part-load degradation PLF = 1 - Cd (1 - PLR) =
+        // 1 - 0.25 x 0.7 = 0.825 applied to the draw: RTF = PLR / PLF.
         assert!(
-            (rtf - 1.0).abs() < 1e-9,
-            "single-speed heating call must run full duty while Heating mode is held; got {rtf}"
+            (rtf - 0.3 / 0.825).abs() < 1e-6,
+            "single-speed heating call must run the zone-needed fraction with the \
+             part-load degradation applied to its draw; got {rtf}"
         );
     }
 
     // At 900 s timestep (coarse resolution), a solver-provided IdealCapacity signal for
     // half the rated capacity (4000 W of 8000 W rated) produces fractional RTF.
     // Flow: apply signal → update_control (use_ideal=true, FSM enters Heating at 19°C) →
-    //   ideal_capacity_w=4000 > 0 → load_ratio = 4000/8000 = 0.5 → RTF ≈ 0.5.
+    //   ideal_capacity_w=4000 > 0 → load_ratio = 4000/8000 = 0.5 → RTF = PLR/PLF.
     #[test]
     fn coarse_timestep_ideal_signal_produces_fractional_rtf() {
         let cfg = heater_config();
@@ -8186,10 +8200,13 @@ mod ideal_capacity_tests {
 
         let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
         // Flat biquadratic [1,0,0,0,0,0] → cap_ratio=1.0, PLR = 4000/8000 = 0.5.
-        // PLF slightly adjusts, so allow ±5%.
+        // The runtime fraction carries the part-load degradation:
+        // PLF = 1 - Cd (1 - PLR) = 1 - 0.25 x 0.5 = 0.875, RTF = PLR / PLF
+        // (EnergyPlus DXCoils.cc:9859).
         assert!(
-            (rtf - 0.5).abs() < 0.05,
-            "IdealCapacity=4000 W at 900 s (half rated) must produce RTF ≈ 0.5, got {rtf}"
+            (rtf - 0.5 / 0.875).abs() < 1e-6,
+            "IdealCapacity=4000 W at 900 s (half rated) must produce RTF = PLR/PLF = \
+             0.571, got {rtf}"
         );
     }
 

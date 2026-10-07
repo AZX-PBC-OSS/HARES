@@ -230,6 +230,12 @@ impl Equipment for ElectricBaseboard {
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
+        // The runtime fraction and the part-load ratio coincide for a
+        // resistance element: it delivers `duty` of rated for the whole step
+        // and draws for that same fraction (EnergyPlus HeatingCoils.cc:1873:
+        // `ElecUseLoad *= PartLoadRatio`).
+        self.telemetry.set(tk::RUNTIME_FRACTION, duty);
+        self.telemetry.set(tk::PART_LOAD_RATIO, duty);
         self.telemetry
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         let sp = self.hvac.effective_setpoints();
@@ -388,6 +394,8 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
+    telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
     telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
@@ -410,6 +418,17 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Delivered sensible zone heat (baseboard bypasses ducts)".to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "Fraction of the step the element runs (equals the part-load ratio)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Delivered capacity as a fraction of rated".to_string(),
         },
         TelemetryField {
             name: tk::OPERATING_MODE.to_string(),
@@ -595,6 +614,13 @@ mod tests {
             ..PortSlots::default()
         };
         eq.update_control(&env);
+        eprintln!(
+            "SCRATCH duty={} mode={:?} edges={:?} sp={:?}",
+            eq.hvac.runtime.duty_cycle,
+            eq.hvac.thermostat_fsm.mode,
+            eq.hvac.thermostat_fsm.band_edges(),
+            eq.hvac.thermostat_fsm.effective_setpoints()
+        );
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         assert!((ports.electrical.net_active_w() - 3000.0).abs() < 1.0);
         assert!((ports.thermal[0].sensible_gain_w - 3_000.0).abs() < 1e-9);

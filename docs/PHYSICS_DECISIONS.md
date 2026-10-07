@@ -87,3 +87,34 @@ on the fleet's gas-boiler home (the boiler had been heating to a setpoint the
 zone never reached); the BESTEST 600 heating 3222.6 to 3100.9 kWh, cooling
 6134.0 to 5737.7 kWh; the BESTEST 900 heating 948.2 to 1061.2 kWh (toward its
 ASHRAE band); the BESTEST 640 heating 2144.3 to 2065.8 kWh.
+
+## Cycling HVAC runs the fraction of the step the zone needs
+
+A cycling unit (an air conditioner, a heat pump heating or cooling, a
+furnace, a boiler, a baseboard) no longer runs whole steps at full capacity
+or off: its control computes a runtime fraction, the zone's position between
+the thermostat's release edge and its full-capacity edge with the span held
+to at least 0.5 C (`cycling_load_fraction`,
+`crates/hares-equipment/src/hvac/helpers.rs`), and the unit delivers that
+fraction of rated capacity within the step. The thermostat FSM stays the
+on/off latch and the equivalent battery's window and baseline power follow
+the delivery. The electric draw of DX equipment follows the runtime fraction
+`RTF = PLR / PLF` with the part-load degradation `PLF = 1 - Cd (1 - PLR)`
+(EnergyPlus `DXCoils.cc:9859` and the PLF curve's [0.7, 1] clamp at
+`DXCoils.cc:1101-1131`, Cd = 0.25 per AHRI 210/240-2023 S6.6.3, the
+vendor's `Coil:DX` default clamp); fuel and resistance coils scale their
+delivered load and energy by the part-load ratio (EnergyPlus
+`HeatingCoils.cc:1873-1874`). OCHRE runs the same part-load delivery through
+duty-cycle control at sub-hourly resolution (`vendors/OCHRE/ochre/Equipment/HVAC.py:315-317,
+328-333`). Telemetry reports the runtime fraction on every cycling unit
+(`runtime_fraction`, alongside `part_load_ratio` and `part_load_factor`).
+
+The ideal path (the timestep at or above 300 s, or variable-speed
+equipment) already delivered a continuous capacity; its dispatch contract
+is the preceding section's. Measured: the OCHRE parity corpus at 60 s
+improves on every fixture (the conditioned zone MAE 0.39 to 0.25 C on
+cz2a_gas_furnace_ac_res_wh, 0.34 to 0.25 on cz6b_resistance_res_wh, 0.60 to
+0.24 on the 24-hour ResStock fixture); the six goldens are bitwise
+unchanged (every golden runs the ideal path at its resolution); the
+single-building benchmark (60 s steps) runs about 10 % faster with the
+modulating fraction than with whole-step cycling.

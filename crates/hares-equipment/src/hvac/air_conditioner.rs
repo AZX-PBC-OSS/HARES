@@ -37,15 +37,14 @@ use super::staging::{DEFAULT_PLF_DEGRADATION_COEFF, DEFAULT_STARTUP_CD};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{
-        lookup_zone, outage_forces_off, register_ebm_telemetry_keys, served_zone_ports,
-        step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
+        cycling_load_fraction, lookup_zone, outage_forces_off, register_ebm_telemetry_keys,
+        served_zone_ports, step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
 
 const CRANKCASE_HEATER_KW: f64 = 0.05;
 const CRANKCASE_HEATER_THRESHOLD_C: f64 = 12.8;
-const MIN_LOAD_FRACTION_DEADBAND_C: f64 = 0.5;
 
 pub struct AirConditioner {
     pub(super) core: CoolingCore,
@@ -1054,18 +1053,13 @@ impl CoolingCore {
                 self.operating_mode = OperatingMode::Off;
                 self.hvac.update_prev_zone_temp(None);
             } else {
-                let deadband = self
-                    .hvac
-                    .thermostat_fsm
-                    .thermostat
-                    .hysteresis_c
-                    .max(MIN_LOAD_FRACTION_DEADBAND_C);
-                let load_fraction =
-                    if self.hvac.config.speed_control_mode == SpeedControlMode::SingleSpeed {
-                        1.0
-                    } else {
-                        ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0)
-                    };
+                let ((_, _), (cool_on, cool_off)) = self.hvac.thermostat_fsm.band_edges();
+                // One runtime-fraction path for every cycling unit: the
+                // single-speed unit delivers the fraction of capacity the
+                // zone needs, like the multi-speed arms below; its electric
+                // draw follows the runtime fraction with the part-load
+                // degradation (EnergyPlus DXCoils.cc:9859).
+                let load_fraction = cycling_load_fraction(zone_temp, cool_off, cool_on);
                 self.hvac.update_prev_zone_temp(Some(zone_temp));
                 self.hvac.runtime.duty_cycle = match self.hvac.config.speed_control_mode {
                     SpeedControlMode::VariableSpeedIdeal => {
@@ -3025,10 +3019,10 @@ mod tests {
 
     /// Two-speed AC selects the high stage when load fraction exceeds
     /// `low_speed_capacity_fraction` (default 0.72 per OCHRE/AHRI), and the low stage otherwise.
-    /// With `hysteresis_c=0` the thermostat activates at zone_temp > setpoint (24°C)
-    /// and `MIN_LOAD_FRACTION_DEADBAND_C=0.5°C` governs the load fraction:
-    ///   zone 24.4°C → load_fraction = 0.4/0.5 = 0.8 > 0.5 → stage 1 (8 000 W)
-    ///   zone 24.1°C → load_fraction = 0.1/0.5 = 0.2 ≤ 0.5 → stage 0 (4 000 W)
+    /// With `hysteresis_c=0.1` the thermostat activates at zone_temp > 24.08 and the
+    /// band-relative load fraction governs the stage choice:
+    ///   zone 24.4°C → load_fraction = (24.4-23.98)/0.1 → 1.0 > 0.5 → stage 1 (8 000 W)
+    ///   zone 24.1°C → load_fraction = (24.1-23.98)/0.1 = 0.2+ → stage 0 (4 000 W)
     /// The test verifies that two-speed stage selection routes to different capacity
     /// stages by observing the resulting electrical draw.
     #[test]
@@ -3086,10 +3080,13 @@ mod tests {
         );
     }
 
-    /// Single-speed AC must run binary on/off at the thermostat timestep.
-    /// When cooling is called, duty is 1.0 regardless of setpoint error magnitude.
+    /// Single-speed AC runs the runtime fraction the zone needs: the load
+    /// fraction is the zone's position between the cooling turn-off and the
+    /// turn-on, the same one-runtime-fraction path the multi-speed arms
+    /// follow (OD-38), with the span floored at 0.5 C so a narrow
+    /// hysteresis modulates over it.
     #[test]
-    fn single_speed_cooling_call_uses_full_duty_cycle() {
+    fn single_speed_cooling_call_uses_the_zone_needed_runtime_fraction() {
         // Zero hysteresis so thermostat activates right at setpoint (24°C).
         let cfg =
             ac_config_with(|typed| typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C));
@@ -3110,11 +3107,18 @@ mod tests {
 
         assert!(
             (duty_full - 1.0).abs() < 1e-9,
-            "single-speed cooling call must use duty=1.0, got {duty_full}"
+            "single-speed cooling call past the floored span must use duty=1.0, got {duty_full}"
+        );
+        // The turn-off is 24 - 0.1x0.2 = 23.98; the span floors at 0.5 C:
+        // (24.2 - 23.98) / 0.5 = 0.44.
+        assert!(
+            (duty_part - 0.44).abs() < 1e-9,
+            "single-speed cooling call near the setpoint must use the zone-needed \
+             fraction 0.44, got {duty_part}"
         );
         assert!(
-            (duty_part - 1.0).abs() < 1e-9,
-            "single-speed cooling call must use duty=1.0 even near setpoint, got {duty_part}"
+            duty_full > duty_part,
+            "the deeper the zone into the band, the larger the fraction"
         );
     }
 
@@ -3124,7 +3128,7 @@ mod tests {
             typed.number_of_speeds = 4;
             typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
-        let env_part = env(24.25, 0.010, 18.0, 35.0); // load_fraction=(0.25/0.5)=0.5
+        let env_part = env(24.25, 0.010, 18.0, 35.0); // load_fraction=(24.25-23.98)/0.5=0.54
         let env_full = env(24.60, 0.010, 18.0, 35.0); // clamped to 1.0
 
         let mut eq_part = AirConditioner::new(cfg.clone());
@@ -3135,7 +3139,7 @@ mod tests {
         );
         eq_part.update_control(&env_part);
         assert!(
-            (eq_part.core.hvac.runtime.duty_cycle - 0.5).abs() < 1e-9,
+            (eq_part.core.hvac.runtime.duty_cycle - 0.54).abs() < 1e-9,
             "variable-speed ideal should preserve fractional duty cycle; got {}",
             eq_part.core.hvac.runtime.duty_cycle
         );
@@ -3172,7 +3176,7 @@ mod tests {
 
         eq.update_control(&env);
         assert!(
-            (eq.core.hvac.runtime.duty_cycle - 0.5).abs() < 1e-9,
+            (eq.core.hvac.runtime.duty_cycle - 0.54).abs() < 1e-9,
             "central 4-speed variable cooling should preserve fractional duty; got {}",
             eq.core.hvac.runtime.duty_cycle
         );
@@ -3189,7 +3193,9 @@ mod tests {
             typed.fan_power_w = Some(0.0);
             typed.startup_cd = None;
         });
-        let environment = env(24.25, 0.010, 18.0, 35.0);
+        // The load fraction 0.5 exactly: (24.23 - 23.98)/0.5, an exact match
+        // for the ladder's second stage (half of the 8 000 W max).
+        let environment = env(24.23, 0.010, 18.0, 35.0);
 
         let mut eq = AirConditioner::new(cfg.clone());
         eq.init(&cfg, &environment).unwrap();

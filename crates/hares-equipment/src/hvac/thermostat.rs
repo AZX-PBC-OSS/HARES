@@ -265,6 +265,27 @@ pub struct ThermostatFsm {
 }
 
 impl ThermostatFsm {
+    /// The thermostat's turn-on/turn-off threshold temperatures per axis,
+    /// the thresholds `update_mode_at` switches on (thermostat.rs:432-435).
+    /// Returns `((heat_turn_on, heat_turn_off), (cool_turn_on, cool_turn_off))`.
+    pub fn band_edges(&self) -> ((f64, f64), (f64, f64)) {
+        let setpoints = self.effective_setpoints();
+        let hysteresis = self.thermostat.hysteresis_c;
+        // `deadband_offset` is validated at thermostat construction
+        // (`ThermostatConfig::validate`), so no clamp is needed here.
+        let offset = self.thermostat.deadband_offset;
+        (
+            (
+                setpoints.heating_c - hysteresis * (1.0 - offset),
+                setpoints.heating_c + hysteresis * offset,
+            ),
+            (
+                setpoints.cooling_c + hysteresis * (1.0 - offset),
+                setpoints.cooling_c - hysteresis * offset,
+            ),
+        )
+    }
+
     pub fn new(static_setpoints: ThermalSetpoints) -> Self {
         let thermostat = ThermostatConfig::default();
         Self {

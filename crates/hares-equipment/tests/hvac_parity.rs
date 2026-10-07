@@ -1846,13 +1846,16 @@ fn two_speed_ac_setpoint_matrix_transitions_from_high_to_low_stage() {
         "high-load two-speed call should run full runtime fraction; got {}",
         high.runtime_fraction
     );
-    let expected_low_plr = 0.4_f64 / 0.72_f64;
+    // The band-relative load fraction: the turn-off is 24 - 0.2 = 23.8 and
+    // the turn-on 24.8, so the zone 24.4 sits at (24.4-23.8)/1.0 = 0.6 of
+    // the band.
+    let expected_low_plr = 0.6_f64 / 0.72_f64;
     // Two-speed PLF Cd = 0.11; RTF = PLR / PLF where PLF = 1 - Cd * (1 - PLR).
     let cd = 0.11;
     let expected_rtf = expected_low_plr / (1.0 - cd * (1.0 - expected_low_plr));
     assert!(
         (low.runtime_fraction - expected_rtf).abs() < 1e-9,
-        "load_fraction 0.4 with default low stage fraction 0.72 should cycle stage 0 at \
+        "load_fraction 0.6 with default low stage fraction 0.72 should cycle stage 0 at \
          RTF=PLR/PLF≈{expected_rtf:.4}; got {}",
         low.runtime_fraction
     );

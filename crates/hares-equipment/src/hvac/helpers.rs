@@ -170,13 +170,51 @@ pub fn outage_forces_off(hvac: &mut HvacEquipment, env: &EnvironmentState) -> bo
     true
 }
 
+/// Floor for the band span a cycling unit's runtime fraction divides by, so
+/// a narrow hysteresis does not saturate the fraction a hair's breadth past
+/// the release edge.
+pub const MIN_LOAD_FRACTION_DEADBAND_C: f64 = 0.5;
+
+/// The runtime fraction of rated capacity a cycling unit delivers within the
+/// step: the zone's position between the thermostat's release edge (fraction
+/// 0) and its full-capacity edge (fraction 1), clamped to [0, 1].
+///
+/// A cycling unit no longer runs whole steps at full capacity or off: it
+/// delivers within the step the fraction of capacity the zone needs to reach
+/// and hold the setpoint band, and its electric or fuel input follows the
+/// runtime fraction with the part-load degradation applied where the
+/// reference applies one (EnergyPlus `DXCoils.cc:9859`:
+/// `CoolingCoilRuntimeFraction = PartLoadRatio / PLF`, the PLF curve clamped
+/// to [0.7, 1]; fuel and resistance coils scale their delivered load and
+/// energy by the part-load ratio per `HeatingCoils.cc:1873-1874`). OCHRE
+/// runs the same part-load delivery through duty-cycle control at sub-hourly
+/// resolution (HVAC.py:315-317, 328-333).
+///
+/// `released_c` is the threshold the unit's mode releases at (the heating
+/// turn-off, the cooling turn-off) and `full_c` the one it turns on at (the
+/// heating turn-on, the cooling turn-on): one formula for both axes, the
+/// band signed so the fraction runs 0 at the release edge to 1 at the call
+/// edge. The span is held to at least [`MIN_LOAD_FRACTION_DEADBAND_C`] so a
+/// narrow hysteresis modulates over the same 0.5 C the wider bands do.
+#[must_use]
+pub fn cycling_load_fraction(zone_temp_c: f64, released_c: f64, full_c: f64) -> f64 {
+    let band = full_c - released_c;
+    if band.abs() <= f64::EPSILON {
+        // A degenerate band resolves no fraction; the thresholds are
+        // validated to at least MIN_THERMOSTAT_BAND_C apart at construction.
+        return 0.0;
+    }
+    let span = band.signum() * band.abs().max(MIN_LOAD_FRACTION_DEADBAND_C);
+    ((zone_temp_c - released_c) / span).clamp(0.0, 1.0)
+}
+
 /// Shared `update_control` logic for simple heating equipment.
 ///
 /// Runs the thermostat FSM and returns the resulting `OperatingMode`.
-/// On a `Heating` call the duty cycle is set to 1.0 for cycling (on/off) mode,
-/// or preserved from an ideal-capacity solver for coarse timesteps (>=300 s) or
-/// when `use_ideal_capacity` is configured. All other modes set duty to 0.0 and
-/// return `Off`.
+/// On a `Heating` call a cycling unit's duty cycle is the runtime fraction
+/// the zone needs ([`cycling_load_fraction`]); an ideal-capacity unit's duty
+/// is preserved for the solver's dispatch to set. All other modes set duty
+/// to 0.0 and return `Off`.
 pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) -> OperatingMode {
     // Safety cutoff: prevent simulation runaway where zone temperatures
     // reach physically impossible levels (e.g. 49.5 °C indoors in January).
@@ -218,7 +256,16 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
     let result = match hvac.update_mode(env) {
         Ok(super::thermostat::ThermostatMode::Heating) => {
             if !hvac.use_ideal_capacity(env) {
-                hvac.runtime.duty_cycle = 1.0;
+                // Cycling (on/off) mode: deliver the runtime fraction the
+                // zone needs to reach and hold the setpoint band.
+                let zone_temp_c = hvac
+                    .config
+                    .zone_id
+                    .and_then(|zone| lookup_zone(env, zone).ok())
+                    .map(|zone| zone.temperature_c)
+                    .unwrap_or(f64::NAN);
+                let ((heat_on, heat_off), _) = hvac.thermostat_fsm.band_edges();
+                hvac.runtime.duty_cycle = cycling_load_fraction(zone_temp_c, heat_off, heat_on);
             } else {
                 hvac.runtime.duty_cycle = hvac.runtime.duty_cycle.clamp(0.0, 1.0);
             }
@@ -564,10 +611,29 @@ mod tests {
     use crate::config::{ConfigPayload, ConfigValue};
 
     use super::{
-        DuctDseContext, loop_id_from_config, parse_fuel_type, parse_zone_id_key,
-        register_ebm_telemetry_keys, resolve_duct_dse, step_equivalent_battery,
+        DuctDseContext, cycling_load_fraction, loop_id_from_config, parse_fuel_type,
+        parse_zone_id_key, register_ebm_telemetry_keys, resolve_duct_dse, step_equivalent_battery,
         write_ebm_telemetry, zone_id_from_config,
     };
+
+    /// The fraction runs 0 at the release edge, 1 at the call edge, and
+    /// clamps outside; one formula covers both axes (the heating band's
+    /// edges arrive descending, the cooling's ascending).
+    #[test]
+    fn cycling_load_fraction_runs_zero_at_the_release_edge_to_one_at_the_call_edge() {
+        // Cooling: release 23.8, full call 24.8.
+        assert!((cycling_load_fraction(23.8, 23.8, 24.8)).abs() < 1e-12);
+        assert!((cycling_load_fraction(24.3, 23.8, 24.8) - 0.5).abs() < 1e-12);
+        assert!((cycling_load_fraction(24.8, 23.8, 24.8) - 1.0).abs() < 1e-12);
+        assert!((cycling_load_fraction(26.0, 23.8, 24.8) - 1.0).abs() < 1e-12);
+        assert!((cycling_load_fraction(23.0, 23.8, 24.8)).abs() < 1e-12);
+        // Heating: release 20.2 (descending to the call edge 19.2).
+        assert!((cycling_load_fraction(20.2, 20.2, 19.2)).abs() < 1e-12);
+        assert!((cycling_load_fraction(19.7, 20.2, 19.2) - 0.5).abs() < 1e-12);
+        assert!((cycling_load_fraction(19.0, 20.2, 19.2) - 1.0).abs() < 1e-12);
+        // A narrow hysteresis modulates over the floored 0.5 C span.
+        assert!((cycling_load_fraction(24.2, 23.98, 24.08) - 0.44).abs() < 1e-12);
+    }
 
     #[test]
     fn parse_fuel_type_covers_all_variants() {
