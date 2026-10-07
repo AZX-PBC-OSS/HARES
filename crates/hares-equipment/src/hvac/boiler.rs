@@ -332,7 +332,8 @@ impl Equipment for ElectricBoiler {
         let electric_kw = element_kw + pump_kw;
 
         let loop_id = bound_loop_id(self.loop_id, "Electric Boiler", &self.descriptor.name)?;
-        let return_temp_c = loop_return_temp_c(env, loop_id).unwrap_or(self.default_return_temp_c);
+        let return_temp_c = loop_return_temp_c(env, loop_id, &self.descriptor.name)?
+            .unwrap_or(self.default_return_temp_c);
         let cp_used = cp_j_kg_k(self.fluid_type);
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
             return_temp_c + thermal_output_w / (self.flow_rate_kg_s * cp_used)
@@ -749,7 +750,8 @@ impl Equipment for GasBoiler {
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * plr * sf;
         let loop_id = bound_loop_id(self.loop_id, "Gas Boiler", &self.descriptor.name)?;
-        let return_temp_c = loop_return_temp_c(env, loop_id).unwrap_or(self.default_return_temp_c);
+        let return_temp_c = loop_return_temp_c(env, loop_id, &self.descriptor.name)?
+            .unwrap_or(self.default_return_temp_c);
         // Condensing EIR polynomial uses zone air temperature (OCHRE HVAC.py:651:
         // t_in = self.zone.temperature), not return water temperature.
         let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
@@ -1054,18 +1056,34 @@ fn bound_loop_id(loop_id: Option<LoopId>, kind: &str, name: &str) -> crate::Resu
     })
 }
 
-fn loop_return_temp_c(env: &EnvironmentState, loop_id: LoopId) -> Option<f64> {
-    let payload = env
+/// The return temperature [°C] the fluid domain reports for `loop_id`.
+///
+/// A payload that does not decode is an error naming the loop, never a lost
+/// error falling back to a default; a loop whose state the domain
+/// does not carry is its own error at the caller's step.
+fn loop_return_temp_c(
+    env: &EnvironmentState,
+    loop_id: LoopId,
+    name: &str,
+) -> crate::Result<Option<f64>> {
+    let Some(payload) = env
         .custom_domains
         .iter()
-        .find(|update| update.domain_id == FLUID)?
-        .custom_payload
-        .as_ref()?;
-    let states = FluidDomainPayload::decode(payload).ok()?;
-    states
+        .find(|update| update.domain_id == FLUID)
+        .and_then(|update| update.custom_payload.as_ref())
+    else {
+        return Ok(None);
+    };
+    let states = FluidDomainPayload::decode(payload).map_err(|err| {
+        HaresError::Equipment(format!(
+            "'{name}': the fluid domain payload does not decode for loop {}: {err}",
+            loop_id.0
+        ))
+    })?;
+    Ok(states
         .into_iter()
         .find(|state| state.loop_id == loop_id)
-        .map(|state| state.mean_return_temp_c)
+        .map(|state| state.mean_return_temp_c))
 }
 
 fn electric_boiler_default_telemetry() -> Telemetry {

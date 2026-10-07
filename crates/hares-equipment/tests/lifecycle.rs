@@ -1186,7 +1186,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             GeneratorConfig {
                 equipment_id: None,
                 zone_id: None,
-                fuel_type: None,
+                fuel_type: Some(FuelType::Gas),
                 rated_power_kw: 6.0,
                 eta_electric: Some(0.3),
                 eta_thermal: Some(0.0),

@@ -287,6 +287,7 @@ mod tests {
             fuel_type: FuelType::None,
             parameters: Default::default(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 EquipmentConfig::from_typed(name.to_string(), name.to_string(), config).unwrap(),
             ),
@@ -306,6 +307,7 @@ mod tests {
             fuel_type: FuelType::None,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,

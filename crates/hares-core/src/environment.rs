@@ -316,10 +316,34 @@ impl EnvironmentManager {
             .get(init_offset)
             .copied()
             .unwrap_or(initial_outdoor_temp_c);
+        // Every zone's humidity ratio initializes to the outdoor humidity
+        // ratio at initialization, as EnergyPlus initializes a zone's air
+        // humidity ratio from `OutHumRat` (HeatBalanceSurfaceManager.cc,
+        // InitThermalSurfaces:2418-2419). No zone starts at a fixed
+        // constant: the moisture balance integrates from the weather the
+        // run actually starts in. An empty weather series falls back to the
+        // default weather state's outdoor humidity ratio (0.008 kg/kg, the
+        // documented 55.2 % RH at 20.0 °C).
+        let initial_pressure_kpa = weather
+            .pressure_kpa
+            .get(init_offset)
+            .copied()
+            .unwrap_or(101.325);
+        let initial_outdoor_humidity_ratio = weather
+            .dew_point_c
+            .get(init_offset)
+            .map(|&dew_point_c| {
+                hares_physics::psychrometrics::humidity_ratio_from_tdp(
+                    dew_point_c,
+                    initial_pressure_kpa * 1000.0,
+                )
+            })
+            .unwrap_or(DEFAULT_OUTDOOR_HUMIDITY_RATIO);
         let zones = initial_zones(
             building,
             initial_outdoor_temp_c,
             initial_ground_temp_c,
+            initial_outdoor_humidity_ratio,
             start_time,
             options.initial_rng,
             options.setpoint_deadband_c,
@@ -1205,10 +1229,16 @@ fn build_surface_geometry(
 const OUTDOOR_HEATING_COOLING_THRESHOLD_C: f64 = 12.0;
 const DEFAULT_SETPOINT_C: f64 = 21.0;
 
+/// The default weather state's outdoor humidity ratio (0.008 kg/kg, 55.2 %
+/// RH at 20.0 °C), the fallback when a weather series is empty and the
+/// outdoor value the initial zones otherwise start from is unavailable.
+const DEFAULT_OUTDOOR_HUMIDITY_RATIO: f64 = 0.008;
+
 fn initial_zones(
     building: &Building,
     outdoor_temp_c: f64,
     ground_temp_c: f64,
+    initial_humidity_ratio: f64,
     start_time: DateTime<FixedOffset>,
     initial_rng: Option<ChaCha8Rng>,
     setpoint_deadband_c: Option<f64>,
@@ -1254,7 +1284,9 @@ fn initial_zones(
                 Ok(ZoneState {
                     id: ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)),
                     temperature_c: temp,
-                    humidity_ratio: 0.008,
+                    // EnergyPlus initializes every zone's humidity ratio from
+                    // the outdoor air (HeatBalanceSurfaceManager.cc:2418-2419).
+                    humidity_ratio: initial_humidity_ratio,
                     volume_m3,
                 })
             },

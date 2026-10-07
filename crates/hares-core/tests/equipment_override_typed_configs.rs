@@ -220,11 +220,14 @@ fn blueprint_added_pv_applies_the_spec_bag_override() {
             .cloned()
             .expect("PV config object");
         parameters.insert("capacity_kw".to_string(), json!(bag_capacity_kw));
+        let mut typed_overrides = serde_json::Map::new();
+        typed_overrides.insert("capacity_kw".to_string(), json!(bag_capacity_kw));
         let spec = hares_io::EquipmentSpec {
             instance_name: None,
             name: "PV".to_string(),
             fuel_type: hares_types::FuelType::Electric,
             parameters,
+            typed_overrides,
             zip_params: None,
             typed_config: Some(
                 hares_equipment::EquipmentConfig::from_typed(

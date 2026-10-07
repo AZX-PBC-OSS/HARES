@@ -164,10 +164,14 @@ pub(super) fn resolve_scheduled_loads(
                 defaults,
             ));
         } else {
-            tracing::error!(
-                "BuildingOccupancy present but NumberofResidents, NumberofBedrooms, \
-                 and schedule extension params are all absent; skipping Occupancy spec"
-            );
+            return Err(HpxmlError::MissingField {
+                path: "BuildingSummary/BuildingOccupancy/NumberofResidents",
+                system_kind: "Occupancy",
+                system_id: element_id(occupancy).unwrap_or_else(|| "unknown".to_string()),
+                reason: "BuildingOccupancy carries neither NumberofResidents, nor a \
+                         NumberofBedrooms proxy, nor schedule extension params; an \
+                         occupancy entry that names no input is rejected, not skipped",
+            });
         }
     }
 
@@ -672,20 +676,40 @@ pub(super) fn resolve_scheduled_loads(
             let location = child_text(group, "Location")
                 .unwrap_or_else(|| "interior".to_string())
                 .to_ascii_lowercase();
-            let ty = lighting_group_type(group).unwrap_or_else(|| "incandescent".to_string());
             let frac = child_f64(group, "FractionofUnitsInLocation").unwrap_or(0.0);
 
             let entry = by_location.entry(location).or_default();
-            match ty.as_str() {
-                "lightemittingdiode" => entry.led += frac,
-                "compactfluorescent" => entry.compact_fluorescent += frac,
-                "fluorescenttube" => entry.fluorescent_tube += frac,
-                other => {
-                    tracing::warn!(
-                        lighting_type = other,
-                        "Unrecognized lighting type; light fraction will not be accounted"
-                    );
+            // A group whose energy is stated directly (a Load) needs no
+            // type: OS-HPXML's accounting reads the kWh and never the tier
+            // (lighting.rb:27-33). A group whose FRACTION is stated with a
+            // type no tier reads is an input defect: the fraction would be
+            // silently unaccounted.
+            let ty = lighting_group_type(group);
+            match ty.as_deref() {
+                Some("lightemittingdiode") => entry.led += frac,
+                Some("compactfluorescent") => entry.compact_fluorescent += frac,
+                Some("fluorescenttube") => entry.fluorescent_tube += frac,
+                Some(other) => {
+                    return Err(HpxmlError::InvalidField {
+                        path: "LightingGroup/LightingType",
+                        system_kind: "Lighting",
+                        system_id: element_id(group).unwrap_or_else(|| "unknown".to_string()),
+                        value_received: other.to_string(),
+                        reason: "unrecognized lighting type; the light fraction would \
+                                 not be accounted, so the group is rejected instead",
+                    });
                 }
+                None if frac != 0.0 => {
+                    return Err(HpxmlError::MissingField {
+                        path: "LightingGroup/LightingType",
+                        system_kind: "Lighting",
+                        system_id: element_id(group).unwrap_or_else(|| "unknown".to_string()),
+                        reason: "a LightingGroup with a FractionofUnitsInLocation but \
+                                 no LightingType would have its fraction silently \
+                                 unaccounted; state the type or the group's Load",
+                    });
+                }
+                None => {}
             }
             if let Some(kwh) = child_load_kwh(group) {
                 entry.explicit_kwh = Some(kwh);
@@ -699,11 +723,14 @@ pub(super) fn resolve_scheduled_loads(
                 "garage" => "Garage Lighting",
                 "basement" => "Basement Lighting",
                 other => {
-                    tracing::warn!(
-                        lighting_location = other,
-                        "Unrecognized lighting location; assuming Indoor Lighting"
-                    );
-                    "Indoor Lighting"
+                    return Err(HpxmlError::InvalidField {
+                        path: "LightingGroup/Location",
+                        system_kind: "Lighting",
+                        system_id: element_id(lighting).unwrap_or_else(|| "unknown".to_string()),
+                        value_received: other.to_string(),
+                        reason: "unrecognized lighting location; no defaulting rule \
+                                 exists for a location the input does not name",
+                    });
                 }
             }
             .to_string();
@@ -951,7 +978,7 @@ pub(super) fn resolve_scheduled_loads(
     }
 
     // Pools, HotTubs, and Spas — delegated to resolve_pool module.
-    resolve_pool_and_spa_loads(details, defaults, specs);
+    resolve_pool_and_spa_loads(details, defaults, specs)?;
     Ok(())
 }
 
@@ -1893,7 +1920,7 @@ mod tests {
     }
 
     #[test]
-    fn occupancy_spec_skipped_when_no_fields_and_no_extensions() {
+    fn occupancy_entry_with_no_input_errors() {
         let xml = r#"
             <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                    xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
@@ -1916,12 +1943,16 @@ mod tests {
         "#;
         let building = parse_building(xml).expect("building should parse");
         let mut specs = Vec::new();
-        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
-            .expect("resolve_scheduled_loads");
-
+        let err = resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect_err("an occupancy entry that names no input is an error, not a skip");
+        let message = err.to_string();
         assert!(
-            !specs.iter().any(|s| s.name == "Occupancy"),
-            "Occupancy spec should not be created when no occupant fields and no extension params"
+            message.contains("NumberofResidents"),
+            "the error must name the missing field, got: {message}"
+        );
+        assert!(
+            message.contains("BuildingOccupancy"),
+            "the error must name the element, got: {message}"
         );
     }
 

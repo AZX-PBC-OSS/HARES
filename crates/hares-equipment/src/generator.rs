@@ -1129,9 +1129,18 @@ impl Generator {
         let c = config.require_typed::<GeneratorConfig>("Generator")?;
         c.validate()?;
 
-        if let Some(fuel_type) = c.fuel_type {
-            self.descriptor.fuel = fuel_type;
-        }
+        // The fuel is the input's stated fuel: no generator runs as Gas
+        // because its config named none (the constructor's pre-init
+        // placeholder never survives init).
+        let fuel = c.fuel_type.ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "Generator '{}': its config names no fuel_type; a generator's fuel \
+                 must come from its input (HPXML FuelType or the config), never a \
+                 Gas fallback",
+                self.descriptor.name
+            ))
+        })?;
+        self.descriptor.fuel = fuel;
         // Preserve-when-absent: an absent `equipment_id` key keeps the
         // descriptor's existing (assembly-injected) identity instead of
         // clobbering it — `None` from the tri-state reader means "not
@@ -2268,7 +2277,8 @@ mod tests {
         let mut cfg = GeneratorConfig {
             equipment_id: None,
             zone_id: None,
-            fuel_type: None,
+            // The fuel is stated input, never a Gas fallback.
+            fuel_type: Some(FuelType::Gas),
             rated_power_kw: 10.0,
             eta_electric: Some(0.30),
             eta_thermal: None,
@@ -4956,7 +4966,7 @@ mod tests {
         GeneratorConfig {
             equipment_id: None,
             zone_id: None,
-            fuel_type: None,
+            fuel_type: Some(FuelType::Gas),
             rated_power_kw: 10.0,
             eta_electric: None,
             eta_thermal: None,

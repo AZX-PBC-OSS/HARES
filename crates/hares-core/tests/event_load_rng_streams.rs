@@ -82,6 +82,7 @@ fn probe_spec(class: &str) -> hares_io::EquipmentSpec {
             .expect("probe parameters are an object")
             .clone(),
         zip_params: None,
+        typed_overrides: serde_json::Map::new(),
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,

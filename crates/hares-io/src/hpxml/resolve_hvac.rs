@@ -309,63 +309,78 @@ pub fn compute_duct_dse_params(
 ///
 /// Called after autosizing to replace placeholder capacities with computed
 /// values. Matches on the canonical equipment name to select the correct
-/// config builder.
+/// config builder. A builder failure is an error naming the equipment and
+/// the failure: a rebuild that silently left the raw spec (placeholder
+/// capacities) in place would run autosized numbers through un-autosized
+/// equipment.
+///
+/// # Errors
+///
+/// The matched builder's own error, or the unrecognized-name error.
 pub fn rebuild_hvac_typed_config(
     name: &str,
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
-) -> Option<EquipmentConfig> {
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
     match name {
-        "Gas Furnace" => try_build_gas_furnace_config(name, params, duct_params)
-            .ok()
-            .flatten(),
-        "Electric Furnace" => try_build_electric_furnace_config(name, params, duct_params)
-            .ok()
-            .flatten(),
-        "Gas Boiler" => try_build_gas_boiler_config(name, params).ok().flatten(),
-        "Electric Boiler" => try_build_electric_boiler_config(name, params)
-            .ok()
-            .flatten(),
-        "Electric Baseboard" => try_build_electric_baseboard_config(name, params)
-            .ok()
-            .flatten(),
-        "Ideal HVAC" => try_build_ideal_hvac_config(name, params),
-        "Air Conditioner" => try_build_central_ac_config(name, params, duct_params)
-            .ok()
-            .flatten(),
-        "Room AC" => try_build_room_ac_config(name, params),
+        "Gas Furnace" => try_build_gas_furnace_config(name, params, duct_params)?
+            .ok_or_else(|| rebuild_failed(name)),
+        "Electric Furnace" => try_build_electric_furnace_config(name, params, duct_params)?
+            .ok_or_else(|| rebuild_failed(name)),
+        "Gas Boiler" => {
+            try_build_gas_boiler_config(name, params)?.ok_or_else(|| rebuild_failed(name))
+        }
+        "Electric Boiler" => {
+            try_build_electric_boiler_config(name, params)?.ok_or_else(|| rebuild_failed(name))
+        }
+        "Electric Baseboard" => {
+            try_build_electric_baseboard_config(name, params)?.ok_or_else(|| rebuild_failed(name))
+        }
+        "Ideal HVAC" => {
+            try_build_ideal_hvac_config(name, params).ok_or_else(|| rebuild_failed(name))
+        }
+        "Air Conditioner" => try_build_central_ac_config(name, params, duct_params)?
+            .ok_or_else(|| rebuild_failed(name)),
+        "Room AC" => try_build_room_ac_config(name, params).ok_or_else(|| rebuild_failed(name)),
         "ASHP Heater" | "MSHP Heater" => {
             let is_mini_split = name.starts_with("MSHP");
-            try_build_heat_pump_heater_config(name, params, duct_params, is_mini_split)
-                .ok()
-                .flatten()
+            try_build_heat_pump_heater_config(name, params, duct_params, is_mini_split)?
+                .ok_or_else(|| rebuild_failed(name))
         }
         "ASHP Cooler" | "MSHP Cooler" => {
             let is_mini_split = name.starts_with("MSHP");
-            try_build_heat_pump_cooler_config(name, params, duct_params, is_mini_split)
-                .ok()
-                .flatten()
+            try_build_heat_pump_cooler_config(name, params, duct_params, is_mini_split)?
+                .ok_or_else(|| rebuild_failed(name))
         }
         "GSHP Heater" | "WSHP Heater" => {
-            try_build_heat_pump_heater_config(name, params, duct_params, false)
-                .ok()
-                .flatten()
+            try_build_heat_pump_heater_config(name, params, duct_params, false)?
+                .ok_or_else(|| rebuild_failed(name))
         }
         "GSHP Cooler" | "WSHP Cooler" => {
-            try_build_heat_pump_cooler_config(name, params, duct_params, false)
-                .ok()
-                .flatten()
+            try_build_heat_pump_cooler_config(name, params, duct_params, false)?
+                .ok_or_else(|| rebuild_failed(name))
         }
-        "Dehumidifier" => try_build_dehumidifier_config(name, params),
-        other => {
-            tracing::warn!(
-                canonical_name = other,
-                "rebuild_hvac_typed_config called with unrecognized equipment name; \
-                 returning None"
-            );
-            None
+        "Dehumidifier" => {
+            try_build_dehumidifier_config(name, params).ok_or_else(|| rebuild_failed(name))
         }
+        other => Err(HpxmlError::Parse(
+            format!("rebuild_hvac_typed_config called with unrecognized equipment name '{other}'")
+                .into(),
+        )),
     }
+}
+
+/// The rebuild failure for `name`: the typed config did not build from the
+/// spec's parameters, so autosizing could not replace its placeholder
+/// capacities.
+fn rebuild_failed(name: &str) -> HpxmlError {
+    HpxmlError::Parse(
+        format!(
+            "autosized typed config for '{name}' did not build from the spec's \
+             parameters; the raw spec with placeholder capacities is not a valid fallback"
+        )
+        .into(),
+    )
 }
 
 /// Compute a `DuctConfig` from the duct parameter bundle produced by
@@ -411,11 +426,14 @@ fn compute_duct_config(
         "under_slab" => Ashrae152ZoneType::UnderSlab,
         "ext_walls" => Ashrae152ZoneType::ExteriorWalls,
         other => {
-            tracing::warn!(
-                duct_zone_type = other,
-                "Unrecognized duct zone type; skipping DSE calculation"
-            );
-            return Ok(DuctConfig::default());
+            return Err(HpxmlError::InvalidField {
+                path: "Ducts/zone type",
+                system_kind: "Ducts",
+                system_id: duct_params.zone_type.clone().unwrap_or_default(),
+                value_received: other.to_string(),
+                reason: "unrecognized duct zone type for the ASHRAE 152 duct DSE \
+                         calculation; no default zone model may be substituted",
+            });
         }
     };
 
@@ -1151,13 +1169,39 @@ fn try_build_central_ac_config(
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
 ) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
-    let Some(seer) = seer_from_params(params) else {
-        tracing::warn!("Skipping AC: AnnualCoolingEfficiency (SEER) not found in HPXML");
-        return Ok(None);
+    // SEER first, then EER as the stated metric (the speed-inference
+    // fallback below accepts EER-only systems for the same reason).
+    let stated_efficiency = seer_from_params(params).or_else(|| eer_from_params(params));
+    let Some(efficiency) = stated_efficiency else {
+        return Err(HpxmlError::MissingField {
+            path: "CoolingSystem/AnnualCoolingEfficiency",
+            system_kind: "Central AC",
+            system_id: params
+                .get("equipment_id")
+                .and_then(Value::as_u64)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            reason: "no SEER or EER (AnnualCoolingEfficiency) on the cooling system; \
+                     OS-HPXML v1.12.0 has no defaulting rule for a missing cooling \
+                     efficiency (defaults.rb converts SEER to SEER2 only), so the \
+                     system is rejected",
+        });
     };
-    let eir = BTU_PER_HR_PER_W / seer.max(1e-6);
+    // EIR = 1/(Btu/Wh efficiency) in W/W for either metric: SEER and EER
+    // share the Btu/Wh denominator form (EIR = 3.413/efficiency).
+    let eir = BTU_PER_HR_PER_W / efficiency.max(1e-6);
     let Some(capacity_w) = params.get("cooling_capacity_w").and_then(Value::as_f64) else {
-        return Ok(None);
+        return Err(HpxmlError::MissingField {
+            path: "CoolingSystem/CoolingCapacity",
+            system_kind: "Central AC",
+            system_id: params
+                .get("equipment_id")
+                .and_then(Value::as_u64)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            reason: "no cooling capacity on the cooling system and autosizing did not \
+                     supply one; a central AC without a determinable capacity is rejected",
+        });
     };
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
@@ -2010,8 +2054,13 @@ pub(super) fn resolve_hvac(
                 .or(child_text(heating, "FuelType").as_deref()),
         )?;
         let Some(system_type) = parse_named_type(heating, "HeatingSystemType") else {
-            tracing::warn!("HeatingSystem has empty or self-closing HeatingSystemType; skipping");
-            continue;
+            return Err(HpxmlError::MissingField {
+                path: "HeatingSystem/HeatingSystemType",
+                system_kind: "HeatingSystem",
+                system_id: element_id(heating).unwrap_or_else(|| "unknown".to_string()),
+                reason: "the HeatingSystemType element is empty or self-closing; a \
+                         heating system whose type the input does not state is rejected",
+            });
         };
         let name = canonical_hvac_heating_name(&system_type, fuel)?;
         let mut params = Map::new();
@@ -2157,14 +2206,26 @@ pub(super) fn resolve_hvac(
                 .or(Some("electricity")),
         )?;
         let Some(system_type) = child_text(cooling, "CoolingSystemType") else {
-            tracing::warn!("CoolingSystem has empty or missing CoolingSystemType; skipping");
-            continue;
+            return Err(HpxmlError::MissingField {
+                path: "CoolingSystem/CoolingSystemType",
+                system_kind: "CoolingSystem",
+                system_id: element_id(cooling).unwrap_or_else(|| "unknown".to_string()),
+                reason: "the CoolingSystemType element is empty or missing; a cooling \
+                         system whose type the input does not state is rejected",
+            });
         };
         let name = match canonical_hvac_cooling_name(&system_type, fuel) {
             Ok(name) => name,
-            Err(e) => {
-                tracing::warn!("Skipping unsupported cooling system: {e}");
-                continue;
+            Err(_e) => {
+                return Err(HpxmlError::InvalidField {
+                    path: "CoolingSystem/CoolingSystemType",
+                    system_kind: "CoolingSystem",
+                    system_id: element_id(cooling).unwrap_or_else(|| "unknown".to_string()),
+                    value_received: system_type.clone(),
+                    reason: "unsupported cooling system type; no equipment class \
+                             exists for it and a skipped system would silently leave \
+                             the home without its cooling equipment",
+                });
             }
         };
         let mut params = Map::new();
@@ -2255,9 +2316,7 @@ pub(super) fn resolve_hvac(
                 Err(e) => return Err(e),
             },
             "Room AC" => try_build_room_ac_config(&name, &params),
-            "MSHP Cooler" => try_build_heat_pump_cooler_config(&name, &params, &duct_params, true)
-                .ok()
-                .flatten(),
+            "MSHP Cooler" => try_build_heat_pump_cooler_config(&name, &params, &duct_params, true)?,
             // Unreachable: canonical_hvac_cooling_name validates all names.
             _ => unreachable!(
                 "canonical_hvac_cooling_name validated '{}' but typed_config match did not cover it",
@@ -3903,52 +3962,6 @@ mod tests {
     use hares_physics::units as conv;
     use hares_types::{BoundaryPolicy, HumidityAccumulator, ScheduleSourceConfig};
     use std::collections::HashMap;
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-    use tracing_subscriber::fmt::MakeWriter;
-
-    #[derive(Clone, Default)]
-    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl<'a> MakeWriter<'a> for SharedWriter {
-        type Writer = SharedWriterGuard;
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedWriterGuard(self.0.clone())
-        }
-    }
-
-    struct SharedWriterGuard(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for SharedWriterGuard {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("writer lock poisoned")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn capture_warnings<F>(f: F) -> String
-    where
-        F: FnOnce(),
-    {
-        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let writer = SharedWriter(buffer.clone());
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .without_time()
-            .with_ansi(false)
-            .with_target(false)
-            .with_writer(writer)
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
-        String::from_utf8(buffer.lock().expect("log lock poisoned").clone())
-            .expect("logs must be valid utf8")
-    }
 
     fn empty_building(zones: Vec<Zone>) -> Building {
         Building {
@@ -6417,19 +6430,21 @@ mod tests {
         let mut params = Map::new();
         params.insert("cooling_capacity_w".to_string(), json!(12_000.0));
 
-        let log = capture_warnings(|| {
-            let result =
-                try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-                    .expect("builder Result must be Ok when SEER is absent");
-            assert!(
-                result.is_none(),
-                "builder must return None when SEER is absent"
-            );
-        });
-
+        // No SEER and no EER: the efficiency the EIR needs is not stated, and
+        // OS-HPXML v1.12.0 has no defaulting rule for it. The pre-fix code
+        // skipped the AC with a warning, leaving the home without its
+        // cooling equipment.
+        let err =
+            try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
+                .expect_err("a central AC with no stated efficiency must be rejected");
+        let message = err.to_string();
         assert!(
-            log.contains("AnnualCoolingEfficiency (SEER) not found"),
-            "expected SEER-missing warning in log output; got: {log:?}"
+            message.contains("AnnualCoolingEfficiency"),
+            "expected the missing-efficiency error, got: {message}"
+        );
+        assert!(
+            message.contains("Central AC") || message.contains("cooling system"),
+            "the error must name the system, got: {message}"
         );
     }
 

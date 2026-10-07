@@ -175,7 +175,7 @@ fn build_minimal_dwelling(hpxml_xml: &str) -> Dwelling {
         hpxml_path,
         schedule_path: Some(schedule_path),
         weather_path,
-        defaults_path: None,
+        defaults_path: Some(hares_core::shipped_defaults_dir()),
         sim_config: SimulationConfig {
             start_time,
             duration: Duration::hours(1),

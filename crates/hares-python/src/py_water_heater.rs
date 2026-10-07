@@ -122,8 +122,16 @@ pub fn gas_wh_spec_from_py(wh: &PyGasWaterHeater) -> PyResult<EquipmentSpec> {
     let typed_config = if wh.autosize {
         None
     } else {
-        let volume = Some(wh.tank_volume_m3.unwrap_or(0.19));
-        let capacity = Some(wh.heating_capacity_w.unwrap_or(4500.0));
+        // The constructor rejected a non-autosized gas water heater without
+        // both values, so they are present here; no fallback exists.
+        let volume = Some(
+            wh.tank_volume_m3
+                .expect("constructor checked tank_volume_m3"),
+        );
+        let capacity = Some(
+            wh.heating_capacity_w
+                .expect("constructor checked heating_capacity_w"),
+        );
         let cfg = GasWaterHeaterConfig {
             fan_power_w: None,
             fuel_type: FuelType::Gas,
@@ -281,8 +289,17 @@ pub fn elec_res_wh_spec_from_py(wh: &PyElectricResistanceWH) -> PyResult<Equipme
     let typed_config = if wh.autosize {
         None
     } else {
-        let volume = Some(wh.tank_volume_m3.unwrap_or(0.19));
-        let capacity = Some(wh.heating_capacity_w.unwrap_or(4500.0));
+        // The constructor rejected a non-autosized electric-resistance water
+        // heater without both values, so they are present here; no fallback
+        // exists.
+        let volume = Some(
+            wh.tank_volume_m3
+                .expect("constructor checked tank_volume_m3"),
+        );
+        let capacity = Some(
+            wh.heating_capacity_w
+                .expect("constructor checked heating_capacity_w"),
+        );
         let cfg = ElectricResistanceWaterHeaterConfig {
             tank_volume_m3: volume,
             uniform_energy_factor: wh.uniform_energy_factor,
@@ -447,8 +464,17 @@ pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> PyResult<EquipmentSpec> {
     let typed_config = if wh.autosize {
         None
     } else {
-        let volume = Some(wh.tank_volume_m3.unwrap_or(0.19));
-        let backup = Some(wh.backup_capacity_w.unwrap_or(4500.0));
+        // The constructor rejected a non-autosized heat pump water heater
+        // without tank_volume_m3 and backup_capacity_w, so they are present
+        // here; no fallback exists. The COP is genuinely optional.
+        let volume = Some(
+            wh.tank_volume_m3
+                .expect("constructor checked tank_volume_m3"),
+        );
+        let backup = Some(
+            wh.backup_capacity_w
+                .expect("constructor checked backup_capacity_w"),
+        );
         let cop = Some(wh.cop.unwrap_or(3.5));
         let cfg = HeatPumpWaterHeaterConfig {
             tank_volume_m3: volume,

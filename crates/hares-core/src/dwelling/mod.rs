@@ -18,6 +18,14 @@ pub use premise_zip::PremiseZip;
 pub use blueprint::DwellingBlueprint;
 pub use conversions::{building_to_boundary_inputs, building_to_zone_inputs, stage_rank};
 
+/// The repo's shipped `defaults/` tree, the one directory test and synthetic
+/// setups load a defaults store from (the single helper): a setup whose
+/// dwelling needs the shipped defaults names this path, never a missing or
+/// working-directory-relative file.
+pub fn shipped_defaults_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+}
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -798,6 +806,7 @@ fn equipment_descriptor_specs(equipment: &[&dyn Equipment]) -> Vec<hares_io::Equ
                 fuel_type: d.fuel,
                 parameters: Map::new(),
                 zip_params: None,
+                typed_overrides: serde_json::Map::new(),
                 typed_config: None,
                 system_id: None,
                 related_hvac_idref: None,
@@ -1654,7 +1663,15 @@ fn pv_orientations(spec: &hares_io::EquipmentSpec) -> Result<Vec<hares_equipment
 fn attach_pv_to_roofs(specs: &mut [hares_io::EquipmentSpec], building: &Building) -> Result<()> {
     use hares_io::hpxml::building::BoundaryType;
 
-    let roofs: Vec<(u32, f64, f64, f64)> = building
+    // Roof candidates carry their azimuth from the input. A roof with no
+    // azimuth models in all four directions when pitched, or at an
+    // arbitrary azimuth when flat, per OS-HPXML v1.12.0
+    // (geometry.rb:20-25, `apply_roofs`): either way the azimuth cannot
+    // exclude it, so such a roof matches on tilt alone. No azimuth is ever
+    // invented here. A roof with no tilt has no OS-HPXML default (the pitch
+    // comes from its geometry) and is an input defect when a PV needs to
+    // attach.
+    let roofs: Vec<(u32, Option<f64>, f64, f64)> = building
         .boundaries
         .iter()
         .enumerate()
@@ -1662,7 +1679,7 @@ fn attach_pv_to_roofs(specs: &mut [hares_io::EquipmentSpec], building: &Building
         .map(|(idx, b)| {
             (
                 idx as u32,
-                b.azimuth_deg.unwrap_or(180.0),
+                b.azimuth_deg,
                 b.tilt_deg.unwrap_or(0.0),
                 b.area_m2,
             )
@@ -1679,17 +1696,43 @@ fn attach_pv_to_roofs(specs: &mut [hares_io::EquipmentSpec], building: &Building
         };
         let (pv_az, pv_tilt) = (orientation.azimuth_deg, orientation.tilt_deg);
 
-        // Find the closest roof within tolerance (15° azimuth, 10° tilt).
+        let tiltless: Vec<String> = building
+            .boundaries
+            .iter()
+            .filter(|b| b.boundary_type == BoundaryType::Roof && b.tilt_deg.is_none())
+            .map(|b| b.id.clone())
+            .collect();
+        if !tiltless.is_empty() {
+            return Err(HaresError::Dwelling(format!(
+                "PV '{}': roof boundary '{}' has no tilt; a PV cannot attach to \
+                 a roof whose orientation the input does not state",
+                spec.instance_name.as_deref().unwrap_or(&spec.name),
+                tiltless.join(", "),
+            )));
+        }
+
+        // Find the closest roof within tolerance (15° azimuth where the
+        // azimuth is known, 10° tilt).
         let best = roofs
             .iter()
             .filter(|(_, az, tilt, _)| {
-                let az_diff = (*az - pv_az).abs().min(360.0 - (*az - pv_az).abs());
-                az_diff <= 15.0 && (*tilt - pv_tilt).abs() <= 10.0
+                let tilt_ok = (*tilt - pv_tilt).abs() <= 10.0;
+                match az {
+                    Some(az) => {
+                        let az_diff = (*az - pv_az).abs().min(360.0 - (*az - pv_az).abs());
+                        tilt_ok && az_diff <= 15.0
+                    }
+                    None => tilt_ok,
+                }
             })
             .min_by(|(_, az_a, tilt_a, _), (_, az_b, tilt_b, _)| {
-                let da = (*az_a - pv_az).abs().min(360.0 - (*az_a - pv_az).abs())
+                let da = az_a
+                    .map(|az| (az - pv_az).abs().min(360.0 - (az - pv_az).abs()))
+                    .unwrap_or(0.0)
                     + (*tilt_a - pv_tilt).abs();
-                let db = (*az_b - pv_az).abs().min(360.0 - (*az_b - pv_az).abs())
+                let db = az_b
+                    .map(|az| (az - pv_az).abs().min(360.0 - (az - pv_az).abs()))
+                    .unwrap_or(0.0)
                     + (*tilt_b - pv_tilt).abs();
                 da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
             });
@@ -1708,7 +1751,7 @@ fn register_pv_roof_shading(
     specs: &[hares_io::EquipmentSpec],
     building: &Building,
     env: &mut EnvironmentManager,
-) {
+) -> Result<()> {
     let mut coverage_by_roof: std::collections::HashMap<u32, f64> =
         std::collections::HashMap::new();
 
@@ -1720,11 +1763,25 @@ fn register_pv_roof_shading(
         let capacity_kw = spec.parameters.get("capacity_kw").and_then(|v| v.as_f64());
 
         if let (Some(bid), Some(cap)) = (boundary_id, capacity_kw) {
-            let roof_area = building
-                .boundaries
-                .get(bid as usize)
-                .map(|b| b.area_m2)
-                .unwrap_or(1.0);
+            let Some(boundary) = building.boundaries.get(bid as usize) else {
+                return Err(HaresError::Dwelling(format!(
+                    "PV '{}' attaches to boundary {} which does not exist; the \
+                     roof's area is required to register its shading coverage",
+                    spec.instance_name.as_deref().unwrap_or(&spec.name),
+                    bid
+                )));
+            };
+            let roof_area = boundary.area_m2;
+            if !(roof_area.is_finite() && roof_area > 0.0) {
+                return Err(HaresError::Dwelling(format!(
+                    "PV '{}' attaches to roof '{}' whose area is not positive \
+                     ({} m²); the roof's area is required to register its \
+                     shading coverage",
+                    spec.instance_name.as_deref().unwrap_or(&spec.name),
+                    boundary.id,
+                    roof_area
+                )));
+            }
             // ~2 m² per 420 W panel
             let collector_area = cap * 1000.0 / 420.0 * 2.0;
             *coverage_by_roof.entry(bid as u32).or_default() += collector_area / roof_area;
@@ -1734,6 +1791,7 @@ fn register_pv_roof_shading(
     for (surface_id, coverage) in coverage_by_roof {
         env.set_pv_roof_coverage(surface_id, coverage);
     }
+    Ok(())
 }
 
 /// Verify that every zone referenced by a port declaration exists in the
@@ -2249,11 +2307,18 @@ impl Dwelling {
             patches: None,
         };
 
-        Self::from_preparsed(
+        Self::from_preparsed_with_defaults(
             dwelling_config,
             hpxml_building,
             weather,
             schedule_result.schedule,
+            // The synthetic dwelling's inputs are fully explicit: its envelope
+            // defines its own layer stack and its schedule carries its own
+            // columns, so no defaults store is consulted. The empty store is
+            // declared here, the typed way: no setup reaches an empty
+            // store through a missing file: a defaults load failure is an
+            // error naming the path.
+            hares_io::DefaultsStore::empty(),
         )
     }
 
@@ -2270,6 +2335,19 @@ impl Dwelling {
         schedule: ScheduleTimeSeries,
     ) -> Result<Self> {
         let blueprint = DwellingBlueprint::from_parts(config, building, weather, schedule)?;
+        build_from_blueprint(blueprint)
+    }
+
+    fn from_preparsed_with_defaults(
+        config: DwellingConfig,
+        building: Building,
+        weather: WeatherTimeSeries,
+        schedule: ScheduleTimeSeries,
+        defaults: hares_io::defaults::DefaultsStore,
+    ) -> Result<Self> {
+        let blueprint = DwellingBlueprint::from_parts_with_defaults(
+            config, building, weather, schedule, defaults,
+        )?;
         build_from_blueprint(blueprint)
     }
 }
@@ -2389,9 +2467,23 @@ fn build_from_blueprint_inner(
     // Auto-attach PV arrays to the closest matching roof surface and
     // register shading coverage on attached roofs.
     attach_pv_to_roofs(&mut equipment_specs, &bp.building)?;
-    register_pv_roof_shading(&equipment_specs, &bp.building, &mut environment);
+    register_pv_roof_shading(&equipment_specs, &bp.building, &mut environment)?;
 
     let initial_env = environment.update(&clock, &[])?;
+
+    // The initial zone humidity's derivation is a documented init rule, not
+    // an input defect: it is captured for observability (like the AIM-2
+    // coefficients), never as a run warning the consumer gates would carry
+    // on every home.
+    #[cfg(feature = "observe")]
+    tracing::info!(
+        target: "observe",
+        column = "initial_zone_humidity_ratio",
+        humidity_ratio = initial_env.weather.outdoor_humidity_ratio,
+        "initial zone humidity ratio taken from the weather's outdoor humidity \
+         ratio at initialization (the EnergyPlus zone init, \
+         HeatBalanceSurfaceManager.cc:2418-2419)"
+    );
 
     for warning in conversions::envelope_input_warnings(&bp.building)? {
         warnings.push_warning(warning);
@@ -2529,14 +2621,10 @@ fn build_from_blueprint_inner(
 
     // Read number_of_occupants from the Occupancy spec to scale the raw
     // schedule fraction (0–1) into a person count for internal heat gains.
-    #[cfg(any(test, debug_assertions))]
     let has_occupancy_spec;
     let occupancy_scale = match equipment_specs.iter().find(|s| s.name == "Occupancy") {
         Some(spec) => {
-            #[cfg(any(test, debug_assertions))]
-            {
-                has_occupancy_spec = true;
-            }
+            has_occupancy_spec = true;
             let val = spec.parameters.get("number_of_occupants").ok_or_else(|| {
                 HaresError::Equipment(
                     "Occupancy spec is missing required key 'number_of_occupants'".into(),
@@ -2549,18 +2637,16 @@ fn build_from_blueprint_inner(
             })?
         }
         None => {
-            #[cfg(any(test, debug_assertions))]
-            {
-                has_occupancy_spec = false;
-            }
+            has_occupancy_spec = false;
             1.0
         }
     };
 
     // Invariant: number_of_occupants must be non-negative regardless of
     // derivation path (HPXML NumberofResidents, derived from bedrooms, or default).
-    // A negative value indicates a data error in the parser or input.
-    #[cfg(any(test, debug_assertions))]
+    // A negative value indicates a data error in the parser or input. The
+    // invariant guards physics, so it holds in release builds too:
+    // in release a negative count silently gave zero occupant heat.
     if has_occupancy_spec && occupancy_scale < 0.0 {
         return Err(HaresError::Dwelling(format!(
             "Occupancy 'number_of_occupants' must be non-negative; got {}; \
@@ -2580,7 +2666,7 @@ fn build_from_blueprint_inner(
     // An absent Occupancy spec is valid (e.g. BESTEST unconditioned structures).
     // ASHRAE HoF 2021 Ch.18 §18.4 — occupant heat gain is a primary driver of
     // cooling load; silently zeroing it produces a systematic underestimate.
-    #[cfg(any(test, debug_assertions))]
+    // The invariant guards physics, so it holds in release builds too.
     if has_occupancy_spec && occupancy_column_idx.is_none() {
         let has_hpxml_fractions = equipment_specs
             .iter()
@@ -4701,7 +4787,7 @@ impl Dwelling {
         // Must run BEFORE solver feedback actor collects targets.
         for &idx in &self.roster.equipment_execution_order {
             if self.equipment[idx].descriptor().stage == ExecutionStage::Thermal {
-                let _ = self.equipment[idx].update_control(&self.latest_env);
+                self.equipment[idx].update_control(&self.latest_env);
             }
         }
 
@@ -5010,7 +5096,7 @@ impl Dwelling {
         // on the current timestep, not one step later.
         for &idx in &self.roster.equipment_execution_order {
             if self.equipment[idx].descriptor().stage == ExecutionStage::Thermal {
-                let _ = self.equipment[idx].update_control(&self.latest_env);
+                self.equipment[idx].update_control(&self.latest_env);
             }
         }
 
@@ -11883,11 +11969,39 @@ occupancy = 1.0
         };
         validate_sim_config(&sim_config).expect("valid sim config");
 
-        // Point defaults_path at a defaults directory whose CSV loads but
-        // carries no 'Occupancy' profile, and the Occupancy spec has no
-        // HPXML extension fractions (only NumberofResidents): no occupancy
-        // source of any kind is available.
+        // Point defaults_path at a defaults directory whose store loads
+        // (the shipped zip, generator-curve and EV-mapping files; a store
+        // needs them) and whose profiles CSV carries no 'Occupancy'
+        // profile, while the Occupancy spec has no HPXML extension
+        // fractions (only NumberofResidents): no occupancy source of any
+        // kind is available.
         let no_occupancy_defaults = tempfile::tempdir().expect("create temp dir");
+        let shipped = shipped_defaults_dir();
+        std::fs::create_dir_all(no_occupancy_defaults.path().join("ev"))
+            .expect("create the ev defaults dir");
+        std::fs::create_dir_all(no_occupancy_defaults.path().join("generator"))
+            .expect("create the generator defaults dir");
+        std::fs::copy(
+            shipped.join("zip_parameters.toml"),
+            no_occupancy_defaults.path().join("zip_parameters.toml"),
+        )
+        .expect("copy the shipped zip parameters");
+        std::fs::copy(
+            shipped.join("generator").join("efficiency_curve.toml"),
+            no_occupancy_defaults
+                .path()
+                .join("generator")
+                .join("efficiency_curve.toml"),
+        )
+        .expect("copy the shipped generator curve");
+        std::fs::copy(
+            shipped.join("ev").join("vehicle_mapping.csv"),
+            no_occupancy_defaults
+                .path()
+                .join("ev")
+                .join("vehicle_mapping.csv"),
+        )
+        .expect("copy the shipped EV vehicle mapping");
         std::fs::write(
             no_occupancy_defaults
                 .path()
@@ -11992,6 +12106,7 @@ occupancy = 1.0
             fuel_type: hares_types::FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -18306,6 +18421,7 @@ master_seed = 42
                 fuel_type: FuelType::Electric,
                 parameters: Map::new(),
                 zip_params: None,
+                typed_overrides: serde_json::Map::new(),
                 typed_config: None,
                 system_id: None,
                 related_hvac_idref: None,
@@ -18317,6 +18433,7 @@ master_seed = 42
                 fuel_type: FuelType::Electric,
                 parameters: Map::new(),
                 zip_params: None,
+                typed_overrides: serde_json::Map::new(),
                 typed_config: None,
                 system_id: None,
                 related_hvac_idref: None,
@@ -18384,6 +18501,7 @@ master_seed = 42
                 fuel_type: fuel,
                 parameters: Map::new(),
                 zip_params: None,
+                typed_overrides: serde_json::Map::new(),
                 typed_config: None,
                 system_id: None,
                 related_hvac_idref: None,
@@ -18449,6 +18567,7 @@ master_seed = 42
             fuel_type: FuelType::Gas,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -18494,6 +18613,7 @@ master_seed = 42
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -18514,6 +18634,7 @@ master_seed = 42
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -18565,6 +18686,7 @@ master_seed = 42
                 fuel_type: FuelType::Electric,
                 parameters: serde_json::Map::new(),
                 zip_params: None,
+                typed_overrides: serde_json::Map::new(),
                 typed_config: None,
                 system_id: None,
                 related_hvac_idref: None,
@@ -18577,6 +18699,7 @@ master_seed = 42
                 fuel_type: FuelType::Electric,
                 parameters: serde_json::Map::new(),
                 zip_params: None,
+                typed_overrides: serde_json::Map::new(),
                 typed_config: None,
                 system_id: None,
                 related_hvac_idref: None,
@@ -18589,6 +18712,7 @@ master_seed = 42
                 fuel_type: FuelType::Electric,
                 parameters: serde_json::Map::new(),
                 zip_params: None,
+                typed_overrides: serde_json::Map::new(),
                 typed_config: None,
                 system_id: None,
                 related_hvac_idref: None,
@@ -18735,6 +18859,7 @@ master_seed = 42
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -18773,6 +18898,7 @@ master_seed = 42
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,

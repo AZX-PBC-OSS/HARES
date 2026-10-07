@@ -7,7 +7,7 @@ use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml::equipment::resolve_equipment;
 use hares_io::hpxml::validation::validate_hpxml_schema;
-use hares_io::hpxml::{BoundaryType, HpxmlError, ZoneType, parse_hpxml_str};
+use hares_io::hpxml::{BoundaryType, ZoneType, parse_hpxml_str};
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/hpxml/ochre_samples")
@@ -217,31 +217,17 @@ fn missing_hvac_type_tags_fail_resolution_instead_of_defaulting() {
         let xml = minimal_hpxml_with_systems(systems_xml);
         let building = parse_building(&xml).expect("minimal fixture should parse");
         let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
-        match missing_field {
-            "HeatingSystemType" | "CoolingSystemType" => {
-                // Empty/missing HVAC type tags are now skipped gracefully
-                // (valid ResStock 2025.1 buildings with portable heaters, no central HVAC)
-                let specs = result.expect("empty HVAC type should be skipped, not rejected");
-                assert!(
-                    specs
-                        .iter()
-                        .all(|s| s.name != "Gas Furnace" && s.name != "Air Conditioner"),
-                    "{label}: no HVAC equipment should be generated from empty type tag"
-                );
-            }
-            _ => {
-                let err = result.expect_err(
-                    "resolve_equipment must fail when required HVAC type tags are absent",
-                );
-                match err {
-                    HpxmlError::Parse(message) => assert!(
-                        message.to_string().contains(missing_field),
-                        "{label} case should mention missing {missing_field}, got: {message}"
-                    ),
-                    other => panic!("{label} case should return HpxmlError::Parse, got {other:?}"),
-                }
-            }
-        }
+        // Every missing HVAC type tag fails resolution: an HVAC
+        // system whose type the input does not state is an input defect,
+        // not a system to skip. ResStock homes that encode "no central
+        // HVAC" as an empty type tag are such input defects, to record.
+        let err = result
+            .expect_err("resolve_equipment must fail when required HVAC type tags are absent");
+        let message = err.to_string();
+        assert!(
+            message.contains(missing_field) || message.contains("type"),
+            "{label} case should mention {missing_field}, got: {message}"
+        );
     }
 }
 

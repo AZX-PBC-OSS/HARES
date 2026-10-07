@@ -31,6 +31,16 @@ pub struct EquipmentSpec {
     pub instance_name: Option<String>,
     pub fuel_type: FuelType,
     pub parameters: Map<String, Value>,
+    /// The caller's config overrides for a typed payload, apart from the
+    /// bag: the bag mixes the resolver's machinery keys (autosize flags,
+    /// duct inputs, schedule column indexes) with the serialized payload,
+    /// and a key either channel may write cannot be diagnosed as a typo.
+    /// Every key here must be a field the payload's schema reads (the
+    /// reserved `equipment_id` aside); an unknown key is an error naming
+    /// the equipment and the field when the spec is added to a blueprint
+    /// or built. A raw spec (no typed config) keeps its config in
+    /// `parameters` and carries no overrides.
+    pub typed_overrides: Map<String, Value>,
     pub zip_params: Option<ZipLoad>,
     /// Typed config, populated for equipment types that have been migrated.
     /// When present, consumers should prefer this over raw `parameters`.
@@ -202,6 +212,7 @@ pub(crate) fn build_spec(
         instance_name: None,
         fuel_type,
         parameters,
+        typed_overrides: Map::new(),
         zip_params,
         typed_config: None,
         system_id: None,
@@ -236,6 +247,7 @@ where
         fuel_type,
         parameters,
         zip_params: defaults.zip_params(&name).cloned(),
+        typed_overrides: serde_json::Map::new(),
         typed_config: Some(typed_config),
         system_id: None,
         related_hvac_idref: None,

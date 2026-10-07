@@ -275,7 +275,7 @@ fn oracle_ideal_hvac_24h_50pct_load() {
             rated_fan_power_w: None,
             rated_eir: None,
             capacity_min_w: None,
-            fuel_type: None,
+            fuel_type: Some(FuelType::Gas),
             capacity_biquadratic_coeffs: None,
             eir_biquadratic_coeffs: None,
         },
@@ -622,7 +622,7 @@ fn oracle_generator_24h_constant_load() {
         GeneratorConfig {
             equipment_id: None,
             zone_id: None,
-            fuel_type: None,
+            fuel_type: Some(FuelType::Gas),
             rated_power_kw: rated_kw,
             eta_electric: Some(eta_electric),
             eta_thermal: Some(0.0),

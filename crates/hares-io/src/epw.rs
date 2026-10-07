@@ -130,6 +130,31 @@ pub fn parse_epw_location_state<P: AsRef<Path>>(path: P) -> Option<String> {
     }
 }
 
+/// Extract the WMO station number from an EPW file's LOCATION header.
+///
+/// Reads only the first line of the file. Returns the station number
+/// (e.g. `"725650"`) from field index 5 of the LOCATION header per the
+/// EPW Data Dictionary (the same value `parse_weather` puts on
+/// [`crate::WeatherMeta::station_wmo`]), or `None` if the file is missing,
+/// unreadable, or the field is absent.
+pub fn parse_epw_station_wmo<P: AsRef<Path>>(path: P) -> Option<String> {
+    let path_ref = path.as_ref();
+    if path_ref.extension()?.to_str()? != "epw" {
+        return None;
+    }
+    let first_line =
+        std::io::BufRead::lines(std::io::BufReader::new(fs::File::open(path_ref).ok()?))
+            .next()?
+            .ok()?;
+
+    if !first_line.starts_with("LOCATION") {
+        return None;
+    }
+    let fields: Vec<&str> = first_line.split(',').collect();
+    let wmo = fields.get(5)?.trim();
+    (!wmo.is_empty()).then(|| wmo.to_string())
+}
+
 fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     let mut lines = contents.lines();
 

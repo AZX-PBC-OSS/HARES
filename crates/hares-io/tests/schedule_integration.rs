@@ -61,6 +61,7 @@ fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
         fuel_type: FuelType::Electric,
         parameters,
         zip_params: None,
+        typed_overrides: serde_json::Map::new(),
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,
@@ -563,6 +564,7 @@ fn hvac_without_setpoints_takes_the_os_hpxml_defaults() {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 EquipmentConfig::from_typed(
                     "ASHP Heater".to_string(),
@@ -587,6 +589,7 @@ fn hvac_without_setpoints_takes_the_os_hpxml_defaults() {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 EquipmentConfig::from_typed(
                     "ASHP Cooler".to_string(),

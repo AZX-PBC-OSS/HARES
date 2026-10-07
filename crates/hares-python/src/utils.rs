@@ -122,6 +122,7 @@ pub fn make_spec(
         instance_name: Some(instance_name.to_string()),
         fuel_type,
         parameters: params,
+        typed_overrides: Map::new(),
         zip_params: None,
         typed_config,
         system_id: None,

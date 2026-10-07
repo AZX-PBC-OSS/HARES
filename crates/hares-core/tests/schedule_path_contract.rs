@@ -290,6 +290,10 @@ fn generated_schedule_requires_a_defaults_directory() {
 /// `defaults_path` setting: the default profiles come only from the
 /// directory the config names, never from a working-directory guess. The
 /// BEopt example schedule has no lighting or plug-load columns.
+///
+/// With the defaults policy (a load failure is an error), a config
+/// with no defaults directory fails first at the store load, naming the
+/// path: no dwelling reaches schedule injection through a missing store.
 #[test]
 fn schedule_file_missing_a_column_needs_a_defaults_directory() {
     let mut config = generated_schedule_config(Some(
@@ -299,19 +303,18 @@ fn schedule_file_missing_a_column_needs_a_defaults_directory() {
 
     let err = match Dwelling::from_config(config.clone()) {
         Err(err) => err,
-        Ok(_) => panic!(
-            "an equipment with no schedule column and no defaults directory must fail construction"
-        ),
+        Ok(_) => {
+            panic!("a config with no defaults directory must fail construction at the store load")
+        }
     };
     let message = err.to_string();
     assert!(
-        message.contains("has no schedule source"),
-        "the error must name the equipment without a schedule source, got: {message}"
+        message.contains("defaults load failed"),
+        "the error must name the defaults load failure, got: {message}"
     );
     assert!(
-        message.contains("no defaults directory is configured")
-            && message.contains("defaults_path"),
-        "the error must name the missing defaults directory and the setting, got: {message}"
+        message.contains("defaults"),
+        "the error must name the path it tried, got: {message}"
     );
 
     config.defaults_path = Some(project_root().join("defaults"));

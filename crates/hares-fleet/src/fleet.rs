@@ -976,7 +976,16 @@ fn validate_fleet_building_zone(
     weather_path: &Path,
     bldg_id: i64,
 ) -> ZoneMatchStatus {
-    let Some(building_zone) = hares_io::parse_iecc_climate_zone(hpxml_path) else {
+    // One IECC resolution path for the dwelling and the fleet: the HPXML's
+    // declared zone, else the weather station's zone (the OS-HPXML default
+    // the dwelling build derives in `apply_climate_zone_default`).
+    let station_wmo = hares_io::parse_epw_station_wmo(weather_path);
+    let declared_zone = hares_io::parse_iecc_climate_zone(hpxml_path);
+    let building_zone = hares_io::hpxml::climate_zone::resolve_iecc_climate_zone(
+        declared_zone.as_deref(),
+        station_wmo.as_deref(),
+    );
+    let Some(building_zone) = building_zone else {
         return ZoneMatchStatus::Skipped;
     };
 
@@ -2139,7 +2148,9 @@ mod tests {
             }
         );
 
-        // Missing zone -> skipped
+        // Missing zone: the weather station's zone is derived (one IECC
+        // resolution path for the dwelling and the fleet), so the derived
+        // 5B matches CO and the validation proceeds.
         let no_zone_xml = r#"<?xml version='1.0'?>
 <HPXML xmlns='http://hpxmlonline.com/2023/09' schemaVersion='4.0'>
   <Building/>
@@ -2147,6 +2158,20 @@ mod tests {
         write_temp_file(&hpxml_path, no_zone_xml);
         assert_eq!(
             validate_fleet_building_zone(&hpxml_path, &epw_path, 3),
+            ZoneMatchStatus::Match {
+                building_zone: "5B".to_string(),
+                weather_state: "CO".to_string()
+            }
+        );
+
+        // A station the OS-HPXML table does not carry derives no zone: skipped.
+        let no_wmo_epw = dir.path().join("no-wmo.epw");
+        write_temp_file(
+            &no_wmo_epw,
+            "LOCATION,USA_CO_Unknown,XZ,USA,TMY3,,39.83,-104.65,-7.0,1609.0",
+        );
+        assert_eq!(
+            validate_fleet_building_zone(&hpxml_path, &no_wmo_epw, 5),
             ZoneMatchStatus::Skipped
         );
 
@@ -2263,13 +2288,11 @@ mod tests {
         for config in without_defaults {
             let message = match Dwelling::from_config(config) {
                 Err(err) => err.to_string(),
-                Ok(_) => panic!(
-                    "a schedule missing a mapped column must fail without a defaults directory"
-                ),
+                Ok(_) => panic!("a config with no defaults directory must fail at the store load"),
             };
             assert!(
-                message.contains("defaults_path"),
-                "the error must name the defaults_path setting, got: {message}"
+                message.contains("defaults load failed"),
+                "the error must name the defaults load failure, got: {message}"
             );
         }
     }

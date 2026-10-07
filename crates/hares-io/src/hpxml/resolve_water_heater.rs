@@ -656,6 +656,7 @@ where
         fuel_type,
         parameters,
         zip_params: defaults.zip_params(&name).cloned(),
+        typed_overrides: serde_json::Map::new(),
         typed_config: Some(typed_config),
         system_id: None,
         related_hvac_idref: None,

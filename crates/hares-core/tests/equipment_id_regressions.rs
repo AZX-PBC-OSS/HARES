@@ -681,6 +681,7 @@ fn dehumidifier_spec(instance: &str, equipment_id: u32) -> hares_io::EquipmentSp
         fuel_type: FuelType::Electric,
         parameters: serde_json::Map::new(),
         zip_params: None,
+        typed_overrides: serde_json::Map::new(),
         typed_config: Some(typed),
         system_id: None,
         related_hvac_idref: None,

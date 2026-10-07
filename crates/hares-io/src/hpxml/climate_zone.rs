@@ -64,6 +64,21 @@ pub fn apply_climate_zone_default(building: &mut Building, station_wmo: Option<&
     building.parse_warnings.push(Warning::new("hpxml", message));
 }
 
+/// The building's effective IECC zone for a path-based reader: the HPXML's
+/// declared zone, else the weather station's zone (the OS-HPXML default,
+/// `apply_climate_and_risk_zones`, defaults.rb:974-983). One resolution
+/// path for the dwelling ([`apply_climate_zone_default`]) and the fleet's
+/// zone-match validation, so a building whose HPXML gives no zone is
+/// validated against the same zone the dwelling would derive.
+pub fn resolve_iecc_climate_zone(
+    declared: Option<&str>,
+    station_wmo: Option<&str>,
+) -> Option<String> {
+    declared
+        .map(str::to_string)
+        .or_else(|| station_wmo.and_then(iecc_zone_for_wmo).map(str::to_string))
+}
+
 #[cfg(test)]
 mod tests {
     use sha2::{Digest, Sha256};

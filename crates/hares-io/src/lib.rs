@@ -39,7 +39,7 @@ pub use envelope_lut::{
 pub use epw::{
     DesignConditions, SkyTempModel, berdahl_martin_sky_emissivity, clark_allen_sky_emissivity,
     compute_sky_temp_c, monthly_day_counts, parse_epw, parse_epw_location_state,
-    sky_temp_from_emissivity,
+    parse_epw_station_wmo, sky_temp_from_emissivity,
 };
 // Re-export canonical physical constants from hares-physics (preserving public API names).
 pub use hares_physics::constants::CELSIUS_TO_KELVIN as KELVIN_OFFSET_C;

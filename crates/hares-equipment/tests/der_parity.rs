@@ -24,8 +24,8 @@ use hares_equipment::{
     GeneratorEfficiencyCurvePoint, PvConfig,
 };
 use hares_types::{
-    ControlSignal, EnvironmentState, GridState, PortSlots, SurfaceIrradiance, WeatherState, ZoneId,
-    ZoneState,
+    ControlSignal, EnvironmentState, FuelType, GridState, PortSlots, SurfaceIrradiance,
+    WeatherState, ZoneId, ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -694,7 +694,7 @@ fn generator_fuel_efficiency_at_half_load() {
         GeneratorConfig {
             equipment_id: None,
             zone_id: None,
-            fuel_type: None,
+            fuel_type: Some(FuelType::Gas),
             rated_power_kw: 10.0,
             eta_electric: Some(0.30),
             eta_thermal: None,
@@ -819,7 +819,7 @@ fn generator_ramp_rate_is_kw_per_second() {
         GeneratorConfig {
             equipment_id: None,
             zone_id: None,
-            fuel_type: None,
+            fuel_type: Some(FuelType::Gas),
             rated_power_kw: 10.0,
             eta_electric: Some(0.30),
             eta_thermal: None,
@@ -926,7 +926,7 @@ fn generator_capacity_min_enforced() {
         GeneratorConfig {
             equipment_id: None,
             zone_id: None,
-            fuel_type: None,
+            fuel_type: Some(FuelType::Gas),
             rated_power_kw: 10.0,
             eta_electric: Some(0.30),
             eta_thermal: None,

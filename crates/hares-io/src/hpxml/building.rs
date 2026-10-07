@@ -790,7 +790,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         None => None,
     };
 
-    let (mut boundaries, pitch_absent_ids) = parse_boundaries(details)?;
+    let (mut boundaries, pitch_absent_ids) = parse_boundaries(details, &mut parse_warnings)?;
     let windows = parse_windows(details, &mut boundaries)?;
     let skylights = parse_skylights(details, &mut boundaries)?;
 
@@ -1263,7 +1263,10 @@ fn parse_hvac_setpoints(
     }
 }
 
-fn parse_boundaries(details: &XmlNode) -> Result<(Vec<Boundary>, Vec<String>), HpxmlError> {
+fn parse_boundaries(
+    details: &XmlNode,
+    _parse_warnings: &mut Vec<Warning>,
+) -> Result<(Vec<Boundary>, Vec<String>), HpxmlError> {
     let mut out = Vec::new();
     let mut pitch_absent_ids = Vec::new();
     let boundary_specs = [
@@ -1298,6 +1301,71 @@ fn parse_boundaries(details: &XmlNode) -> Result<(Vec<Boundary>, Vec<String>), H
                     boundary_type.clone(),
                     &mut pitch_absent_ids,
                 )?);
+            }
+        }
+    }
+
+    // A subsurface (door) inherits the zones of the wall it is attached to:
+    // OS-HPXML gives a subsurface its parent surface's outside boundary
+    // condition (hpxml.rb subsurface handling, `OutsideBoundaryCondition`
+    // from AttachedToWall), so an exterior adjacency the door does not state
+    // is derived from the wall, never defaulted to Outdoor. An attached
+    // wall the boundary list does not hold is an error naming both ids.
+    // A subsurface (door) inherits the zones of the wall it is attached to:
+    // OS-HPXML gives a subsurface its parent surface's outside boundary
+    // condition (hpxml.rb subsurface handling, `OutsideBoundaryCondition`
+    // from AttachedToWall), so an exterior adjacency the door does not state
+    // is derived from the wall, never defaulted to Outdoor. An attached
+    // wall the boundary list does not hold is an error naming both ids.
+    // The derivation is recorded as a parse warning naming the door and the
+    // wall it was taken from.
+    if let Some(doors) = enclosure.child("Doors") {
+        for door in doors.children_named("Door") {
+            let Some(wall_id) = door
+                .child("AttachedToWall")
+                .and_then(|n| n.attrs.get("idref"))
+                .map(|id| id.to_string())
+            else {
+                continue;
+            };
+            let door_id = element_id(door).unwrap_or_else(|| "unknown".to_string());
+            let Some(wall) = out.iter().find(|bd| bd.id == wall_id) else {
+                return Err(HpxmlError::MissingField {
+                    path: "Door/AttachedToWall",
+                    system_kind: "Door",
+                    system_id: door_id,
+                    reason: "the attached wall's idref matches no parsed boundary, so \
+                             the door's zones cannot be derived from it",
+                });
+            };
+            let (wall_interior, wall_exterior) =
+                (wall.interior_zone.clone(), wall.exterior_zone.clone());
+            let Some(bd) = out
+                .iter_mut()
+                .find(|bd| bd.boundary_type == BoundaryType::Door && bd.id == door_id)
+            else {
+                continue;
+            };
+            let mut inherited: Vec<String> = Vec::new();
+            if bd.interior_zone.is_none() {
+                bd.interior_zone = wall_interior;
+                inherited.push("interior".to_string());
+            }
+            if bd.exterior_zone.is_none() {
+                bd.exterior_zone = wall_exterior;
+                inherited.push("exterior".to_string());
+            }
+            if !inherited.is_empty() {
+                // A derivation from stated input (the wall's own adjacency),
+                // not a substituted default: recorded as a parse trace, not
+                // a run warning.
+                tracing::debug!(
+                    door = %door_id,
+                    wall = %wall_id,
+                    zones = %inherited.join(" and "),
+                    "door zones derived from its attached wall (the subsurface's \
+                     parent surface's boundary condition, as OS-HPXML does)"
+                );
             }
         }
     }
@@ -2617,10 +2685,15 @@ fn parse_duct_systems(
                             leakage_cfm25_by_type.insert(dtype, value);
                         }
                         _ => {
-                            tracing::warn!(
-                                units = %units,
-                                "unsupported duct leakage unit (cannot convert to fraction without fan flow); skipping"
-                            );
+                            return Err(HpxmlError::UnrecognisedUnit {
+                                value,
+                                unit: units.clone(),
+                                context: format!(
+                                    "a DuctLeakageMeasurement on duct type '{dtype}' \
+                                     (a fraction, percent or cfm25 value is required; \
+                                     the measurement is dropped otherwise)"
+                                ),
+                            });
                         }
                     }
                 }

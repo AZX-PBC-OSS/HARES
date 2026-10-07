@@ -179,15 +179,23 @@ pub struct AutosizeContext {
 /// Floor area is derived from `building.conditioned_volume_m3 / building.ceiling_height_m`,
 /// falling back to the first conditioned zone's `floor_area_m2`.
 ///
-/// If floor area cannot be determined (both sources are absent or zero), a `warn!` is
-/// emitted and gains are returned based on occupancy only (zero lighting/plug component).
+/// If floor area cannot be determined (both sources are absent or zero), an
+/// error naming the missing input is returned: sizing on occupancy-only
+/// gains undersizes the home.
 ///
 /// Override: when `ctx.internal_gains_w > 0.0`, the context-supplied values
 /// take precedence (HPXML override path).
-pub fn compute_default_internal_gains(ctx: &AutosizeContext, building: &Building) -> (f64, f64) {
+///
+/// # Errors
+///
+/// No conditioned floor area is determinable from the building.
+pub fn compute_default_internal_gains(
+    ctx: &AutosizeContext,
+    building: &Building,
+) -> hares_types::Result<(f64, f64)> {
     // Override via AutosizeContext (HPXML-supplied values).
     if ctx.internal_gains_w > 0.0 {
-        return (ctx.internal_gains_w, ctx.internal_gains_latent_w);
+        return Ok((ctx.internal_gains_w, ctx.internal_gains_latent_w));
     }
 
     // Occupancy: DEFAULT_OCCUPANTS × per-capita gains.
@@ -216,16 +224,18 @@ pub fn compute_default_internal_gains(ctx: &AutosizeContext, building: &Building
         Some(area) if area > 0.0 => {
             let lights_and_plug = area * DEFAULT_LIGHTING_PLUG_DENSITY_W_M2;
             let sensible = occ_sensible + lights_and_plug;
-            (sensible, occ_latent)
+            Ok((sensible, occ_latent))
         }
         _ => {
-            tracing::warn!(
-                occupancy_sensible_w = occ_sensible,
-                occupancy_latent_w = occ_latent,
-                "cooling autosizing: conditioned floor area is zero or missing — \
-                 internal gains limited to occupancy only; sizing may be conservative"
-            );
-            (occ_sensible, occ_latent)
+            // A home with no determinable conditioned floor area is an input
+            // defect: sizing the cooling load on occupancy-only gains
+            // undersizes every unit the home has.
+            Err(hares_types::HaresError::Dwelling(
+                "cooling autosizing: no conditioned floor area is determinable \
+                 (no ceiling height and volume, and no conditioned zone floor \
+                 area); lighting and plug gains cannot be sized"
+                    .to_string(),
+            ))
         }
     }
 }
@@ -294,7 +304,8 @@ pub fn autosize_equipment_capacities(
     // Compute internal gains for cooling autosizing.
     // ACCA Manual J-2016 §7: cooling design loads must include sensible
     // internal gains from occupancy, lighting, and appliances.
-    let (internal_gains_w, internal_gains_latent_w) = compute_default_internal_gains(ctx, building);
+    let (internal_gains_w, internal_gains_latent_w) =
+        compute_default_internal_gains(ctx, building)?;
 
     for spec in specs.iter_mut() {
         let needs_heating = spec
@@ -321,6 +332,14 @@ pub fn autosize_equipment_capacities(
         if !needs_heating && !needs_cooling && !needs_backup {
             continue;
         }
+
+        // The rebuild contract at the end of the loop: a spec whose typed
+        // config existed (placeholders to replace) or which carried autosize
+        // flags (a pending typed config) leaves the loop with a typed config.
+        let had_typed_config = spec.typed_config.is_some();
+        let had_autosize_flags = spec.parameters.contains_key("autosize_heating")
+            || spec.parameters.contains_key("autosize_cooling")
+            || spec.parameters.contains_key("autosize_backup");
 
         // Determine indoor design setpoints.
         // Prefer the equipment's own setpoint; fall back to building setpoints;
@@ -584,9 +603,22 @@ pub fn autosize_equipment_capacities(
             }
         }
 
-        // Rebuild typed config with updated capacities.
-        spec.typed_config =
-            rebuild_hvac_typed_config(&spec.name, &spec.parameters, &ctx.duct_params);
+        // Rebuild typed config with updated capacities. The rebuild owns
+        // two cases: a spec that carried a typed config (the autosized
+        // placeholders are replaced), and a spec pending autosize (the
+        // resolver left its typed config unset when the capacity was
+        // absent; the config builds here from the autosized parameters).
+        // A raw spec without autosize flags keeps the raw channel. A
+        // rebuild that fails is an error: silently leaving the raw
+        // spec in place would run autosized parameters through
+        // placeholder-capacity equipment.
+        if had_typed_config || had_autosize_flags {
+            spec.typed_config = Some(
+                rebuild_hvac_typed_config(&spec.name, &spec.parameters, &ctx.duct_params).map_err(
+                    |e| hares_types::HaresError::Dwelling(format!("autosize rebuild: {e}")),
+                )?,
+            );
+        }
     }
 
     Ok(())
@@ -1188,12 +1220,16 @@ mod tests {
 
         let mut params = Map::new();
         params.insert("autosize_heating".to_string(), json!(true));
+        // The typed config builds after autosizing, so the spec states
+        // every field a furnace's config needs.
+        params.insert("efficiency_afue".to_string(), json!(0.80));
         let spec = EquipmentSpec {
             name: "Gas Furnace".to_string(),
             instance_name: None,
             fuel_type: hares_types::FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1251,6 +1287,7 @@ mod tests {
             fuel_type: hares_types::FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1307,12 +1344,16 @@ mod tests {
 
         let mut params = Map::new();
         params.insert("autosize_heating".to_string(), json!(true));
+        // The typed config builds after autosizing, so the spec states
+        // every field a furnace's config needs.
+        params.insert("efficiency_afue".to_string(), json!(0.80));
         let spec = EquipmentSpec {
             name: "Gas Furnace".to_string(),
             instance_name: None,
             fuel_type: hares_types::FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1372,6 +1413,7 @@ mod tests {
             fuel_type: hares_types::FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1428,12 +1470,16 @@ mod tests {
         let mut params = Map::new();
         params.insert("autosize_heating".to_string(), json!(true));
         params.insert("autosize_heating_factor".to_string(), json!(1.2));
+        // The typed config builds after autosizing, so the spec states
+        // every field a furnace's config needs.
+        params.insert("efficiency_afue".to_string(), json!(0.80));
         let spec = EquipmentSpec {
             name: "Gas Furnace".to_string(),
             instance_name: None,
             fuel_type: hares_types::FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1487,12 +1533,18 @@ mod tests {
         let mut params = Map::new();
         params.insert("autosize_cooling".to_string(), json!(true));
         params.insert("autosize_cooling_factor".to_string(), json!(1.0));
+        // The typed config builds after autosizing, so the spec states
+        // every field a furnace's config needs; the heating capacity is
+        // stated (only the cooling is autosized here).
+        params.insert("efficiency_afue".to_string(), json!(0.80));
+        params.insert("heating_capacity_w".to_string(), json!(10_000.0));
         let spec = EquipmentSpec {
             name: "Gas Furnace".to_string(),
             instance_name: None,
             fuel_type: hares_types::FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1525,7 +1577,7 @@ mod tests {
 
         // minimal_building() has no floor area → occupancy-only gains: 2 × 75 = 150 W.
         let (internal_gains_w, _internal_gains_latent_w) =
-            compute_default_internal_gains(&ctx, &building);
+            compute_default_internal_gains(&ctx, &building).unwrap();
         let raw_capacity = thermal
             .autosize_design_day_cooling(
                 ZONE,
@@ -1560,12 +1612,16 @@ mod tests {
         params.insert("autosize_heating".to_string(), json!(true));
         params.insert("autosize_heating_min_w".to_string(), json!(5000.0));
         params.insert("autosize_heating_max_w".to_string(), json!(600.0));
+        // The typed config builds after autosizing, so the spec states
+        // every field a furnace's config needs.
+        params.insert("efficiency_afue".to_string(), json!(0.80));
         let spec = EquipmentSpec {
             name: "Gas Furnace".to_string(),
             instance_name: None,
             fuel_type: hares_types::FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1761,6 +1817,7 @@ mod tests {
             fuel_type: hares_types::FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1821,6 +1878,7 @@ mod tests {
             fuel_type: hares_types::FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1885,6 +1943,7 @@ mod tests {
             fuel_type: hares_types::FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -2770,12 +2829,10 @@ mod tests {
     }
 
     #[test]
-    fn compute_default_internal_gains_matches_ashrae_defaults() {
-        // Verify that the default internal gains match:
-        // - Occupancy: 2 × 75 W/person = 150 W sensible (ASHRAE HoF 2021 Ch.18 Table 1)
-        // - Lighting/plug: 5 W/m² per ASHRAE 62.2-2022 Appendix B
-        // - Occupancy latent: 2 × 55 W/person = 110 W (ASHRAE HoF 2021 Ch.18 Table 1)
-
+    fn compute_default_internal_gains_errors_when_no_floor_area_is_determinable() {
+        // A zero conditioned volume and no zone floor area leave no floor
+        // area: an input defect, an error naming the missing input (the silent-default rule;
+        // the pre-fix code warned and sized on occupancy-only gains).
         let mut building = minimal_building();
         building.conditioned_volume_m3 = 0.0;
         let ctx = AutosizeContext {
@@ -2788,12 +2845,39 @@ mod tests {
             internal_gains_latent_w: 0.0,
         };
 
-        // A zero conditioned volume and no zone floor area leave no floor
-        // area, so the function returns occupancy-only gains with a warning.
-        let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
+        let err = compute_default_internal_gains(&ctx, &building)
+            .expect_err("no floor area is an error, not occupancy-only gains");
+        let message = err.to_string();
+        assert!(
+            message.contains("floor area"),
+            "the error must name the missing floor area, got: {message}"
+        );
+    }
 
-        // Sensible from occupancy only (no floor area → no lights/plug component).
-        let expected_occ_sensible = 2.0 * OCCUPANT_SENSIBLE_GAIN_W; // 150 W
+    #[test]
+    fn compute_default_internal_gains_matches_ashrae_defaults() {
+        // Verify that the default internal gains match:
+        // - Occupancy: 2 × 75 W/person = 150 W sensible (ASHRAE HoF 2021 Ch.18 Table 1)
+        // - Lighting/plug: 5 W/m² per ASHRAE 62.2-2022 Appendix B
+        // - Occupancy latent: 2 × 55 W/person = 110 W (ASHRAE HoF 2021 Ch.18 Table 1)
+
+        let building = minimal_building();
+        let ctx = AutosizeContext {
+            design_conditions: None,
+            weather_lat: 39.74,
+            weather_lon: -104.87,
+            weather_elevation_m: 0.0,
+            duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
+        };
+
+        // minimal_building's volume 400 m³ over 2.5 m gives 160 m² of floor
+        // area: occupancy plus the lighting/plug density.
+        let (sensible, latent) = compute_default_internal_gains(&ctx, &building).unwrap();
+
+        // Sensible: occupancy (150 W) + 160 m² × 5 W/m² = 950 W.
+        let expected_occ_sensible = 2.0 * OCCUPANT_SENSIBLE_GAIN_W + 160.0 * 5.0;
         let expected_occ_latent = 2.0 * OCCUPANT_LATENT_GAIN_W; // 110 W
 
         assert!(
@@ -2840,7 +2924,7 @@ mod tests {
             internal_gains_latent_w: 0.0,
         };
 
-        let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
+        let (sensible, latent) = compute_default_internal_gains(&ctx, &building).unwrap();
 
         // conditioned_volume / ceiling_height = 180 / 2.4 = 75 m²
         // Occupancy: 2 × 75 = 150 W
@@ -2873,7 +2957,7 @@ mod tests {
             internal_gains_latent_w: 200.0,
         };
 
-        let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
+        let (sensible, latent) = compute_default_internal_gains(&ctx, &building).unwrap();
 
         assert!(
             (sensible - 800.0).abs() < 1e-6,
@@ -2929,6 +3013,7 @@ mod tests {
             fuel_type: fuel,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3016,6 +3101,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3304,6 +3390,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,

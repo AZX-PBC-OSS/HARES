@@ -79,7 +79,7 @@ fn generator_fluid_solver_invariant_passes() {
     let gen_cfg = GeneratorConfig {
         equipment_id: None,
         zone_id: Some(1),
-        fuel_type: None,
+        fuel_type: Some(hares_types::FuelType::Gas),
         rated_power_kw: 10.0,
         eta_electric: Some(0.30),
         eta_thermal: Some(0.35),

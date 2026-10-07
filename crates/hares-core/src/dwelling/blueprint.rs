@@ -66,9 +66,35 @@ impl DwellingBlueprint {
     /// Build blueprint from already-parsed building, weather, and schedule data.
     pub(super) fn from_parts(
         config: DwellingConfig,
+        building: hares_io::Building,
+        weather: WeatherTimeSeries,
+        schedule: ScheduleTimeSeries,
+    ) -> Result<Self, HaresError> {
+        let resolved_defaults_dir = config
+            .defaults_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("defaults"));
+        let defaults = DefaultsStore::load(&resolved_defaults_dir).map_err(|err| {
+            HaresError::Io(format!(
+                "defaults load failed for '{}': {err}",
+                resolved_defaults_dir.display()
+            ))
+        })?;
+        Self::from_parts_with_defaults(config, building, weather, schedule, defaults)
+    }
+
+    /// Build blueprint from already-parsed data and an explicit defaults
+    /// store: the typed constructor for a caller that has already loaded (or
+    /// deliberately declined) defaults. A synthetic dwelling, whose inputs
+    /// are fully explicit, passes [`DefaultsStore::empty`]; no caller reaches
+    /// an empty store through a missing file (one policy: the store's load
+    /// failure is an error naming the path).
+    pub(super) fn from_parts_with_defaults(
+        config: DwellingConfig,
         mut building: hares_io::Building,
         mut weather: WeatherTimeSeries,
         schedule: ScheduleTimeSeries,
+        defaults: DefaultsStore,
     ) -> Result<Self, HaresError> {
         let site_location = resolve_site_location(
             &building.site,
@@ -115,27 +141,6 @@ impl DwellingBlueprint {
         let weather_avgs = compute_weather_averages(&weather, &building)?;
         let design_conditions = weather.design_conditions;
         let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
-
-        let resolved_defaults_dir = config
-            .defaults_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("defaults"));
-        let defaults = match DefaultsStore::load(&resolved_defaults_dir) {
-            Ok(store) => store,
-            // Corrupt defaults data must surface: continuing with an empty
-            // store would silently swap every equipment's resolved defaults
-            // (ZIP sidecars, HVAC curves) for class-table fallbacks — a
-            // structurally normal dwelling running different numbers.
-            Err(err @ hares_io::DefaultsError::MalformedToml { .. }) => {
-                return Err(HaresError::Io(err.to_string()));
-            }
-            // Unavailable defaults (missing dir / I/O error) keep the
-            // documented degradation: warn and run on the class tables.
-            Err(err) => {
-                tracing::warn!("defaults load failed; using empty defaults store: {err}");
-                DefaultsStore::empty()
-            }
-        };
 
         // The blueprint's construction-time warnings, in report order: the
         // HPXML parse warnings first, then the equipment resolution warnings.
@@ -213,10 +218,10 @@ impl DwellingBlueprint {
     /// instance name (or canonical name, when instance name is absent) already
     /// exists in the blueprint.
     pub fn add_equipment_spec(&mut self, mut spec: EquipmentSpec) -> Result<(), HaresError> {
-        // The caller's spec-level parameter overrides land in the typed
-        // payload here, so the one config generation the assembly builds
-        // from carries them; a bag key the payload does not carry is
-        // machinery state and passes through.
+        // The caller's spec-level overrides land from the dedicated
+        // override field here, so the one config generation the assembly
+        // builds from carries them; an override key no schema field reads
+        // is an error naming the equipment and the field.
         super::conversions::apply_spec_bag_to_typed_config(&mut spec)?;
         let name = spec.instance_name.as_deref().unwrap_or(&spec.name);
         if self

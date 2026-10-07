@@ -704,7 +704,7 @@ pub fn inject_schedule_into_specs(
         // Ventilation Fan: constant power from equipment properties, not schedule CSV.
         // Mirrors OCHRE: schedule["Ventilation Fan (kW)"] = equipment["Power (W)"] / 1000
         if spec.name == "Ventilation Fan" {
-            inject_constant_power_schedule(spec, schedule.len());
+            inject_constant_power_schedule(spec, schedule.len())?;
             continue;
         }
 
@@ -1513,27 +1513,58 @@ fn inject_event_schedule(
 }
 
 /// Inject a constant power schedule for equipment that runs at rated power
-/// (e.g., Ventilation Fan).  Reads `power_w` from the spec parameters.
-fn inject_constant_power_schedule(spec: &mut EquipmentSpec, schedule_len: usize) {
+/// (e.g., Ventilation Fan).
+///
+/// The power is the spec's declared `power_w`; a Ventilation Fan's rated
+/// power is its declared fan power (`fan_power_w`, or the supply/exhaust
+/// pair); a spec that declares neither resolves through [`resolve_max_kw`],
+/// so a spec with no determinable power is a resolve error naming the
+/// equipment and the missing field, never a silent 0 kW constant.
+fn inject_constant_power_schedule(
+    spec: &mut EquipmentSpec,
+    schedule_len: usize,
+) -> Result<(), HaresError> {
     if schedule_len == 0 {
-        return;
+        return Ok(());
     }
     if spec.parameters.keys().any(|k| {
         k.starts_with("power_schedule_")
             || k.starts_with("power_profile_")
             || k == "power_constant_kw"
     }) {
-        return;
+        return Ok(());
     }
 
-    let power_kw = spec
+    let power_w = spec
         .parameters
         .get("power_w")
         .and_then(|v| v.as_f64())
-        .unwrap_or(0.0)
-        / 1000.0;
+        .or_else(|| fan_rated_power_w(spec));
+    let power_kw = match power_w {
+        Some(power_w) => power_w / 1000.0,
+        None => resolve_max_kw(spec, 1.0, "the constant-power schedule source")?,
+    };
 
     inject_compact_constant_power(spec, power_kw);
+    Ok(())
+}
+
+/// A Ventilation Fan spec's total rated fan power [W]: the declared
+/// `fan_power_w`, else the supply/exhaust pair's sum.
+fn fan_rated_power_w(spec: &EquipmentSpec) -> Option<f64> {
+    let total = |a: Option<f64>, b: Option<f64>| match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    };
+    let supply = spec
+        .parameters
+        .get("supply_fan_power_w")
+        .and_then(|v| v.as_f64());
+    let exhaust = spec
+        .parameters
+        .get("exhaust_fan_power_w")
+        .and_then(|v| v.as_f64());
+    total(supply, exhaust).or_else(|| spec.parameters.get("fan_power_w").and_then(|v| v.as_f64()))
 }
 
 fn inject_compact_column_power(spec: &mut EquipmentSpec, col_idx: usize) {
@@ -1893,6 +1924,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1918,6 +1950,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -2113,6 +2146,60 @@ mod tests {
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!((peak - 0.5).abs() < 1e-9, "max power should win precedence");
+    }
+
+    /// A Ventilation Fan spec with no power input fails the resolve with the
+    /// resolve error naming the equipment and the missing fields. The pre-fix
+    /// code injected a constant-power schedule at 0 kW instead.
+    #[test]
+    fn constant_power_schedule_without_a_power_is_a_resolve_error() {
+        let mut schedule = make_schedule(24);
+        let mut spec = make_spec("Ventilation Fan", 0.0);
+        spec.parameters.remove("annual_electric_kwh");
+        let mut specs = vec![spec];
+        let err = inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+        )
+        .expect_err("a constant-power schedule without a power must fail the resolve");
+        let message = err.to_string();
+        assert!(
+            message.contains("Ventilation Fan"),
+            "the error must name the equipment: {message}"
+        );
+        assert!(
+            message.contains("max_electric_power_w"),
+            "the error must name the missing field: {message}"
+        );
+    }
+
+    /// A Ventilation Fan spec's rated fan power is a determinable constant
+    /// power: `fan_power_w` (or the supply/exhaust pair) sets
+    /// `power_constant_kw` without `power_w` being present.
+    #[test]
+    fn constant_power_schedule_reads_the_fan_rated_power() {
+        let mut schedule = make_schedule(24);
+        let mut spec = make_spec("Ventilation Fan", 0.0);
+        spec.parameters
+            .insert("fan_power_w".to_string(), Value::from(876.0));
+        let mut specs = vec![spec];
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+        )
+        .expect("the fan's rated fan power is a determinable power");
+        let kw = specs[0]
+            .parameters
+            .get("power_constant_kw")
+            .and_then(Value::as_f64)
+            .expect("power_constant_kw injected");
+        assert!((kw - 0.876).abs() < 1e-9, "expected 0.876 kW, got {kw}");
     }
 
     #[test]
@@ -2426,6 +2513,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 hares_equipment::EquipmentConfig::from_typed(
                     name.to_string(),
@@ -2698,6 +2786,7 @@ mod tests {
             },
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(typed_config),
             system_id: None,
             related_hvac_idref: None,
@@ -2737,6 +2826,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(typed_config),
             system_id: None,
             related_hvac_idref: None,
@@ -2962,6 +3052,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(typed_config),
             system_id: None,
             related_hvac_idref: None,
@@ -3002,6 +3093,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3088,6 +3180,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3625,6 +3718,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3820,6 +3914,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3914,6 +4009,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -4223,6 +4319,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,

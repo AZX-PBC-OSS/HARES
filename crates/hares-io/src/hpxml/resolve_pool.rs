@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 use hares_physics::units as conv;
 use hares_types::FuelType;
 
+use super::HpxmlError;
 use super::building::XmlNode;
 use super::equipment::{EquipmentSpec, build_spec};
 use super::xml_helpers::{
@@ -59,10 +60,11 @@ pub(super) fn resolve_pool_and_spa_loads(
     details: &XmlNode,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
-) {
+) -> Result<(), HpxmlError> {
     let pool_equipment = resolve_pools(details, defaults, specs);
     resolve_hot_tubs(details, defaults, specs);
-    resolve_spas(details, defaults, specs, &pool_equipment);
+    resolve_spas(details, defaults, specs, &pool_equipment)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -285,12 +287,13 @@ fn resolve_spas(
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
     pool_equipment: &HashMap<String, PoolEquipmentLoads>,
-) {
+) -> Result<(), HpxmlError> {
     let Some(spas) = details.child("Spas") else {
-        return;
+        return Ok(());
     };
-    resolve_permanent_spas(spas, defaults, specs, pool_equipment);
+    resolve_permanent_spas(spas, defaults, specs, pool_equipment)?;
     resolve_portable_electric_spas(spas, defaults, specs);
+    Ok(())
 }
 
 fn resolve_permanent_spas(
@@ -298,19 +301,24 @@ fn resolve_permanent_spas(
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
     pool_equipment: &HashMap<String, PoolEquipmentLoads>,
-) {
+) -> Result<(), HpxmlError> {
     for spa in spas.children_named("PermanentSpa") {
         let Some(loads) = resolve_local_ref(spa, "AttachedToPool", pool_equipment) else {
             let idref = spa
                 .child("AttachedToPool")
                 .and_then(|a| a.attrs.get("idref"))
                 .map(|s| s.as_str())
-                .unwrap_or("<absent>");
-            tracing::warn!(
-                attached_to_pool = %idref,
-                "PermanentSpa AttachedToPool idref could not be resolved; skipping"
-            );
-            continue;
+                .unwrap_or("<absent>")
+                .to_string();
+            return Err(HpxmlError::InvalidField {
+                path: "PermanentSpa/AttachedToPool",
+                system_kind: "PermanentSpa",
+                system_id: element_id(spa).unwrap_or_else(|| "unknown".to_string()),
+                value_received: idref,
+                reason: "the AttachedToPool idref does not resolve to a resolved pool \
+                         equipment load; a spa whose pump and heater loads cannot be \
+                         found is rejected, not skipped",
+            });
         };
         tracing::info!("PermanentSpa resolved pool equipment via AttachedToPool/@idref");
         if let Some(ref pump_params) = loads.pump_params {
@@ -330,6 +338,7 @@ fn resolve_permanent_spas(
             ));
         }
     }
+    Ok(())
 }
 
 fn resolve_portable_electric_spas(
@@ -450,7 +459,8 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
+        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+            .expect("the pool and spa loads must resolve");
 
         let pump = specs
             .iter()
@@ -532,7 +542,8 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
+        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+            .expect("the pool and spa loads must resolve");
 
         let pump = specs
             .iter()
@@ -580,7 +591,8 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
+        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+            .expect("the pool and spa loads must resolve");
 
         assert!(
             specs.iter().all(|s| s.name != "Pool Pump"
@@ -616,7 +628,8 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
+        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+            .expect("the pool and spa loads must resolve");
 
         let pump = specs
             .iter()
@@ -657,7 +670,8 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
+        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+            .expect("the pool and spa loads must resolve");
 
         let pump = specs
             .iter()
@@ -716,7 +730,8 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
+        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+            .expect("the pool and spa loads must resolve");
 
         let pool_pump = specs
             .iter()
@@ -763,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn permanent_spa_unresolved_idref_produces_no_spec() {
+    fn permanent_spa_unresolved_idref_errors() {
         let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
           <Building>
             <BuildingDetails>
@@ -787,14 +802,20 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
-
+        // An idref that resolves to nothing is an input defect naming the
+        // spa and the idref: the pre-fix code skipped the spa
+        // silently and the home lost its spa loads.
+        let err =
+            resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+                .expect_err("an unresolvable AttachedToPool idref must fail the resolve");
+        let message = err.to_string();
         assert!(
-            specs.iter().all(|s| s.name != "Pool Pump"
-                && s.name != "Pool Heater"
-                && s.name != "Spa Pump"
-                && s.name != "Spa Heater"),
-            "no pool/spa specs when PermanentSpa references missing pool"
+            message.contains("MissingPool"),
+            "the error must name the idref, got: {message}"
+        );
+        assert!(
+            message.contains("AttachedToPool"),
+            "the error must name the field, got: {message}"
         );
     }
 
@@ -818,7 +839,8 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
+        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+            .expect("the pool and spa loads must resolve");
 
         assert!(
             specs.iter().all(|s| s.name != "Pool Pump"
@@ -862,7 +884,8 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
+        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+            .expect("the pool and spa loads must resolve");
 
         let pump = specs
             .iter()
@@ -904,7 +927,8 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
+        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+            .expect("the pool and spa loads must resolve");
 
         assert!(specs.iter().any(|s| s.name == "Pool Pump"));
     }
@@ -942,7 +966,8 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
+        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+            .expect("the pool and spa loads must resolve");
 
         let pump = specs
             .iter()
@@ -988,7 +1013,8 @@ mod tests {
 
         let building = parse_building(xml).expect("parse building");
         let mut specs = Vec::new();
-        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs);
+        resolve_pool_and_spa_loads(&building.details_xml, &DefaultsStore::empty(), &mut specs)
+            .expect("the pool and spa loads must resolve");
 
         let heater = specs
             .iter()

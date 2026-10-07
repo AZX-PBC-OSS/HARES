@@ -497,25 +497,20 @@ pub(crate) fn resolve_exterior(
     match boundary.exterior_zone.as_ref() {
         Some(hares_io::hpxml::ZoneType::Outdoor) => Ok(ExteriorTarget::Outdoor),
         Some(hares_io::hpxml::ZoneType::Ground) => Ok(ExteriorTarget::Ground),
-        Some(hares_io::hpxml::ZoneType::Other(raw)) => {
-            tracing::warn!(
-                boundary_id = %boundary.id,
-                zone_type = %raw,
-                "Unrecognised exterior zone type; defaulting to Outdoor"
-            );
-            Ok(ExteriorTarget::Outdoor)
-        }
+        Some(hares_io::hpxml::ZoneType::Other(raw)) => Err(HaresError::Dwelling(format!(
+            "boundary '{}': unrecognised exterior zone text '{raw}'; no zone may be \
+             substituted for a location the input does not name",
+            boundary.id
+        ))),
         Some(zt) => {
             let idx = find_zone_idx(building, Some(&boundary.id), Some(zt), n_zones)?;
             Ok(ExteriorTarget::Zone(idx))
         }
-        None => {
-            tracing::warn!(
-                boundary_id = %boundary.id,
-                "Boundary has no exterior zone; defaulting to Outdoor"
-            );
-            Ok(ExteriorTarget::Outdoor)
-        }
+        None => Err(HaresError::Dwelling(format!(
+            "boundary '{}': no exterior zone; the boundary names neither its exterior \
+             adjacency nor a wall to derive it from",
+            boundary.id
+        ))),
     }
 }
 
@@ -659,27 +654,36 @@ pub(crate) fn equipment_config_from_spec(
     Ok(cfg)
 }
 
-/// Land a spec's own parameter bag onto its typed payload as an override
+/// Land a spec's own typed overrides onto its typed payload as an override
 /// layer, one key at a time, validating the payload against its typed
 /// struct as each key lands.
 ///
 /// This is the blueprint entrance's spec-level override channel: a
-/// caller-built spec may carry parameters alongside a typed config, and
-/// every key the typed payload already carries overrides that field (the
-/// conversion paths then read the landed payload as the one config
-/// generation). The bag keeps the one encoding its producer writes for both
-/// channel purposes (the Python builders' human fuel spellings ("natural
-/// gas", "electric"), the HPXML resolvers' raw text), and the landing
-/// translates it into the canonical vocabulary the payload's serde
-/// deserializer reads: a raw-text value the shared fuel parser can read
-/// lands in its canonical form ("Gas"). A value that neither lands nor
-/// normalizes fails the build naming the equipment, the field, and the
-/// offending value. A bag key the payload does not carry is the resolver's
-/// machinery state (autosize flags, duct inputs, wiring and identity ids,
-/// schedule column indexes) and never config: those keys feed the passes
-/// that own them, so they pass through untouched rather than surfacing as
-/// unknown-field errors. A raw spec has no payload to land on and is
-/// returned unchanged: its bag IS its config.
+/// caller-built spec carries its overrides in
+/// [`hares_io::EquipmentSpec::typed_overrides`], deliberately apart from
+/// the parameter bag (the bag mixes the resolver's machinery keys with the
+/// serialized payload and cannot diagnose a caller's typo), and every
+/// override lands on the payload whether or not the payload's serialized
+/// data carries the field: an override of an unset optional reaches the
+/// schema. The conversion paths then read the landed payload as
+/// the one config generation. The bag keeps the one encoding its producer
+/// writes (the Python builders' human fuel spellings ("natural gas",
+/// "electric"), the HPXML resolvers' raw text), and the landing translates
+/// it into the canonical vocabulary the payload's serde deserializer
+/// reads: a raw-text value the shared fuel parser can read lands in its
+/// canonical form ("Gas"). A value that neither lands nor normalizes fails
+/// the build naming the equipment, the field, and the offending value.
+///
+/// An override key the payload's schema does not read is an error naming
+/// the equipment and the field: the bag is never consulted for overrides,
+/// so nothing else can be mistaken for one. The reserved `equipment_id`
+/// is the identity channel the assembly's assignment pass and the
+/// four-way malformed-id classifier own, and a spec-bag id (malformed
+/// included) must keep reaching that classifier, whose diagnosis names
+/// the channel and the value.
+///
+/// A raw spec has no payload to land on and is returned unchanged: its
+/// bag IS its config.
 pub(crate) fn apply_spec_bag_to_typed_config(spec: &mut hares_io::EquipmentSpec) -> Result<()> {
     let Some(typed) = spec.typed_config.as_mut() else {
         return Ok(());
@@ -719,30 +723,24 @@ pub(crate) fn apply_spec_bag_to_typed_config(spec: &mut hares_io::EquipmentSpec)
     Ok(())
 }
 
-/// Merge a spec's own parameter bag onto a typed payload's data as an
+/// Merge a spec's own typed overrides onto a typed payload's data as an
 /// override layer, one key at a time.
 ///
-/// A bag key the payload already carries overrides that field: the
-/// blueprint caller's spec-level override of a typed field. Each key's
-/// landing is validated against the typed struct before it is kept, so the
-/// error for a rejected value names the field that failed (serde's own path
-/// when the payload's schema can report one, the bag key when the flattened
-/// heat-pump configs' schema cannot). Three key classes never land:
+/// An override key lands whether or not the payload's serialized data
+/// carries it: the schema decides. Three key classes never land:
 ///
 /// - `equipment_id`: the identity channel the assembly's assignment pass
-///   and the four-way malformed-id classifier own. It is reserved in the
-///   dwelling-level override channel too, and a spec-bag id (malformed
-///   included) must keep reaching that classifier, whose diagnosis names
-///   the channel and the value.
-/// - A bag key the payload does not carry: the resolver's machinery state
-///   (autosize flags, duct inputs, wiring ids, schedule column indexes),
-///   which feeds the passes that own it and would otherwise surface as an
-///   unknown-field error against a schema it was never meant for. The
-///   pass-through is by construction ambiguous with a real field the
-///   payload merely does not serialize (an `Option` that is `None` and
-///   skipped): such an override is silently dropped (the known limitation
-///   filed for follow-up, needing an `EquipmentSpec` shape change to
-///   resolve).
+///   and the four-way malformed-id classifier own.
+/// - A key the payload's schema does not read: an error naming the
+///   equipment and the key. The probe is the schema itself
+///   ([`hares_equipment::typed_payload_reads`]), so an unset optional
+///   (`Option` skipped in the serialized payload) is overridable while a
+///   typo is rejected.
+///
+/// Each landing is validated against the typed struct before it is kept,
+/// so the error for a rejected value names the field that failed (serde's
+/// own path when the payload's schema can report one, the bag key when the
+/// flattened heat-pump configs' schema cannot).
 ///
 /// A raw-text value the shared fuel parser can read lands in its canonical
 /// form: the bags' fuel vocabulary is the human/HPXML spelling the Python
@@ -755,17 +753,33 @@ fn land_spec_parameters(
     spec: &hares_io::EquipmentSpec,
     type_name: &str,
 ) -> Result<()> {
-    for (key, value) in &spec.parameters {
-        if key.as_str() == hares_equipment::config::KEY_EQUIPMENT_ID
-            || !landed.contains_key(key.as_str())
-        {
+    let display_name = spec.instance_name.as_ref().unwrap_or(&spec.name);
+    for (key, value) in &spec.typed_overrides {
+        if key.as_str() == hares_equipment::config::KEY_EQUIPMENT_ID {
             continue;
+        }
+        let reads =
+            hares_equipment::typed_payload_reads(type_name, landed, key, value).map_err(|err| {
+                HaresError::Equipment(format!(
+                    "equipment '{display_name}': its typed config type '{type_name}' \
+                     is not registered, so the override '{key}' cannot be checked: {err}"
+                ))
+            })?;
+        if !reads {
+            return Err(HaresError::InvalidEquipmentParameter {
+                equipment: display_name.clone(),
+                key: key.clone(),
+                reason: format!(
+                    "no field of the equipment's typed config '{type_name}' reads \
+                     this key; the parameter bag's machinery keys are not overrides"
+                ),
+            });
         }
         let mut trial = landed.clone();
         let single: Map<String, Value> = [(key.clone(), value.clone())].into_iter().collect();
         hares_io::hpxml::nested_update(&mut trial, &single);
         if trial == *landed {
-            // The bag agrees with the payload: nothing to land, and the
+            // The override agrees with the payload: nothing to land, and the
             // payload keeps the init-time semantics it always had.
             continue;
         }
@@ -798,9 +812,8 @@ fn land_spec_parameters(
                     Some(retry) => *landed = retry,
                     None => {
                         return Err(HaresError::Equipment(format!(
-                            "equipment '{}': its typed config rejected the spec's \
+                            "equipment '{display_name}': its typed config rejected the spec's \
                              parameters: '{}': {}",
-                            spec.instance_name.as_ref().unwrap_or(&spec.name),
                             failure.path.unwrap_or_else(|| key.to_string()),
                             failure.message,
                         )));
@@ -1017,6 +1030,7 @@ pub(crate) fn merged_equipment_config(
         name: spec.name.clone(),
         fuel_type: spec.fuel_type,
         parameters: merged,
+        typed_overrides: spec.typed_overrides.clone(),
         zip_params,
         typed_config: spec.typed_config.clone(),
         system_id: spec.system_id.clone(),
@@ -1729,6 +1743,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 hares_equipment::EquipmentConfig::from_typed(
                     "Gas Furnace".to_string(),
@@ -1809,11 +1824,14 @@ mod tests {
             .cloned()
             .expect("PV config object");
         parameters.insert("capacity_kw".to_string(), json!(override_kw));
+        let mut typed_overrides = serde_json::Map::new();
+        typed_overrides.insert("capacity_kw".to_string(), json!(override_kw));
         hares_io::EquipmentSpec {
             instance_name: None,
             name: "PV".to_string(),
             fuel_type: FuelType::Electric,
             parameters,
+            typed_overrides,
             zip_params: None,
             typed_config: Some(
                 hares_equipment::EquipmentConfig::from_typed(
@@ -1832,7 +1850,7 @@ mod tests {
     #[test]
     fn spec_parameter_override_on_typed_spec_reaches_the_typed_config() {
         let mut spec = pv_spec_with_bag_override(9.0);
-        apply_spec_bag_to_typed_config(&mut spec).expect("the spec's parameters must land");
+        apply_spec_bag_to_typed_config(&mut spec).expect("the spec's overrides must land");
         let overrides = serde_json::Value::Object(serde_json::Map::new());
 
         let merged = merged_equipment_config(&spec, &overrides)
@@ -1843,7 +1861,7 @@ mod tests {
 
         assert!(
             (cfg.capacity_kw - 9.0).abs() < 1e-12,
-            "a parameter the caller set on the spec's bag must reach the typed \
+            "an override the caller set on the spec must reach the typed \
              config instead of being dropped, got capacity_kw {}",
             cfg.capacity_kw
         );
@@ -1852,7 +1870,7 @@ mod tests {
     #[test]
     fn spec_parameter_bag_in_agreement_with_typed_payload_merges_unchanged() {
         let mut spec = pv_spec_with_bag_override(5.0);
-        apply_spec_bag_to_typed_config(&mut spec).expect("the spec's parameters must land");
+        apply_spec_bag_to_typed_config(&mut spec).expect("the spec's overrides must land");
         let overrides = serde_json::Value::Object(serde_json::Map::new());
 
         let merged = merged_equipment_config(&spec, &overrides)
@@ -1866,8 +1884,8 @@ mod tests {
     }
 
     /// The bag-encoding disagreement case the Python builders write: the
-    /// bag carries the human fuel spelling ("natural gas", the same text
-    /// the raw channel parses) while the typed payload carries the
+    /// override carries the human fuel spelling ("natural gas", the same
+    /// text the raw channel parses) while the typed payload carries the
     /// canonical serde form ("Gas"). The landing must translate the raw
     /// text into the canonical form, not reject the spec.
     #[test]
@@ -1878,17 +1896,18 @@ mod tests {
             "heating_capacity_w": 4000.0,
         }))
         .expect("minimal GasWaterHeaterConfig");
-        let mut parameters = serde_json::to_value(&typed_cfg)
-            .expect("serializable gas water heater config")
-            .as_object()
-            .cloned()
-            .expect("gas water heater config object");
-        parameters.insert("fuel_type".to_string(), json!("natural gas"));
+        let mut typed_overrides = serde_json::Map::new();
+        typed_overrides.insert("fuel_type".to_string(), json!("natural gas"));
         let mut spec = hares_io::EquipmentSpec {
             instance_name: None,
             name: "Gas Water Heater".to_string(),
             fuel_type: FuelType::Gas,
-            parameters,
+            parameters: serde_json::to_value(&typed_cfg)
+                .expect("serializable gas water heater config")
+                .as_object()
+                .cloned()
+                .expect("gas water heater config object"),
+            typed_overrides,
             zip_params: None,
             typed_config: Some(
                 hares_equipment::EquipmentConfig::from_typed(
@@ -1913,7 +1932,7 @@ mod tests {
         assert_eq!(
             cfg.fuel_type,
             FuelType::Gas,
-            "the bag's raw text must land as the canonical enum the payload's \
+            "the override's raw text must land as the canonical enum the payload's \
              deserializer reads"
         );
     }
@@ -1929,7 +1948,7 @@ mod tests {
             ("electric", FuelType::Electric),
         ] {
             let mut spec = heat_pump_heater_spec_with_backup_fuel(FuelType::Gas);
-            spec.parameters
+            spec.typed_overrides
                 .insert("backup_fuel".to_string(), json!(raw));
 
             apply_spec_bag_to_typed_config(&mut spec)
@@ -1958,17 +1977,22 @@ mod tests {
             "heating_capacity_w": 4000.0,
         }))
         .expect("minimal GasWaterHeaterConfig");
-        let mut parameters = serde_json::to_value(&typed_cfg)
+        let mut typed_overrides = serde_json::to_value(&typed_cfg)
             .expect("serializable gas water heater config")
             .as_object()
             .cloned()
             .expect("gas water heater config object");
-        parameters.insert("fuel_type".to_string(), json!("ban gas"));
+        typed_overrides.insert("fuel_type".to_string(), json!("ban gas"));
         let mut spec = hares_io::EquipmentSpec {
             instance_name: Some("Hot Water".to_string()),
             name: "Gas Water Heater".to_string(),
             fuel_type: FuelType::Gas,
-            parameters,
+            parameters: serde_json::to_value(&typed_cfg)
+                .expect("serializable gas water heater config")
+                .as_object()
+                .cloned()
+                .expect("gas water heater config object"),
+            typed_overrides,
             zip_params: None,
             typed_config: Some(
                 hares_equipment::EquipmentConfig::from_typed(
@@ -2005,7 +2029,7 @@ mod tests {
     #[test]
     fn spec_bag_unparseable_fuel_on_flattened_config_names_the_bag_key() {
         let mut spec = heat_pump_heater_spec_with_backup_fuel(FuelType::Gas);
-        spec.parameters
+        spec.typed_overrides
             .insert("backup_fuel".to_string(), json!("ban gas"));
 
         let err = apply_spec_bag_to_typed_config(&mut spec)
@@ -2019,6 +2043,180 @@ mod tests {
         assert!(
             msg.contains("ban gas"),
             "the error must carry the offending value, got: {msg}"
+        );
+    }
+
+    /// A spec whose typed payload is the schema-valid JSON `data`, with one
+    /// override on the dedicated override field.
+    fn spec_with_payload(
+        type_name: &str,
+        data: serde_json::Value,
+        field: &str,
+        value: serde_json::Value,
+    ) -> hares_io::EquipmentSpec {
+        let mut typed_overrides = serde_json::Map::new();
+        typed_overrides.insert(field.to_string(), value);
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: type_name.to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: data.as_object().cloned().unwrap_or_default(),
+            typed_overrides,
+            zip_params: None,
+            typed_config: Some(hares_equipment::EquipmentConfig::with_payload(
+                type_name.to_string(),
+                type_name.to_string(),
+                hares_equipment::ConfigPayload::Typed {
+                    type_name: type_name.to_string(),
+                    version: 1,
+                    data,
+                },
+            )),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }
+    }
+
+    /// Every registered config class takes an override of an unset
+    /// optional field: the field is absent from the payload's serialized
+    /// data (`skip_serializing_if`), and the schema still reads it. The
+    /// pre-fix landing keyed off the payload's carried keys and dropped
+    /// every one of these silently.
+    #[test]
+    fn an_override_of_an_unset_optional_lands_on_every_config_class() {
+        let cases: Vec<(&str, &str, serde_json::Value, serde_json::Value)> = vec![
+            (
+                "Gas Furnace",
+                "fan_power_w",
+                json!({"afue": 1.0, "capacity_w": 1.0}),
+                json!(350.0),
+            ),
+            (
+                "Electric Furnace",
+                "fan_power_w",
+                json!({"capacity_w": 1.0, "eir": 1.0, "setpoint": {}}),
+                json!(350.0),
+            ),
+            (
+                "Gas Boiler",
+                "fan_power_w",
+                json!({"afue": 1.0, "capacity_w": 1.0}),
+                json!(350.0),
+            ),
+            (
+                "Electric Boiler",
+                "fan_power_w",
+                json!({"capacity_w": 1.0, "eir": 1.0}),
+                json!(350.0),
+            ),
+            (
+                "Electric Baseboard",
+                "zone_id",
+                json!({"capacity_w": 1.0, "eir": 1.0}),
+                json!(1),
+            ),
+            ("Ideal HVAC", "shr", json!({}), json!(0.5)),
+            (
+                "Central AC",
+                "fan_power_w",
+                json!({"capacity_w": 1.0, "eir": 1.0}),
+                json!(350.0),
+            ),
+            (
+                "Room AC",
+                "shr",
+                json!({"capacity_w": 1.0, "eir": 1.0}),
+                json!(0.5),
+            ),
+            ("Dehumidifier", "zone_id", json!({}), json!(1)),
+            ("ASHP Heater", "backup_fuel", json!({}), json!("Gas")),
+            ("ASHP Cooler", "zone_id", json!({}), json!(1)),
+            (
+                "Gas Water Heater",
+                "ua_w_per_k",
+                json!({"fuel_type": "Gas"}),
+                json!(5.0),
+            ),
+            (
+                "Electric Resistance Water Heater",
+                "ua_w_per_k",
+                json!({}),
+                json!(5.0),
+            ),
+            (
+                "Tankless Water Heater",
+                "zone_id",
+                json!({"fuel_type": "Gas"}),
+                json!(1),
+            ),
+            ("Indirect Tank", "ua_w_per_k", json!({}), json!(5.0)),
+            ("Heat Pump Water Heater", "cop", json!({}), json!(3.0)),
+            ("PV", "noct_c", json!({"capacity_kw": 1.0}), json!(45.0)),
+            (
+                "Battery",
+                "self_discharge_pct_per_day",
+                json!({"capacity_kwh": 1.0, "max_charge_kw": 1.0, "max_discharge_kw": 1.0}),
+                json!(0.1),
+            ),
+            (
+                "EV",
+                "charging_level",
+                json!({"capacity_kwh": 1.0, "max_charging_power_kw": 1.0}),
+                json!("L2"),
+            ),
+            (
+                "Generator",
+                "zone_id",
+                json!({"rated_power_kw": 1.0}),
+                json!(1),
+            ),
+            (
+                "Ventilation Fan",
+                "sensible_effectiveness",
+                json!({"flow_rate_m3_s": 1.0}),
+                json!(0.7),
+            ),
+        ];
+        for (type_name, field, payload, value) in cases {
+            let mut spec = spec_with_payload(type_name, payload, field, value.clone());
+            apply_spec_bag_to_typed_config(&mut spec).unwrap_or_else(|err| {
+                panic!("{type_name}: the unset optional '{field}' must land: {err}")
+            });
+            let hares_equipment::ConfigPayload::Typed { data, .. } =
+                &spec.typed_config.as_ref().expect("typed").payload
+            else {
+                panic!("{type_name}: typed payload expected");
+            };
+            assert_eq!(
+                data.get(field),
+                Some(&value),
+                "{type_name}: the override of the unset optional '{field}' must reach the payload"
+            );
+        }
+    }
+
+    /// A typo'd override key on a spec errors naming the equipment and the
+    /// field: the dedicated override field has no machinery keys to hide
+    /// behind, so the whole channel is strict (the acceptance test).
+    #[test]
+    fn a_typo_override_key_errors_naming_the_equipment_and_field() {
+        let mut spec = spec_with_payload(
+            "Gas Furnace",
+            json!({"afue": 1.0, "capacity_w": 1.0}),
+            "afuee",
+            json!(0.96),
+        );
+        let err = apply_spec_bag_to_typed_config(&mut spec)
+            .expect_err("a typo'd override key must fail the landing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Gas Furnace"),
+            "the error must name the equipment, got: {msg}"
+        );
+        assert!(
+            msg.contains("afuee"),
+            "the error must name the field, got: {msg}"
         );
     }
 
@@ -2043,6 +2241,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 hares_equipment::EquipmentConfig::from_typed(
                     "ASHP Heater".to_string(),
@@ -2070,6 +2269,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 hares_equipment::EquipmentConfig::from_typed(
                     "ASHP Heater".to_string(),
@@ -2120,6 +2320,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 hares_equipment::EquipmentConfig::from_typed(
                     "Dehumidifier".to_string(),
@@ -2193,6 +2394,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(eq_cfg),
             system_id: None,
             related_hvac_idref: None,
@@ -2393,6 +2595,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: serde_json::Map::new(),
             zip_params: hares_types::zip::zip_defaults_for_class("ASHP Heater"),
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -4068,10 +4271,13 @@ mod tests {
             foundation_depth_m: None,
         };
         let result = resolve_exterior(&building, &boundary, 1);
-        assert_eq!(
-            result.unwrap(),
-            hares_envelope::ExteriorTarget::Outdoor,
-            "None exterior zone must default to Outdoor target"
+        // An exterior adjacency the boundary neither states nor can derive
+        // from a wall is an error: the pre-fix code defaulted to
+        // Outdoor and the boundary's true adjacency was lost.
+        let err = result.expect_err("a boundary with no exterior zone is an error");
+        assert!(
+            err.to_string().contains("none_ext"),
+            "the error must name the boundary, got: {err}"
         );
     }
 
@@ -4117,10 +4323,18 @@ mod tests {
             foundation_depth_m: None,
         };
         let result = resolve_exterior(&building, &boundary, 1);
-        assert_eq!(
-            result.unwrap(),
-            hares_envelope::ExteriorTarget::Outdoor,
-            "unrecognised exterior zone type must map to Outdoor target"
+        // Unrecognised exterior zone text is an error naming it:
+        // the pre-fix code defaulted to Outdoor and the input's text was
+        // silently discarded.
+        let err = result.expect_err("unrecognised exterior zone text is an error");
+        let message = err.to_string();
+        assert!(
+            message.contains("Foobar"),
+            "the error must name the unrecognised text, got: {message}"
+        );
+        assert!(
+            message.contains("other_ext"),
+            "the error must name the boundary, got: {message}"
         );
     }
 
@@ -4141,6 +4355,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,

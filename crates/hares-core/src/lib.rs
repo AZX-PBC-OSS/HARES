@@ -31,7 +31,7 @@ pub use clock::SimClock;
 pub use dwelling::{
     BatteryLutData, Dwelling, DwellingConfig, HpxmlInputs, PremiseZip,
     SimulationResults as DwellingSimulationResults, StepResult, building_to_boundary_inputs,
-    building_to_zone_inputs,
+    building_to_zone_inputs, shipped_defaults_dir,
 };
 pub use engine::{KernelTimer, SimStatus, SimulationEngine, SimulationResults};
 pub use environment::{EnvironmentInitOptions, EnvironmentManager};
