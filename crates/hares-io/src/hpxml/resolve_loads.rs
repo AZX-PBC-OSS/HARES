@@ -38,58 +38,67 @@ pub(crate) const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
 
 /// Resolve a bedroom count for appliance energy calculations.
 ///
-/// Reads `NumberofBedrooms` from HPXML first. When absent, derives from
-/// `NumberofResidents` using `max(1, n_occ - 1)` — a house-type-agnostic
-/// approximation. HARES diverges from OCHRE `hpxml.py:791-800`, which uses
-/// house-type-specific regression formulas (-1.47+1.69*n_occ for detached,
-/// -0.68+1.09*n_occ for attached). HARES cannot access the house type at
-/// this point in the parse (it is resolved later in building construction).
-///
-/// Falls back to ANSI/RESNET 301-2014 Table 4.2.2(1) Reference Home default
-/// of 3 bedrooms when neither `NumberofBedrooms` nor `NumberofResidents`
-/// is available in HPXML.
+/// OCHRE hpxml.py:791-800 adjusts the bedroom count by occupants and house
+/// type and feeds the adjusted count to every appliance energy formula
+/// (hpxml.py:1664). HARES applies the same adjustment: when
+/// `NumberofResidents` is present the adjusted count replaces the raw
+/// `NumberofBedrooms` entirely; when it is absent OCHRE cannot run at all,
+/// so HARES keeps the raw count, then the ANSI/RESNET 301-2014 Table
+/// 4.2.2(1) Reference Home default of 3 bedrooms.
 fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> f64 {
-    if let Some(n) = details
+    let n_bedrooms_raw = details
         .path(&[
             "BuildingSummary",
             "BuildingConstruction",
             "NumberofBedrooms",
         ])
         .and_then(|n| parse_trimmed_f64(&n.text))
-    {
-        #[cfg(feature = "observe")]
-        tracing::info!(
-            bedroom_source = "HPXML NumberofBedrooms",
-            n_bedrooms = n,
-            "bedroom count read directly from HPXML"
-        );
-        return n;
-    }
-    if let Some(n_occ) = details
+        .unwrap_or(3.0);
+    let n_occupants = details
         .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
-        .and_then(|n| parse_trimmed_f64(&n.text))
-    {
-        // Diverges from OCHRE hpxml.py:791-800 which uses house-type-specific
-        // regression formulas (-1.47+1.69*n_occ for detached, -0.68+1.09*n_occ
-        // for attached). HARES uses max(1, n_occ - 1) as a house-type-agnostic
-        // approximation because house type is not yet resolved at this point.
-        let derived = (n_occ - 1.0).max(1.0);
-        tracing::warn!(
-            derived_bedrooms = derived,
-            n_occupants = n_occ,
-            "NumberofBedrooms absent from HPXML; derived = max(1, NumberofResidents - 1)"
-        );
-        #[cfg(feature = "observe")]
-        tracing::info!(
-            bedroom_source = "derived from occupants",
-            n_bedrooms = derived,
-            n_occupants = n_occ,
-            "bedroom count imputed from occupant count"
-        );
-        return derived;
+        .and_then(|n| parse_trimmed_f64(&n.text));
+    let house_type = details
+        .path(&[
+            "BuildingSummary",
+            "BuildingConstruction",
+            "ResidentialFacilityType",
+        ])
+        .map(|n| n.text.trim().to_ascii_lowercase());
+    let adjusted = adjusted_bedroom_count(n_occupants, house_type.as_deref(), n_bedrooms_raw);
+    #[cfg(feature = "observe")]
+    tracing::info!(
+        bedroom_source = if n_occupants.is_some() {
+            "adjusted from occupants and house type"
+        } else {
+            "HPXML NumberofBedrooms"
+        },
+        n_bedrooms = adjusted,
+        n_occupants = n_occupants.unwrap_or(f64::NAN),
+        "appliance bedroom count resolved"
+    );
+    adjusted
+}
+
+/// OCHRE hpxml.py:791-800: the adjusted bedroom count the reference applies
+/// to every appliance and water-heater draw energy formula, from occupants
+/// and house type. With occupants present the raw `NumberofBedrooms` plays
+/// no part in the formula; with them absent OCHRE cannot run, so HARES
+/// keeps the raw count as its fallback.
+pub(super) fn adjusted_bedroom_count(
+    n_occupants: Option<f64>,
+    house_type: Option<&str>,
+    n_bedrooms_raw: f64,
+) -> f64 {
+    match n_occupants {
+        Some(occ) => match house_type {
+            Some("single-family attached" | "apartment unit") => (-0.68 + 1.09 * occ).max(0.0),
+            // OCHRE raises on any other house type label (hpxml.py:799);
+            // HARES falls back to the detached formula, the same pattern the
+            // water-heater draw parse applies.
+            _ => (-1.47 + 1.69 * occ).max(0.0),
+        },
+        None => n_bedrooms_raw,
     }
-    // ANSI/RESNET 301-2014 Table 4.2.2(1) Reference Home: 3 bedrooms.
-    3.0
 }
 
 pub(super) fn resolve_scheduled_loads(
@@ -1802,7 +1811,9 @@ mod tests {
             </BuildingDetails>"#,
         )
         .expect("parse");
-        assert_eq!(resolve_bedroom_count_for_appliances(&details), 2.0);
+        // OCHRE hpxml.py:794-797: occupants present, house type unknown in
+        // this fragment, so the detached branch applies: -1.47 + 1.69*3.
+        assert_eq!(resolve_bedroom_count_for_appliances(&details), -1.47 + 1.69 * 3.0);
     }
 
     #[test]
@@ -1819,7 +1830,8 @@ mod tests {
 
     #[test]
     fn bedroom_count_derived_minimum_is_1() {
-        // NumberofResidents=1 → max(1, 1-1) → max(1, 0) → 1
+        // NumberofResidents=1, no house type: the detached branch
+        // (OCHRE hpxml.py:794-795) floored at 0 occupants.
         let details = parse_xml_document(
             r#"<BuildingDetails>
                 <BuildingSummary>
@@ -1830,7 +1842,7 @@ mod tests {
             </BuildingDetails>"#,
         )
         .expect("parse");
-        assert_eq!(resolve_bedroom_count_for_appliances(&details), 1.0);
+        assert_eq!(resolve_bedroom_count_for_appliances(&details), -1.47 + 1.69);
     }
 
     #[test]
@@ -2947,5 +2959,133 @@ mod tests {
             specs.iter().all(|s| s.name != "Dehumidifier"),
             "the rejected dehumidifier spec must not be pushed"
         );
+    }
+
+    fn occupancy_test_building(summary: &str, appliances: &str, zones: Vec<Zone>) -> Building {
+        let details = parse_xml_document(&format!(
+            "<BuildingDetails>{summary}<Appliances>{appliances}</Appliances></BuildingDetails>"
+        ))
+        .expect("parse occupancy details");
+        let mut building = appliance_test_building("", zones);
+        building.details_xml = details;
+        building
+    }
+
+    /// OCHRE hpxml.py:791-800: with occupants present every appliance energy
+    /// formula takes the occupant-adjusted bedroom count, and the raw
+    /// `NumberofBedrooms` plays no part. For 3 occupants in a detached home
+    /// the adjusted count is -1.47 + 1.69*3 = 3.6 whether the HPXML says 3
+    /// bedrooms or 5.
+    #[test]
+    fn appliance_energies_use_the_occupant_adjusted_bedroom_count() {
+        let summary = "<BuildingSummary>\
+             <BuildingConstruction><NumberofBedrooms>3</NumberofBedrooms>\
+             <ResidentialFacilityType>single-family detached</ResidentialFacilityType>\
+             </BuildingConstruction>\
+             <BuildingOccupancy><NumberofResidents>3</NumberofResidents></BuildingOccupancy>\
+           </BuildingSummary>";
+        let building = occupancy_test_building(
+            summary,
+            r"<Dishwasher/><CookingRange/><Refrigerator/>",
+            vec![conditioned_zone()],
+        );
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("appliances resolve");
+        let specs = specs;
+        let find = |name: &str| specs.iter().find(|s| s.name == name).expect(name);
+
+        // Dishwasher: kwh_per_cycle = ((33.12*0.5497/1.09 - 467*0.02504)
+        //   / (0.12*0.5497/1.09 - 0.02504)) / (4*52) with the label defaults;
+        // dwcpy = (88.4 + 34.9*n_bedrooms) * (12/12) at n_bedrooms = 3.6.
+        let kwh_per_cyc = ((33.12 * 0.5497 / 1.09 - 467.0 * 0.12 * 0.02504 / 0.12)
+            / (0.12 * 0.5497 / 1.09 - 0.02504))
+            / (4.0 * 52.0);
+        let expected = kwh_per_cyc * (88.4 + 34.9 * 3.6);
+        let actual = param(find("Dishwasher"), "annual_electric_kwh").expect("dishwasher annual kWh");
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "dishwasher annual energy {actual} != adjusted-count {expected}"
+        );
+
+        // Cooking range (electric): 331 + 39*n_bedrooms at 3.6.
+        let expected_range = 331.0 + 39.0 * 3.6;
+        let actual_range = param(find("Cooking Range"), "annual_electric_kwh").expect("range kWh");
+        assert!(
+            (actual_range - expected_range).abs() < 1e-9,
+            "range annual energy {actual_range} != adjusted-count {expected_range}"
+        );
+
+        // Refrigerator default: 637 + 18*n_bedrooms at 3.6.
+        let expected_fridge = 637.0 + 18.0 * 3.6;
+        let actual_fridge = param(find("Refrigerator"), "annual_electric_kwh").expect("fridge kWh");
+        assert!(
+            (actual_fridge - expected_fridge).abs() < 1e-9,
+            "refrigerator default {actual_fridge} != adjusted-count {expected_fridge}"
+        );
+    }
+
+    /// Attached homes and apartment units take the -0.68 + 1.09*occupants
+    /// branch (OCHRE hpxml.py:796-797).
+    #[test]
+    fn attached_homes_take_the_attached_bedroom_adjustment() {
+        let summary = "<BuildingSummary>\
+             <BuildingConstruction><NumberofBedrooms>4</NumberofBedrooms>\
+             <ResidentialFacilityType>single-family attached</ResidentialFacilityType>\
+             </BuildingConstruction>\
+             <BuildingOccupancy><NumberofResidents>3</NumberofResidents></BuildingOccupancy>\
+           </BuildingSummary>";
+        let building = occupancy_test_building(
+            summary,
+            r"<CookingRange/>",
+            vec![conditioned_zone()],
+        );
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("appliances resolve");
+        let range = specs.iter().find(|s| s.name == "Cooking Range").expect("range");
+        let expected = 331.0 + 39.0 * (-0.68 + 1.09 * 3.0);
+        let actual = param(range, "annual_electric_kwh").expect("range kWh");
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "range annual energy {actual} != attached adjustment {expected}"
+        );
+    }
+
+    /// Without occupants OCHRE cannot apply the adjustment, so the raw
+    /// `NumberofBedrooms` stands.
+    #[test]
+    fn appliance_energies_keep_the_raw_bedroom_count_without_occupants() {
+        let summary = "<BuildingSummary>\
+             <BuildingConstruction><NumberofBedrooms>5</NumberofBedrooms>\
+             <ResidentialFacilityType>single-family detached</ResidentialFacilityType>\
+             </BuildingConstruction>\
+           </BuildingSummary>";
+        let building = occupancy_test_building(summary, "<CookingRange/>", vec![conditioned_zone()]);
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("appliances resolve");
+        let range = specs.iter().find(|s| s.name == "Cooking Range").expect("range");
+        assert_eq!(param(range, "annual_electric_kwh"), Some(331.0 + 39.0 * 5.0));
+    }
+
+    #[test]
+    fn adjusted_bedroom_count_follows_ochre_formulas() {
+        use super::adjusted_bedroom_count as adj;
+        let detached = Some("single-family detached");
+        let attached = Some("single-family attached");
+        let manufactured = Some("manufactured home");
+        let apartment = Some("apartment unit");
+        let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-12, "{a} != {b}");
+        close(adj(Some(3.0), detached, 3.0), -1.47 + 1.69 * 3.0);
+        close(adj(Some(3.0), manufactured, 3.0), -1.47 + 1.69 * 3.0);
+        close(adj(Some(3.0), attached, 3.0), -0.68 + 1.09 * 3.0);
+        close(adj(Some(3.0), apartment, 3.0), -0.68 + 1.09 * 3.0);
+        // max(0, .) floors the detached formula at zero occupants.
+        assert_eq!(adj(Some(0.5), detached, 3.0), 0.0);
+        // An unrecognized house type label falls back to the detached branch.
+        close(adj(Some(3.0), Some("sro"), 3.0), -1.47 + 1.69 * 3.0);
+        // No occupants: the raw count stands.
+        assert_eq!(adj(None, detached, 3.0), 3.0);
     }
 }

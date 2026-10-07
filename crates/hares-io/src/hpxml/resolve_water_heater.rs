@@ -563,7 +563,8 @@ fn parse_avg_water_draw_and_bedrooms(
         None => resolve_bedroom_count(None, data_patches),
     };
 
-    // Adjust bedroom count by occupancy and house type (OCHRE hpxml.py:789-797).
+    // Adjust bedroom count by occupancy and house type (OCHRE hpxml.py:789-797),
+    // the shared adjustment the appliance energies also apply.
     let n_occupants = details
         .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
         .and_then(|n| parse_trimmed_f64(&n.text));
@@ -574,13 +575,11 @@ fn parse_avg_water_draw_and_bedrooms(
             "ResidentialFacilityType",
         ])
         .map(|n| n.text.trim().to_ascii_lowercase());
-    let n_bedrooms = match (n_occupants, house_type.as_deref()) {
-        (Some(occ), Some("single-family attached" | "apartment unit")) => {
-            (-0.68 + 1.09 * occ).max(0.0)
-        }
-        (Some(occ), _) => (-1.47 + 1.69 * occ).max(0.0),
-        (None, _) => n_bedrooms_raw,
-    };
+    let n_bedrooms = super::resolve_loads::adjusted_bedroom_count(
+        n_occupants,
+        house_type.as_deref(),
+        n_bedrooms_raw,
+    );
 
     // Fixture efficiency: low-flow if any WaterFixture has <LowFlow>true</LowFlow>.
     let mut any_low_flow = false;
