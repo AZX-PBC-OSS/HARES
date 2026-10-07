@@ -1245,7 +1245,8 @@ mod tests {
         // delivery temperature.
         let mains_c = 10.0_f64;
         let delivery_c = 40.6_f64;
-        let draw_enthalpy_j = draw_l * 1.0e-3
+        let draw_enthalpy_j = draw_l
+            * 1.0e-3
             * water_density_kg_m3(delivery_c)
             * CP_LIQUID_WATER_J_KG_K
             * (delivery_c - mains_c);

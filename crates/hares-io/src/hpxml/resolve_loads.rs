@@ -1813,7 +1813,10 @@ mod tests {
         .expect("parse");
         // OCHRE hpxml.py:794-797: occupants present, house type unknown in
         // this fragment, so the detached branch applies: -1.47 + 1.69*3.
-        assert_eq!(resolve_bedroom_count_for_appliances(&details), -1.47 + 1.69 * 3.0);
+        assert_eq!(
+            resolve_bedroom_count_for_appliances(&details),
+            -1.47 + 1.69 * 3.0
+        );
     }
 
     #[test]
@@ -3002,7 +3005,8 @@ mod tests {
             / (0.12 * 0.5497 / 1.09 - 0.02504))
             / (4.0 * 52.0);
         let expected = kwh_per_cyc * (88.4 + 34.9 * 3.6);
-        let actual = param(find("Dishwasher"), "annual_electric_kwh").expect("dishwasher annual kWh");
+        let actual =
+            param(find("Dishwasher"), "annual_electric_kwh").expect("dishwasher annual kWh");
         assert!(
             (actual - expected).abs() < 1e-9,
             "dishwasher annual energy {actual} != adjusted-count {expected}"
@@ -3035,15 +3039,15 @@ mod tests {
              </BuildingConstruction>\
              <BuildingOccupancy><NumberofResidents>3</NumberofResidents></BuildingOccupancy>\
            </BuildingSummary>";
-        let building = occupancy_test_building(
-            summary,
-            r"<CookingRange/>",
-            vec![conditioned_zone()],
-        );
+        let building =
+            occupancy_test_building(summary, r"<CookingRange/>", vec![conditioned_zone()]);
         let mut specs = Vec::new();
         resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
             .expect("appliances resolve");
-        let range = specs.iter().find(|s| s.name == "Cooking Range").expect("range");
+        let range = specs
+            .iter()
+            .find(|s| s.name == "Cooking Range")
+            .expect("range");
         let expected = 331.0 + 39.0 * (-0.68 + 1.09 * 3.0);
         let actual = param(range, "annual_electric_kwh").expect("range kWh");
         assert!(
@@ -3061,12 +3065,19 @@ mod tests {
              <ResidentialFacilityType>single-family detached</ResidentialFacilityType>\
              </BuildingConstruction>\
            </BuildingSummary>";
-        let building = occupancy_test_building(summary, "<CookingRange/>", vec![conditioned_zone()]);
+        let building =
+            occupancy_test_building(summary, "<CookingRange/>", vec![conditioned_zone()]);
         let mut specs = Vec::new();
         resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
             .expect("appliances resolve");
-        let range = specs.iter().find(|s| s.name == "Cooking Range").expect("range");
-        assert_eq!(param(range, "annual_electric_kwh"), Some(331.0 + 39.0 * 5.0));
+        let range = specs
+            .iter()
+            .find(|s| s.name == "Cooking Range")
+            .expect("range");
+        assert_eq!(
+            param(range, "annual_electric_kwh"),
+            Some(331.0 + 39.0 * 5.0)
+        );
     }
 
     #[test]

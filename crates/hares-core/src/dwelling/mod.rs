@@ -6459,7 +6459,10 @@ impl Dwelling {
             // Transmitted (through-glass) flux only, the OCHRE column
             // definition (Envelope.py:1160); the inward-flowing absorbed
             // share is part of `window_solar_w`, not this column.
-            ("Window Transmitted Solar Gain (W)", gains.window_through_glass_w),
+            (
+                "Window Transmitted Solar Gain (W)",
+                gains.window_through_glass_w,
+            ),
             ("Infiltration Heat Gain - Indoor (W)", gains.infiltration_w),
             (
                 "Forced Ventilation Heat Gain - Indoor (W)",

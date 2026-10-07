@@ -5051,8 +5051,7 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             ideal_capacity_degraded_threshold: 3,
         };
-        let mut solver =
-            ThermalSolver::new(model, wiring, cfg, 60.0, &env, zone_temp).unwrap();
+        let mut solver = ThermalSolver::new(model, wiring, cfg, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
         {
             let ports = PortSlots {
