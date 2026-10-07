@@ -312,20 +312,22 @@ def test_output_columns_present(
 # (ochre_records.check_record), so the xfail reasons, built from these
 # records, cannot go stale.
 #
-# The records moved once, when the attic, zone-volume, terrain, roughness
-# and temperature-capacitance physics landed: every trace metric roughly
-# halved toward OCHRE (worst 6 h 2.4091 to 1.3243, 48 h mean 0.8217 to
-# 0.3843, overnight worst 4.7194 to 1.4696, HARES heating 39.266 to
-# 29.4475 kWh against OCHRE's unchanged 47.052). What remains is still
-# untriaged.
+# The records moved twice: once when the attic, zone-volume, terrain,
+# roughness and temperature-capacitance physics landed (every trace metric
+# roughly halved toward OCHRE), and once when the initial zone humidity
+# followed the weather's outdoor humidity ratio at initialization (the
+# EnergyPlus zone init, HeatBalanceSurfaceManager.cc:2418-2419) instead of a
+# fixed 0.008 kg/kg: the moisture balance starts from the weather the run
+# starts in and the trace metrics moved toward OCHRE again. What remains is
+# still untriaged.
 # ---------------------------------------------------------------------------
 
 TRACE_WORST_6H_C = 1.3243
-TRACE_MEAN_48H_C = 0.3843
+TRACE_MEAN_48H_C = 0.3545
 TRACE_HEATING_OCHRE_KWH = 47.052
 TRACE_HEATING_HARES_KWH = 29.4475
-OVERNIGHT_WORST_C = 1.4696
-OVERNIGHT_MEAN_C = 0.4123
+OVERNIGHT_WORST_C = 1.3713
+OVERNIGHT_MEAN_C = 0.3216
 SOLAR_MEAN_RATIO = 1.3048
 SOLAR_WORST_REL_ERR = 0.3151
 
