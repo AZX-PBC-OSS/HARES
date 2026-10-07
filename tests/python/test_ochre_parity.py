@@ -180,15 +180,10 @@ ZERO_ABS_TOL_KWH = 1e-12
 # mark gets removed. Only the comparison assertion is expected: a missing
 # column raises LookupError, which fails the case even under the mark, and
 # test_parity_columns_present pins every column without a mark.
-PARITY_XFAILS: dict[str, str] = {
-    "Lighting Electric Power (kW)": (
-        "HARES's Lighting End Use aggregate holds Indoor Lighting only: "
-        "columns.rs's LIGHTING arm does not tag 'Exterior Lighting', which "
-        "falls to the Other aggregate; measured over the parity hour: OCHRE "
-        "0.09256122877254946 kWh vs HARES 0.08545972626253563 kWh, a relative "
-        "error of 7.7%, the Exterior Lighting share"
-    ),
-}
+# The Lighting mark came off (2026-10-07): columns.rs's LIGHTING arm tags
+# "Exterior Lighting", the aggregate holds indoor plus exterior, and the case
+# passes within the tolerance.
+PARITY_XFAILS: dict[str, str] = {}
 
 
 def _parity_cases() -> list[object]:

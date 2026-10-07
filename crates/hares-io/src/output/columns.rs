@@ -211,8 +211,11 @@ pub fn equipment_name_to_end_use(name: &str) -> EndUse {
         // Generator
         "Gas Generator" | "Gas Fuel Cell" => EndUse::GENERATOR,
 
-        // Lighting
-        "Lighting" | "Indoor Lighting" | "Outdoor Lighting" | "Garage Lighting" => EndUse::LIGHTING,
+        // Lighting: every LightingLoad name OCHRE's Equipment/__init__.py
+        // registers under its "Lighting" end use, including "Exterior
+        // Lighting", so the aggregate holds indoor plus exterior.
+        "Lighting" | "Indoor Lighting" | "Outdoor Lighting" | "Garage Lighting"
+        | "Exterior Lighting" => EndUse::LIGHTING,
 
         // Plug Loads
         "Plug Loads" | "MELs" => EndUse::PLUG_LOADS,
@@ -1787,6 +1790,25 @@ mod tests {
         assert_eq!(
             equipment_name_to_end_use("Air Conditioner"),
             EndUse::HVAC_COOLING
+        );
+        // Every LightingLoad name OCHRE's Equipment/__init__.py registers maps
+        // to LIGHTING, so the aggregate holds indoor plus exterior.
+        assert_eq!(equipment_name_to_end_use("Lighting"), EndUse::LIGHTING);
+        assert_eq!(
+            equipment_name_to_end_use("Indoor Lighting"),
+            EndUse::LIGHTING
+        );
+        assert_eq!(
+            equipment_name_to_end_use("Exterior Lighting"),
+            EndUse::LIGHTING
+        );
+        assert_eq!(
+            equipment_name_to_end_use("Outdoor Lighting"),
+            EndUse::LIGHTING
+        );
+        assert_eq!(
+            equipment_name_to_end_use("Garage Lighting"),
+            EndUse::LIGHTING
         );
         assert_eq!(
             equipment_name_to_end_use("Dehumidifier"),

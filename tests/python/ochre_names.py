@@ -18,23 +18,28 @@ OCHRE_TO_HARES: dict[str, str | list[str]] = {
     "HVAC Cooling Electric Power (kW)": "HVAC Cooling End Use Electric Power (kW)",
     "Water Heating Electric Power (kW)": "Water Heating End Use Electric Power (kW)",
     # OCHRE's Lighting aggregate sums its lighting equipment (Indoor plus
-    # Exterior for the BEopt fixture). HARES's Lighting End Use aggregate holds
-    # only the equipment its columns.rs name map tags LIGHTING, which misses
-    # "Exterior Lighting" (that name falls to the Other aggregate), so this
-    # mapping compares against a narrower sum; the parity suite reports the
-    # gap as a strict xfail.
+    # Exterior for the BEopt fixture, ochre/Equipment/ScheduledLoad.py:97:
+    # LightingLoad.end_use = "Lighting"). HARES's Lighting End Use aggregate
+    # holds the same set: columns.rs's LIGHTING arm tags
+    # "Exterior Lighting" as well, so the aggregates match without a
+    # per-equipment decomposition.
     "Lighting Electric Power (kW)": "Lighting End Use Electric Power (kW)",
     # OCHRE's Other aggregate sums every equipment in its "Other" end-use
     # bucket (ochre/Dwelling.py combines equipment_by_end_use; the documented
     # member list is in ochre's defaults "Variable names and units.csv": mech
     # vent, refrigerator, freezer, dishwasher, clothes washer, clothes dryer,
     # range/oven, ceiling fan, pool pump, pool heater, hot tub pump, hot tub
-    # heater, well pump, television, plug loads). HARES's same-named Other End
-    # Use aggregate is instead the fallback for equipment its name map does
-    # not recognise (for the BEopt fixture: TV, Exterior Lighting, Clothes
-    # Washer, Clothes Dryer), so the definitionally exact match is the sum of
-    # the per-equipment columns HARES keeps verbatim; members the dwelling
-    # has no equipment for resolve to nothing on both sides.
+    # heater, well pump, television, plug loads). Exterior Lighting was never
+    # a member: OCHRE tags it "Lighting", and HARES's Other End Use aggregate
+    # stopped holding it when the name joined the LIGHTING arm (the measured
+    # consequence: the Other comparison's members and values are unchanged,
+    # while HARES's own Other End Use column sheds the Exterior Lighting
+    # share its fallback used to catch). HARES's same-named Other End Use
+    # aggregate is the fallback for equipment its name map does not recognise
+    # (for the BEopt fixture: TV, Clothes Washer, Clothes Dryer), so the
+    # definitionally exact match is the sum of the per-equipment columns
+    # HARES keeps verbatim; members the dwelling has no equipment for
+    # resolve to nothing on both sides.
     "Other Electric Power (kW)": [
         "Ventilation Fan Electric Power (kW)",
         "Refrigerator Electric Power (kW)",
