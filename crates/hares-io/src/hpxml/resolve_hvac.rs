@@ -4073,7 +4073,7 @@ mod tests {
         let mut building = empty_building(vec![zone]);
         building.site.latitude_deg = Some(40.0);
         building.site.longitude_deg = Some(-105.0);
-        building.conditioned_volume_m3 = Some(400.0);
+        building.conditioned_volume_m3 = 400.0;
         let err = compute_duct_dse_params(&building).unwrap_err();
         assert!(
             err.to_string().contains("other housing unit"),
