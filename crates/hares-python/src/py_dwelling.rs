@@ -2852,6 +2852,7 @@ fn snapshot_to_py(
         let d = PyDict::new(py);
         let gains = &solvers.envelope_gains;
         d.set_item("window_solar_w", gains.window_solar_w)?;
+        d.set_item("window_through_glass_w", gains.window_through_glass_w)?;
         d.set_item("opaque_solar_lwr_w", gains.opaque_solar_lwr_w)?;
         d.set_item("interior_lwr_w", gains.interior_lwr_w)?;
         d.set_item("infiltration_w", gains.infiltration_w)?;

@@ -1243,7 +1243,8 @@ impl ThermalSolver {
 
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         self.window_solar_diag_buf.clear();
-        let window_solar_w = self.apply_solar_inputs(&mut u, env);
+        let window_solar = self.apply_solar_inputs(&mut u, env);
+        let window_solar_w = window_solar.injected_w;
 
         // Absorbed opaque exterior solar [W], both application paths. The
         // non-iterative path injects the full absorbed flux (returned
@@ -1420,6 +1421,7 @@ impl ThermalSolver {
 
         self.component_gains = EnvelopeComponentGains {
             window_solar_w,
+            window_through_glass_w: window_solar.through_glass_w,
             opaque_solar_lwr_w,
             interior_lwr_w,
             infiltration_w: infiltration_indoor_w,
@@ -4958,6 +4960,129 @@ mod tests {
         assert!(
             delta_oblique < delta_normal * 0.95,
             "oblique gain must be less than 95% of normal gain: delta_oblique={delta_oblique:.6}, delta_normal={delta_normal:.6}"
+        );
+    }
+
+    /// The reported "Window Transmitted Solar Gain" quantity is the
+    /// through-glass flux only, excluding the inward-flowing share of the
+    /// glass-absorbed solar: `through_glass = A·τ·POA` and
+    /// `injected = through_glass + A·(SHGC − τ)·N_i·POA` per window. The
+    /// through-glass value is what OCHRE reports under the same name
+    /// (Envelope.py:1160: `transmitted_gain = solar_gain × transmittance`).
+    #[test]
+    fn window_transmitted_report_excludes_absorbed_inward_share() {
+        use hares_physics::solar::{GlazingCurve, calculate_window_parameters, window_iam};
+
+        let zone_temp = 18.0_f64;
+        let outdoor_temp = 5.0_f64;
+        let r = 2.0_f64;
+        let c = 50_000.0_f64;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 3, &[1.0 / (r * c), 1.0 / c, 1.0 / c]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let window_surface_id: u32 = 55;
+        let shgc = 0.4_f64;
+        let u = 1.8_f64;
+        let area_m2 = 2.0_f64;
+        let (transmittance, radiation_frac) = calculate_window_parameters(shgc, u, 0.01);
+        let win_props = WindowSolarProperties {
+            shgc,
+            winter_shgc: shgc,
+            u_factor_w_m2_k: u,
+            area_m2,
+            transmittance,
+            winter_transmittance: transmittance,
+            radiation_frac,
+            glazing_curve: GlazingCurve::from_u_shgc(u, shgc),
+            tilt_deg: 90.0,
+            azimuth_deg: 180.0,
+        };
+
+        let mut env = env_for_temp(zone_temp, outdoor_temp);
+        env.weather.solar_irradiance = vec![SurfaceIrradiance {
+            surface_id: window_surface_id,
+            direct_w_m2: 500.0,
+            diffuse_w_m2: 0.0,
+            reflected_w_m2: 0.0,
+            angle_of_incidence_rad: 5.0_f64.to_radians(),
+        }];
+        env.current_time = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
+            .single()
+            .unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let cfg = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::from([(window_surface_id, win_props)]),
+            window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            ideal_capacity_degraded_threshold: 3,
+        };
+        let mut solver =
+            ThermalSolver::new(model, wiring, cfg, 60.0, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+        {
+            let ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..Default::default()
+            };
+            solver.prepare_inputs(&ports, &env).unwrap();
+        }
+
+        let gains = solver.component_gains();
+        let iam = window_iam(5.0_f64.to_radians(), GlazingCurve::from_u_shgc(u, shgc));
+        let poa_beam = 500.0 * iam;
+        let expected_through_glass = area_m2 * transmittance * poa_beam;
+        let expected_absorbed = area_m2 * (shgc - transmittance) * radiation_frac * poa_beam;
+
+        assert!(
+            (gains.window_through_glass_w - expected_through_glass).abs() < 1e-9,
+            "through-glass {} != area·τ·POA {}",
+            gains.window_through_glass_w,
+            expected_through_glass
+        );
+        assert!(
+            (gains.window_solar_w - (expected_through_glass + expected_absorbed)).abs() < 1e-9,
+            "injected {} != through-glass + absorbed-inward {}",
+            gains.window_solar_w,
+            expected_through_glass + expected_absorbed
+        );
+        assert!(
+            gains.window_solar_w > gains.window_through_glass_w,
+            "the absorbed-inward share must be part of the injection total only"
         );
     }
 

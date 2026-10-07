@@ -295,7 +295,10 @@ mod tests {
             // Envelope component gains come from post_solvers.
             if let Some(solver) = snap.phases.post_solvers.as_ref() {
                 let g = &solver.envelope_gains;
-                hares_window_solar.push(g.window_solar_w);
+                // Through-glass flux: the OCHRE column's definition
+                // (Envelope.py:1160). The injected total adds the
+                // inward-flowing absorbed share OCHRE's column omits.
+                hares_window_solar.push(g.window_through_glass_w);
                 hares_opaque_solar_lwr.push(g.opaque_solar_lwr_w);
                 hares_interior_lwr.push(g.interior_lwr_w);
                 hares_infiltration.push(g.infiltration_w);
@@ -602,9 +605,10 @@ mod tests {
 
             // Zone heat gains (indoor)
             if let Some(g) = g {
+                // Through-glass flux, the OCHRE column's definition.
                 row(
                     "Window Transmitted Solar (W)",
-                    g.window_solar_w,
+                    g.window_through_glass_w,
                     o("Window Transmitted Solar Gain (W)"),
                 );
                 row(

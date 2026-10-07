@@ -784,7 +784,10 @@ mod tests {
                     h_infiltration += g.infiltration_w;
                     h_ventilation += g.ventilation_w;
                     h_nat_vent += g.natural_ventilation_w;
-                    h_window_solar += g.window_solar_w;
+                    // Through-glass flux: the OCHRE column's definition
+                    // (Envelope.py:1160). The injected total adds the
+                    // inward-flowing absorbed share OCHRE's column omits.
+                    h_window_solar += g.window_through_glass_w;
                     h_window_heat += g.window_heat_gain_w;
                     h_wall_heat += g.wall_heat_gain_w;
                     h_roof_heat += g.roof_heat_gain_w;

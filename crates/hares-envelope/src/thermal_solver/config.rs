@@ -897,6 +897,24 @@ pub enum ThermalSolverError {
 
 pub type Result<T> = std::result::Result<T, ThermalSolverError>;
 
+/// Window solar injection totals from the per-step window solar pass.
+///
+/// Splitting the two reporting quantities: the zone's energy balance is
+/// driven by `injected_w`, the reported "Window Transmitted Solar Gain (W)"
+/// column is `through_glass_w` (OCHRE Envelope.py:1160 reports the
+/// through-glass flux under that name).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WindowSolarTotals {
+    /// Total window solar reaching the zone [W]: the through-glass
+    /// (transmitted) flux plus the inward-flowing share of the
+    /// glass-absorbed flux.
+    pub injected_w: f64,
+    /// Through-glass (transmitted) window solar [W] only:
+    /// `area × transmittance × POA` per window, before the interior
+    /// distribution's leave-back-out share.
+    pub through_glass_w: f64,
+}
+
 /// Per-timestep envelope component gains [W] for output/diagnostics.
 ///
 /// Values are signed: positive = heat flowing INTO the indoor zone — with two
@@ -908,8 +926,18 @@ pub type Result<T> = std::result::Result<T, ThermalSolverError>;
 /// Populated after each `resolve()` call; read via [`ThermalSolver::component_gains`].
 #[derive(Debug, Clone, Default)]
 pub struct EnvelopeComponentGains {
-    /// Window transmitted solar (SHGC × IAM × area × POA) [W].
+    /// Total window solar reaching the zone [W]: the through-glass (transmitted)
+    /// flux plus the inward-flowing share of the glass-absorbed flux. This is
+    /// the energy-conserving injection total; the transmitted-only flux is
+    /// `window_through_glass_w`.
     pub window_solar_w: f64,
+    /// Through-glass (transmitted) window solar [W] only:
+    /// `area × transmittance × POA` per window, before the interior
+    /// distribution's leave-back-out share. This is OCHRE's
+    /// "Window Transmitted Solar Gain (W)" definition (Envelope.py:1160:
+    /// `surface.transmitted_gain = solar_gain * surface.transmittance`) and
+    /// the value HARES reports under that column name.
+    pub window_through_glass_w: f64,
     /// Opaque exterior surface solar + LWR combined — the absorbed gross
     /// at the exterior skins, summed over both application paths
     /// (iterative and non-iterative).

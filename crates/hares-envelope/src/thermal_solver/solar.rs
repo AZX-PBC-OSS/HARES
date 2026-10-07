@@ -48,20 +48,23 @@ fn beam_cosine_factor(
 
 impl ThermalSolver {
     /// Applies window solar (transmitted + inward-flowing absorbed share) and
-    /// returns the total injected into `u` [W].
+    /// returns the injection totals.
     ///
-    /// The returned total is exact by construction: the distribution paths
-    /// conserve the transmitted flux into `u` (beam + diffuse equals the
-    /// absorbed sum plus the reflected remainder plus the windows' inward
-    /// absorbed share; the transmittance share that leaves back out through
-    /// the glazing is not injected). Callers use the return value for
-    /// component-gains diagnostics instead of measuring a `u` delta.
+    /// `injected_w` is exact by construction: the distribution paths conserve
+    /// the transmitted flux into `u` (beam + diffuse equals the absorbed sum
+    /// plus the reflected remainder plus the windows' inward absorbed share;
+    /// the transmittance share that leaves back out through the glazing is
+    /// not injected). Callers use it for component-gains diagnostics instead
+    /// of measuring a `u` delta. `through_glass_w` is the transmitted flux
+    /// before that distribution, the reported "Window Transmitted Solar
+    /// Gain (W)" quantity.
     pub(super) fn apply_solar_inputs(
         &mut self,
         u: &mut DVector<f64>,
         env: &EnvironmentState,
-    ) -> f64 {
+    ) -> super::config::WindowSolarTotals {
         let mut total_w = 0.0;
+        let mut through_glass_w = 0.0;
         let month = env.current_time.month();
         let is_winter = resnet_is_winter(month);
 
@@ -92,6 +95,7 @@ impl ThermalSolver {
                 let transmitted_beam_w = win.area_m2 * transmittance * poa_beam;
                 let transmitted_diffuse_w = win.area_m2 * transmittance * poa_diffuse;
                 let transmitted_total_w = transmitted_beam_w + transmitted_diffuse_w;
+                through_glass_w += transmitted_total_w;
 
                 assert!(
                     shgc >= transmittance - 1e-6,
@@ -150,7 +154,10 @@ impl ThermalSolver {
                     });
             }
         }
-        total_w
+        super::config::WindowSolarTotals {
+            injected_w: total_w,
+            through_glass_w,
+        }
     }
 
     /// Distributes transmitted window solar to interior surfaces and zone air.
