@@ -18,7 +18,7 @@ pub const KELVIN_OFFSET: f64 = 273.15;
 /// satellite-derived albedo via the `Surface Albedo` column.
 pub const DEFAULT_GROUND_ALBEDO: f64 = 0.2;
 
-use crate::{CoreOutput, DomainUpdate, EquipmentId};
+use crate::{CoreOutput, EquipmentId};
 
 /// Price-like external signals consumed by higher-level controllers.
 ///
@@ -519,7 +519,10 @@ pub struct EnvironmentState {
     pub zones: Vec<ZoneState>,
     pub weather: WeatherState,
     pub grid: GridState,
-    pub custom_domains: Vec<DomainUpdate>,
+    /// The per-domain update slots: one per built-in domain plus one per
+    /// installed custom solver. Written once per step by the environment
+    /// manager and the solvers, read without a search.
+    pub domains: crate::domain_solver::DomainSlots,
     /// The schedule row this step reads: the row of the step's calendar
     /// date and time, with the 365-day schedule's leap-day skip and year
     /// wrap applied. The environment manager always sets it; it is `None`
@@ -587,37 +590,6 @@ impl EnvironmentState {
     pub fn time_step_secs(&self) -> f64 {
         self.time_res.num_milliseconds() as f64 / 1000.0
     }
-
-    /// Replace the domain update for `update.domain_id` in-place, or append if
-    /// no entry for that domain exists yet. Avoids the O(n) `retain` + `push`
-    /// pattern that would reallocate on every timestep.
-    #[inline]
-    pub fn upsert_domain(&mut self, update: DomainUpdate) {
-        if let Some(slot) = self
-            .custom_domains
-            .iter_mut()
-            .find(|u| u.domain_id == update.domain_id)
-        {
-            *slot = update;
-        } else {
-            self.custom_domains.push(update);
-        }
-    }
-
-    /// Like `upsert_domain` but clones from a reference, reusing the existing
-    /// slot's allocations via `clone_from` when the domain already exists.
-    #[inline]
-    pub fn upsert_domain_ref(&mut self, update: &DomainUpdate) {
-        if let Some(slot) = self
-            .custom_domains
-            .iter_mut()
-            .find(|u| u.domain_id == update.domain_id)
-        {
-            slot.clone_from(update);
-        } else {
-            self.custom_domains.push(update.clone());
-        }
-    }
 }
 
 /// Serialize `chrono::Duration` as integer milliseconds.
@@ -644,6 +616,7 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+    use crate::DomainUpdate;
 
     #[test]
     fn grid_state_bus_semantics() {
@@ -703,7 +676,7 @@ mod tests {
 
     #[test]
     fn environment_state_round_trips_through_json() {
-        let state = EnvironmentState {
+        let mut state = EnvironmentState {
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.5,
@@ -747,11 +720,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
-            custom_domains: vec![DomainUpdate {
-                domain_id: crate::DomainId(9),
-                zone_temperatures_c: vec![(ZoneId(1), 21.0)],
-                custom_payload: Some(vec![1.0, 2.0, 3.0]),
-            }],
+            domains: crate::domain_solver::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -763,6 +732,19 @@ mod tests {
             price_signal: PriceSignal::default(),
             electrical: ElectricalSummary::default(),
         };
+
+        let slot = state
+            .domains
+            .install_custom(crate::DomainId(9))
+            .expect("install custom domain");
+        state.domains.set_custom(
+            slot,
+            &DomainUpdate {
+                domain_id: crate::DomainId(9),
+                zone_temperatures_c: vec![(ZoneId(1), 21.0)],
+                custom_payload: Some(vec![1.0, 2.0, 3.0]),
+            },
+        );
 
         let json = serde_json::to_string(&state).expect("serialize environment state");
         let decoded: EnvironmentState =
@@ -787,7 +769,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
-            custom_domains: vec![],
+            domains: crate::domain_solver::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -848,7 +830,15 @@ mod tests {
                 "solar_irradiance": []
             },
             "grid": { "voltage_pu": 1.0, "frequency_hz": 60.0 },
-            "custom_domains": [],
+            "domains": {
+                "thermal": { "update": { "domain_id": 0, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "humidity": { "update": { "domain_id": 2, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "electrical": { "update": { "domain_id": 1, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "fluid": { "update": { "domain_id": 3, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "schedule": { "update": { "domain_id": 65535, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "mains_water": { "update": { "domain_id": 65534, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "custom": []
+            },
             "current_time": "2026-03-18T12:00:00+00:00",
             "time_res": 300000
         }"#;
@@ -859,64 +849,65 @@ mod tests {
     }
 
     #[test]
-    fn upsert_domain_inserts_when_empty() {
+    fn domain_slot_read_is_none_until_written() {
         let mut state = crate::test_utils::default_env();
-        state.custom_domains.clear();
+        assert!(state.domains.thermal.get().is_none());
         let update = DomainUpdate {
-            domain_id: crate::DomainId(99),
+            domain_id: crate::THERMAL,
             zone_temperatures_c: vec![(ZoneId(1), 22.0)],
             custom_payload: None,
         };
-        state.upsert_domain(update.clone());
-        assert_eq!(state.custom_domains.len(), 1);
-        assert_eq!(state.custom_domains[0], update);
+        state.domains.thermal.set_from(&update);
+        assert_eq!(state.domains.thermal.get(), Some(&update));
+        state.domains.thermal.clear();
+        assert!(state.domains.thermal.get().is_none());
     }
 
     #[test]
-    fn upsert_domain_replaces_existing() {
+    fn domain_slot_set_from_replaces_previous_update() {
         let mut state = crate::test_utils::default_env();
-        state.custom_domains.clear();
         let v1 = DomainUpdate {
-            domain_id: crate::DomainId(5),
+            domain_id: crate::THERMAL,
             zone_temperatures_c: vec![(ZoneId(1), 20.0)],
             custom_payload: Some(vec![1.0]),
         };
         let v2 = DomainUpdate {
-            domain_id: crate::DomainId(5),
+            domain_id: crate::THERMAL,
             zone_temperatures_c: vec![(ZoneId(1), 25.0)],
             custom_payload: Some(vec![2.0, 3.0]),
         };
-        state.upsert_domain(v1);
-        state.upsert_domain(v2.clone());
-        assert_eq!(state.custom_domains.len(), 1);
-        assert_eq!(state.custom_domains[0], v2);
+        state.domains.thermal.set_from(&v1);
+        state.domains.thermal.set_from(&v2);
+        assert_eq!(state.domains.thermal.get(), Some(&v2));
+        // A different domain's slot is untouched.
+        assert!(state.domains.humidity.get().is_none());
     }
 
     #[test]
-    fn upsert_domain_preserves_other_domains() {
-        let mut state = crate::test_utils::default_env();
-        state.custom_domains.clear();
-        let a = DomainUpdate {
-            domain_id: crate::DomainId(1),
-            zone_temperatures_c: vec![],
-            custom_payload: None,
-        };
-        let b = DomainUpdate {
-            domain_id: crate::DomainId(2),
-            zone_temperatures_c: vec![],
-            custom_payload: None,
-        };
-        let b_updated = DomainUpdate {
-            domain_id: crate::DomainId(2),
-            zone_temperatures_c: vec![(ZoneId(1), 30.0)],
-            custom_payload: Some(vec![99.0]),
-        };
-        state.upsert_domain(a.clone());
-        state.upsert_domain(b);
-        state.upsert_domain(b_updated.clone());
-        assert_eq!(state.custom_domains.len(), 2);
-        assert_eq!(state.custom_domains[0], a);
-        assert_eq!(state.custom_domains[1], b_updated);
+    fn install_custom_rejects_fixed_ids_and_duplicates() {
+        let mut slots = crate::domain_solver::DomainSlots::default();
+        let first = slots
+            .install_custom(crate::DomainId(42))
+            .expect("first custom install");
+        assert_eq!(slots.custom(first), None);
+        for fixed in [
+            crate::THERMAL,
+            crate::ELECTRICAL,
+            crate::HUMIDITY,
+            crate::FLUID,
+            crate::SCHEDULE_DOMAIN_ID,
+            crate::MAINS_WATER_DOMAIN_ID,
+        ] {
+            let err = slots
+                .install_custom(fixed)
+                .expect_err("a fixed id must be refused");
+            assert!(err.to_string().contains(&format!("{fixed:?}")));
+        }
+        let err = slots
+            .install_custom(crate::DomainId(42))
+            .expect_err("a duplicate id must be refused");
+        assert!(err.to_string().contains("DomainId(42)"));
+        assert_eq!(slots.custom(first), None);
     }
 
     /// WeatherState::default() must produce values that avoid NaN/Inf hazards

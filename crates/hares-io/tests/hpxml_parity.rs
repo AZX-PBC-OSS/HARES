@@ -118,7 +118,7 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
-        custom_domains: vec![],
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: HashMap::new(),
         equipment_core: HashMap::new(),
         current_time: FixedOffset::east_opt(0)

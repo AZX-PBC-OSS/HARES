@@ -4170,9 +4170,7 @@ mod tests {
         use hares_equipment::Equipment;
         use hares_equipment::config::ConfigValue;
         use hares_equipment::event_load::EventBasedLoad;
-        use hares_types::{
-            DomainUpdate, GridState, SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
-        };
+        use hares_types::{GridState, WeatherState, ZoneId, ZoneState};
 
         let mut schedule = make_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
         let mut specs: Vec<EquipmentSpec> = Vec::new();
@@ -4221,7 +4219,7 @@ mod tests {
         zone_map.insert(hares_types::ZoneRole::Indoor, ZoneId(1));
         cfg.zone_map = Some(zone_map);
 
-        let env = hares_types::EnvironmentState {
+        let mut env = hares_types::EnvironmentState {
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
@@ -4236,11 +4234,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
-            custom_domains: vec![DomainUpdate {
-                domain_id: SCHEDULE_DOMAIN_ID,
-                zone_temperatures_c: Vec::new(),
-                custom_payload: Some(vec![0.0, 0.0]),
-            }],
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: HashMap::new(),
             equipment_core: HashMap::new(),
             current_time: chrono::FixedOffset::east_opt(0)
@@ -4252,6 +4246,11 @@ mod tests {
             price_signal: Default::default(),
             electrical: Default::default(),
         };
+        env.domains.schedule.set_from(&hares_types::DomainUpdate {
+            domain_id: hares_types::SCHEDULE_DOMAIN_ID,
+            zone_temperatures_c: Vec::new(),
+            custom_payload: Some(vec![0.0, 0.0]),
+        });
 
         let mut eq = EventBasedLoad::new(cfg.clone());
         eq.init(&cfg, &env).expect(

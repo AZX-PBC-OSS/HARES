@@ -410,7 +410,7 @@ pub mod testing {
                     island_bus_voltage_pu: None,
                 },
                 schedule_row: None,
-                custom_domains: vec![],
+                domains: hares_types::DomainSlots::default(),
                 current_time: FixedOffset::east_opt(0)
                     .expect("offset")
                     .with_ymd_and_hms(year, month, day, self.hour as u32, 0, 0)

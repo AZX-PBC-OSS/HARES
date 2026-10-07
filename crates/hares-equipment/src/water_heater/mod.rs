@@ -506,22 +506,13 @@ mod tests {
     }
 
     fn env_with_payloads(schedule_payload: Option<Vec<f64>>) -> EnvironmentState {
-        let mut custom_domains = Vec::new();
-        if let Some(payload) = schedule_payload {
-            custom_domains.push(DomainUpdate {
-                domain_id: SCHEDULE_DOMAIN_ID,
-                zone_temperatures_c: Vec::new(),
-                custom_payload: Some(payload),
-            });
-        }
-
         // Use NaN to exercise the non-finite mains-temperature path in tests.
         let weather = WeatherState {
             mains_temp_c: f64::NAN,
             ..Default::default()
         };
 
-        EnvironmentState {
+        let mut env = EnvironmentState {
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: Vec::new(),
             weather,
@@ -531,7 +522,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
-            custom_domains,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -542,7 +533,15 @@ mod tests {
             time_res: ChronoDuration::seconds(60),
             price_signal: Default::default(),
             electrical: Default::default(),
+        };
+        if let Some(payload) = schedule_payload {
+            env.domains.schedule.set_from(&DomainUpdate {
+                domain_id: SCHEDULE_DOMAIN_ID,
+                zone_temperatures_c: Vec::new(),
+                custom_payload: Some(payload),
+            });
         }
+        env
     }
 
     #[test]
@@ -754,7 +753,7 @@ mod dhw_integration_tests {
     use hares_types::rng::{RngStream, dwelling_seed};
 
     fn base_env() -> EnvironmentState {
-        EnvironmentState {
+        let mut env = EnvironmentState {
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
@@ -783,11 +782,7 @@ mod dhw_integration_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
-            custom_domains: vec![DomainUpdate {
-                domain_id: SCHEDULE_DOMAIN_ID,
-                zone_temperatures_c: Vec::new(),
-                custom_payload: Some(vec![1.0, 1.0]),
-            }],
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -798,7 +793,13 @@ mod dhw_integration_tests {
             time_res: ChronoDuration::minutes(1),
             price_signal: Default::default(),
             electrical: Default::default(),
-        }
+        };
+        env.domains.schedule.set_from(&DomainUpdate {
+            domain_id: SCHEDULE_DOMAIN_ID,
+            zone_temperatures_c: Vec::new(),
+            custom_payload: Some(vec![1.0, 1.0]),
+        });
+        env
     }
 
     fn washer_config_with_draw(draw_volume_l: f64) -> EquipmentConfig {

@@ -1893,7 +1893,7 @@ mod tests {
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn base_env() -> EnvironmentState {
-        EnvironmentState {
+        let mut env = EnvironmentState {
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
@@ -1922,11 +1922,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
-            custom_domains: vec![DomainUpdate {
-                domain_id: SCHEDULE_DOMAIN_ID,
-                zone_temperatures_c: Vec::new(),
-                custom_payload: Some(vec![0.0, 0.0]),
-            }],
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1937,7 +1933,13 @@ mod tests {
             time_res: ChronoDuration::minutes(1),
             price_signal: Default::default(),
             electrical: Default::default(),
-        }
+        };
+        env.domains.schedule.set_from(&DomainUpdate {
+            domain_id: SCHEDULE_DOMAIN_ID,
+            zone_temperatures_c: Vec::new(),
+            custom_payload: Some(vec![0.0, 0.0]),
+        });
+        env
     }
 
     /// A raw config carrying the stream a dwelling would assign `name`.
@@ -1989,12 +1991,11 @@ mod tests {
     }
 
     fn set_schedule_payload(env: &mut EnvironmentState, values: Vec<f64>) {
-        let slot = env
-            .custom_domains
-            .iter_mut()
-            .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
-            .expect("schedule domain must exist");
-        slot.custom_payload = Some(values);
+        env.domains.schedule.set_from(&DomainUpdate {
+            domain_id: SCHEDULE_DOMAIN_ID,
+            zone_temperatures_c: Vec::new(),
+            custom_payload: Some(values),
+        });
     }
 
     #[test]

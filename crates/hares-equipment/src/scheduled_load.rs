@@ -1088,7 +1088,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
-            custom_domains: vec![],
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1607,7 +1607,7 @@ mod tests {
 
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
-        env.custom_domains.push(DomainUpdate {
+        env.domains.schedule.set_from(&DomainUpdate {
             domain_id: SCHEDULE_DOMAIN_ID,
             zone_temperatures_c: vec![],
             custom_payload: Some(vec![2.5, 7.25]),
@@ -2730,7 +2730,7 @@ mod tests {
         let mut eq =
             ScheduledLoad::new(config.clone(), hares_types::EndUse::OTHER, "Seasonal Pump");
         let mut env = base_env();
-        env.custom_domains.push(DomainUpdate {
+        env.domains.schedule.set_from(&DomainUpdate {
             domain_id: SCHEDULE_DOMAIN_ID,
             zone_temperatures_c: vec![],
             custom_payload: Some(vec![2.5, 7.25]),

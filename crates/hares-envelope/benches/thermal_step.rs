@@ -110,7 +110,7 @@ fn bench_env() -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
-        custom_domains: vec![],
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: HashMap::new(),
         equipment_core: Default::default(),
         current_time: denver_offset::denver_offset()

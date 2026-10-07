@@ -20,8 +20,8 @@ use hares_physics::{
 #[cfg(feature = "observe")]
 use hares_physics::water_mains::water_mains_raw_fahrenheit;
 use hares_types::{
-    AmbientLocation, AmbientOtherSpaceTemps, DomainId, EnvironmentState, GridState, HaresError,
-    SCHEDULE_DOMAIN_ID, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+    AmbientLocation, AmbientOtherSpaceTemps, EnvironmentState, GridState, HaresError,
+    SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
 };
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
@@ -32,7 +32,6 @@ use crate::ambient_air::{MoistAir, scheduled_space_air};
 
 const DEFAULT_GRID_VOLTAGE_PU: f64 = 1.0;
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
-const MAINS_WATER_DOMAIN_ID: DomainId = DomainId(u16::MAX - 1);
 
 /// Geometry required for solar irradiance projection.
 ///
@@ -180,9 +179,10 @@ pub struct EnvironmentManager {
     // Pre-allocated buffers reused each step to avoid per-step allocations.
     solar_irradiance_buf: Vec<SurfaceIrradiance>,
     schedule_values_buf: Vec<f64>,
-    mains_payload_buf: Vec<f64>,
-    schedule_payload_swap: Vec<f64>,
-    mains_payload_swap: Vec<f64>,
+    /// The slot writes' allocation accumulator; this crate's test build
+    /// only. The dwelling's snapshot-allocation test reads it.
+    #[cfg(test)]
+    pub(crate) slot_write_allocations: u64,
 }
 
 impl EnvironmentManager {
@@ -384,9 +384,8 @@ impl EnvironmentManager {
             pv_roof_coverage: std::collections::HashMap::new(),
             solar_irradiance_buf: Vec::with_capacity(num_surfaces),
             schedule_values_buf: Vec::with_capacity(num_schedule_cols),
-            mains_payload_buf: vec![0.0],
-            schedule_payload_swap: Vec::with_capacity(num_schedule_cols),
-            mains_payload_swap: Vec::with_capacity(1),
+            #[cfg(test)]
+            slot_write_allocations: 0,
         })
     }
 
@@ -576,8 +575,8 @@ impl EnvironmentManager {
     /// Returns the schedule column index for the occupancy column, if present.
     ///
     /// The returned index can be used to look up the occupancy value from the
-    /// schedule payload in [`EnvironmentState::custom_domains`] at domain id
-    /// [`hares_types::SCHEDULE_DOMAIN_ID`]. Resolution lives in
+    /// schedule payload in [`EnvironmentState::domains`]'s schedule slot.
+    /// Resolution lives in
     /// `hares_io::resolve_occupancy_column`, shared with the
     /// unknown-schedule-column check, so the check treats the column the
     /// environment reads as read.
@@ -897,44 +896,31 @@ impl EnvironmentManager {
             island_bus_voltage_pu: None,
         });
 
-        // Step 6: custom_domains -- swap-based reuse to avoid per-step allocations.
-        self.mains_payload_buf[0] = mains_temp_c;
+        // Step 6: domain slots -- the schedule and mains payloads are
+        // written in place into their slots' retained vectors, so a
+        // steady-state step allocates nothing here.
 
-        // Recover previously-swapped Vecs from the existing DomainUpdates.
-        for du in state.custom_domains.drain(..) {
-            if du.domain_id == SCHEDULE_DOMAIN_ID {
-                if let Some(v) = du.custom_payload {
-                    self.schedule_payload_swap = v;
-                }
-            } else if du.domain_id == MAINS_WATER_DOMAIN_ID
-                && let Some(v) = du.custom_payload
-            {
-                self.mains_payload_swap = v;
-            }
-        }
+        // Every slot is unwritten until this step's writer fills it: the
+        // solvers' upserts used to drain these entries out of the state
+        // and push them back.
+        #[cfg(test)]
+        let alloc_before = hares_types::alloc_count::thread_allocations();
+        state.domains.clear_step();
 
-        self.schedule_payload_swap.clear();
-        self.schedule_payload_swap
-            .extend_from_slice(&self.schedule_values_buf);
+        let schedule_payload = state.domains.schedule.payload_mut();
+        schedule_payload.clear();
+        schedule_payload.extend_from_slice(&self.schedule_values_buf);
 
-        self.mains_payload_swap.clear();
-        self.mains_payload_swap
-            .extend_from_slice(&self.mains_payload_buf);
-
-        let sched_payload = std::mem::take(&mut self.schedule_payload_swap);
-        let mains_payload = std::mem::take(&mut self.mains_payload_swap);
-
-        state.custom_domains.push(hares_types::DomainUpdate {
-            domain_id: SCHEDULE_DOMAIN_ID,
-            zone_temperatures_c: Vec::new(),
-            custom_payload: Some(sched_payload),
-        });
-        state.custom_domains.push(hares_types::DomainUpdate {
-            domain_id: MAINS_WATER_DOMAIN_ID,
-            zone_temperatures_c: Vec::new(),
-            custom_payload: Some(mains_payload),
-        });
+        let mains_payload = state.domains.mains_water.payload_mut();
+        mains_payload.clear();
+        mains_payload.push(mains_temp_c);
         state.schedule_row = Some(schedule_idx);
+        #[cfg(test)]
+        if let (Some(before), Some(after)) =
+            (alloc_before, hares_types::alloc_count::thread_allocations())
+        {
+            self.slot_write_allocations += after.saturating_sub(before);
+        }
 
         // Step 7: weather scalar fields
         state.weather.outdoor_temp_c = outdoor_temp_c;
@@ -998,7 +984,7 @@ impl EnvironmentManager {
             },
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             schedule_row: None,
-            custom_domains: Vec::new(),
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: clock.current_time(),
@@ -2053,9 +2039,11 @@ mod tests {
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]).unwrap();
-        let payload = env.custom_domains[0]
-            .custom_payload
-            .clone()
+        let payload = env
+            .domains
+            .schedule
+            .get()
+            .and_then(|d| d.custom_payload.clone())
             .expect("schedule payload");
         assert!((payload[0] - 1.23).abs() < 1.0e-6);
     }
@@ -2102,9 +2090,11 @@ mod tests {
             let _ = clock.next();
         }
         let env = manager.update(&clock, &[]).unwrap();
-        let payload = env.custom_domains[0]
-            .custom_payload
-            .clone()
+        let payload = env
+            .domains
+            .schedule
+            .get()
+            .and_then(|d| d.custom_payload.clone())
             .expect("schedule payload");
         assert!((payload[0] - 1.23).abs() < 1.0e-6);
     }
@@ -2539,9 +2529,9 @@ mod tests {
         for step in 0..72u64 {
             let env = mgr.update(&clock, &[]).unwrap();
             let got = env
-                .custom_domains
-                .iter()
-                .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
+                .domains
+                .schedule
+                .get()
                 .and_then(|d| d.custom_payload.as_ref())
                 .and_then(|p| p.first())
                 .copied()
@@ -2626,9 +2616,9 @@ mod tests {
             env_jan.weather.outdoor_temp_c
         );
         let mains_jan = env_jan
-            .custom_domains
-            .iter()
-            .find(|d| d.domain_id == MAINS_WATER_DOMAIN_ID)
+            .domains
+            .mains_water
+            .get()
             .and_then(|d| d.custom_payload.as_ref())
             .and_then(|p| p.first())
             .copied()
@@ -2658,9 +2648,9 @@ mod tests {
             env_jul.weather.outdoor_temp_c
         );
         let mains_jul = env_jul
-            .custom_domains
-            .iter()
-            .find(|d| d.domain_id == MAINS_WATER_DOMAIN_ID)
+            .domains
+            .mains_water
+            .get()
             .and_then(|d| d.custom_payload.as_ref())
             .and_then(|p| p.first())
             .copied()
@@ -3221,9 +3211,9 @@ mod tests {
 
         /// Helper: extract the first schedule value from an EnvironmentState.
         fn schedule_val(env: &EnvironmentState) -> f64 {
-            env.custom_domains
-                .iter()
-                .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
+            env.domains
+                .schedule
+                .get()
                 .and_then(|d| d.custom_payload.as_ref())
                 .and_then(|p| p.first())
                 .copied()

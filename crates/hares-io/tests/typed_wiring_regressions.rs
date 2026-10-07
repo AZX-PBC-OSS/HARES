@@ -54,7 +54,7 @@ fn sample_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
-        custom_domains: vec![],
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)

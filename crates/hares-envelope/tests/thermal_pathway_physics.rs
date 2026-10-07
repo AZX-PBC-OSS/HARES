@@ -64,7 +64,7 @@ fn make_env(zone_temp: f64, outdoor_temp: f64, ground_temp: f64) -> EnvironmentS
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
-        custom_domains: vec![],
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()
@@ -808,7 +808,7 @@ fn kusuda_depth_corrected_ground_temp_used_at_2_4m_minneapolis_january() {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
-        custom_domains: vec![],
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()

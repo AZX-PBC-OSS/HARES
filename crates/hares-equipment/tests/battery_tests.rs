@@ -50,7 +50,7 @@ fn base_env() -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
-        custom_domains: vec![],
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)

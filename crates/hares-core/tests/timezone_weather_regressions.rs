@@ -7,7 +7,6 @@ use hares_io::hpxml::building::XmlNode;
 use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
 use hares_io::schedule::ColumnAggregation;
 use hares_io::{ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
-use hares_types::SCHEDULE_DOMAIN_ID;
 
 fn offset_east(seconds: i32) -> FixedOffset {
     FixedOffset::east_opt(seconds).expect("valid offset")
@@ -160,9 +159,9 @@ fn sequential_weather(start_temp_c: f64, rows: usize, timezone_offset_h: f64) ->
 }
 
 fn schedule_value(env: &hares_types::EnvironmentState) -> f64 {
-    env.custom_domains
-        .iter()
-        .find(|domain| domain.domain_id == SCHEDULE_DOMAIN_ID)
+    env.domains
+        .schedule
+        .get()
         .and_then(|domain| domain.custom_payload.as_ref())
         .and_then(|payload| payload.first())
         .copied()

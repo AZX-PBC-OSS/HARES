@@ -9,8 +9,7 @@ use hares_physics::psychrometrics::{
     humidity_ratio_from_tdp, relative_humidity, wet_bulb_from_humidity_ratio,
 };
 use hares_types::{
-    DomainId, DomainSolver, DomainUpdate, EnvironmentState, HUMIDITY, HaresError, PortSlots,
-    THERMAL, ZoneId,
+    DomainId, DomainSolver, DomainUpdate, EnvironmentState, HUMIDITY, HaresError, PortSlots, ZoneId,
 };
 
 #[derive(Debug, Clone)]
@@ -149,7 +148,7 @@ impl DomainSolver for HumiditySolver {
         self.m_dot_inf_buf.clear();
         self.w_outdoor_buf.clear();
         self.condensation_kg.clear();
-        if let Some(thermal_update) = env.custom_domains.iter().find(|u| u.domain_id == THERMAL) {
+        if let Some(thermal_update) = env.domains.thermal.get() {
             for &(zone_id, t_c) in &thermal_update.zone_temperatures_c {
                 self.zone_temp_buf.insert(zone_id, t_c);
             }
@@ -457,7 +456,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
-            custom_domains: vec![],
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -518,7 +517,7 @@ mod tests {
     #[test]
     fn relative_humidity_round_trip_is_consistent() {
         let mut env = env_with_zone(24.0, 0.009);
-        env.custom_domains.push(DomainUpdate {
+        env.domains.thermal.set_from(&DomainUpdate {
             domain_id: THERMAL,
             zone_temperatures_c: vec![(ZoneId(1), 23.0)],
             custom_payload: None,
@@ -610,7 +609,7 @@ mod tests {
         // Build an environment where the thermal domain has already run and produced
         // a latent payload for our zone.
         let mut env = env_with_zone(22.0, 0.008);
-        env.custom_domains.push(DomainUpdate {
+        env.domains.thermal.set_from(&DomainUpdate {
             domain_id: THERMAL,
             zone_temperatures_c: vec![(zone_id, 22.0)],
             custom_payload: Some(vec![f64::from(zone_id.0), q_latent_w, 0.0, 0.0, 0.0]),
@@ -676,7 +675,7 @@ mod tests {
         // 5-float per-zone thermal payload: [zone_id, latent, m_dot, w_out, residual]
         let mut thermal_env = env_with_zone(22.0, w_init);
         thermal_env.zones = env.zones.clone(); // two zones
-        thermal_env.custom_domains.push(DomainUpdate {
+        thermal_env.domains.thermal.set_from(&DomainUpdate {
             domain_id: THERMAL,
             zone_temperatures_c: vec![(zone1_id, 22.0), (zone2_id, 22.0)],
             custom_payload: Some(vec![
@@ -1042,7 +1041,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
-            custom_domains: vec![],
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -1269,7 +1268,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
-            custom_domains: vec![],
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -1626,7 +1625,7 @@ mod tests {
             let w_old = solver.humidity_ratio(zone_id);
             let q_latent_step = m_dot * h_fg * (w_outdoor - w_old);
             let mut env_step = env_with_zone(t_c, w_old);
-            env_step.custom_domains.push(DomainUpdate {
+            env_step.domains.thermal.set_from(&DomainUpdate {
                 domain_id: THERMAL,
                 zone_temperatures_c: vec![(zone_id, t_c)],
                 custom_payload: Some(vec![
@@ -1690,7 +1689,7 @@ mod tests {
 
         let mut solver_semi = HumiditySolver::new(config.clone(), &env);
         let mut env_semi = env_with_zone(t_c, w_initial);
-        env_semi.custom_domains.push(DomainUpdate {
+        env_semi.domains.thermal.set_from(&DomainUpdate {
             domain_id: THERMAL,
             zone_temperatures_c: vec![(zone_id, t_c)],
             custom_payload: Some(vec![
@@ -1706,7 +1705,7 @@ mod tests {
         let w_semi = solver_semi.humidity_ratio(zone_id);
 
         let mut env_explicit = env_with_zone(t_c, w_initial);
-        env_explicit.custom_domains.push(DomainUpdate {
+        env_explicit.domains.thermal.set_from(&DomainUpdate {
             domain_id: THERMAL,
             zone_temperatures_c: vec![(zone_id, t_c)],
             custom_payload: Some(vec![f64::from(zone_id.0), q_latent_w, 0.0, 0.0, 0.0]),
@@ -1754,7 +1753,7 @@ mod tests {
         let w_old = solver.humidity_ratio(zone_id);
 
         let mut env_step = env_with_zone(t_c, w_initial);
-        env_step.custom_domains.push(DomainUpdate {
+        env_step.domains.thermal.set_from(&DomainUpdate {
             domain_id: THERMAL,
             zone_temperatures_c: vec![(zone_id, t_c)],
             custom_payload: Some(vec![

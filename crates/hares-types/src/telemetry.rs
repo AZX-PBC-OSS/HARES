@@ -22,12 +22,48 @@ use serde::{Deserialize, Serialize};
 /// traits naturally: a latched map differs from a clean one, and that is
 /// correct. The unknown-key latch carries no simulation state, so it is not
 /// serialized.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+///
+/// `Clone` is hand-written: the derived `clone_from` runs `*self =
+/// source.clone()`, which reallocates the map and every key, so a
+/// per-step snapshot through `clone_from` would allocate every step.
+/// The hand-written `clone_from` overwrites the values in place when
+/// both maps hold the same key set (the steady state: every key is
+/// registered at init) and falls back to `HashMap::clone_from`
+/// otherwise.
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Telemetry(
     pub HashMap<String, f64>,
     Option<(String, f64)>,
     #[serde(skip)] Option<String>,
 );
+
+impl Clone for Telemetry {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), self.1.clone(), self.2.clone())
+    }
+
+    /// Copies `source` over `self` in place. When both maps have the same
+    /// length and every source key is present in `self` (the steady
+    /// state), only the `f64` values are overwritten and nothing
+    /// allocates; otherwise `HashMap::clone_from` reuses the table's
+    /// capacity where it can. The latches copy through `Option::clone_from`
+    /// in both cases, which allocates nothing when both sides agree (the
+    /// steady state): a latched source always yields a latched copy, and a
+    /// clean source clears a latched destination's latches.
+    fn clone_from(&mut self, source: &Self) {
+        if self.0.len() == source.0.len() && source.0.keys().all(|key| self.0.contains_key(key)) {
+            for (key, value) in &source.0 {
+                if let Some(slot) = self.0.get_mut(key) {
+                    *slot = *value;
+                }
+            }
+        } else {
+            self.0.clone_from(&source.0);
+        }
+        self.1.clone_from(&source.1);
+        self.2.clone_from(&source.2);
+    }
+}
 
 impl Telemetry {
     #[must_use]
@@ -174,6 +210,15 @@ impl FromIterator<(String, f64)> for Telemetry {
 #[cfg(test)]
 mod tests {
     use super::Telemetry;
+
+    #[test]
+    fn clone_impl_covers_every_field() {
+        // Destructuring pins the field count: adding a field fails to
+        // compile here, so the hand-written `Clone` cannot silently miss
+        // it.
+        let telemetry = Telemetry::new();
+        let Telemetry(_, _, _) = telemetry;
+    }
 
     #[test]
     fn telemetry_from_iter_and_accessors_work() {

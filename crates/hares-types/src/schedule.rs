@@ -156,7 +156,7 @@ impl TimeWindow {
     }
 }
 
-/// Canonical custom-domain id used for schedule payloads in `EnvironmentState.custom_domains`.
+/// Canonical domain id of the schedule payload's slot in `EnvironmentState.domains`.
 pub const SCHEDULE_DOMAIN_ID: DomainId = DomainId(u16::MAX);
 
 /// Out-of-range index behavior for schedule-backed sources.
@@ -632,13 +632,13 @@ impl ScheduleSource {
             }
             Self::ColumnRef { col_idx, boundary } => {
                 let payload = env
-                    .custom_domains
-                    .iter()
-                    .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
+                    .domains
+                    .schedule
+                    .get()
                     .and_then(|d| d.custom_payload.as_ref())
                     .ok_or_else(|| {
                         HaresError::Equipment(
-                            "schedule domain payload not found in environment custom domains"
+                            "schedule domain payload not found in the environment's schedule slot"
                                 .to_string(),
                         )
                     })?;
@@ -1345,11 +1345,11 @@ mod tests {
     #[test]
     fn column_ref_reads_schedule_domain_payload() {
         let mut env = default_env();
-        env.custom_domains = vec![DomainUpdate {
+        env.domains.schedule.set_from(&DomainUpdate {
             domain_id: SCHEDULE_DOMAIN_ID,
             zone_temperatures_c: vec![(ZoneId(1), 21.0)],
             custom_payload: Some(vec![2.0, 4.0, 6.0]),
-        }];
+        });
 
         let mut source = ScheduleSource::ColumnRef {
             col_idx: 1,

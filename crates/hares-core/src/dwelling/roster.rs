@@ -113,6 +113,9 @@ enum OutputCachesPlan {
 /// roster, installed verbatim by [`Dwelling::install_roster_caches`].
 struct RosterPlan {
     equipment_id_by_name: HashMap<String, EquipmentId>,
+    /// The live equipment ids as a set: the per-step snapshot's retain
+    /// reads it directly, instead of rebuilding the set every step.
+    active_equipment_ids: HashSet<EquipmentId>,
     dispatch_targets: Vec<DispatchTarget>,
     ambient_locations: Vec<AmbientLocation>,
     pre_step: Option<PreStepRosterCaches>,
@@ -1166,6 +1169,7 @@ impl Dwelling {
 
         Ok(RosterPlan {
             equipment_id_by_name,
+            active_equipment_ids: equipment.iter().map(|eq| eq.descriptor().id).collect(),
             dispatch_targets: compute_equipment_dispatch_targets(equipment),
             ambient_locations,
             pre_step,
@@ -1237,6 +1241,7 @@ impl Dwelling {
     /// before calling this.
     fn install_roster_caches(&mut self, plan: RosterPlan) {
         self.equipment_id_by_name = plan.equipment_id_by_name;
+        self.active_equipment_ids = plan.active_equipment_ids;
         // Every actor's equipment binding goes stale on any identity change
         // (a replacement receives a new never-reused id, and an actor
         // registered before its equipment existed had no binding), and a

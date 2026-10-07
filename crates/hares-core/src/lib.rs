@@ -1,5 +1,13 @@
 //! Core simulation engine: dwelling, clock, scheduler, and checkpoint.
 
+// The unit-test binary installs the counting allocator so the dwelling's
+// snapshot-path allocation tests read real per-thread counts; it applies
+// to this crate's test build alone.
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: hares_types::alloc_count::CountingAllocator =
+    hares_types::alloc_count::CountingAllocator;
+
 pub mod actor;
 pub mod actor_registry;
 pub mod actors;

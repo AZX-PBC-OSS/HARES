@@ -78,9 +78,9 @@ use hares_types::rng::RngStream;
 use hares_types::{
     ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary,
     EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource,
-    ThermalAccumulator, ThermalCategory, ThermostatAxis, Warning, ZoneId, ZoneMap, ZoneRole,
-    telemetry_keys as tk, validate_core_contract,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, ThermalAccumulator,
+    ThermalCategory, ThermostatAxis, Warning, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
+    validate_core_contract,
 };
 use hares_types::{ControlCapabilities, CoreOutput, validate_port_core_electrical_consistency};
 use rand::SeedableRng;
@@ -121,7 +121,7 @@ use conversions::{
     required_duration, required_path, validate_equipment_override_keys, validate_sim_config,
     validate_wildcard_override,
 };
-#[cfg(feature = "profiling")]
+#[cfg(any(feature = "profiling", test))]
 use hares_types::alloc_count::thread_allocations;
 use solver_builder::build_default_solvers;
 #[cfg(feature = "profiling")]
@@ -1854,6 +1854,83 @@ fn validate_equipment_loops(
     Ok(())
 }
 
+/// The snapshot path's per-site allocation accumulators, compiled only in
+/// this crate's own test build: the step path brackets each site with
+/// `thread_allocations()` reads and adds the difference to the site's
+/// field. `dwelling_snapshot_allocation_free_after_first_step` asserts
+/// every field grows by zero on every step after the first.
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SnapshotAllocations {
+    /// The extracted per-equipment snapshot body, once per equipment.
+    snapshot_equipment: u64,
+    /// The schedule and mains slot writes inside `update_in_place`.
+    update_in_place_slots: u64,
+    thermal_set_from: u64,
+    humidity_set_from: u64,
+    electrical_set_from: u64,
+    fluid_set_from: u64,
+    /// Every custom slot's `set_custom`, once per installed solver.
+    custom_set_from: u64,
+}
+
+#[cfg(test)]
+impl SnapshotAllocations {
+    /// The per-site totals as an ordered list a test can diff by name.
+    fn totals(&self) -> [(&'static str, u64); 7] {
+        [
+            ("snapshot_equipment", self.snapshot_equipment),
+            ("update_in_place_slots", self.update_in_place_slots),
+            ("thermal_set_from", self.thermal_set_from),
+            ("humidity_set_from", self.humidity_set_from),
+            ("electrical_set_from", self.electrical_set_from),
+            ("fluid_set_from", self.fluid_set_from),
+            ("custom_set_from", self.custom_set_from),
+        ]
+    }
+}
+
+/// The snapshot path's bracketed sites.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum SnapshotAllocSite {
+    SnapshotEquipment,
+    ThermalSetFrom,
+    HumiditySetFrom,
+    ElectricalSetFrom,
+    FluidSetFrom,
+}
+
+#[cfg(test)]
+impl Dwelling {
+    /// The snapshot path's per-site allocation totals, with the
+    /// environment manager's slot-write accumulator folded in.
+    fn snapshot_allocation_totals(&self) -> SnapshotAllocations {
+        let mut totals = self.snapshot_allocations;
+        totals.update_in_place_slots = self.environment.slot_write_allocations;
+        totals
+    }
+
+    /// Adds the allocations the counting allocator saw between `before`
+    /// and now to `site`'s accumulator. Both reads are `None` when no
+    /// binary installed the allocator, and then nothing is recorded.
+    fn record_snapshot_allocations(&mut self, before: Option<u64>, site: SnapshotAllocSite) {
+        if let (Some(before), Some(after)) = (before, thread_allocations()) {
+            let delta = after.saturating_sub(before);
+            let accumulators = &mut self.snapshot_allocations;
+            match site {
+                SnapshotAllocSite::SnapshotEquipment => {
+                    accumulators.snapshot_equipment += delta;
+                }
+                SnapshotAllocSite::ThermalSetFrom => accumulators.thermal_set_from += delta,
+                SnapshotAllocSite::HumiditySetFrom => accumulators.humidity_set_from += delta,
+                SnapshotAllocSite::ElectricalSetFrom => accumulators.electrical_set_from += delta,
+                SnapshotAllocSite::FluidSetFrom => accumulators.fluid_set_from += delta,
+            }
+        }
+    }
+}
+
 /// Top-level single-dwelling simulation orchestrator.
 pub struct Dwelling {
     pub bldg_id: i64,
@@ -1935,6 +2012,14 @@ pub struct Dwelling {
     latest_env: EnvironmentState,
     simulation_results: SimulationResults,
     custom_domain_solvers: Vec<Box<dyn DomainSolver>>,
+    /// The custom domain slot handle of each installed solver, in the
+    /// same order: resolved once at installation, read every step.
+    custom_solver_slots: Vec<hares_types::CustomDomainSlot>,
+    /// The live equipment ids the per-step snapshot retain reads.
+    /// Computed by the roster plan, installed by
+    /// `install_roster_caches`, and rebuilt on every equipment and actor
+    /// change.
+    active_equipment_ids: HashSet<EquipmentId>,
     /// Pre-allocated DomainUpdate buffers for each built-in solver, reused per step.
     thermal_update_buf: hares_types::DomainUpdate,
     humidity_update_buf: hares_types::DomainUpdate,
@@ -1942,6 +2027,9 @@ pub struct Dwelling {
     fluid_update_buf: hares_types::DomainUpdate,
     /// Pre-allocated DomainUpdate buffers for custom domain solvers, one per solver.
     custom_update_bufs: Vec<hares_types::DomainUpdate>,
+    /// The snapshot path's per-site allocation accumulators; test build only.
+    #[cfg(test)]
+    snapshot_allocations: SnapshotAllocations,
     #[cfg(debug_assertions)]
     test_panic_on_step: bool,
     #[cfg(debug_assertions)]
@@ -3006,11 +3094,15 @@ fn build_from_blueprint_inner(
         latest_env: initial_env,
         simulation_results: SimulationResults::default(),
         custom_domain_solvers: Vec::new(),
+        custom_solver_slots: Vec::new(),
+        active_equipment_ids: HashSet::new(),
         thermal_update_buf: hares_types::DomainUpdate::empty(hares_types::THERMAL),
         humidity_update_buf: hares_types::DomainUpdate::empty(hares_types::HUMIDITY),
         electrical_update_buf: hares_types::DomainUpdate::empty(hares_types::ELECTRICAL),
         fluid_update_buf: hares_types::DomainUpdate::empty(hares_types::FLUID),
         custom_update_bufs: Vec::new(),
+        #[cfg(test)]
+        snapshot_allocations: SnapshotAllocations::default(),
         timestamp_buf: String::with_capacity(32),
         occupancy_column_idx,
         occupancy_scale,
@@ -3690,11 +3782,7 @@ impl Dwelling {
         // custom_payload.  The payload carries 5 floats per zone:
         // [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor, residual_w].
         let mut energy_balance_residuals = vec![0.0; zone_ids.len()];
-        if let Some(thermal_update) = self
-            .latest_env
-            .custom_domains
-            .iter()
-            .find(|u| u.domain_id == hares_types::THERMAL)
+        if let Some(thermal_update) = self.latest_env.domains.thermal.get()
             && let Some(payload) = &thermal_update.custom_payload
         {
             let residual_map: HashMap<ZoneId, f64> = payload
@@ -4087,45 +4175,86 @@ impl Dwelling {
             .equipment_telemetry
             .retain(|name, _| name == hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY);
 
-        for eq in &self.equipment {
-            let desc = eq.descriptor();
-            let id = self
-                .equipment_id_by_name
-                .get(&desc.name)
-                .copied()
-                .expect("invariant: equipment_id_by_name is built from this equipment set");
-            // Identity desync invariant: the name→id map is rebuilt only by
-            // a roster change, while equipment-side consumers read
-            // `descriptor().id` live. A divergence here means some code path
-            // mutated an equipment's id after registration, so every
-            // id-keyed lookup would address the wrong equipment. No public
-            // API can reach it; this assert catches any future internal
-            // mutator.
-            debug_assert_eq!(
-                id, desc.id,
-                "equipment '{}' id drifted from its registered identity",
-                desc.name
-            );
-            self.latest_env
-                .equipment_core
-                .insert(id, eq.core_output().clone());
+        for idx in 0..self.equipment.len() {
+            self.snapshot_equipment_entry(idx);
+        }
+    }
 
-            let telemetry = eq.telemetry();
-            match self.latest_env.equipment_telemetry.get_mut(&desc.name) {
-                Some(existing) => existing.clone_from(telemetry),
-                None => {
-                    self.latest_env
-                        .equipment_telemetry
-                        .insert(desc.name.clone(), telemetry.clone());
-                }
+    /// The per-equipment snapshot body the step path and
+    /// `snapshot_equipment_state` share: one equipment's core output and
+    /// telemetry copied into `latest_env`. The copies are in place:
+    /// `clone_from` on the existing entry overwrites the map's `f64`
+    /// values and the latches, so a steady-state snapshot (every key
+    /// registered at init) allocates nothing beyond a brand-new
+    /// equipment's first entry.
+    fn snapshot_equipment_entry(&mut self, idx: usize) {
+        let eq = self.equipment[idx].as_ref();
+        let desc = eq.descriptor();
+        let id = self
+            .equipment_id_by_name
+            .get(&desc.name)
+            .copied()
+            .expect("invariant: equipment_id_by_name is built from this equipment set");
+        // Identity desync invariant: the name→id map is rebuilt only by
+        // a roster change, while equipment-side consumers read
+        // `descriptor().id` live. A divergence here means some code path
+        // mutated an equipment's id after registration, so every
+        // id-keyed lookup would address the wrong equipment. No public
+        // API can reach it; this assert catches any future internal
+        // mutator.
+        debug_assert_eq!(
+            id, desc.id,
+            "equipment '{}' id drifted from its registered identity",
+            desc.name
+        );
+        self.latest_env
+            .equipment_core
+            .insert(id, eq.core_output().clone());
+
+        let telemetry = eq.telemetry();
+        match self.latest_env.equipment_telemetry.get_mut(&desc.name) {
+            Some(existing) => existing.clone_from(telemetry),
+            None => {
+                self.latest_env
+                    .equipment_telemetry
+                    .insert(desc.name.clone(), telemetry.clone());
             }
         }
+    }
+
+    /// Installs a custom domain solver and reserves its update slot in
+    /// the environment state. The returned handle is the slot the
+    /// solver's update is readable through after each step
+    /// ([`hares_types::DomainSlots::custom`]); it is resolved once, at
+    /// installation.
+    ///
+    /// # Errors
+    ///
+    /// Names the id when the solver's domain is one of the fixed slots,
+    /// is already installed, or when the dwelling has already stepped:
+    /// the step path's slot set is fixed once stepping starts.
+    pub fn install_domain_solver(
+        &mut self,
+        solver: Box<dyn DomainSolver>,
+    ) -> Result<hares_types::CustomDomainSlot> {
+        let id = solver.domain_id();
+        if self.clock.current_step > 0 {
+            return Err(HaresError::InvalidState(format!(
+                "custom domain solver for {id:?} cannot be installed after the dwelling's first step"
+            )));
+        }
+        let slot = self.latest_env.domains.install_custom(id)?;
+        self.custom_update_bufs
+            .push(hares_types::DomainUpdate::empty(id));
+        self.custom_solver_slots.push(slot);
+        self.custom_domain_solvers.push(solver);
+        Ok(slot)
     }
 
     /// Accumulates occupancy-driven internal heat gains into zone thermal ports.
     ///
     /// Reads the current occupancy count from the schedule payload carried in
-    /// `latest_env.custom_domains`, then deposits gains into the **conditioned
+    /// `latest_env`'s schedule slot, then deposits gains into the **conditioned
     /// (indoor) zone only** — matching OCHRE behaviour where occupant heat is
     /// applied solely to the `indoor_zone`:
     ///   - sensible convective: `n_occupants × OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_CONVECTIVE_FRACTION`
@@ -4147,9 +4276,9 @@ impl Dwelling {
         // step time is a programming error (schedule update not pushed).
         let n_occupants = self
             .latest_env
-            .custom_domains
-            .iter()
-            .find(|u| u.domain_id == SCHEDULE_DOMAIN_ID)
+            .domains
+            .schedule
+            .get()
             .and_then(|u| u.custom_payload.as_ref())
             .and_then(|p| p.get(col_idx))
             .copied()
@@ -5453,12 +5582,20 @@ impl Dwelling {
         // Apply zone temps and capture observer data while we still have the borrow.
         apply_thermal_update_to_zones(&mut self.latest_env, &self.thermal_update_buf);
 
-        // Upsert thermal domain so humidity/electrical solvers see updated state.
-        // Zone temperatures are already applied above; the upsert stores the full
-        // DomainUpdate in custom_domains for solvers that read it (humidity).
+        // Write the thermal domain's slot so humidity/electrical solvers see
+        // the updated state. Zone temperatures are already applied above; the
+        // slot write copies the full DomainUpdate in place for solvers that
+        // read it (humidity).
         #[cfg(feature = "observe")]
         let thermal_for_observer = self.thermal_update_buf.clone();
-        self.latest_env.upsert_domain_ref(&self.thermal_update_buf);
+        #[cfg(test)]
+        let alloc_before = thread_allocations();
+        self.latest_env
+            .domains
+            .thermal
+            .set_from(&self.thermal_update_buf);
+        #[cfg(test)]
+        self.record_snapshot_allocations(alloc_before, SnapshotAllocSite::ThermalSetFrom);
 
         // Capture the pre-resolve (committed) humidity ratios so the
         // always-on moisture balance check can diff this step's solver
@@ -5571,16 +5708,33 @@ impl Dwelling {
             diagnostics::write_row(writer, &diag, n_zones);
         }
 
-        self.latest_env.upsert_domain_ref(&self.humidity_update_buf);
+        #[cfg(test)]
+        let alloc_before = thread_allocations();
         self.latest_env
-            .upsert_domain_ref(&self.electrical_update_buf);
-        self.latest_env.upsert_domain_ref(&self.fluid_update_buf);
+            .domains
+            .humidity
+            .set_from(&self.humidity_update_buf);
+        #[cfg(test)]
+        self.record_snapshot_allocations(alloc_before, SnapshotAllocSite::HumiditySetFrom);
+        #[cfg(test)]
+        let alloc_before = thread_allocations();
+        self.latest_env
+            .domains
+            .electrical
+            .set_from(&self.electrical_update_buf);
+        #[cfg(test)]
+        self.record_snapshot_allocations(alloc_before, SnapshotAllocSite::ElectricalSetFrom);
+        #[cfg(test)]
+        let alloc_before = thread_allocations();
+        self.latest_env
+            .domains
+            .fluid
+            .set_from(&self.fluid_update_buf);
+        #[cfg(test)]
+        self.record_snapshot_allocations(alloc_before, SnapshotAllocSite::FluidSetFrom);
 
-        // Ensure custom update buffers match the number of custom solvers.
-        while self.custom_update_bufs.len() < self.custom_domain_solvers.len() {
-            self.custom_update_bufs
-                .push(hares_types::DomainUpdate::empty(hares_types::DomainId(0)));
-        }
+        #[cfg(test)]
+        let mut custom_alloc_delta = 0u64;
         for (i, solver) in self.custom_domain_solvers.iter_mut().enumerate() {
             solver.resolve(
                 &self.ports,
@@ -5588,8 +5742,21 @@ impl Dwelling {
                 dt,
                 &mut self.custom_update_bufs[i],
             )?;
+            #[cfg(test)]
+            let alloc_before = thread_allocations();
             self.latest_env
-                .upsert_domain_ref(&self.custom_update_bufs[i]);
+                .domains
+                .set_custom(self.custom_solver_slots[i], &self.custom_update_bufs[i]);
+            #[cfg(test)]
+            {
+                if let (Some(before), Some(after)) = (alloc_before, thread_allocations()) {
+                    custom_alloc_delta += after.saturating_sub(before);
+                }
+            }
+        }
+        #[cfg(test)]
+        {
+            self.snapshot_allocations.custom_set_from += custom_alloc_delta;
         }
 
         #[cfg(feature = "observe")]
@@ -5811,20 +5978,11 @@ impl Dwelling {
         // equipment that stepped this timestep. Snapshot runs AFTER all
         // equipment phases (Independent + Electrical + Thermal in Step 3) so
         // nothing is one step stale.
-        let active_equipment_ids: HashSet<EquipmentId> = self
-            .equipment
-            .iter()
-            .map(|eq| {
-                let desc = eq.descriptor();
-                self.equipment_id_by_name
-                    .get(&desc.name)
-                    .copied()
-                    .expect("invariant: equipment_id_by_name is built from this equipment set")
-            })
-            .collect();
+        #[cfg(test)]
+        let alloc_before = thread_allocations();
         self.latest_env
             .equipment_core
-            .retain(|id, _| active_equipment_ids.contains(id));
+            .retain(|id, _| self.active_equipment_ids.contains(id));
         self.latest_env.equipment_core.reserve(self.equipment.len());
         self.latest_env.equipment_telemetry.retain(|name, _| {
             name == hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY
@@ -5833,39 +5991,14 @@ impl Dwelling {
         self.latest_env
             .equipment_telemetry
             .reserve(self.equipment.len());
-        for (idx, eq) in self.equipment.iter().enumerate() {
+        for idx in 0..self.equipment.len() {
             if self.step_failed[idx] {
                 continue;
             }
-            let desc = eq.descriptor();
-            let id = self
-                .equipment_id_by_name
-                .get(&desc.name)
-                .copied()
-                .expect("invariant: equipment_id_by_name is built from this equipment set");
-            // Identity desync invariant — see `snapshot_equipment_state`.
-            debug_assert_eq!(
-                id, desc.id,
-                "equipment '{}' id drifted from its registered identity",
-                desc.name
-            );
-            self.latest_env
-                .equipment_core
-                .insert(id, eq.core_output().clone());
-
-            // Per-equipment telemetry snapshot for next-step actor reads.
-            // Use `clone_from` on the existing entry so steady-state telemetry
-            // keys reuse their f64 slots without reallocating the inner map.
-            let telemetry = eq.telemetry();
-            match self.latest_env.equipment_telemetry.get_mut(&desc.name) {
-                Some(existing) => existing.clone_from(telemetry),
-                None => {
-                    self.latest_env
-                        .equipment_telemetry
-                        .insert(desc.name.clone(), telemetry.clone());
-                }
-            }
+            self.snapshot_equipment_entry(idx);
         }
+        #[cfg(test)]
+        self.record_snapshot_allocations(alloc_before, SnapshotAllocSite::SnapshotEquipment);
 
         for (i, entry) in self.roster.zone_temp_scratch.iter_mut().enumerate() {
             entry.1 = if let Some(env_idx) = self.roster.zones.zone_env_indices[i] {
@@ -6728,11 +6861,7 @@ impl Dwelling {
 
         // Moisture balance: mass conservation across the humidity solver.
         // Warm-up included: no warm-up tolerance is granted.
-        if let Some(update) = self
-            .latest_env
-            .custom_domains
-            .iter()
-            .find(|u| u.domain_id == hares_types::HUMIDITY)
+        if let Some(update) = self.latest_env.domains.humidity.get()
             && let Some(payload) = &update.custom_payload
         {
             for &value in payload {
@@ -6752,11 +6881,7 @@ impl Dwelling {
         self.invariant_infiltration_w_outdoor.clear();
         #[cfg(all(feature = "observe", debug_assertions))]
         self.invariant_moisture_capture.clear();
-        if let Some(thermal_update) = self
-            .latest_env
-            .custom_domains
-            .iter()
-            .find(|u| u.domain_id == hares_types::THERMAL)
+        if let Some(thermal_update) = self.latest_env.domains.thermal.get()
             && let Some(payload) = &thermal_update.custom_payload
         {
             // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor,
@@ -7218,7 +7343,8 @@ mod tests {
     use hares_types::{
         ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, DRLevel, EndUse,
         EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, LoopId,
-        OperatingMode, PortDeclaration, Telemetry, TelemetryField, ZoneId, ZoneState,
+        OperatingMode, PortDeclaration, SCHEDULE_DOMAIN_ID, Telemetry, TelemetryField, ZoneId,
+        ZoneState,
     };
     use std::borrow::Cow;
     use std::fs;
@@ -7228,6 +7354,145 @@ mod tests {
     use std::time::Duration;
     use syn::spanned::Spanned;
     use syn::visit::Visit;
+
+    /// The step's snapshot path allocates nothing after the first step:
+    /// the equipment snapshot copies in place, the environment update's
+    /// slot writes reuse their retained vectors, and every domain
+    /// `set_from` reuses the slot's update. The site accumulators are
+    /// `#[cfg(test)]` fields bracketed by `thread_allocations()` reads
+    /// on the step path itself; this binary installs the counting
+    /// allocator, so the counts are real. The recorder's allocations
+    /// (`write_output` off here) and everything outside the brackets are
+    /// out of scope.
+    #[test]
+    fn dwelling_snapshot_allocation_free_after_first_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+
+        let mut dwelling = Dwelling::from_hpxml_with_write_output(
+            HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
+            start_time,
+            chrono::Duration::minutes(15),
+            chrono::Duration::hours(2),
+            None,
+            Some(false),
+            // The BEopt example schedule does not name every mapped
+            // column; the profiles load from the repo's defaults.
+            Some(root.join("defaults")),
+        )
+        .expect("build the fixture dwelling");
+
+        dwelling.run_timestep(false).expect("first step");
+        let baseline = dwelling.snapshot_allocation_totals().totals();
+        for _ in 0..4 {
+            dwelling.run_timestep(false).expect("step");
+        }
+        for (site, before, after) in dwelling
+            .snapshot_allocation_totals()
+            .totals()
+            .into_iter()
+            .zip(baseline)
+            .map(|((name, after), (_, before))| (name, before, after))
+        {
+            assert_eq!(
+                after,
+                before,
+                "snapshot site '{site}' allocated {} times after the first step",
+                after - before
+            );
+        }
+    }
+
+    /// A custom solver's slot is resolved once at installation: the
+    /// returned handle reads the solver's update after a step, and every
+    /// installation that would drift the step path's fixed slot set is
+    /// an error naming the id.
+    #[test]
+    fn custom_domain_slot_resolved_at_installation() {
+        use hares_types::{DomainSolver, DomainUpdate, EnvironmentState, PortSlots};
+        use std::time::Duration as StdDuration;
+
+        struct StubSolver {
+            id: hares_types::DomainId,
+        }
+
+        impl DomainSolver for StubSolver {
+            fn domain_id(&self) -> hares_types::DomainId {
+                self.id
+            }
+            fn resolve(
+                &mut self,
+                _ports: &PortSlots,
+                _env: &EnvironmentState,
+                _dt: StdDuration,
+                out: &mut DomainUpdate,
+            ) -> std::result::Result<(), HaresError> {
+                out.custom_payload = Some(vec![7.0]);
+                Ok(())
+            }
+        }
+
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config(&base_path).expect("build dwelling");
+
+        let slot = dwelling
+            .install_domain_solver(Box::new(StubSolver {
+                id: hares_types::DomainId(42),
+            }))
+            .expect("first install of DomainId(42)");
+
+        dwelling.run_timestep(false).expect("step");
+
+        let update = dwelling
+            .latest_env
+            .domains
+            .custom(slot)
+            .expect("the solver's slot is written after a step");
+        assert_eq!(update.domain_id, hares_types::DomainId(42));
+        assert_eq!(update.custom_payload, Some(vec![7.0]));
+
+        // The same id, a fixed id, and any id at all after the first
+        // step: all refused, each error naming the id.
+        let again = dwelling
+            .install_domain_solver(Box::new(StubSolver {
+                id: hares_types::DomainId(42),
+            }))
+            .expect_err("a duplicate id must be refused");
+        assert!(again.to_string().contains("DomainId(42)"));
+
+        for fixed in [
+            hares_types::THERMAL,
+            hares_types::ELECTRICAL,
+            hares_types::HUMIDITY,
+            hares_types::FLUID,
+            hares_types::SCHEDULE_DOMAIN_ID,
+            hares_types::MAINS_WATER_DOMAIN_ID,
+        ] {
+            let err = dwelling
+                .install_domain_solver(Box::new(StubSolver { id: fixed }))
+                .expect_err("a fixed id must be refused");
+            assert!(
+                err.to_string().contains(&format!("{fixed:?}")),
+                "the error must name the id: {err}"
+            );
+        }
+
+        let err = dwelling
+            .install_domain_solver(Box::new(StubSolver {
+                id: hares_types::DomainId(43),
+            }))
+            .expect_err("no install after the first step");
+        assert!(err.to_string().contains("DomainId(43)"));
+    }
 
     /// A rollback reports every path of the heat it discards, short-wave
     /// and radiant included.
@@ -7632,6 +7897,7 @@ fn cfg_gated_helper() {
         let equipment = equipment_refs(&dwelling.equipment);
         dwelling.roster.equipment_execution_order = compute_equipment_execution_order(&equipment);
         dwelling.roster.equipment_ids = equipment.iter().map(|eq| eq.descriptor().id).collect();
+        dwelling.active_equipment_ids = equipment.iter().map(|eq| eq.descriptor().id).collect();
         dwelling.roster.hvac_thermal_consistency =
             build_hvac_thermal_consistency(&dwelling.ports, &equipment);
         dwelling.roster.equipment_column_map = build_equipment_column_map(
@@ -11722,11 +11988,15 @@ occupancy = 1.0
         dwelling.occupancy_scale = 4.0;
 
         // Inject a schedule domain update with occupancy fraction = 0.5.
-        dwelling.latest_env.upsert_domain(DomainUpdate {
-            domain_id: SCHEDULE_DOMAIN_ID,
-            zone_temperatures_c: vec![],
-            custom_payload: Some(vec![0.5]),
-        });
+        dwelling
+            .latest_env
+            .domains
+            .schedule
+            .set_from(&DomainUpdate {
+                domain_id: SCHEDULE_DOMAIN_ID,
+                zone_temperatures_c: vec![],
+                custom_payload: Some(vec![0.5]),
+            });
 
         // Zero thermal ports so we can measure the contribution.
         for thermal in &mut dwelling.ports.thermal {
@@ -11868,11 +12138,15 @@ occupancy = 1.0
         dwelling.occupancy_column_idx = Some(0);
         dwelling.occupancy_scale = 2.0;
 
-        dwelling.latest_env.upsert_domain(DomainUpdate {
-            domain_id: SCHEDULE_DOMAIN_ID,
-            zone_temperatures_c: vec![],
-            custom_payload: Some(vec![0.5]),
-        });
+        dwelling
+            .latest_env
+            .domains
+            .schedule
+            .set_from(&DomainUpdate {
+                domain_id: SCHEDULE_DOMAIN_ID,
+                zone_temperatures_c: vec![],
+                custom_payload: Some(vec![0.5]),
+            });
 
         let indoor_zone = dwelling.thermal_solver.config().indoor_zone_id;
 
@@ -12504,7 +12778,7 @@ occupancy = 1.0
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
-            custom_domains: vec![],
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: HashMap::new(),
             equipment_core: HashMap::new(),
             current_time: chrono::FixedOffset::east_opt(0)
@@ -12700,7 +12974,7 @@ master_seed = 0
                     island_bus_voltage_pu: None,
                 },
                 schedule_row: None,
-                custom_domains: vec![],
+                domains: hares_types::DomainSlots::default(),
                 equipment_telemetry: Default::default(),
                 equipment_core: Default::default(),
                 current_time: FixedOffset::east_opt(0)
@@ -17716,13 +17990,11 @@ master_seed = 0
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
 
         dwelling
-            .custom_update_bufs
-            .push(hares_types::DomainUpdate::empty(hares_types::DomainId(0)));
-
-        dwelling.custom_domain_solvers.push(Box::new(StubSolver {
-            id: DomainId(42),
-            state: vec![1.0, 2.0, 3.0],
-        }));
+            .install_domain_solver(Box::new(StubSolver {
+                id: DomainId(42),
+                state: vec![1.0, 2.0, 3.0],
+            }))
+            .expect("install stub solver");
 
         dwelling.enable_observer(10);
 
@@ -17816,12 +18088,8 @@ master_seed = 0
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
 
         dwelling
-            .custom_update_bufs
-            .push(hares_types::DomainUpdate::empty(hares_types::DomainId(0)));
-
-        dwelling
-            .custom_domain_solvers
-            .push(Box::new(StubSolver { id: DomainId(77) }));
+            .install_domain_solver(Box::new(StubSolver { id: DomainId(77) }))
+            .expect("install stub solver");
 
         dwelling.enable_observer(10);
 

@@ -54,7 +54,7 @@ fn make_env(zone_temp_c: f64) -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
-        custom_domains: vec![],
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
@@ -381,11 +381,11 @@ fn gas_wh_consumes_gas_not_electricity() {
 #[test]
 fn resistance_wh_uses_schedule_draw_source() {
     let mut env = make_env(21.0);
-    env.custom_domains = vec![DomainUpdate {
+    env.domains.schedule.set_from(&DomainUpdate {
         domain_id: SCHEDULE_DOMAIN_ID,
         zone_temperatures_c: vec![],
         custom_payload: Some(vec![99.0, 0.05]),
-    }];
+    });
 
     let mut typed: ElectricResistanceWaterHeaterConfig = resistance_config(52.0, 2.0, 40.0, 0.0)
         .typed()
@@ -417,11 +417,11 @@ fn resistance_wh_uses_schedule_draw_source() {
 #[test]
 fn gas_wh_uses_schedule_draw_source() {
     let mut env = make_env(21.0);
-    env.custom_domains = vec![DomainUpdate {
+    env.domains.schedule.set_from(&DomainUpdate {
         domain_id: SCHEDULE_DOMAIN_ID,
         zone_temperatures_c: vec![],
         custom_payload: Some(vec![99.0, 0.05]),
-    }];
+    });
 
     let mut typed: GasWaterHeaterConfig = gas_config(52.0, 2.0, 40.0, 0.0)
         .typed()
@@ -452,11 +452,11 @@ fn gas_wh_uses_schedule_draw_source() {
 fn tankless_wh_uses_schedule_draw_and_mains_inputs() {
     let mut env = make_env(21.0);
     env.weather.mains_temp_c = f64::NAN;
-    env.custom_domains = vec![DomainUpdate {
+    env.domains.schedule.set_from(&DomainUpdate {
         domain_id: SCHEDULE_DOMAIN_ID,
         zone_temperatures_c: vec![],
         custom_payload: Some(vec![10.0, 0.05]),
-    }];
+    });
 
     let cfg = tankless_config(
         FuelType::Electric,

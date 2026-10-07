@@ -571,7 +571,7 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: Vec::new(),
+            domains: hares_types::DomainSlots::default(),
             schedule_row: Some(0),
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             equipment_telemetry: std::collections::HashMap::new(),

@@ -112,7 +112,7 @@ fn equipment_config_from_spec_with_extras(
 }
 
 fn base_env(payload: Vec<f64>) -> EnvironmentState {
-    EnvironmentState {
+    let mut env = EnvironmentState {
         ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
@@ -137,11 +137,7 @@ fn base_env(payload: Vec<f64>) -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
-        custom_domains: vec![DomainUpdate {
-            domain_id: SCHEDULE_DOMAIN_ID,
-            zone_temperatures_c: Vec::new(),
-            custom_payload: Some(payload),
-        }],
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
@@ -152,7 +148,13 @@ fn base_env(payload: Vec<f64>) -> EnvironmentState {
         time_res: ChronoDuration::minutes(1),
         price_signal: Default::default(),
         electrical: Default::default(),
-    }
+    };
+    env.domains.schedule.set_from(&DomainUpdate {
+        domain_id: SCHEDULE_DOMAIN_ID,
+        zone_temperatures_c: Vec::new(),
+        custom_payload: Some(payload),
+    });
+    env
 }
 
 fn payload_for_row(schedule: &ScheduleTimeSeries, row: usize) -> Vec<f64> {
