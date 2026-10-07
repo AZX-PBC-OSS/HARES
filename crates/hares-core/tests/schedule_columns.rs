@@ -235,9 +235,60 @@ fn a_column_for_equipment_the_home_lacks_is_a_dwelling_warning() {
     );
 }
 
-/// The `schedule` warnings of the bldg0176775 home built with
-/// `schedule_path` and stepped once.
-fn bldg0176775_schedule_warnings(schedule_path: &Path) -> Vec<String> {
+/// A `microwave` column on an OS-HPXML-derived building (the ResStock
+/// schedule family) shapes nothing additional: OS-HPXML v1.12.0 models no
+/// microwave appliance and its residual "other" plug loads already carry
+/// the microwave energy (`defaults.rb` `get_residual_mels_values`, from
+/// RECS 2020), so the home carries no Microwave load and the column is
+/// reported unread.
+#[test]
+fn a_microwave_column_on_an_os_hpxml_building_counts_only_the_residual_mels() {
+    let bldg = project_root().join("tests/fixtures/resstock/2025.1/bldg0176775");
+    let csv = std::fs::read_to_string(bldg.join("in.schedules.csv")).expect("read the schedule");
+    let with_microwave: Vec<String> = csv
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            if i == 0 {
+                format!("{line},microwave")
+            } else {
+                format!("{line},0.0")
+            }
+        })
+        .collect();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let schedule_path = dir.path().join("in.schedules.csv");
+    std::fs::write(&schedule_path, with_microwave.join("\n")).expect("write schedule");
+
+    let mut dwelling = bldg0176775_dwelling(&schedule_path);
+    dwelling.step().expect("a step of the home runs");
+    let warnings: Vec<String> = dwelling
+        .take_warnings()
+        .into_iter()
+        .filter(|warning| warning.starts_with("schedule: "))
+        .collect();
+
+    assert_eq!(
+        warnings.len(),
+        1,
+        "one warning for the one unread column, got {warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("'microwave' has no entry in COLUMN_MAPPINGS"),
+        "{}",
+        warnings[0]
+    );
+    assert!(
+        !dwelling
+            .equipment()
+            .iter()
+            .any(|eq| eq.descriptor().name == "Microwave"),
+        "no Microwave load may ride on top of the residual plug loads"
+    );
+}
+
+/// Builds the bldg0176775 home with the given schedule and steps it once.
+fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
     let bldg = project_root().join("tests/fixtures/resstock/2025.1/bldg0176775");
     let sim = SimulationConfig {
         start_time: FixedOffset::west_opt(5 * 3600)
@@ -275,6 +326,12 @@ fn bldg0176775_schedule_warnings(schedule_path: &Path) -> Vec<String> {
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds from bldg0176775");
     dwelling.step().expect("a step of the ResStock home runs");
     dwelling
+}
+
+/// The `schedule` warnings of the bldg0176775 home built with
+/// `schedule_path` and stepped once.
+fn bldg0176775_schedule_warnings(schedule_path: &Path) -> Vec<String> {
+    bldg0176775_dwelling(schedule_path)
         .take_warnings()
         .into_iter()
         .filter(|warning| warning.starts_with("schedule: "))

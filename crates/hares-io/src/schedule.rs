@@ -73,6 +73,38 @@ pub fn resolve_occupancy_column(column_index: &HashMap<String, usize>) -> Option
         .map(|(key, &idx)| (key.clone(), idx))
 }
 
+/// Which schedule-file convention a CSV's columns follow, decided by its
+/// occupancy column.
+///
+/// OS-HPXML-derived inputs name the occupancy column `occupants` or
+/// `occupancy`; the BEopt/OCHRE event files name it `Occupancy (Persons)`
+/// and resolve only through [`resolve_occupancy_column`]'s case-insensitive
+/// fallback. The family decides the columns whose energy accounting differs
+/// between the two conventions: OS-HPXML v1.12.0 models no microwave
+/// appliance and its residual plug loads already carry the microwave energy,
+/// while a BEopt/OCHRE-format input models the microwave separately. A file
+/// with no occupancy column at all is treated as OS-HPXML-derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleFormatFamily {
+    /// An OS-HPXML-derived schedule (the `occupants` column family).
+    OsHpxml,
+    /// A BEopt/OCHRE event schedule (the `Occupancy (Persons)` family).
+    BeoptOchre,
+}
+
+/// Decides the schedule file's [`ScheduleFormatFamily`] from its headers.
+#[must_use]
+pub fn schedule_format_family(column_index: &HashMap<String, usize>) -> ScheduleFormatFamily {
+    if column_index.contains_key("occupants") || column_index.contains_key("occupancy") {
+        return ScheduleFormatFamily::OsHpxml;
+    }
+    if resolve_occupancy_column(column_index).is_some() {
+        ScheduleFormatFamily::BeoptOchre
+    } else {
+        ScheduleFormatFamily::OsHpxml
+    }
+}
+
 /// Column-major schedule time series.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleTimeSeries {

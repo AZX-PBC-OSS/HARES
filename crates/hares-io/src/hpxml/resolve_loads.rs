@@ -1282,6 +1282,12 @@ pub(super) fn default_radiant_share(name: &str) -> Option<f64> {
         "Cooking Range" | "Clothes Washer" | "Clothes Dryer" | "Dishwasher" | "Refrigerator"
         | "Freezer" | "MELs" | "Plug Loads" | "TV" | "Gas Fireplace" | "Gas Grill"
         | "Gas Lighting" => Some(0.6),
+        // OS-HPXML v1.12.0 models no microwave appliance, so a microwave a
+        // BEopt/OCHRE-format input declares takes the plug-load radiant
+        // split of the residual plug loads the reference keeps it inside:
+        // `rad_frac = 0.6 * sens_frac` (`misc_loads.rb:89`), the same share
+        // the appliances above take.
+        "Microwave" => Some(0.6),
         "Ceiling Fan" => Some(0.558),
         "Indoor Lighting" | "Basement Lighting" | "Garage Lighting" | "Lighting" => Some(0.6),
         _ => None,

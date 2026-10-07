@@ -24,7 +24,10 @@ use crate::EquipmentSpec;
 use crate::defaults::DefaultsStore;
 use crate::draw_profile::normalize_draw_profile;
 use crate::hpxml::{MICROWAVE_DEFAULT_ANNUAL_KWH, build_spec};
-use crate::schedule::{ColumnAggregation, ScheduleTimeSeries, resolve_occupancy_column};
+use crate::schedule::{
+    ColumnAggregation, ScheduleFormatFamily, ScheduleTimeSeries, resolve_occupancy_column,
+    schedule_format_family,
+};
 
 // OS-HPXML's manual-thermostat default setpoints
 // (defaults.rb:2827-2848, 6746-6785).
@@ -54,10 +57,45 @@ enum ScheduleCategory {
     },
 }
 
+/// Which schedule-file families a column mapping applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MappingFamilies {
+    /// The columns the OS-HPXML and BEopt/OCHRE conventions share.
+    Both,
+    /// The one mapping whose energy accounting differs between the
+    /// conventions: OS-HPXML v1.12.0 models no microwave appliance (its
+    /// bundled HPXML v3 schema has no `Microwave` element, and `defaults.rb`
+    /// `get_residual_mels_values` sizes the residual "other" plug loads from
+    /// RECS 2020 with the microwave energy inside), and its schedule files
+    /// carry no microwave column. A `microwave` column on an OS-HPXML-derived
+    /// building therefore shapes nothing additional: the energy is already in
+    /// the residual MELs, and a separate Microwave load would count it twice.
+    /// A BEopt/OCHRE-format input (the `Occupancy (Persons)` event files)
+    /// models the microwave separately, so the column stays mapped there.
+    BeoptOchreOnly,
+}
+
 struct ColumnMapping {
     csv_column: &'static str,
     equipment_name: &'static str,
     category: ScheduleCategory,
+}
+
+impl ColumnMapping {
+    fn families(&self) -> MappingFamilies {
+        match self.csv_column {
+            "microwave" => MappingFamilies::BeoptOchreOnly,
+            _ => MappingFamilies::Both,
+        }
+    }
+
+    /// Whether the mapping applies to a schedule file of the given family.
+    fn applies_to(&self, family: ScheduleFormatFamily) -> bool {
+        match self.families() {
+            MappingFamilies::Both => true,
+            MappingFamilies::BeoptOchreOnly => family == ScheduleFormatFamily::BeoptOchre,
+        }
+    }
 }
 
 const COLUMN_MAPPINGS: &[ColumnMapping] = &[
@@ -682,15 +720,17 @@ pub fn inject_schedule_into_specs(
         None => DefaultProfiles::default(),
     };
 
+    let schedule_family = schedule_format_family(&csv_col_map);
     let mapping_by_equipment: HashMap<&str, &ColumnMapping> = COLUMN_MAPPINGS
         .iter()
         .filter(|m| {
-            matches!(
-                m.category,
-                ScheduleCategory::Power
-                    | ScheduleCategory::EventWindow
-                    | ScheduleCategory::Occupancy
-            )
+            m.applies_to(schedule_family)
+                && matches!(
+                    m.category,
+                    ScheduleCategory::Power
+                        | ScheduleCategory::EventWindow
+                        | ScheduleCategory::Occupancy
+                )
         })
         .map(|m| (m.equipment_name, m))
         .collect();
@@ -1632,13 +1672,18 @@ fn normalize_schedule_col_name(name: &str) -> String {
 
 /// Create an EquipmentSpec for a CSV column whose equipment the HPXML does
 /// not describe, when that equipment has a default annual energy to scale
-/// the column by (a microwave, which no HPXML element carries). A column for
+/// the column by (a microwave, which no HPXML element carries, in a
+/// BEopt/OCHRE-format schedule). A column for
 /// any other equipment the HPXML leaves out (garage or basement lighting in
 /// a building without that space, an appliance the home does not have)
 /// creates nothing: the column is a profile, and with no equipment energy
 /// it would drive a zero-power load. Such a column is reported as a
 /// construction warning, so a declared schedule input does not vanish
-/// from the run unrecorded.
+/// from the run unrecorded. On an OS-HPXML-derived schedule the microwave
+/// column creates nothing for the same reason and its energy stays in the
+/// residual plug loads (OS-HPXML v1.12.0 `defaults.rb`
+/// `get_residual_mels_values`, from RECS 2020), so the column is reported
+/// unread instead of a second Microwave load.
 ///
 /// Specs are constructed through `build_spec`, the path every HPXML-derived
 /// spec takes, so default gain fractions, fuel-type labels and ZIP
@@ -1649,14 +1694,17 @@ fn ensure_specs_for_csv_columns(
     defaults: &DefaultsStore,
     warnings: &mut Vec<Warning>,
 ) {
+    let family = schedule_format_family(csv_col_map);
     for mapping in COLUMN_MAPPINGS {
-        if matches!(
-            mapping.category,
-            ScheduleCategory::NotUsed { .. }
-                | ScheduleCategory::Occupancy
-                | ScheduleCategory::Setpoint
-                | ScheduleCategory::WaterHeater
-        ) {
+        if !mapping.applies_to(family)
+            || matches!(
+                mapping.category,
+                ScheduleCategory::NotUsed { .. }
+                    | ScheduleCategory::Occupancy
+                    | ScheduleCategory::Setpoint
+                    | ScheduleCategory::WaterHeater
+            )
+        {
             continue;
         }
         let col_name = normalize_schedule_col_name(mapping.csv_column);
@@ -1695,19 +1743,21 @@ fn default_annual_kwh_for_equipment(equipment_name: &str) -> Option<f64> {
 }
 
 /// Return the set of CSV column names that are neither in `COLUMN_MAPPINGS`
-/// (any category, so `NotUsed` entries keep their columns known) nor the
-/// occupancy column the environment resolves.
+/// (any category, so `NotUsed` entries keep their columns known, within the
+/// mapping's schedule families) nor the occupancy column the environment
+/// resolves.
 ///
 /// The caller reports one `Warning` per returned column.
 pub(crate) fn find_unknown_schedule_columns(csv_col_map: &HashMap<String, usize>) -> Vec<String> {
     let occupancy_column = resolve_occupancy_column(csv_col_map).map(|(name, _)| name);
+    let family = schedule_format_family(csv_col_map);
     let mut unknown: Vec<String> = csv_col_map
         .keys()
         .filter(|col_name| {
             let normalized = normalize_schedule_col_name(col_name);
-            let is_mapped = COLUMN_MAPPINGS
-                .iter()
-                .any(|m| normalize_schedule_col_name(m.csv_column) == normalized);
+            let is_mapped = COLUMN_MAPPINGS.iter().any(|m| {
+                m.applies_to(family) && normalize_schedule_col_name(m.csv_column) == normalized
+            });
             !is_mapped && occupancy_column.as_deref() != Some(col_name.as_str())
         })
         .cloned()
@@ -4060,7 +4110,9 @@ mod tests {
 
     // ── Microwave column mapping tests ──
 
-    fn make_schedule_with_microwave_column(values: &[f64]) -> ScheduleTimeSeries {
+    /// A BEopt/OCHRE-format schedule (`Occupancy (Persons)`, the event-file
+    /// family) carrying a `microwave` column.
+    fn make_beopt_schedule_with_microwave_column(values: &[f64]) -> ScheduleTimeSeries {
         let start =
             DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
         let timestamps = (0..values.len())
@@ -4068,20 +4120,74 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut column_index = HashMap::new();
+        column_index.insert("Occupancy (Persons)".to_string(), 1);
         column_index.insert("microwave".to_string(), 0);
         ScheduleTimeSeries {
             timestamps,
-            column_names: vec!["microwave".to_string()],
-            columns: vec![values.to_vec()],
+            column_names: vec!["microwave".to_string(), "Occupancy (Persons)".to_string()],
+            columns: vec![values.to_vec(), vec![1.0; values.len()]],
             column_index,
             source_step_secs: 3600,
-            column_aggregations: vec![crate::ColumnAggregation::Mean],
+            column_aggregations: vec![crate::ColumnAggregation::Mean; 2],
+        }
+    }
+
+    /// An OS-HPXML-derived schedule (`occupants`, the residual
+    /// `plug_loads_other` column) carrying a `microwave` column.
+    fn make_os_hpxml_schedule_with_microwave_column(values: &[f64]) -> ScheduleTimeSeries {
+        let start =
+            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+        let timestamps = (0..values.len())
+            .map(|i| start + Duration::hours(i as i64))
+            .collect::<Vec<_>>();
+
+        let mut column_index = HashMap::new();
+        column_index.insert("occupants".to_string(), 2);
+        column_index.insert("plug_loads_other".to_string(), 1);
+        column_index.insert("microwave".to_string(), 0);
+        ScheduleTimeSeries {
+            timestamps,
+            column_names: vec![
+                "microwave".to_string(),
+                "plug_loads_other".to_string(),
+                "occupants".to_string(),
+            ],
+            columns: vec![
+                values.to_vec(),
+                vec![0.04; values.len()],
+                vec![1.0; values.len()],
+            ],
+            column_index,
+            source_step_secs: 3600,
+            column_aggregations: vec![crate::ColumnAggregation::Mean; 3],
+        }
+    }
+
+    /// The residual MELs spec an OS-HPXML building resolves from its
+    /// declared "other" plug load, with the annual energy the ResStock
+    /// fixtures carry.
+    fn melts_spec_with_residual_energy(annual_kwh: f64) -> EquipmentSpec {
+        let mut params = Map::new();
+        params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+        params.insert("sensible_gain_fraction".to_string(), Value::from(0.855));
+        params.insert("latent_gain_fraction".to_string(), Value::from(0.045));
+        EquipmentSpec {
+            instance_name: None,
+            name: "MELs".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: params,
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
         }
     }
 
     #[test]
     fn microwave_csv_column_creates_spec_with_event_schedule_and_nonzero_energy() {
-        let mut schedule = make_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
+        let mut schedule = make_beopt_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
         let mut specs: Vec<EquipmentSpec> = Vec::new();
 
         inject_schedule_into_specs(
@@ -4156,6 +4262,90 @@ mod tests {
             (latent - 0.08).abs() < 1e-12,
             "microwave latent gain fraction should match default_gain_fractions"
         );
+
+        // OS-HPXML v1.12.0 misc_loads.rb:89: the plug-load radiant split,
+        // 0.6 of the sensible heat radiant.
+        let radiant = specs[0]
+            .parameters
+            .get("radiant_share_of_sensible")
+            .and_then(Value::as_f64)
+            .expect("radiant_share_of_sensible must be injected by build_spec");
+        assert!(
+            (radiant - 0.6).abs() < 1e-12,
+            "a declared microwave takes OS-HPXML's plug-load radiant split"
+        );
+    }
+
+    /// The acceptance rule, OS-HPXML half: a `microwave` column on an
+    /// OS-HPXML-derived schedule shapes nothing additional. OS-HPXML
+    /// v1.12.0 models no microwave appliance and its residual "other" plug
+    /// loads already carry the microwave energy (`defaults.rb`
+    /// `get_residual_mels_values`, from RECS 2020), so the total
+    /// plug-load plus microwave energy stays the residual MELs alone, and
+    /// the column is reported unread.
+    #[test]
+    fn an_os_hpxml_schedules_microwave_column_counts_only_the_residual_mels() {
+        let mut schedule = make_os_hpxml_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
+        let mut specs: Vec<EquipmentSpec> = vec![melts_spec_with_residual_energy(1119.0 * 2.42)];
+        let mut warnings = Vec::new();
+
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut warnings,
+        )
+        .expect("inject_schedule_into_specs should succeed");
+
+        assert!(
+            !specs.iter().any(|s| s.name == "Microwave"),
+            "no Microwave load may ride on top of the residual plug loads, got {:?}",
+            specs.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+        );
+        let mels = specs
+            .iter()
+            .find(|s| s.name == "MELs")
+            .expect("the residual MELs spec stays");
+        let annual_kwh = mels
+            .parameters
+            .get("annual_electric_kwh")
+            .and_then(Value::as_f64)
+            .expect("annual_electric_kwh must be set");
+        assert!(
+            (annual_kwh - 1119.0 * 2.42).abs() < 1e-9,
+            "the residual's declared energy is untouched: {annual_kwh}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.source.as_ref() == "schedule"
+                && w.message
+                    .contains("'microwave' has no entry in COLUMN_MAPPINGS")),
+            "the column is reported unread, got {warnings:?}"
+        );
+    }
+
+    /// The unknown-column check reports a `microwave` column on an
+    /// OS-HPXML-derived schedule (the mapping applies only to the
+    /// BEopt/OCHRE event family) and keeps it mapped on a BEopt/OCHRE
+    /// schedule.
+    #[test]
+    fn the_microwave_column_is_unknown_only_outside_the_beopt_family() {
+        let os_hpxml = HashMap::from([("occupants".to_string(), 0), ("microwave".to_string(), 1)]);
+        let unknown = super::find_unknown_schedule_columns(&os_hpxml);
+        assert!(
+            unknown.contains(&"microwave".to_string()),
+            "an OS-HPXML schedule's microwave column is unread: {unknown:?}"
+        );
+
+        let beopt = HashMap::from([
+            ("Occupancy (Persons)".to_string(), 0),
+            ("microwave".to_string(), 1),
+        ]);
+        let unknown = super::find_unknown_schedule_columns(&beopt);
+        assert!(
+            !unknown.contains(&"microwave".to_string()),
+            "a BEopt/OCHRE schedule's microwave column is mapped: {unknown:?}"
+        );
     }
 
     /// Regression: an auto-created Microwave spec (from a schedule CSV column
@@ -4172,7 +4362,7 @@ mod tests {
         use hares_equipment::event_load::EventBasedLoad;
         use hares_types::{GridState, WeatherState, ZoneId, ZoneState};
 
-        let mut schedule = make_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
+        let mut schedule = make_beopt_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
         let mut specs: Vec<EquipmentSpec> = Vec::new();
 
         inject_schedule_into_specs(
@@ -4264,6 +4454,7 @@ mod tests {
         let mut column_index = HashMap::new();
         column_index.insert("unknown_column".to_string(), 0);
         column_index.insert("microwave".to_string(), 1);
+        column_index.insert("Occupancy (Persons)".to_string(), 2);
 
         let unmapped = super::find_unknown_schedule_columns(&column_index);
         assert!(
@@ -4300,14 +4491,23 @@ mod tests {
         let mut column_index = HashMap::new();
         column_index.insert("cooking_range".to_string(), 0);
         column_index.insert("microwave".to_string(), 1);
+        column_index.insert("Occupancy (Persons)".to_string(), 2);
 
         let mut schedule = ScheduleTimeSeries {
             timestamps,
-            column_names: vec!["cooking_range".to_string(), "microwave".to_string()],
-            columns: vec![vec![0.1, 0.5, 0.3, 0.1], vec![0.0, 1.0, 0.5, 0.0]],
+            column_names: vec![
+                "cooking_range".to_string(),
+                "microwave".to_string(),
+                "Occupancy (Persons)".to_string(),
+            ],
+            columns: vec![
+                vec![0.1, 0.5, 0.3, 0.1],
+                vec![0.0, 1.0, 0.5, 0.0],
+                vec![1.0, 1.0, 1.0, 1.0],
+            ],
             column_index,
             source_step_secs: 3600,
-            column_aggregations: vec![ColumnAggregation::Mean, ColumnAggregation::Mean],
+            column_aggregations: vec![ColumnAggregation::Mean; 3],
         };
 
         let mut params = Map::new();
