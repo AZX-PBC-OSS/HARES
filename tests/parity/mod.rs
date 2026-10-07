@@ -71,6 +71,15 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // resstock_bldg0112631_24h: a lock on a 24 h window that predates
         // this triage, measured 25.4 %; its cause is not yet established.
         ("resstock_bldg0112631_24h", METRIC_PEAK_HVAC_POWER) => Some(25.7),
+        // resstock_bldg0112631_24h: the zone temperature band is re-sized to
+        // the observed residual plus margin. The fixture's
+        // SimulationControl/TemperatureCapacitanceMultiplier (1.0) is the
+        // pre-v1.11 element OS-HPXML v1.12 no longer reads, so the zone
+        // takes the default multiplier 7 (OCHRE applies 7 to every zone
+        // too), and the appliance, plug-load and lighting radiant split
+        // (D-005, D-006, D-007) enters with it: the residual moved 0.441 to
+        // 0.616 C. The attic's non-gable roofs take OS-HPXML's square hip.
+        ("resstock_bldg0112631_24h", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.63),
         _ => None,
     }
 }

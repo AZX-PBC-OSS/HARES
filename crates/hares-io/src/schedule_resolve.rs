@@ -26,9 +26,10 @@ use crate::draw_profile::normalize_draw_profile;
 use crate::hpxml::{MICROWAVE_DEFAULT_ANNUAL_KWH, build_spec};
 use crate::schedule::{ColumnAggregation, ScheduleTimeSeries, resolve_occupancy_column};
 
-// HERS Reference Home default thermostat setpoints (ASHRAE 90.2).
-pub(super) const HERS_HEATING_SETPOINT_C: f64 = 20.0;
-pub(super) const HERS_COOLING_SETPOINT_C: f64 = 24.0;
+// OS-HPXML's manual-thermostat default setpoints
+// (defaults.rb:2827-2848, 6746-6785).
+const OS_HPXML_DEFAULT_HEATING_SETPOINT_F: f64 = 68.0;
+const OS_HPXML_DEFAULT_COOLING_SETPOINT_F: f64 = 78.0;
 
 /// Maps HPXML/ResStock schedule CSV column names (lowercase, normalized) to
 /// OCHRE equipment names.  The category determines how to convert:
@@ -380,10 +381,6 @@ impl DefaultProfiles {
             ),
         }
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.profiles.is_empty()
-    }
 }
 
 /// One parsed row of the default schedule profiles file, for the error a
@@ -734,9 +731,9 @@ pub fn inject_schedule_into_specs(
     // any heating/cooling HVAC equipment. The CSV column `heating_setpoint`
     // maps to all heating equipment, `cooling_setpoint` to all cooling.
     // When neither a schedule CSV column nor HPXML-derived setpoints are
-    // present, falls back to the HERS reference-home default profiles
-    // loaded from Default Schedule Parameters.csv.
-    inject_setpoint_schedules(specs, &csv_col_map, schedule, &profiles)?;
+    // present, the unit takes OS-HPXML's manual-thermostat default
+    // (68 °F heating, 78 °F cooling), recorded as a warning naming it.
+    inject_setpoint_schedules(specs, &csv_col_map, schedule, warnings)?;
     Ok(())
 }
 
@@ -788,45 +785,61 @@ fn find_setpoint_source<'a>(data: &'a Value, key: &str) -> Option<&'a Value> {
     None
 }
 
-fn inject_default_setpoint_profile(
+/// Give `spec` OS-HPXML's default `prefix` ("heating" or "cooling")
+/// setpoint and record the substitution as a warning naming the unit.
+fn inject_default_setpoint(
     spec: &mut EquipmentSpec,
-    ochre_name: &str,
     prefix: &str,
-    profiles: &DefaultProfiles,
-) {
-    let Some(profile) = profiles.find(ochre_name) else {
-        return;
-    };
-    let temp = match prefix {
-        "heating" => HERS_HEATING_SETPOINT_C,
-        "cooling" => HERS_COOLING_SETPOINT_C,
-        _ => return,
-    };
-    let source = ScheduleSourceConfig::DailyProfile {
-        weekday: profile.weekday_fractions.map(|f| f * temp),
-        weekend: profile.weekend_fractions.map(|f| f * temp),
-        month_multipliers: profile.month_multipliers,
+    default_f: f64,
+    warnings: &mut Vec<Warning>,
+) -> Result<(), HaresError> {
+    let setpoint_c = hares_physics::units::temperature_f_to_c(default_f);
+    // The config enum is internally tagged, so a constant travels as a flat
+    // daily profile.
+    let source = serde_json::to_value(ScheduleSourceConfig::DailyProfile {
+        weekday: [setpoint_c; 24],
+        weekend: [setpoint_c; 24],
+        month_multipliers: [1.0; 12],
         max_value: 1.0,
-    };
-    let Some(typed) = spec.typed_config.as_mut() else {
-        return;
-    };
-    let ConfigPayload::Typed { data, .. } = &mut typed.payload else {
-        return;
-    };
-    let Some(obj) = data.as_object_mut() else {
-        return;
-    };
-    if let Ok(json) = serde_json::to_value(source) {
-        insert_setpoint_into_obj(obj, &format!("{prefix}_setpoint_source"), json);
+    })
+    .map_err(|e| HaresError::Equipment(format!("{}: setpoint source: {e}", spec.name)))?;
+    let inserted = spec
+        .typed_config
+        .as_mut()
+        .and_then(|typed| match &mut typed.payload {
+            ConfigPayload::Typed { data, .. } => data.as_object_mut(),
+            ConfigPayload::Raw { .. } => None,
+        })
+        .is_some_and(|obj| {
+            insert_setpoint_into_obj(obj, &format!("{prefix}_setpoint_source"), source)
+        });
+    if !inserted {
+        return Err(HaresError::Equipment(format!(
+            "{}: no {prefix} setpoint in the HPXML or the schedule, and the unit's \
+             config has no setpoint block to take the default",
+            spec.name
+        )));
     }
+    warnings.push(Warning::new(
+        "schedule",
+        format!(
+            "{}: no {prefix} setpoint in the HPXML or the schedule; defaulted to \
+             {default_f} °F ({setpoint_c:.2} °C) as OS-HPXML does",
+            spec.name
+        ),
+    ));
+    Ok(())
 }
 
-fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Value) {
-    if let Some(sp) = obj.get_mut("setpoint")
-        && let Some(sp_obj) = sp.as_object_mut()
-    {
-        sp_obj.insert(key.to_string(), value);
+/// Insert `value` under `key` in the config's `setpoint` block; false when
+/// the config has no such block.
+fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Value) -> bool {
+    match obj.get_mut("setpoint").and_then(Value::as_object_mut) {
+        Some(sp_obj) => {
+            sp_obj.insert(key.to_string(), value);
+            true
+        }
+        None => false,
     }
 }
 
@@ -834,7 +847,7 @@ fn inject_setpoint_schedules(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
-    profiles: &DefaultProfiles,
+    warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
     // Store only the column index -- the equipment resolves the value each
     // timestep from the environment's schedule domain payload. No materialization.
@@ -843,27 +856,30 @@ fn inject_setpoint_schedules(
 
     inject_water_heater_schedule_columns(specs, csv_col_map, schedule)?;
 
-    // Skip the entire loop only when there is no work to do at all.
-    if heating_col.is_none() && cooling_col.is_none() && profiles.is_empty() {
-        return Ok(());
-    }
-
     for spec in specs.iter_mut() {
         if HEATING_EQUIPMENT.contains(&spec.name.as_str()) {
             if let Some(col_idx) = heating_col {
                 // Schedule CSV provides a per-timestep heating column.
                 set_typed_setpoint_source(spec, "heating", col_idx);
             } else if !spec_has_setpoint_source(spec, "heating") {
-                // No HPXML-derived setpoint schedule and no CSV column:
-                // fall back to the HERS reference-home default profile.
-                inject_default_setpoint_profile(spec, "HVAC Heating", "heating", profiles);
+                inject_default_setpoint(
+                    spec,
+                    "heating",
+                    OS_HPXML_DEFAULT_HEATING_SETPOINT_F,
+                    warnings,
+                )?;
             }
         }
         if COOLING_EQUIPMENT.contains(&spec.name.as_str()) {
             if let Some(col_idx) = cooling_col {
                 set_typed_setpoint_source(spec, "cooling", col_idx);
             } else if !spec_has_setpoint_source(spec, "cooling") {
-                inject_default_setpoint_profile(spec, "HVAC Cooling", "cooling", profiles);
+                inject_default_setpoint(
+                    spec,
+                    "cooling",
+                    OS_HPXML_DEFAULT_COOLING_SETPOINT_F,
+                    warnings,
+                )?;
             }
         }
     }
@@ -3175,8 +3191,11 @@ mod tests {
         assert_eq!(cool.month_multipliers, [1.0; 12]);
     }
 
+    /// A unit whose HPXML and schedule carry no setpoint takes OS-HPXML's
+    /// manual-thermostat default (68 °F heating, 78 °F cooling), recorded
+    /// as a warning naming the unit.
     #[test]
-    fn hvac_spec_without_hpxml_setpoints_gets_default_daily_profile() {
+    fn hvac_spec_without_setpoints_takes_the_os_hpxml_default_with_a_warning() {
         use hares_equipment::hvac::heat_pump_config::{
             HeatPumpCommonConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
         };
@@ -3185,6 +3204,7 @@ mod tests {
         write_defaults_csv_with_setpoints(dir.path());
 
         let mut schedule = make_schedule(24);
+        let mut warnings = Vec::new();
         let mut specs = vec![
             make_typed_spec(
                 "ASHP Heater",
@@ -3255,52 +3275,54 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            &mut Vec::new(),
+            &mut warnings,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
-        // Heater: should receive a heating DailyProfile with max_value = 20 °C.
-        let heater_data = typed_data_of_spec(&specs[0]);
-        let heater_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
-            find_setpoint_in_json(heater_data, "heating_setpoint_source")
-                .cloned()
-                .expect("heater heating_setpoint_source must be injected"),
-        )
-        .expect("heater source must deserialize");
-        assert!(
-            matches!(&heater_source,
-                hares_types::ScheduleSourceConfig::DailyProfile { weekday, max_value, .. }
-                if (weekday[0] - super::HERS_HEATING_SETPOINT_C).abs() < 1e-12
-                && (max_value - 1.0).abs() < 1e-12),
-            "expected DailyProfile with weekday[0]={}°C and max_value=1.0, got {heater_source:?}",
-            super::HERS_HEATING_SETPOINT_C,
-        );
-
-        // Cooler: should receive a cooling DailyProfile with max_value = 24 °C.
-        let cooler_data = typed_data_of_spec(&specs[1]);
-        let cooler_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
-            find_setpoint_in_json(cooler_data, "cooling_setpoint_source")
-                .cloned()
-                .expect("cooler cooling_setpoint_source must be injected"),
-        )
-        .expect("cooler source must deserialize");
-        assert!(
-            matches!(&cooler_source,
-                hares_types::ScheduleSourceConfig::DailyProfile { weekday, max_value, .. }
-                if (weekday[0] - super::HERS_COOLING_SETPOINT_C).abs() < 1e-12
-                && (max_value - 1.0).abs() < 1e-12),
-            "expected DailyProfile with weekday[0]={}°C and max_value=1.0, got {cooler_source:?}",
-            super::HERS_COOLING_SETPOINT_C,
-        );
+        // 68 °F and 78 °F, as constants: a flat DailyProfile.
+        for (spec, key, expected_c) in [
+            (&specs[0], "heating_setpoint_source", 20.0),
+            (
+                &specs[1],
+                "cooling_setpoint_source",
+                (78.0 - 32.0) * 5.0 / 9.0,
+            ),
+        ] {
+            let source: hares_types::ScheduleSourceConfig = serde_json::from_value(
+                find_setpoint_in_json(typed_data_of_spec(spec), key)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{}: {key} must be injected", spec.name)),
+            )
+            .expect("source must deserialize");
+            assert!(
+                matches!(&source, hares_types::ScheduleSourceConfig::DailyProfile {
+                    weekday, weekend, month_multipliers, max_value }
+                    if weekday.iter().chain(weekend).all(|c| (c - expected_c).abs() < 1e-9)
+                        && month_multipliers.iter().all(|m| *m == 1.0)
+                        && *max_value == 1.0),
+                "{}: expected a constant {expected_c} °C, got {source:?}",
+                spec.name
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.message.contains(spec.name.as_str())
+                        && w.message.contains("OS-HPXML")),
+                "{}: the default must be a warning naming the unit, got {warnings:?}",
+                spec.name
+            );
+        }
 
         // Heater should NOT get a cooling source, and cooler should NOT get a
         // heating source.
         assert!(
-            find_setpoint_in_json(heater_data, "cooling_setpoint_source").is_none(),
+            find_setpoint_in_json(typed_data_of_spec(&specs[0]), "cooling_setpoint_source")
+                .is_none(),
             "heater should not have a cooling setpoint source"
         );
         assert!(
-            find_setpoint_in_json(cooler_data, "heating_setpoint_source").is_none(),
+            find_setpoint_in_json(typed_data_of_spec(&specs[1]), "heating_setpoint_source")
+                .is_none(),
             "cooler should not have a heating setpoint source"
         );
     }
