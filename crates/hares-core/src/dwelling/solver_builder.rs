@@ -1288,6 +1288,15 @@ pub(crate) fn build_default_solvers(
             });
     }
 
+    // The diffuse distribution's window shares accumulate in surface-id
+    // order: the map's per-process iteration order would vary the float
+    // accumulation bit by bit and break the bit-exact goldens.
+    thermal_cfg.window_ids_sorted = {
+        let mut ids: Vec<u32> = thermal_cfg.window_zone_ids.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    };
+
     // Always populate interior_solar_zones so that solar distribution works
     // in both StarMesh and ScriptF modes. In StarMesh mode, interior_lwr_zones
     // is empty but solar still needs surface metadata for the radiation_frac split.
@@ -1904,6 +1913,7 @@ mod tests {
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
@@ -3257,6 +3267,7 @@ mod tests {
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
@@ -3469,6 +3480,7 @@ mod tests {
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
@@ -3709,6 +3721,7 @@ mod tests {
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
@@ -3950,6 +3963,7 @@ mod tests {
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
@@ -4243,6 +4257,7 @@ mod tests {
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
@@ -4514,6 +4529,7 @@ mod tests {
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
@@ -4775,6 +4791,7 @@ mod tests {
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,

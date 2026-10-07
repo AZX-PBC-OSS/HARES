@@ -35,9 +35,30 @@ const HEATING_ONLY_SAMPLES: [&str; 2] = [
 ];
 
 fn build_sample(sample: &str, month: u32) -> Dwelling {
-    let hpxml_path = project_root()
+    let sample_path = project_root()
         .join("vendors/OCHRE/test/OS-HPXML Sample Files")
         .join(sample);
+    // The samples declare a heating-season setpoint only; the cooling
+    // setpoint comes from the defaults. Inject a 71 °F cooling setpoint so
+    // the July day deterministically calls for cooling: with the conditioned
+    // basement merged into the conditioned space (OS-HPXML
+    // geometry.rb `create_or_get_space`, 1704-1716), the ground-coupled
+    // basement holds the zone under the defaulted 78 °F on a Denver July
+    // day, and the mode contract the test pins (the cooler's operating mode
+    // while it delivers) would otherwise never be exercised.
+    let xml = std::fs::read_to_string(&sample_path)
+        .unwrap_or_else(|err| panic!("{sample} must be readable: {err}"));
+    let with_cooling = xml.replace(
+        "<SetpointTempHeatingSeason>68.0</SetpointTempHeatingSeason>",
+        "<SetpointTempHeatingSeason>68.0</SetpointTempHeatingSeason>\n            \
+         <SetpointTempCoolingSeason>71.0</SetpointTempCoolingSeason>",
+    );
+    assert_ne!(xml, with_cooling, "{sample} must carry a heating setpoint");
+    let dir = tempfile::tempdir().expect("temp dir for the patched sample");
+    let hpxml_path = dir.path().join(sample);
+    std::fs::write(&hpxml_path, &with_cooling)
+        .unwrap_or_else(|err| panic!("{sample} patch must be writable: {err}"));
+
     let start_time = denver_offset::denver_offset()
         .with_ymd_and_hms(2023, month, 15, 0, 0, 0)
         .single()

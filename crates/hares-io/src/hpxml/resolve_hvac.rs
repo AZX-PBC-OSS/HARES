@@ -1890,29 +1890,6 @@ fn zone_type_to_ashrae152_str(zone: &Zone, building: &Building) -> super::Result
     }
 }
 
-/// Compute basement heat distribution params for heating equipment.
-///
-/// OCHRE HVAC.py lines 181-184: for finished basements, 20% of DSE-adjusted
-/// capacity is routed to the Foundation zone. Returns empty map when the
-/// building does not have a finished basement.
-fn compute_basement_params(building: &Building) -> Map<String, Value> {
-    let mut params = Map::new();
-    if building.foundation_name.as_deref() != Some("Finished Basement") {
-        return params;
-    }
-    let Some(zone_idx) = building
-        .zones
-        .iter()
-        .position(|z| matches!(z.zone_type, ZoneType::Foundation))
-    else {
-        return params;
-    };
-    let zone_id = (zone_idx as u16) + 1;
-    params.insert("basement_zone_id".to_string(), json!(zone_id));
-    params.insert("basement_airflow_ratio".to_string(), json!(0.2_f64));
-    params
-}
-
 /// Id (1-indexed) of the building's one conditioned zone, for `equipment`
 /// that conditions it (HVAC here, the dehumidifier in `resolve_loads`). A
 /// building with none cannot host the equipment: a typed error naming it.
@@ -2039,7 +2016,6 @@ pub(super) fn resolve_hvac(
 
     let setpoint_params = parse_hvac_setpoint_params(details)?;
     let duct_params = compute_duct_dse_params(building)?;
-    let basement_params = compute_basement_params(building);
 
     // Track parsed system IDs for primary-system invariant checks.
     let mut heating_sys_ids: Vec<String> = Vec::new();
@@ -2136,9 +2112,6 @@ pub(super) fn resolve_hvac(
             params.insert("deadband_c".to_string(), json!(deadband));
         }
         duct_params.insert_into_map(&mut params);
-        for (k, v) in &basement_params {
-            params.insert(k.clone(), v.clone());
-        }
         // OCHRE only applies startup_cd for heat pump heaters (ASHP/MSHP),
         // not for furnaces, boilers, or baseboard.
         if matches!(name.as_str(), "ASHP Heater" | "MSHP Heater") {
@@ -2600,9 +2573,6 @@ pub(super) fn resolve_hvac(
         let is_mini_split = heat_pump_type == "mini-split";
         let mut heater_params = params.clone();
         let mut cooler_params = params;
-        for (k, v) in &basement_params {
-            heater_params.insert(k.clone(), v.clone());
-        }
         apply_multispeed_heating_parameters(&mut heater_params, defaults, heater_name, warnings);
         apply_multispeed_cooling_parameters(&mut cooler_params, defaults, cooler_name, warnings);
         insert_startup_degradation(&mut heater_params, heater_name, true);
@@ -4003,6 +3973,7 @@ mod tests {
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
@@ -4286,6 +4257,21 @@ mod tests {
     // -----------------------------------------------------------------------
     // zone_type_to_ashrae152_str -- foundation type granularity
     // -----------------------------------------------------------------------
+
+    fn conditioned_zone() -> Zone {
+        Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: None,
+            volume_m3: None,
+            attached_wall_ids: vec![],
+            duct_systems: vec![],
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
+        }
+    }
 
     fn foundation_zone(vented: bool) -> Zone {
         Zone {
@@ -4623,47 +4609,6 @@ mod tests {
                 zone.zone_type
             );
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // compute_basement_params
-    // -----------------------------------------------------------------------
-
-    fn conditioned_zone() -> Zone {
-        Zone {
-            zone_type: ZoneType::Conditioned,
-            floor_area_m2: None,
-            volume_m3: None,
-            attached_wall_ids: vec![],
-            duct_systems: vec![],
-            vented: false,
-            ventilation_ach: None,
-            ventilation_sla: None,
-            height_m: None,
-            hpxml_location: None,
-        }
-    }
-
-    #[test]
-    fn basement_params_empty_when_no_finished_basement() {
-        let mut b = empty_building(vec![conditioned_zone(), foundation_zone(false)]);
-        b.foundation_name = Some("Unfinished Basement".into());
-        let params = compute_basement_params(&b);
-        assert!(
-            params.is_empty(),
-            "unfinished basement must not produce basement params"
-        );
-    }
-
-    #[test]
-    fn basement_params_empty_when_no_foundation_zone() {
-        let mut b = empty_building(vec![conditioned_zone()]);
-        b.foundation_name = Some("Finished Basement".into());
-        let params = compute_basement_params(&b);
-        assert!(
-            params.is_empty(),
-            "finished basement name without Foundation zone must not produce params"
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -5602,27 +5547,6 @@ mod tests {
         assert_eq!(cfg.integrated_energy_factor, Some(2.0));
         assert_eq!(cfg.fraction_served, Some(0.8));
         assert_eq!(cfg.target_rh, Some(0.5));
-    }
-
-    #[test]
-    fn basement_params_returns_zone_id_and_ratio_for_finished_basement() {
-        // Zones sorted: Conditioned(idx=0) → ZoneId(1), Foundation(idx=1) → ZoneId(2).
-        let mut b = empty_building(vec![conditioned_zone(), foundation_zone(false)]);
-        b.foundation_name = Some("Finished Basement".into());
-        let params = compute_basement_params(&b);
-        assert_eq!(
-            params.get("basement_zone_id").and_then(|v| v.as_f64()),
-            Some(2.0),
-            "Foundation zone at index 1 → ZoneId 2"
-        );
-        let ratio = params
-            .get("basement_airflow_ratio")
-            .and_then(|v| v.as_f64())
-            .expect("basement_airflow_ratio must be present");
-        assert!(
-            (ratio - 0.2).abs() < 1e-12,
-            "OCHRE default basement airflow ratio is 0.2, got {ratio}"
-        );
     }
 
     // -----------------------------------------------------------------------

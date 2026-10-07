@@ -305,6 +305,13 @@ pub struct Building {
     /// Foundation type name for LUT matching (e.g. "Unfinished Basement", "Crawlspace").
     /// Derived from `<Foundation>/<FoundationType>` per OCHRE hpxml.py:276-286.
     pub foundation_name: Option<String>,
+    /// A foundation the HPXML declares conditioned (a finished basement, or
+    /// an explicitly conditioned crawlspace) is merged into the conditioned
+    /// space per OS-HPXML (geometry.rb `create_or_get_space`, 1704-1716;
+    /// hpxml.rb `conditioned_locations`, 12311-12316) and has no thermal
+    /// zone of its own. HARES models at most one foundation, matching the
+    /// single-foundation read of `foundation_name`.
+    pub conditioned_foundation_merged: bool,
     /// Residential facility type from `<BuildingConstruction>/<ResidentialFacilityType>`.
     /// Used for adjusted bedroom count in water heater draw profiles.
     pub residential_facility_type: Option<String>,
@@ -733,24 +740,16 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 match tag {
                     "Crawlspace" => Some("Crawlspace".to_string()),
                     "Basement" => {
-                        // Prefer HPXML 4.x <Conditioned> element if present.
-                        // Fall back to OCHRE heuristic: total_floors > floors_above_grade
-                        // means basement is conditioned (finished).
                         let foundation_id = details
                             .path(&["Enclosure", "Foundations", "Foundation"])
                             .and_then(element_id)
                             .unwrap_or_else(|| "unknown".to_string());
-                        let explicit = child
-                            .child("Conditioned")
-                            .map(|n| {
-                                xs_boolean(n, "Basement/Conditioned", "Foundation", &foundation_id)
-                            })
-                            .transpose()?;
-                        let inferred = match total_conditioned_floors {
-                            Some(total) => total > floors_above_grade,
-                            None => false,
-                        };
-                        let is_finished = explicit.unwrap_or(inferred);
+                        let is_finished = foundation_node_is_conditioned(
+                            child,
+                            &foundation_id,
+                            total_conditioned_floors,
+                            floors_above_grade,
+                        )?;
                         if is_finished {
                             Some("Finished Basement".to_string())
                         } else {
@@ -939,7 +938,13 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         _ => Some(total),
     };
 
-    let mut zones = build_zone_map(details, indoor_floor_area_m2)?;
+    let (mut zones, conditioned_foundation_merged) = build_zone_map(
+        details,
+        Some(conditioned_floor_area_m2),
+        indoor_floor_area_m2,
+        total_conditioned_floors,
+        floors_above_grade,
+    )?;
     ensure_referenced_zones_exist(&boundaries, &mut zones);
     // A space exists where an enclosure surface is adjacent to it: OS-HPXML
     // creates spaces only for the locations surfaces name (geometry.rb:1738,
@@ -1231,6 +1236,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         floors_above_grade,
         has_flue_or_chimney,
         foundation_name,
+        conditioned_foundation_merged,
         residential_facility_type,
         temperature_capacitance_multiplier: temperature_capacitance_multiplier(
             root,
@@ -1962,6 +1968,10 @@ fn parse_boundary_area(
     id: &str,
 ) -> Result<f64, HpxmlError> {
     let area = parse_value_with_units(node.child("Area"), ValueKind::Area)?;
+    let interior = node
+        .child("InteriorAdjacentTo")
+        .map(|n| n.text.trim().to_string())
+        .unwrap_or_default();
     match boundary_type {
         BoundaryType::FoundationWall => {
             if let Some(a) = area {
@@ -2009,12 +2019,9 @@ fn parse_boundary_area(
                 }
                 return Ok(a);
             }
-            tracing::warn!(
-                boundary_id = id,
-                boundary_type = boundary_type_label(boundary_type),
-                "Area element missing; defaulting to 0.0 — heat loss through this surface will be zero"
-            );
-            Ok(0.0)
+            Err(HpxmlError::Parse(
+                format!("slab in '{interior}' has no Area").into(),
+            ))
         }
         _ => {
             let area_m2 = area.ok_or_else(|| {
@@ -2382,27 +2389,46 @@ fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
     }
 }
 
+/// Whether an HPXML `<Foundation>` node's foundation is conditioned: the
+/// explicit `<Conditioned>` flag (HPXML 4.x, read under either
+/// `<Basement>` or `<Crawlspace>`), else the OCHRE finished-basement
+/// inference for a basement (hpxml.py:276-280: total floors above the
+/// above-grade floors). A crawlspace with no explicit flag is
+/// unconditioned.
+fn foundation_node_is_conditioned(
+    ft_child: &XmlNode,
+    foundation_id: &str,
+    total_conditioned_floors: Option<f64>,
+    floors_above_grade: f64,
+) -> Result<bool, HpxmlError> {
+    let path: &'static str = match ft_child.name.as_str() {
+        "Crawlspace" => "Crawlspace/Conditioned",
+        _ => "Basement/Conditioned",
+    };
+    let explicit = ft_child
+        .child("Conditioned")
+        .map(|n| xs_boolean(n, path, "Foundation", foundation_id))
+        .transpose()?;
+    Ok(match explicit {
+        Some(flag) => flag,
+        None => {
+            ft_child.name == "Basement"
+                && total_conditioned_floors.is_some_and(|total| total > floors_above_grade)
+        }
+    })
+}
+
 fn build_zone_map(
     details: &XmlNode,
     conditioned_floor_area_m2: Option<f64>,
-) -> Result<HashMap<String, Zone>, HpxmlError> {
+    above_grade_floor_area_m2: Option<f64>,
+    total_conditioned_floors: Option<f64>,
+    floors_above_grade: f64,
+) -> Result<(HashMap<String, Zone>, bool), HpxmlError> {
+    // A conditioned foundation (finished basement, conditioned crawlspace)
+    // merges into the conditioned space per OS-HPXML and builds no zone.
+    let mut merged = false;
     let mut zones: HashMap<String, Zone> = HashMap::new();
-
-    zones.insert(
-        "conditioned".to_string(),
-        Zone {
-            zone_type: ZoneType::Conditioned,
-            floor_area_m2: conditioned_floor_area_m2,
-            volume_m3: None,
-            attached_wall_ids: Vec::new(),
-            duct_systems: Vec::new(),
-            vented: false,
-            ventilation_ach: None,
-            ventilation_sla: None,
-            height_m: None,
-            hpxml_location: None,
-        },
-    );
 
     zones.insert(
         "outdoor".to_string(),
@@ -2503,6 +2529,24 @@ fn build_zone_map(
                     .child("FoundationType")
                     .and_then(|ft| ft.children.first());
                 let foundation_type = ft_child.map(|child| child.name.as_str());
+
+                // A conditioned foundation is part of the conditioned space
+                // (OS-HPXML geometry.rb `create_or_get_space`, 1704-1716; the
+                // surfaces name it conditioned through `parse_zone_label`) and
+                // has no Foundation zone of its own.
+                if let Some(ft_child) = ft_child {
+                    let foundation_id = element_id(node).unwrap_or_else(|| "unknown".to_string());
+                    if foundation_node_is_conditioned(
+                        ft_child,
+                        &foundation_id,
+                        total_conditioned_floors,
+                        floors_above_grade,
+                    )? {
+                        merged = true;
+                        continue;
+                    }
+                }
+
                 let vented_explicit = ft_child
                     .and_then(|child| child.child("Vented"))
                     .map(|v| {
@@ -2553,7 +2597,32 @@ fn build_zone_map(
         }
     }
 
-    Ok(zones)
+    // The conditioned zone. A merged conditioned foundation is part of it
+    // (OS-HPXML geometry.rb `create_or_get_space`, 1704-1716), so its floor
+    // area is the HPXML ConditionedFloorArea, the basement's included
+    // (OCHRE hpxml.py:253, "indoor + foundation"); otherwise only the
+    // above-grade share, the foundation zone holding the rest.
+    zones.insert(
+        "conditioned".to_string(),
+        Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: if merged {
+                conditioned_floor_area_m2
+            } else {
+                above_grade_floor_area_m2
+            },
+            volume_m3: None,
+            attached_wall_ids: Vec::new(),
+            duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
+        },
+    );
+
+    Ok((zones, merged))
 }
 
 fn ensure_referenced_zones_exist(boundaries: &[Boundary], zones: &mut HashMap<String, Zone>) {
@@ -3292,13 +3361,24 @@ fn parse_zone_ref(node: Option<&XmlNode>) -> Option<ZoneType> {
 
 pub(crate) fn parse_zone_label(text: &str) -> ZoneType {
     let norm = normalize_ascii(text);
+    // A conditioned foundation is conditioned space, not a separate zone:
+    // OS-HPXML merges every conditioned location ("basement - conditioned",
+    // "crawlspace - conditioned") into the one conditioned space
+    // (geometry.rb `create_or_get_space`, 1704-1716; hpxml.rb
+    // `conditioned_locations`, 12311-12316). "unconditioned" contains
+    // "conditioned" as a substring, so the negation is checked first.
+    let is_conditioned = norm.contains("condition") && !norm.contains("unconditioned");
     if norm.contains("attic") {
         ZoneType::Attic
     } else if norm.contains("garage") {
         ZoneType::Garage
     } else if norm.contains("foundation") || norm.contains("basement") || norm.contains("crawl") {
-        ZoneType::Foundation
-    } else if norm.contains("condition") || norm == "living space" {
+        if is_conditioned {
+            ZoneType::Conditioned
+        } else {
+            ZoneType::Foundation
+        }
+    } else if is_conditioned || norm == "living space" {
         ZoneType::Conditioned
     } else if norm == "ground" {
         ZoneType::Ground
@@ -3311,6 +3391,22 @@ pub(crate) fn parse_zone_label(text: &str) -> ZoneType {
     } else {
         ZoneType::Other(text.trim().to_string())
     }
+}
+
+/// Whether an HPXML location label names the living space itself rather
+/// than a conditioned foundation merged into it. OCHRE builds the
+/// "Interior Wall" surface only in the living zone (hpxml.py
+/// `add_interior_boundaries`), so the splits that assume that surface
+/// (the HPWH wall interaction) key on the living space, not on any
+/// conditioned label.
+pub(crate) fn is_living_space_label(text: &str) -> bool {
+    let norm = normalize_ascii(text);
+    norm == "living space"
+        || (norm.contains("condition")
+            && !norm.contains("unconditioned")
+            && !norm.contains("basement")
+            && !norm.contains("crawl")
+            && !norm.contains("foundation"))
 }
 
 /// Rewrite `ZoneType::Adjacent` to match the non-Adjacent zone in the pair.
@@ -3530,7 +3626,15 @@ pub fn check_foundation_zone_invariant(building: &Building) {
         .iter()
         .any(|z| z.zone_type == ZoneType::Foundation);
 
-    if !has_foundation_zone && let Some(ref fnd_name) = building.foundation_name {
+    // A conditioned foundation merged into the conditioned space has no
+    // Foundation zone by design: its mass and surfaces are the conditioned
+    // zone's (OS-HPXML geometry.rb `create_or_get_space`, 1704-1716).
+    let merged = building.conditioned_foundation_merged;
+
+    if !has_foundation_zone
+        && !merged
+        && let Some(ref fnd_name) = building.foundation_name
+    {
         tracing::warn!(
             foundation_name = %fnd_name,
             "Foundation zone missing despite foundation type being set. \
@@ -4455,13 +4559,18 @@ mod tests {
     fn foundation_zone_volume_is_the_slab_area_times_the_tallest_wall() {
         let wall = |id: &str, height_ft: f64| {
             format!(
-                "<FoundationWall>\n            <SystemIdentifier id=\"{id}\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n            <Height units=\"ft\">{height_ft}</Height>\n          </FoundationWall>"
+                "<FoundationWall>\n            <SystemIdentifier id=\"{id}\"/>\n            <InteriorAdjacentTo>basement - unconditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n            <Height units=\"ft\">{height_ft}</Height>\n          </FoundationWall>"
             )
         };
-        let xml = SAMPLE_XML.replace(
-            "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n          </FoundationWall>",
-            &format!("{}{}", wall("FoundationWall1", 3.0), wall("FoundationWall2", 7.0)),
-        );
+        let xml = SAMPLE_XML
+            .replace(
+                "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n          </FoundationWall>",
+                &format!("{}{}", wall("FoundationWall1", 3.0), wall("FoundationWall2", 7.0)),
+            )
+            .replace(
+                "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>",
+                "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - unconditioned</InteriorAdjacentTo>",
+            );
 
         let building = parse_building(&xml).expect("parse should succeed");
         let foundation = building

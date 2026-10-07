@@ -98,6 +98,7 @@ fn minimal_building() -> hares_io::Building {
         floors_above_grade: 1.0,
         has_flue_or_chimney: None,
         foundation_name: None,
+        conditioned_foundation_merged: false,
         residential_facility_type: None,
         temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,

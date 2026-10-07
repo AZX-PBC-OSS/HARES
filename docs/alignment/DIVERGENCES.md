@@ -608,3 +608,60 @@ justification → measured impact → pinning tests.
   `crates/hares-equipment/src/hvac/hvac_core.rs`
   (`ashp_default_multi_speed_curves_match_ochre_csv_columns`). Each
   fails when the defaults revert to the OCHRE CSV's `Single_1` column.
+
+---
+
+## D-015: A conditioned basement merges into the conditioned space
+
+- **Quantity:** the thermal zone a conditioned foundation (a finished
+  basement, an explicitly conditioned crawlspace) occupies, and the HVAC
+  capacity its air receives.
+- **Reference behavior:** OS-HPXML v1.12.0 maps every conditioned
+  location into the one conditioned space: `geometry.rb`
+  `create_or_get_space` (1704-1716) rewrites
+  `HPXML::conditioned_locations` (hpxml.rb:12311-12316: conditioned
+  space, basement - conditioned, crawlspace - conditioned, other housing
+  unit) to `LocationConditionedSpace`, and the HVAC serves that zone
+  (`hvac.rb:97` and every `apply_*` entry point). Surfaces adjacent to a
+  conditioned below-grade location get their adjacent surface created
+  inside `LocationConditionedSpace` (geometry.rb:1495-1502), and the
+  conditioned floor area and building volume count the basement
+  (`geometry.rb` `apply_conditioned_floor_area`, 750-771).
+- **OCHRE behavior:** the fork keeps a finished basement a separate
+  `Foundation` zone with no setpoint and no HVAC serving it
+  (`ochre/utils/hpxml.py:673-684` builds it for
+  `total_floors > indoor_floors`; hpxml.py:688-689 leaves it unvented
+  with no infiltration method), and routes 20% of a heater's DSE-adjusted
+  capacity into it as a duct-style split (`ochre/Equipment/HVAC.py:181-184`).
+  The zone floats between ground and indoor temperature instead of being
+  conditioned space.
+- **HARES behavior (since this fix):** a conditioned foundation parses as
+  the conditioned zone (`parse_zone_label`), builds no Foundation zone
+  (`build_zone_map`), and its surfaces, loads and ducts account to the
+  conditioned zone; the conditioned zone's floor area is the full
+  `ConditionedFloorArea`, the basement's included. The OCHRE 20%
+  basement heat fraction is not reproduced: OS-HPXML has no such split
+  because the space is one zone.
+- **Justification:** class (a) against OCHRE, class (b) fix in HARES:
+  HARES's `parse_zone_label` read any label containing "basement" as a
+  Foundation zone before the conditioned check, so `base.xml`'s
+  conditioned basement sat unheated at 7.6 °C on 15 January. The
+  reference merges the space; OCHRE's floating zone and 20% heater split
+  are its own workaround for the same zone it declines to condition.
+- **Measured impact:** base.xml, 15 January, ideal HVAC at the 68 °F
+  heating setpoint: the basement's zone went from 7.3 °C (a separate
+  floating Foundation zone, the ledger's 7.6 °C) to tracking the
+  setpoint within the deadband; the HVAC's delivered heating for the day
+  changed by the basement's ground-coupled load (pre-fix the
+  `<Conditioned>` flag moved nothing: the two models were bitwise
+  identical). On the Denver July day the merged ground-coupled basement
+  holds the zone under the defaulted 78 °F cooling setpoint where the
+  separate-zone model called for cooling. The committed goldens and the
+  twelve parity fixtures carry no conditioned basement and are unchanged.
+- **Pinning tests:** `tests/conditioned_basement.rs`
+  (`conditioned_basement_is_held_at_the_setpoint`,
+  `conditioned_basement_loads_reach_the_hvac`),
+  `crates/hares-io/tests/hpxml_parsing_tests.rs`
+  (`conditioned_basement_merges_into_the_conditioned_zone`). Each fails
+  when the label parse reverts to a separate unheated foundation zone.
+

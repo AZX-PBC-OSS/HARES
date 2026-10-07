@@ -85,18 +85,25 @@ fn location_height_m(
     })
 }
 
+/// Slab areas per HPXML location, keyed by the location's text.
+fn slab_areas_m2_by_location(details: &XmlNode) -> Result<BTreeMap<String, f64>, HpxmlError> {
+    let mut areas: BTreeMap<String, f64> = BTreeMap::new();
+    for (location, slab) in surfaces(details, "Slabs", "Slab") {
+        let area = parse_value_with_units(slab.child("Area"), ValueKind::Area)?
+            .ok_or_else(|| HpxmlError::Parse(format!("slab in '{location}' has no Area").into()))?;
+        *areas.entry(location).or_default() += area;
+    }
+    Ok(areas)
+}
+
 /// Slab area per HPXML location of `zone_type`.
 fn slab_areas_m2(
     details: &XmlNode,
     zone_type: &ZoneType,
 ) -> Result<BTreeMap<String, f64>, HpxmlError> {
     let mut areas: BTreeMap<String, f64> = BTreeMap::new();
-    for (location, slab) in surfaces(details, "Slabs", "Slab") {
+    for (location, area) in slab_areas_m2_by_location(details)? {
         if parse_zone_label(&location) == *zone_type {
-            let area =
-                parse_value_with_units(slab.child("Area"), ValueKind::Area)?.ok_or_else(|| {
-                    HpxmlError::Parse(format!("slab in '{location}' has no Area").into())
-                })?;
             *areas.entry(location).or_default() += area;
         }
     }
@@ -627,7 +634,7 @@ fn conditioned_crawlspace_volume_ft3(
     warnings: &mut Vec<Warning>,
 ) -> Result<f64, HpxmlError> {
     let crawl_location = "crawlspace - conditioned";
-    let crawl_area_m2 = slab_areas_m2(details, &ZoneType::Foundation)?
+    let crawl_area_m2 = slab_areas_m2_by_location(details)?
         .get(crawl_location)
         .copied()
         .unwrap_or(0.0);

@@ -2609,8 +2609,13 @@ fn zone_volume_m3(building: &hares_io::Building, zone_type: &ZoneType) -> Option
 fn zone_volume_follows_the_os_hpxml_default() {
     use hares_physics::units::{area_ft2_to_m2, length_ft_to_m};
     for (sample, zone_type, slab_ft2, height_ft) in [
-        // Conditioned basement: 1350 ft2 slab, 8 ft walls.
-        ("base.xml", ZoneType::Foundation, 1350.0, 8.0),
+        // Unconditioned basement: 1350 ft2 slab, 8 ft walls.
+        (
+            "base-foundation-unconditioned-basement-assembly-r.xml",
+            ZoneType::Foundation,
+            1350.0,
+            8.0,
+        ),
         // Unvented crawlspace: 1350 ft2 slab, 4 ft walls.
         (
             "base-foundation-unvented-crawlspace.xml",
@@ -2628,6 +2633,47 @@ fn zone_volume_follows_the_os_hpxml_default() {
         assert!(
             (volume - expected).abs() < 1e-9,
             "{sample}: {zone_type:?} volume {volume} m3, expected {expected} m3"
+        );
+    }
+}
+
+/// A conditioned basement merges into the conditioned space (OS-HPXML
+/// geometry.rb `create_or_get_space`, 1704-1716): no Foundation zone, and
+/// the conditioned zone's floor area is the full ConditionedFloorArea, the
+/// basement's included (OCHRE hpxml.py:253).
+#[test]
+fn conditioned_basement_merges_into_the_conditioned_zone() {
+    for (sample, cfa_ft2) in [
+        ("base.xml", 2700.0),
+        (
+            "base-foundation-conditioned-basement-slab-insulation.xml",
+            2700.0,
+        ),
+        ("base-foundation-conditioned-crawlspace.xml", 1350.0),
+    ] {
+        let building = parse_vendored_sample(sample);
+        assert!(
+            building
+                .zones
+                .iter()
+                .all(|zone| zone.zone_type != ZoneType::Foundation),
+            "{sample}: a conditioned foundation must not build a separate (unheated) \
+             Foundation zone",
+        );
+        assert!(
+            building.conditioned_foundation_merged,
+            "{sample}: the conditioned foundation must be recorded as merged",
+        );
+        let conditioned = building
+            .zones
+            .iter()
+            .find(|z| z.zone_type == ZoneType::Conditioned)
+            .unwrap_or_else(|| panic!("{sample}: no conditioned zone"));
+        assert_eq!(
+            conditioned.floor_area_m2,
+            Some(hares_physics::units::area_ft2_to_m2(cfa_ft2)),
+            "{sample}: the merged conditioned zone's floor area is the full \
+             ConditionedFloorArea"
         );
     }
 }

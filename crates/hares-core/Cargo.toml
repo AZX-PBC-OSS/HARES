@@ -63,6 +63,10 @@ name = "conditioned_oracle"
 path = "../../tests/conditioned_oracle.rs"
 
 [[test]]
+name = "conditioned_basement"
+path = "../../tests/conditioned_basement.rs"
+
+[[test]]
 name = "freefloat_oracle"
 path = "../../tests/freefloat_oracle.rs"
 

@@ -2809,6 +2809,18 @@ fn build_from_blueprint_inner(
                 hares_io::hpxml::ZoneType::Other(_) => {}
             }
         }
+        // A conditioned foundation merged into the conditioned space (a
+        // finished basement) has no zone of its own: its role is served by
+        // the conditioned zone, so equipment and loads named for it
+        // ("Basement Lighting", an HPWH's location) route there. OS-HPXML
+        // merges every conditioned location into the one conditioned space
+        // (geometry.rb `create_or_get_space`, 1704-1716).
+        if bp.building.conditioned_foundation_merged
+            && let Some(indoor) = map.get(ZoneRole::Indoor)
+        {
+            map.insert(ZoneRole::Basement, indoor);
+            map.insert(ZoneRole::Crawlspace, indoor);
+        }
         map
     };
 
@@ -12690,6 +12702,7 @@ occupancy = 1.0
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,

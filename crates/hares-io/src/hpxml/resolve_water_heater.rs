@@ -10,7 +10,7 @@ use hares_equipment::{
 };
 use hares_types::{FuelType, Warning, parse_trimmed_f64};
 
-use super::building::{Building, XmlNode, ZoneType};
+use super::building::{Building, XmlNode};
 use super::data_patches::HpxmlDataPatches;
 use super::equipment::EquipmentSpec;
 use super::water_heater_ua::{UaInputs, WhCategory, ua_from_energy_factor};
@@ -69,7 +69,7 @@ fn zone_id_for_location(building: &Building, location_text: &str) -> Option<u16>
 /// apply_hpwh_zone_heat_gain_program, frac_radiant 0), so the share there is
 /// 0.0, including a conditioned basement or crawlspace.
 fn hpwh_wall_heat_fraction(location: &str) -> f64 {
-    if super::building::parse_zone_label(location) == ZoneType::Conditioned {
+    if super::building::is_living_space_label(location) {
         0.5
     } else {
         0.0
@@ -1220,6 +1220,7 @@ mod tests {
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
@@ -2736,6 +2737,7 @@ mod tests {
             floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,

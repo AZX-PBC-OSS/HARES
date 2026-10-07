@@ -70,13 +70,15 @@ fn base_fixture_preserves_summary_fields_and_imperial_unit_defaults() {
     let volume_m3 = building.conditioned_volume_m3;
     let ceiling_height_m = building.ceiling_height_m;
 
-    let expected_floor_area_m2 = (2700.0 * 0.092_903_04) * 0.5;
+    let expected_floor_area_m2 = 2700.0 * 0.092_903_04;
     let expected_volume_m3 = 21600.0 * 0.028_316_846_592;
     let expected_ceiling_height_m = 8.0 * 0.3048;
 
     assert!(
         (floor_area_m2 - expected_floor_area_m2).abs() < 0.01,
-        "Conditioned zone area should use HPXML/OCHRE imperial defaults and basement split"
+        "Conditioned zone area should use HPXML/OCHRE imperial defaults; the \
+         conditioned basement is merged into it, so the area is the full \
+         ConditionedFloorArea (OS-HPXML geometry.rb:1704-1716)"
     );
     assert!(
         (volume_m3 - expected_volume_m3).abs() < 0.01,
@@ -143,12 +145,20 @@ fn garage_basement_fixture_preserves_explicit_zone_adjacency() {
             .any(|zone| matches!(zone.zone_type, ZoneType::Garage)),
         "garage zone should be created from explicit garage adjacencies"
     );
+    // The fixture's basement is declared conditioned: OS-HPXML merges it
+    // into the conditioned space (geometry.rb `create_or_get_space`,
+    // 1704-1716), so it builds no Foundation zone of its own.
     assert!(
         building
             .zones
             .iter()
-            .any(|zone| matches!(zone.zone_type, ZoneType::Foundation)),
-        "foundation zone should be created from explicit basement foundation data"
+            .all(|zone| !matches!(zone.zone_type, ZoneType::Foundation)),
+        "a conditioned basement must merge into the conditioned space, not build \
+         a separate unheated Foundation zone"
+    );
+    assert!(
+        building.conditioned_foundation_merged,
+        "the conditioned basement must be recorded as merged"
     );
 
     let wall_to_garage = building
@@ -159,8 +169,9 @@ fn garage_basement_fixture_preserves_explicit_zone_adjacency() {
         })
         .expect("Wall3 should exist in garage fixture");
     assert!(
-        matches!(wall_to_garage.interior_zone, Some(ZoneType::Foundation)),
-        "Wall3 interior adjacency should stay mapped to the conditioned basement/foundation zone"
+        matches!(wall_to_garage.interior_zone, Some(ZoneType::Conditioned)),
+        "Wall3 interior adjacency (the conditioned basement) should map to the \
+         conditioned zone it merged into"
     );
     assert!(
         matches!(wall_to_garage.exterior_zone, Some(ZoneType::Garage)),
