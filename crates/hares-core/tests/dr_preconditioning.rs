@@ -260,6 +260,56 @@ fn a_dual_mode_unit_displaces_only_the_named_axis_for_a_year() {
     assert_eq!(dwelling.health().rejected_control_signals, 0);
 }
 
+/// A cooling TurnOff event held for the whole run does not hold BESTEST
+/// 600's ideal unit out of heating. The unit's heating capability stays
+/// intact: the override reaches it only while its end-use label says
+/// cooling, and the thermostat re-derives heating from the setpoints every
+/// step, so every step whose zone calls for heat still delivers it. The
+/// run's heating energy keeps at least four fifths of the no-actor
+/// baseline; the remainder is the curtailment's own thermal carry-over,
+/// with the zone held above the heating setpoint through the warm hours by
+/// the barred cooling and that stored heat reducing the heating the
+/// thermostat calls for. Measured on this fixture (2000 hourly steps,
+/// Denver): 1313.51 kWh without the event, 1088.78 kWh with it, 0.83 of
+/// the baseline, 0 heating calls suppressed. A sticky override that
+/// reached the unit in every mode delivered about an eighth of the
+/// baseline.
+#[test]
+fn a_cooling_turn_off_does_not_hold_the_ideal_unit_out_of_heating() {
+    fn heating_kwh(with_event: bool) -> f64 {
+        let mut dwelling = bestest_600();
+        if with_event {
+            let actor = DrCompliance::new("DR")
+                .with_compliance_model(AlwaysComply)
+                .with_hvac_target(DispatchTarget::ByEndUse(EndUse::HVAC_COOLING))
+                .with_hvac_action(DrAction::TurnOff);
+            let mut actor = actor;
+            actor.set_dr_level(DRLevel::Moderate);
+            dwelling
+                .add_actor(Box::new(actor))
+                .expect("register the DR actor");
+        }
+        let mut heating_wh = 0.0_f64;
+        for _ in 0..2000 {
+            heating_wh += dwelling.step().expect("step").hvac_heating_w;
+        }
+        heating_wh / 1000.0
+    }
+
+    let baseline = heating_kwh(false);
+    let with_event = heating_kwh(true);
+    assert!(
+        with_event >= 0.8 * baseline,
+        "a cooling TurnOff must not hold the unit out of heating: \
+         {with_event:.2} kWh against a {baseline:.2} kWh baseline"
+    );
+    assert!(
+        baseline > with_event,
+        "a year-long cooling curtailment must not increase heating: \
+         {with_event:.2} kWh against a {baseline:.2} kWh baseline"
+    );
+}
+
 /// An end-use event reaches a unit serving both setpoints whatever mode
 /// the unit is in, moves only the end use's axis, and no signal is
 /// rejected.
