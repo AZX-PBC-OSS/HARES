@@ -578,8 +578,8 @@ justification → measured impact → pinning tests.
   v1.12.0, with ±100 °C bounds that clamp nothing
   (`min_Tdb`/`max_Tdb` rows); extrapolated to -17 °C they read capacity
   0.485 and EIR 1.545 where the reference's anchor model reads 0.432 and
-  1.785: the COP came out 16% optimistic at the temperature where the
-  ledger's class of unit runs just above its -17.8 °C lockout. Class
+  1.785: the COP came out 16% optimistic at the temperature where this
+  class of unit runs just above its -17.8 °C lockout. Class
   (a): OCHRE's default curve set is outdated/simplified; HARES keeps the
   reference physics. OCHRE stays the bar for the rated-COP conversion
   (HSPF/3.412141633, `ochre/utils/hpxml.py:855-856`), which OS-HPXML
@@ -587,9 +587,9 @@ justification → measured impact → pinning tests.
   (`defaults.rb:8288-8298`): HARES's absolute COP at a given outdoor
   temperature is therefore lower than OS-HPXML's read of the same unit
   (measured below); the curve shapes now agree.
-- **Measured impact:** for the ledger's 12 kW, HSPF 9.5 ASHP at -17 °C
-  outdoor (dry January air, RH ≈ 80%): full-load compressor COP 1.80 →
-  1.56, capacity at -17 °C 5.82 kW → 5.18 kW. Between the anchors
+- **Measured impact:** for the 12 kW, HSPF 9.5 ASHP of the pinning tests
+  at -17 °C outdoor (dry January air, RH ≈ 80%): full-load compressor
+  COP 1.80 → 1.56, capacity at -17 °C 5.82 kW → 5.18 kW. Between the anchors
   the quadratic EIR sits within ~3% of the reference's rational form
   (at 0 °C: 1.101 vs 1.137); above the rating point the quadratic turns
   EIR back up where the reference's linear power model keeps improving
