@@ -5613,7 +5613,6 @@ mod tests {
         );
     }
 
-            wall(ZoneType::Garage, ZoneType::Outdoor, 8.0, 90.0),
     #[test]
     fn attic_floor_area_includes_garage_ceiling() {
         // When there's a Garage→Attic floor boundary, the attic floor area should
