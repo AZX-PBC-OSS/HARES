@@ -533,7 +533,7 @@ mod dispatch_observer {
 
     use hares_types::{ControlSignal, DutyCycleComponent};
 
-    static COUNTERS: LazyLock<Mutex<[u64; 25]>> = LazyLock::new(|| Mutex::new([0; 25]));
+    static COUNTERS: LazyLock<Mutex<[u64; 26]>> = LazyLock::new(|| Mutex::new([0; 26]));
     static DUTY_CYCLE_COMPONENT_EVENTS: LazyLock<Mutex<Vec<(DutyCycleComponent, f64)>>> =
         LazyLock::new(|| Mutex::new(Vec::new()));
 
@@ -564,6 +564,7 @@ mod dispatch_observer {
             ControlSignal::EvSetReadyBy { .. } => 22,
             ControlSignal::EventDelay { .. } => 23,
             ControlSignal::MaxCapacityFraction { .. } => 24,
+            ControlSignal::NonHvacZoneInput { .. } => 25,
         }
     }
 

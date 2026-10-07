@@ -87,7 +87,8 @@ impl ElectricBaseboard {
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY
                 | ControlCapabilities::MODE_OVERRIDE
-                | ControlCapabilities::DEMAND_RESPONSE,
+                | ControlCapabilities::DEMAND_RESPONSE
+                | ControlCapabilities::NON_HVAC_ZONE_INPUT,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_MODE

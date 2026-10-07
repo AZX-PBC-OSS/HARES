@@ -37,8 +37,9 @@ use super::staging::{DEFAULT_PLF_DEGRADATION_COEFF, DEFAULT_STARTUP_CD};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{
-        cycling_load_fraction, lookup_zone, outage_forces_off, register_ebm_telemetry_keys,
-        served_zone_ports, step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
+        cycling_load_fraction, lookup_zone, netted_cycling_duty, outage_forces_off,
+        register_ebm_telemetry_keys, served_zone_ports, step_equivalent_battery,
+        write_ebm_telemetry, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -547,7 +548,8 @@ impl CoolingCore {
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
                     | ControlCapabilities::IDEAL_CAPACITY
-                    | ControlCapabilities::MAX_CAPACITY_FRACTION,
+                    | ControlCapabilities::MAX_CAPACITY_FRACTION
+                    | ControlCapabilities::NON_HVAC_ZONE_INPUT,
                 core_capabilities: CoreCapabilities::ELECTRIC
                     | CoreCapabilities::HAS_MODE
                     | CoreCapabilities::THERMAL
@@ -1053,31 +1055,47 @@ impl CoolingCore {
                 self.operating_mode = OperatingMode::Off;
                 self.hvac.update_prev_zone_temp(None);
             } else {
-                let ((_, _), (cool_on, cool_off)) = self.hvac.thermostat_fsm.band_edges();
                 // One runtime-fraction path for every cycling unit: the
                 // single-speed unit delivers the fraction of capacity the
                 // zone needs, like the multi-speed arms below; its electric
                 // draw follows the runtime fraction with the part-load
-                // degradation (EnergyPlus DXCoils.cc:9859).
-                let load_fraction = cycling_load_fraction(zone_temp, cool_off, cool_on);
+                // degradation (EnergyPlus DXCoils.cc:9859). The ideal arms
+                // keep the raw band estimate: their delivery is the solver's
+                // netted capacity, so the share must not be netted twice.
+                let ((_, _), (cool_on, cool_off)) = self.hvac.thermostat_fsm.band_edges();
+                let ideal_band_fraction = cycling_load_fraction(zone_temp, cool_off, cool_on);
                 self.hvac.update_prev_zone_temp(Some(zone_temp));
                 self.hvac.runtime.duty_cycle = match self.hvac.config.speed_control_mode {
                     SpeedControlMode::VariableSpeedIdeal => {
-                        self.select_variable_speed_cooling(load_fraction)
+                        self.select_variable_speed_cooling(ideal_band_fraction)
                             .part_load_ratio
                     }
                     _ if self.use_ideal => 1.0,
                     _ => {
+                        // The cycling arm nets the zone's non-HVAC share out
+                        // of its band estimate, the same netting the ideal
+                        // solve applies to its capacity, and anchors the
+                        // fraction's zero edge at the cooling setpoint.
+                        let ((_, _), (cool_zero, cool_full)) =
+                            self.hvac.thermostat_fsm.duty_bands();
+                        let band_fraction = cycling_load_fraction(zone_temp, cool_zero, cool_full);
+                        let netted_fraction = netted_cycling_duty(
+                            band_fraction,
+                            self.hvac.runtime.non_hvac_input_w,
+                            self.hvac.rated_capacity_w(ThermostatMode::Cooling),
+                        );
                         self.hvac
-                            .select_speed_with_zone_temp(load_fraction, Some(zone_temp), false)
+                            .select_speed_with_zone_temp(netted_fraction, Some(zone_temp), false)
                             .part_load_ratio
                     }
                 };
-                self.operating_mode = if self.hvac.runtime.duty_cycle > 0.0 {
-                    OperatingMode::Cooling
-                } else {
-                    OperatingMode::Off
-                };
+                // The thermostat's latch owns the mode, like the heating
+                // arms: a latched hold step whose netted band estimate is
+                // zero (the zone below the setpoint) delivers nothing but
+                // keeps the latch's mode until the FSM releases at its own
+                // edge. The step's zero duty zeroes the delivery and the
+                // mode resolves idle downstream.
+                self.operating_mode = OperatingMode::Cooling;
             }
         } else {
             self.hvac.runtime.duty_cycle = 0.0;
@@ -3081,10 +3099,10 @@ mod tests {
     }
 
     /// Single-speed AC runs the runtime fraction the zone needs: the load
-    /// fraction is the zone's position between the cooling turn-off and the
-    /// turn-on, the same one-runtime-fraction path the multi-speed arms
-    /// follow, with the span floored at 0.5 C so a narrow
-    /// hysteresis modulates over it.
+    /// fraction is the zone's position between the cooling setpoint (the
+    /// zero-delivery anchor) and the turn-on, the same one-runtime-fraction
+    /// path the multi-speed arms follow, with the span floored at 0.5 C so
+    /// a narrow hysteresis modulates over it.
     #[test]
     fn single_speed_cooling_call_uses_the_zone_needed_runtime_fraction() {
         // Zero hysteresis so thermostat activates right at setpoint (24°C).
@@ -3109,12 +3127,12 @@ mod tests {
             (duty_full - 1.0).abs() < 1e-9,
             "single-speed cooling call past the floored span must use duty=1.0, got {duty_full}"
         );
-        // The turn-off is 24 - 0.1x0.2 = 23.98; the span floors at 0.5 C:
-        // (24.2 - 23.98) / 0.5 = 0.44.
+        // The zero edge is the setpoint 24.0; the span floors at 0.5 C:
+        // (24.2 - 24.0) / 0.5 = 0.40.
         assert!(
-            (duty_part - 0.44).abs() < 1e-9,
+            (duty_part - 0.40).abs() < 1e-9,
             "single-speed cooling call near the setpoint must use the zone-needed \
-             fraction 0.44, got {duty_part}"
+             fraction 0.40, got {duty_part}"
         );
         assert!(
             duty_full > duty_part,

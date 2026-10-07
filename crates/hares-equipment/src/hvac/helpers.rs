@@ -208,6 +208,36 @@ pub fn cycling_load_fraction(zone_temp_c: f64, released_c: f64, full_c: f64) -> 
     ((zone_temp_c - released_c) / span).clamp(0.0, 1.0)
 }
 
+/// Nets the zone's non-HVAC port share out of a cycling unit's band-position
+/// duty estimate.
+///
+/// The band-position fraction reads the zone's net response, which already
+/// carries the non-HVAC gains' effect, and those gains also enter the zone
+/// through their own ports in the same step. The HVAC's own share of the
+/// delivery therefore excludes them: the delivery is the band estimate less
+/// the share, the same netting `solve_ideal_capacity_for_target` applies to
+/// its capacity. Netting shifts the controller's settling point up by the
+/// share over the effective capacity, which is what aligns the cycling
+/// path's hold with the ideal path's.
+///
+/// A saturated band estimate (1.0) stays 1.0: the unit is at capacity, so
+/// there is no part-load estimate to correct and the thermostat's
+/// full-fraction pin keeps its exact value.
+#[must_use]
+pub fn netted_cycling_duty(
+    band_fraction: f64,
+    non_hvac_input_w: f64,
+    rated_capacity_w: f64,
+) -> f64 {
+    if band_fraction >= 1.0 || band_fraction <= 0.0 {
+        return band_fraction.clamp(0.0, 1.0);
+    }
+    if rated_capacity_w <= 0.0 {
+        return band_fraction;
+    }
+    (band_fraction - non_hvac_input_w / rated_capacity_w).clamp(0.0, 1.0)
+}
+
 /// Shared `update_control` logic for simple heating equipment.
 ///
 /// Runs the thermostat FSM and returns the resulting `OperatingMode`.
@@ -264,8 +294,13 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
                     .and_then(|zone| lookup_zone(env, zone).ok())
                     .map(|zone| zone.temperature_c)
                     .unwrap_or(f64::NAN);
-                let ((heat_on, heat_off), _) = hvac.thermostat_fsm.band_edges();
-                hvac.runtime.duty_cycle = cycling_load_fraction(zone_temp_c, heat_off, heat_on);
+                let ((heat_zero, heat_full), _) = hvac.thermostat_fsm.duty_bands();
+                let band_fraction = cycling_load_fraction(zone_temp_c, heat_zero, heat_full);
+                hvac.runtime.duty_cycle = netted_cycling_duty(
+                    band_fraction,
+                    hvac.runtime.non_hvac_input_w,
+                    hvac.rated_capacity_w(super::thermostat::ThermostatMode::Heating),
+                );
             } else {
                 hvac.runtime.duty_cycle = hvac.runtime.duty_cycle.clamp(0.0, 1.0);
             }
@@ -611,9 +646,9 @@ mod tests {
     use crate::config::{ConfigPayload, ConfigValue};
 
     use super::{
-        DuctDseContext, cycling_load_fraction, loop_id_from_config, parse_fuel_type,
-        parse_zone_id_key, register_ebm_telemetry_keys, resolve_duct_dse, step_equivalent_battery,
-        write_ebm_telemetry, zone_id_from_config,
+        DuctDseContext, cycling_load_fraction, loop_id_from_config, netted_cycling_duty,
+        parse_fuel_type, parse_zone_id_key, register_ebm_telemetry_keys, resolve_duct_dse,
+        step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
     };
 
     /// The fraction runs 0 at the release edge, 1 at the call edge, and
@@ -633,6 +668,19 @@ mod tests {
         assert!((cycling_load_fraction(19.0, 20.2, 19.2) - 1.0).abs() < 1e-12);
         // A narrow hysteresis modulates over the floored 0.5 C span.
         assert!((cycling_load_fraction(24.2, 23.98, 24.08) - 0.44).abs() < 1e-12);
+    }
+
+    /// The netting keeps the saturated edges exact (a full-fraction step
+    /// stays full for the RTF pin, a released step stays zero), subtracts
+    /// the non-HVAC share over rated capacity in the part-load region, and
+    /// clamps at zero when the share exceeds the estimate.
+    #[test]
+    fn netted_cycling_duty_keeps_the_edges_and_nets_the_share() {
+        assert!((netted_cycling_duty(1.0, 500.0, 7_000.0) - 1.0).abs() < 1e-12);
+        assert!(netted_cycling_duty(0.0, 500.0, 7_000.0).abs() < 1e-12);
+        assert!((netted_cycling_duty(0.5, 700.0, 7_000.0) - 0.4).abs() < 1e-12);
+        assert!(netted_cycling_duty(0.05, 700.0, 7_000.0).abs() < 1e-12);
+        assert!((netted_cycling_duty(0.5, 700.0, 0.0) - 0.5).abs() < 1e-12);
     }
 
     #[test]

@@ -20,8 +20,9 @@ use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     ac_config::HeatPumpHeaterConfig,
     helpers::{
-        cycling_load_fraction, lookup_zone, outage_forces_off, register_ebm_telemetry_keys,
-        served_zone_ports, step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
+        cycling_load_fraction, lookup_zone, netted_cycling_duty, outage_forces_off,
+        register_ebm_telemetry_keys, served_zone_ports, step_equivalent_battery,
+        write_ebm_telemetry, zone_id_from_config,
     },
 };
 use super::constants::{
@@ -535,7 +536,8 @@ impl HeatPumpHeaterCore {
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
                     | ControlCapabilities::IDEAL_CAPACITY
-                    | ControlCapabilities::MAX_CAPACITY_FRACTION,
+                    | ControlCapabilities::MAX_CAPACITY_FRACTION
+                    | ControlCapabilities::NON_HVAC_ZONE_INPUT,
                 core_capabilities: CoreCapabilities::ELECTRIC
                     | CoreCapabilities::HAS_MODE
                     | CoreCapabilities::THERMAL
@@ -2322,8 +2324,13 @@ impl HeatPumpHeaterCore {
             // included: deliver the fraction of capacity the zone needs; the
             // compressor's electric draw follows the runtime fraction with
             // the part-load degradation (EnergyPlus DXCoils.cc:9859).
-            let ((heat_on, heat_off), _) = self.hvac.thermostat_fsm.band_edges();
-            cycling_load_fraction(zone.temperature_c, heat_off, heat_on)
+            let ((heat_zero, heat_full), _) = self.hvac.thermostat_fsm.duty_bands();
+            let band_fraction = cycling_load_fraction(zone.temperature_c, heat_zero, heat_full);
+            netted_cycling_duty(
+                band_fraction,
+                self.hvac.runtime.non_hvac_input_w,
+                self.hvac.rated_capacity_w(ThermostatMode::Heating),
+            )
         };
         let speed =
             self.hvac
@@ -8166,12 +8173,12 @@ mod ideal_capacity_tests {
             .unwrap();
 
         let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
-        // The setpoint is 21 C; the turn-off is 21 + 0.2 = 21.2 and the
-        // turn-on 21 - 0.8 = 20.2: the fraction = (21.2 - 20.9)/1.0 = 0.3,
-        // with the part-load degradation PLF = 1 - Cd (1 - PLR) =
-        // 1 - 0.25 x 0.7 = 0.825 applied to the draw: RTF = PLR / PLF.
+        // The setpoint is 21 C: the zero edge is the setpoint and the
+        // turn-on 21 - 0.8 = 20.2, so the fraction = (21.0 - 20.9)/0.8 =
+        // 0.125, with the part-load degradation PLF = 1 - Cd (1 - PLR) =
+        // 1 - 0.25 x 0.875 = 0.78125 applied to the draw: RTF = PLR / PLF.
         assert!(
-            (rtf - 0.3 / 0.825).abs() < 1e-6,
+            (rtf - 0.125 / 0.78125).abs() < 1e-6,
             "single-speed heating call must run the zone-needed fraction with the \
              part-load degradation applied to its draw; got {rtf}"
         );

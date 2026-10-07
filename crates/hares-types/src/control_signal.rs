@@ -7,7 +7,7 @@ use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EvConnectionState, HaresError, IdealCapacityMode, OperatingMode, ProtocolId,
+    EvConnectionState, HaresError, IdealCapacityMode, OperatingMode, ProtocolId, ZoneId,
     validate_thermal_setpoint_deadband,
 };
 
@@ -169,6 +169,18 @@ pub enum ControlSignal {
     MaxCapacityFraction {
         fraction: f64,
     },
+    /// The thermal solver's non-HVAC share of a zone's sensible input column
+    /// [W], dispatched each step to the zone's thermostat equipment. The
+    /// cycling path's band-position duty estimate reads the zone's net
+    /// response, which already carries the non-HVAC gains' effect, and the
+    /// gains also enter the zone through their own ports; netting the share
+    /// out of the delivery keeps the cycling path's integral consistent with
+    /// the ideal solve's, which applies the same correction to its own
+    /// capacity. Equipment serving another zone ignores the signal.
+    NonHvacZoneInput {
+        zone: ZoneId,
+        watts: f64,
+    },
 }
 
 /// Inverter priority mode for smart inverter Watt/Var/CPF dispatch.
@@ -208,6 +220,7 @@ bitflags! {
         const EV_SET_READY_BY = 1 << 22;
         const EVENT_DELAY = 1 << 23;
         const MAX_CAPACITY_FRACTION = 1 << 24;
+        const NON_HVAC_ZONE_INPUT = 1 << 25;
     }
 }
 
@@ -551,6 +564,13 @@ impl ControlSignal {
                     )));
                 }
             }
+            Self::NonHvacZoneInput { watts, .. } => {
+                if !watts.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "NonHvacZoneInput watts must be finite, got {watts}"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -584,6 +604,7 @@ impl ControlSignal {
             Self::EvSetReadyBy { .. } => ControlCapabilities::EV_SET_READY_BY,
             Self::EventDelay { .. } => ControlCapabilities::EVENT_DELAY,
             Self::MaxCapacityFraction { .. } => ControlCapabilities::MAX_CAPACITY_FRACTION,
+            Self::NonHvacZoneInput { .. } => ControlCapabilities::NON_HVAC_ZONE_INPUT,
         }
     }
 }

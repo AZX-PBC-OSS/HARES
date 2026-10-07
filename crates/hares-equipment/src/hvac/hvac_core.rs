@@ -445,6 +445,13 @@ pub struct HvacRuntimeState {
     /// setpoints without mutating `runtime_setpoints` (which is reserved
     /// for `ThermalSetpoint`/`ThermalSetpointDelta` signals).
     pub dr_setpoint_offset_c: f64,
+    /// The served zone's non-HVAC share of the sensible input column [W],
+    /// dispatched every step by the solver-feedback actor. The cycling duty
+    /// arms net it out of the band-position estimate; the ideal path applies
+    /// the same correction inside the solver's capacity dispatch. Not
+    /// checkpointed: the actor re-dispatches every step, so a restored run
+    /// refills it before the next duty evaluation.
+    pub non_hvac_input_w: f64,
 }
 
 /// Control-signal state modified by external control signals.
@@ -560,6 +567,7 @@ impl HvacEquipment {
                 time_at_current_speed_s: 0.0,
                 prev_zone_temp_c: None,
                 dr_setpoint_offset_c: 0.0,
+                non_hvac_input_w: 0.0,
             },
             control: HvacControlState {
                 max_capacity_fraction: 1.0,
@@ -892,6 +900,13 @@ impl HvacEquipment {
         }
         if let ControlSignal::MaxCapacityFraction { fraction } = signal {
             self.control.max_capacity_fraction = *fraction;
+        }
+        if let ControlSignal::NonHvacZoneInput { zone, watts } = signal {
+            // A share addressed to another zone's equipment is ignored: the
+            // dispatcher sends every zone's share to every thermostat unit.
+            if self.config.zone_id == Some(*zone) {
+                self.runtime.non_hvac_input_w = *watts;
+            }
         }
         Ok(())
     }

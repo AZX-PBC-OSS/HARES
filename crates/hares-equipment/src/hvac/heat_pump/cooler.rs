@@ -73,7 +73,8 @@ impl HpCooler {
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
-                    | ControlCapabilities::IDEAL_CAPACITY,
+                    | ControlCapabilities::IDEAL_CAPACITY
+                    | ControlCapabilities::NON_HVAC_ZONE_INPUT,
                 core_capabilities: CoreCapabilities::ELECTRIC
                     | CoreCapabilities::HAS_MODE
                     | CoreCapabilities::THERMAL
@@ -375,7 +376,8 @@ impl GshpCooler {
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
-                    | ControlCapabilities::IDEAL_CAPACITY,
+                    | ControlCapabilities::IDEAL_CAPACITY
+                    | ControlCapabilities::NON_HVAC_ZONE_INPUT,
                 core_capabilities: CoreCapabilities::ELECTRIC
                     | CoreCapabilities::HAS_MODE
                     | CoreCapabilities::THERMAL
@@ -808,7 +810,8 @@ impl WshpCooler {
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
-                    | ControlCapabilities::IDEAL_CAPACITY,
+                    | ControlCapabilities::IDEAL_CAPACITY
+                    | ControlCapabilities::NON_HVAC_ZONE_INPUT,
                 core_capabilities: CoreCapabilities::ELECTRIC
                     | CoreCapabilities::HAS_MODE
                     | CoreCapabilities::THERMAL

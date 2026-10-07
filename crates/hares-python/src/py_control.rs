@@ -815,6 +815,11 @@ impl PyControlSignal {
                 dict.set_item("type", "MaxCapacityFraction")?;
                 dict.set_item("fraction", fraction)?;
             }
+            ControlSignal::NonHvacZoneInput { zone, watts } => {
+                dict.set_item("type", "NonHvacZoneInput")?;
+                dict.set_item("zone", zone.0)?;
+                dict.set_item("watts", watts)?;
+            }
         }
         Ok(dict)
     }

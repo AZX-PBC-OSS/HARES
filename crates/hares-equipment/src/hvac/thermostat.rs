@@ -286,6 +286,25 @@ impl ThermostatFsm {
         )
     }
 
+    /// The band a cycling unit's duty fraction modulates over, per axis:
+    /// `(zero_delivery_edge, full_delivery_edge)`.
+    ///
+    /// The zero-delivery edge is the axis setpoint, the same target the
+    /// ideal path's solve holds the zone to, not the FSM's release edge:
+    /// the release edge is the latch boundary, and anchoring the fraction
+    /// there biases the controller's settling point a `deadband_offset`
+    /// past the setpoint, toward over-delivery. The full-delivery edge
+    /// stays the call edge. `cycling_load_fraction` applies the minimum
+    /// span floor itself.
+    pub fn duty_bands(&self) -> ((f64, f64), (f64, f64)) {
+        let setpoints = self.effective_setpoints();
+        let ((heat_on, _), (cool_on, _)) = self.band_edges();
+        (
+            (setpoints.heating_c, heat_on),
+            (setpoints.cooling_c, cool_on),
+        )
+    }
+
     pub fn new(static_setpoints: ThermalSetpoints) -> Self {
         let thermostat = ThermostatConfig::default();
         Self {
@@ -961,6 +980,20 @@ pub(super) mod tests {
         assert!(result.unwrap()); // signal was handled
         assert_eq!(fsm.runtime_setpoints.unwrap().heating_c, Some(18.0));
         assert_eq!(fsm.runtime_setpoints.unwrap().cooling_c, Some(22.0));
+    }
+
+    /// The duty fraction's band anchors the zero-delivery edge at each
+    /// axis setpoint (the target the ideal solve holds) and keeps the
+    /// call edge as the full-delivery edge.
+    #[test]
+    fn duty_bands_anchor_the_zero_edge_at_the_setpoints() {
+        let fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        });
+        // Defaults: hysteresis 1.0 C, offset 0.2. The call edges sit at
+        // 19.2 (heating turn-on) and 24.8 (cooling turn-on).
+        assert_eq!(fsm.duty_bands(), ((20.0, 19.2), (24.0, 24.8)));
     }
 
     #[test]

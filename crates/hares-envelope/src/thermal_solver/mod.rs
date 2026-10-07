@@ -455,6 +455,16 @@ impl ThermalSolver {
         &self.component_gains
     }
 
+    /// The most recent integrate's per-zone non-HVAC share of the sensible
+    /// input column [W]: the port accumulation's total less the HVAC
+    /// categories, per zone. The ideal-capacity solve subtracts the share
+    /// from its capacity; the solver-feedback actor dispatches the same
+    /// value to the zone's cycling equipment so both delivery paths net it.
+    #[must_use]
+    pub fn non_hvac_zone_inputs(&self) -> &HashMap<ZoneId, f64> {
+        &self.non_hvac_zone_input_w
+    }
+
     /// Full-system stored energy rate from the most recent `resolve()` call [W].
     ///
     /// Computes Σ C_i × (T_next_i − T_prev_i) / dt across ALL thermal state nodes
