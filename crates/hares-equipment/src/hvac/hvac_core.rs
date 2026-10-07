@@ -3742,33 +3742,50 @@ mod tests {
         );
     }
 
+    /// The single-speed ASHP default curves are the OS-HPXML v1.12.0 RESNET
+    /// Addendum 82 anchor model, not the shipped OCHRE CSV's `Single_1`
+    /// column: the OD fix replaced the DOE-2 fit (whose quadratic extrapolation
+    /// below the 17 °F anchor read unphysical COPs) with the reference's
+    /// anchor model. The anchors are pinned exactly in
+    /// `default_curves::tests`; this test keeps the multi-speed arrays
+    /// (still the OCHRE CSV columns, outside the fix's scope) from drifting.
     #[test]
-    fn ashp_default_cap_curve_matches_ochre_csv_single_1() {
+    fn ashp_default_multi_speed_curves_match_ochre_csv_columns() {
         use super::super::default_curves::default_biquadratic_coeffs;
-        let defaults = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 1).unwrap();
-        let expected_cap: [f64; 6] = [
-            0.878143655,
-            -0.002914855,
-            -0.00003337,
-            0.022386661,
-            0.000163944,
-            -0.00002187,
-        ];
-        let expected_eir: [f64; 6] = [
-            0.716518071,
-            0.010275901,
-            0.000460734,
-            -0.006480365,
-            0.000456354,
-            -0.00069764,
-        ];
+
+        // The single-speed default is the RESNET anchor model:
+        // linear capacity through (8.333 °C, 1.0) and (-8.333 °C, 0.626),
+        // pinned exactly in `default_curves::tests`.
+        let single = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 1)
+            .expect("ASHP single-speed defaults exist");
         assert_eq!(
-            defaults[0], expected_cap,
-            "ASHP capacity coefficients must match CSV"
+            single[0],
+            [0.813, 0.0, 0.0, 0.02244, 0.0, 0.0],
+            "single-speed capacity default must be the RESNET anchor line"
         );
         assert_eq!(
-            defaults[1], expected_eir,
-            "ASHP EIR coefficients must match CSV"
+            single[1],
+            [1.1007334853, 0.0, 0.0, -0.02136, 0.001112637825, 0.0],
+            "single-speed EIR default must be the RESNET anchor quadratic"
+        );
+
+        // Two- and four-speed defaults remain the OCHRE CSV columns
+        // (interleaved [cap_0, eir_0, cap_1, eir_1, ...]).
+        let two_speed = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 2)
+            .expect("ASHP two-speed defaults exist");
+        assert_eq!(
+            two_speed[0][0], 0.84077409,
+            "Double_1 capacity c0 must match CSV"
+        );
+        assert_eq!(
+            two_speed[2][0], 0.831506971,
+            "Double_2 capacity c0 must match CSV"
+        );
+        let four_speed = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 4)
+            .expect("ASHP four-speed defaults exist");
+        assert_eq!(
+            four_speed[4][0], 0.96205422,
+            "Variable_3 capacity c0 must match CSV"
         );
     }
 

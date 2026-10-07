@@ -7907,6 +7907,72 @@ mod tests {
              got {cap_ratio_raw}"
         );
     }
+
+    /// Reference pin: a 12 kW, HSPF 9.5 ASHP on the DEFAULT curves, stepping at
+    /// −17 °C outdoor just above its −17.8 °C lockout, delivers the
+    /// reference's capacity and COP ratios.
+    ///
+    /// OS-HPXML v1.12.0's RESNET Addendum 82 anchor model
+    /// (`HPXMLtoOpenStudio/resources/defaults.rb:8254` qm17full = 0.626,
+    /// `:8287` eirm17full = 1.356, linear below): capacity ratio at −17 °C
+    /// is 0.43152 and the normalized COP (1/EIR ratio) is 0.560211, giving
+    /// a full-load compressor COP of (9.5/3.412141633) × 0.560211 ≈ 1.56,
+    /// at or above 1, as the ledger's class of unit requires. The previous
+    /// OCHRE CSV defaults read capacity 0.485 and EIR 1.545 at −17 °C
+    /// (COP 1.80, 16% optimistic).
+    #[test]
+    fn ashp_default_curves_match_reference_at_minus_17c() {
+        let mut cfg = heater_config_with(|typed| {
+            typed.common.heating_capacity_w = Some(12_000.0);
+            typed.common.heating_eir = Some(3.412_141_633 / 9.5);
+        });
+        // Drop the harness's injected identity curves so the equipment-type
+        // default substitution runs.
+        cfg.test_extras_mut().remove("biquadratic_coeffs");
+        // Dry January air (RH ~80% at −17 °C): the on-demand defrost model's
+        // frost delta-w stays near its floor, matching the ledger's scenario.
+        let cold_env = env(19.0, -17.0, 0.001);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &cold_env).unwrap();
+        eq.update_control(&cold_env);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&cold_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        // The curve outputs as the live step observed them.
+        let cap_ratio = eq.telemetry().get(tk::CAP_RATIO).unwrap();
+        assert!(
+            (cap_ratio - 0.431_52).abs() < 1e-3,
+            "CAP_RATIO at −17 °C must match the reference's linear \
+             extrapolation of qm17full (0.626 at 17 °F): expected ≈ 0.43152, \
+             got {cap_ratio:.6}"
+        );
+
+        let eir_ratio = eq.telemetry().get(tk::EIR_RATIO).unwrap();
+        assert!(
+            (eir_ratio - 1.785_449).abs() < 1e-3,
+            "EIR_RATIO at −17 °C must match the reference's extrapolated \
+             power/capacity lines: expected ≈ 1.785449, got {eir_ratio:.6}"
+        );
+
+        // The normalized COP (1/EIR ratio) pins the -17 °C COP; for HSPF 9.5
+        // the full-load compressor COP is (9.5/3.412141633) × 0.560211 ≈ 1.56.
+        let cop_ratio = 1.0 / eir_ratio;
+        assert!(
+            (cop_ratio - 0.560_211).abs() < 1e-3,
+            "the normalized COP at −17 °C must match the reference \
+             (0.560211), got {cop_ratio:.6}"
+        );
+        let cop_full_load = (9.5 / 3.412_141_633) * cop_ratio;
+        assert!(
+            cop_full_load >= 1.0,
+            "the full-load compressor COP at −17 °C must stay at or above 1.0 \
+             for an HSPF 9.5 unit; got {cop_full_load:.4}"
+        );
+    }
 }
 
 #[cfg(test)]

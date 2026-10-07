@@ -539,3 +539,72 @@ justification → measured impact → pinning tests.
   `equipment_zone_resolution::the_equivalent_battery_holds_the_multiplied_zone_capacitance`
   and the structural envelope oracles pin the capacitance and the
   constructions the bound stands on.
+
+## D-014: ASHP single-speed heating defaults from the RESNET anchor model, not the OCHRE CSV
+
+- **Quantity:** the default heating capacity and EIR temperature curves of
+  a single-speed air-source heat pump (the curves HARES substitutes when
+  the HPXML document supplies no biquadratic coefficients).
+- **Reference behavior:** OpenStudio-HPXML v1.12.0 anchors the default
+  heating model on RESNET HERS Addendum 82: capacity 1.0 at the 47 °F
+  rating point and `qm17full = 0.626` at 17 °F
+  (`HPXMLtoOpenStudio/resources/defaults.rb:8254`), EIR
+  `eirm17full = 1.356` at 17 °F (`defaults.rb:8287`), both linear in
+  outdoor temperature between and below the anchors (the defaulted
+  datapoints all sit at the rated indoor temperature,
+  `defaults.rb:2960-2968`; the E+ coil reads them through a
+  `Table:Lookup` with linear extrapolation and `output_min: 0.0`,
+  `hvac.rb:3240-3252`; the no-detailed-data biquadratic fallback carries
+  ±100 °C curve limits, `hvac.rb:3254-3266`). EnergyPlus evaluates the
+  curve inputs clamped to the curve's limits (the CurveManager),
+  resets a negative capacity ratio to 0 with a warning
+  (`DXCoils.cc:11272-11290`), runs the compressor only above
+  `MinOATCompressor` (`DXCoils.cc:11192`), and applies the on-demand
+  reverse-cycle defrost model
+  (`DXCoils.cc:11324-11355`: `1/(1 + 0.01446/dw)`, capacity
+  `0.875·(1-FDT)`, power `0.954·(1-FDT)`).
+- **HARES behavior (since this fix):** the single-speed ASHP default
+  capacity curve is the reference's capacity line in °C
+  (`0.813 + 0.02244·To`, exact at the anchors and by extrapolation), and
+  the default EIR curve is the quadratic through the reference's three
+  points (1.0 at 8.333 °C, 1.356 at -8.333 °C, 1.785449 at -17 °C).
+  Defrost keeps the E+ on-demand model (constants shared:
+  `heat_pump/constants.rs:7-12`), and the curve machinery already
+  mirrors the E+ CurveManager clamping (`hares-physics`
+  `biquadratic.rs:23-30`).
+- **Justification:** OCHRE 0.9.2's default curves
+  (`ochre/defaults/HVAC Heating/Biquadratic ASHP Heater.csv`,
+  `Single_1`) are the old DOE-2 fits OS-HPXML itself shipped before
+  v1.12.0, with ±100 °C bounds that clamp nothing
+  (`min_Tdb`/`max_Tdb` rows); extrapolated to -17 °C they read capacity
+  0.485 and EIR 1.545 where the reference's anchor model reads 0.432 and
+  1.785: the COP came out 16% optimistic at the temperature where the
+  ledger's class of unit runs just above its -17.8 °C lockout. Class
+  (a): OCHRE's default curve set is outdated/simplified; HARES keeps the
+  reference physics. OCHRE stays the bar for the rated-COP conversion
+  (HSPF/3.412141633, `ochre/utils/hpxml.py:855-856`), which OS-HPXML
+  v1.12.0 replaces with the Addendum 82 `cop47full` interpolation table
+  (`defaults.rb:8288-8298`): HARES's absolute COP at a given outdoor
+  temperature is therefore lower than OS-HPXML's read of the same unit
+  (measured below); the curve shapes now agree.
+- **Measured impact:** for the ledger's 12 kW, HSPF 9.5 ASHP at -17 °C
+  outdoor (dry January air, RH ≈ 80%): full-load compressor COP 1.80 →
+  1.56, capacity at -17 °C 5.82 kW → 5.18 kW. Between the anchors
+  the quadratic EIR sits within ~3% of the reference's rational form
+  (at 0 °C: 1.101 vs 1.137); above the rating point the quadratic turns
+  EIR back up where the reference's linear power model keeps improving
+  COP (at 20 °C: 1.118 vs 0.709): heating there is rare and modulated
+  down, and the old curve understated the gain too (1.083 measured
+  ratio). The two-speed and variable-speed ASHP defaults and the MSHP
+  defaults keep the OCHRE CSV columns (no measured case; their
+  extrapolation below the 17 °F anchor is a candidate for its own row).
+- **Pinning tests:**
+  `crates/hares-equipment/src/hvac/default_curves.rs`
+  (`ashp_single_capacity_matches_resnet_anchor_model`,
+  `ashp_single_eir_matches_resnet_anchor_model`,
+  `ashp_single_compressor_cop_at_minus_17c_stays_above_one`),
+  `crates/hares-equipment/src/hvac/heat_pump/heater.rs`
+  (`ashp_default_curves_match_reference_at_minus_17c`),
+  `crates/hares-equipment/src/hvac/hvac_core.rs`
+  (`ashp_default_multi_speed_curves_match_ochre_csv_columns`). Each
+  fails when the defaults revert to the OCHRE CSV's `Single_1` column.
