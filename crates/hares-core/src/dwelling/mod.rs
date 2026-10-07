@@ -5589,13 +5589,16 @@ impl Dwelling {
         #[cfg(feature = "observe")]
         let thermal_for_observer = self.thermal_update_buf.clone();
         #[cfg(test)]
-        let alloc_before = thread_allocations();
+        let thermal_alloc_before = thread_allocations();
         self.latest_env
             .domains
             .thermal
             .set_from(&self.thermal_update_buf);
         #[cfg(test)]
-        self.record_snapshot_allocations(alloc_before, SnapshotAllocSite::ThermalSetFrom);
+        self.record_snapshot_allocations(
+            thermal_alloc_before,
+            SnapshotAllocSite::ThermalSetFrom,
+        );
 
         // Capture the pre-resolve (committed) humidity ratios so the
         // always-on moisture balance check can diff this step's solver
@@ -5709,29 +5712,38 @@ impl Dwelling {
         }
 
         #[cfg(test)]
-        let alloc_before = thread_allocations();
+        let humidity_alloc_before = thread_allocations();
         self.latest_env
             .domains
             .humidity
             .set_from(&self.humidity_update_buf);
         #[cfg(test)]
-        self.record_snapshot_allocations(alloc_before, SnapshotAllocSite::HumiditySetFrom);
+        self.record_snapshot_allocations(
+            humidity_alloc_before,
+            SnapshotAllocSite::HumiditySetFrom,
+        );
         #[cfg(test)]
-        let alloc_before = thread_allocations();
+        let electrical_alloc_before = thread_allocations();
         self.latest_env
             .domains
             .electrical
             .set_from(&self.electrical_update_buf);
         #[cfg(test)]
-        self.record_snapshot_allocations(alloc_before, SnapshotAllocSite::ElectricalSetFrom);
+        self.record_snapshot_allocations(
+            electrical_alloc_before,
+            SnapshotAllocSite::ElectricalSetFrom,
+        );
         #[cfg(test)]
-        let alloc_before = thread_allocations();
+        let fluid_alloc_before = thread_allocations();
         self.latest_env
             .domains
             .fluid
             .set_from(&self.fluid_update_buf);
         #[cfg(test)]
-        self.record_snapshot_allocations(alloc_before, SnapshotAllocSite::FluidSetFrom);
+        self.record_snapshot_allocations(
+            fluid_alloc_before,
+            SnapshotAllocSite::FluidSetFrom,
+        );
 
         #[cfg(test)]
         let mut custom_alloc_delta = 0u64;
@@ -5979,7 +5991,7 @@ impl Dwelling {
         // equipment phases (Independent + Electrical + Thermal in Step 3) so
         // nothing is one step stale.
         #[cfg(test)]
-        let alloc_before = thread_allocations();
+        let equipment_alloc_before = thread_allocations();
         self.latest_env
             .equipment_core
             .retain(|id, _| self.active_equipment_ids.contains(id));
@@ -5998,7 +6010,10 @@ impl Dwelling {
             self.snapshot_equipment_entry(idx);
         }
         #[cfg(test)]
-        self.record_snapshot_allocations(alloc_before, SnapshotAllocSite::SnapshotEquipment);
+        self.record_snapshot_allocations(
+            equipment_alloc_before,
+            SnapshotAllocSite::SnapshotEquipment,
+        );
 
         for (i, entry) in self.roster.zone_temp_scratch.iter_mut().enumerate() {
             entry.1 = if let Some(env_idx) = self.roster.zones.zone_env_indices[i] {
