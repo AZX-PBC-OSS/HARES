@@ -34,7 +34,7 @@ const HDPE_ROUGHNESS_M: f64 = 1.5e-6;
 /// 2020 Ch.9.6.
 const MINOR_LOSS_FACTOR: f64 = 0.4;
 
-/// Default additional system head loss [m] for the heat-pump water-to-refrigerant
+/// Default additional system head loss (m) for the heat-pump water-to-refrigerant
 /// heat exchanger and distribution headers — typical for residential 4-ton GSHP
 /// with brazed-plate HX. ASHRAE HVAC Systems & Equipment 2020 Ch.9 Table 7.
 pub const DEFAULT_SYSTEM_HEAD_LOSS_M: f64 = 3.0;
@@ -43,7 +43,7 @@ pub const DEFAULT_SYSTEM_HEAD_LOSS_M: f64 = 3.0;
 // Public interface
 // ---------------------------------------------------------------------------
 
-/// Compute ground-loop circulation pump electrical input power [kW].
+/// Compute ground-loop circulation pump electrical input power (kW).
 ///
 /// The pump runs any time the heat pump compressor is active to maintain
 /// water flow through the ground loop.  Power is computed from the
@@ -52,9 +52,9 @@ pub const DEFAULT_SYSTEM_HEAD_LOSS_M: f64 = 3.0;
 ///
 /// # Arguments
 ///
-/// * `loop_depth_m` — Vertical borehole depth below ground surface [m].
+/// * `loop_depth_m` -- Vertical borehole depth below ground surface (m).
 ///   Total pipe length = 2 × depth (supply + return).
-/// * `pipe_diameter_m` — Inner diameter of the HDPE U-bend pipe [m].
+/// * `pipe_diameter_m` -- Inner diameter of the HDPE U-bend pipe (m).
 ///   Typical: 0.025 m (1" nominal SDR11).
 /// * `flow_rate_m3_per_s` — Design volumetric flow rate through the
 ///   circulation loop [m³/s]. Typical: 0.00019 m³/s (≈ 3 US GPM) per
@@ -64,7 +64,7 @@ pub const DEFAULT_SYSTEM_HEAD_LOSS_M: f64 = 3.0;
 /// * `motor_efficiency` — Electrical-to-shaft efficiency of the pump
 ///   motor [-]. PSC motor: 0.40–0.60; ECM: 0.70–0.85.
 /// * `system_head_loss_m` — Additional head loss from the water-to-refrigerant
-///   heat exchanger, distribution headers, isolation valves, and strainer [m].
+///   heat exchanger, distribution headers, isolation valves, and strainer (m).
 ///   Use [`DEFAULT_SYSTEM_HEAD_LOSS_M`] for a typical residential brazed-plate
 ///   HX at design flow. Set to 0.0 for borehole loop only.
 #[must_use]

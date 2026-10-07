@@ -418,19 +418,19 @@ pub struct EvConfig {
     pub heater_threshold_c: Option<f64>,
     /// Battery pack thermal mass (J/K). Defaults to the capacity-derived
     /// value (pack mass × cell specific heat; see
-    /// [`default_thermal_mass_j_per_k`]).
+    /// `default_thermal_mass_j_per_k`).
     pub thermal_mass_j_per_k: Option<f64>,
     /// Pack-to-ambient heat transfer coefficient (W/K). Defaults to the
-    /// area-scaled value (see [`default_ua_w_per_k`]).
+    /// area-scaled value (see `default_ua_w_per_k`).
     pub ua_w_per_k: Option<f64>,
     /// Series cell count (sets pack voltage). Defaults to 96 (≈350–360 V
     /// nominal NMC, the prevailing EV architecture).
     pub n_series: Option<u32>,
     /// Parallel string count (sets pack current sharing and resistance).
     /// Defaults to a value derived from `capacity_kwh` (see
-    /// [`default_n_parallel`]).
+    /// `default_n_parallel`).
     pub n_parallel: Option<u32>,
-    /// Cell internal resistance [Ω] at mid-SOC, 25 °C. Drives the I²R
+    /// Cell internal resistance (Ω) at mid-SOC, 25 °C. Drives the I²R
     /// pack heating during charge, discharge, and drive. Defaults to the
     /// stationary Battery's 5 mΩ cell default so both packs share one
     /// parameterization.
@@ -465,7 +465,7 @@ pub struct EvConfig {
     /// Defaults to 1.0 (unity — EV onboard chargers have PFC front-ends at
     /// ~0.99+; default runs bit-identical to pre-reactive behaviour).
     pub power_factor: Option<f64>,
-    /// Charger/inverter AC apparent-power rating [kVA]. Used as the kVA
+    /// Charger/inverter AC apparent-power rating (kVA). Used as the kVA
     /// clamp for reactive power (active-power priority: P never curtailed).
     /// Defaults to `max(max_charging_power_kw, v2g_max_discharge_kw,
     /// v2l_max_discharge_kw)` at init time.

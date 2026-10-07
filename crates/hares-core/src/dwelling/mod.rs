@@ -3405,7 +3405,7 @@ impl Dwelling {
     }
 
     /// Test-only hook: causes the thermal invariant check in the next
-    /// [`check_step_invariants`](Self::check_step_invariants) call to receive deliberately
+    /// `check_step_invariants` call to receive deliberately
     /// broken balance terms, forcing `InvariantViolation { check_name: "thermal_balance" }`.
     ///
     /// Available in test builds (including plain-release test runs). Has no
@@ -3696,14 +3696,14 @@ impl Dwelling {
         &self.thermal_solver
     }
 
-    /// Load [kW] the island sources failed to cover during the last islanded
+    /// Load (kW) the island sources failed to cover during the last islanded
     /// step (would-be phantom grid import). 0.0 when not islanded.
     #[must_use]
     pub fn island_unserved_kw(&self) -> f64 {
         self.island_unserved_kw
     }
 
-    /// Surplus on-site generation [kW] the island could not absorb during the
+    /// Surplus on-site generation (kW) the island could not absorb during the
     /// last islanded step (would-be phantom grid export). 0.0 when not
     /// islanded.
     #[must_use]

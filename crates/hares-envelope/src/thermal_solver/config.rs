@@ -82,7 +82,7 @@ pub struct InteriorConvectionInjection {
     pub surface_state_index: usize,
     /// Row index of the zone air node in the state vector.
     pub zone_state_index: usize,
-    /// Surface area [m²].
+    /// Surface area (m²).
     pub area_m2: f64,
     /// Surface tilt from horizontal [°]; 0° = horizontal, 90° = vertical.
     pub tilt_deg: f64,
@@ -204,17 +204,17 @@ pub struct MechanicalVentilationParams {
 /// - EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area: `Q = sqrt(Qw² + Qst²)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct NaturalVentilationConfig {
-    /// Effective operable window area [m²].
+    /// Effective operable window area (m²).
     ///
     /// Typically computed as `total_window_area_m2 * OPEN_AREA_FRACTION`.
     /// Use [`NaturalVentilationConfig::from_window_area`] to apply the standard fraction.
     pub open_area_m2: f64,
-    /// Vertical separation between inlet and outlet openings [m].
+    /// Vertical separation between inlet and outlet openings (m).
     ///
     /// EnergyPlus `DH` parameter. Used for cross-ventilation stack computation.
     /// Default 0.0 — produces no stack flow unless explicitly set.
     pub dh_m: f64,
-    /// Zone height [m]; used as characteristic opening height for single-sided
+    /// Zone height (m); used as characteristic opening height for single-sided
     /// stack computation. Typical residential value: 2.5 m.
     pub zone_height_m: f64,
     /// Opening type: single-sided or cross-ventilation.
@@ -242,7 +242,7 @@ impl NaturalVentilationConfig {
     pub const DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO: f64 = 0.0115;
     /// Default opening azimuth [°] -- South-facing, common for passive cooling in the northern hemisphere.
     pub const DEFAULT_OPENING_AZIMUTH_DEG: f64 = 180.0;
-    /// Default zone height [m] for single-sided stack computation.
+    /// Default zone height (m) for single-sided stack computation.
     pub const DEFAULT_ZONE_HEIGHT_M: f64 = 2.5;
 
     /// Construct from total window area; applies the standard 6.7% open-area fraction.
@@ -279,13 +279,13 @@ pub struct WindowSolarProperties {
     pub winter_shgc: f64,
     /// Window U-factor [W/(m²·K)], used to select the EnergyPlus glazing curve.
     pub u_factor_w_m2_k: f64,
-    /// Glazing area [m²].
+    /// Glazing area (m²).
     pub area_m2: f64,
-    /// Summer solar transmittance at normal incidence [dimensionless].
+    /// Summer solar transmittance at normal incidence (dimensionless).
     pub transmittance: f64,
-    /// Winter solar transmittance at normal incidence [dimensionless].
+    /// Winter solar transmittance at normal incidence (dimensionless).
     pub winter_transmittance: f64,
-    /// Inward-flowing fraction of absorbed solar [dimensionless].
+    /// Inward-flowing fraction of absorbed solar (dimensionless).
     pub radiation_frac: f64,
     /// Precomputed EnergyPlus glazing curve from `u_factor_w_m2_k` and `shgc`.
     pub glazing_curve: GlazingCurve,
@@ -339,9 +339,9 @@ pub struct InteriorSurfaceInfo {
     /// temperature.  In a lumped-zone model use the zone air state index; the net
     /// exchange then collapses to zero because all surfaces share the same temperature.
     pub state_index: usize,
-    /// Index into the input vector `u` where the net LW heat flux [W] is added.
+    /// Index into the input vector `u` where the net LW heat flux (W) is added.
     pub input_index: usize,
-    /// Surface area [m²].
+    /// Surface area (m²).
     pub area_m2: f64,
     /// Longwave emissivity [-].
     pub emissivity: f64,
@@ -365,7 +365,7 @@ pub struct InteriorSurfaceInfo {
     /// Interior radiative film resistance converted to K/W.
     ///
     /// Used by the iterative interior LWR solver to convert net radiative
-    /// surface flux [W] into a surface-temperature perturbation:
+    /// surface flux (W) into a surface-temperature perturbation:
     /// `T_surf,new = T_surf,base + Q_lwr * rad_res_k_w`.
     pub rad_res_k_w: f64,
     /// Solar absorptance [-] for interior solar distribution.
@@ -425,7 +425,7 @@ pub struct InteriorSolarSurfaceInfo {
     /// excluded from the radiant distribution by `solar_absorptance = 0.0`
     /// (set at construction in solver_builder.rs), not by a `None` index.
     pub input_index: Option<usize>,
-    /// Surface area [m²].
+    /// Surface area (m²).
     pub area_m2: f64,
     /// Solar absorptance [-].
     pub solar_absorptance: f64,
@@ -487,27 +487,27 @@ impl InteriorLwrZoneConfig {
 
 /// Metadata for one exterior surface used to compute longwave radiation at runtime.
 ///
-/// The sky view factor is derived from `tilt_deg` on each call via [`sky_view_factor`];
+/// The sky view factor is derived from `tilt_deg` on each call via [`crate::sky_view_factor`];
 /// it is not cached here so that the struct remains free of init ordering.
 ///
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExteriorSurfaceInfo {
-    /// Unique surface identifier matching [`SurfaceIrradiance::surface_id`] in weather data.
+    /// Unique surface identifier matching [`hares_types::environment::SurfaceIrradiance::surface_id`] in weather data.
     pub surface_id: u32,
     /// Index into the state vector `x` for the RC node whose temperature approximates this surface.
     pub state_index: usize,
-    /// Index into the input vector `u` where the longwave flux [W] is accumulated.
+    /// Index into the input vector `u` where the longwave flux (W) is accumulated.
     pub input_index: usize,
-    /// Surface area [m²].
+    /// Surface area (m²).
     pub area_m2: f64,
-    /// Longwave emissivity [-]; use [`EMISSIVITY_DEFAULT`] (0.90) for opaque surfaces.
+    /// Longwave emissivity [-]; use [`crate::EMISSIVITY_DEFAULT`] (0.90) for opaque surfaces.
     pub emissivity: f64,
     /// Surface tilt from horizontal [°]; 0° = horizontal roof, 90° = vertical wall.
     pub tilt_deg: f64,
     /// Surface azimuth [°] clockwise from north.
     /// Used by autosizing to compute per-surface design-day solar irradiance.
     pub azimuth_deg: f64,
-    /// Radiation fraction: `R_film / (R_film + R_outermost_half)` -- dimensionless [0,1].
+    /// Radiation fraction: `R_film / (R_film + R_outermost_half)` -- dimensionless `[0,1]`.
     ///
     /// Controls how much the true surface temperature deviates from the RC node
     /// temperature. A value of 0.0 means use the node temperature directly (no
@@ -526,7 +526,7 @@ pub struct ExteriorSurfaceInfo {
     /// the half-layer conducts comparably to the film (thin siding, stucco,
     /// metal). See docs/alignment/DIVERGENCES.md.
     ///
-    /// Converts net surface heat flux [W] to a temperature perturbation on
+    /// Converts net surface heat flux (W) to a temperature perturbation on
     /// the exterior surface.
     pub rad_res_k_w: f64,
     /// Number of sub-iterations per timestep: `floor(dt_s / 300.0) + 1`.
@@ -562,7 +562,7 @@ pub struct StateSpaceWiring {
     /// Each entry is a column index in B_ext. The parallel vec
     /// `ground_temp_input_depths_m` holds the foundation depth for each column.
     pub ground_temp_input_indices: Vec<usize>,
-    /// Foundation depth [m] for each entry in `ground_temp_input_indices`.
+    /// Foundation depth (m) for each entry in `ground_temp_input_indices`.
     ///
     /// Same length as `ground_temp_input_indices`. Each depth is used to
     /// evaluate `kusuda_achenbach_temp` for the corresponding B-matrix column
@@ -615,7 +615,7 @@ pub enum FilmCoefficientModel {
     /// h_conv does not depend on surface-to-air ΔT. Same values as EnergyPlus
     /// `CalcASHRAESimpleIntConvCoeff` and OCHRE's init-time calculation.
     AshraeSimple,
-    /// Per-step TARP natural convection via [`tarp_h_natural`] (EnergyPlus default).
+    /// Per-step TARP natural convection via [`hares_physics::film_coefficients::tarp_h_natural`] (EnergyPlus default).
     /// h_conv ∝ |ΔT|^(1/3), evaluated each timestep from T_surface and T_zone,
     /// injected as explicit forcing rather than a static A-matrix conductance.
     ///
@@ -652,7 +652,7 @@ pub struct ThermalSolverConfig {
     /// Per-zone interior surface configurations for intra-zone LW radiation.
     ///
     /// Empty = no interior LW correction (backward-compatible default).
-    /// When populated, the solver calls [`interior_longwave_linearised_w`] for each zone
+    /// When populated, the solver calls [`crate::interior_longwave_linearised_w`] for each zone
     /// using the current zone air temperature as the linearisation point and accumulates
     /// the net surface fluxes into the corresponding `input_index` entries in `u`.
     pub interior_lwr_zones: Vec<InteriorLwrZoneConfig>,
@@ -707,7 +707,7 @@ pub struct ThermalSolverConfig {
 
 impl ThermalSolverConfig {
     /// Validates structural invariants that are otherwise only discoverable
-    /// by reading two files side by side. Called by [`ThermalSolver::new`]
+    /// by reading two files side by side. Called by [`crate::ThermalSolver::new`]
     /// with the assembled model's dimensions so mis-wiring fails fast with
     /// the offending surface named, instead of silently double-injecting or
     /// dropping a surface's flux.
@@ -724,7 +724,7 @@ impl ThermalSolverConfig {
     /// without their own injection column (windows, fallback-R walls)
     /// legitimately share a zone's sensible-heat column, which is additive.
     /// True double-registration of a dedicated injection column is checked
-    /// against the wiring in [`ThermalSolver::new`].
+    /// against the wiring in [`crate::ThermalSolver::new`].
     pub fn validate(&self, n_states: usize, n_inputs: usize) -> std::result::Result<(), String> {
         let mut seen_surface_ids = std::collections::HashSet::new();
         for info in &self.exterior_surfaces {
@@ -916,6 +916,9 @@ pub struct WindowSolarTotals {
 }
 
 /// Per-timestep envelope component gains [W] for output/diagnostics.
+=======
+/// Per-timestep envelope component gains (W) for output/diagnostics.
+>>>>>>> 57845180 (docs: fix broken API doc links and check the docs build in the block)
 ///
 /// Values are signed: positive = heat flowing INTO the indoor zone — with two
 /// documented exceptions: `opaque_solar_lwr_w`, `opaque_solar_w`, and
@@ -923,7 +926,7 @@ pub struct WindowSolarTotals {
 /// drivers, OCHRE "Ext. Solar/LWR Gain"), and `interior_lwr_w` is a gross
 /// exchange activity metric. None of those are net zone loads; see their
 /// field docs.
-/// Populated after each `resolve()` call; read via [`ThermalSolver::component_gains`].
+/// Populated after each `resolve()` call; read via [`crate::ThermalSolver::component_gains`].
 #[derive(Debug, Clone, Default)]
 pub struct EnvelopeComponentGains {
     /// Total window solar reaching the zone [W]: the through-glass (transmitted)
@@ -952,7 +955,7 @@ pub struct EnvelopeComponentGains {
     /// 26.1 — "Inside Heat Balance": Interior Convection) see
     /// `wall_heat_gain_w`, `floor_heat_gain_w`, and `roof_heat_gain_w`.
     pub opaque_solar_lwr_w: f64,
-    /// Total interior longwave radiation exchange activity [W].
+    /// Total interior longwave radiation exchange activity (W).
     /// Computed as Σ|q_i|/2 over all surfaces in the zone, where q_i is the
     /// net LWR flux into surface i. By energy conservation, Σ q_i = 0, so the
     /// signed sum is always zero and useless. The absolute-value sum divided
@@ -961,77 +964,77 @@ pub struct EnvelopeComponentGains {
     /// For StarMesh mode this is always 0 (radiation is baked into the A-matrix
     /// at construction time and no per-timestep injection occurs).
     pub interior_lwr_w: f64,
-    /// Infiltration sensible heat gain (indoor zone only) [W].
+    /// Infiltration sensible heat gain (indoor zone only) (W).
     /// After unbalanced ventilation scaling: `raw_inf × nat_flow_ratio`.
     pub infiltration_w: f64,
-    /// Forced mechanical ventilation sensible heat gain (indoor zone only) [W].
+    /// Forced mechanical ventilation sensible heat gain (indoor zone only) (W).
     /// For unbalanced systems this is the forced component of the quadrature
     /// combination `sqrt(nat² + forced²)`. OCHRE may report this differently.
     pub ventilation_w: f64,
-    /// Natural ventilation sensible heat gain [W].
+    /// Natural ventilation sensible heat gain (W).
     pub natural_ventilation_w: f64,
-    /// Combined infiltration + ventilation sensible gain [W].
+    /// Combined infiltration + ventilation sensible gain (W).
     /// `= ρ × sqrt(nat² + forced²) × cp × ΔT` for unbalanced systems.
     /// Compare this to OCHRE's sum of infiltration + forced + natural ventilation.
     pub combined_airflow_sensible_w: f64,
-    /// Total convective sensible gains from all equipment ports (HVAC + appliances) [W].
+    /// Total convective sensible gains from all equipment ports (HVAC + appliances) (W).
     /// Only the convective portion that goes directly to zone air.
     pub port_convective_w: f64,
-    /// Total radiant sensible gains from equipment ports distributed to surfaces [W].
+    /// Total radiant sensible gains from equipment ports distributed to surfaces (W).
     /// Distributed via E+ TMULT method; some reaches zone air via radiation_frac split.
     pub port_radiant_w: f64,
-    /// Total short-wave (visible light) gains from equipment ports [W],
+    /// Total short-wave (visible light) gains from equipment ports (W),
     /// absorbed by the surfaces as transmitted diffuse solar is.
     pub port_shortwave_w: f64,
-    /// HVAC heating contribution to the indoor zone [W].
+    /// HVAC heating contribution to the indoor zone (W).
     pub hvac_heating_w: f64,
-    /// HVAC cooling contribution to the indoor zone [W].
+    /// HVAC cooling contribution to the indoor zone (W).
     pub hvac_cooling_w: f64,
-    /// Non-HVAC internal gains (appliances, lighting, occupancy) [W].
+    /// Non-HVAC internal gains (appliances, lighting, occupancy) (W).
     /// Equals the `InternalGain` category total for the indoor zone:
     /// convective, long-wave radiant and short-wave.
     pub internal_gain_w: f64,
-    /// Equipment jacket/shell losses summed across all zone accumulators [W].
+    /// Equipment jacket/shell losses summed across all zone accumulators (W).
     /// Water heaters and boilers in unconditioned zones deposit losses into that
     /// zone's accumulator; this field captures all zones (water heater skin loss,
     /// boiler shell loss, etc.).
     pub jacket_loss_w: f64,
-    /// Per-zone jacket loss breakdown [W] — zone ID → sensible watts.
+    /// Per-zone jacket loss breakdown (W) -- zone ID → sensible watts.
     /// Gated by `observe` feature; complements the aggregate `jacket_loss_w`
     /// for verifying equipment in unconditioned zones produces expected output.
     #[cfg(feature = "observe")]
     pub jacket_loss_by_zone: Vec<(ZoneId, f64)>,
-    /// Duct distribution losses [W] -- heat deposited into the duct zone, removed from delivered capacity.
+    /// Duct distribution losses (W) -- heat deposited into the duct zone, removed from delivered capacity.
     pub duct_loss_w: f64,
-    /// Dehumidifier sensible heat gain to the indoor zone [W].
+    /// Dehumidifier sensible heat gain to the indoor zone (W).
     /// Standalone dehumidifiers are zone HVAC equipment (EnergyPlus Eng. Ref.,
     /// Zone Equipment and Zone Forced Air Units), not passive internal gains.
     pub hvac_dehumidification_w: f64,
-    /// Per-zone infiltration sensible heat gains [W].
+    /// Per-zone infiltration sensible heat gains (W).
     /// `infiltration_w` is the indoor-zone alias for backward compatibility.
     pub infiltration_by_zone: Vec<(ZoneId, f64)>,
-    /// Per-zone interior LWR total exchange activity [W] (Σ|q_i|/2 per zone).
-    /// See [`interior_lwr_w`] for the physical meaning.
+    /// Per-zone interior LWR total exchange activity (W) (Σ|q_i|/2 per zone).
+    /// See [`Self::interior_lwr_w`] for the physical meaning.
     pub interior_lwr_by_zone: Vec<(ZoneId, f64)>,
     /// Net sensible heat delivered from wall-boundary interior surfaces to
-    /// zone air [W] — the inside-face convection term (EnergyPlus ERM 26.1 —
+    /// zone air (W) -- the inside-face convection term (EnergyPlus ERM 26.1 --
     /// "Inside Heat Balance": Interior Convection; TARP per Walton 1983),
     /// i.e. the time-lagged result of exterior solar, LWR, and ΔT conduction
     /// drivers (OCHRE's "Wall Heat Gain - Indoor").
     pub wall_heat_gain_w: f64,
     /// Net sensible heat delivered from floor-boundary interior surfaces to
-    /// zone air [W] (OCHRE's "Floor Heat Gain - Indoor").
+    /// zone air (W) (OCHRE's "Floor Heat Gain - Indoor").
     pub floor_heat_gain_w: f64,
     /// Net sensible heat delivered from roof-boundary interior surfaces to
-    /// zone air [W] (OCHRE's "Roof Heat Gain - Indoor").
+    /// zone air (W) (OCHRE's "Roof Heat Gain - Indoor").
     pub roof_heat_gain_w: f64,
     /// Net sensible heat delivered from window interior surfaces to zone
-    /// air [W] (convection; transmitted solar is reported separately as
+    /// air (W) (convection; transmitted solar is reported separately as
     /// `window_solar_w`).
     pub window_heat_gain_w: f64,
-    /// Net sensible heat delivered from internal-mass surfaces to zone air [W].
+    /// Net sensible heat delivered from internal-mass surfaces to zone air (W).
     pub internal_mass_heat_gain_w: f64,
-    /// Zone air heat-balance residual [W] for the indoor zone, the
+    /// Zone air heat-balance residual (W) for the indoor zone, the
     /// difference between stored energy and every accounted term:
     /// `C_zone·ΔT/dt − u[zone] injections − matrix exchange − airflow
     /// terms`. The matrix exchange is computed from
@@ -1044,7 +1047,7 @@ pub struct EnvelopeComponentGains {
     /// sustained values beyond that envelope indicate mis-wired gains —
     /// the I-02 defect class. Diagnostic only.
     pub zone_air_balance_residual_w: f64,
-    /// Absorbed opaque exterior solar [W] — the full skin-absorbed flux
+    /// Absorbed opaque exterior solar (W) -- the full skin-absorbed flux
     /// `α·A·POA`, summed over both application paths. The non-iterative
     /// path (rad_frac == 0) injects the full absorbed flux directly
     /// (solar.rs); the iterative path (rad_frac > 0) accumulates its
@@ -1054,7 +1057,7 @@ pub struct EnvelopeComponentGains {
     /// per-surface split see `ExtSurfaceDiag::solar_absorbed_w`
     /// (`observe_detailed`).
     pub opaque_solar_w: f64,
-    /// Net exterior longwave radiation exchange at the opaque skins [W],
+    /// Net exterior longwave radiation exchange at the opaque skins (W),
     /// summed over both application paths: positive when the environment
     /// (air + sky) radiates more into the surface than the surface emits —
     /// typically negative on clear nights. OCHRE parity: "{boundary} Ext.
@@ -1063,7 +1066,7 @@ pub struct EnvelopeComponentGains {
     /// zone. For the per-surface split see `ExtSurfaceDiag`
     /// (`observe_detailed` feature).
     pub exterior_lwr_w: f64,
-    /// Window exterior LWR beyond U-factor assumption [W].
+    /// Window exterior LWR beyond U-factor assumption (W).
     /// When T_sky < T_air (clear night), windows radiate more to sky than the
     /// U-factor (which assumes T_sky ≈ T_air) accounts for. This field tracks
     /// that additional cooling. Negative = cooling. Zero when T_sky = T_air.

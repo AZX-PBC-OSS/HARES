@@ -63,7 +63,7 @@ pub struct DefrostConfig {
         rename = "defrost_capacity_reduction_factor"
     )]
     pub capacity_reduction_factor: f64,
-    /// Additional fixed defrost power draw [W] (legacy/OCHRE field).
+    /// Additional fixed defrost power draw (W) (legacy/OCHRE field).
     #[serde(default)]
     pub defrost_power_w: f64,
     /// Control mode: OnDemand (humidity-based) or Timed.
@@ -95,7 +95,7 @@ pub struct DefrostConfig {
     /// Temperature Curve Name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defrost_eir_coeffs: Option<[f64; 6]>,
-    /// For Resistive strategy: rated defrost heater capacity [W].
+    /// For Resistive strategy: rated defrost heater capacity (W).
     /// Must be > 0 when `strategy == Resistive`; zero is valid for ReverseCycle
     /// (the default) since reverse-cycle defrost uses the compressor, not a
     /// dedicated heater.
@@ -238,11 +238,11 @@ pub struct DefrostCycleTracker {
     /// Accumulated frost proxy: incremented by `dt * time_fraction` each step when
     /// the compressor is running and conditions favor frost. Reset on Defrosting entry.
     pub accumulated_frost_s: f64,
-    /// Elapsed time in the current defrost cycle [s]. Reset on Accumulating entry.
+    /// Elapsed time in the current defrost cycle (s). Reset on Accumulating entry.
     pub defrost_elapsed_s: f64,
-    /// Target defrost cycle duration [s] (default 210 s = 3.5 min).
+    /// Target defrost cycle duration (s) (default 210 s = 3.5 min).
     pub cycle_duration_s: f64,
-    /// Hard cap on defrost cycle duration [s] (default 600 s = 10 min).
+    /// Hard cap on defrost cycle duration (s) (default 600 s = 10 min).
     pub max_defrost_duration_s: f64,
     /// EWMA of defrost `time_fraction` used for inter-defrost interval calculation.
     /// Smooths step-to-step fluctuations when OAT oscillates around the defrost
@@ -267,7 +267,7 @@ impl DefrostCycleTracker {
 
     /// Advance the FSM by one timestep.
     ///
-    /// - `dt_s` — timestep duration [s]
+    /// - `dt_s` -- timestep duration (s)
     /// - `time_fraction` — continuous defrost time fraction from `evaluate_defrost`
     ///   (only meaningful when `conditions_favor_frost` is true)
     /// - `conditions_favor_frost` — true when OAT < max_oat_defrost_c and the
@@ -433,14 +433,14 @@ pub struct DefrostInputs {
     pub outdoor_db_c: f64,
     /// Outdoor humidity ratio [kg/kg].
     pub outdoor_humidity_ratio: f64,
-    /// Outdoor air pressure [Pa].
+    /// Outdoor air pressure (Pa).
     pub pressure_pa: f64,
     /// Indoor inlet wet-bulb temperature [°C]; used for the optional
     /// biquadratic EIR curve in Timed + ReverseCycle mode.
     pub inlet_wb_c: f64,
-    /// Heat pump rated (maximum) heating capacity [W].
+    /// Heat pump rated (maximum) heating capacity (W).
     pub rated_capacity_w: f64,
-    /// Current operating heating capacity [W].
+    /// Current operating heating capacity (W).
     pub current_capacity_w: f64,
     /// Compressor runtime fraction [0..1]; scales timed defrost power
     /// proportionally with compressor operation.

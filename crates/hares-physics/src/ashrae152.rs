@@ -220,7 +220,7 @@ pub struct DuctDseInput {
     pub fan_flow_low_m3_s: Option<f64>,
     /// `true` for a heat-pump heating system (affects equipment factor).
     pub is_heat_pump: bool,
-    /// Burial depth of duct below slab grade [m].
+    /// Burial depth of duct below slab grade (m).
     ///
     /// Only relevant for [`Ashrae152ZoneType::UnderSlab`]. When `Some` and
     /// positive, enables a bounded exponential interpolation between the

@@ -57,7 +57,7 @@ pub struct ThermalSnapshot {
     pub latent_recovery_efficiency: f64,
     /// Consecutive ideal-capacity solve failures per zone, sorted by zone.
     pub ideal_capacity_failure_counts: Vec<(ZoneId, usize)>,
-    /// Last successfully solved ideal capacity [W] per zone, sorted by zone:
+    /// Last successfully solved ideal capacity (W) per zone, sorted by zone:
     /// the degraded fallback once failures reach the threshold.
     pub last_good_capacity_w: Vec<(ZoneId, f64)>,
     /// Per-zone non-HVAC share of the zone sensible input column [W] from

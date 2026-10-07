@@ -107,9 +107,9 @@ impl DemandWindow {
 /// copied, so passing by value adds no allocation.
 #[derive(Clone, Copy, Debug)]
 pub struct BillingStep {
-    /// Net metered power this step [kW] (export negative).
+    /// Net metered power this step (kW) (export negative).
     pub net_power_kw: f64,
-    /// Step length [s].
+    /// Step length (s).
     pub dt_seconds: f64,
     /// Import price this step [USD/kWh].
     pub import_price: f64,
@@ -119,7 +119,7 @@ pub struct BillingStep {
     pub period_idx: u16,
     /// Demand-window TOU period index.
     pub demand_period_idx: u16,
-    /// EV import energy this step [kWh], tracked separately for CPP events.
+    /// EV import energy this step (kWh), tracked separately for CPP events.
     pub ev_import_kwh: f64,
 }
 

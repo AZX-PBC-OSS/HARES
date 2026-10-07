@@ -8,7 +8,7 @@ use std::fmt;
 use chrono::{DateTime, Duration, FixedOffset};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Offset between Kelvin and Celsius [K].
+/// Offset between Kelvin and Celsius (K).
 pub const KELVIN_OFFSET: f64 = 273.15;
 
 /// Default ground albedo for bare ground (EnergyPlus default: 0.2).
@@ -45,20 +45,20 @@ pub struct PriceSignal {
 /// `pv_generation_kw` when `actual_pv_kw` is zero.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ElectricalSummary {
-    /// Total PV generation [kW], positive = producing.
+    /// Total PV generation (kW), positive = producing.
     /// In forecast-driven modes this may carry forecast values;
     /// in normal simulation it holds the prior-step actual output.
     pub pv_generation_kw: f64,
-    /// Total non-dispatchable load [kW], positive = consuming.
+    /// Total non-dispatchable load (kW), positive = consuming.
     /// Excludes battery and EV (those are dispatchable).
     pub base_load_kw: f64,
-    /// Net grid power [kW], positive = importing, negative = exporting.
+    /// Net grid power (kW), positive = importing, negative = exporting.
     pub net_grid_kw: f64,
-    /// Total battery power [kW], positive = charging, negative = discharging.
+    /// Total battery power (kW), positive = charging, negative = discharging.
     pub battery_power_kw: f64,
-    /// Total EV power [kW], positive = charging.
+    /// Total EV power (kW), positive = charging.
     pub ev_power_kw: f64,
-    /// Actual (observed) PV generation from equipment step [kW], positive = producing.
+    /// Actual (observed) PV generation from equipment step (kW), positive = producing.
     ///
     /// Always reflects real equipment output; never carries forecast values.
     /// Set to 0.0 when no PV equipment is present or when actual data is
@@ -147,7 +147,7 @@ pub struct SurfaceIrradiance {
     pub direct_w_m2: f64,
     pub diffuse_w_m2: f64,
     pub reflected_w_m2: f64,
-    /// Angle of incidence between beam radiation and the surface normal [rad].
+    /// Angle of incidence between beam radiation and the surface normal (rad).
     ///
     /// Used by the thermal solver to apply window IAM corrections.
     /// Defaults to 0.0 (normal incidence) when not set or deserialized from
@@ -194,7 +194,7 @@ pub struct WeatherState {
     /// Diffuse horizontal irradiance (W/m2) from weather station / TMY data.
     #[serde(default)]
     pub dhi_w_m2: f64,
-    /// Solar altitude angle above the horizon [degrees].
+    /// Solar altitude angle above the horizon (degrees).
     /// Positive when sun is up, negative when below horizon.
     /// Computed from `solar_position()` each timestep.
     #[serde(default)]
@@ -208,7 +208,7 @@ pub struct WeatherState {
     /// Defaults to 10.0 (US annual average per ASHRAE/EnergyPlus) when environment data is unavailable.
     #[serde(default = "default_mains_temp_c")]
     pub mains_temp_c: f64,
-    /// Liquid precipitation depth for this timestep [m].
+    /// Liquid precipitation depth for this timestep (m).
     /// Parsed from EPW field 33 (Liquid Precipitation Depth).
     /// Zero when data is unavailable.
     #[serde(default)]
@@ -372,10 +372,10 @@ impl WeatherState {
 /// during outages.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GridState {
-    /// Utility service voltage [pu]. Exactly `0.0` = utility outage.
+    /// Utility service voltage (pu). Exactly `0.0` = utility outage.
     pub voltage_pu: f64,
     pub frequency_hz: f64,
-    /// Island-formed bus voltage [pu] during a utility outage.
+    /// Island-formed bus voltage (pu) during a utility outage.
     ///
     /// `Some(v)` when an on-site island-capable source (battery with usable
     /// charge, generator, discharging V2G/V2L EV) holds the home bus at `v`
@@ -402,7 +402,7 @@ impl GridState {
         self.voltage_pu == 0.0
     }
 
-    /// Voltage at the home's bus [pu]: the utility voltage when the utility
+    /// Voltage at the home's bus (pu): the utility voltage when the utility
     /// is up, or the island-formed bus voltage (if any) during an outage.
     /// `0.0` means the bus is de-energized.
     #[inline]

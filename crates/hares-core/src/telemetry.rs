@@ -20,15 +20,15 @@ pub struct DwellingTelemetry {
     pub equipment_power_kw: Vec<f64>,
     pub setpoint_heat_c: Vec<f64>,
     pub setpoint_cool_c: Vec<f64>,
-    /// Per-zone energy balance residual [W] from the zone-air first-law check.
+    /// Per-zone energy balance residual (W) from the zone-air first-law check.
     /// One entry per zone in the same order as `zone_names`.
     pub energy_balance_residuals: Vec<f64>,
     pub total_power_kw: f64,
     pub reactive_power_kvar: f64,
-    /// Load [kW] the island sources failed to cover during islanded operation
+    /// Load (kW) the island sources failed to cover during islanded operation
     /// (would-be phantom grid import). Always 0.0 when not islanded.
     pub island_unserved_kw: f64,
-    /// Surplus on-site generation [kW] the island could not absorb during
+    /// Surplus on-site generation (kW) the island could not absorb during
     /// islanded operation (would-be phantom grid export). Always 0.0 when not
     /// islanded.
     pub island_excess_kw: f64,

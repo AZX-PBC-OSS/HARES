@@ -325,15 +325,15 @@ pub struct MoistureInvariantCapture {
 #[derive(Debug, Clone)]
 pub struct MoistureZoneInvariant {
     pub zone_id: ZoneId,
-    /// Sum of independently tracked moisture sources [kg].
+    /// Sum of independently tracked moisture sources (kg).
     pub expected_sources_kg: f64,
-    /// Sum of independently tracked moisture sinks [kg].
+    /// Sum of independently tracked moisture sinks (kg).
     pub expected_sinks_kg: f64,
-    /// Solver's actual moisture mass change in the zone air (dW · ρ · V) [kg].
+    /// Solver's actual moisture mass change in the zone air (dW · ρ · V) (kg).
     pub solver_delta_kg: f64,
-    /// Net material sorption/desorption: expected_sources_kg − expected_sinks_kg − solver_delta_kg [kg].
+    /// Net material sorption/desorption: expected_sources_kg − expected_sinks_kg − solver_delta_kg (kg).
     pub sorption_residual_kg: f64,
     /// Mass of moisture removed from (positive) or added to (negative) the zone
-    /// air by humidity-ratio clamp enforcement (condensation / frost deposition) [kg].
+    /// air by humidity-ratio clamp enforcement (condensation / frost deposition) (kg).
     pub condensation_kg: f64,
 }

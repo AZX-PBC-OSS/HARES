@@ -3,7 +3,7 @@
 //! Actors are decision-makers (occupants, thermostats, grid operators, DR programs)
 //! that push commands to equipment via control channels. Actors never directly
 //! mutate environment or equipment state--they only emit [`DispatchRequest`]s
-//! that flow through the [`ControlDispatcher`].
+//! that flow through the `ControlDispatcher`.
 //!
 //! # Key Principles
 //!
@@ -214,7 +214,7 @@ pub trait Actor: Send + Sync + 'static {
     /// # Arguments
     ///
     /// * `pv_kw` - Actual PV generation from current-step Independent equipment
-    ///   ports [kW], positive = producing.
+    ///   ports (kW), positive = producing.
     /// * `env` - Current environment state.
     /// * `out` - Pre-allocated output buffer to append revised dispatch requests to.
     fn adjust_for_pv(

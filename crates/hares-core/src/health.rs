@@ -155,9 +155,9 @@ pub struct WarmupResiduals {
     pub max_temperature_c: f64,
     /// |Δ daily min temperature| of [`Self::worst_zone`] [°C].
     pub min_temperature_c: f64,
-    /// Relative change of the aggregate daily peak heating [fraction].
+    /// Relative change of the aggregate daily peak heating (fraction).
     pub heating_load: f64,
-    /// Relative change of the aggregate daily peak cooling [fraction].
+    /// Relative change of the aggregate daily peak cooling (fraction).
     pub cooling_load: f64,
 }
 

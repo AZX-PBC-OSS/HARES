@@ -244,7 +244,7 @@ impl ZipLoad {
         }
     }
 
-    /// Apply full ZIP voltage-dependent scaling to a real power [kW].
+    /// Apply full ZIP voltage-dependent scaling to a real power (kW).
     ///
     /// Returns `(real_kw, reactive_kvar)`.
     /// Returns `(0.0, 0.0)` when `p_kw` is zero or voltage is zero (grid
@@ -271,7 +271,7 @@ impl ZipLoad {
         (real_kw, reactive_kvar)
     }
 
-    /// Reactive power [kVAR] from an already-computed real power [kW]
+    /// Reactive power (kVAR) from an already-computed real power (kW)
     /// (Rule R1: Q-only, real power is never touched).
     ///
     /// `Q = p_kw * tan(acos(pf)) * (zq * V² + iq * V + pq)` with

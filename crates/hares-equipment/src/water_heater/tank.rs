@@ -47,11 +47,11 @@ pub struct DrawResult {
     /// temperatures.  For draws fully contained within the top node, this
     /// collapses to the top-node temperature.
     pub outlet_temp_c: f64,
-    /// Thermal energy removed from the tank by the draw [J].
+    /// Thermal energy removed from the tank by the draw (J).
     pub energy_out_j: f64,
-    /// Thermal energy added to the tank by incoming mains water [J].
+    /// Thermal energy added to the tank by incoming mains water (J).
     pub energy_in_j: f64,
-    /// Unmet load power [W]: heat that could not be delivered because outlet
+    /// Unmet load power (W): heat that could not be delivered because outlet
     /// temperature was below the fixture setpoint. Zero when outlet >= setpoint.
     ///
     /// OCHRE Water.py:363: `h_unmet_load = max(draw_tempered / 60 * water_c *
@@ -237,7 +237,7 @@ impl StratifiedTank {
         &self.ua_per_node
     }
 
-    /// Total skin (jacket) heat loss from the most recent conduction step [W].
+    /// Total skin (jacket) heat loss from the most recent conduction step (W).
     /// Positive means heat flowing OUT of the tank into the ambient zone.
     pub fn skin_loss_w(&self) -> f64 {
         self.last_skin_loss_w
@@ -277,7 +277,7 @@ impl StratifiedTank {
         &self.node_volumes_m3
     }
 
-    /// Compute the ideal heating power [W] for a specific element node.
+    /// Compute the ideal heating power (W) for a specific element node.
     ///
     /// Predicts what the node temperature would be after one timestep with
     /// heater OFF (standby loss only), then returns the power needed to bring

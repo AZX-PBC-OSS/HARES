@@ -2,7 +2,7 @@
 //!
 //! Actors register for named execution phases with an optional priority within
 //! each phase. The scheduler builds a deterministic, sorted plan each time
-//! registrations change, and the [`Dwelling`] drives actor execution from that
+//! registrations change, and the [`crate::Dwelling`] drives actor execution from that
 //! plan at each timestep.
 //!
 //! # Phases (execution order)
@@ -79,7 +79,7 @@ pub struct PlanEntry {
 /// # Design
 ///
 /// 1. Actors register with a phase and a priority.
-/// 2. Calling [`build`] produces a sorted [`Vec<PlanEntry>`] ordered by
+/// 2. Calling [`Self::build`] produces a sorted [`Vec<PlanEntry>`] ordered by
 ///    `(phase.ordinal, priority, registration_index)`.
 /// 3. The plan is consumed once per timestep and rebuilt when registrations
 ///    change (actor added/removed).

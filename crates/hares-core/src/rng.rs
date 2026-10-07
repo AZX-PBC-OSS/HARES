@@ -17,7 +17,7 @@ use rand_chacha::ChaCha8Rng;
 /// per-timestep advancement, etc.).
 pub const RNG_STREAM_DWELLING: u64 = 0;
 /// First stream of the range reserved for built-in EV driver actors (see
-/// [`ev_driver_stream`]).
+/// `ev_driver_stream`).
 pub const RNG_STREAM_EV_DRIVER_BASE: u64 = 1;
 // Event-based load equipment (EventBasedLoad, WetAppliance) draws from
 // `hares_types::rng::RngStream::event_load`: a stream keyed by the load's

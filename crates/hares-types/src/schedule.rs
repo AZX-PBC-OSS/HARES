@@ -897,7 +897,7 @@ pub enum SeasonFilter {
     Summer,
     Winter,
     /// Shoulder / intermediate season (e.g. spring and fall). When no shoulder
-    /// month range is configured, this behaves identically to [`All`].
+    /// month range is configured, this behaves identically to [`SeasonFilter::All`].
     Shoulder,
 }
 
@@ -1068,7 +1068,7 @@ impl SeasonalSplit {
 
     /// Returns `true` if the given 1-indexed month is in the shoulder range.
     ///
-    /// Handles wrapping the same way as [`is_summer`]. Returns `false` if
+    /// Handles wrapping the same way as [`Self::is_summer`]. Returns `false` if
     /// shoulder is not configured.
     pub fn is_shoulder(&self, month: u8) -> bool {
         debug_assert!((1..=12).contains(&month), "month out of range: {month}");

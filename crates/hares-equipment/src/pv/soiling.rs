@@ -43,11 +43,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SoilingConfig {
-    /// Rainfall accumulation window [s].
+    /// Rainfall accumulation window (s).
     /// Rain within this rolling window is summed to detect cleaning events.
     /// Kimber default: 86_400 (24 hours).
     pub rain_accum_period_s: f64,
-    /// Minimum accumulated rainfall within the window to trigger cleaning [m].
+    /// Minimum accumulated rainfall within the window to trigger cleaning (m).
     /// Kimber default: 0.006 (6 mm).
     pub cleaning_threshold_m: f64,
     /// Fractional energy loss rate during dry periods [1/s].
@@ -58,7 +58,7 @@ pub struct SoilingConfig {
     ///   Desert SW:                  0.0030/day
     ///   Northern CA suburban:       0.0010/day
     pub soiling_loss_rate_per_s: f64,
-    /// Grace period after a cleaning event [s].
+    /// Grace period after a cleaning event (s).
     /// While ground remains damp, wind-blown dust is suppressed and soiling
     /// rate is effectively zero. Kimber default: 1_209_600 (14 days).
     pub grace_period_s: f64,

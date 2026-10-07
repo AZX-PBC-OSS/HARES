@@ -275,7 +275,7 @@ pub struct BoundaryInput {
     /// Populated from the building's boundary emissivity data by
     /// `building_to_boundary_inputs` in `hares-core`.
     pub interior_emissivity: f64,
-    /// Centroid depth of the boundary below grade [m].
+    /// Centroid depth of the boundary below grade (m).
     ///
     /// For ground-contacting boundaries (`ExteriorTarget::Ground`), this is the
     /// depth at which the Kusuda-Achenbach ground temperature is evaluated.
@@ -360,7 +360,7 @@ pub struct BoundaryDiagnostic {
     pub inner_node: Option<NodeId>,
     /// Interior-facing longwave emissivity [-] for star-mesh radiation.
     pub interior_emissivity: f64,
-    /// Foundation depth below grade for ground-contacting boundaries [m].
+    /// Foundation depth below grade for ground-contacting boundaries (m).
     ///
     /// Copied from `BoundaryInput::foundation_depth_m`. 0.0 for above-grade
     /// boundaries. Used by solver_builder to attach depth-aware
@@ -499,7 +499,7 @@ pub enum BoundaryRcError {
         "zone {zone_idx} has a temperature capacitance multiplier of {multiplier}; it must be finite and positive"
     )]
     CapacitanceMultiplier { zone_idx: usize, multiplier: f64 },
-    /// Non-positive site atmospheric pressure [Pa] supplied to zone capacitance derivation.
+    /// Non-positive site atmospheric pressure (Pa) supplied to zone capacitance derivation.
     /// Site pressure must be physically positive; zero or negative indicates
     /// missing or corrupted weather/configuration data.
     #[error("invalid site_pressure_pa: expected > 0, got {value}")]
@@ -515,7 +515,7 @@ pub enum BoundaryRcError {
 /// Zone air capacitance: C = ρ × cp × V × temperature_capacitance_multiplier, where ρ is computed
 /// from the ideal gas law: ρ = p / (R_da × T_ref).
 ///
-/// - `site_pressure_pa`: ISA standard atmospheric pressure at site elevation [Pa].
+/// - `site_pressure_pa`: ISA standard atmospheric pressure at site elevation (Pa).
 ///   Use [`hares_physics::air_properties::standard_pressure_pa`] to compute from
 ///   elevation, or [`hares_physics::constants::SEA_LEVEL_PRESSURE_PA`] (101 325 Pa)
 ///   when elevation is unknown (backward-compatible with the former sea-level constant).
@@ -1930,8 +1930,8 @@ pub fn parallel_path_conductivity(k_cavity_w_m_k: f64, framing_factor: Option<f6
 /// `U_stud = 1 / r_stud`, `U_cavity = 1 / r_cavity`.
 ///
 /// # Parameters
-/// - `stud_width_m`: width of a single stud [m] (e.g. 0.0381 m = 1.5 in)
-/// - `stud_spacing_m`: on-center stud spacing [m] (e.g. 0.4064 m = 16 in)
+/// - `stud_width_m`: width of a single stud (m) (e.g. 0.0381 m = 1.5 in)
+/// - `stud_spacing_m`: on-center stud spacing (m) (e.g. 0.4064 m = 16 in)
 /// - `r_cavity_m2_k_w`: total R-value of the insulated cavity assembly (all
 ///   layers excluding the stud thermal bridge) [m²·K/W]
 /// - `r_stud_m2_k_w`: R-value through the stud cross-section [m²·K/W].

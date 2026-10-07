@@ -237,7 +237,7 @@ impl FluidSolver {
         payload
     }
 
-    /// Restores solver state from a checkpoint payload produced by [`snapshot_payload`].
+    /// Restores solver state from a checkpoint payload produced by [`Self::snapshot_payload`].
     /// Checks that `payload` is a well-formed checkpoint payload: whole
     /// `(loop_id, supply, return)` triples with integral loop ids in the
     /// `LoopId` range.

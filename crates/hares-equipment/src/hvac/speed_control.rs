@@ -26,7 +26,7 @@ pub enum SpeedControlMode {
 /// Startup capacity ramp configuration (Winkler 2011 exponential model).
 ///
 /// The ramp multiplier follows:
-///   t_full = 20.0 * c_d + 0.4  [minutes]
+///   t_full = 20.0 * c_d + 0.4  (minutes)
 ///   mult = clamp(0, 1, -1.025 * exp(-3.79936 * t / t_full) + 1.025)
 ///
 /// When `c_d == 0.0` the ramp is bypassed and the multiplier is always 1.0.
@@ -40,7 +40,7 @@ pub enum SpeedControlMode {
 pub struct StartupConfig {
     /// Winkler (2011) startup capacity degradation coefficient (Cd). 0.0 disables the ramp entirely.
     pub c_d: f64,
-    /// Accumulated time [minutes] since the compressor last started.
+    /// Accumulated time (minutes) since the compressor last started.
     /// Reset to `0.0` on the first on-step after an off-step; set to
     /// `0.5 * dt_min` immediately after the reset, then incremented by
     /// `dt_min` on subsequent on-steps. Preserved across off-steps.

@@ -9,7 +9,7 @@ use crate::units::*;
 use hares_types::HaresError;
 use uom::si::length::meter;
 
-/// ISA standard pressure at altitude [Pa].
+/// ISA standard pressure at altitude (Pa).
 pub fn standard_pressure_pa(elevation_m: f64) -> f64 {
     SEA_LEVEL_PRESSURE_PA * (1.0 - ISA_LAPSE_COEFFICIENT * elevation_m).powf(ISA_PRESSURE_EXPONENT)
 }

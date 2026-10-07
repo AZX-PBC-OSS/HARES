@@ -214,7 +214,7 @@ impl EnvironmentManager {
         )
     }
 
-    /// Like [`new`] but with optional per-column weather resampling overrides.
+    /// Like [`Self::new`] but with optional per-column weather resampling overrides.
     ///
     /// Pass `Some(ResampleOverrides::ochre_compat())` for OCHRE parity testing.
     pub fn new_with_resample(
@@ -699,7 +699,7 @@ impl EnvironmentManager {
 
     /// Feed zone-state feedback into the internal zone buffer.
     ///
-    /// Call this before [`update_in_place`] when the caller holds a borrow on
+    /// Call this before [`Self::update_in_place`] when the caller holds a borrow on
     /// the zone slice that would conflict with a simultaneous `&mut self`. This
     /// separates zone ingestion from the environment computation so the borrow
     /// checker can see two distinct phases.
@@ -713,7 +713,7 @@ impl EnvironmentManager {
     /// Update `state` in-place for the current clock step.
     ///
     /// Reads zone temperatures from the internal buffer (populated by a prior
-    /// [`feed_zones`] call or the previous [`update`] call). All heap-allocated
+    /// [`Self::feed_zones`] call or the previous [`Self::update`] call). All heap-allocated
     /// fields inside `state` are cleared and refilled, reusing existing
     /// capacity and eliminating per-step allocations on the hot path.
     pub fn update_in_place(

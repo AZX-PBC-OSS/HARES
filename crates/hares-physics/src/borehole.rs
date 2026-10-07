@@ -92,11 +92,11 @@ const DEFAULT_PIPE_CONDUCTIVITY_W_PER_M_K: f64 = 0.40;
 /// diffusivity in m²/day.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoreholeConfig {
-    /// Vertical borehole depth below ground surface [m].
+    /// Vertical borehole depth below ground surface (m).
     pub borehole_depth_m: f64,
-    /// Borehole radius (half the drilled diameter) [m].
+    /// Borehole radius (half the drilled diameter) (m).
     pub borehole_radius_m: f64,
-    /// Center-to-center spacing of the U-tube shanks [m].
+    /// Center-to-center spacing of the U-tube shanks (m).
     pub shank_spacing_m: f64,
     /// Number of boreholes in the field.
     pub number_of_boreholes: u32,
@@ -106,9 +106,9 @@ pub struct BoreholeConfig {
     pub soil_diffusivity_m2_per_day: f64,
     /// Grout (backfill) thermal conductivity [W/(m·K)].
     pub grout_conductivity_w_per_m_k: f64,
-    /// HDPE U-tube pipe outer radius [m].
+    /// HDPE U-tube pipe outer radius (m).
     pub pipe_outer_radius_m: f64,
-    /// HDPE U-tube pipe inner radius [m].
+    /// HDPE U-tube pipe inner radius (m).
     pub pipe_inner_radius_m: f64,
     /// HDPE pipe thermal conductivity [W/(m·K)].
     pub pipe_conductivity_w_per_m_k: f64,
@@ -469,8 +469,8 @@ fn g_function(tau: f64, rb_over_h: f64) -> f64 {
 /// # Interior mutability
 ///
 /// The thermal history is stored behind a [`RwLock`] so that
-/// [`compute_entering_water_temp`] can read the history via `&self` while
-/// [`record_heat_rate`] can update it. This is a legitimate use of interior
+/// [`Self::compute_entering_water_temp`] can read the history via `&self` while
+/// [`Self::record_heat_rate`] can update it. This is a legitimate use of interior
 /// mutability: the model presents an immutable façade to equipment code
 /// that calls `SourceTemperature::compute(&self, …)`, while accumulating
 /// state internally.
@@ -629,9 +629,9 @@ impl BoreholeGFunctionModel {
     ///
     /// # Parameters
     ///
-    /// * `heat_rate_w` — Net thermal power exchanged with the ground [W],
+    /// * `heat_rate_w` -- Net thermal power exchanged with the ground (W),
     ///   positive for injection (cooling), negative for extraction (heating).
-    /// * `dt_s` — Duration of the timestep [s].
+    /// * `dt_s` -- Duration of the timestep (s).
     pub fn record_heat_rate(&self, heat_rate_w: f64, dt_s: f64) {
         if dt_s <= 0.0 {
             return;

@@ -101,7 +101,7 @@ impl HumiditySolver {
         self.humidity_ratios.get(&zone_id).copied().unwrap_or(0.0)
     }
 
-    /// Return the per-step condensation mass [kg] for `zone_id`.
+    /// Return the per-step condensation mass (kg) for `zone_id`.
     ///
     /// Positive = condensation to surfaces (moisture removed from air).
     /// Negative = frost deposition/sublimation (moisture added to air when

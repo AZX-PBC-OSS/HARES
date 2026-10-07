@@ -84,7 +84,7 @@ pub struct EpwRecord {
     pub horizontal_infrared_w_m2: f64,
     pub sky_temp_c: f64,
     pub ground_temp_c: f64,
-    /// Liquid precipitation depth [m]. Zero when EPW field 33 is absent or invalid.
+    /// Liquid precipitation depth (m). Zero when EPW field 33 is absent or invalid.
     pub liquid_precip_m: f64,
 }
 

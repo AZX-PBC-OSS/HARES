@@ -191,7 +191,7 @@ impl ThermalSolver {
     /// Compute the cooling HVAC capacity (W) required to maintain `target_c` at
     /// design outdoor conditions with peak solar gains and internal gains.
     ///
-    /// Unlike [`autosize_capacity`] which zeros all solar inputs, this method
+    /// Unlike [`Self::autosize_capacity`] which zeros all solar inputs, this method
     /// computes clear-sky solar irradiance for July 21 solar noon at the given
     /// latitude/longitude and applies per-surface solar gains to the input vector
     /// before solving. This produces a higher (more realistic) cooling capacity
@@ -204,7 +204,7 @@ impl ThermalSolver {
     /// are also included per ACCA Manual J-2016 §7 (cooling load includes
     /// internal gains).
     ///
-    /// As with [`autosize_capacity`], the steady-state capacity is computed
+    /// As with [`Self::autosize_capacity`], the steady-state capacity is computed
     /// from the DC gain of the state-space model rather than a one-step back-
     /// solve from the cold-start state. This avoids inflating the apparent
     /// capacity due to transient wall-mass warm-up.
@@ -1247,7 +1247,7 @@ impl ThermalSolver {
     ///
     /// At each timestep the ideal HVAC input that drives zone temperature to
     /// `target_c` in one step is computed via
-    /// [`StateSpaceModel::solve_for_output_input`], applied to the input
+    /// [`crate::state_space::StateSpaceModel::solve_for_output_input`], applied to the input
     /// vector, and the solver is stepped. The peak HVAC input across the
     /// recording day timesteps is the sizing capacity.
     ///
@@ -1284,7 +1284,7 @@ impl ThermalSolver {
     /// ASHRAE cooling design-day diurnal dry-bulb profile and clear-sky solar.
     ///
     /// Outdoor temperature follows the ASHRAE 2017 HoF Ch.14 Table 1 profile
-    /// with a diurnal range of [`COOLING_DESIGN_DAY_RANGE_C`]. Clear-sky
+    /// with a diurnal range of `COOLING_DESIGN_DAY_RANGE_C`. Clear-sky
     /// solar irradiance is computed at hourly intervals using the ASHRAE
     /// clear-sky model and Perez (1990) anisotropic tilted irradiance model
     /// for each window and opaque surface.

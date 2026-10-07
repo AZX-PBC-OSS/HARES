@@ -239,7 +239,7 @@ pub fn take_panic_info() -> Option<PanicInfoCapture> {
 }
 
 /// Converts a panic payload (from [`panic::catch_unwind`]) to a string,
-/// enriched with file and line context from the thread-local [`PANIC_INFO`]
+/// enriched with file and line context from the thread-local `PANIC_INFO`
 /// cell when available.
 ///
 /// If the custom hook captured location metadata, the output has the form

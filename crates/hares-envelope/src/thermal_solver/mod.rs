@@ -350,31 +350,31 @@ pub struct ThermalSolver {
 /// port application sequence.
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneSensibleBreakdown {
-    /// u[zone_air] after outdoor temperature inputs [W].
+    /// `u[zone_air]` after outdoor temperature inputs (W).
     pub after_outdoor_w: f64,
-    /// u[zone_air] after window solar inputs [W].
+    /// `u[zone_air]` after window solar inputs (W).
     pub after_window_solar_w: f64,
-    /// u[zone_air] after exterior solar inputs [W].
+    /// `u[zone_air]` after exterior solar inputs (W).
     pub after_ext_solar_w: f64,
-    /// u[zone_air] after exterior LWR inputs [W].
+    /// `u[zone_air]` after exterior LWR inputs (W).
     pub after_ext_lwr_w: f64,
-    /// u[zone_air] after interior LWR inputs (ScriptF) [W].
+    /// `u[zone_air]` after interior LWR inputs (ScriptF) (W).
     pub after_int_lwr_w: f64,
-    /// Direct convective gain from equipment sensible ports [W].
+    /// Direct convective gain from equipment sensible ports (W).
     pub convective_direct_w: f64,
-    /// Radiant-to-air convective residual after TMULT surface distribution [W].
+    /// Radiant-to-air convective residual after TMULT surface distribution (W).
     ///
     /// Radiant gain × (1 − radiation_frac) for each surface, weighted
     /// by area×emissivity per the EnergyPlus TMULT method.
     pub radiant_to_air_residual_w: f64,
-    /// Radiant gain delivered to interior surface RC nodes [W].
+    /// Radiant gain delivered to interior surface RC nodes (W).
     ///
     /// Radiant gain × radiation_frac for each surface.
     pub radiant_to_surfaces_w: f64,
-    /// Short-wave gain reaching zone air [W]: the part each surface passes
+    /// Short-wave gain reaching zone air (W): the part each surface passes
     /// on to the air, plus any the surfaces do not absorb.
     pub shortwave_to_air_w: f64,
-    /// Short-wave gain delivered to interior surface RC nodes [W].
+    /// Short-wave gain delivered to interior surface RC nodes (W).
     pub shortwave_to_surfaces_w: f64,
 }
 
@@ -478,7 +478,7 @@ impl ThermalSolver {
         self.full_system_stored_energy_w
     }
 
-    /// Per-zone energy balance residuals from the most recent `resolve()` call [W].
+    /// Per-zone energy balance residuals from the most recent `resolve()` call (W).
     ///
     /// Returns a map from zone ID to the zone-air-only residual:
     /// `|C_zone × ΔT_zone / dt − q_port_sensible|` where q_port_sensible is the
@@ -498,11 +498,11 @@ impl ThermalSolver {
     ///
     /// Returns `(q_gains_slice, delta_e_storage_w, q_loss_w)` where:
     /// - `q_gains_slice`: external energy injections computed from B_c × u
-    ///   weighted by node capacitance [W],
+    ///   weighted by node capacitance (W),
     /// - `delta_e_storage_w`: full-system stored energy rate
-    ///   Σ C_i × (T_next_i − T_prev_i) / dt [W],
+    ///   Σ C_i × (T_next_i − T_prev_i) / dt (W),
     /// - `q_loss_w`: total envelope conduction to outdoor/ground derived from
-    ///   A_c × x weighted by capacitance [W], positive when heat leaves.
+    ///   A_c × x weighted by capacitance (W), positive when heat leaves.
     ///
     /// These are computed independently inside `integrate_inner` using the
     /// continuous-time state-space matrices, the input vector `u`, and the
@@ -605,7 +605,7 @@ impl ThermalSolver {
             .unwrap_or_default()
     }
 
-    /// Returns the per-component breakdown of u[zone_sensible] for debugging.
+    /// Returns the per-component breakdown of `u[zone_sensible]` for debugging.
     ///
     /// Applies both sensible and radiant port inputs in the same sequence as
     /// the production path (`build_input_vector`), so the reported zone-air

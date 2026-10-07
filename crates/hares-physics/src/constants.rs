@@ -142,7 +142,7 @@ pub fn cp_j_kg_k(fluid_type: FluidType) -> f64 {
 
 // --- Atmosphere ---
 
-/// Sea-level standard pressure [Pa]. ISA 1976 / ICAO Doc 7488.
+/// Sea-level standard pressure (Pa). ISA 1976 / ICAO Doc 7488.
 pub const SEA_LEVEL_PRESSURE_PA: f64 = 101_325.0;
 
 /// ISA temperature lapse coefficient [1/m].
@@ -312,14 +312,14 @@ pub const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8;
 /// *Fundamentals of Heat and Mass Transfer* 7th ed. §1.2.3 Eq.1.9.
 ///
 /// * `emissivity` — surface emissivity [-], typically 0.84 (glass) or 0.90 (opaque)
-/// * `t_kelvin`    — linearisation pivot temperature [K]; commonly 293.15 K (20°C)
+/// * `t_kelvin`    -- linearisation pivot temperature (K); commonly 293.15 K (20°C)
 #[must_use]
 #[inline]
 pub fn linearised_h_rad(emissivity: f64, t_kelvin: f64) -> f64 {
     4.0 * emissivity * STEFAN_BOLTZMANN * t_kelvin.powi(3)
 }
 
-/// Celsius to Kelvin offset [K].
+/// Celsius to Kelvin offset (K).
 /// ISA 1976 / NIST: T(K) = T(°C) + 273.15.
 pub const CELSIUS_TO_KELVIN: f64 = 273.15;
 

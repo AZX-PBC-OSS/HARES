@@ -50,17 +50,17 @@ pub struct VentilationConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
     pub flow_rate_m3_s: f64,
-    /// Total combined fan power [W] for exhaust + supply fans.
+    /// Total combined fan power (W) for exhaust + supply fans.
     /// For balanced systems (HRV/ERV) when supply/exhaust fan power is not
     /// provided separately, this is assumed to be the total and is split
     /// equally between supply and exhaust fans. For exhaust-only systems
     /// this is the single exhaust fan power.
     pub fan_power_w: Option<f64>,
-    /// Rated supply fan power [W] for balanced systems.
+    /// Rated supply fan power (W) for balanced systems.
     /// When both supply and exhaust fan power are provided, fan_power_w
     /// is ignored. For exhaust-only systems this should be None or 0.
     pub supply_fan_power_w: Option<f64>,
-    /// Rated exhaust fan power [W]. See supply_fan_power_w for interaction rules.
+    /// Rated exhaust fan power (W). See supply_fan_power_w for interaction rules.
     pub exhaust_fan_power_w: Option<f64>,
     pub sensible_effectiveness: Option<f64>,
     pub latent_effectiveness: Option<f64>,

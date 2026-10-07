@@ -22,7 +22,7 @@ pub enum ExtrapolationStrategy {
     /// Return NaN if any coordinate is out of bounds.
     NaN,
     /// Extrapolate linearly using the edge-segment slope.
-    /// Fractional positions outside [0,1] are allowed, producing weights <0 or >1.
+    /// Fractional positions outside `[0,1]` are allowed, producing weights <0 or >1.
     ///
     /// # Warning
     /// Linear extrapolation can produce physically nonsensical values (negative

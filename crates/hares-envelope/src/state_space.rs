@@ -126,7 +126,7 @@ pub struct ScalarSolveTarget {
 /// ([`StateSpaceModel::solve_for_output_input`],
 /// [`StateSpaceModel::solve_for_input`],
 /// [`StateSpaceModel::solve_for_scalar_input_identity_coupled`]), split into
-/// the step-shared prefix ([`StateSpaceModel::fill_shared_prefix`]) and the
+/// the step-shared prefix (`fill_shared_prefix`) and the
 /// per-call target-dependent tail (the `solve_*_tail` methods).
 ///
 /// Sized once to the state dimension and reused across calls so a hot loop
@@ -404,7 +404,7 @@ impl StateSpaceModel {
         })
     }
 
-    /// Zero-allocation step: x[k+1] = N·x[k] + B_eff·u[k].
+    /// Zero-allocation step: x[k+1] = N·`x[k]` + B_eff·`u[k]`.
     pub fn step_into(&self, x: &DVector<f64>, u: &DVector<f64>, buf: &mut DVector<f64>) {
         buf.gemv(1.0, &self.n_mat, x, 0.0); // buf = N·x
         buf.gemv(1.0, &self.b_eff, u, 1.0); // buf += B_eff·u
@@ -417,7 +417,7 @@ impl StateSpaceModel {
         buf
     }
 
-    /// Computes output from current state/input: y[k] = C * x[k] + D * u[k].
+    /// Computes output from current state/input: `y[k]` = C * `x[k]` + D * `u[k]`.
     pub fn output(&self, x: &DVector<f64>, u: &DVector<f64>) -> DVector<f64> {
         let mut y = DVector::zeros(self.c.nrows());
         let mut du = DVector::zeros(self.c.nrows());
@@ -467,10 +467,10 @@ impl StateSpaceModel {
     /// after one uncoupled step.
     ///
     /// Full computation: fills the step-shared prefix into `scratch` (see
-    /// [`Self::fill_shared_prefix`]) and runs the target-dependent tail. A
+    /// `fill_shared_prefix`) and runs the target-dependent tail. A
     /// caller solving several targets against one `(x, u)` pair can fill the
-    /// prefix once with [`Self::fill_shared_prefix`] and call
-    /// [`Self::solve_uncoupled_tail`] per target instead.
+    /// prefix once with `fill_shared_prefix` and call
+    /// `solve_uncoupled_tail` per target instead.
     pub fn solve_for_output_input(
         &self,
         x: &DVector<f64>,
@@ -527,10 +527,10 @@ impl StateSpaceModel {
     ///
     /// `(I + D)·x = b` ⇒ `x[i] = b[i]` for uncoupled rows,
     /// `x[i] = b[i] / (1 + d_i)` for coupled rows. Builds the RHS via
-    /// [`build_coupled_rhs`] then applies diagonal scaling.
+    /// [`Self::build_coupled_rhs`] then applies diagonal scaling.
     ///
     /// Allocates the aggregated-damping vector per call; the hot path uses
-    /// [`step_with_identity_coupling_into_scratch`], which receives it as a
+    /// [`Self::step_with_identity_coupling_into_scratch`], which receives it as a
     /// persistent buffer.
     ///
     /// Vendor alignment: OCHRE StateSpaceModel.py `update_model()` (line 318)
@@ -549,7 +549,7 @@ impl StateSpaceModel {
         self.step_with_identity_coupling_into_scratch(x, u, buf, couplings, &mut d_agg);
     }
 
-    /// Same as [`step_with_identity_coupling_into`] but uses a caller-provided
+    /// Same as [`Self::step_with_identity_coupling_into`] but uses a caller-provided
     /// scratch buffer to avoid per-timestep heap allocation.  The buffer must
     /// have length ≥ `state_dim()` and will be zeroed before use.
     pub fn step_with_identity_coupling_into_scratch(

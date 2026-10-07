@@ -41,7 +41,7 @@ impl WarningLog {
         }
     }
 
-    /// Append a structured [`Warning`], formatted `"{source}: {message}"`
+    /// Append a structured [`hares_types::Warning`], formatted `"{source}: {message}"`
     /// (prefixed `"step {n}: "` when the warning carries a step index).
     ///
     /// Every producer of the run's warnings pushes through this method, so

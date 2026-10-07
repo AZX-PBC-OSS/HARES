@@ -102,7 +102,7 @@ pub struct GasEnergyMetrics {
     pub total_kwh_equivalent: f64,
 }
 
-/// Envelope component loads [kWh] over the simulation period.
+/// Envelope component loads (kWh) over the simulation period.
 ///
 /// These represent the net thermal loads imposed on the conditioned zone by
 /// each envelope component: positive = heat gain to zone, negative = heat
@@ -111,7 +111,7 @@ pub struct GasEnergyMetrics {
 /// air heat balance to within the semi-implicit/TARP coupling split, which
 /// is reported separately as the "Zone Air Heat Balance Residual (W)"
 /// column rather than in any of these fields. The exception is
-/// [`interior_lwr_kwh`], a gross exchange metric that is documented inline
+/// [`Self::interior_lwr_kwh`], a gross exchange metric that is documented inline
 /// and must not be summed into a net balance.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EnvelopeComponentLoadsKwh {

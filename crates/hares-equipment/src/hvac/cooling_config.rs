@@ -27,7 +27,7 @@ pub struct CentralAirConditionerConfig {
     /// Number of compressor speeds (1, 2, or 4 for variable-speed).
     #[serde(default = "default_one")]
     pub number_of_speeds: u8,
-    /// Per-stage cooling capacities [W].
+    /// Per-stage cooling capacities (W).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_capacities_w: Option<Vec<f64>>,
     /// Per-stage energy input ratios (EIR = 1/COP).
@@ -53,10 +53,10 @@ pub struct CentralAirConditionerConfig {
     /// Fraction of zone load served by this equipment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fraction_load_served: Option<f64>,
-    /// Crankcase heater rated power [kW].
+    /// Crankcase heater rated power (kW).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_heater_kw: Option<f64>,
-    /// Crankcase activation threshold [C].
+    /// Crankcase activation threshold (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_heater_threshold_c: Option<f64>,
     /// Outdoor-temperature capacity curve coefficients `[c0, c1, c2]`.
@@ -71,16 +71,16 @@ pub struct CentralAirConditionerConfig {
     /// Startup capacity degradation coefficient (Cd).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_cd: Option<f64>,
-    /// Biquadratic curve x1 (wet-bulb) lower bound [C].
+    /// Biquadratic curve x1 (wet-bulb) lower bound (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub biquadratic_x1_min: Option<f64>,
-    /// Biquadratic curve x1 (wet-bulb) upper bound [C].
+    /// Biquadratic curve x1 (wet-bulb) upper bound (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub biquadratic_x1_max: Option<f64>,
-    /// Biquadratic curve x2 (outdoor dry-bulb) lower bound [C].
+    /// Biquadratic curve x2 (outdoor dry-bulb) lower bound (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub biquadratic_x2_min: Option<f64>,
-    /// Biquadratic curve x2 (outdoor dry-bulb) upper bound [C].
+    /// Biquadratic curve x2 (outdoor dry-bulb) upper bound (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub biquadratic_x2_max: Option<f64>,
     /// Flow-fraction lower clamp bound.
@@ -303,16 +303,16 @@ pub struct RoomAcConfig {
     /// Airflow in m^3/s/W for the HVAC wrapper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub airflow_m3_s_per_w: Option<f64>,
-    /// Biquadratic curve x1 (wet-bulb) lower bound [C].
+    /// Biquadratic curve x1 (wet-bulb) lower bound (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub biquadratic_x1_min: Option<f64>,
-    /// Biquadratic curve x1 (wet-bulb) upper bound [C].
+    /// Biquadratic curve x1 (wet-bulb) upper bound (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub biquadratic_x1_max: Option<f64>,
-    /// Biquadratic curve x2 (outdoor dry-bulb) lower bound [C].
+    /// Biquadratic curve x2 (outdoor dry-bulb) lower bound (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub biquadratic_x2_min: Option<f64>,
-    /// Biquadratic curve x2 (outdoor dry-bulb) upper bound [C].
+    /// Biquadratic curve x2 (outdoor dry-bulb) upper bound (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub biquadratic_x2_max: Option<f64>,
     /// Flow-fraction lower clamp bound.
@@ -333,10 +333,10 @@ pub struct RoomAcConfig {
     /// Startup capacity degradation coefficient (Cd).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_cd: Option<f64>,
-    /// Crankcase heater rated power [kW].
+    /// Crankcase heater rated power (kW).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_heater_kw: Option<f64>,
-    /// Crankcase activation threshold [C].
+    /// Crankcase activation threshold (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_heater_threshold_c: Option<f64>,
     /// Outdoor-temperature capacity curve coefficients `[c0, c1, c2]`.
@@ -489,7 +489,7 @@ pub struct DehumidifierConfig {
     /// EnergyPlus `ZoneDehumidifier.cc` lines 769–808.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plf_min: Option<f64>,
-    /// Off-cycle parasitic electric load [W].
+    /// Off-cycle parasitic electric load (W).
     ///
     /// When the unit is off, this constant load (standby electronics, controls,
     /// crankcase heater) is drawn continuously. EnergyPlus

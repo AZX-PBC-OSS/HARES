@@ -35,7 +35,7 @@ pub struct GasFurnaceConfig {
     pub fan_power_w: Option<f64>,
     #[serde(default = "default_one")]
     pub number_of_speeds: u8,
-    /// Per-stage heating capacities [W]. Overrides `capacity_w` when present.
+    /// Per-stage heating capacities (W). Overrides `capacity_w` when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_heating_capacities_w: Option<Vec<f64>>,
     /// Per-stage energy input ratios (EIR = 1/AFUE per stage). Overrides `afue` when present.
@@ -358,25 +358,25 @@ pub struct IdealHvacConfig {
     pub fraction_heating_load_served: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fraction_cooling_load_served: Option<f64>,
-    /// Rated fan power [W]. When non-zero, fan electrical consumption is
+    /// Rated fan power (W). When non-zero, fan electrical consumption is
     /// computed as `capacity * eir * fan_power_ratio` in ideal-capacity mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rated_fan_power_w: Option<f64>,
     /// Energy input ratio (1/COP). Defaults to 1.0 (ideal).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rated_eir: Option<f64>,
-    /// Minimum capacity [W]. Below this threshold the unit shuts off.
+    /// Minimum capacity (W). Below this threshold the unit shuts off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_min_w: Option<f64>,
     /// Override fuel type for the equipment descriptor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fuel_type: Option<FuelType>,
-    /// Biquadratic capacity correction curve coefficients [a,b,c,d,e,f].
+    /// Biquadratic capacity correction curve coefficients `[a,b,c,d,e,f]`.
     /// Default identity: CAP_FT = 1.0 (no correction).
     /// EnergyPlus: `Q_corrected = Q_rated × CAP_FT(T_indoor, T_outdoor)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_biquadratic_coeffs: Option<String>,
-    /// Biquadratic EIR correction curve coefficients [a,b,c,d,e,f].
+    /// Biquadratic EIR correction curve coefficients `[a,b,c,d,e,f]`.
     /// Default identity: EIR_FT = 1.0 (no correction).
     /// EnergyPlus: `EIR_corrected = EIR_rated × EIR_FT(T_indoor, T_outdoor)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

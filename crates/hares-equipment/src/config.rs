@@ -806,10 +806,10 @@ pub fn normalize_enum_text(raw: &str) -> Option<serde_json::Value> {
 /// 3. [`hares_types::zip::ZipLoad::constant_power`] (no reactive power,
 ///    real power untouched).
 ///
-/// The returned [`ResolvedZip`] is governing — the equipment (a scheduled or
+/// The returned [`hares_types::zip::ResolvedZip`] is governing -- the equipment (a scheduled or
 /// event load) scales its real power through the real-power polynomial at
 /// the bus voltage each step. Rule R1 callers use
-/// [`resolve_reactive_zip`] instead.
+/// `resolve_reactive_zip` instead.
 #[must_use]
 pub fn resolve_zip(config: &EquipmentConfig) -> hares_types::zip::ResolvedZip {
     hares_types::zip::ResolvedZip::governing(resolve_zip_load(config))

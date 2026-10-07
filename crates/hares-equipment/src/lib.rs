@@ -147,7 +147,7 @@ pub(crate) fn linear_temp_derate(temp_c: f64, temp_min: f64, temp_max: f64) -> f
 /// [`Equipment::expected_mean_power_kw`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ExpectedMeanPower {
-    /// Known expected mean draw [kW] from the equipment's own configuration.
+    /// Known expected mean draw (kW) from the equipment's own configuration.
     Kw(f64),
     /// The draw follows a column of the dwelling's schedule data (index
     /// into the loaded schedule's columns); the mean must be computed from
@@ -366,7 +366,7 @@ pub trait Equipment: Send + Sync {
     /// The primary resolved ZIP/power-factor model this equipment applies to
     /// its (primary-component) real power for reactive purposes, together
     /// with the regime it was resolved under
-    /// ([`ResolvedZip::real_power_zip_applies`]).
+    /// ([`hares_types::zip::ResolvedZip::real_power_zip_applies`]).
     ///
     /// Semantics per equipment family:
     /// - **Typed equipment** (HVAC, water heaters, ventilation, scheduled and
@@ -420,7 +420,7 @@ pub trait Equipment: Send + Sync {
         None
     }
 
-    /// How this equipment's expected mean real power [kW] over the loaded
+    /// How this equipment's expected mean real power (kW) over the loaded
     /// schedule horizon can be determined, for premise-level ZIP
     /// aggregation ([`hares_types::zip::ResolvedZip`] mixes weighted by
     /// expected draw).
@@ -448,25 +448,25 @@ pub trait Equipment: Send + Sync {
     // -----------------------------------------------------------------
 
     /// Whether this equipment has been fully registered via
-    /// [`Dwelling::add_equipment`] and is now running — LUT setters
+    /// `Dwelling::add_equipment` and is now running -- LUT setters
     /// reject calls when this returns `true`.
     fn is_initialized(&self) -> bool {
         false
     }
 
-    /// Called by [`Dwelling::add_equipment`] after successful registration.
+    /// Called by `Dwelling::add_equipment` after successful registration.
     /// Equipment that supports LUT injection must override this to gate
     /// further mutation.
     fn mark_initialized(&mut self) {}
 
-    /// Temporarily clears the initialized guard for [`Dwelling`]'s own
+    /// Temporarily clears the initialized guard for `Dwelling`'s own
     /// reconfiguration methods (`set_battery_lut`, `clear_battery_lut`,
     /// `set_ev_charging_curve_lut`, `clear_ev_charging_curve_lut`).
     /// The guard exists to block unmediated mutation via a raw
     /// `dyn Equipment` reference held outside `Dwelling`'s control;
     /// **authorized** reconfiguration through `Dwelling`'s own methods
     /// calls this first, performs the LUT mutation while the gate is
-    /// down, then calls [`mark_initialized`] to restore it.
+    /// down, then calls [`Self::mark_initialized`] to restore it.
     ///
     /// Equipment that supports LUT injection must override this to
     /// clear the flag.

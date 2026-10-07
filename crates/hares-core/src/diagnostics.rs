@@ -36,7 +36,7 @@ pub struct StepDiagnostics {
     pub timestamp_s: f64,
     pub outdoor_temp_c: f64,
     pub zone_temps_c: Vec<(ZoneId, f64)>,
-    /// Total thermal port sensible gain per zone [W] (HVAC + appliances
+    /// Total thermal port sensible gain per zone (W) (HVAC + appliances
     /// combined): convective, long-wave radiant and short-wave.
     pub thermal_gains_w: Vec<(ZoneId, f64)>,
     pub thermal_latent_w: Vec<(ZoneId, f64)>,
@@ -53,20 +53,20 @@ pub struct StepDiagnostics {
 pub struct EnvelopeDiag {
     pub window_solar_w: f64,
     pub opaque_solar_lwr_w: f64,
-    /// Total interior LWR exchange activity [W] (Σ|q_i|/2).
+    /// Total interior LWR exchange activity (W) (Σ|q_i|/2).
     pub interior_lwr_w: f64,
-    /// Non-HVAC internal gains [W].
+    /// Non-HVAC internal gains (W).
     pub internal_gain_w: f64,
-    /// Total port convective [W] (HVAC + appliances).
+    /// Total port convective (W) (HVAC + appliances).
     pub port_convective_w: f64,
-    /// Total port radiant [W] (HVAC + appliances distributed to surfaces).
+    /// Total port radiant (W) (HVAC + appliances distributed to surfaces).
     ///
     /// ASHRAE HoF Ch. 18: internal gains have separate convective and radiant
     /// components; reporting both enables MRT diagnosis and BESTEST comparisons.
     /// EnergyPlus exposes `OtherEquipment Radiant Heating Rate [W]` as a
     /// separate output variable (I/O Ref v8.4, Internal Gains group).
     pub port_radiant_w: f64,
-    /// Total port short-wave (visible light) [W], absorbed by the surfaces
+    /// Total port short-wave (visible light) (W), absorbed by the surfaces
     /// like transmitted diffuse solar.
     pub port_shortwave_w: f64,
     /// Outdoor moist-air density used for infiltration mass-flow conversion [kg/m³].

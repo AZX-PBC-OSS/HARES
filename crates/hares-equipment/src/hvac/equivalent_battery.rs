@@ -26,23 +26,23 @@ const REF_TEMP_COOLING_C: f64 = 30.0;
 /// envelope solver's state variables. State-of-charge is `(energy - min) / (max - min)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EquivalentBatteryModel {
-    /// Current energy state [kWh]. Computed as absolute thermal energy relative to
+    /// Current energy state (kWh). Computed as absolute thermal energy relative to
     /// reference temperature. `None` when equipment is in Deadband mode.
     pub energy_kwh: Option<f64>,
-    /// Minimum energy state [kWh]. Energy at the thermostat turn-on threshold,
+    /// Minimum energy state (kWh). Energy at the thermostat turn-on threshold,
     /// computed as `capacitance * (t_on - ref_temp) * hvac_direction`.
     pub min_energy_kwh: f64,
-    /// Maximum energy state [kWh]. Energy at the thermostat turn-off threshold,
+    /// Maximum energy state (kWh). Energy at the thermostat turn-off threshold,
     /// computed as `capacitance * (t_off - ref_temp) * hvac_direction`.
     /// `None` when rated capacity is unavailable.
     pub max_energy_kwh: Option<f64>,
-    /// Maximum power consumption [kW]. `None` when rated capacity is unavailable.
+    /// Maximum power consumption (kW). `None` when rated capacity is unavailable.
     pub max_power_kw: Option<f64>,
     /// Charging efficiency [-]. Coefficient of performance `COP = 1 / EIR`: the
     /// thermal energy delivered to (or removed from) the building per unit of
     /// electrical energy consumed. Matches OCHRE `1 / self.eir` (HVAC.py:639).
     pub efficiency: f64,
-    /// Baseline disturbance power [kW]: the steady-state electrical power the
+    /// Baseline disturbance power (kW): the steady-state electrical power the
     /// system must draw to hold the current setpoint against envelope losses.
     /// Computed as `capacity_ideal_w * eir / 1000` — the ideal thermal capacity
     /// needed to maintain setpoint, divided by the COP to convert thermal load
@@ -96,7 +96,7 @@ impl HvacEquipment {
     ///
     /// `rated_eir` is the equipment's energy input ratio (electrical input per unit
     /// thermal output); `efficiency = 1 / rated_eir` is the resulting COP
-    /// (OCHRE HVAC.py:639). `capacity_ideal_w` is the ideal thermal capacity [W]
+    /// (OCHRE HVAC.py:639). `capacity_ideal_w` is the ideal thermal capacity (W)
     /// needed to hold the setpoint against envelope losses (OCHRE `capacity_ideal`,
     /// HVAC.py:640); `baseline_power_kw = capacity_ideal_w * rated_eir / 1000` is the
     /// steady-state electrical draw to maintain state.
@@ -105,8 +105,8 @@ impl HvacEquipment {
     ///
     /// # Errors
     ///
-    /// The errors of [`Self::equivalent_battery_window`] and
-    /// [`EquivalentBatteryWindow::with_load`].
+    /// The errors of `equivalent_battery_window` and
+    /// `EquivalentBatteryWindow::with_load`.
     pub fn make_equivalent_battery_model(
         &self,
         zone_temp_c: f64,

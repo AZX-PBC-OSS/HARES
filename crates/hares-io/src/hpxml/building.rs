@@ -122,7 +122,7 @@ pub struct Boundary {
     pub insulation_details: Option<String>,
     /// Whether an attic radiant barrier is present on this boundary surface.
     ///
-    /// When true, longwave emissivity should be set to [`EMISSIVITY_RADIANT_BARRIER`]
+    /// When true, longwave emissivity should be set to [`hares_envelope::EMISSIVITY_RADIANT_BARRIER`]
     /// (0.05) rather than the default 0.90.  Applies to roof/attic boundary types.
     pub has_radiant_barrier: bool,
     /// Solar absorptance [-] from HPXML `<SolarAbsorptance>`.
@@ -144,7 +144,7 @@ pub struct Boundary {
     pub lut_boundary_name: Option<String>,
     /// HPXML `<FloorOrCeiling>` -- distinguishes adjacent floors from ceilings.
     pub floor_or_ceiling: Option<FloorOrCeiling>,
-    /// Surface tilt angle [degrees].
+    /// Surface tilt angle (degrees).
     ///
     /// 0 = horizontal facing up (flat roof), 90 = vertical (wall),
     /// 180 = horizontal facing down (floor from above).
@@ -157,7 +157,7 @@ pub struct Boundary {
     /// Typical values: 0.23 for 2x4 @ 16" OC, 0.22 for 2x6 @ 16" OC.
     /// `None` means no framing correction (insulation R-value used uniformly).
     pub framing_factor: Option<f64>,
-    /// Exposed perimeter length [m] for slab-on-grade boundaries.
+    /// Exposed perimeter length (m) for slab-on-grade boundaries.
     ///
     /// Parsed from HPXML `<Slab>/<ExposedPerimeter>` (HPXML 4.x) or
     /// `<Slab>/<Perimeter>` (HPXML 3.x), in feet; converted to meters via
@@ -171,7 +171,7 @@ pub struct Boundary {
     /// (converted from IP ft²·°F·h/Btu). Used to select the ASHRAE F2 perimeter
     /// heat loss coefficient via [`hares_physics::ground::f2_coefficient`].
     pub perimeter_insulation_r_m2_k_w: Option<f64>,
-    /// Foundation depth below grade [m] for ground temperature calculations.
+    /// Foundation depth below grade (m) for ground temperature calculations.
     ///
     /// For foundation walls: the centroid depth of the below-grade portion
     /// (typically `DepthBelowGrade / 2.0`). For slabs: the depth below grade

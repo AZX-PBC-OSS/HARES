@@ -149,7 +149,7 @@ pub fn solar_position(
     }
 }
 
-/// Angle of incidence [deg] between sun rays and a surface normal.
+/// Angle of incidence (deg) between sun rays and a surface normal.
 pub fn angle_of_incidence(
     surface_tilt_deg: f64,
     surface_azimuth_deg: f64,
@@ -298,9 +298,9 @@ pub fn clear_sky_irradiance_params(
 /// # Arguments
 /// * `dhi` -- diffuse horizontal irradiance [W/m²]
 /// * `dni` -- direct normal irradiance [W/m²]
-/// * `zenith_deg` -- solar zenith angle [degrees]
-/// * `aoi_deg` -- angle of incidence on the surface [degrees]
-/// * `tilt_deg` -- surface tilt from horizontal [degrees]
+/// * `zenith_deg` -- solar zenith angle (degrees)
+/// * `aoi_deg` -- angle of incidence on the surface (degrees)
+/// * `tilt_deg` -- surface tilt from horizontal (degrees)
 /// * `dni_extra` -- extraterrestrial normal irradiance [W/m²]
 /// * `elevation_m` -- site elevation [m above sea level] for airmass correction
 #[must_use]
@@ -699,7 +699,7 @@ pub fn isotropic_tilted_irradiance(
     }
 }
 
-/// Window transmitted solar gain [W].
+/// Window transmitted solar gain (W).
 pub fn window_transmitted_solar(irradiance_w_m2: f64, shgc: f64, area_m2: f64) -> f64 {
     irradiance_w_m2 * shgc * area_m2
 }
@@ -821,7 +821,7 @@ impl GlazingCurve {
 /// polynomial angular model normalised to 1.0 at normal incidence.
 ///
 /// # Arguments
-/// * `theta_rad` -- angle of incidence [rad].  Values < 0 or ≥ π/2 return 0.
+/// * `theta_rad` -- angle of incidence (rad).  Values < 0 or ≥ π/2 return 0.
 /// * `curve` -- glazing curve; use [`GlazingCurve::from_u_shgc`] to select.
 ///
 /// # References
@@ -859,7 +859,7 @@ pub fn window_iam(theta_rad: f64, curve: GlazingCurve) -> f64 {
 ///
 /// # References
 /// - EnergyPlus Engineering Reference, Window Calculation Module, Step 1.
-///   https://bigladdersoftware.com/epx/docs/9-5/engineering-reference/window-calculation-module.html
+///   <https://bigladdersoftware.com/epx/docs/9-5/engineering-reference/window-calculation-module.html>
 /// - OCHRE `ochre/utils/envelope.py:294–304` sets res_ext_w = 0, absorbing Ro,w
 ///   into r_window. HARES diverges from OCHRE here for correctness.
 pub fn window_u_factor_decomposition(u_factor_w_m2_k: f64) -> Result<(f64, f64, f64), HaresError> {
@@ -987,7 +987,7 @@ pub fn calculate_window_parameters(
     (transmittance, radiation_frac)
 }
 
-/// Window transmitted solar with angle-of-incidence dependent transmittance [W].
+/// Window transmitted solar with angle-of-incidence dependent transmittance (W).
 ///
 /// Applies the EnergyPlus IAM polynomial to beam radiation and a
 /// pre-computed hemispherical IAM constant to diffuse radiation.
@@ -995,9 +995,9 @@ pub fn calculate_window_parameters(
 /// # Arguments
 /// * `beam_irradiance_w_m2` -- beam (direct) POA irradiance [W/m²].
 /// * `diffuse_irradiance_w_m2` -- diffuse + reflected POA irradiance [W/m²].
-/// * `shgc` -- solar heat gain coefficient at normal incidence [dimensionless].
-/// * `area_m2` -- glazing area [m²].
-/// * `angle_of_incidence_rad` -- angle between beam and surface normal [rad].
+/// * `shgc` -- solar heat gain coefficient at normal incidence (dimensionless).
+/// * `area_m2` -- glazing area (m²).
+/// * `angle_of_incidence_rad` -- angle between beam and surface normal (rad).
 /// * `curve` -- EnergyPlus glazing curve for angular correction.
 #[must_use]
 pub fn window_transmitted_solar_angular(

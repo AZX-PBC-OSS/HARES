@@ -182,11 +182,11 @@ pub const RUNTIME_COOLING_SETPOINT_C: &str = "runtime_cooling_setpoint_c";
 
 // ── Thermostat short-cycle protection ──────────────────────────────────────
 
-/// Minimum compressor on-time [s] from thermostat FSM.
+/// Minimum compressor on-time (s) from thermostat FSM.
 /// scope: output
 pub const MIN_ON_TIME_S: &str = "min_on_time_s";
 
-/// Minimum compressor off-time [s] from thermostat FSM.
+/// Minimum compressor off-time (s) from thermostat FSM.
 /// scope: output
 pub const MIN_OFF_TIME_S: &str = "min_off_time_s";
 
@@ -218,7 +218,7 @@ pub const PART_LOAD_FACTOR: &str = "part_load_factor";
 /// scope: internal
 pub const STARTUP_MULTIPLIER: &str = "startup_multiplier";
 
-/// Elapsed time since compressor startup [minutes]. Preserved across
+/// Elapsed time since compressor startup (minutes). Preserved across
 /// off-steps and reset only on a true off→on transition (edge detection,
 /// matching OCHRE's mode-transition reset). Used with `STARTUP_MULTIPLIER`
 /// in diagnostic CSV output to detect whether the startup timer erroneously
@@ -311,30 +311,30 @@ pub const EIR: &str = "eir";
 /// scope: internal
 pub const EBM_EFFICIENCY: &str = "ebm_efficiency";
 
-/// Equivalent battery model baseline power [kW] — steady-state electrical draw
+/// Equivalent battery model baseline power (kW) -- steady-state electrical draw
 /// to hold the setpoint against envelope losses.
 ///
 /// scope: internal
 pub const EBM_BASELINE_POWER_KW: &str = "ebm_baseline_power_kw";
 
-/// Equivalent battery model current energy state [kWh].
+/// Equivalent battery model current energy state (kWh).
 ///
 /// scope: internal
 pub const EBM_ENERGY_KWH: &str = "ebm_energy_kwh";
 
-/// Equivalent battery model minimum energy state [kWh] — energy at thermostat
+/// Equivalent battery model minimum energy state (kWh) -- energy at thermostat
 /// turn-on threshold.
 ///
 /// scope: internal
 pub const EBM_MIN_ENERGY_KWH: &str = "ebm_min_energy_kwh";
 
-/// Equivalent battery model maximum energy state [kWh] — energy at thermostat
+/// Equivalent battery model maximum energy state (kWh) -- energy at thermostat
 /// turn-off threshold.
 ///
 /// scope: internal
 pub const EBM_MAX_ENERGY_KWH: &str = "ebm_max_energy_kwh";
 
-/// Equivalent battery model maximum power [kW] — equipment rated capacity in
+/// Equivalent battery model maximum power (kW) -- equipment rated capacity in
 /// electrical units.
 ///
 /// scope: internal
@@ -445,12 +445,12 @@ pub const N_SERIES: &str = "n_series";
 /// scope: internal
 pub const N_PARALLEL: &str = "n_parallel";
 
-/// Per-cell capacity [Ah] from config (f64::NAN when not provided).
+/// Per-cell capacity (Ah) from config (f64::NAN when not provided).
 ///
 /// scope: internal
 pub const AH_CELL: &str = "ah_cell";
 
-/// Per-cell nominal voltage [V] from config (f64::NAN when not provided).
+/// Per-cell nominal voltage (V) from config (f64::NAN when not provided).
 ///
 /// scope: internal
 pub const V_CELL: &str = "v_cell";
@@ -460,13 +460,13 @@ pub const V_CELL: &str = "v_cell";
 /// scope: internal
 pub const DERIVATION_SOURCE: &str = "derivation_source";
 
-/// Physical pack capacity implied by the derived integer topology [kWh].
+/// Physical pack capacity implied by the derived integer topology (kWh).
 /// Computed as n_parallel * ah_cell * n_series * v_cell / 1000 after topology derivation.
 ///
 /// scope: internal
 pub const IMPLIED_CAPACITY_KWH: &str = "implied_capacity_kwh";
 
-/// Declared (configured) pack capacity [kWh] — the target that topology derivation
+/// Declared (configured) pack capacity (kWh) -- the target that topology derivation
 /// attempts to satisfy.
 ///
 /// scope: internal
@@ -492,7 +492,7 @@ pub const AWAY_CHARGE_POWER_KW: &str = "away_charge_power_kw";
 /// scope: internal
 pub const CAPACITY_KWH: &str = "capacity_kwh";
 
-/// Cumulative EV drive energy [kWh] dispatched by the driver actor but not
+/// Cumulative EV drive energy (kWh) dispatched by the driver actor but not
 /// deliverable by the pack (a trip longer than the vehicle's remaining
 /// range). The equipment delivers what the pack holds and accounts the
 /// undeliverable remainder here, so a drive shortfall is observable output
@@ -501,7 +501,7 @@ pub const CAPACITY_KWH: &str = "capacity_kwh";
 /// scope: internal
 pub const DRIVE_SHORTFALL_KWH: &str = "drive_shortfall_kwh";
 
-/// Rated (beginning-of-life) pack capacity [kWh]. Held constant from
+/// Rated (beginning-of-life) pack capacity (kWh). Held constant from
 /// initialization; paired with `CAPACITY_KWH` (the degraded usable capacity)
 /// so downstream observers and the capacity-degradation invariant can verify
 /// `CAPACITY_KWH / CAPACITY_KWH_RATED ≈ 1 − capacity_fade_fraction`.
@@ -636,7 +636,7 @@ pub const MIN_COMPRESSOR_FRACTION: &str = "min_compressor_fraction";
 /// scope: internal
 pub const PUMP_POWER_KW: &str = "pump_power_kw";
 
-/// Crankcase heater electric draw [kW], space_fraction-scaled like the other
+/// Crankcase heater electric draw (kW), space_fraction-scaled like the other
 /// per-component sub-meters so components sum to the unit total.
 ///
 /// scope: internal
@@ -696,7 +696,7 @@ pub const PILOT_HEAT_TO_WATER_W: &str = "pilot_heat_to_water_w";
 pub const PILOT_HEAT_TO_AMBIENT_W: &str = "pilot_heat_to_ambient_w";
 
 // ── Envelope energy balance ─────────────────────────────────────────────────
-/// Per-zone energy balance residual [W] from the zone-air first-law check.
+/// Per-zone energy balance residual (W) from the zone-air first-law check.
 ///
 /// Published every timestep by the thermal solver's `format_domain_update`.
 /// Values near zero indicate the zone air energy balance closes; large values
@@ -714,12 +714,12 @@ pub const SENSIBLE_RECOVERY_W: &str = "sensible_recovery_w";
 /// scope: internal
 pub const LATENT_RECOVERY_W: &str = "latent_recovery_w";
 
-/// Supply-side fan electrical power per timestep [W].
+/// Supply-side fan electrical power per timestep (W).
 ///
 /// scope: internal
 pub const VENT_SUPPLY_FAN_POWER_W: &str = "vent_supply_fan_power_w";
 
-/// Exhaust-side fan electrical power per timestep [W].
+/// Exhaust-side fan electrical power per timestep (W).
 ///
 /// scope: internal
 pub const VENT_EXHAUST_FAN_POWER_W: &str = "vent_exhaust_fan_power_w";

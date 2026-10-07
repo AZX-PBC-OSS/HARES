@@ -229,7 +229,7 @@ pub(super) fn is_cycle_change_allowed(
 
 /// Thermostat finite-state machine owning the 11 fields and 5 methods that
 /// were previously duplicated between [`HvacEquipment`](super::HvacEquipment)
-/// and [`IdealHvac`](super::IdealHvac).
+/// and [`IdealHvac`](super::ideal_hvac::IdealHvac).
 ///
 /// Both structs embed `pub thermostat_fsm: ThermostatFsm` and delegate to it.
 /// Equipment-specific side-effects (e.g. `IdealHvac` clearing
@@ -246,10 +246,10 @@ pub struct ThermostatFsm {
     pub runtime_setpoints: Option<RuntimeSetpointOverride>,
     pub heating_setpoint_source: Option<ScheduleSource>,
     pub cooling_setpoint_source: Option<ScheduleSource>,
-    /// Minimum time [s] compressor must remain On before an Off transition is
+    /// Minimum time (s) compressor must remain On before an Off transition is
     /// allowed. Prevents short-cycle wear. 0.0 = disabled (default).
     pub min_on_time_s: f64,
-    /// Minimum time [s] compressor must remain Off before an On transition is
+    /// Minimum time (s) compressor must remain Off before an On transition is
     /// allowed. Prevents short-cycle wear. 0.0 = disabled (default).
     pub min_off_time_s: f64,
     /// Count of setpoint overrides whose unnamed axis was moved to keep the

@@ -22,7 +22,7 @@
 //!   teleporting the building to the station.
 //! * **UTC offset:** caller override → HPXML `UTCOffset` → weather-file
 //!   timezone → IANA timezone looked up from the resolved coordinates (via
-//!   [`tzf-rs`], evaluated at standard time) → derived from longitude
+//!   the `tzf-rs` crate, evaluated at standard time) → derived from longitude
 //!   (`round(longitude / 15)`) only if the coordinate lookup fails.
 //!
 //! Whenever two *present* sources disagree beyond a tolerance the resolver

@@ -596,7 +596,7 @@ pub enum EfficiencyModel {
     /// Quadratic curve from Vishwanathan et al. (2018):
     ///   eff = rated * (-0.5 * cr² + 1.5 * cr)
     /// where cr = |P_electric| / capacity.
-    /// Reference: Appl Energy, https://doi.org/10.1016/j.apenergy.2018.06.013
+    /// Reference: Appl Energy, <https://doi.org/10.1016/j.apenergy.2018.06.013>
     ///
     /// Note: OCHRE has a bug at line 169: `return min(eff, 0.001)` should be
     /// `max(eff, 0.001)`. We use `max` here for correct clamping.

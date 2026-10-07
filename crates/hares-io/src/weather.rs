@@ -325,10 +325,10 @@ pub enum ResampleMethod {
     ///
     /// Uses flat extrapolation at the year boundary (no cyclic wrap). For
     /// smooth year-boundary transitions in multi-year simulations, use
-    /// [`PchipCyclic`] instead.
+    /// [`ResampleMethod::PchipCyclic`] instead.
     #[default]
     Pchip,
-    /// Cyclic PCHIP -- same as [`Pchip`] but treats the data as periodic:
+    /// Cyclic PCHIP -- same as [`ResampleMethod::Pchip`] but treats the data as periodic:
     /// the last value connects smoothly back to the first via a wrap-around
     /// segment, and endpoint slopes use centered differences across the
     /// year boundary. Eliminates the discontinuity that flat extrapolation
@@ -370,16 +370,16 @@ pub enum ResampleMethod {
     /// at the year boundary.
     ///
     /// Key properties:
-    /// - At frac = 0 (hour start): value = (values[prev] + values[i]) / 2
+    /// - At frac = 0 (hour start): value = (`values[prev]` + `values[i]`) / 2
     ///   — average of neighboring midpoints → C0 continuous across boundaries.
-    /// - At frac = 0.5 (midpoint): value = values[i] — current hourly value.
-    /// - At frac → 1 (hour end): value → (values[i] + values[next]) / 2
+    /// - At frac = 0.5 (midpoint): value = `values[i]` -- current hourly value.
+    /// - At frac → 1 (hour end): value → (`values[i]` + `values[next]`) / 2
     ///   — matches start of next hour → C0 continuous.
     ///
     /// ---
     /// WARNING: This method does **not** preserve hourly energy integrals.
     /// The continuous-limit hourly mean over hour `i` is a weighted blend:
-    ///   mean = 0.125·values[prev] + 0.75·values[i] + 0.125·values[next]
+    ///   mean = 0.125·`values[prev]` + 0.75·`values[i]` + 0.125·`values[next]`
     /// This equals `values[i]` only when `prev = next = i` (constant or
     /// symmetric signal). At a sunrise step `prev=0, cur=800, next=800` the
     /// mean is 700 W/m² — a 12.5% shortfall against the true hourly average
@@ -508,7 +508,7 @@ pub struct WeatherTimeSeries {
     pub horizontal_infrared_w_m2: Vec<f64>,
     pub sky_temp_c: Vec<f64>,
     pub ground_temp_c: Vec<f64>,
-    /// Liquid precipitation depth per timestep [m].
+    /// Liquid precipitation depth per timestep (m).
     /// Parsed from EPW field 33; zero when data is unavailable.
     pub liquid_precip_m: Vec<f64>,
     /// Surface albedo (ground reflectance) [dimensionless, 0–1].

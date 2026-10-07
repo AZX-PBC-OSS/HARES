@@ -440,7 +440,7 @@ pub enum DefaultsError {
     #[error("missing critical row '{row_name}' in {path}")]
     MissingRow { path: PathBuf, row_name: String },
     /// An EV vehicle-mapping load failure from
-    /// [`load_vehicle_mapping_csv`]: the message names the path, the row
+    /// `load_vehicle_mapping_csv`: the message names the path, the row
     /// number and the field.
     #[error(transparent)]
     VehicleMapping(#[from] HaresError),

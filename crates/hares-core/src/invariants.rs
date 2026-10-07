@@ -45,7 +45,7 @@ impl InvariantChecker {
     /// The check asserts:
     /// `|Σ(Q_gain) − ΔE_storage − Q_loss_envelope| < max(1.0, 1e-6 · Σ|Q_gain_i|)`
     ///
-    /// All values in watts [W].
+    /// All values in watts (W).
     pub fn check_thermal(
         &self,
         q_gains: &[f64],
@@ -98,7 +98,7 @@ impl InvariantChecker {
     /// Verifies reactive power balance across the bus.
     ///
     /// The check asserts:
-    /// `|Q_solver − Q_ports| < max(0.001, 1e-6 · gross_reactive_flux)` [kvar]
+    /// `|Q_solver − Q_ports| < max(0.001, 1e-6 · gross_reactive_flux)` (kvar)
     ///
     /// Unlike active power, reactive power is accumulated as one signed sum
     /// (no load/gen split).  The gross reactive flux is therefore
@@ -140,7 +140,7 @@ impl InvariantChecker {
     /// Verifies electrical power balance across the bus.
     ///
     /// The check asserts:
-    /// `|P_grid + Σ P_equipment_ports| < max(0.001, 1e-6 · Σ|P_i|)` [kW]
+    /// `|P_grid + Σ P_equipment_ports| < max(0.001, 1e-6 · Σ|P_i|)` (kW)
     pub fn check_electrical(
         &self,
         p_grid: f64,
@@ -550,7 +550,7 @@ impl InvariantChecker {
     /// context-rich NaN-screening gate that fires at the earliest possible
     /// phase boundary — before any residual is computed.
     ///
-    /// Called from the dwelling's [`Dwelling::check_step_invariants`] at the
+    /// Called from the dwelling's `Dwelling::check_step_invariants` at the
     /// top of the
     /// per-step invariant pass, and from diagnostic / telemetry construction
     /// sites as a backstop.

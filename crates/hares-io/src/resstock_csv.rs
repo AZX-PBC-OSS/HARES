@@ -14,12 +14,12 @@
 //! | GHI [W/m²]          | **Measured** -- CSV column                               |
 //! | DNI [W/m²]          | **Measured** -- CSV column                               |
 //! | DHI [W/m²]          | **Measured** -- CSV column                               |
-//! | Pressure [kPa]      | **Estimated** -- ISA standard atmosphere from elevation (ISO 2533:1975 §5) |
+//! | Pressure (kPa)      | **Estimated** -- ISA standard atmosphere from elevation (ISO 2533:1975 §5) |
 //! | Dew point [°C]      | **Estimated** -- Magnus formula from dry bulb + RH       |
 //! | Horizontal IR [W/m²]| **Placeholder** -- set to 0.0 (triggers Clark-Allen)     |
 //! | Sky temperature [°C]| **Estimated** -- Clark-Allen from dry bulb + dew point   |
 //! | Opaque sky cover    | **Placeholder** -- set to 0.0 (unavailable)              |
-//! | Precipitation [m]   | **Placeholder** -- set to 0.0 (unavailable)              |
+//! | Precipitation (m)   | **Placeholder** -- set to 0.0 (unavailable)              |
 //! | Ground temp [°C]    | **Estimated** -- DOE-2 model from monthly dry-bulb avg   |
 //!
 //! ResStock CSV pressure is a constant ISA estimate derived from site elevation.

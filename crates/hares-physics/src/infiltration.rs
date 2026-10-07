@@ -185,10 +185,10 @@ pub fn ashrae_wind_stack(
 /// ```
 ///
 /// # Parameters
-/// - `ela_m2`: effective leakage area [m²]
+/// - `ela_m2`: effective leakage area (m²)
 /// - `stack_coeff`: ELA stack coefficient [L/(s·cm⁴·K)]
 /// - `wind_coeff`: ELA wind coefficient [L/(s·cm⁴·(m/s)²)]
-/// - `delta_t_c`: indoor–outdoor temperature difference [K]
+/// - `delta_t_c`: indoor–outdoor temperature difference (K)
 /// - `wind_speed_m_s`: wind speed at building height [m/s]
 ///
 /// Returns volumetric flow [m³/s].
@@ -299,7 +299,7 @@ pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_d
 /// `ZoneVentilation:WindandStackOpenArea` model.
 #[derive(Debug, Clone, Copy)]
 pub struct NaturalVentilationInputs {
-    /// Ventilating open area [m²].
+    /// Ventilating open area (m²).
     pub open_area_m2: f64,
     /// Zone air temperature [°C].
     pub t_zone_c: f64,
@@ -313,17 +313,17 @@ pub struct NaturalVentilationInputs {
     pub max_outdoor_humidity_ratio: f64,
     /// Wind speed [m/s].
     pub wind_speed_m_s: f64,
-    /// Zone volume [m³], used only for the 20 ACH cap.
+    /// Zone volume (m³), used only for the 20 ACH cap.
     pub zone_volume_m3: f64,
     /// Opening facing azimuth [°].
     pub opening_azimuth_deg: f64,
     /// Wind direction [°].
     pub wind_direction_deg: f64,
-    /// Cross-ventilation height difference [m].
+    /// Cross-ventilation height difference (m).
     pub dh_m: f64,
     /// Opening type, which selects the discharge coefficient and stack height.
     pub opening_type: OpeningType,
-    /// Zone height [m], the stack height for single-sided openings.
+    /// Zone height (m), the stack height for single-sided openings.
     pub zone_height_m: f64,
 }
 
@@ -462,7 +462,7 @@ pub fn natural_ventilation_flow_m3_s(inputs: NaturalVentilationInputs) -> (f64, 
 /// - `base_infil_m3_s`: natural infiltration rate computed by the zone model [m³/s]
 /// - `supply_leakage_m3_s`: supply duct leakage flow during fan operation [m³/s]
 /// - `return_leakage_m3_s`: return duct leakage flow during fan operation [m³/s]
-/// - `house_volume_m3`: conditioned zone volume [m³]
+/// - `house_volume_m3`: conditioned zone volume (m³)
 ///
 /// Returns the adjusted infiltration flow [m³/s].  When both leakage flows are
 /// zero the function is a no-op (returns `base_infil_m3_s` unchanged).
@@ -599,11 +599,11 @@ pub enum FoundationLeakageClass {
 /// Input parameters for `aim2_coefficients_from_ach50`.
 #[derive(Clone, Debug)]
 pub struct Aim2Params {
-    /// Blower-door result at 50 Pa [ACH].
+    /// Blower-door result at 50 Pa (ACH).
     pub ach50: f64,
-    /// Conditioned volume [m³].
+    /// Conditioned volume (m³).
     pub volume_m3: f64,
-    /// Infiltration height [m] (total envelope height for stack effect).
+    /// Infiltration height (m) (total envelope height for stack effect).
     pub infiltration_height_m: f64,
     /// Foundation leakage distribution.
     pub foundation: FoundationLeakageClass,
@@ -785,8 +785,8 @@ pub fn sherman_grimsrud_terrain_factor(terrain: TerrainClass, height_m: f64) -> 
 ///   - 0.0  for conditioned zones (vertical-dominated leakage)
 ///   - 0.4  for garages (mixed)
 ///   - 0.75 for vented attics (ceiling-dominated leakage)
-/// - `zone_height_m`: zone height [m]
-/// - `zone_height_above_ground_m`: height of zone bottom above ground [m]
+/// - `zone_height_m`: zone height (m)
+/// - `zone_height_above_ground_m`: height of zone bottom above ground (m)
 /// - `terrain`: site terrain class for wind speed correction
 /// - `shielding`: shielding coefficient from Walker-Wilson (1998) Table 3:
 ///   - 0.10 (well-shielded: dense trees/buildings on all sides)
@@ -805,7 +805,7 @@ pub fn sherman_grimsrud_terrain_factor(terrain: TerrainClass, height_m: f64) -> 
 /// `Cs = f_s² × g × H / T_in × 1e-2`
 /// where `f_s = (2/3)(1 + R/2) × √(2·nl·(1-nl)) / (√nl + √(1-nl))` is the
 /// Walker-Wilson stack shape factor, `g = 9.80665 m/s²`, `H` is zone height,
-/// `T_in` is indoor temperature [K], and `1e-2` converts m²/(s²·K) →
+/// `T_in` is indoor temperature (K), and `1e-2` converts m²/(s²·K) →
 /// (L/s)²/(cm⁴·K) since `1 m² = 1e4 cm²` and `1 L²/cm⁴ = 1e6 cm²`.
 ///
 /// **Wind coefficient:**

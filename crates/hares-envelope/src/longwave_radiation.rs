@@ -136,7 +136,7 @@ pub fn beta_factor(tilt_deg: f64) -> f64 {
 /// Parameters for a single exterior surface.
 #[derive(Debug, Clone, Copy)]
 pub struct ExteriorSurface {
-    /// Surface area [m²].
+    /// Surface area (m²).
     pub area_m2: f64,
     /// Longwave emissivity [-], typically 0.90 for opaque, 0.84 for glass.
     pub emissivity: f64,
@@ -147,7 +147,7 @@ pub struct ExteriorSurface {
     pub beta: f64,
 }
 
-/// Net longwave radiation flux onto one exterior surface [W].
+/// Net longwave radiation flux onto one exterior surface (W).
 ///
 /// Positive = net heat gain onto the surface.
 ///
@@ -169,7 +169,7 @@ pub struct ExteriorSurface {
 ///   node temperature directly will introduce systematic error.
 ///
 /// # Returns
-/// Net longwave heat flux onto the surface [W]. Negative means net emission.
+/// Net longwave heat flux onto the surface (W). Negative means net emission.
 #[must_use]
 pub fn exterior_longwave_w(
     surface: &ExteriorSurface,
@@ -222,7 +222,7 @@ pub fn exterior_longwave_w_m2(
 /// Parameters for a single interior surface for zone radiation exchange.
 #[derive(Debug, Clone, Copy)]
 pub struct InteriorSurface {
-    /// Surface area [m²].
+    /// Surface area (m²).
     pub area_m2: f64,
     /// Longwave emissivity [-].
     pub emissivity: f64,
@@ -243,7 +243,7 @@ pub fn linearised_h_r(emissivity: f64, t_avg_c: f64) -> f64 {
     hares_physics::constants::linearised_h_rad(emissivity, t_avg_c + CELSIUS_TO_KELVIN)
 }
 
-/// Net longwave radiation exchange for each interior surface in a zone [W].
+/// Net longwave radiation exchange for each interior surface in a zone (W).
 ///
 /// Returns a `Vec<f64>` of net fluxes (positive = net gain, negative = net
 /// loss) corresponding 1-to-1 with the input `surfaces` slice.
@@ -268,7 +268,7 @@ pub fn linearised_h_r(emissivity: f64, t_avg_c: f64) -> f64 {
 ///   (accounting for any film resistance), not RC-network node temperatures.
 ///
 /// # Returns
-/// Net LW heat flux for each surface [W].  The sum is zero by energy conservation.
+/// Net LW heat flux for each surface (W).  The sum is zero by energy conservation.
 ///
 /// # Panics
 /// Does not panic; returns all-zeros if `surfaces` is empty or total area is zero.
@@ -356,12 +356,12 @@ impl ScriptFCoefficients {
         }
     }
 
-    /// Compute net interior LWR flux per surface [W] using exact T⁴ radiosity.
+    /// Compute net interior LWR flux per surface (W) using exact T⁴ radiosity.
     ///
     /// Uses pre-computed radiosity weights with full Stefan-Boltzmann T⁴ radiation.
     /// Energy-conserving by construction (Σ q_i = 0).
     ///
-    /// Returns vec of net fluxes [W]. Positive = surface gains heat.
+    /// Returns vec of net fluxes (W). Positive = surface gains heat.
     #[must_use]
     pub fn net_flux_w(&self, t_surfaces_c: &[f64]) -> Vec<f64> {
         let n = self.e_sigma_a.len();
@@ -426,7 +426,7 @@ impl ScriptFCoefficients {
     }
 }
 
-/// Linearised net interior longwave radiation for each surface [W].
+/// Linearised net interior longwave radiation for each surface (W).
 ///
 /// This is a faster, linear approximation that avoids T⁴ per timestep.
 /// Useful when an analytic linearisation around an operating point is

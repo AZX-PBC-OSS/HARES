@@ -1,10 +1,10 @@
 //! The run-level warning type every producer shares.
 //!
 //! Equipment, input resolvers and the tariff parser raise warnings through
-//! this one type; the dwelling's [`crate::WarningLog`] formats them into the
-//! strings `take_warnings()` returns. A `tracing` log line is never the only
-//! signal of a warning: every producer carries the value so the run's caller
-//! sees it.
+//! this one type; the dwelling's warning log (`hares_core::dwelling::warnings::WarningLog`)
+//! formats them into the strings `take_warnings()` returns. A `tracing` log line is
+//! never the only signal of a warning: every producer carries the value so the run's
+//! caller sees it.
 
 use std::fmt;
 use std::sync::Arc;

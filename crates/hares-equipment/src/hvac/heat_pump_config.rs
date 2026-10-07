@@ -113,11 +113,11 @@ pub struct HeatPumpCommonConfig {
     pub charge_defect_ratio: Option<f64>,
 
     // ── Ground-loop circulation pump (GSHP only) ───
-    /// Vertical borehole loop depth [m]. Default 60 m (≈200 ft), typical for
+    /// Vertical borehole loop depth (m). Default 60 m (≈200 ft), typical for
     /// residential vertical ground loops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pump_loop_depth_m: Option<f64>,
-    /// Inner diameter of the HDPE U-bend pipe [m]. Default 0.025 m (1″ nominal
+    /// Inner diameter of the HDPE U-bend pipe (m). Default 0.025 m (1″ nominal
     /// SDR11 pipe, ≈ 0.027 m OD, ≈ 0.022 m ID — HARES default rounds to 0.025).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pump_pipe_diameter_m: Option<f64>,
@@ -137,7 +137,7 @@ pub struct HeatPumpCommonConfig {
     /// 0.70–0.85; set accordingly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pump_motor_efficiency: Option<f64>,
-    /// Additional head loss beyond the borehole loop [m], covering the
+    /// Additional head loss beyond the borehole loop (m), covering the
     /// water‑to‑refrigerant heat exchanger, distribution headers, isolation
     /// valves, and strainer. Default 3.0 m for a typical residential 4‑ton
     /// brazed‑plate HX per ASHRAE HVAC Systems & Equipment 2020 Ch.9 Table 7.
@@ -153,13 +153,13 @@ pub struct HeatPumpCommonConfig {
     pub enter_water_temp_c: Option<f64>,
 
     // ── Borehole heat exchanger (GSHP) ───
-    /// Vertical borehole depth [m]. Default 60 m.
+    /// Vertical borehole depth (m). Default 60 m.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borehole_depth_m: Option<f64>,
-    /// Borehole radius [m]. Default 0.0762 m (3″ radius, 6″ borehole).
+    /// Borehole radius (m). Default 0.0762 m (3″ radius, 6″ borehole).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borehole_radius_m: Option<f64>,
-    /// Center-to-center U-tube shank spacing [m]. Default 0.062 m.
+    /// Center-to-center U-tube shank spacing (m). Default 0.062 m.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borehole_shank_spacing_m: Option<f64>,
     /// Number of boreholes in the field. Default 1.
@@ -175,10 +175,10 @@ pub struct HeatPumpCommonConfig {
     /// Grout (backfill) thermal conductivity [W/(m·K)]. Default 0.73.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borehole_grout_conductivity_w_per_m_k: Option<f64>,
-    /// HDPE U-tube pipe outer radius [m]. Default 0.01335 m.
+    /// HDPE U-tube pipe outer radius (m). Default 0.01335 m.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borehole_pipe_outer_radius_m: Option<f64>,
-    /// HDPE U-tube pipe inner radius [m]. Default 0.01085 m.
+    /// HDPE U-tube pipe inner radius (m). Default 0.01085 m.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borehole_pipe_inner_radius_m: Option<f64>,
     /// HDPE pipe thermal conductivity [W/(m·K)]. Default 0.40.
@@ -261,19 +261,19 @@ impl Default for HeatPumpCommonConfig {
 pub struct HeatPumpHeaterConfig {
     #[serde(flatten)]
     pub common: HeatPumpCommonConfig,
-    /// Heat-pump lockout below this outdoor temperature [C].
+    /// Heat-pump lockout below this outdoor temperature (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hp_lockout_temp_c: Option<f64>,
-    /// Electric-resistance lockout below this outdoor temperature [C].
+    /// Electric-resistance lockout below this outdoor temperature (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub er_lockout_temp_c: Option<f64>,
-    /// EnergyPlus supplemental-ER upper OAT cap [C].
+    /// EnergyPlus supplemental-ER upper OAT cap (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_oat_supplemental_c: Option<f64>,
-    /// ER call threshold offset below the heating setpoint [C].
+    /// ER call threshold offset below the heating setpoint (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub er_setpoint_offset_c: Option<f64>,
-    /// ER hard lockout duration after a setpoint raise [s].
+    /// ER hard lockout duration after a setpoint raise (s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub er_hard_lockout_time_s: Option<f64>,
     /// Heating-side sensible heat ratio. Default 1.0 (all-sensible) matching
@@ -489,7 +489,7 @@ pub struct HeatPumpCoolerConfig {
     /// Per-stage sensible heat ratios.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_shrs: Option<Vec<f64>>,
-    /// Crankcase heater rated power [kW]. Applied as parasitic load when the
+    /// Crankcase heater rated power (kW). Applied as parasitic load when the
     /// compressor is off and outdoor air temperature is below the threshold.
     /// ASHP default 0.050 kW (50 W) at 12.78°C (55°F); MSHP default 0.015 kW
     /// (15 W) at 0°C (32°F). OCHRE HVAC.py AirConditioner class.

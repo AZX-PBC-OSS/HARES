@@ -74,9 +74,9 @@ pub enum HeatTransferDirection {
 pub enum PortContribution {
     Thermal {
         zone: ZoneId,
-        /// Convective sensible gain [W]: goes directly to zone air.
+        /// Convective sensible gain (W): goes directly to zone air.
         sensible_gain_w: f64,
-        /// Radiant sensible gain [W]: distributed to surface nodes via TMULT.
+        /// Radiant sensible gain (W): distributed to surface nodes via TMULT.
         /// sensible_gain_w + radiant_gain_w = total sensible gain.
         radiant_gain_w: f64,
         latent_gain_w: f64,
@@ -101,7 +101,7 @@ pub enum PortContribution {
         supply_temp_c: f64,
         return_temp_c: f64,
         fluid_type: FluidType,
-        /// Declared thermal power delivered to this loop [W].
+        /// Declared thermal power delivered to this loop (W).
         /// None when the contributor does not quantify thermal energy
         /// (e.g. static temperature/flow, or no thermal recovery active).
         thermal_power_w: Option<f64>,
@@ -250,7 +250,7 @@ pub struct ThermalAccumulator {
     pub sensible_gain_w: f64,
     pub radiant_gain_w: f64,
     pub latent_gain_w: f64,
-    /// Short-wave (visible) internal gain [W], distributed to the zone's
+    /// Short-wave (visible) internal gain (W), distributed to the zone's
     /// interior surfaces like transmitted diffuse solar.
     pub shortwave_gain_w: f64,
     pub sensible_by_category: [f64; THERMAL_CATEGORY_COUNT],
@@ -391,7 +391,7 @@ pub struct ElectricalAccumulator {
 }
 
 impl ElectricalAccumulator {
-    /// Net active power [W]: load (positive) + generation (negative).
+    /// Net active power (W): load (positive) + generation (negative).
     pub fn net_active_w(&self) -> f64 {
         self.load_power_w + self.generation_power_w
     }
