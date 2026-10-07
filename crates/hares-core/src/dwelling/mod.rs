@@ -5595,10 +5595,7 @@ impl Dwelling {
             .thermal
             .set_from(&self.thermal_update_buf);
         #[cfg(test)]
-        self.record_snapshot_allocations(
-            thermal_alloc_before,
-            SnapshotAllocSite::ThermalSetFrom,
-        );
+        self.record_snapshot_allocations(thermal_alloc_before, SnapshotAllocSite::ThermalSetFrom);
 
         // Capture the pre-resolve (committed) humidity ratios so the
         // always-on moisture balance check can diff this step's solver
@@ -5718,10 +5715,7 @@ impl Dwelling {
             .humidity
             .set_from(&self.humidity_update_buf);
         #[cfg(test)]
-        self.record_snapshot_allocations(
-            humidity_alloc_before,
-            SnapshotAllocSite::HumiditySetFrom,
-        );
+        self.record_snapshot_allocations(humidity_alloc_before, SnapshotAllocSite::HumiditySetFrom);
         #[cfg(test)]
         let electrical_alloc_before = thread_allocations();
         self.latest_env
@@ -5740,10 +5734,7 @@ impl Dwelling {
             .fluid
             .set_from(&self.fluid_update_buf);
         #[cfg(test)]
-        self.record_snapshot_allocations(
-            fluid_alloc_before,
-            SnapshotAllocSite::FluidSetFrom,
-        );
+        self.record_snapshot_allocations(fluid_alloc_before, SnapshotAllocSite::FluidSetFrom);
 
         #[cfg(test)]
         let mut custom_alloc_delta = 0u64;
