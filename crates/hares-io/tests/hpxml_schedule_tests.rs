@@ -162,8 +162,8 @@ fn hvac_without_a_schedule_file_keeps_the_hpxml_hourly_setpoints() {
     let building = parse_building(&xml).expect("parse");
     let defaults_dir = project_root().join("defaults");
     let defaults = hares_io::defaults::DefaultsStore::load(&defaults_dir).expect("defaults load");
-    let mut specs = hares_io::resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("resolve");
+    let mut specs =
+        hares_io::resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("resolve");
     let mut schedule = generate_default_schedule(
         test_start(),
         Duration::hours(24),
