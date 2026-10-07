@@ -106,21 +106,24 @@ fn run_single_case(case: &BestestCase) {
 fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
     use BestestMetric::*;
     Some(match (case_id, metric) {
-        // 600: heating 3249.1 vs band 4296–5709; cooling 5905.8 vs 6137–7964.
-        // Re-measured 2026-10-07 after the diffuse short-wave window loss:
-        // the zone's windows now take their EnergyPlus share of the
-        // enclosure's diffuse pool back out through the glazing
-        // (HeatBalanceSurfaceManager.cc:4272, 4315), so less transmitted
-        // diffuse solar is absorbed indoors: cooling −228 kWh, heating
-        // +26 kWh per year; the free-float cases lose the same diffuse gain.
-        ("600", AnnualHeatingLoadKwh) => 3249.112643,
-        ("600", AnnualCoolingLoadKwh) => 5905.813758,
-        // 640: heating energy 2166.3 vs band 2751–3803 (+22.0: the same
-        // diffuse window loss raises the heating need slightly).
-        ("640", AnnualHeatingEnergyKwh) => 2166.271024,
-        // 900: heating 990.6 vs band 1170–2041 (+42.4, the heavy-mass case
-        // holds the diffuse loss longer).
-        ("900", AnnualHeatingLoadKwh) => 990.553892,
+        // 600: heating 3122.3 vs band 4296–5709; cooling 5542.0 vs 6137–7964.
+        // Re-measured 2026-10-07 at the combined tip: the diffuse short-wave
+        // window loss (the zone's windows take their EnergyPlus share of the
+        // enclosure's diffuse pool back out through the glazing,
+        // HeatBalanceSurfaceManager.cc:4272, 4315) and the ideal dispatch's
+        // setpoint landing (the solve no longer subtracts the previous
+        // step's HVAC delivery) both move the fixed-accuracy cases; the
+        // out-of-band residual is the documented state this lock pins
+        // against silent drift.
+        ("600", AnnualHeatingLoadKwh) => 3122.278349,
+        ("600", AnnualCoolingLoadKwh) => 5542.031522,
+        // 640: heating energy 2086.2 vs band 2751–3803 (the dispatch
+        // landing dominates the diffuse loss here).
+        ("640", AnnualHeatingEnergyKwh) => 2086.165423,
+        // 900: heating 1105.8 vs band 1170–2041 (the heavy-mass case
+        // gains heating from the dispatch's setpoint landing: the old
+        // state-dependent offset under-delivered).
+        ("900", AnnualHeatingLoadKwh) => 1105.795088,
         // 600FF: peak 73.73 vs band 64.9–69.5 (min in band: strict).
         // Re-measured: +0.76 K peak (more floor-retained beam
         // solar at the freefloat peak step).
