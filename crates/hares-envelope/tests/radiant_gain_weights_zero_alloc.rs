@@ -239,6 +239,7 @@ fn make_solver(
         indoor_zone_id: ZoneId(1),
         window_properties: HashMap::new(),
         window_zone_ids: HashMap::new(),
+        window_ids_sorted: Vec::new(),
         exterior_surfaces: vec![],
         interior_lwr_zones: vec![interior_lwr_zone],
         infiltration,

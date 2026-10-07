@@ -4,7 +4,13 @@ use hares_types::{EnvironmentState, ZoneId};
 use nalgebra::DVector;
 
 use super::ThermalSolver;
-use super::config::{InteriorSolarSurfaceInfo, InteriorSurfaceInfo};
+use super::config::{InteriorSolarSurfaceInfo, InteriorSurfaceInfo, WindowDiffuseShare};
+
+/// The winter months for the window optics (ANSI/RESNET 301): October
+/// through April.
+pub(crate) fn resnet_is_winter(month: u32) -> bool {
+    month >= 10 || month <= 4
+}
 
 /// Cosine weight of the transmitted beam on an interior surface face
 /// (parallel-flood approximation).
@@ -45,10 +51,11 @@ impl ThermalSolver {
     /// returns the total injected into `u` [W].
     ///
     /// The returned total is exact by construction: the distribution paths
-    /// conserve the transmitted flux (beam + diffuse == Σ absorbed + reflected),
-    /// so per window the injection is `absorbed_zone_w + transmitted_total_w`
-    /// regardless of which distribution branch ran. Callers use the return
-    /// value for component-gains diagnostics instead of measuring a `u` delta.
+    /// conserve the transmitted flux into `u` (beam + diffuse equals the
+    /// absorbed sum plus the reflected remainder plus the windows' inward
+    /// absorbed share; the transmittance share that leaves back out through
+    /// the glazing is not injected). Callers use the return value for
+    /// component-gains diagnostics instead of measuring a `u` delta.
     pub(super) fn apply_solar_inputs(
         &mut self,
         u: &mut DVector<f64>,
@@ -56,8 +63,7 @@ impl ThermalSolver {
     ) -> f64 {
         let mut total_w = 0.0;
         let month = env.current_time.month();
-        // ANSI/RESNET 301: winter = October through April (months 10–4).
-        let is_winter = month >= 10 || month <= 4;
+        let is_winter = resnet_is_winter(month);
 
         for irr in &env.weather.solar_irradiance {
             let Some(&idx) = self.wiring.solar_input_indices.get(&irr.surface_id) else {
@@ -107,14 +113,17 @@ impl ThermalSolver {
                 total_w += absorbed_zone_w;
 
                 let injected_transmitted_w = match zone_id {
-                    Some(zid) => self.distribute_transmitted_solar(
-                        u,
-                        zid,
-                        transmitted_beam_w,
-                        transmitted_diffuse_w,
-                        env.weather.solar_altitude_deg,
-                        env.weather.solar_azimuth_deg,
-                    ),
+                    Some(zid) => {
+                        self.fill_window_diffuse_shares(zid, is_winter);
+                        self.distribute_transmitted_solar(
+                            u,
+                            zid,
+                            transmitted_beam_w,
+                            transmitted_diffuse_w,
+                            env.weather.solar_altitude_deg,
+                            env.weather.solar_azimuth_deg,
+                        )
+                    }
                     None => None,
                 };
 
@@ -151,6 +160,12 @@ impl ThermalSolver {
     ///
     /// The angles place the beam only; a diffuse-only call (short-wave
     /// internal gain) passes zero beam and any angles.
+    ///
+    /// The caller must have called [`Self::fill_window_diffuse_shares`] for
+    /// `zone_id` first: the diffuse pool loses each window's
+    /// transmittance-weighted share back out through the glazing
+    /// (EnergyPlus `HeatBalanceSurfaceManager.cc` `solVMULT`, cited on
+    /// [`DiffuseSplit`]); the lost watts are not injected.
     pub(super) fn distribute_transmitted_solar(
         &mut self,
         u: &mut DVector<f64>,
@@ -171,8 +186,9 @@ impl ThermalSolver {
         if let Some(zone_cfg) = lwr_zone
             && !zone_cfg.surfaces.is_empty()
         {
-            let reflected_w = compute_solar_distribution_into(
+            let split = compute_solar_distribution_into(
                 &zone_cfg.surfaces,
+                &self.window_share_buf,
                 beam_w,
                 diffuse_w,
                 solar_altitude_deg,
@@ -183,7 +199,7 @@ impl ThermalSolver {
                 deposit_solar_to_surface_nodes(&zone_cfg.surfaces, &self.solar_absorbed_buf, u);
             let mut injected_w = nodes_w;
             if let Some(&air_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) {
-                let air_total = reflected_w + air_spillover;
+                let air_total = split.undistributed_w + air_spillover + split.window_air_w;
                 if air_idx < u.len() && air_total > 0.0 {
                     u[air_idx] += air_total;
                     injected_w += air_total;
@@ -203,8 +219,9 @@ impl ThermalSolver {
             return None;
         }
 
-        let reflected_w = compute_solar_distribution_into_solar(
+        let split = compute_solar_distribution_into_solar(
             &zone_cfg.surfaces,
+            &self.window_share_buf,
             beam_w,
             diffuse_w,
             solar_altitude_deg,
@@ -215,13 +232,53 @@ impl ThermalSolver {
             deposit_solar_to_solar_surfaces(&zone_cfg.surfaces, &self.solar_absorbed_buf, u);
         let mut injected_w = nodes_w;
         if let Some(&air_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) {
-            let air_total = reflected_w + air_spillover;
+            let air_total = split.undistributed_w + air_spillover + split.window_air_w;
             if air_idx < u.len() && air_total > 0.0 {
                 u[air_idx] += air_total;
                 injected_w += air_total;
             }
         }
         Some(injected_w)
+    }
+
+    /// Fills `window_share_buf` with `zone_id`'s windows' shares of the
+    /// zone's diffuse short-wave distribution and returns their total
+    /// weight [m²].
+    ///
+    /// Per EnergyPlus each window joins the enclosure's diffuse denominator
+    /// with `Area × (TransDiff + AbsDiffBack)`
+    /// (`HeatBalanceSurfaceManager.cc:4272`): the effective diffuse
+    /// transmittance this window's pool arrived through (the season's
+    /// transmittance times the glazing curve's diffuse IAM) and the glass
+    /// absorptance `SHGC - τ` the window model decomposes the SHGC into,
+    /// split by the window's inward-flowing fraction N_i.
+    pub(super) fn fill_window_diffuse_shares(&mut self, zone_id: ZoneId, is_winter: bool) -> f64 {
+        self.window_share_buf.clear();
+        let mut weight_sum = 0.0;
+        for &surface_id in &self.config.window_ids_sorted {
+            if self.config.window_zone_ids.get(&surface_id) != Some(&zone_id) {
+                continue;
+            }
+            let Some(win) = self.config.window_properties.get(&surface_id) else {
+                continue;
+            };
+            let transmittance = if is_winter {
+                win.winter_transmittance
+            } else {
+                win.transmittance
+            };
+            let shgc = if is_winter { win.winter_shgc } else { win.shgc };
+            let tau_diff = transmittance * win.glazing_curve.diffuse_iam();
+            let alpha = (shgc - transmittance).max(0.0);
+            let share = WindowDiffuseShare {
+                tau_weight: win.area_m2 * tau_diff,
+                alpha_weight: win.area_m2 * alpha,
+                n_i: win.radiation_frac,
+            };
+            weight_sum += share.weight();
+            self.window_share_buf.push(share);
+        }
+        weight_sum
     }
 
     /// Delivers opaque solar gain to exterior surfaces via [`ExteriorSurfaceInfo`].
@@ -269,28 +326,31 @@ impl ThermalSolver {
 /// Pure solar distribution calculation. Extracted for testability.
 ///
 /// Distributes `beam_w` and `diffuse_w` to surfaces. Returns per-surface
-/// absorbed [W] and total reflected to zone air [W].
+/// absorbed [W] and the rest of the pool as [`DiffuseSplit`].
 ///
-/// Energy conservation: `beam_w + diffuse_w == Σ absorbed + reflected` always holds.
+/// Energy conservation: `beam_w + diffuse_w == Σ absorbed + split.total()`
+/// always holds.
 #[cfg(test)]
 pub(crate) fn compute_solar_distribution(
     surfaces: &[InteriorSurfaceInfo],
+    windows: &[WindowDiffuseShare],
     beam_w: f64,
     diffuse_w: f64,
     solar_altitude_deg: f64,
     solar_azimuth_deg: f64,
-) -> (Vec<f64>, f64) {
+) -> (Vec<f64>, DiffuseSplit) {
     let n = surfaces.len();
     let mut absorbed = vec![0.0_f64; n];
-    let reflected = compute_solar_distribution_into(
+    let split = compute_solar_distribution_into(
         surfaces,
+        windows,
         beam_w,
         diffuse_w,
         solar_altitude_deg,
         solar_azimuth_deg,
         &mut absorbed,
     );
-    (absorbed, reflected)
+    (absorbed, split)
 }
 
 /// Common interface for surface types in solar distribution calculations.
@@ -343,25 +403,62 @@ impl SolarDistributableSurface for InteriorSolarSurfaceInfo {
     }
 }
 
+/// Where a diffuse short-wave pool ended up: the shares that are not
+/// absorbed on the opaque interior surfaces.
+///
+/// EnergyPlus pools an enclosure's diffuse short-wave (transmitted diffuse
+/// solar plus the lights' visible part) and distributes it over the opaque
+/// surfaces AND the windows (`HeatBalanceSurfaceManager.cc:4206` opaque
+/// `Area × AbsIntSurf`, `:4272` window `Area × (TransDiff + AbsDiffBack)`,
+/// `:4315` `solVMULT = 1/SUM1`); each window's transmittance-weighted share
+/// passes back out through the glazing and its absorptance-weighted share
+/// is absorbed in the glass layers (`:3837-3892`), split by the window's
+/// inward-flowing fraction between the zone and outward conduction.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct DiffuseSplit {
+    /// Pool [W] neither the opaque surfaces nor the windows took: reflected
+    /// back to zone air (zero-absorptance edge cases).
+    pub undistributed_w: f64,
+    /// Pool [W] that left back out through the glazing: each window's
+    /// transmittance-weighted share plus the outward part of its absorbed
+    /// share, `(1 - n_i) × α`-weighted.
+    pub window_out_w: f64,
+    /// Pool [W] absorbed in the glass that flows inward: each window's
+    /// `n_i × α`-weighted share, delivered to zone air by the caller.
+    pub window_air_w: f64,
+}
+
+impl DiffuseSplit {
+    fn total(&self) -> f64 {
+        self.undistributed_w + self.window_out_w + self.window_air_w
+    }
+}
+
 /// Generic solar distribution into a caller-owned buffer.
 ///
 /// Parameterised over `S: SolarDistributableSurface` so that both
 /// [`InteriorSurfaceInfo`] (ScriptF) and [`InteriorSolarSurfaceInfo`] (StarMesh)
-/// paths share a single implementation. Returns total reflected [W].
+/// paths share a single implementation. Returns per-surface absorbed [W]
+/// in `absorbed` and the diffuse pool's non-opaque split as [`DiffuseSplit`].
 ///
 /// `absorbed_buf` is resized and zeroed as needed.
 ///
-/// View factors are normalized by `area × absorptance / Σ(area × absorptance)`.
-/// When all surfaces have nonzero absorptance, all solar is distributed. When
-/// absorptance sums to zero, all solar is returned as reflected to zone air.
+/// The beam normalizes over the opaque surfaces only (cosine-weighted
+/// parallel-flood). The diffuse pool distributes over the opaque surfaces
+/// AND the zone's windows (EnergyPlus's enclosure `SUM1`, cited above):
+/// each window's transmittance-weighted share of the pool leaves back out
+/// through the glazing and its absorptance-weighted share splits by the
+/// window's inward-flowing fraction. When every weight is zero, all solar
+/// is returned as reflected to zone air.
 fn compute_solar_distribution_into_generic<S: SolarDistributableSurface>(
     surfaces: &[S],
+    windows: &[WindowDiffuseShare],
     beam_w: f64,
     diffuse_w: f64,
     solar_altitude_deg: f64,
     solar_azimuth_deg: f64,
     absorbed: &mut Vec<f64>,
-) -> f64 {
+) -> DiffuseSplit {
     let n = surfaces.len();
     absorbed.clear();
     absorbed.resize(n, 0.0);
@@ -370,6 +467,8 @@ fn compute_solar_distribution_into_generic<S: SolarDistributableSurface>(
         .iter()
         .map(|s| s.area_m2() * s.solar_absorptance())
         .sum();
+    let window_weight: f64 = windows.iter().map(WindowDiffuseShare::weight).sum();
+    let mut diffuse_split = DiffuseSplit::default();
 
     // Beam: cosine-weighted parallel-flood distribution. Each interior
     // face is illuminated in proportion to area × absorptance × the cosine
@@ -407,18 +506,33 @@ fn compute_solar_distribution_into_generic<S: SolarDistributableSurface>(
         }
     }
 
-    // Diffuse: all surfaces by area × absorptance, normalized to sum to 1.
-    if diffuse_w > 0.0 && total_wa > 0.0 {
+    // Diffuse: the enclosure's pool distributes over the opaque surfaces
+    // and the windows by weight; the windows' transmittance-weighted share
+    // leaves back out through the glazing (EnergyPlus `solVMULT`, cited
+    // above) and their absorptance-weighted share splits by each window's
+    // inward-flowing fraction.
+    let sum1 = total_wa + window_weight;
+    if diffuse_w > 0.0 && sum1 > 0.0 {
         for (i, s) in surfaces.iter().enumerate() {
-            let factor = s.area_m2() * s.solar_absorptance() / total_wa;
+            let factor = s.area_m2() * s.solar_absorptance() / sum1;
             absorbed[i] += diffuse_w * factor;
+        }
+        for w in windows {
+            // The window's transmittance-weighted slice of the pool leaves
+            // back out; its absorptance-weighted slice splits by the
+            // inward-flowing fraction.
+            diffuse_split.window_out_w +=
+                diffuse_w * (w.tau_weight + w.alpha_weight * (1.0 - w.n_i)) / sum1;
+            diffuse_split.window_air_w += diffuse_w * w.alpha_weight * w.n_i / sum1;
         }
     }
 
     // Any energy not distributed to surfaces is reflected back to zone air.
     // This handles zero-absorptance surfaces and numerical edge cases.
     let total_distributed: f64 = absorbed.iter().sum();
-    (beam_w + diffuse_w) - total_distributed
+    diffuse_split.undistributed_w =
+        (beam_w + diffuse_w) - total_distributed - diffuse_split.total();
+    diffuse_split
 }
 
 /// Like `compute_solar_distribution` but writes into a caller-owned buffer.
@@ -427,14 +541,16 @@ fn compute_solar_distribution_into_generic<S: SolarDistributableSurface>(
 /// [`InteriorSurfaceInfo`] (ScriptF mode).
 pub(crate) fn compute_solar_distribution_into(
     surfaces: &[InteriorSurfaceInfo],
+    windows: &[WindowDiffuseShare],
     beam_w: f64,
     diffuse_w: f64,
     solar_altitude_deg: f64,
     solar_azimuth_deg: f64,
     absorbed: &mut Vec<f64>,
-) -> f64 {
+) -> DiffuseSplit {
     compute_solar_distribution_into_generic(
         surfaces,
+        windows,
         beam_w,
         diffuse_w,
         solar_altitude_deg,
@@ -479,14 +595,16 @@ fn deposit_solar_to_surface_nodes(
 /// Delegates to [`compute_solar_distribution_into_generic`].
 pub(crate) fn compute_solar_distribution_into_solar(
     surfaces: &[InteriorSolarSurfaceInfo],
+    windows: &[WindowDiffuseShare],
     beam_w: f64,
     diffuse_w: f64,
     solar_altitude_deg: f64,
     solar_azimuth_deg: f64,
     absorbed: &mut Vec<f64>,
-) -> f64 {
+) -> DiffuseSplit {
     compute_solar_distribution_into_generic(
         surfaces,
+        windows,
         beam_w,
         diffuse_w,
         solar_altitude_deg,
@@ -529,6 +647,18 @@ mod tests {
     /// lit, matching most assertions written for the legacy split.
     const TEST_ALT: f64 = 45.0;
     const TEST_AZ: f64 = 180.0;
+
+    /// Distribution over `surfaces` with no windows: the pool is fully
+    /// accounted by Σ absorbed + the split's undistributed share.
+    fn distribute(
+        surfaces: &[InteriorSurfaceInfo],
+        beam: f64,
+        diffuse: f64,
+        altitude: f64,
+        azimuth: f64,
+    ) -> (Vec<f64>, DiffuseSplit) {
+        compute_solar_distribution(surfaces, &[], beam, diffuse, altitude, azimuth)
+    }
 
     /// `is_floor` maps to the tilt/azimuth of the canonical box:
     /// floor (tilt 180), everything else a north wall (tilt 90, azimuth 0).
@@ -574,8 +704,7 @@ mod tests {
         ];
         let beam = 500.0;
         let diffuse = 200.0;
-        let (absorbed, reflected) =
-            compute_solar_distribution(&surfaces, beam, diffuse, TEST_ALT, TEST_AZ);
+        let (absorbed, split) = distribute(&surfaces, beam, diffuse, TEST_ALT, TEST_AZ);
 
         // Normalized view factors: all solar distributed to surfaces, reflected = 0.
         let total_absorbed: f64 = absorbed.iter().sum();
@@ -585,16 +714,18 @@ mod tests {
             beam + diffuse
         );
         assert!(
-            reflected.abs() < 1e-6,
-            "no reflection with normalized view factors, got {reflected}"
+            split.undistributed_w.abs() < 1e-6,
+            "no reflection with normalized view factors, got {}",
+            split.undistributed_w
         );
     }
 
-    /// Randomized conservation: `beam + diffuse == Σ absorbed + reflected`
+    /// Randomized conservation: `beam + diffuse == Σ absorbed + split.total()`
     /// must hold exactly for ANY surface set and flux split, not just the
     /// fixed point above. 256 deterministic pseudo-random cases (SplitMix64,
     /// no external deps) spanning 1–8 surfaces, areas 1–100 m², absorptances
-    /// 0–1, floor fraction 0–0.9, and fluxes 0–5 kW (including all-zero).
+    /// 0–1, floor fraction 0–0.9, and fluxes 0–5 kW (including all-zero),
+    /// with 0–3 windows whose shares join the diffuse denominator.
     #[test]
     fn solar_distribution_conserves_energy_randomized() {
         let mut state = 0x9E3779B97F4A7C15_u64;
@@ -619,14 +750,24 @@ mod tests {
                     )
                 })
                 .collect();
+            let windows: Vec<WindowDiffuseShare> = (0..(next_f64() * 4.0) as usize)
+                .map(|_| {
+                    let tau = next_f64() * 0.8;
+                    WindowDiffuseShare {
+                        tau_weight: (1.0 + next_f64() * 29.0) * tau,
+                        alpha_weight: (1.0 + next_f64() * 29.0) * next_f64() * 0.5,
+                        n_i: next_f64(),
+                    }
+                })
+                .collect();
             let beam = next_f64() * 5000.0;
             let diffuse = next_f64() * 5000.0;
             let altitude = next_f64() * 90.0;
             let azimuth = next_f64() * 360.0;
 
-            let (absorbed, reflected) =
-                compute_solar_distribution(&surfaces, beam, diffuse, altitude, azimuth);
-            let total: f64 = absorbed.iter().sum::<f64>() + reflected;
+            let (absorbed, split) =
+                compute_solar_distribution(&surfaces, &windows, beam, diffuse, altitude, azimuth);
+            let total: f64 = absorbed.iter().sum::<f64>() + split.total();
             let expected = beam + diffuse;
             let tol = 1e-9 * expected.max(1.0);
             assert!(
@@ -636,10 +777,75 @@ mod tests {
                 total - expected
             );
             assert!(
-                reflected >= -tol,
-                "case {case}: reflected must be non-negative, got {reflected}"
+                split.undistributed_w >= -tol,
+                "case {case}: reflected must be non-negative, got {}",
+                split.undistributed_w
             );
         }
+    }
+
+    /// An enclosure with a known window fraction loses the EnergyPlus share
+    /// of the diffuse short-wave through the glazing, and the energy balance
+    /// closes.
+    ///
+    /// EnergyPlus v24.2.0 distributes the enclosure's diffuse pool over the
+    /// opaque surfaces (`HeatBalanceSurfaceManager.cc:4206`) AND the windows
+    /// (`:4272`, `Area × (TransDiff + AbsDiffBack)`), `solVMULT = 1/SUM1`
+    /// (`:4315`); each window's transmittance-weighted share passes back out
+    /// through the glazing and its absorptance-weighted share is absorbed in
+    /// the glass layers (`:3837-3892`). HARES before this fix distributed
+    /// over the opaque surfaces only, so all of it was absorbed indoors.
+    #[test]
+    fn diffuse_pool_leaves_back_out_through_the_windows() {
+        // One opaque wall (10 m², α 0.5 → weight 5) and one window
+        // (10 m², effective diffuse τ 0.4, glass α 0.3, N_i 0.7 → weight 7).
+        let surfaces = vec![make_surface(10.0, 0.5, false)];
+        let windows = vec![WindowDiffuseShare {
+            tau_weight: 10.0 * 0.4,
+            alpha_weight: 10.0 * 0.3,
+            n_i: 0.7,
+        }];
+        let diffuse = 240.0;
+        let (absorbed, split) =
+            compute_solar_distribution(&surfaces, &windows, 0.0, diffuse, TEST_ALT, TEST_AZ);
+
+        // SUM1 = 5 + 7 = 12: the opaque surface takes 240 × 5/12 = 100 W;
+        // the window's τ share 240 × 4/12 = 80 W leaves; its α share
+        // 240 × 3/12 = 60 W splits 42 W inward (N_i 0.7) and 18 W out.
+        let total_absorbed: f64 = absorbed.iter().sum();
+        assert!((total_absorbed - 100.0).abs() < 1e-9, "{total_absorbed}");
+        assert!(
+            (split.window_out_w - 98.0).abs() < 1e-9,
+            "{}",
+            split.window_out_w
+        );
+        assert!(
+            (split.window_air_w - 42.0).abs() < 1e-9,
+            "{}",
+            split.window_air_w
+        );
+        assert!(
+            split.undistributed_w.abs() < 1e-9,
+            "{}",
+            split.undistributed_w
+        );
+        // The balance closes: pool == opaque + out + inward.
+        assert!(
+            (total_absorbed + split.window_out_w + split.window_air_w - diffuse).abs() < 1e-9,
+            "the diffuse pool must close across the glazing: {} + {} + {} != {diffuse}",
+            total_absorbed,
+            split.window_out_w,
+            split.window_air_w
+        );
+
+        // The same enclosure with no windows distributes everything
+        // indoors: the pre-fix behavior, kept for windowless zones.
+        let (absorbed, split) =
+            compute_solar_distribution(&surfaces, &[], 0.0, diffuse, TEST_ALT, TEST_AZ);
+        let total_absorbed: f64 = absorbed.iter().sum();
+        assert!((total_absorbed - diffuse).abs() < 1e-9);
+        assert!(split.window_out_w.abs() < 1e-9);
+        assert!(split.window_air_w.abs() < 1e-9);
     }
 
     #[test]
@@ -657,7 +863,7 @@ mod tests {
         ];
         let beam = 1000.0;
         let diffuse = 0.0;
-        let (absorbed, _) = compute_solar_distribution(&surfaces, beam, diffuse, TEST_ALT, TEST_AZ);
+        let (absorbed, _) = distribute(&surfaces, beam, diffuse, TEST_ALT, TEST_AZ);
 
         assert!(
             absorbed[0] > absorbed[1],
@@ -681,8 +887,7 @@ mod tests {
             make_surface(40.0, 0.0, true),  // perfectly reflective floor
             make_surface(40.0, 0.0, false), // perfectly reflective ceiling
         ];
-        let (absorbed, reflected) =
-            compute_solar_distribution(&surfaces, 500.0, 200.0, TEST_ALT, TEST_AZ);
+        let (absorbed, split) = distribute(&surfaces, 500.0, 200.0, TEST_ALT, TEST_AZ);
         let total_absorbed: f64 = absorbed.iter().sum();
         // With zero absorptance, no distribution occurs -- all energy reflected to zone air.
         assert!(
@@ -690,8 +895,9 @@ mod tests {
             "zero absorptance should mean zero distribution, got {total_absorbed}"
         );
         assert!(
-            (reflected - 700.0).abs() < 1e-6,
-            "all energy should be reflected when absorptance is zero, got {reflected}"
+            (split.undistributed_w - 700.0).abs() < 1e-6,
+            "all energy should be reflected when absorptance is zero, got {}",
+            split.undistributed_w
         );
     }
 
@@ -701,16 +907,16 @@ mod tests {
             make_surface(50.0, 1.0, true),  // blackbody floor
             make_surface(50.0, 1.0, false), // blackbody ceiling
         ];
-        let (absorbed, reflected) =
-            compute_solar_distribution(&surfaces, 500.0, 200.0, TEST_ALT, TEST_AZ);
+        let (absorbed, split) = distribute(&surfaces, 500.0, 200.0, TEST_ALT, TEST_AZ);
         let total_absorbed: f64 = absorbed.iter().sum();
         assert!(
             (total_absorbed - 700.0).abs() < 1e-6,
             "full absorptance should absorb everything, got {total_absorbed}"
         );
         assert!(
-            reflected.abs() < 1e-6,
-            "no reflection expected, got {reflected}"
+            split.undistributed_w.abs() < 1e-6,
+            "no reflection expected, got {}",
+            split.undistributed_w
         );
     }
 
@@ -720,7 +926,7 @@ mod tests {
             make_surface(30.0, 0.6, false), // wall A (30 m²)
             make_surface(10.0, 0.6, false), // wall B (10 m²)
         ];
-        let (absorbed, _) = compute_solar_distribution(&surfaces, 0.0, 400.0, TEST_ALT, TEST_AZ);
+        let (absorbed, _) = distribute(&surfaces, 0.0, 400.0, TEST_ALT, TEST_AZ);
 
         // Wall A gets 3× the incident of wall B (area ratio 30:10)
         // Both have same absorptance so absorbed ratio = area ratio
@@ -737,8 +943,7 @@ mod tests {
             make_surface(20.0, 0.5, false),
             make_surface(20.0, 0.5, false),
         ];
-        let (absorbed, reflected) =
-            compute_solar_distribution(&surfaces, 1000.0, 0.0, TEST_ALT, TEST_AZ);
+        let (absorbed, split) = distribute(&surfaces, 1000.0, 0.0, TEST_ALT, TEST_AZ);
         let total: f64 = absorbed.iter().sum();
         // No floors: full beam goes to walls. Normalized: each wall gets 500 W.
         assert!(
@@ -746,8 +951,9 @@ mod tests {
             "all beam should be distributed to walls, got {total}"
         );
         assert!(
-            reflected.abs() < 1e-6,
-            "no reflection with normalized view factors, got {reflected}"
+            split.undistributed_w.abs() < 1e-6,
+            "no reflection with normalized view factors, got {}",
+            split.undistributed_w
         );
     }
 
@@ -792,17 +998,15 @@ mod tests {
             make_surface(40.0, 0.6, true),
             make_surface(40.0, 0.5, false),
         ];
-        let (absorbed, reflected) =
-            compute_solar_distribution(&surfaces, 0.0, 0.0, TEST_ALT, TEST_AZ);
+        let (absorbed, split) = distribute(&surfaces, 0.0, 0.0, TEST_ALT, TEST_AZ);
         assert!(absorbed.iter().all(|&q| q == 0.0));
-        assert_eq!(reflected, 0.0);
+        assert_eq!(split, DiffuseSplit::default());
     }
 
     #[test]
     fn single_surface_receives_all_solar() {
         let surfaces = vec![make_surface(20.0, 0.7, true)];
-        let (absorbed, reflected) =
-            compute_solar_distribution(&surfaces, 500.0, 200.0, TEST_ALT, TEST_AZ);
+        let (absorbed, split) = distribute(&surfaces, 500.0, 200.0, TEST_ALT, TEST_AZ);
         // Single floor: sole surface gets all solar via normalized view factor.
         assert!(
             (absorbed[0] - 700.0).abs() < 1e-6,
@@ -810,8 +1014,9 @@ mod tests {
             absorbed[0]
         );
         assert!(
-            reflected.abs() < 1e-6,
-            "no reflection with normalized view factors, got {reflected}"
+            split.undistributed_w.abs() < 1e-6,
+            "no reflection with normalized view factors, got {}",
+            split.undistributed_w
         );
     }
 
@@ -847,8 +1052,9 @@ mod tests {
         let diffuse = 200.0;
 
         let mut absorbed = Vec::new();
-        let reflected = compute_solar_distribution_into(
+        let split = compute_solar_distribution_into(
             &surfaces,
+            &[],
             beam,
             diffuse,
             TEST_ALT,
@@ -859,7 +1065,7 @@ mod tests {
         let total_input = beam + diffuse;
         let total_absorbed: f64 = absorbed.iter().sum();
         assert!(
-            (total_absorbed + reflected - total_input).abs() < 1e-6,
+            (total_absorbed + split.total() - total_input).abs() < 1e-6,
             "energy conservation violated"
         );
 
@@ -900,8 +1106,7 @@ mod tests {
     #[test]
     fn only_floors_receive_full_beam_budget() {
         let surfaces = vec![make_surface(30.0, 0.6, true), make_surface(20.0, 0.6, true)];
-        let (absorbed, reflected) =
-            compute_solar_distribution(&surfaces, 1000.0, 0.0, TEST_ALT, TEST_AZ);
+        let (absorbed, split) = distribute(&surfaces, 1000.0, 0.0, TEST_ALT, TEST_AZ);
         // All surfaces are floors with same absorptance. Normalized: all beam distributed.
         let total_absorbed: f64 = absorbed.iter().sum();
         assert!(
@@ -909,8 +1114,9 @@ mod tests {
             "only-floors: all beam should be distributed, got {total_absorbed}"
         );
         assert!(
-            reflected.abs() < 1e-6,
-            "no reflection with normalized view factors, got {reflected}"
+            split.undistributed_w.abs() < 1e-6,
+            "no reflection with normalized view factors, got {}",
+            split.undistributed_w
         );
     }
 
@@ -947,7 +1153,7 @@ mod tests {
             make_surface_oriented(20.0, 0.5, false, 90.0, 0.0), // north wall
             make_surface_oriented(20.0, 0.5, false, 90.0, 180.0), // south wall
         ];
-        let (absorbed, _) = compute_solar_distribution(&surfaces, 1000.0, 0.0, 60.0, 180.0);
+        let (absorbed, _) = distribute(&surfaces, 1000.0, 0.0, 60.0, 180.0);
         assert!(absorbed[0] > 0.0, "floor must receive beam at high sun");
         assert_eq!(absorbed[1], 0.0, "ceiling must never receive beam");
         assert!(absorbed[2] > 0.0, "north (opposite) wall must receive beam");
@@ -963,7 +1169,7 @@ mod tests {
             make_surface_oriented(20.0, 0.5, false, 90.0, 270.0), // west wall
             make_surface_oriented(20.0, 0.5, false, 90.0, 90.0), // east wall (window side)
         ];
-        let (absorbed2, _) = compute_solar_distribution(&surfaces2, 1000.0, 0.0, 5.0, 90.0);
+        let (absorbed2, _) = distribute(&surfaces2, 1000.0, 0.0, 5.0, 90.0);
         let total2: f64 = absorbed2.iter().sum();
         assert!(
             // Geometric share at this fixture: west wall 20·0.5·cos(5°) =
@@ -988,13 +1194,13 @@ mod tests {
             make_surface_oriented(30.0, 0.5, false, 90.0, 180.0),
             make_surface_oriented(30.0, 0.5, false, 90.0, 180.0),
         ];
-        let (absorbed, reflected) = compute_solar_distribution(&surfaces, 800.0, 0.0, 0.0, 0.0);
+        let (absorbed, split) = distribute(&surfaces, 800.0, 0.0, 0.0, 0.0);
         let total: f64 = absorbed.iter().sum();
         assert!(
             (total - 800.0).abs() < 1e-6,
             "fallback must still distribute the full beam (conservation), got {total}"
         );
-        assert!(reflected.abs() < 1e-6);
+        assert!(split.undistributed_w.abs() < 1e-6);
     }
 
     /// The zero-weight fallback must actually EXECUTE, and must put the beam
@@ -1019,17 +1225,19 @@ mod tests {
             make_surface_oriented(30.0, 0.5, false, 90.0, 0.0),
             make_surface_oriented(10.0, 0.9, false, 90.0, 0.0),
         ];
-        let (absorbed, reflected) = compute_solar_distribution(&surfaces, 800.0, 0.0, 45.0, 90.0);
+        let (absorbed, split) = distribute(&surfaces, 800.0, 0.0, 45.0, 90.0);
         let total: f64 = absorbed.iter().sum();
         assert!(
             (total - 800.0).abs() < 1e-9,
             "the beam that entered must land on surface mass, got {total} W \
-             absorbed (reflected {reflected} W) — dumping to zone air changes \
-             window solar from mass-mediated to instant air gain"
+             absorbed (reflected {} W), dumping to zone air changes \
+             window solar from mass-mediated to instant air gain",
+            split.undistributed_w
         );
         assert!(
-            reflected.abs() < 1e-9,
-            "fallback must not report the beam as reflected, got {reflected} W"
+            split.undistributed_w.abs() < 1e-9,
+            "fallback must not report the beam as reflected, got {} W",
+            split.undistributed_w
         );
         // The fallback split is isotropic: area × absorptance share, NOT the
         // (all-zero) cosine weights. 30·0.5 = 15 vs 10·0.9 = 9 → 500 / 300.
@@ -1050,8 +1258,8 @@ mod tests {
             make_surface(20.0, 0.5, false),
         ];
         let beam = 1000.0;
-        let (abs_high, _) = compute_solar_distribution(&surfaces, beam, 0.0, 70.0, TEST_AZ);
-        let (abs_low, _) = compute_solar_distribution(&surfaces, beam, 0.0, 10.0, TEST_AZ);
+        let (abs_high, _) = distribute(&surfaces, beam, 0.0, 70.0, TEST_AZ);
+        let (abs_low, _) = distribute(&surfaces, beam, 0.0, 10.0, TEST_AZ);
         assert!(
             abs_high[0] > abs_low[0],
             "floor should absorb more at 70° ({}) than 10° ({})",

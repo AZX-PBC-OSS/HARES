@@ -46,12 +46,13 @@ pub use config::{
     ExteriorSurfaceInfo, FilmCoefficientModel, InfiltrationMethod, InteriorConvectionInjection,
     InteriorLwrZoneConfig, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
     MechanicalVentilationParams, NaturalVentilationConfig, OpeningType, StateSpaceWiring,
-    ThermalSolverConfig, ThermalSolverError, WindowSolarProperties,
+    ThermalSolverConfig, ThermalSolverError, WindowDiffuseShare, WindowSolarProperties,
 };
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use chrono::Datelike as _;
 use hares_physics::air_properties::moist_air_density_kg_m3;
 use hares_physics::constants::{KJ_TO_J, LATENT_HEAT_VAPORISATION_0C_KJ_KG};
 use hares_types::{
@@ -64,6 +65,7 @@ use crate::state_space::{SolveScratch, StateSpaceModel};
 
 use infiltration::{InfiltrationCoupling, apply_infiltration_and_ventilation};
 use initialization::initialize_steady_state;
+use solar::resnet_is_winter;
 
 const H_FG_J_PER_KG: f64 = LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J;
 
@@ -212,6 +214,10 @@ pub struct ThermalSolver {
     /// Reused across `distribute_radiant_lwr_surfaces` and
     /// `distribute_radiant_solar_surfaces` to avoid per-timestep allocation.
     radiant_weights_buf: Vec<f64>,
+    /// Pre-allocated buffer for the zone's windows' shares of the diffuse
+    /// short-wave distribution (`solar.rs` `fill_window_diffuse_shares`),
+    /// refilled per call, never allocated per step.
+    window_share_buf: Vec<WindowDiffuseShare>,
     /// Pre-sorted zone temperature buffer for format_domain_update; indexed parallel to sorted zone_output_indices.
     zone_temps_buf: Vec<(ZoneId, f64)>,
     latent_pairs_buf: Vec<(ZoneId, f64)>,
@@ -641,7 +647,8 @@ impl ThermalSolver {
         let total_radiant_w: f64 = ports.thermal.iter().map(|t| t.radiant_gain_w).sum();
         let radiant_to_surfaces_w = (total_radiant_w - radiant_to_air_residual_w).max(0.0);
 
-        self.apply_port_shortwave_inputs(&mut u, ports);
+        let shortwave_is_winter = resnet_is_winter(env.current_time.month());
+        self.apply_port_shortwave_inputs(&mut u, ports, shortwave_is_winter);
         let shortwave_to_air_w = u[z_idx] - after_radiant;
         let total_shortwave_w: f64 = ports.thermal.iter().map(|t| t.shortwave_gain_w).sum();
         let shortwave_to_surfaces_w = (total_shortwave_w - shortwave_to_air_w).max(0.0);
@@ -1149,6 +1156,7 @@ impl ThermalSolver {
             per_boundary_static_r_film,
             prev_zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),
             radiant_weights_buf: Vec::with_capacity(max_radiant_surfaces),
+            window_share_buf: Vec::with_capacity(env.weather.solar_irradiance.len()),
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_linearised_warned_zones: HashSet::new(),
             energy_balance_residuals: HashMap::with_capacity(n_zones_for_latent),
@@ -1271,7 +1279,8 @@ impl ThermalSolver {
 
         self.apply_port_convective_inputs(&mut u, ports);
         self.apply_port_radiant_inputs(&mut u, ports);
-        self.apply_port_shortwave_inputs(&mut u, ports);
+        let shortwave_is_winter = resnet_is_winter(env.current_time.month());
+        self.apply_port_shortwave_inputs(&mut u, ports, shortwave_is_winter);
 
         let indoor_zone = self.config.indoor_zone_id;
         let indoor_heat = ports
@@ -1797,6 +1806,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -1891,6 +1901,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![interior_lwr_zone],
             infiltration: vec![],
@@ -2034,6 +2045,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -2131,6 +2143,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -2626,6 +2639,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -2681,6 +2695,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![(ZoneId(1), method)],
@@ -2970,6 +2985,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3044,6 +3060,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3100,6 +3117,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3160,6 +3178,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3242,6 +3261,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3305,6 +3325,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3378,6 +3399,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3454,6 +3476,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3535,6 +3558,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3664,6 +3688,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 42,
                     state_index: 0,
@@ -3828,6 +3853,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 1,
                     state_index: 0,
@@ -4003,6 +4029,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
 
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 0,
@@ -4368,6 +4395,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 7,
                     state_index: 0,
@@ -4502,6 +4530,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -4590,6 +4619,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -4693,6 +4723,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
 
                 exterior_surfaces,
                 interior_lwr_zones: vec![],
@@ -4857,6 +4888,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::from([(window_surface_id, win_props)]),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
                 exterior_surfaces: vec![],
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
@@ -4979,6 +5011,7 @@ mod tests {
                     indoor_zone_id: ZoneId(1),
                     window_properties: HashMap::new(),
                     window_zone_ids: HashMap::new(),
+                    window_ids_sorted: Vec::new(),
 
                     exterior_surfaces,
                     interior_lwr_zones: vec![],
@@ -5335,6 +5368,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![lwr_zone.clone()],
             infiltration: vec![],
@@ -5405,6 +5439,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -5600,6 +5635,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.5 })],
@@ -5775,6 +5811,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::from([(window_surface_id, win_props)]),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
                 exterior_surfaces: vec![],
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
@@ -6034,7 +6071,7 @@ mod tests {
         };
 
         let mut u = DVector::zeros(3);
-        solver.apply_port_shortwave_inputs(&mut u, &ports);
+        solver.apply_port_shortwave_inputs(&mut u, &ports, false);
 
         let total_weight: f64 = surfaces.iter().map(|&(_, a, abs, _)| a * abs).sum();
         assert!(total_weight > 0.0);
@@ -6229,6 +6266,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![interior_lwr_zone],
             infiltration: vec![],
@@ -6373,6 +6411,7 @@ mod tests {
             indoor_zone_id: zone,
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![interior_lwr_zone],
             infiltration: vec![],
@@ -6643,6 +6682,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -6776,6 +6816,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -6958,6 +6999,7 @@ mod tests {
             indoor_zone_id: indoor,
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -7154,6 +7196,7 @@ mod tests {
             indoor_zone_id: indoor,
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -7277,6 +7320,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             interior_solar_zones: Vec::new(),

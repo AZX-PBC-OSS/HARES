@@ -297,6 +297,37 @@ pub struct WindowSolarProperties {
     pub azimuth_deg: f64,
 }
 
+/// One window's share of its zone's diffuse short-wave distribution
+/// (EnergyPlus v24.2.0 `HeatBalanceSurfaceManager.cc:4272`: each window
+/// joins the enclosure's `SUM1` with `Area × (TransDiff + AbsDiffBack)`).
+///
+/// Weights are `Area × coefficient`; the pool distributes over
+/// `Σ opaque(A × α) + Σ windows(τ + α weights)`. The window's
+/// transmittance-weighted share of the pool passes back out through the
+/// glazing (lost); the absorptance-weighted share is absorbed in the glass
+/// and splits by the window's inward-flowing fraction `n_i` (the rest
+/// conducts out).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowDiffuseShare {
+    /// `Area × effective diffuse transmittance` [m²], the share of the
+    /// zone's diffuse pool that leaves back out through this window.
+    pub tau_weight: f64,
+    /// `Area × back diffuse absorptance` [m²], the share absorbed in the
+    /// glass, split by `n_i`.
+    pub alpha_weight: f64,
+    /// Inward-flowing fraction of glass-absorbed solar [-] (the window
+    /// model's N_i): `alpha_weight`'s share reaches zone air, the rest
+    /// conducts out.
+    pub n_i: f64,
+}
+
+impl WindowDiffuseShare {
+    /// The window's total weight in the distribution denominator [m²].
+    pub fn weight(&self) -> f64 {
+        self.tau_weight + self.alpha_weight
+    }
+}
+
 /// One interior surface participating in intra-zone longwave radiation exchange.
 ///
 /// Each entry describes a surface node within a zone (e.g. ceiling, floor, wall).
@@ -611,6 +642,11 @@ pub struct ThermalSolverConfig {
     /// Used by the interior solar distribution to route transmitted solar
     /// to the correct zone's interior surfaces.
     pub window_zone_ids: HashMap<u32, ZoneId>,
+    /// The window surface ids, sorted ascending. The diffuse distribution's
+    /// window shares accumulate in this order: a HashMap's per-process
+    /// iteration order would vary the float accumulation bit by bit and
+    /// break the bit-exact goldens.
+    pub window_ids_sorted: Vec<u32>,
     /// Exterior surfaces for LWR and opaque solar gain.
     pub exterior_surfaces: Vec<ExteriorSurfaceInfo>,
     /// Per-zone interior surface configurations for intra-zone LW radiation.
@@ -761,6 +797,7 @@ impl ThermalSolverConfig {
             indoor_zone_id,
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: Vec::new(),
             interior_lwr_zones: Vec::new(),
             interior_solar_zones: Vec::new(),

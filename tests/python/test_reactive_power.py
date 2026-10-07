@@ -20,11 +20,36 @@ from typing import Any, TypedDict
 
 from conftest import make_dwelling
 
+import pathlib
+
 ROOT = __import__("pathlib").Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
+
+
+def _base_xml_with_cooling_setpoint(tmp_path, setpoint_f=69.0):
+    """base.xml with an explicit cooling-season setpoint.
+
+    base.xml declares a conditioned basement, which merges into the
+    conditioned space per OS-HPXML (geometry.rb `create_or_get_space`,
+    1704-1716); the merged ground-coupled basement holds the zone under the
+    defaulted 78 °F cooling setpoint on a Denver July afternoon, so the AC
+    compressor never runs. A 69 °F setpoint (the thermostat calls for
+    cooling above setpoint + the 1 °C hysteresis, 21.6 °C) guarantees the
+    cooling call the ZIP power-factor tests need.
+    """
+    xml = pathlib.Path(HPXML).read_text()
+    marker = "<SetpointTempHeatingSeason>68.0</SetpointTempHeatingSeason>"
+    assert marker in xml, "base.xml must carry a heating setpoint"
+    patched = xml.replace(
+        marker,
+        f"{marker}\n            <SetpointTempCoolingSeason>{setpoint_f}</SetpointTempCoolingSeason>",
+    )
+    path = tmp_path / "base-cooling-71f.xml"
+    path.write_text(patched)
+    return str(path)
 
 
 class _CommonKwargs(TypedDict):
@@ -425,18 +450,23 @@ class TestDefaultEvZeroQ:
 
 
 class TestZipPfOverride:
-    def test_zip_pf_override_changes_q_leaves_p_identical(self):
+    def test_zip_pf_override_changes_q_leaves_p_identical(self, tmp_path):
         from ochre_next import Dwelling
 
         # July afternoon so the AC compressor actually runs (a pf override
         # retargets the compressor component; the resistive crankcase heater
         # that runs on cold winter standby emits Q == 0 regardless of pf).
+        # The cooling setpoint is injected: the merged ground-coupled
+        # basement holds the zone under the defaulted setpoint otherwise.
         common: _CommonKwargs = {
-            "hpxml": HPXML,
+            "hpxml": _base_xml_with_cooling_setpoint(tmp_path),
             "schedule": SCHEDULE,
             "weather": WEATHER,
             "start_time": "2019-07-01T14:00:00",
-            "duration_s": 3600,
+            # Three hours: the merged ground-coupled basement damps the
+            # zone's climb to the cooling call (it crosses at ~2 h into the
+            # July afternoon), and the loop breaks when the compressor runs.
+            "duration_s": 10800,
             "time_res_s": 60,
             "defaults_path": str(HARES_DEFAULTS),
             "bldg_id": 42,
@@ -455,10 +485,11 @@ class TestZipPfOverride:
         )
         dw_ov.initialize()
 
-        # Step until the compressor draws power (thermostat may take a few
-        # minutes to call for cooling from the initialized zone state).
+        # Step until the compressor draws power (the merged ground-coupled
+        # basement damps the zone's climb to the cooling call; it crosses at
+        # ~2 h into the July afternoon).
         compressor_kw = 0.0
-        for _ in range(60):
+        for _ in range(180):
             dw_base.step()
             dw_ov.step()
             tel = _equipment_telemetry(dw_base, "Air Conditioner")
@@ -500,18 +531,23 @@ class TestZipPfOverride:
             f"={expected_q_ov}"
         )
 
-    def test_zip_override_telemetry_reactive_key_present(self):
+    def test_zip_override_telemetry_reactive_key_present(self, tmp_path):
         from ochre_next import Dwelling
 
         # July afternoon: the compressor must run for Q != 0 — on winter
         # standby only the resistive crankcase heater draws power and the
-        # per-component model correctly reports Q == 0 for it.
+        # per-component model correctly reports Q == 0 for it. The cooling
+        # setpoint is injected: the merged ground-coupled basement holds the
+        # zone under the defaulted setpoint otherwise.
         common: _CommonKwargs = {
-            "hpxml": HPXML,
+            "hpxml": _base_xml_with_cooling_setpoint(tmp_path),
             "schedule": SCHEDULE,
             "weather": WEATHER,
             "start_time": "2019-07-01T14:00:00",
-            "duration_s": 3600,
+            # Three hours: the merged ground-coupled basement damps the
+            # zone's climb to the cooling call (it crosses at ~2 h into the
+            # July afternoon), and the loop breaks when the compressor runs.
+            "duration_s": 10800,
             "time_res_s": 60,
             "defaults_path": str(HARES_DEFAULTS),
             "bldg_id": 42,
@@ -526,7 +562,7 @@ class TestZipPfOverride:
         dw.initialize()
 
         tel = None
-        for _ in range(60):
+        for _ in range(180):
             dw.step()
             tel = _equipment_telemetry(dw, "Air Conditioner")
             if tel.get("compressor_kw", 0.0) > 0.0:

@@ -665,3 +665,62 @@ justification → measured impact → pinning tests.
   (`conditioned_basement_merges_into_the_conditioned_zone`). Each fails
   when the label parse reverts to a separate unheated foundation zone.
 
+---
+
+## D-016: Diffuse short-wave leaves back out through the windows
+
+- **Quantity:** the share of a zone's diffuse short-wave pool
+  (transmitted diffuse solar plus the lights' visible part) that passes
+  back out through the glazing instead of being absorbed indoors.
+- **Reference behavior:** EnergyPlus v24.2.0 pools an enclosure's diffuse
+  short-wave and distributes it over the opaque surfaces AND the windows:
+  each opaque surface joins the denominator with `Area × AbsIntSurf`
+  (`HeatBalanceSurfaceManager.cc:4206`), each window with
+  `Area × (TransDiff + AbsDiffBack)` (`:4272`), `solVMULT = 1/SUM1`
+  (`:4315`); the opaque surfaces absorb their share (`:3773-3774`), the
+  windows' glass layers absorb their `AbsDiffBack` share (`:3837-3892`)
+  and the transmittance-weighted share is deposited nowhere: it leaves
+  back out through the glazing. The lights' visible gain joins the same
+  pool (`EnclSolQSWRadLights`, `:3693`) and scales by the same
+  `solVMULT` (`:3749-3753`).
+- **OCHRE behavior:** the fork spreads ALL transmitted solar over the
+  zone's surfaces by `Area × absorptivity` including the windows' own
+  absorptivity (`ochre/Models/Envelope.py:548-558`); its comment claims
+  "some heat is reflected back out of the windows and lost" but the
+  window's own share is deposited (its `absorptivity` excludes the
+  transmittance, and the whole pool is delivered: the view factors sum
+  to 1 and `zone.radiation_heat` reaches the zone air, Envelope.py:1198).
+  Nothing leaves.
+- **HARES behavior (since this fix):** the diffuse distribution's
+  denominator gains each zone's windows at
+  `Area × (τ_diffuse + SHGC − τ)` (`solar.rs`
+  `compute_solar_distribution_into_generic`, the same structure as the
+  EnergyPlus `SUM1`); the transmittance-weighted share of the pool leaves
+  (lost), the absorptance-weighted share splits by the window's
+  inward-flowing fraction N_i (inward to zone air, outward conducted
+  away), the same decomposition the window's beam-absorbed solar already
+  applies (`apply_solar_inputs`). One path for transmitted solar and
+  lighting: both flow through `distribute_transmitted_solar`.
+- **Justification:** class (a) against OCHRE, class (b) fix in HARES:
+  HARES distributed the diffuse pool over the opaque surfaces only (the
+  windows carried `solar_absorptance = 0.0`), so every transmitted
+  diffuse watt was absorbed indoors; the reference loses the window's
+  transmittance share through the glazing. The N_i split follows
+  HARES's own SHGC decomposition for consistency between the beam and
+  diffuse paths; EnergyPlus resolves the glass-layer heat balance
+  explicitly (a later refinement if the layer model arrives).
+- **Measured impact:** on the seven committed goldens (every one has
+  windows) the annual gross consumption moved ≤ 0.005 %, in the
+  expected directions: cooling fell where cooling runs
+  (consumer_shape hvac_cooling 1115.28 → 1114.72 kWh), heating rose
+  slightly (95.12 → 95.18 kWh), and the free-float BESTEST peaks fell
+  (900FF peak 46.61 → 45.96 °C, min 3.44 → 3.18 °C); case 600's annual
+  cooling fell 6134.0 → 5905.8 kWh. The committed goldens are the
+  re-captured values; the pinning test closes the balance exactly
+  (pool == opaque + out + inward).
+- **Pinning tests:** `crates/hares-envelope/src/thermal_solver/solar.rs`
+  (`diffuse_pool_leaves_back_out_through_the_windows`: the closed-form
+  EnergyPlus shares and the energy closure;
+  `solar_distribution_conserves_energy_randomized`: the conservation
+  identity with windows in the denominator). Each fails when the
+  distribution reverts to the opaque-only denominator.
