@@ -183,8 +183,13 @@ def test_band_range_and_zip_each_carry_their_own_doc():
 def test_vec_env_bounds_a_deadband_by_each_dwelling_s_target_class():
     from ochre_next._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
 
+    dwellings = [_make_dwelling(seed=i) for i in range(2)]
+    # The fixture's construction notices (base.xml gives no ShieldingofHome,
+    # which takes OS-HPXML's default) are not a step's warnings.
+    for dwelling in dwellings:
+        dwelling.take_warnings()
     env = VecDwellingGymEnv(
-        dwellings=[_make_dwelling(seed=i) for i in range(2)],
+        dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config={"Gas Furnace": ["heat_c", "deadband_c"]},
         reward_fn=lambda ctx: -ctx["total_power_kw"],
