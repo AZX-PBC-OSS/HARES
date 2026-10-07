@@ -257,7 +257,6 @@ impl DwellingConfig {
     /// a construction error naming it.
     pub(crate) fn load_schedule(
         &self,
-        building: &Building,
         weather_meta: &hares_io::WeatherMeta,
     ) -> Result<ScheduleTimeSeries> {
         match self.schedule_path.as_deref() {
@@ -277,8 +276,7 @@ impl DwellingConfig {
                     ))
                 })?;
                 let profiles = hares_io::load_default_profiles(defaults_dir)?;
-                Ok(hares_io::hpxml_schedule::generate_schedule_from_hpxml(
-                    building,
+                Ok(hares_io::hpxml_schedule::generate_default_schedule(
                     self.sim_config.start_time,
                     self.sim_config.duration,
                     self.sim_config.time_res,
@@ -1942,7 +1940,7 @@ impl Dwelling {
         let weather = parse_weather(&config.weather_path)
             .map_err(|err| HaresError::Io(format!("weather parse failed: {err}")))?;
 
-        let schedule_raw = config.load_schedule(&building, &weather.meta)?;
+        let schedule_raw = config.load_schedule(&weather.meta)?;
 
         let target_step_secs = duration_to_u32_secs(config.sim_config.time_res)?;
         let schedule = schedule_raw
@@ -12057,6 +12055,7 @@ occupancy = 1.0
             residential_facility_type: None,
             mass_multiplier_override: None,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: XmlNode {
                 name: String::new(),
                 attrs: HashMap::new(),
