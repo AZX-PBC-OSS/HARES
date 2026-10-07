@@ -1285,7 +1285,7 @@ fn propane_furnace_resolves_to_gas_furnace_config_with_propane_fuel() {
     );
     let building = parse_building(&xml).expect("should parse");
     let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("propane furnace should resolve without error (ticket #079)");
+        .expect("propane furnace should resolve without error");
 
     let furnace = specs
         .iter()
@@ -1324,7 +1324,7 @@ fn fuel_oil_2_boiler_resolves_to_gas_boiler_config_with_oil_fuel() {
     );
     let building = parse_building(&xml).expect("should parse");
     let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("fuel oil 2 boiler should resolve without error (ticket #079)");
+        .expect("fuel oil 2 boiler should resolve without error");
 
     let boiler = specs
         .iter()
