@@ -50,10 +50,11 @@ use serde::{Deserialize, Serialize};
 /// version ([`hares_tariff::TARIFF_SNAPSHOT_SCHEMA_VERSION`]), validated
 /// independently of this constant.
 ///
-/// v12: `equipment_states` entries carry the equipment's consecutive failed
+/// v13: `equipment_states` entries carry the equipment's consecutive failed
 /// steps, so a restored run ends at the same step the uninterrupted one
 /// does under `SimulationConfig::max_consecutive_step_failures`.
-pub const CHECKPOINT_VERSION: u32 = 12;
+/// Checkpoints written by v12 builds are rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 13;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -355,7 +356,7 @@ mod tests {
 
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema`]`::<DwellingCheckpoint>()`.
-    const PINNED_VERSION: u32 = 12;
+    const PINNED_VERSION: u32 = 13;
     const PINNED_SCHEMA_SHA256: &str =
         "3d4c0064e152fe8b3adf79e27b45d685dbfe7dd4bba1733d65c6761754f358ac";
 
@@ -550,6 +551,57 @@ mod tests {
                 && msg.contains("file=6")
                 && msg.contains(&format!("expected={CHECKPOINT_VERSION}")),
             "a pre-v7 checkpoint must be rejected by the version gate with both versions named; got: {msg}"
+        );
+        assert!(
+            !msg.contains("parse failed"),
+            "the rejection must come from the version gate, not schema parsing; got: {msg}"
+        );
+    }
+
+    /// A checkpoint from the schema immediately before
+    /// `consecutive_step_failures` joined `EquipmentStateCheckpoint`
+    /// (format_version 12, equipment states without the field) must be
+    /// rejected by the version gate with both versions named. The body is
+    /// otherwise exactly this build's schema, so a full parse that ran
+    /// before the gate would report a missing field instead of the
+    /// actionable version mismatch.
+    #[test]
+    fn v12_checkpoint_without_step_failures_rejected_by_the_version_gate() {
+        let mut body: serde_json::Value =
+            serde_json::to_value(populated_checkpoint()).expect("serialize the checkpoint");
+        body["format_version"] = serde_json::json!(12);
+        let mut removed = 0;
+        for state in body["equipment_states"]
+            .as_array_mut()
+            .expect("equipment_states is an array")
+            .iter_mut()
+        {
+            if state
+                .as_object_mut()
+                .expect("each equipment state is an object")
+                .remove("consecutive_step_failures")
+                .is_some()
+            {
+                removed += 1;
+            }
+        }
+        assert!(
+            removed > 0,
+            "the fixture must carry the field for its removal to be the schema change under test"
+        );
+        let json_bytes = serde_json::to_vec(&body).expect("serialize the v12 blob");
+        let file_bytes = crate::checksum::write_with_sha256(&json_bytes);
+
+        let (_dir, path) = checkpoint_path();
+        std::fs::write(&path, &file_bytes).expect("write the v12 blob");
+
+        let err = DwellingCheckpoint::load(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("checkpoint version mismatch")
+                && msg.contains("file=12")
+                && msg.contains(&format!("expected={CHECKPOINT_VERSION}")),
+            "a v12 checkpoint must be rejected by the version gate with both versions named; got: {msg}"
         );
         assert!(
             !msg.contains("parse failed"),
