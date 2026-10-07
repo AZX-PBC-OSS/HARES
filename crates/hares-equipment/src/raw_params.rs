@@ -387,6 +387,7 @@ mod tests {
         )
     }
 
+    #[cfg(debug_assertions)]
     fn panic_message(result: std::thread::Result<()>) -> String {
         let payload = result.expect_err("the read must panic");
         payload
