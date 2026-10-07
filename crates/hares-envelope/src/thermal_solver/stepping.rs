@@ -422,7 +422,11 @@ impl ThermalSolver {
     /// bitwise equality.
     ///
     /// Returns the required capacity in watts (positive = heating, negative = cooling),
-    /// or 0.0 if the zone is unknown or solving fails.
+    /// or 0.0 if the zone is unknown or solving fails. The returned value is the
+    /// zone sensible input the step needs as an absolute quantity: the dispatcher
+    /// hands it to equipment that delivers exactly it (OCHRE's contract,
+    /// HVAC.py:424 "h_desired should be equal to self.delivered_heat"), so
+    /// delivering the return and stepping must land the zone on the target.
     ///
     /// Logging behaviour: failure emits `tracing::warn!` with structured context
     /// (zone, target, zone temp, outdoor temp, error) on the first failure in a
@@ -490,11 +494,22 @@ impl ThermalSolver {
             .first()
             .map(|&idx| self.last_u[idx])
             .unwrap_or(f64::NAN);
-        let capacity_value = self.last_u[input_idx];
 
-        match total.map(|raw| raw - capacity_value) {
+        match total {
             Ok(capacity) => {
-                self.last_good_capacity_w.insert(zone, capacity);
+                // The solve returns the zone sensible column's absolute value;
+                // the HVAC equipment must deliver only its own share of that
+                // column. The non-HVAC share (appliances, plug loads, jacket
+                // losses) is the last integrate's recorded split: this step's
+                // value is estimated by the last step's (schedule-driven
+                // gains move slowly between steps).
+                let hvac_share = capacity
+                    - self
+                        .non_hvac_zone_input_w
+                        .get(&zone)
+                        .copied()
+                        .unwrap_or(0.0);
+                self.last_good_capacity_w.insert(zone, hvac_share);
                 let prethreshold = self.ideal_capacity_warned_zones.remove(&zone);
                 let degraded = self.ideal_capacity_degraded_warned_zones.remove(&zone);
                 if prethreshold || degraded {
@@ -512,7 +527,7 @@ impl ThermalSolver {
                 } else {
                     self.ideal_capacity_failure_counts.remove(&zone);
                 }
-                capacity
+                hvac_share
             }
             Err(e) => {
                 let count = self
@@ -557,7 +572,6 @@ impl ThermalSolver {
                         target_c,
                         t_zone_c = t_zone,
                         oat_c = t_out,
-                        capacity_w = capacity_value,
                         consecutive_failures = count,
                         threshold,
                         error = %e,
@@ -766,6 +780,19 @@ impl ThermalSolver {
         // (semi-implicit: the diagonal coupling is added to the identity,
         // forming I + D; off-diagonal terms act as explicit forcing).
         self.apply_convection_forcing();
+
+        // Record each zone's non-HVAC share of the sensible input column for
+        // the next ideal-capacity solve: the full port accumulation (this
+        // step's equipment has stepped) minus the HVAC categories. The
+        // prepare phase's partial accumulation does not write this estimate.
+        self.non_hvac_zone_input_w.clear();
+        for acc in &ports.thermal {
+            let non_hvac_w = acc.sensible_gain_w
+                - acc.sensible_for_category(hares_types::ThermalCategory::HvacHeating)
+                - acc.sensible_for_category(hares_types::ThermalCategory::HvacCooling)
+                - acc.sensible_for_category(hares_types::ThermalCategory::HvacDehumidification);
+            self.non_hvac_zone_input_w.insert(acc.zone, non_hvac_w);
+        }
 
         if !self.coupling_buf.is_empty() {
             self.model.step_with_identity_coupling_into_scratch(

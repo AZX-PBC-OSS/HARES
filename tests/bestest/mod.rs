@@ -106,19 +106,22 @@ fn run_single_case(case: &BestestCase) {
 fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
     use BestestMetric::*;
     Some(match (case_id, metric) {
-        // 600: heating 3222.6 vs band 4296–5709; cooling 6134.0 vs 6137–7964.
-        // Cooling baseline re-measured after the beam-floor solar
-        // distribution change (tilt/azimuth-based floor fraction replacing
-        // the legacy constant): more beam solar retained on the floor →
-        // +63 kWh cooling. All four drifts below share this cause
-        // and direction.
-        ("600", AnnualHeatingLoadKwh) => 3222.601862,
-        ("600", AnnualCoolingLoadKwh) => 6133.952799,
-        // 640: heating energy 2144.3 vs band 2751–3803.
-        ("640", AnnualHeatingEnergyKwh) => 2144.269543,
-        // 900: heating 948.2 vs band 1170–2041 (cooling in band: strict).
-        // Re-measured: −29 kWh heating (more floor-retained solar).
-        ("900", AnnualHeatingLoadKwh) => 948.188657,
+        // 600: heating 3101.0 vs band 4296–5709; cooling 5737.7 vs 6137–7964.
+        // Re-measured after the ideal dispatch's non-HVAC correction (the
+        // ideal HVAC now delivers its own share of the zone sensible column;
+        // the internal gains were previously double-counted in the dispatch):
+        // the zone holds its comfort setpoints instead of riding the gains'
+        // bias, so annual heating and cooling both drop. All three drifted
+        // heating baselines below share this cause and direction.
+        ("600", AnnualHeatingLoadKwh) => 3100.948422,
+        ("600", AnnualCoolingLoadKwh) => 5737.727912,
+        // 640: heating energy 2065.8 vs band 2751–3803 (same cause).
+        ("640", AnnualHeatingEnergyKwh) => 2065.778510,
+        // 900: heating 1061.2 vs band 1170–2041 (cooling in band: strict).
+        // Same cause, opposite direction: the base's dispatch under-delivered
+        // by the previous step's HVAC delivery, and the case's setpoint hold
+        // now recovers the band edge more closely (+113 kWh).
+        ("900", AnnualHeatingLoadKwh) => 1061.215929,
         // 600FF: peak 73.73 vs band 64.9–69.5 (min in band: strict).
         // Re-measured: +0.76 K peak (more floor-retained beam
         // solar at the freefloat peak step).

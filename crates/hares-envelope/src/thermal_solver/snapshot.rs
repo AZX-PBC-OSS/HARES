@@ -60,6 +60,10 @@ pub struct ThermalSnapshot {
     /// Last successfully solved ideal capacity [W] per zone, sorted by zone:
     /// the degraded fallback once failures reach the threshold.
     pub last_good_capacity_w: Vec<(ZoneId, f64)>,
+    /// Per-zone non-HVAC share of the zone sensible input column [W] from
+    /// the last integrate, sorted by zone: the estimate the next
+    /// ideal-capacity solve subtracts.
+    pub non_hvac_zone_input_w: Vec<(ZoneId, f64)>,
 }
 
 /// Every coupling's forcing is its implicit coefficient `d` times a
@@ -135,6 +139,7 @@ impl ThermalSolver {
             latent_recovery_efficiency: self.config.ventilation.latent_recovery_efficiency,
             ideal_capacity_failure_counts: sorted_zone_pairs(&self.ideal_capacity_failure_counts),
             last_good_capacity_w: sorted_zone_pairs(&self.last_good_capacity_w),
+            non_hvac_zone_input_w: sorted_zone_pairs(&self.non_hvac_zone_input_w),
         }
     }
 
@@ -183,6 +188,9 @@ impl ThermalSolver {
             |&count| count > 0,
         )?;
         self.validate_zone_pairs("last_good_capacity_w", &snap.last_good_capacity_w, |w| {
+            w.is_finite()
+        })?;
+        self.validate_zone_pairs("non_hvac_zone_input_w", &snap.non_hvac_zone_input_w, |w| {
             w.is_finite()
         })
     }
@@ -301,6 +309,9 @@ impl ThermalSolver {
         self.last_good_capacity_w.clear();
         self.last_good_capacity_w
             .extend(snap.last_good_capacity_w.iter().copied());
+        self.non_hvac_zone_input_w.clear();
+        self.non_hvac_zone_input_w
+            .extend(snap.non_hvac_zone_input_w.iter().copied());
         self.ideal_capacity_degraded_zones.clear();
         self.ideal_capacity_warned_zones.clear();
         self.ideal_capacity_degraded_warned_zones.clear();

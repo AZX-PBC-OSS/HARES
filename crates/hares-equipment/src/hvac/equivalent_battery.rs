@@ -54,6 +54,30 @@ pub struct EquivalentBatteryModel {
 }
 
 impl HvacEquipment {
+    /// The axis the equivalent battery window publishes for: the thermostat's
+    /// active mode when it names an axis the unit serves (has rated capacity
+    /// for), otherwise the unit's own populated capacity axis. A unit with no
+    /// capacity on either axis has no window.
+    ///
+    /// OCHRE publishes each end use's EBM window every step, independent of
+    /// the thermostat's call (`results.update(self.make_equivalent_battery_model())`
+    /// in `update_results`, HVAC.py:601-602, model at HVAC.py:620-641): the
+    /// window is a property of the zone state and the setpoints, not of the
+    /// on/off latch. HARES carries one set of EBM keys per unit, so the
+    /// window follows the served axis and does not vanish when the FSM rests
+    /// while the ideal-capacity loop still delivers.
+    fn ebm_axis(&self) -> ThermostatMode {
+        let serves_heating = self.config.heating_capacities_w.iter().any(|&w| w > 0.0);
+        let serves_cooling = self.config.cooling_capacities_w.iter().any(|&w| w > 0.0);
+        match self.thermostat_fsm.mode {
+            ThermostatMode::Heating if serves_heating => ThermostatMode::Heating,
+            ThermostatMode::Cooling if serves_cooling => ThermostatMode::Cooling,
+            _ if serves_cooling && !serves_heating => ThermostatMode::Cooling,
+            _ if serves_heating => ThermostatMode::Heating,
+            _ => ThermostatMode::Deadband,
+        }
+    }
+
     /// Compute Equivalent Battery Model parameters from current equipment state.
     ///
     /// Energy state tracks absolute thermal energy stored in the building relative
@@ -135,8 +159,7 @@ impl HvacEquipment {
         let t_cool_on = setpoints.cooling_c + hysteresis * (1.0 - offset);
 
         let (max_power_kw, energy_kwh, min_energy_kwh, max_energy_kwh, _ref_temp_c) = match self
-            .thermostat_fsm
-            .mode
+            .ebm_axis()
         {
             ThermostatMode::Heating => {
                 let rated_w = self.rated_capacity_w(ThermostatMode::Heating);
@@ -505,6 +528,69 @@ mod tests {
             (range_zero - range_default).abs() < 1e-10,
             "energy range should be identical regardless of deadband_offset (same deadband width)"
         );
+    }
+
+    /// OCHRE publishes the EBM window every step regardless of the
+    /// thermostat's call (HVAC.py:601-602, 620-641). A heating unit whose FSM
+    /// rests in Deadband (the zone between the bands, the ideal-capacity loop
+    /// still dispatching) publishes its heating window.
+    #[test]
+    fn the_window_publishes_while_the_thermostat_rests_in_deadband() {
+        let eq = heating_equipment(21.0, 10_000.0, 1.0, 0.2);
+        assert_eq!(eq.thermostat_fsm.mode, ThermostatMode::Heating);
+        // The zone between the bands: the FSM rests in Deadband.
+        let mut eq = eq;
+        eq.thermostat_fsm.mode = ThermostatMode::Deadband;
+
+        let ebm = eq
+            .make_equivalent_battery_model(20.5, 2.5, TEST_EIR, TEST_CAP_IDEAL_W)
+            .expect("a resting thermostat still has an EBM window");
+        assert!(ebm.energy_kwh.is_some(), "energy publishes in Deadband");
+        assert!(
+            ebm.max_energy_kwh.is_some(),
+            "max_energy_kwh publishes in Deadband"
+        );
+        assert!(
+            ebm.max_power_kw.is_some(),
+            "max_power_kw publishes in Deadband"
+        );
+        let range = ebm.max_energy_kwh.unwrap() - ebm.min_energy_kwh;
+        assert!((range - 2.5 * 1.0).abs() < 1e-10);
+    }
+
+    /// A cooling-only unit whose shared FSM sits in Heating (no heating
+    /// capacity behind it) publishes its COOLING window, not zeros: the
+    /// window follows the served axis, not the FSM's transient mode.
+    #[test]
+    fn a_cooling_only_unit_publishes_its_cooling_window_regardless_of_fsm_mode() {
+        let mut eq = cooling_equipment(24.0, 10_000.0, 1.0, 0.2);
+        eq.thermostat_fsm.mode = ThermostatMode::Heating;
+
+        let ebm = eq
+            .make_equivalent_battery_model(24.5, 3.5, TEST_EIR, TEST_CAP_IDEAL_W)
+            .expect("a cooling unit in FSM Heating still has its cooling window");
+        let range = ebm.max_energy_kwh.unwrap() - ebm.min_energy_kwh;
+        assert!((range - 3.5 * 1.0).abs() < 1e-10);
+        // Below the 30 C cooling reference the stored "coolth" energy is
+        // positive (hvac_dir -1 times a negative temperature difference).
+        assert!(ebm.max_energy_kwh.unwrap() > 0.0);
+    }
+
+    /// A unit with no capacity on either axis has no window (the fields stay
+    /// `None`) and the EBM constructor still succeeds.
+    #[test]
+    fn a_capacity_less_unit_has_no_window() {
+        let mut eq = heating_equipment(21.0, 10_000.0, 1.0, 0.2);
+        eq.config.heating_capacities_w.clear();
+        eq.thermostat_fsm.mode = ThermostatMode::Deadband;
+
+        let ebm = eq
+            .make_equivalent_battery_model(20.5, 2.5, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
+        assert!(ebm.energy_kwh.is_none());
+        assert!(ebm.max_energy_kwh.is_none());
+        assert!(ebm.max_power_kw.is_none());
+        assert_eq!(ebm.min_energy_kwh, 0.0);
     }
 
     #[test]

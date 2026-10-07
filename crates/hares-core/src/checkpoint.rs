@@ -50,11 +50,13 @@ use serde::{Deserialize, Serialize};
 /// version ([`hares_tariff::TARIFF_SNAPSHOT_SCHEMA_VERSION`]), validated
 /// independently of this constant.
 ///
-/// v13: `equipment_states` entries carry the equipment's consecutive failed
-/// steps, so a restored run ends at the same step the uninterrupted one
-/// does under `SimulationConfig::max_consecutive_step_failures`.
-/// Checkpoints written by v12 builds are rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 13;
+/// v14: the thermal snapshot carries the per-zone non-HVAC share of the
+/// zone sensible input column the next ideal-capacity solve estimates from
+/// (the `ThermalSnapshot`'s `non_hvac_zone_input_w`; the snapshot's own
+/// schema version is unchanged at 1 because v1 was never released in a
+/// build without the field).
+/// Checkpoints written by v13 builds are rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 14;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -276,6 +278,7 @@ mod tests {
             latent_recovery_efficiency: 0.0,
             ideal_capacity_failure_counts: vec![],
             last_good_capacity_w: vec![],
+            non_hvac_zone_input_w: vec![],
         }
     }
 
@@ -308,6 +311,7 @@ mod tests {
                 latent_recovery_efficiency: 0.12,
                 ideal_capacity_failure_counts: vec![(ZoneId(1), 2)],
                 last_good_capacity_w: vec![(ZoneId(1), 5537.98)],
+                non_hvac_zone_input_w: vec![(ZoneId(1), 412.5)],
             },
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![1.0, 2.0, 3.0],
@@ -356,9 +360,9 @@ mod tests {
 
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema`]`::<DwellingCheckpoint>()`.
-    const PINNED_VERSION: u32 = 13;
+    const PINNED_VERSION: u32 = 14;
     const PINNED_SCHEMA_SHA256: &str =
-        "3d4c0064e152fe8b3adf79e27b45d685dbfe7dd4bba1733d65c6761754f358ac";
+        "5a7267067360d5101e69165bdfd7afa08847c8a96057d0f67af6a545ac1683a3";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the

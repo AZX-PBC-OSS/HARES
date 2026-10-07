@@ -283,6 +283,16 @@ pub struct ThermalSolver {
     /// `consecutive failures >= ideal_capacity_degraded_threshold`, this value
     /// is returned as a degraded fallback instead of 0.0.
     last_good_capacity_w: HashMap<ZoneId, f64>,
+    /// Per-zone non-HVAC share of the zone sensible input column [W], read
+    /// from the most recent full-step port accumulation (the integrate phase):
+    /// the column's total minus its HVAC heating/cooling/dehumidification
+    /// categories. `solve_ideal_capacity_for_target` solves for the column's
+    /// absolute value, so the capacity it hands the dispatcher is the HVAC's
+    /// own share: this step's non-HVAC gains are estimated by the last step's
+    /// (schedule-driven gains move slowly between steps). The prepare phase's
+    /// partial accumulation (occupancy gains only, before the equipment
+    /// steps) must not clobber the estimate.
+    non_hvac_zone_input_w: HashMap<ZoneId, f64>,
     /// Zones that received a degraded (last-good) capacity value during the
     /// most recent call to `solve_ideal_capacity_for_target`. Cleared at the
     /// start of each step via `begin_step_degradation_tracking`.
@@ -1144,6 +1154,7 @@ impl ThermalSolver {
             energy_balance_residuals: HashMap::with_capacity(n_zones_for_latent),
             ideal_capacity_failure_counts: HashMap::with_capacity(n_zones_for_latent),
             last_good_capacity_w: HashMap::with_capacity(n_zones_for_latent),
+            non_hvac_zone_input_w: HashMap::with_capacity(n_zones_for_latent),
             ideal_capacity_degraded_zones: HashSet::new(),
             ideal_capacity_degraded_warned_zones: HashSet::new(),
             ideal_capacity_warned_zones: HashSet::new(),
@@ -2819,13 +2830,119 @@ mod tests {
         assert!(delta > 1e-3, "ELA effect too small: delta={delta:.6} C");
     }
 
+    /// One-zone solver for the ideal-capacity contract tests: R = 2 K/W,
+    /// C = 50 MJ/K (13.9 kWh/K), 1-hour steps. Large enough capacitance that
+    /// a multi-kW input moves the zone less than a degree per step, the
+    /// dwelling-like regime.
+    fn ideal_contract_solver(dt_s: i64, zone_temp: f64, outdoor_temp: f64) -> ThermalSolver {
+        let r = 2.0;
+        let c = 5.0e7;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, dt_s as f64, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..StateSpaceWiring::default()
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            ..ThermalSolverConfig::new(ZoneId(1))
+        };
+        let env = env_for_temp(zone_temp, outdoor_temp);
+        let mut solver =
+            ThermalSolver::new(model, wiring, config, dt_s as f64, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+        solver
+    }
+
+    /// Steps the solver once with `hvac_w` delivered as the HVAC heating
+    /// category and `non_hvac_w` as an internal gain, returning the zone
+    /// temperature after the step.
+    fn step_with_gains(
+        solver: &mut ThermalSolver,
+        hvac_w: f64,
+        non_hvac_w: f64,
+        zone_temp: f64,
+        outdoor_temp: f64,
+        dt: i64,
+    ) -> f64 {
+        let env = env_for_temp(zone_temp, outdoor_temp);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        ports.thermal[0].add(hvac_w, 0.0, 0.0, hares_types::ThermalCategory::HvacHeating);
+        ports.thermal[0].add(
+            non_hvac_w,
+            0.0,
+            0.0,
+            hares_types::ThermalCategory::InternalGain,
+        );
+        let mut update = DomainUpdate::empty(hares_types::domain_solver::THERMAL);
+        DomainSolver::resolve(
+            solver,
+            &ports,
+            &env,
+            std::time::Duration::from_secs(dt as u64),
+            &mut update,
+        )
+        .unwrap();
+        update.zone_temperatures_c[0].1
+    }
+
+    /// The ideal-capacity contract across steps: after a step that already
+    /// delivered a nonzero input, solving for a new target and delivering the
+    /// returned value must land the zone on that target. The dispatcher
+    /// (`SolverFeedbackActor`) hands the return to equipment that delivers
+    /// exactly it, so a returned value short by the previous step's input
+    /// leaves the zone permanently off its setpoint. The non-HVAC gains
+    /// (appliances, plug loads) ride in the same zone sensible column: the
+    /// solve's return is the HVAC's own share, the non-HVAC part estimated
+    /// from the previous step's split.
+    #[test]
+    fn ideal_capacity_delivered_on_the_step_after_a_delivery_reaches_its_target() {
+        let dt = 3600;
+        let mut solver = ideal_contract_solver(dt, 18.0, -5.0);
+
+        // A prior step that already delivered heat (a running boiler) plus a
+        // steady internal gain.
+        let t1 = step_with_gains(&mut solver, 6000.0, 500.0, 18.0, -5.0, dt);
+        assert!(t1 > 18.0, "the prior delivery must have warmed the zone");
+
+        let target = 21.0;
+        let q = solver.solve_ideal_capacity_for_target(ZoneId(1), target);
+        assert!(q > 0.0, "heating toward the target must be positive: {q}");
+        let t2 = step_with_gains(&mut solver, q, 500.0, t1, -5.0, dt);
+        assert!(
+            (t2 - target).abs() < 0.05,
+            "delivering the returned capacity must land the zone on the target: \
+             t={t2:.4}, target={target}, q={q:.0} W"
+        );
+
+        // Holding at the same target the next step: the hold capacity, not a
+        // delta over the previous delivery.
+        let q_hold = solver.solve_ideal_capacity_for_target(ZoneId(1), target);
+        let t3 = step_with_gains(&mut solver, q_hold, 500.0, t2, -5.0, dt);
+        assert!(
+            (t3 - target).abs() < 0.05,
+            "holding the target step over step must hold: t={t3:.4}, target={target}"
+        );
+    }
+
     #[test]
     fn solve_ideal_capacity_for_target_returns_correct_load() {
         let zone_temp = 18.0;
         let outdoor_temp = -5.0;
         let target_c = 21.0;
         let env = env_for_temp(zone_temp, outdoor_temp);
-
         let r = 2.0;
         let c = 50_000.0;
         let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
