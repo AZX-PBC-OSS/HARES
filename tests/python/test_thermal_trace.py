@@ -306,32 +306,45 @@ def test_output_columns_present(
 # ---------------------------------------------------------------------------
 # Measured divergences
 #
-# HARES misses each comparison's threshold below and the cause is not yet
-# triaged; the strict xfails declare that. The values measured against the
-# seeded OCHRE reference are recorded here and checked first in each test
-# (ochre_records.check_record), so the xfail reasons, built from these
-# records, cannot go stale.
+# HARES misses each comparison's threshold below; the causes are triaged and
+# the records re-measured (2026-10-07, at the combined physics tip):
 #
-# The records moved twice: once when the attic, zone-volume, terrain,
-# roughness and temperature-capacitance physics landed (every trace metric
-# roughly halved toward OCHRE), and once when the initial zone humidity
-# followed the weather's outdoor humidity ratio at initialization (the
-# EnergyPlus zone init, HeatBalanceSurfaceManager.cc:2418-2419) instead of a
-# fixed 0.008 kg/kg: the moisture balance starts from the weather the run
-# starts in and the trace metrics moved toward OCHRE again. What remains is
-# still untriaged.
+# - The window-solar record's cause was a HARES output-column bug: the
+#   "Window Transmitted Solar Gain (W)" column carried the zone's total
+#   window solar injection (through-glass flux plus the inward-flowing share
+#   of the glass-absorbed flux), a fixed 1.3048 multiplier on OCHRE's
+#   through-glass-only definition (Envelope.py:1160). The column now carries
+#   the through-glass flux only; the case passes and its xfail mark is off.
+# - The earlier step-1 infiltration lead (an unseeded 02-measurement run
+#   printed infiltration heat gain as the first component past 5% at step 1)
+#   does not reproduce seeded at the tip: step-1 infiltration agrees within
+#   0.7% and no tracked component crosses 5% in the first hours.
+# - The remaining zone-temperature divergence is the two envelope models'
+#   thermal response: it is near-flat over the first hours (worst 0.71 C at
+#   t=248 min), then grows through day 2 (day-1 heating +4.8%, 48 h heating
+#   -11.7%), the signature of D-012's class: OCHRE's fitted RC network
+#   distributes the same constructions' capacitance differently.
+#
+# The three thermal-trace cases below stay strict xfails for the temperature
+# thresholds; their in-test records (ochre_records.check_record, edge
+# inclusive) hold each measured pair so the reasons cannot go stale.
 # ---------------------------------------------------------------------------
 
 TRACE_WORST_6H_C = 0.7066
-TRACE_MEAN_48H_C = 0.3691
+TRACE_MEAN_48H_C = 0.3697
 TRACE_HEATING_OCHRE_KWH = 47.052
-TRACE_HEATING_HARES_KWH = 41.6910
+TRACE_HEATING_HARES_KWH = 41.553
 OVERNIGHT_WORST_C = 1.3031
-OVERNIGHT_MEAN_C = 0.3671
-SOLAR_MEAN_RATIO = 1.3048
-SOLAR_WORST_REL_ERR = 0.3151
+OVERNIGHT_MEAN_C = 0.3672
+SOLAR_MEAN_RATIO = 0.9991
+SOLAR_WORST_REL_ERR = 0.0096
 
-UNTRIAGED = "The divergence is not yet triaged to a cause."
+ENVELOPE_RESPONSE = (
+    "The cause is the two envelope models' thermal response "
+    "(OCHRE's fitted RC network, DIVERGENCES D-012's class); the window-solar "
+    "column bug and the step-1 infiltration lead are cleared, and the "
+    "divergence grows over the run rather than starting at step 1."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +358,7 @@ UNTRIAGED = "The divergence is not yet triaged to a cause."
         f"HARES's zone temperature diverges from OCHRE's: worst step of the first "
         f"6 h {TRACE_WORST_6H_C:.2f} °C against the 0.1 °C threshold, 48 h mean "
         f"{TRACE_MEAN_48H_C:.2f} °C against 0.5 °C; 48 h heating {TRACE_HEATING_HARES_KWH:.1f} "
-        f"kWh against OCHRE's {TRACE_HEATING_OCHRE_KWH:.1f} kWh. {UNTRIAGED}"
+        f"kWh against OCHRE's {TRACE_HEATING_OCHRE_KWH:.1f} kWh. {ENVELOPE_RESPONSE}"
     ),
     raises=AssertionError,
     strict=True,
@@ -457,7 +470,7 @@ def test_48h_thermal_trace(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> 
     reason=(
         f"HARES's overnight zone temperature (18:00 to 08:00) diverges from OCHRE's "
         f"by up to {OVERNIGHT_WORST_C:.2f} °C against the 0.3 °C threshold "
-        f"(mean {OVERNIGHT_MEAN_C:.2f} °C). {UNTRIAGED}"
+        f"(mean {OVERNIGHT_MEAN_C:.2f} °C). {ENVELOPE_RESPONSE}"
     ),
     raises=AssertionError,
     strict=True,
@@ -514,19 +527,17 @@ def test_overnight_losses(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> N
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    reason=(
-        f"HARES's window transmitted solar gain over 10:00 to 16:00 is "
-        f"{SOLAR_MEAN_RATIO:.3f} times OCHRE's on average, every sampled step "
-        f"outside the 5% band, the worst {SOLAR_WORST_REL_ERR:.1%} high. {UNTRIAGED}"
-    ),
-    raises=AssertionError,
-    strict=True,
-)
 def test_solar_peak(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> None:
     """Solar peak window: 10:00–16:00 on day 1 (600–960 steps).
 
     Compare Window Transmitted Solar Gain within 5% at steps where solar > 10 W.
+
+    The 1.3048x divergence this case once declared came off (2026-10-07):
+    HARES's output column carried the zone's total window solar injection
+    (through-glass plus the inward-flowing absorbed share, a fixed 1.305
+    multiplier on OCHRE's through-glass definition, Envelope.py:1160). The
+    column now carries the through-glass flux only and the gain ratio is
+    SOLAR_MEAN_RATIO, every sampled step inside the 5% band.
     """
     STEP_START = 10 * 60  # 600
     STEP_END = 16 * 60  # 960

@@ -1181,6 +1181,101 @@ mod tests {
         );
     }
 
+    /// A day of constant tempered draw heats the fixtures' volume from the
+    /// mains to the delivery temperature plus the tank's standby loss, within
+    /// the deadband's storage drift: the closed form an EnergyPlus
+    /// `WaterHeater:Mixed` satisfies under load. This pins the draw reaching
+    /// the tank at its normalized volume: the OCHRE reference's tank silently
+    /// drops its fixtures' draw column (its schedule builder names it
+    /// "Water Fixtures (L/min)" at ochre/utils/schedule.py:47 while the tank
+    /// reads "Water Heating (L/min)" at ochre/Models/Water.py:287), and a
+    /// tank that lost the draw would sit near the standby floor, about a
+    /// tenth of the draw-day energy here.
+    #[test]
+    fn element_energy_matches_the_draw_enthalpy_closed_form() {
+        use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+        use hares_physics::water_density_kg_m3;
+
+        // The parity week's unit: 50 gal rated (45 gal actual after the
+        // electric volume correction), UEF 0.92, 125 F setpoint, ambient 21 C.
+        let volume_m3 = 0.170_3;
+        let setpoint_c = 51.667_f64;
+        let mut typed = typed_config();
+        typed.tank_volume_m3 = Some(volume_m3);
+        typed.ua_w_per_k = Some(1.325_5);
+        typed.setpoint_c = Some(setpoint_c);
+        typed.initial_tank_temp_c = Some(setpoint_c);
+        typed.element_power_w = Some(5_500.0);
+        // 256.06 L/day of tempered fixture draw, the normalized draw volume
+        // the parity week's draw schedule integrates to.
+        let fixture_draw_kg_s = 2.963_7e-3;
+        typed.draw_flow_rate_kg_s = Some(fixture_draw_kg_s);
+        let cfg = config_from_typed(typed);
+
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &env(21.0)).unwrap();
+
+        let dt = Duration::from_secs(60);
+        let mut p = ports();
+        // One step populates the telemetry; the 24 h integration starts from
+        // the initialized tank, not the pre-population zeros.
+        wh.step(&env(21.0), dt, &mut p).unwrap();
+        let mut electric_j = 0.0_f64;
+        let mut standby_j = 0.0_f64;
+        let mut draw_l = 0.0_f64;
+        let t_start_avg = wh
+            .telemetry()
+            .get(tk::TANK_AVG_TEMP_C)
+            .expect("tank avg temp telemetry");
+        for _ in 1..(24 * 60) {
+            wh.step(&env(21.0), dt, &mut p).unwrap();
+            let telem = wh.telemetry();
+            electric_j += telem.get(tk::ELECTRIC_POWER_W).unwrap_or(0.0) * dt.as_secs_f64();
+            standby_j += telem.get(tk::SKIN_LOSS_W).unwrap_or(0.0) * dt.as_secs_f64();
+            draw_l += telem.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0) * dt.as_secs_f64()
+                / water_density_kg_m3(setpoint_c)
+                * 1000.0;
+        }
+        let t_end_avg = wh.telemetry().get(tk::TANK_AVG_TEMP_C).expect("end temp");
+        // Liters to kilograms: 1 L = 1e-3 m3 of water.
+        let storage_j = volume_m3 * 1000.0 * CP_LIQUID_WATER_J_KG_K * (t_end_avg - t_start_avg);
+
+        // The delivery enthalpy the TMV guarantees: the drawn volume (liters)
+        // heated from the 10 C equipment-default mains to the 40.6 C
+        // delivery temperature.
+        let mains_c = 10.0_f64;
+        let delivery_c = 40.6_f64;
+        let draw_enthalpy_j = draw_l * 1.0e-3
+            * water_density_kg_m3(delivery_c)
+            * CP_LIQUID_WATER_J_KG_K
+            * (delivery_c - mains_c);
+        let expected_j = draw_enthalpy_j + standby_j + storage_j;
+
+        eprintln!("24 h water-heater decomposition:");
+        eprintln!("  electric        {} kWh", electric_j / 3.6e6);
+        eprintln!("  draw volume     {draw_l} L");
+        eprintln!("  draw enthalpy   {} kWh", draw_enthalpy_j / 3.6e6);
+        eprintln!("  standby loss    {} kWh", standby_j / 3.6e6);
+        eprintln!("  storage change  {} kWh", storage_j / 3.6e6);
+
+        assert!(
+            (electric_j - expected_j).abs() / expected_j < 0.02,
+            "element energy {:.4} kWh must match draw enthalpy + standby + \
+             storage {:.4} kWh (the closed form)",
+            electric_j / 3.6e6,
+            expected_j / 3.6e6
+        );
+        // And the draw-day scale: the element energy is an order of magnitude
+        // above the standby-only floor a lost draw would leave.
+        assert!(
+            electric_j > 5.0 * standby_j,
+            "element energy {:.3} kWh must dominate the standby floor {:.3} kWh: \
+             the fixtures' draw must reach the tank",
+            electric_j / 3.6e6,
+            standby_j / 3.6e6
+        );
+    }
+
     /// Reactive-power contract for the resistive element family:
     /// class pf = 1.0 → Q is exactly Some(0.0) while drawing power, the
     /// REACTIVE capability is declared, and port/CoreOutput/telemetry agree.

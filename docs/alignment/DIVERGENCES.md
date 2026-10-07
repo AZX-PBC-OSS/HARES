@@ -718,9 +718,115 @@ justification → measured impact → pinning tests.
   cooling fell 6134.0 → 5905.8 kWh. The committed goldens are the
   re-captured values; the pinning test closes the balance exactly
   (pool == opaque + out + inward).
-- **Pinning tests:** `crates/hares-envelope/src/thermal_solver/solar.rs`
-  (`diffuse_pool_leaves_back_out_through_the_windows`: the closed-form
-  EnergyPlus shares and the energy closure;
-  `solar_distribution_conserves_energy_randomized`: the conservation
-  identity with windows in the denominator). Each fails when the
-  distribution reverts to the opaque-only denominator.
+ - **Pinning tests:** `crates/hares-envelope/src/thermal_solver/solar.rs`
+   (`diffuse_pool_leaves_back_out_through_the_windows`: the closed-form
+   EnergyPlus shares and the energy closure;
+   `solar_distribution_conserves_energy_randomized`: the conservation
+   identity with windows in the denominator). Each fails when the
+   distribution reverts to the opaque-only denominator.
+
+---
+
+## D-017: The fixtures' hot-water draw reaches the tank
+
+- **Quantity:** the fixtures' share of a dwelling's domestic hot-water
+  draw (sinks, showers, baths: the `hot_water_fixtures` schedule column),
+  as a load on the storage tank.
+- **Reference behavior:** the fixtures' draw is the dwelling's main
+  hot-water load. OS-HPXML v1.12.0 sizes the water heater's load from the
+  fixture demand (`WaterHeatingSystem`'s `FractionDHWLoadServed` applies
+  to the fixture plus appliance draw, the ANSI/RESNET 301 reference of
+  14.6 + 10 gal/day per adjusted bedroom plus the distribution waste);
+  EnergyPlus `WaterHeater:Mixed` receives it as the plant hot-water
+  demand. The draw schedule integrates to the normalized daily volume
+  (here 256.1 L/day, the RESNET reference for 3.6 adjusted bedrooms and
+  this fixture's standard distribution).
+- **OCHRE behavior:** the fixture draw never reaches the tank. The
+  schedule builder names the fixtures column "Water Fixtures (L/min)"
+  (`ochre/utils/schedule.py:47` mapping, `convert_water_column` at
+  `:350-368`) but the tank model reads "Water Heating (L/min)"
+  (`ochre/Models/Water.py:179`, `:287`); no rename bridges the two, so
+  `update_water_draw` sees the `.get` default 0 every step and only the
+  clothes-washer and dishwasher columns flow (`Water.py:288-290`). The
+  release tag v0.9.2 carries the mismatch (upstream commit b781132
+  renamed the schedule side to "Water Fixtures" and the tank side with
+  it, but the vendored tree's `Water.py:287` still reads the old name,
+  as does the upstream v0.9.2 tag's own `Water.py`); the tank silently
+  heats the appliances' draw and standby only. Measured on the parity
+  window: the tank receives 15.6 L over 24 h (the dishwasher alone; the
+  washer's draw is 0 that day) and the water heater draws 1.01 kWh.
+- **HARES behavior:** the fixtures' normalized draw reaches the tank:
+  `normalize_draw_profile` scales the schedule fractions to the RESNET
+  daily volume (`crates/hares-io/src/draw_profile.rs`), and the storage
+  water heaters pull it through the tempered-draw path
+  (`crates/hares-equipment/src/water_heater/tank.rs` `step_tempered`,
+  the TMV volume ratio of OCHRE Water.py:303-325). The tank draws
+  259 L over the measured day and the element delivers the closed form:
+  draw enthalpy 9.14 kWh + standby 1.16 kWh + storage 0.00 kWh =
+  10.27 kWh, measured to 0.3 %.
+- **Justification:** class (a): OCHRE is wrong (a dropped input, not a
+  physics choice). EnergyPlus-grade physics is the target; the
+  dwelling's water-heating energy follows the HPXML's declared fixture
+  demand.
+- **Measured impact:** the parity week's water heating is 78.56 kWh
+  (HARES) against OCHRE's 11.37 kWh (6.9x), and the 24 h window's
+  12.28 kWh against 1.01 kWh (12.2x). The reference scale: the
+  fixtures' 256 L/day at the 40.6 C delivery temperature is
+  8.1 kWh/day of delivered enthalpy, plus the tank's standby (0.9 to
+  1.2 kWh/day at this UA) and the appliances' own hot draws (up to
+  0.8 kWh/day): the flat-draw closed form measures 10.27 kWh/day at
+  the equipment level (the balance identity to 0.3 %), the parity
+  week's peaky draw 11.2 kWh/day averaged. OCHRE's 1.6 kWh/day average
+  is the appliance draws and standby only; its fixtures draw nothing.
+  The 24 h total-electric parity gap is this difference plus the D-012
+  envelope class.
+- **Pinning tests:** `crates/hares-equipment/src/water_heater/
+  resistance.rs`
+  (`element_energy_matches_the_draw_enthalpy_closed_form`: the 24 h
+  element energy equals draw enthalpy + standby + storage and dominates
+  the standby-only floor a lost draw would leave, so re-aligning with
+  OCHRE's dropped column fails the test); `tests/python/
+  test_ochre_parity.py` (the 24 h Water Heating case: a strict xfail
+  whose reason quotes the measured pair and this register entry).
+
+---
+
+## D-018: Slab ground temperature from the EPW's shallow ground table
+
+- **Quantity:** the undisturbed ground temperature driving a
+  slab-on-grade floor's conduction.
+- **Reference behavior:** OS-HPXML v1.12.0 sets EnergyPlus's
+  `Site:GroundTemperature:Shallow` from the weather file's GROUND
+  TEMPERATURES table (`HPXMLtoOpenStudio/resources/location.rb`
+  `apply_ground_temps`: `weather.data.ShallowGroundMonthlyTemps`);
+  the EPW carries the measured monthly shallow ground temperatures for
+  the station (Denver Intl AP, 0.5 m: 0.36 C January to 16.66 C May).
+- **OCHRE behavior:** the ground temperature is a DOE-2 correlation of
+  the air temperature (`ochre/utils/schedule.py` `import_weather`, the
+  `t_ground` block citing DOE-2 `src\WTH.f`): an annual sinusoid around
+  the annual mean air temperature with a phase lag, never reading the
+  EPW's ground table. Measured over the winter conditioned oracle:
+  OCHRE's ground drives at 6.53 C mean where the EPW table's shallow
+  temperature sits at 2.78 C.
+- **HARES behavior:** the ground boundary reads the EPW's ground
+  temperature table (the weather file's monthly shallow temperatures,
+  carried through the weather state; the deep ground term uses the
+  Kusuda-Achenbach correlation whose parameters derive from the same
+  table).
+- **Justification:** class (a): OCHRE substitutes an air-based
+  correlation for the measured station data the reference toolchain
+  uses. The EPW table is the OS-HPXML v1.12.0 source; the correlation
+  is OCHRE's simplification.
+- **Measured impact:** the slab's floor heat gain over the winter
+  conditioned oracle: HARES -216.6 W mean against OCHRE -724.8 W
+  (OCHRE's warmer correlated ground heats the slab; HARES's measured
+  2.78 C January ground does not). On the free-float winter oracle
+  this is the largest single component gap (Floor -26.7 W HARES
+  against +183.3 W OCHRE) and it pushes the free-float indoor mean
+  apart (HARES 11.43 C, OCHRE 13.38 C, MAE 1.94 C).
+- **Pinning tests:** the free-float and conditioned oracles' floor
+  heat-gain diagnostics (`tests/freefloat_oracle.rs`,
+  `tests/conditioned_oracle.rs`, observe builds) carry the per-scenario
+  means; the weather state's ground temperature binding is pinned by
+  the EPW weather parity tests (`crates/hares-io/tests/
+  weather_parity.rs`).
