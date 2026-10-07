@@ -8158,7 +8158,7 @@ mod ideal_capacity_tests {
 
         // Step 2: keep zone between turn-on and turn-off thresholds so FSM
         // remains in Heating hold; the runtime fraction is the zone's
-        // position between the setpoint and the turn-on (OD-38's one
+        // position between the setpoint and the turn-on (the one
         // runtime-fraction path, single-speed included).
         let env_hold = make_env(20.9, 60);
         eq.update_control(&env_hold);

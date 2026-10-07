@@ -1,4 +1,4 @@
-//! OD-38's pinning test: cycling HVAC delivers the fraction of the step the
+//! Pinning test: cycling HVAC delivers the fraction of the step the
 //! zone needs, so the zone holds its setpoint band instead of swinging
 //! whole-step capacity around it.
 //!

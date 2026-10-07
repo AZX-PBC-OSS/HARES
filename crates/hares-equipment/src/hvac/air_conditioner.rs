@@ -3083,7 +3083,7 @@ mod tests {
     /// Single-speed AC runs the runtime fraction the zone needs: the load
     /// fraction is the zone's position between the cooling turn-off and the
     /// turn-on, the same one-runtime-fraction path the multi-speed arms
-    /// follow (OD-38), with the span floored at 0.5 C so a narrow
+    /// follow, with the span floored at 0.5 C so a narrow
     /// hysteresis modulates over it.
     #[test]
     fn single_speed_cooling_call_uses_the_zone_needed_runtime_fraction() {

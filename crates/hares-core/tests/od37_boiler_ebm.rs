@@ -1,4 +1,4 @@
-//! OD-37's pinning test: ResStock 2025.1 bldg0000002 (a gas boiler with
+//! Pinning test: ResStock 2025.1 bldg0000002 (a gas boiler with
 //! hydronic baseboard distribution and a room AC sharing the conditioned
 //! zone, Connecticut weather G0900090, January).
 //!
