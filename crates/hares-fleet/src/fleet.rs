@@ -47,6 +47,28 @@ pub struct DwellingOutcome {
     pub status: SimStatus,
 }
 
+/// The fleet construction report: what a ResStock fleet build parsed and
+/// built, and how many homes' weather files resolved.
+///
+/// The counts describe one [`Fleet::from_resstock`] build: every metadata
+/// row is a parsed building, the dwellings that survived the filter are the
+/// built ones, and the weather counts classify the built dwellings by
+/// whether their weather file resolved to a readable file. A fleet built by
+/// any other constructor carries no report, because no metadata parse or
+/// weather resolution happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FleetReport {
+    /// Metadata rows parsed into buildings, before any filter.
+    pub buildings_parsed: usize,
+    /// Dwellings built from the parsed buildings (post-filter entries).
+    pub dwellings_built: usize,
+    /// Built dwellings whose weather file resolved to a readable file.
+    pub weather_resolved: usize,
+    /// Built dwellings whose weather file did not resolve (no FIPS, no
+    /// file, or an unreadable file).
+    pub weather_failed: usize,
+}
+
 #[derive(Debug, Clone)]
 struct FleetEntry {
     config: DwellingConfig,
@@ -87,6 +109,8 @@ pub enum FleetError {
         "dwelling at index {index} has invalid sample_weight {value} (must be finite and non-negative)"
     )]
     InvalidAggregationWeight { index: usize, value: f64 },
+    #[error("output_verbosity {value} exceeds the maximum of {max}")]
+    InvalidOutputVerbosity { value: u8, max: u8 },
 }
 
 /// Errors returned by [`Fleet::simulate`].
@@ -109,6 +133,9 @@ pub enum SimError {
 pub struct Fleet {
     entries: Vec<FleetEntry>,
     progress: Option<ProgressCallback>,
+    /// The construction report, recorded when the fleet was built from
+    /// ResStock metadata.
+    report: Option<FleetReport>,
 }
 
 impl std::fmt::Debug for Fleet {
@@ -116,6 +143,7 @@ impl std::fmt::Debug for Fleet {
         f.debug_struct("Fleet")
             .field("entries", &self.entries)
             .field("progress", &self.progress.as_ref().map(|_| "..."))
+            .field("report", &self.report)
             .finish()
     }
 }
@@ -134,6 +162,7 @@ impl Fleet {
         Self {
             entries,
             progress: None,
+            report: None,
         }
     }
 
@@ -189,6 +218,7 @@ impl Fleet {
 
         let mut resolved = 0usize;
         let mut unresolved = 0usize;
+        let buildings_parsed = buildings.len();
 
         let entries: Vec<FleetEntry> = buildings
             .into_iter()
@@ -251,10 +281,84 @@ impl Fleet {
             unresolved,
         );
 
+        let report = FleetReport {
+            buildings_parsed,
+            dwellings_built: entries.len(),
+            weather_resolved: resolved,
+            weather_failed: unresolved,
+        };
         Ok(Self {
             entries,
             progress: None,
+            report: Some(report),
         })
+    }
+
+    /// The fleet's construction report: what a ResStock build parsed and
+    /// built, and how many homes' weather files resolved. `None` when the
+    /// fleet was built by a constructor that parses no metadata and
+    /// resolves no weather files.
+    #[must_use]
+    pub fn report(&self) -> Option<&FleetReport> {
+        self.report.as_ref()
+    }
+
+    /// The fleet's building identities, in fleet order: the order
+    /// [`simulate`](Self::simulate) emits its outcomes in, so a caller can
+    /// label per-home results without re-reading the metadata.
+    #[must_use]
+    pub fn bldg_ids(&self) -> Vec<i64> {
+        self.entries
+            .iter()
+            .map(|entry| entry.config.bldg_id)
+            .collect()
+    }
+
+    /// Sets every dwelling's output verbosity, the same bound
+    /// `SimulationConfig::from_toml` enforces when the field is parsed.
+    ///
+    /// A fleet built from ResStock metadata constructs its homes' sim
+    /// configs itself, so this builder is the one surface that moves their
+    /// output verbosity after construction and before
+    /// [`simulate`](Self::simulate).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FleetError::InvalidOutputVerbosity`] when `verbosity`
+    /// exceeds `hares_io::MAX_VERBOSITY`.
+    pub fn with_output_verbosity(mut self, verbosity: u8) -> Result<Self> {
+        if verbosity > hares_io::MAX_VERBOSITY {
+            return Err(FleetError::InvalidOutputVerbosity {
+                value: verbosity,
+                max: hares_io::MAX_VERBOSITY,
+            });
+        }
+        for entry in &mut self.entries {
+            entry.config.sim_config.output_verbosity = verbosity;
+        }
+        Ok(self)
+    }
+
+    /// Turns every dwelling's output recorder on, with the dwelling's
+    /// destination `output_dir/engine_output_{index}.parquet` (Parquet) in
+    /// fleet order, batches retained: the run mode whose products a caller
+    /// reads from the retained batches, with real run metrics.
+    ///
+    /// A fleet built from ResStock metadata constructs its homes' sim
+    /// configs with the recorder off (no output destination exists at
+    /// construction); this builder is the surface that moves the output
+    /// mode after construction and before [`simulate`](Self::simulate),
+    /// mirroring what a config-carrying caller sets on its own
+    /// `DwellingConfig`s.
+    #[must_use]
+    pub fn with_retained_output(mut self, output_dir: &Path) -> Self {
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            entry.config.sim_config.write_output = true;
+            entry.config.sim_config.output_format = hares_io::OutputFormat::Parquet;
+            entry.config.sim_config.output_path =
+                Some(output_dir.join(format!("engine_output_{index}.parquet")));
+        }
+        self
     }
 
     /// Installs a fleet progress callback.
@@ -2254,6 +2358,94 @@ mod tests {
 
     fn resstock_fixtures_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/resstock")
+    }
+
+    /// The constructor's report counts the parsed buildings, the built
+    /// dwellings and the resolved weather files of one build.
+    #[test]
+    fn fleet_report_counts_the_resstock_construction() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("test.parquet");
+        write_resstock_parquet_v2025(&pq, 19_694);
+        let fixtures = resstock_fixtures_root().join("2025.1");
+
+        let fleet = Fleet::from_resstock(
+            &pq,
+            &fixtures,
+            &fixtures.join("weather"),
+            Some(ResStockVersion::V2025_1),
+            None,
+            None,
+            None,
+        )
+        .expect("fleet construction");
+
+        let report = fleet.report().expect("a ResStock build records its report");
+        assert_eq!(report.buildings_parsed, 1, "one metadata row");
+        assert_eq!(report.dwellings_built, 1, "one built dwelling");
+        assert_eq!(
+            report.weather_resolved, 1,
+            "the building's HPXML station resolves the weather file"
+        );
+        assert_eq!(report.weather_failed, 0);
+    }
+
+    /// A fleet built from explicit configs parses no metadata and resolves
+    /// no weather files, so it carries no construction report.
+    #[test]
+    fn from_buildings_carries_no_construction_report() {
+        let config = DwellingConfig {
+            hpxml_path: PathBuf::from("no.xml"),
+            schedule_path: None,
+            weather_path: PathBuf::from("no.epw"),
+            defaults_path: None,
+            sim_config: resstock_sim_config(None),
+            overrides: None,
+            bldg_id: 1,
+            initialization_duration: None,
+            resample_overrides: None,
+            patches: None,
+        };
+        let fleet = Fleet::from_buildings(vec![config]);
+        assert!(fleet.report().is_none());
+        assert_eq!(fleet.bldg_ids(), vec![1], "the identities stay readable");
+    }
+
+    /// The verbosity builder sets every dwelling's sim config and applies
+    /// the same bound the config parser does.
+    #[test]
+    fn with_output_verbosity_sets_every_home_and_validates() {
+        let config = |bldg_id| DwellingConfig {
+            hpxml_path: PathBuf::from("no.xml"),
+            schedule_path: None,
+            weather_path: PathBuf::from("no.epw"),
+            defaults_path: None,
+            sim_config: resstock_sim_config(None),
+            overrides: None,
+            bldg_id,
+            initialization_duration: None,
+            resample_overrides: None,
+            patches: None,
+        };
+        let fleet = Fleet::from_buildings(vec![config(1), config(2)])
+            .with_output_verbosity(2)
+            .expect("verbosity 2 is valid");
+        for id in fleet.bldg_ids() {
+            let entry = fleet
+                .entries
+                .iter()
+                .find(|entry| entry.config.bldg_id == id)
+                .expect("the id came from the fleet");
+            assert_eq!(entry.config.sim_config.output_verbosity, 2);
+        }
+
+        let error = Fleet::from_buildings(vec![config(1)])
+            .with_output_verbosity(hares_io::MAX_VERBOSITY + 1)
+            .expect_err("verbosity above the maximum must be rejected");
+        assert!(
+            error.to_string().contains("output_verbosity"),
+            "the error names the field: {error}"
+        );
     }
 
     #[test]

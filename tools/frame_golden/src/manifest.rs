@@ -37,6 +37,8 @@ impl Feature {
 pub enum ManifestKind {
     Dwelling,
     Fleet,
+    #[serde(rename = "resstock_fleet")]
+    ResstockFleet,
 }
 
 /// The resolution a fleet's products are bucketed at, as the manifest
@@ -46,6 +48,71 @@ pub enum ManifestKind {
 pub enum ManifestResolution {
     FifteenMin,
     Hourly,
+}
+
+impl ManifestResolution {
+    /// The aggregation resolution the engine folds to.
+    pub fn resolution(self) -> hares_fleet::AggregationResolution {
+        match self {
+            ManifestResolution::Hourly => hares_fleet::AggregationResolution::Hourly,
+            ManifestResolution::FifteenMin => hares_fleet::AggregationResolution::FifteenMin,
+        }
+    }
+}
+
+/// The `[fleet]` table's variable selection, as the manifest spells it:
+/// `verbosity-N` selects every variable the home's catalogue declares at
+/// verbosity level N or below. Any other spelling is rejected at parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestSelection {
+    Verbosity(u8),
+}
+
+impl ManifestSelection {
+    /// The verbosity level the selection stands for.
+    pub fn verbosity(self) -> u8 {
+        match self {
+            ManifestSelection::Verbosity(level) => level,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ManifestSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        let level = text
+            .strip_prefix("verbosity-")
+            .and_then(|rest| rest.parse::<u8>().ok())
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "unknown selection {text:?}: the accepted spelling is \"verbosity-<level>\" with a level of 0 to {}",
+                    hares_io::MAX_VERBOSITY
+                ))
+            })?;
+        if level > hares_io::MAX_VERBOSITY {
+            return Err(serde::de::Error::custom(format!(
+                "selection {text:?}: verbosity level {level} exceeds the maximum of {}",
+                hares_io::MAX_VERBOSITY
+            )));
+        }
+        Ok(ManifestSelection::Verbosity(level))
+    }
+}
+
+/// The manifest's required `[fleet]` table for kind `resstock_fleet`: the
+/// fleet report's request, a frequency and a variable selection. The
+/// metadata's weight column carries the homes' weights; no `[[home]]`
+/// entries exist for this kind.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetReportSpec {
+    /// The frequency the fleet's products are bucketed at.
+    pub frequency: ManifestResolution,
+    /// The variable selection the fleet's homes report.
+    pub selection: ManifestSelection,
 }
 
 /// One `[[home]]` entry. Paths are repository-relative; `overrides` is the
@@ -103,7 +170,11 @@ pub struct GoldenManifest {
     pub defaults: String,
     #[serde(default)]
     pub defaults_files: BTreeMap<String, String>,
-    pub simulation: toml::Table,
+    /// A `SimulationConfig` table verbatim, required for kinds "dwelling"
+    /// and "fleet" and rejected for kind "resstock_fleet" (whose homes'
+    /// sim config is the ResStock constructor's own).
+    #[serde(default)]
+    pub simulation: Option<toml::Table>,
     /// Defaulted so a manifest with no `[[home]]` reaches the domain
     /// validator (which states the per-kind rule) instead of a generic
     /// serde missing-field error.
@@ -120,10 +191,50 @@ pub struct GoldenManifest {
     /// run time.
     #[serde(default)]
     pub tariff: Option<TariffConfig>,
+    /// Kind "resstock_fleet" only: the metadata parquet the fleet builds
+    /// from, repository-relative. Every other kind rejects the key.
+    #[serde(default)]
+    pub metadata: Option<String>,
+    /// Kind "resstock_fleet" only: the unpacked buildings directory
+    /// (`bldg<bldg_id:07>/home.xml` and `in.schedules.csv` per building),
+    /// repository-relative.
+    #[serde(default)]
+    pub buildings_dir: Option<String>,
+    /// Kind "resstock_fleet" only: the weather directory the buildings'
+    /// HPXML station FIPS resolve against, repository-relative.
+    #[serde(default)]
+    pub weather_dir: Option<String>,
+    /// Kind "resstock_fleet" only: the ResStock release the metadata
+    /// speaks.
+    #[serde(default, deserialize_with = "resstock_version")]
+    pub version: Option<hares_io::ResStockVersion>,
+    /// Kind "resstock_fleet" only: the simulation duration in seconds.
+    /// The fleet's own sim config (the ResStock constructor's) carries the
+    /// start, the step and the output settings.
+    #[serde(default)]
+    pub duration: Option<u64>,
+    /// The required `[fleet]` table for kind "resstock_fleet": the fleet
+    /// report's frequency and selection. Every other kind rejects the
+    /// table.
+    #[serde(default)]
+    pub fleet: Option<FleetReportSpec>,
     /// Where the manifest was parsed from, for error messages; not part
     /// of the manifest text itself.
     #[serde(skip)]
     pub source: PathBuf,
+}
+
+/// Deserializes a `ResStockVersion` from its release spelling, so a
+/// manifest naming an unknown release fails with the known spellings.
+fn resstock_version<'de, D>(deserializer: D) -> Result<Option<hares_io::ResStockVersion>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text = Option::<String>::deserialize(deserializer)?;
+    match text {
+        None => Ok(None),
+        Some(text) => text.parse().map(Some).map_err(serde::de::Error::custom),
+    }
 }
 
 /// Every field of `hares_io::SimulationConfig`. A manifest key outside this
@@ -179,83 +290,132 @@ impl GoldenManifest {
     }
 
     fn validate(&self, path: &Path) -> FrameGoldenResult<()> {
-        for key in self.simulation.keys() {
-            if !SIMULATION_KEYS.contains(&key.as_str()) {
-                return Err(FrameGoldenError::Manifest {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "unknown key {key:?} in [simulation]: known keys are {SIMULATION_KEYS:?}"
-                    ),
-                });
+        let fail = |detail: String| FrameGoldenError::Manifest {
+            path: path.to_path_buf(),
+            detail,
+        };
+        let resstock_keys: [(&str, bool); 6] = [
+            ("metadata", self.metadata.is_some()),
+            ("buildings_dir", self.buildings_dir.is_some()),
+            ("weather_dir", self.weather_dir.is_some()),
+            ("version", self.version.is_some()),
+            ("duration", self.duration.is_some()),
+            ("fleet", self.fleet.is_some()),
+        ];
+        match self.kind {
+            ManifestKind::ResstockFleet => {
+                for (key, present) in resstock_keys {
+                    if !present {
+                        return Err(fail(format!(
+                            "kind \"resstock_fleet\" requires the key {key:?}"
+                        )));
+                    }
+                }
+                if !self.home.is_empty() {
+                    return Err(fail(
+                        "kind \"resstock_fleet\" takes no [[home]] entries: the homes come from the metadata"
+                            .to_string(),
+                    ));
+                }
+                if self.resolution.is_some() {
+                    return Err(fail(format!(
+                        "resolution is accepted for kind \"fleet\" only, found kind {:?}: the [fleet] table's frequency carries it for kind \"resstock_fleet\"",
+                        self.kind
+                    )));
+                }
+                if self.duration == Some(0) {
+                    return Err(fail("duration must be positive".to_string()));
+                }
             }
+            ManifestKind::Dwelling | ManifestKind::Fleet => {
+                for (key, present) in resstock_keys {
+                    if present {
+                        return Err(fail(format!(
+                            "{key} is accepted for kind \"resstock_fleet\" only, found kind {:?}",
+                            self.kind
+                        )));
+                    }
+                }
+            }
+        }
+        match &self.simulation {
+            Some(simulation) => {
+                if self.kind == ManifestKind::ResstockFleet {
+                    return Err(fail(format!(
+                        "[simulation] is accepted for kinds \"dwelling\" and \"fleet\" only, found kind {:?}: a resstock fleet's sim config is its constructor's own",
+                        self.kind
+                    )));
+                }
+                for key in simulation.keys() {
+                    if !SIMULATION_KEYS.contains(&key.as_str()) {
+                        return Err(fail(format!(
+                            "unknown key {key:?} in [simulation]: known keys are {SIMULATION_KEYS:?}"
+                        )));
+                    }
+                }
+            }
+            None if self.kind != ManifestKind::ResstockFleet => {
+                return Err(fail(format!(
+                    "kind {:?} requires a [simulation] table",
+                    self.kind
+                )));
+            }
+            None => {}
         }
         if let Some(tariff) = &self.tariff {
             if self.kind != ManifestKind::Dwelling {
-                return Err(FrameGoldenError::Manifest {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "[tariff] is accepted for kind \"dwelling\" only, found kind {:?}",
-                        self.kind
-                    ),
-                });
+                return Err(fail(format!(
+                    "[tariff] is accepted for kind \"dwelling\" only, found kind {:?}",
+                    self.kind
+                )));
             }
             tariff
                 .zone_tz()
-                .map_err(|detail| FrameGoldenError::Manifest {
-                    path: path.to_path_buf(),
-                    detail: format!("[tariff] {detail}"),
-                })?;
+                .map_err(|detail| fail(format!("[tariff] {detail}")))?;
         }
         let count = self.home.len();
         match self.kind {
-            ManifestKind::Dwelling if count != 1 => Err(FrameGoldenError::Manifest {
-                path: path.to_path_buf(),
-                detail: format!("kind \"dwelling\" requires exactly one [[home]], found {count}"),
-            }),
-            ManifestKind::Fleet if count < 2 => Err(FrameGoldenError::Manifest {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "kind \"fleet\" requires two or more [[home]] entries, found {count}"
-                ),
-            }),
-            ManifestKind::Dwelling | ManifestKind::Fleet => Ok(()),
+            ManifestKind::Dwelling if count != 1 => Err(fail(format!(
+                "kind \"dwelling\" requires exactly one [[home]], found {count}"
+            ))),
+            ManifestKind::Fleet if count < 2 => Err(fail(format!(
+                "kind \"fleet\" requires two or more [[home]] entries, found {count}"
+            ))),
+            ManifestKind::Dwelling | ManifestKind::Fleet | ManifestKind::ResstockFleet => Ok(()),
         }?;
         for home in &self.home {
             match (self.kind, home.weight) {
                 (ManifestKind::Fleet, None) => {
-                    return Err(FrameGoldenError::Manifest {
-                        path: path.to_path_buf(),
-                        detail: format!(
-                            "[[home]] bldg_id {}: weight is required for kind \"fleet\"",
-                            home.bldg_id
-                        ),
-                    });
+                    return Err(fail(format!(
+                        "[[home]] bldg_id {}: weight is required for kind \"fleet\"",
+                        home.bldg_id
+                    )));
                 }
                 (ManifestKind::Dwelling, Some(_)) => {
-                    return Err(FrameGoldenError::Manifest {
-                        path: path.to_path_buf(),
-                        detail: format!(
-                            "[[home]] bldg_id {}: weight is accepted for kind \"fleet\" only, found kind {:?}",
-                            home.bldg_id, self.kind
-                        ),
-                    });
+                    return Err(fail(format!(
+                        "[[home]] bldg_id {}: weight is accepted for kind \"fleet\" only, found kind {:?}",
+                        home.bldg_id, self.kind
+                    )));
                 }
+                // A resstock fleet takes no [[home]] entries at all; the
+                // check above rejects one before the weights matter.
+                (ManifestKind::ResstockFleet, _weight) => {}
                 (ManifestKind::Fleet, Some(_)) | (ManifestKind::Dwelling, None) => {}
             }
         }
         match (self.kind, self.resolution) {
-            (ManifestKind::Fleet, None) => Err(FrameGoldenError::Manifest {
-                path: path.to_path_buf(),
-                detail: "resolution is required for kind \"fleet\"".to_string(),
-            }),
-            (ManifestKind::Dwelling, Some(_)) => Err(FrameGoldenError::Manifest {
-                path: path.to_path_buf(),
-                detail: format!(
+            (ManifestKind::Fleet, None) => Err(fail(
+                "resolution is required for kind \"fleet\"".to_string(),
+            )),
+            (ManifestKind::Dwelling, Some(_)) | (ManifestKind::ResstockFleet, Some(_)) => {
+                Err(fail(format!(
                     "resolution is accepted for kind \"fleet\" only, found kind {:?}",
                     self.kind
-                ),
-            }),
-            (ManifestKind::Fleet, Some(_)) | (ManifestKind::Dwelling, None) => Ok(()),
+                )))
+            }
+            (ManifestKind::Fleet, Some(_))
+            | (ManifestKind::Dwelling, None)
+            | (ManifestKind::ResstockFleet, None) => Ok(()),
         }
     }
 
@@ -274,10 +434,17 @@ impl GoldenManifest {
 
     /// Parses the `[simulation]` table through `SimulationConfig::from_toml`
     /// so its validation rules (positive, time_res-divisible duration and
-    /// the verbosity cap) apply exactly as they do anywhere else.
+    /// the verbosity cap) apply exactly as they do anywhere else. The
+    /// validator rejects a kind without the table it needs, so the
+    /// `None` here is unreachable through [`GoldenManifest::load`].
     pub fn simulation_config(&self) -> FrameGoldenResult<hares_io::SimulationConfig> {
-        let text = toml::to_string(&self.simulation)
-            .map_err(|err| FrameGoldenError::SimulationConfig(err.to_string()))?;
+        let text = toml::to_string(self.simulation.as_ref().ok_or_else(|| {
+            FrameGoldenError::SimulationConfig(format!(
+                "manifest {:?}: kind {:?} carries no [simulation] table",
+                self.source, self.kind
+            ))
+        })?)
+        .map_err(|err| FrameGoldenError::SimulationConfig(err.to_string()))?;
         hares_io::SimulationConfig::from_toml(&text)
             .map_err(|err| FrameGoldenError::SimulationConfig(err.to_string()))
     }

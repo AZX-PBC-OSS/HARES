@@ -38,6 +38,7 @@ fn build_doc(
         kind: match products.kind {
             crate::manifest::ManifestKind::Dwelling => "dwelling".to_string(),
             crate::manifest::ManifestKind::Fleet => "fleet".to_string(),
+            crate::manifest::ManifestKind::ResstockFleet => "resstock_fleet".to_string(),
         },
         features: manifest.feature_names(),
         defaults_dir: products.defaults_dir.clone(),

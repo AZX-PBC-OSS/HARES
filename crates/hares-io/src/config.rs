@@ -215,7 +215,10 @@ impl SimulationConfig {
 
 const DEFAULT_TIME_RES_SECS: i64 = 60;
 const DEFAULT_CHUNK_SIZE: usize = 10_000;
-const MAX_VERBOSITY: u8 = 8;
+/// The highest `output_verbosity` a `SimulationConfig` accepts. Public
+/// because every surface that sets the field outside `from_toml` (the
+/// fleet's verbosity builder) applies the same bound.
+pub const MAX_VERBOSITY: u8 = 8;
 
 fn default_time_res() -> Duration {
     Duration::seconds(DEFAULT_TIME_RES_SECS)

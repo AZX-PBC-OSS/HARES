@@ -21,8 +21,8 @@ pub mod weather;
 pub mod wsf;
 
 pub use config::{
-    ConfigError, DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES, OutputFormat, RotationPolicy,
-    SimulationConfig,
+    ConfigError, DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES, MAX_VERBOSITY, OutputFormat,
+    RotationPolicy, SimulationConfig,
 };
 pub use defaults::{
     BiquadraticCoefficients, DefaultsCategory, DefaultsError, DefaultsStore, EquipmentDefaults,

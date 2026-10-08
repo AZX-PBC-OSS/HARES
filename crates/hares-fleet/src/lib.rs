@@ -5,4 +5,6 @@ pub mod fleet;
 pub mod progress;
 
 pub use aggregation::{AggregationResolution, DwellingMetrics, FleetResults};
-pub use fleet::{DwellingBuildError, DwellingOutcome, Fleet, SimError, SimStatus, SteppableFleet};
+pub use fleet::{
+    DwellingBuildError, DwellingOutcome, Fleet, FleetReport, SimError, SimStatus, SteppableFleet,
+};

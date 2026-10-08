@@ -33,6 +33,23 @@ impl std::fmt::Display for ResStockVersion {
     }
 }
 
+impl std::str::FromStr for ResStockVersion {
+    type Err = String;
+
+    /// Parses the release spellings [`Display`](Self::fmt) writes: the
+    /// error names every accepted spelling.
+    fn from_str(text: &str) -> std::result::Result<Self, Self::Err> {
+        match text {
+            "2024.1" => Ok(Self::V2024_1),
+            "2024.2" => Ok(Self::V2024_2),
+            "2025.1" => Ok(Self::V2025_1),
+            other => Err(format!(
+                "unknown ResStock version {other:?}: known versions are \"2024.1\", \"2024.2\", \"2025.1\""
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResStockBuilding {
     pub bldg_id: i64,

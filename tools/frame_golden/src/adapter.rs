@@ -28,7 +28,7 @@ use tempfile::TempDir;
 use crate::defaults;
 use crate::error::{FrameGoldenError, FrameGoldenResult};
 use crate::golden::{MetricsRow, flatten_metrics};
-use crate::manifest::{GoldenManifest, ManifestKind, ManifestResolution, repo_path};
+use crate::manifest::{GoldenManifest, ManifestKind, repo_path};
 
 /// Whether a run keeps its frames. `Full` retains every product in memory
 /// (the engine's own file output goes to a deleted temp directory);
@@ -74,6 +74,7 @@ impl RunTiming {
 }
 
 /// Everything one run of a manifest produces.
+#[derive(Clone)]
 pub struct RunProducts {
     pub kind: ManifestKind,
     pub timing: RunTiming,
@@ -133,11 +134,13 @@ fn initialization_duration(secs: u64) -> Option<StdDuration> {
     }
 }
 
-/// Runs the manifest: a single dwelling, or a fleet on a single-thread pool.
+/// Runs the manifest: a single dwelling, a fleet of explicit homes, or a
+/// fleet built from ResStock metadata.
 pub fn run(req: RunRequest) -> FrameGoldenResult<RunProducts> {
     match req.manifest.kind {
         ManifestKind::Dwelling => run_dwelling(req),
         ManifestKind::Fleet => run_fleet(req),
+        ManifestKind::ResstockFleet => run_resstock_fleet(req),
     }
 }
 
@@ -314,49 +317,164 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         .map_err(|err| FrameGoldenError::Engine(err.to_string()))?;
     let construct = construct_start.elapsed();
 
+    let bldg_ids = fleet.bldg_ids();
     let simulate_start = Instant::now();
+    let outcomes = simulate_fleet(&fleet)?;
+    fleet_products(
+        req.manifest,
+        &bldg_ids,
+        outcomes,
+        req.manifest
+            .resolution
+            .expect("a fleet manifest carries a resolution: the manifest validator rejects a fleet manifest without one")
+            .resolution(),
+        construct,
+        simulate_start.elapsed(),
+        defaults_digest,
+        None,
+    )
+}
+
+/// Runs a `resstock_fleet` manifest: the homes come from the metadata
+/// through `Fleet::from_resstock`, their weights from the metadata's
+/// weight column, and the run's products include the fleet's construction
+/// report beside the simulation products.
+fn run_resstock_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
+    let manifest = req.manifest;
+    let spec = manifest
+        .fleet
+        .as_ref()
+        .expect("a resstock fleet manifest carries a [fleet] table: the manifest validator rejects one without");
+    let defaults_tree = defaults::prepare(req.repo_root, manifest)?;
+    let defaults_digest = defaults::digest_used(&defaults_tree)?;
+
+    // The manifest's duration (or the run's --duration-s override) is the
+    // ResStock constructor's duration argument; the step and the start
+    // stay the constructor's own (one minute, the constructor's fixed
+    // start rule).
+    let seconds: i64 = match req.duration_override_s {
+        Some(override_s) => override_s,
+        None => i64::try_from(manifest.duration.expect("validated")).map_err(|_| {
+            FrameGoldenError::SimulationConfig("duration overflows i64".to_string())
+        })?,
+    };
+    let resstock_step_seconds = 60;
+    if seconds <= 0 || seconds % resstock_step_seconds != 0 {
+        return Err(FrameGoldenError::SimulationConfig(format!(
+            "duration {seconds} must be positive and divisible by the ResStock fleet's step ({resstock_step_seconds}s)"
+        )));
+    }
+
+    let construct_start = Instant::now();
+    let fleet = Fleet::from_resstock(
+        &repo_path(
+            req.repo_root,
+            manifest.metadata.as_deref().expect("validated"),
+        ),
+        &repo_path(
+            req.repo_root,
+            manifest.buildings_dir.as_deref().expect("validated"),
+        ),
+        &repo_path(
+            req.repo_root,
+            manifest.weather_dir.as_deref().expect("validated"),
+        ),
+        manifest.version,
+        None,
+        Some(chrono::Duration::seconds(seconds)),
+        Some(defaults_tree.dir()),
+    )
+    .map_err(|err| FrameGoldenError::Engine(err.to_string()))?;
+    // The ResStock constructor builds its homes' sim configs with the
+    // recorder off (no output destination exists at construction): the
+    // fleet's run metrics and retained batches exist only when the
+    // recorder is on, so a full run gives every home a destination in a
+    // temp directory that is deleted with the run.
+    let engine_dir = TempDir::new()?;
+    let fleet = if req.output == RunOutput::Full {
+        fleet.with_retained_output(engine_dir.path())
+    } else {
+        fleet
+    };
+    let fleet = fleet
+        .with_output_verbosity(spec.selection.verbosity())
+        .map_err(|err| FrameGoldenError::Engine(err.to_string()))?;
+    let report = *fleet
+        .report()
+        .expect("a fleet built from ResStock metadata carries its construction report");
+    let bldg_ids = fleet.bldg_ids();
+    let construct = construct_start.elapsed();
+
+    let simulate_start = Instant::now();
+    let outcomes = simulate_fleet(&fleet)?;
+    fleet_products(
+        manifest,
+        &bldg_ids,
+        outcomes,
+        spec.frequency.resolution(),
+        construct,
+        simulate_start.elapsed(),
+        defaults_digest,
+        Some(report),
+    )
+}
+
+/// Simulates one fleet on the adapter's pinned single-thread pool: the
+/// capture's thread count is pinned, not ambient.
+fn simulate_fleet(fleet: &Fleet) -> FrameGoldenResult<Vec<DwellingOutcome>> {
     // n_threads = 1 builds an explicit single-thread rayon pool for this
-    // call: the capture's thread count is pinned, not ambient.
-    let outcomes = fleet.simulate(1);
-    let mut completed: Vec<DwellingOutcome> = Vec::with_capacity(outcomes.len());
-    for outcome in outcomes {
+    // call.
+    let mut completed: Vec<DwellingOutcome> = Vec::with_capacity(fleet.len());
+    for outcome in fleet.simulate(1) {
         match outcome {
             Ok(outcome) => completed.push(outcome),
             Err(err) => return Err(FrameGoldenError::Engine(err.to_string())),
         }
     }
-    for (home, outcome) in req.manifest.home.iter().zip(&completed) {
+    Ok(completed)
+}
+
+/// The shared fleet finish: the failed-home check, the aggregate fold at
+/// `resolution`, and the fleet's products (`aggregate`, `weights`,
+/// `homes`, plus `fleet_report` when the run carries a construction
+/// report). The simulate timing includes the aggregate step: the fleet's
+/// products do not exist until aggregation has run.
+#[allow(clippy::too_many_arguments)]
+fn fleet_products(
+    manifest: &GoldenManifest,
+    bldg_ids: &[i64],
+    completed: Vec<DwellingOutcome>,
+    resolution: AggregationResolution,
+    construct: StdDuration,
+    simulate_elapsed: StdDuration,
+    defaults_digest: String,
+    report: Option<hares_fleet::FleetReport>,
+) -> FrameGoldenResult<RunProducts> {
+    for (index, outcome) in completed.iter().enumerate() {
         if let hares_fleet::SimStatus::Failed(message) = &outcome.status {
+            let bldg_id = bldg_ids
+                .get(index)
+                .map_or("?".to_string(), |id| id.to_string());
             return Err(FrameGoldenError::Engine(format!(
-                "home {} failed: {message}",
-                home.bldg_id
+                "home {bldg_id} failed: {message}"
             )));
         }
     }
-    let resolution = match req
-        .manifest
-        .resolution
-        .expect("a fleet manifest carries a resolution: the manifest validator rejects a fleet manifest without one")
-    {
-        ManifestResolution::Hourly => AggregationResolution::Hourly,
-        ManifestResolution::FifteenMin => AggregationResolution::FifteenMin,
-    };
-    // The simulate timing includes the aggregate step: the fleet's
-    // products do not exist until aggregation has run.
+    let aggregate_start = Instant::now();
     let fleet_results = aggregate(&completed, resolution)
         .map_err(|err| FrameGoldenError::Engine(err.to_string()))?;
-    let simulate = simulate_start.elapsed();
+    let simulate = simulate_elapsed + aggregate_start.elapsed();
 
     let mut frames = BTreeMap::new();
     frames.insert(
         "aggregate".to_string(),
         FrameProducts::from_batches(vec![fleet_results.aggregate_timeseries.clone()])?,
     );
-    frames.insert(
-        "weights".to_string(),
-        weights_frame(req.manifest, &completed)?,
-    );
-    frames.insert("homes".to_string(), homes_frame(req.manifest, &completed)?);
+    frames.insert("weights".to_string(), weights_frame(bldg_ids, &completed)?);
+    frames.insert("homes".to_string(), homes_frame(bldg_ids, &completed)?);
+    if let Some(report) = report {
+        frames.insert("fleet_report".to_string(), fleet_report_frame(report)?);
+    }
 
     let metrics_rows = completed
         .iter()
@@ -364,7 +482,7 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         .collect();
 
     Ok(RunProducts {
-        kind: ManifestKind::Fleet,
+        kind: manifest.kind,
         timing: RunTiming {
             construct,
             simulate,
@@ -372,7 +490,7 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         frames,
         metrics_rows,
         health: None,
-        defaults_dir: req.manifest.defaults.clone(),
+        defaults_dir: manifest.defaults.clone(),
         defaults_digest,
         #[cfg(feature = "profiling")]
         profiling: None,
@@ -383,10 +501,10 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
 /// contributes to the aggregate. The per-cell covered-weight batch arrives
 /// with the fleet result refactor; its adapter update replaces this frame.
 fn weights_frame(
-    manifest: &GoldenManifest,
+    bldg_ids: &[i64],
     outcomes: &[DwellingOutcome],
 ) -> FrameGoldenResult<FrameProducts> {
-    let bldg_ids: Int64Array = manifest.home.iter().map(|home| home.bldg_id).collect();
+    let bldg_ids: Int64Array = bldg_ids.iter().copied().collect();
     let weights: Float64Array = outcomes
         .iter()
         .map(|outcome| outcome.sample_weight)
@@ -404,11 +522,8 @@ fn weights_frame(
 
 /// One row per home: the identity, weight and per-home results behind the
 /// aggregate. Status is the fleet's own rendering of the run outcome.
-fn homes_frame(
-    manifest: &GoldenManifest,
-    outcomes: &[DwellingOutcome],
-) -> FrameGoldenResult<FrameProducts> {
-    let bldg_ids: Int64Array = manifest.home.iter().map(|home| home.bldg_id).collect();
+fn homes_frame(bldg_ids: &[i64], outcomes: &[DwellingOutcome]) -> FrameGoldenResult<FrameProducts> {
+    let bldg_ids: Int64Array = bldg_ids.iter().copied().collect();
     let total_energy: Float64Array = outcomes
         .iter()
         .map(|outcome| outcome.result.metrics.total_energy_kwh.net_energy_kwh)
@@ -524,6 +639,36 @@ fn billing_frame(
             Arc::new(peak.finish()),
             Arc::new(import.finish()),
             Arc::new(export_kwh.finish()),
+        ],
+    )?;
+    Ok(FrameProducts {
+        schema,
+        batches: vec![batch],
+    })
+}
+
+/// The fleet construction report: one row of counts, the run's statement
+/// of what the ResStock build parsed and built and how many homes' weather
+/// files resolved.
+fn fleet_report_frame(report: hares_fleet::FleetReport) -> FrameGoldenResult<FrameProducts> {
+    let int = |value: usize| Int64Array::from(vec![value as i64]);
+    let buildings_parsed = int(report.buildings_parsed);
+    let dwellings_built = int(report.dwellings_built);
+    let weather_resolved = int(report.weather_resolved);
+    let weather_failed = int(report.weather_failed);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("buildings_parsed", DataType::Int64, false),
+        Field::new("dwellings_built", DataType::Int64, false),
+        Field::new("weather_resolved", DataType::Int64, false),
+        Field::new("weather_failed", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(buildings_parsed),
+            Arc::new(dwellings_built),
+            Arc::new(weather_resolved),
+            Arc::new(weather_failed),
         ],
     )?;
     Ok(FrameProducts {
