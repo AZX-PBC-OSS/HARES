@@ -445,7 +445,7 @@ pub struct HvacRuntimeState {
     /// setpoints without mutating `runtime_setpoints` (which is reserved
     /// for `ThermalSetpoint`/`ThermalSetpointDelta` signals).
     pub dr_setpoint_offset_c: f64,
-    /// The served zone's non-HVAC share of the sensible input column [W],
+    /// The served zone's non-HVAC share of the sensible input column (W),
     /// dispatched every step by the solver-feedback actor. The cycling duty
     /// arms net it out of the band-position estimate; the ideal path applies
     /// the same correction inside the solver's capacity dispatch. Not

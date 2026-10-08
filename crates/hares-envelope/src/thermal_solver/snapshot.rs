@@ -60,7 +60,7 @@ pub struct ThermalSnapshot {
     /// Last successfully solved ideal capacity (W) per zone, sorted by zone:
     /// the degraded fallback once failures reach the threshold.
     pub last_good_capacity_w: Vec<(ZoneId, f64)>,
-    /// Per-zone non-HVAC share of the zone sensible input column [W] from
+    /// Per-zone non-HVAC share of the zone sensible input column (W) from
     /// the last integrate, sorted by zone: the estimate the next
     /// ideal-capacity solve subtracts.
     pub non_hvac_zone_input_w: Vec<(ZoneId, f64)>,

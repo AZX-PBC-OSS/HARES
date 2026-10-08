@@ -309,10 +309,10 @@ pub struct WindowSolarProperties {
 /// conducts out).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowDiffuseShare {
-    /// `Area × effective diffuse transmittance` [m²], the share of the
+    /// `Area × effective diffuse transmittance` in m², the share of the
     /// zone's diffuse pool that leaves back out through this window.
     pub tau_weight: f64,
-    /// `Area × back diffuse absorptance` [m²], the share absorbed in the
+    /// `Area × back diffuse absorptance` in m², the share absorbed in the
     /// glass, split by `n_i`.
     pub alpha_weight: f64,
     /// Inward-flowing fraction of glass-absorbed solar [-] (the window
@@ -322,7 +322,7 @@ pub struct WindowDiffuseShare {
 }
 
 impl WindowDiffuseShare {
-    /// The window's total weight in the distribution denominator [m²].
+    /// The window's total weight in the distribution denominator, in m².
     pub fn weight(&self) -> f64 {
         self.tau_weight + self.alpha_weight
     }
@@ -905,20 +905,17 @@ pub type Result<T> = std::result::Result<T, ThermalSolverError>;
 /// through-glass flux under that name).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WindowSolarTotals {
-    /// Total window solar reaching the zone [W]: the through-glass
+    /// Total window solar reaching the zone (W): the through-glass
     /// (transmitted) flux plus the inward-flowing share of the
     /// glass-absorbed flux.
     pub injected_w: f64,
-    /// Through-glass (transmitted) window solar [W] only:
+    /// Through-glass (transmitted) window solar (W) only:
     /// `area × transmittance × POA` per window, before the interior
     /// distribution's leave-back-out share.
     pub through_glass_w: f64,
 }
 
-/// Per-timestep envelope component gains [W] for output/diagnostics.
-=======
 /// Per-timestep envelope component gains (W) for output/diagnostics.
->>>>>>> 57845180 (docs: fix broken API doc links and check the docs build in the block)
 ///
 /// Values are signed: positive = heat flowing INTO the indoor zone — with two
 /// documented exceptions: `opaque_solar_lwr_w`, `opaque_solar_w`, and
@@ -929,12 +926,12 @@ pub struct WindowSolarTotals {
 /// Populated after each `resolve()` call; read via [`crate::ThermalSolver::component_gains`].
 #[derive(Debug, Clone, Default)]
 pub struct EnvelopeComponentGains {
-    /// Total window solar reaching the zone [W]: the through-glass (transmitted)
+    /// Total window solar reaching the zone (W): the through-glass (transmitted)
     /// flux plus the inward-flowing share of the glass-absorbed flux. This is
     /// the energy-conserving injection total; the transmitted-only flux is
     /// `window_through_glass_w`.
     pub window_solar_w: f64,
-    /// Through-glass (transmitted) window solar [W] only:
+    /// Through-glass (transmitted) window solar (W) only:
     /// `area × transmittance × POA` per window, before the interior
     /// distribution's leave-back-out share. This is OCHRE's
     /// "Window Transmitted Solar Gain (W)" definition (Envelope.py:1160:

@@ -170,7 +170,7 @@ pub enum ControlSignal {
         fraction: f64,
     },
     /// The thermal solver's non-HVAC share of a zone's sensible input column
-    /// [W], dispatched each step to the zone's thermostat equipment. The
+    /// (W), dispatched each step to the zone's thermostat equipment. The
     /// cycling path's band-position duty estimate reads the zone's net
     /// response, which already carries the non-HVAC gains' effect, and the
     /// gains also enter the zone through their own ports; netting the share
