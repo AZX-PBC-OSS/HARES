@@ -124,10 +124,12 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
         // gains heating from the dispatch's setpoint landing: the old
         // state-dependent offset under-delivered).
         ("900", AnnualHeatingLoadKwh) => 1105.795088,
-        // 600FF: peak 73.73 vs band 64.9–69.5 (min in band: strict).
-        // Re-measured: +0.76 K peak (more floor-retained beam
-        // solar at the freefloat peak step).
-        ("600FF", PeakZoneTempC) => 73.726140,
+        // 600FF: peak 73.21 vs band 64.9–69.5 (min in band: strict).
+        // Re-measured: the through-glass diffuse flux (the window
+        // transmitted solar column reports what leaves back out through
+        // the glazing) moved the freefloat peak −0.52 K from 73.73; the
+        // movement predates this branch and re-captures here.
+        ("600FF", PeakZoneTempC) => 73.210144,
         // 900FF: peak 45.96 vs 41.6–44.8; min 3.18 vs −6.4…−1.6.
         // Re-measured after the diffuse window loss: the peak
         // −0.65 K, the min −0.26 K (less diffuse solar through the day).
