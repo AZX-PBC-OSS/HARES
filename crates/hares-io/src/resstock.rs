@@ -54,8 +54,11 @@ pub enum ResStockError {
     },
     #[error("null value in required column `{column}` at row {row}")]
     NullRequired { column: String, row: usize },
-    #[error("missing required characteristic: {0}")]
-    MissingCharacteristic(String),
+    #[error("building {bldg_id}: missing required characteristic `{characteristic}`")]
+    MissingCharacteristic {
+        bldg_id: i64,
+        characteristic: String,
+    },
     #[error("invalid sample_weight {value} for building {bldg_id}")]
     InvalidSampleWeight { bldg_id: i64, value: f64 },
     #[error(
@@ -350,7 +353,10 @@ pub fn parse_resstock_metadata(
             }
 
             if !characteristics.contains_key("in.state") {
-                return Err(ResStockError::MissingCharacteristic("in.state".to_string()));
+                return Err(ResStockError::MissingCharacteristic {
+                    bldg_id,
+                    characteristic: "in.state".to_string(),
+                });
             }
 
             let building_dir = extracted_building_dir(buildings_dir, bldg_id);
@@ -799,7 +805,13 @@ mod tests {
         let err = parse_resstock_metadata(&pq, ResStockVersion::V2025_1, tmp.path())
             .expect_err("no in.state column");
         match err {
-            ResStockError::MissingCharacteristic(col) => assert_eq!(col, "in.state"),
+            ResStockError::MissingCharacteristic {
+                bldg_id,
+                characteristic,
+            } => {
+                assert_eq!(bldg_id, 12_345);
+                assert_eq!(characteristic, "in.state");
+            }
             other => panic!("expected MissingCharacteristic for in.state, got {other}"),
         }
     }
@@ -968,8 +980,12 @@ mod tests {
 
         let err = parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).unwrap_err();
         match err {
-            ResStockError::MissingCharacteristic(col) => {
-                assert_eq!(col, "in.state");
+            ResStockError::MissingCharacteristic {
+                bldg_id,
+                characteristic,
+            } => {
+                assert_eq!(bldg_id, 1);
+                assert_eq!(characteristic, "in.state");
             }
             other => panic!("expected MissingCharacteristic for in.state, got {other}"),
         }

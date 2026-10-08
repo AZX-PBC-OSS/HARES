@@ -154,7 +154,9 @@ impl Fleet {
     /// parse, so a filtered fleet still requires every metadata building
     /// to be unpacked. Each building's weather
     /// file is resolved from the FIPS code in its own HPXML
-    /// (`WeatherStation/Name`) against `weather_dir`.
+    /// (`WeatherStation/Name`) against `weather_dir`. Unresolved weather
+    /// only warns and leaves the dwelling an empty weather path for now;
+    /// a later row tightens this to a construction error.
     ///
     /// `resstock_version` defaults to the latest known schema when `None`.
     /// `duration` overrides the default 24-hour simulation duration;

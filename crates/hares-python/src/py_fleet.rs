@@ -124,6 +124,8 @@ impl PyFleet {
     /// directory or files are missing is an error naming the building and
     /// the fix. Each building's weather file is resolved from the FIPS code
     /// in its own HPXML (``WeatherStation/Name``) against ``weather_dir``.
+    /// Unresolved weather only warns and leaves the dwelling an empty
+    /// weather path for now; a later row tightens this to an error.
     #[classmethod]
     #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, duration_s=None, defaults_path=None))]
     #[allow(clippy::too_many_arguments)]

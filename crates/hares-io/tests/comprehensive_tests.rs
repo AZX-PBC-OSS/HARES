@@ -822,9 +822,13 @@ fn missing_in_state_returns_error_not_default() {
 
     let err = parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).unwrap_err();
     match err {
-        ResStockError::MissingCharacteristic(col) => {
+        ResStockError::MissingCharacteristic {
+            bldg_id,
+            characteristic,
+        } => {
+            assert_eq!(bldg_id, 1);
             assert_eq!(
-                col, "in.state",
+                characteristic, "in.state",
                 "error must indicate the missing characteristic is 'in.state'"
             );
         }

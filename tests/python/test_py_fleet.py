@@ -304,7 +304,8 @@ def test_from_resstock_hpxml_dir_keyword_is_removed(tmp_path: Path) -> None:
     _write_extracted_building(tmp_path, 12345)
 
     # The static surface no longer carries the removed keyword, so the call
-    # goes through getattr on purpose.
+    # goes through getattr on purpose. The replacement name is asserted once
+    # the removed-keyword machinery lands.
     legacy_from_resstock = getattr(PyFleet, "from_resstock")
     with pytest.raises(TypeError, match="hpxml_dir"):
         legacy_from_resstock(
