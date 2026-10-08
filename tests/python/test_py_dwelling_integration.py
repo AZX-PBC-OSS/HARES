@@ -305,6 +305,7 @@ class TestControlInjection:
             ControlSignal.load_fraction(0.75),
             ControlSignal.mode_override(OperatingMode.Heating),
             ControlSignal.mode_override_str("Cooling"),
+            ControlSignal.mode_override_release(),
             ControlSignal.demand_response(DRLevel.High),
             ControlSignal.demand_response_str("Normal"),
             ControlSignal.soc_target(target=0.8, min=0.2, max=1.0),

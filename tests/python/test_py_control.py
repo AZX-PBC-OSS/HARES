@@ -235,6 +235,13 @@ class TestControlSignalConstructors:
         assert ControlSignal.thermal_setpoint_release().to_dict() == d
         assert "ThermalSetpoint" in repr(Signal.thermal_setpoint_release())
 
+    def test_mode_override_release_form_carries_nothing(self):
+        d = ControlSignal.mode_override_release().to_dict()
+        assert d == {"type": "ModeOverrideRelease"}
+        assert ControlSignal.from_dict(d).to_dict() == d
+        assert "ModeOverrideRelease" in repr(ControlSignal.mode_override_release())
+        assert "ModeOverrideRelease" in repr(Signal.mode_override_release())
+
     def test_thermal_setpoint_delta(self):
         sig = ControlSignal.thermal_setpoint_delta(
             heating_delta_c=1.0, cooling_delta_c=-0.5
@@ -475,7 +482,7 @@ class TestControlSignalFromDict:
         sig = ControlSignal.from_dict(d)
         assert sig.to_dict()["heating_setpoint_c"] == 20.0
 
-    def test_from_dict_all_25_variants(self):
+    def test_from_dict_all_26_variants(self):
         variants = [
             {"type": "PowerSetpoint", "active_power_kw": 1.0},
             {"type": "ThermalSetpoint", "heating_setpoint_c": 20.0},
@@ -492,6 +499,7 @@ class TestControlSignalFromDict:
             {"type": "SOCTarget", "target_soc": 0.8},
             {"type": "LoadFraction", "fraction": 0.75},
             {"type": "ModeOverride", "mode": "Heating"},
+            {"type": "ModeOverrideRelease"},
             {"type": "DemandResponse", "level": "High"},
             {"type": "ProtocolNative", "protocol": 42, "payload": b"\x01"},
             {"type": "IdealCapacity", "capacity_w": 5000.0},
@@ -503,7 +511,7 @@ class TestControlSignalFromDict:
             {"type": "EventDelay", "delay_s": 300.0},
             {"type": "MaxCapacityFraction", "fraction": 0.5},
         ]
-        assert len(variants) == 25
+        assert len(variants) == 26
         for v in variants:
             sig = ControlSignal.from_dict(v)
             assert sig.to_dict()["type"] == v["type"]
@@ -696,6 +704,12 @@ class TestControlSignalRoundTrip:
         round_trip = ControlSignal.from_dict(d)
         assert round_trip.to_dict() == d
 
+    def test_mode_override_release_round_trip(self):
+        original = ControlSignal.mode_override_release()
+        d = original.to_dict()
+        round_trip = ControlSignal.from_dict(d)
+        assert round_trip.to_dict() == d
+
     def test_demand_response_round_trip(self):
         original = ControlSignal.demand_response(DRLevel.High, 3600.0)
         d = original.to_dict()
@@ -793,6 +807,7 @@ class TestControlSignalRepr:
             (lambda: ControlSignal.ideal_capacity(5000.0), "IdealCapacity"),
             (lambda: ControlSignal.load_fraction(0.5), "LoadFraction"),
             (lambda: ControlSignal.mode_override(OperatingMode.Off), "ModeOverride"),
+            (lambda: ControlSignal.mode_override_release(), "ModeOverrideRelease"),
             (lambda: ControlSignal.demand_response(DRLevel.Normal), "DemandResponse"),
             (lambda: ControlSignal.soc_target(0.8), "SOCTarget"),
             (lambda: ControlSignal.humidity_setpoint(50.0), "HumiditySetpoint"),

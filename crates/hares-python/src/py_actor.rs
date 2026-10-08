@@ -249,6 +249,8 @@ pub enum PySignal {
     ModeOverride {
         mode: PyMode,
     },
+    // pyo3 0.29 complex enums: a fieldless variant must be an empty tuple.
+    ModeOverrideRelease(),
     LoadFraction {
         fraction: f64,
     },
@@ -412,6 +414,7 @@ impl PySignal {
             PySignal::ModeOverride { mode } => ControlSignal::ModeOverride {
                 mode: mode.into_operating_mode(),
             },
+            PySignal::ModeOverrideRelease() => ControlSignal::ModeOverrideRelease,
             PySignal::LoadFraction { fraction } => ControlSignal::LoadFraction { fraction },
             PySignal::PowerLimit { max_kw } => ControlSignal::PowerLimit {
                 max_power_kw: max_kw,
@@ -1065,6 +1068,12 @@ impl PySignal {
     #[staticmethod]
     fn mode_override(mode: PyMode) -> Self {
         PySignal::ModeOverride { mode }
+    }
+
+    /// The release form of `mode_override`: clears a stored mode override.
+    #[staticmethod]
+    fn mode_override_release() -> Self {
+        PySignal::ModeOverrideRelease()
     }
 
     #[staticmethod]

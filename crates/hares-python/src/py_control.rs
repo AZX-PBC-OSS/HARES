@@ -155,6 +155,15 @@ impl PyControlSignal {
         })
     }
 
+    /// The release form of `mode_override`: clears a stored mode override,
+    /// returning the unit to its own control.
+    #[staticmethod]
+    pub fn mode_override_release() -> Self {
+        Self {
+            signal: ControlSignal::ModeOverrideRelease,
+        }
+    }
+
     #[staticmethod]
     #[pyo3(signature = (level, duration_s=None))]
     pub fn demand_response(level: PyDRLevel, duration_s: Option<f64>) -> PyResult<Self> {
@@ -432,6 +441,7 @@ impl PyControlSignal {
             "ModeOverride" => ControlSignal::ModeOverride {
                 mode: parse_mode_or_enum(d, "mode")?,
             },
+            "ModeOverrideRelease" => ControlSignal::ModeOverrideRelease,
             "PowerSetpoint" => {
                 // Signed per the core contract (negative = discharge);
                 // finiteness only, same as the typed constructor.
@@ -750,6 +760,9 @@ impl PyControlSignal {
                     OperatingMode::On => "On",
                 };
                 dict.set_item("mode", m_str)?;
+            }
+            ControlSignal::ModeOverrideRelease => {
+                dict.set_item("type", "ModeOverrideRelease")?;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
                 dict.set_item("type", "DemandResponse")?;

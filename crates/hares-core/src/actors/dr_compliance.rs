@@ -406,6 +406,11 @@ pub struct DrCompliance {
     /// Used to dispatch clear/reset signals when the DR event ends
     /// (current_dr_level transitions to Normal).
     last_dispatched: Vec<(DispatchTarget, DrAction)>,
+    /// Targets whose thermostat the freeze guard forced to a minimum-heating
+    /// setpoint. That setpoint is sticky state like any other: the event's
+    /// end hands the thermostat back with the release form, whether or not
+    /// the guard still fires then. Part of the checkpoint.
+    freeze_guard_setpoints: Vec<DispatchTarget>,
     /// The pre-conditioning axis of `hvac_target` and of each load target,
     /// resolved against the dwelling's equipment on every identity refresh.
     hvac_target_axis: AxisResolution,
@@ -460,6 +465,7 @@ impl DrCompliance {
             freeze_risk_threshold_c: DEFAULT_FREEZE_THRESHOLD_C,
             telemetry,
             last_dispatched: Vec::new(),
+            freeze_guard_setpoints: Vec::new(),
             hvac_target_axis: Ok(None),
             load_target_axes: Vec::new(),
             displaced_axes: Vec::new(),
@@ -743,7 +749,7 @@ impl DrCompliance {
     }
 
     /// Dispatches clear/reset signals for all previously-dispatched targets
-    /// and clears the tracking vector. Returns the number of clear signals
+    /// and clears the tracking vectors. Returns the number of clear signals
     /// dispatched.
     fn dispatch_clear_signals(&mut self, out: &mut Vec<DispatchRequest>) -> usize {
         let before = out.len();
@@ -783,6 +789,16 @@ impl DrCompliance {
             }
         }
         self.last_dispatched.clear();
+        // The freeze guard's minimum-heating setpoint is sticky state too:
+        // hand the thermostat back to its schedule when the event ends,
+        // whatever became of the turn-off it downgraded.
+        for target in self.freeze_guard_setpoints.drain(..) {
+            out.push(DispatchRequest {
+                target,
+                signal: ControlSignal::thermal_release(),
+                priority: PriorityTier::Grid,
+            });
+        }
         out.len().saturating_sub(before)
     }
 
@@ -791,10 +807,19 @@ impl DrCompliance {
         if !action.is_sticky() {
             return;
         }
-        // Use conflicts_with for dedup: same-target new entry replaces old.
-        self.last_dispatched
-            .retain(|(t, _)| !t.conflicts_with(target));
+        // Dedup by target equality: same-target new entry replaces old. A
+        // ByEndUse target is the same target as itself across steps, which
+        // `conflicts_with` (ByName pairs only) would miss.
+        self.last_dispatched.retain(|(t, _)| t != target);
         self.last_dispatched.push((target.clone(), action.clone()));
+    }
+
+    /// Records that the freeze guard forced this target's heating setpoint,
+    /// so the event's end hands the thermostat back. Deduplicated by target
+    /// equality: the guard fires every step the zone stays cold.
+    fn track_freeze_guard_setpoint(&mut self, target: &DispatchTarget) {
+        self.freeze_guard_setpoints.retain(|t| t != target);
+        self.freeze_guard_setpoints.push(target.clone());
     }
 }
 
@@ -841,11 +866,12 @@ impl Actor for DrCompliance {
                 "DR actor '{}' last_dispatched contains non-sticky entries",
                 self.name,
             );
-            let clear_count = if !self.last_dispatched.is_empty() {
-                self.dispatch_clear_signals(out)
-            } else {
-                0
-            };
+            let clear_count =
+                if !self.last_dispatched.is_empty() || !self.freeze_guard_setpoints.is_empty() {
+                    self.dispatch_clear_signals(out)
+                } else {
+                    0
+                };
             self.displaced_axes.clear();
             self.warned_unserved = false;
             self.telemetry.set("dr_complied", 0.0);
@@ -896,8 +922,12 @@ impl Actor for DrCompliance {
             return;
         }
 
-        // Clear previous tracking before recording this step's dispatches.
-        self.last_dispatched.clear();
+        // Tracking is cumulative within the event: `track_dispatched`
+        // replaces the entry of a target it re-dispatches, and a target this
+        // step could not dispatch (protected state, freeze-guard downgrade)
+        // keeps the entry for the state its earlier dispatch installed, so
+        // the event's end releases every unit the event reached. The
+        // event's end clears the tracking (`dispatch_clear_signals`).
 
         // Reset freeze-guard telemetry at the top of the complied path so the
         // field reflects the current step's guard status regardless of
@@ -932,6 +962,7 @@ impl Actor for DrCompliance {
                     },
                     priority: PriorityTier::Grid,
                 });
+                self.track_freeze_guard_setpoint(target);
 
                 self.telemetry.set("dr_freeze_guard", 1.0);
 
@@ -993,6 +1024,7 @@ impl Actor for DrCompliance {
                     },
                     priority: PriorityTier::Grid,
                 });
+                self.track_freeze_guard_setpoint(target);
                 self.telemetry.set("dr_freeze_guard", 1.0);
 
                 tracing::warn!(
@@ -1078,10 +1110,12 @@ impl Actor for DrCompliance {
         }
     }
 
-    /// v2: the snapshot carries the axis each target's pre-conditioning has
+    /// v3: the snapshot also carries the targets whose thermostat the
+    /// freeze guard forced, so the event's end releases them after a
+    /// checkpoint. v2 carried the axis each target's pre-conditioning has
     /// displaced.
     fn checkpoint_version(&self) -> u32 {
-        2
+        3
     }
 
     fn save_state(&self) -> Result<Vec<u8>, HaresError> {
@@ -1089,6 +1123,7 @@ impl Actor for DrCompliance {
             &self.current_dr_level,
             &self.last_dispatched,
             &self.displaced_axes,
+            &self.freeze_guard_setpoints,
         );
         postcard::to_allocvec(&data)
             .map_err(|e| HaresError::Io(format!("DrCompliance save_state: {e}")))
@@ -1102,12 +1137,14 @@ impl Actor for DrCompliance {
             DRLevel,
             Vec<(DispatchTarget, DrAction)>,
             Vec<(DispatchTarget, ThermostatAxis)>,
+            Vec<DispatchTarget>,
         );
-        let (level, dispatched, displaced): State = postcard::from_bytes(data)
+        let (level, dispatched, displaced, freeze_guarded): State = postcard::from_bytes(data)
             .map_err(|e| HaresError::Io(format!("DrCompliance load_state: {e}")))?;
         self.current_dr_level = level;
         self.last_dispatched = dispatched;
         self.displaced_axes = displaced;
+        self.freeze_guard_setpoints = freeze_guarded;
         Ok(())
     }
 }
@@ -1859,17 +1896,25 @@ mod tests {
         }
     }
 
-    /// The snapshot gained the displaced axes, so a blob of the first
-    /// layout does not decode and the schema version has moved past it:
-    /// the dwelling refuses such a blob by version before decoding it.
+    /// The snapshot gained the displaced axes in v2 and the freeze guard's
+    /// forced setpoints in v3, so a blob of an earlier layout does not
+    /// decode and the schema version has moved past both: the dwelling
+    /// refuses such a blob by version before decoding it.
     #[test]
     fn the_snapshot_schema_version_moved_with_the_displaced_axes() {
         let first_layout =
             postcard::to_allocvec(&(DRLevel::High, Vec::<(DispatchTarget, DrAction)>::new()))
                 .unwrap();
+        let second_layout = postcard::to_allocvec(&(
+            DRLevel::High,
+            Vec::<(DispatchTarget, DrAction)>::new(),
+            Vec::<(DispatchTarget, ThermostatAxis)>::new(),
+        ))
+        .unwrap();
         let mut actor = DrCompliance::new("Test");
         assert!(actor.load_state(&first_layout).is_err());
-        assert_eq!(actor.checkpoint_version(), 2);
+        assert!(actor.load_state(&second_layout).is_err());
+        assert_eq!(actor.checkpoint_version(), 3);
     }
 
     /// Relaxation widens the gap on both axes, which is valid for any unit.
@@ -2535,6 +2580,276 @@ mod tests {
         assert!(cleared.contains(&&DispatchTarget::ByName("HRV".into())));
     }
 
+    /// A turn-off accepted in an earlier step keeps its event-end release
+    /// even when later steps reject the re-dispatch (defrost): the forced
+    /// mode the first dispatch installed is still in the equipment, so the
+    /// release must reach every unit the turn-off reached, regardless of
+    /// later rejections.
+    #[test]
+    fn turnoff_release_reaches_a_target_rejected_mid_event() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_action(DrAction::off());
+
+        // Step 1: dispatched and accepted; the forced mode is installed.
+        actor.set_dr_level(DRLevel::Critical);
+        let env_clear = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env_clear, &mut requests);
+        assert_eq!(requests.len(), 1);
+
+        // Step 2: the unit entered defrost; the re-dispatch is rejected, but
+        // the installed mode persists, so it must stay tracked.
+        let mut telem = Telemetry::with_capacity(2);
+        telem.insert(tk::DEFROST_ACTIVE, 1.0);
+        let env_defrost = test_env().with_equipment_telemetry("HVAC", telem).build();
+        let mut requests = Vec::new();
+        actor.decide(&env_defrost, &mut requests);
+        assert!(requests.is_empty(), "defrost blocks the re-dispatch");
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(1.0));
+
+        // Step 3: the event ends; the release reaches the unit anyway.
+        actor.set_dr_level(DRLevel::Normal);
+        let mut requests = Vec::new();
+        actor.decide(&env_clear, &mut requests);
+        assert_eq!(
+            requests.len(),
+            1,
+            "the event's end must release the mode a rejected target still holds"
+        );
+        assert_eq!(requests[0].target, DispatchTarget::ByName("HVAC".into()));
+        assert_eq!(requests[0].signal, ControlSignal::mode_release());
+    }
+
+    /// The same tracking discipline for the water-heater freeze threshold: a
+    /// turn-off accepted in an earlier step is released even when the tank
+    /// later falls below the freeze threshold and every re-dispatch is
+    /// rejected.
+    #[test]
+    fn turnoff_release_reaches_a_wh_freeze_blocked_target() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(DispatchTarget::ByName("HPWH".into()), DrAction::off());
+
+        // Step 1: the tank is warm; the turn-off is dispatched and accepted.
+        let mut telem_warm = Telemetry::with_capacity(2);
+        telem_warm.insert(tk::TANK_AVG_TEMP_C, 45.0);
+        actor.set_dr_level(DRLevel::Critical);
+        let env_warm = test_env()
+            .with_equipment_telemetry("HPWH", telem_warm)
+            .build();
+        let mut requests = Vec::new();
+        actor.decide(&env_warm, &mut requests);
+        assert_eq!(requests.len(), 1);
+
+        // Step 2: the tank fell below the freeze threshold; the re-dispatch
+        // is rejected, but the installed mode persists.
+        let mut telem_cold = Telemetry::with_capacity(2);
+        telem_cold.insert(tk::TANK_AVG_TEMP_C, 3.0);
+        let env_cold = test_env()
+            .with_equipment_telemetry("HPWH", telem_cold)
+            .build();
+        let mut requests = Vec::new();
+        actor.decide(&env_cold, &mut requests);
+        assert!(requests.is_empty(), "the WH freeze threshold blocks it");
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(1.0));
+
+        // Step 3: the event ends; the release reaches the unit anyway.
+        actor.set_dr_level(DRLevel::Normal);
+        let mut requests = Vec::new();
+        actor.decide(&env_cold, &mut requests);
+        assert_eq!(
+            requests.len(),
+            1,
+            "the event's end must release the mode a rejected target still holds"
+        );
+        assert_eq!(requests[0].target, DispatchTarget::ByName("HPWH".into()));
+        assert_eq!(requests[0].signal, ControlSignal::mode_release());
+    }
+
+    /// A target rejected from the event's first step was never reached: no
+    /// state was installed, so no release is dispatched for it.
+    #[test]
+    fn no_release_for_a_target_never_dispatched() {
+        let mut telem = Telemetry::with_capacity(2);
+        telem.insert(tk::DEFROST_ACTIVE, 1.0);
+
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_action(DrAction::off());
+
+        actor.set_dr_level(DRLevel::Critical);
+        let env = test_env().with_equipment_telemetry("HVAC", telem).build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert!(requests.is_empty());
+
+        actor.set_dr_level(DRLevel::Normal);
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert!(
+            requests.is_empty(),
+            "a target the event never reached must not receive a release"
+        );
+    }
+
+    /// The freeze guard's downgraded heating setpoint is sticky state too:
+    /// the event's end hands the thermostat back with the release form.
+    #[test]
+    fn freeze_guard_downgrade_setpoint_is_released_when_the_event_ends() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_action(DrAction::off());
+
+        // Step 1: cold zone; the guard downgrades the turn-off to a
+        // minimum-heating setpoint.
+        actor.set_dr_level(DRLevel::Critical);
+        let env_cold = test_env().zone_temp(3.0).build();
+        let mut requests = Vec::new();
+        actor.decide(&env_cold, &mut requests);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0].signal,
+            ControlSignal::ThermalSetpoint { .. }
+        ));
+
+        // Step 2: the event ends; the forced setpoint is released.
+        actor.set_dr_level(DRLevel::Normal);
+        let mut requests = Vec::new();
+        actor.decide(&env_cold, &mut requests);
+        assert_eq!(
+            requests.len(),
+            1,
+            "the downgraded setpoint needs its release at the event's end"
+        );
+        assert_eq!(requests[0].target, DispatchTarget::ByName("HVAC".into()));
+        assert_eq!(requests[0].signal, ControlSignal::thermal_release());
+
+        // Step 3: consecutive Normal — the release is not re-dispatched.
+        let mut requests = Vec::new();
+        actor.decide(&env_cold, &mut requests);
+        assert!(requests.is_empty(), "released once");
+    }
+
+    /// A target first downgraded by the freeze guard, then dispatched when
+    /// the zone warms, holds both a forced setpoint and a forced mode at the
+    /// event's end; both releases reach it.
+    #[test]
+    fn both_releases_reach_a_target_downgraded_then_dispatched() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_action(DrAction::off());
+
+        // Step 1: cold zone; the guard installs a minimum-heating setpoint.
+        actor.set_dr_level(DRLevel::Critical);
+        let env_cold = test_env().zone_temp(3.0).build();
+        let mut requests = Vec::new();
+        actor.decide(&env_cold, &mut requests);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0].signal,
+            ControlSignal::ThermalSetpoint { .. }
+        ));
+
+        // Step 2: the zone warms; the turn-off is dispatched. The setpoint
+        // the guard installed earlier is still in the thermostat.
+        let env_warm = test_env().zone_temp(22.0).build();
+        let mut requests = Vec::new();
+        actor.decide(&env_warm, &mut requests);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0].signal,
+            ControlSignal::ModeOverride {
+                mode: OperatingMode::Off
+            }
+        ));
+
+        // Step 3: the event ends; both the mode and the setpoint are released.
+        actor.set_dr_level(DRLevel::Normal);
+        let mut requests = Vec::new();
+        actor.decide(&env_warm, &mut requests);
+        assert_eq!(
+            requests.len(),
+            2,
+            "the event's end must release both the forced mode and the forced setpoint"
+        );
+        let releases = requests
+            .iter()
+            .filter(|r| r.signal == ControlSignal::mode_release())
+            .count();
+        assert_eq!(releases, 1, "one mode release for the turn-off");
+        let thermal_releases = requests
+            .iter()
+            .filter(|r| r.signal == ControlSignal::thermal_release())
+            .count();
+        assert_eq!(thermal_releases, 1, "one thermal release for the downgrade");
+    }
+
+    /// An end-use target dispatched every step of a multi-step event holds
+    /// one forced mode, not one per step: the event's end releases it once.
+    #[test]
+    fn an_end_use_target_is_released_once_after_a_multi_step_event() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByEndUse(EndUse::HVAC_HEATING),
+                DrAction::off(),
+            );
+
+        actor.set_dr_level(DRLevel::Critical);
+        let env = test_env().build();
+        for _ in 0..3 {
+            let mut requests = Vec::new();
+            actor.decide(&env, &mut requests);
+            assert_eq!(requests.len(), 1);
+        }
+
+        actor.set_dr_level(DRLevel::Normal);
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(
+            requests.len(),
+            1,
+            "re-dispatching the same end-use target must not duplicate its release"
+        );
+        assert_eq!(requests[0].signal, ControlSignal::mode_release());
+    }
+
+    /// The freeze guard's downgraded setpoint on an end-use target is
+    /// likewise one sticky state, however many steps the guard fires: one
+    /// release at the event's end.
+    #[test]
+    fn an_end_use_downgrade_is_released_once_after_a_multi_step_event() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByEndUse(EndUse::HVAC_HEATING),
+                DrAction::off(),
+            );
+
+        actor.set_dr_level(DRLevel::Critical);
+        let env_cold = test_env().zone_temp(3.0).build();
+        for _ in 0..3 {
+            let mut requests = Vec::new();
+            actor.decide(&env_cold, &mut requests);
+            assert_eq!(requests.len(), 1);
+        }
+
+        actor.set_dr_level(DRLevel::Normal);
+        let mut requests = Vec::new();
+        actor.decide(&env_cold, &mut requests);
+        assert_eq!(
+            requests.len(),
+            1,
+            "the guard firing every step must not duplicate the setpoint's release"
+        );
+        assert_eq!(requests[0].signal, ControlSignal::thermal_release());
+    }
+
     #[test]
     fn no_clear_signals_on_consecutive_normal_calls() {
         let mut actor = DrCompliance::new("Test")
@@ -3192,6 +3507,9 @@ mod tests {
             DispatchTarget::ByName("HVAC".into()),
             DrAction::PowerLimit { max_kw: 3.0 },
         ));
+        actor
+            .freeze_guard_setpoints
+            .push(DispatchTarget::ByName("HVAC".into()));
 
         let blob = actor.save_state().expect("save_state should succeed");
         assert!(
@@ -3209,6 +3527,11 @@ mod tests {
         assert_eq!(
             restored.last_dispatched[0].1,
             DrAction::PowerLimit { max_kw: 3.0 }
+        );
+        assert_eq!(
+            restored.freeze_guard_setpoints,
+            vec![DispatchTarget::ByName("HVAC".into())],
+            "the freeze guard's forced setpoints are part of the checkpoint"
         );
     }
 }

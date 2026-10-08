@@ -165,6 +165,7 @@ class TestControlSignalInterface:
             "load_fraction",
             "mode_override",
             "mode_override_str",
+            "mode_override_release",
             "demand_response",
             "demand_response_str",
             "inverter_priority_mode",
