@@ -1,9 +1,9 @@
-//! The defaults-store policy: a defaults load failure :  a
-//! missing directory, an unreadable file, malformed data :  is an error
-//! naming the path. No dwelling reaches construction through a degraded,
-//! empty store: the equipment's resolved defaults (ZIP sidecars, HVAC
-//! curves, the envelope LUT) would silently fall to class tables and the
-//! run would report success on different numbers.
+//! The defaults-store policy: a defaults load failure (a missing
+//! directory, an unreadable file, malformed data) is an error naming the
+//! path. No dwelling reaches construction through a degraded, empty
+//! store: the equipment's resolved defaults (ZIP sidecars, HVAC curves,
+//! the envelope LUT) would silently fall to class tables and the run
+//! would report success on different numbers.
 
 use std::path::PathBuf;
 
@@ -49,20 +49,29 @@ fn config_with_defaults(defaults: PathBuf) -> DwellingConfig {
     }
 }
 
+/// The blueprint's construction failure on a defaults load failure: the
+/// message names the load failure, and every pin below asserts the path
+/// naming on top of it.
+fn blueprint_defaults_error(config: DwellingConfig) -> String {
+    match DwellingBlueprint::from_config(config) {
+        Err(err) => {
+            let message = err.to_string();
+            assert!(
+                message.contains("defaults load failed"),
+                "the error must name the defaults load failure, got: {message}"
+            );
+            message
+        }
+        Ok(_) => panic!("a defaults load failure must fail the blueprint"),
+    }
+}
+
 /// A defaults path that does not exist fails the blueprint naming the path.
 /// The pre-fix code warned and continued on an empty store.
 #[test]
 fn a_missing_defaults_path_is_an_error_naming_the_path() {
     let missing = project_root().join("tests/scratch/no-such-defaults-dir");
-    let err = match DwellingBlueprint::from_config(config_with_defaults(missing.clone())) {
-        Err(err) => err,
-        Ok(_) => panic!("a missing defaults path must fail the blueprint"),
-    };
-    let message = err.to_string();
-    assert!(
-        message.contains("defaults load failed"),
-        "the error must name the defaults load failure, got: {message}"
-    );
+    let message = blueprint_defaults_error(config_with_defaults(missing));
     assert!(
         message.contains("no-such-defaults-dir"),
         "the error must name the path, got: {message}"
@@ -74,15 +83,42 @@ fn a_missing_defaults_path_is_an_error_naming_the_path() {
 #[test]
 fn a_defaults_directory_without_its_mandatory_files_is_an_error() {
     let empty = tempfile::tempdir().expect("create temp dir");
-    let err = match DwellingBlueprint::from_config(config_with_defaults(empty.path().to_path_buf()))
-    {
-        Err(err) => err,
-        Ok(_) => panic!("an empty defaults directory must fail the blueprint"),
-    };
-    let message = err.to_string();
+    let message = blueprint_defaults_error(config_with_defaults(empty.path().to_path_buf()));
     assert!(
-        message.contains("defaults load failed"),
-        "the error must name the defaults load failure, got: {message}"
+        message.contains("zip_parameters.toml"),
+        "the error must name the first mandatory file it missed, got: {message}"
+    );
+}
+
+/// A defaults file that cannot parse fails the same way: malformed data
+/// never degrades the dwelling to class tables behind a warning.
+#[test]
+fn a_malformed_defaults_file_is_an_error_naming_the_file() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    std::fs::write(
+        dir.path().join("zip_parameters.toml"),
+        "this is { not valid toml",
+    )
+    .expect("write malformed defaults");
+    let message = blueprint_defaults_error(config_with_defaults(dir.path().to_path_buf()));
+    assert!(
+        message.contains("zip_parameters.toml"),
+        "the error must name the malformed file, got: {message}"
+    );
+}
+
+/// A defaults path that names a regular file is not a readable defaults
+/// directory: the load fails naming the path instead of running on an
+/// empty store.
+#[test]
+fn a_defaults_path_that_names_a_regular_file_is_an_error() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let file = dir.path().join("not-a-directory");
+    std::fs::write(&file, "not a defaults directory").expect("write regular file");
+    let message = blueprint_defaults_error(config_with_defaults(file));
+    assert!(
+        message.contains("not-a-directory"),
+        "the error must name the path, got: {message}"
     );
 }
 
