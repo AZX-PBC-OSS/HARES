@@ -14,13 +14,6 @@ use hares_io::{OutputFormat, SimulationConfig};
 use hares_types::HaresError;
 use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
 
-/// Result of computing metrics from Arrow batches, including status context.
-struct MetricsOutcome {
-    metrics: SimulationMetrics,
-    /// If set, indicates that metrics computation degraded (e.g., calculator init failed).
-    warning: Option<String>,
-}
-
 #[cfg(feature = "profiling")]
 use crate::dwelling::DwellingProfilingSummary;
 use crate::dwelling::{Dwelling, DwellingConfig};
@@ -428,7 +421,7 @@ fn resolved_output_path(config: &DwellingConfig) -> Option<PathBuf> {
 fn compute_metrics_from_batches(
     batches: &[RecordBatch],
     sim_config: &SimulationConfig,
-) -> Result<MetricsOutcome, HaresError> {
+) -> Result<SimulationMetrics, HaresError> {
     debug_assert!(
         !batches.is_empty(),
         "compute_metrics_from_batches called with empty batches"
@@ -437,17 +430,13 @@ fn compute_metrics_from_batches(
     let schema = batches[0].schema();
     let time_res_secs = sim_config.time_res_secs_u32();
 
-    let mut calculator = match MetricsCalculator::new(&schema, time_res_secs, sim_config) {
-        Ok(calc) => calc,
-        Err(err) => {
-            return Ok(MetricsOutcome {
-                metrics: empty_metrics(),
-                warning: Some(format!(
-                    "MetricsCalculator init failed: {err} -- metrics are zeroed"
-                )),
-            });
-        }
-    };
+    // A calculator that cannot initialize is a failed computation, not
+    // zeroed metrics: the run's numbers are either computed or the run
+    // reports the failure.
+    let mut calculator =
+        MetricsCalculator::new(&schema, time_res_secs, sim_config).map_err(|err| {
+            HaresError::InvalidState(format!("metrics calculator init failed: {err}"))
+        })?;
 
     for batch in batches {
         calculator
@@ -455,13 +444,10 @@ fn compute_metrics_from_batches(
             .map_err(|e| HaresError::InvalidState(e.to_string()))?;
     }
 
-    Ok(MetricsOutcome {
-        metrics: calculator
-            .finish()
-            .map_err(|e| HaresError::InvalidState(e.to_string()))?
-            .metrics,
-        warning: None,
-    })
+    calculator
+        .finish()
+        .map(|full| full.metrics)
+        .map_err(|e| HaresError::InvalidState(e.to_string()))
 }
 
 /// Metrics for a completed run: from retained batches when available,
@@ -481,11 +467,8 @@ fn finalize_run_metrics(
     warnings: &mut Vec<String>,
 ) -> Result<(SimulationMetrics, Option<&'static str>), HaresError> {
     if !batches.is_empty() {
-        let outcome = compute_metrics_from_batches(batches, sim_config)?;
-        if let Some(w) = &outcome.warning {
-            warnings.push(w.clone());
-        }
-        return Ok((outcome.metrics, None));
+        let metrics = compute_metrics_from_batches(batches, sim_config)?;
+        return Ok((metrics, None));
     }
 
     // Diagnose from what was actually recorded. A zero-row run must be
@@ -611,6 +594,58 @@ fn emit_profile_summary(profile: &RunProfile) {
 mod tests {
     use super::*;
     use std::panic::{self, AssertUnwindSafe};
+
+    #[test]
+    fn a_metrics_calculator_init_failure_fails_not_zeroes() {
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use chrono::TimeZone as _;
+
+        // A retained batch whose schema carries no total electric power
+        // column: the calculator cannot initialize. The metrics are a
+        // failed computation, not zeroed numbers with a warning.
+        let schema = Schema::new(vec![Field::new("Time", DataType::Utf8, false)]);
+        let batch = RecordBatch::try_new(
+            std::sync::Arc::new(schema),
+            vec![std::sync::Arc::new(StringArray::from(vec![
+                "2026-01-01T00:00:00+00:00",
+            ]))],
+        )
+        .expect("batch builds");
+        let sim_config = SimulationConfig {
+            start_time: chrono::FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            duration: chrono::Duration::hours(1),
+            time_res: chrono::Duration::hours(1),
+            output_verbosity: 0,
+            output_path: None,
+            write_output: false,
+            output_format: OutputFormat::Csv,
+            output_chunk_size: 16,
+            setpoint_deadband_c: None,
+            master_seed: 0,
+            civil_timezone: None,
+            site_location: hares_io::SiteLocationOverride::default(),
+            retain_batches: false,
+            rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        };
+        let err = match compute_metrics_from_batches(std::slice::from_ref(&batch), &sim_config) {
+            Err(err) => err,
+            Ok(_) => {
+                panic!("a calculator that cannot initialize must fail the metrics, not zero them")
+            }
+        };
+        assert!(
+            err.to_string()
+                .to_lowercase()
+                .contains("total electric power"),
+            "the error names the missing column: {err}"
+        );
+    }
 
     #[test]
     fn error_handler_double_panic_returns_fallback_simulation_results() {

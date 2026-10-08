@@ -90,7 +90,6 @@ enum OutputCachesPlan {
     /// roster, with a recorder created for it.
     FreshSchema {
         recorder: Box<StreamingRecorder>,
-        metrics_warning: Option<String>,
         output_column_index: HashMap<String, usize>,
         equipment_column_map: Vec<EquipmentColumns>,
         end_use_aggregate_indices: Vec<Option<usize>>,
@@ -1211,20 +1210,19 @@ impl Dwelling {
             self.output_rotation,
         )
         .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?;
-        // Streaming runs collect run metrics incrementally at flush time; a
-        // calculator that cannot initialize zeroes the metrics with a
-        // warning rather than rejecting the change.
-        let metrics_warning = if self.retain_batches {
-            None
-        } else {
+        // Streaming runs collect run metrics incrementally at flush time;
+        // a calculator that cannot initialize fails the plan (the run's
+        // numbers are either computed or the change is refused), it does
+        // not zero the metrics behind a warning.
+        if !self.retain_batches {
             recorder
                 .enable_metrics(self.sim_config.time_res_secs_u32(), &self.sim_config)
-                .err()
-                .map(|err| format!("MetricsCalculator init failed: {err} -- metrics are zeroed"))
-        };
+                .map_err(|err| {
+                    HaresError::InvalidState(format!("metrics calculator init failed: {err}"))
+                })?;
+        }
         Ok(OutputCachesPlan::FreshSchema {
             recorder: Box::new(recorder),
-            metrics_warning,
             output_column_index,
             equipment_column_map,
             end_use_aggregate_indices,
@@ -1326,7 +1324,6 @@ impl Dwelling {
             }
             OutputCachesPlan::FreshSchema {
                 recorder,
-                metrics_warning,
                 output_column_index,
                 equipment_column_map,
                 end_use_aggregate_indices,
@@ -1341,9 +1338,6 @@ impl Dwelling {
                 self.roster
                     .record_scratch
                     .resize(self.roster.output_value_count, 0.0);
-                if let Some(warning) = metrics_warning {
-                    self.push_warning(warning);
-                }
                 self.recorder = Some(*recorder);
                 #[cfg(feature = "observe")]
                 self.log_output_keys_without_columns();
