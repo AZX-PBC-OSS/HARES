@@ -288,6 +288,11 @@ fn bestest_extended_cases_are_tracked() {
             "missing extended BESTEST fixture: {}",
             case.fixture_path().display()
         );
+        // The extended fixtures declare their infiltration (a constant
+        // ACH): each builds under the strict rule that errors on a
+        // conditioned zone with no measurement and no constant rate.
+        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+            .unwrap_or_else(|err| panic!("extended case {} builds: {err}", case.id));
     }
 }
 
