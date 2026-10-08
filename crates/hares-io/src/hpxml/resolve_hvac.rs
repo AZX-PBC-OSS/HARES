@@ -3952,7 +3952,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             // Reserved for Phase 2 autosizing: will hold the building-level design
             // heating/cooling load once Manual J/S autosizing is implemented.
             // Currently always None — autosizing computes per-equipment capacity

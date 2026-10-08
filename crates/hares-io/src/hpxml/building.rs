@@ -921,8 +921,25 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 
     // The conditioned zone should exclude below-grade foundation area when a basement
     // is present. OCHRE: indoor_floor_area = conditioned_floor_area - first_floor_area * below_grade_floors.
-    // If foundation floor area is missing, fall back to the floor-count ratio split.
+    // When the HPXML declares no <Foundation><FloorArea>, the foundation's
+    // floor area is its slabs' area sum, as OS-HPXML v1.12.0 derives it
+    // (geometry.rb:1315-1324, calculate_zone_volume: a foundation zone's
+    // floor area is the area of the slabs adjacent to it; geometry.rb
+    // 750-771, apply_conditioned_floor_area: the conditioned floor area is
+    // the floors and slabs adjacent to conditioned space, so the
+    // foundation's own area is what leaves it). A home whose below-grade
+    // foundation has no slabs has no foundation zone at all (a space exists
+    // only where a surface names it, geometry.rb create_or_get_space), so
+    // the conditioned zone holds the full conditioned floor area.
     let total = conditioned_floor_area_m2;
+    let derived_foundation_floor_area_m2: f64 = boundaries
+        .iter()
+        .filter(|bd| {
+            bd.boundary_type == BoundaryType::Slab
+                && bd.interior_zone.as_ref() == Some(&ZoneType::Foundation)
+        })
+        .map(|bd| bd.area_m2)
+        .sum();
     let indoor_floor_area_m2 = match (total_conditioned_floors, foundation_floor_area_m2) {
         (Some(n_total), Some(foundation_area))
             if n_total > 0.0 && floors_above_grade >= 0.0 && floors_above_grade < n_total =>
@@ -931,9 +948,22 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             Some((total - foundation_area * below_grade_floors).max(0.0))
         }
         (Some(n_total), None)
-            if n_total > 0.0 && floors_above_grade >= 0.0 && floors_above_grade < n_total =>
+            if n_total > 0.0
+                && floors_above_grade >= 0.0
+                && floors_above_grade < n_total
+                && derived_foundation_floor_area_m2 > 0.0 =>
         {
-            Some(total * floors_above_grade / n_total)
+            let below_grade_floors = (n_total - floors_above_grade).max(0.0);
+            parse_warnings.push(Warning::new(
+                "hpxml",
+                format!(
+                    "the foundation declares no FloorArea; its floor area is its slabs' area \
+                     sum ({derived_foundation_floor_area_m2:.1} m2), as OS-HPXML v1.12.0 derives \
+                     it (geometry.rb:1315-1324, calculate_zone_volume; the conditioned floor \
+                     area's split, geometry.rb:750-771, apply_conditioned_floor_area)"
+                ),
+            ));
+            Some((total - derived_foundation_floor_area_m2 * below_grade_floors).max(0.0))
         }
         _ => Some(total),
     };
@@ -4587,6 +4617,73 @@ mod tests {
             "foundation volume: got {actual_volume_m3}, expected {expected_volume_m3}"
         );
         assert_eq!(foundation.height_m, Some(height_m));
+    }
+
+    #[test]
+    fn foundation_floor_area_is_derived_from_the_foundation_slabs() {
+        // The document declares no <Foundation><FloorArea>: the foundation's
+        // floor area is its slabs' area sum (OS-HPXML v1.12.0 geometry.rb
+        // 1315-1324, calculate_zone_volume; the conditioned floor area's
+        // split is the floors and slabs adjacent to conditioned space,
+        // geometry.rb 750-771, apply_conditioned_floor_area), not the
+        // floor-count ratio.
+        let xml = SAMPLE_XML
+            .replace(
+                "</BuildingConstruction>",
+                "<NumberofConditionedFloors>2</NumberofConditionedFloors>\n          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>\n        </BuildingConstruction>",
+            )
+            .replace(
+                "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+                "<Foundation>\n            <FoundationType><Basement><Conditioned>false</Conditioned></Basement></FoundationType>\n          </Foundation>",
+            )
+            .replace(
+                "<InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>",
+                "<InteriorAdjacentTo>basement - unconditioned</InteriorAdjacentTo>",
+            );
+
+        let building = parse_building(&xml).expect("parse should succeed");
+        let conditioned = building
+            .zones
+            .iter()
+            .find(|zone| matches!(zone.zone_type, ZoneType::Conditioned))
+            .expect("conditioned zone expected");
+        let foundation = building
+            .zones
+            .iter()
+            .find(|zone| matches!(zone.zone_type, ZoneType::Foundation))
+            .expect("foundation zone expected");
+
+        // The slab adjacent to the basement is 80 ft2: the split takes the
+        // foundation's slab area, not half the CFA (the floor-count ratio).
+        let conditioned_area_m2 = conditioned
+            .floor_area_m2
+            .expect("conditioned area expected");
+        let expected_conditioned_area_m2 = (2152.0 - 80.0) * 0.092_903_04;
+        assert!(
+            (conditioned_area_m2 - expected_conditioned_area_m2).abs() < 1e-6,
+            "conditioned area from the slab-derived split: got {}, expected {}",
+            conditioned_area_m2,
+            expected_conditioned_area_m2
+        );
+        let foundation_area_m2 = foundation.floor_area_m2.expect("foundation area expected");
+        let expected_foundation_area_m2 = 80.0 * 0.092_903_04;
+        assert!(
+            (foundation_area_m2 - expected_foundation_area_m2).abs() < 1e-6,
+            "foundation area from its slabs: got {}, expected {}",
+            foundation_area_m2,
+            expected_foundation_area_m2
+        );
+        // The derivation is recorded, citing the reference's rule.
+        let derivation = building
+            .parse_warnings
+            .iter()
+            .find(|w| w.message.contains("slab"))
+            .expect("the slab derivation is recorded as a parse warning");
+        assert!(
+            derivation.message.contains("geometry.rb"),
+            "the warning cites the reference: {}",
+            derivation.message
+        );
     }
 
     #[test]
