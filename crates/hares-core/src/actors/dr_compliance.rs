@@ -1901,7 +1901,7 @@ mod tests {
     /// decode and the schema version has moved past both: the dwelling
     /// refuses such a blob by version before decoding it.
     #[test]
-    fn the_snapshot_schema_version_moved_with_the_displaced_axes() {
+    fn the_snapshot_refuses_every_earlier_layout() {
         let first_layout =
             postcard::to_allocvec(&(DRLevel::High, Vec::<(DispatchTarget, DrAction)>::new()))
                 .unwrap();
