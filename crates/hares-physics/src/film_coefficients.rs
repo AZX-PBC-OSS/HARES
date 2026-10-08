@@ -499,13 +499,16 @@ pub fn film_resistances(
     // EnergyPlus ConvectionCoefficients.cc CalcASHRAESimpleIntConvCoeff returns
     // these convection-only values derived from ASHRAE 1985 Table 1 surface
     // conductances at ε = 0.9, minus the radiative component
-    // (1.02 × 0.9 = 0.918 BTU/h·ft²·°F), converted to SI.  These are the
-    // default interior convection coefficients in E+ and match OCHRE's
-    // TARP-at-12.9°C-floor result (envelope.py:374) to within 0.12%.
+    // (1.02 × 0.9 = 0.918 BTU/h·ft²·°F), converted to SI.
     //
-    // For a vertical surface: h_conv = 3.076 W/(m²·K).  Combined with
-    // h_rad ≈ 5.14 at ε = 0.9, T_ref = 293.15 K, the total h_si = 8.22
-    // is consistent with ASHRAE 140-2017 Table 25 (h_si = 8.29).
+    // Vertical: h_conv = 3.076 W/(m²·K), which is OCHRE's frozen TARP value
+    // (1.31·12.9^(1/3) = 3.0759, envelope.py:374) to within 0.003%. The
+    // horizontal and tilted values are NOT OCHRE's: its frozen film is the
+    // TARP model at the clamped ΔT of 12.9 K (1.782 horizontal reduced
+    // against 0.948 here, 3.566 horizontal enhanced against 4.040); the
+    // divergence is registered in docs/alignment/DIVERGENCES.md. Combined
+    // with h_rad ≈ 5.14 at ε = 0.9, T_ref = 293.15 K, the vertical total
+    // h_si = 8.22 is consistent with ASHRAE 140-2017 Table 25 (h_si = 8.29).
     //
     // References:
     // - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, p 79.
@@ -690,6 +693,32 @@ mod tests {
     fn ashrae_simple_horizontal_reduced() {
         let h = ashrae_simple_interior_h_conv(0.0, 25.0, 20.0, false);
         assert_approx(h, 0.948, 1e-10);
+    }
+
+    /// The attic floor's frozen films (the ceiling under an attic, both
+    /// sides) are the ASHRAE Simple horizontal values at the typical zone
+    /// temperatures' direction. With the attic colder than the conditioned
+    /// space there (16.67 against 20 at the anchors), the direction is
+    /// reduced: h = 0.948 W/(m²·K), R ≈ 1.055 m²·K/W on both sides.
+    /// OCHRE's frozen film instead freezes the TARP model at the clamped
+    /// ΔT of 12.9 K (h = 1.782, R ≈ 0.561, its committed winter oracle
+    /// output's "Attic Floor ... Film Coefficient" columns), and
+    /// OS-HPXML v1.12.0 runs the TARP model per step (simcontrols.rb:23-24).
+    /// This test fails if the frozen films silently take OCHRE's values;
+    /// the divergence of record is docs/alignment/DIVERGENCES.md's.
+    #[test]
+    fn the_attic_floor_s_frozen_films_are_the_ashrae_simple_horizontal_values() {
+        let (r_int, r_ext) = film_resistances(
+            0.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Attic,
+            2.0,  // wind: never read away from the outdoors
+            10.0, // typical ground
+            10.0, // typical ambient: the attic interpolates to 16.67
+            SurfaceRoughness::Rough,
+        );
+        assert_approx(r_int, 1.0 / 0.948, 1e-9);
+        assert_approx(r_ext, 1.0 / 0.948, 1e-9);
     }
 
     /// When delta_t=0, all TARP formulas produce h=0 (cbrt(0)=0).

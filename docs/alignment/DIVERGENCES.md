@@ -1294,3 +1294,64 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   (`heating_latent_nonzero_during_defrost_with_sub1_shr`,
   `heating_latent_zero_with_default_shr_during_defrost`, and the
   normal-heating zero above them).
+
+## D-031: The frozen interior film's horizontal and tilted values are the ASHRAE Simple table's
+
+- **Quantity:** the static interior film resistance the A-matrix freezes
+  for non-vertical surfaces (the ceiling under an attic, a roof's attic
+  face, floors over garages and crawlspaces, a slab's conditioned face):
+  which convection model the frozen values come from.
+- **Reference behavior:** OS-HPXML v1.12.0 sets its EnergyPlus models'
+  inside convection algorithm to TARP (`simcontrols.rb:23-24`) and
+  EnergyPlus evaluates the TARP model (Walton 1983, Eqs. 90-92) each step
+  at the actual surface-air difference and direction. OCHRE freezes the
+  same TARP model at init time at the clamped operating point
+  `delta_t = max(12.9, |t_ext - t_int|)` over its interpolated typical
+  zone temperatures (`envelope.py:342-402`, the clamp at `:374`), one
+  value for both faces of a boundary.
+- **HARES behavior:** the A-matrix's static film is the ASHRAE "Simple"
+  algorithm's convection-only values (E+ `ConvectionCoefficients.cc`
+  `CalcASHRAESimpleIntConvCoeff`: vertical 3.076, horizontal 4.040
+  enhanced / 0.948 reduced, tilted 3.870 / 2.281), the direction taken
+  from the same interpolated typical zone temperatures OCHRE interpolates;
+  the per-step TARP correction (`FilmCoefficientModel::PerStepTarp`, the
+  default) then adds `delta_h = h_tarp - h_static` on top wherever TARP at
+  the actual difference exceeds the frozen value (stepping.rs
+  `apply_convection_forcing`).
+- **Justification:** on vertical surfaces the two frozen forms agree
+  (3.076 against TARP's 1.31·12.9^(1/3) = 3.0759, 0.003%), so the choice
+  of baseline is invisible there. On horizontal and tilted surfaces the
+  two frozen forms disagree by up to 2x (the reduced horizontal: 0.948
+  against 1.782), and the correction only ever adds conductance, so the
+  winter ceiling under an attic keeps the reduced static value where
+  OCHRE carries the larger frozen TARP value. The static film is the
+  A-matrix's linearization baseline, and the ASHRAE Simple table is a
+  defensible baseline: it is EnergyPlus's own default inside convection
+  algorithm when none is set (`DataHeatBalance.hh:613`,
+  `ConvectionCoefficients.cc:1842`), and with it the per-step correction
+  stays live on the horizontal surfaces (it fires above ΔT ≈ 1.6 K in the
+  reduced direction), where OCHRE's larger frozen value would suppress it
+  entirely at typical surface-air differences. Re-aligning the baseline to
+  OCHRE's frozen form is the alternative reading; this entry keeps the
+  choice recorded either way.
+- **Class:** (a) against OCHRE: its frozen film is its own simplification
+  of the TARP model it applies elsewhere (its docstring: "Using TARP
+  model for interior surfaces, constant deltaT"; the 12.9 K clamp is
+  OCHRE's own operating-point choice).
+- **Measured impact:** on the winter conditioned oracle
+  (`tests/conditioned_oracle.rs`, `beopt_winter_48h`), freezing OCHRE's
+  TARP form in place of the ASHRAE Simple values moves the attic mean
+  3.57 to 3.71 °C against OCHRE's 4.82 (the cold bias -1.25 to -1.11 °C),
+  the attic MAE 1.30 to 1.14 °C, and the winter roof heat gain -277.7 to
+  -221.1 W against OCHRE's -239.6 W. The floor coupling's frozen films
+  therefore contribute at most about 0.14 °C of the conditioned-attic
+  winter cold bias and do not establish it; the record's residual stays
+  open with its cause unestablished. The committed goldens carry the
+  ASHRAE Simple baseline unchanged.
+- **Pinning tests:**
+  `crates/hares-physics/src/film_coefficients.rs`
+  (`the_attic_floor_s_frozen_films_are_the_ashrae_simple_horizontal_values`
+  fails when the static films take OCHRE's frozen TARP values;
+  `ashrae_simple_vertical_returns_3_076`,
+  `ashrae_simple_horizontal_enhanced`, `ashrae_simple_horizontal_reduced`
+  fail when any frozen value moves).
