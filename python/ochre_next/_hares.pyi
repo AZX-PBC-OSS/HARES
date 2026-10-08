@@ -2546,7 +2546,7 @@ class Fleet:
     def from_resstock(
         cls,
         metadata_path: str,
-        hpxml_dir: str,
+        buildings_dir: str,
         weather_dir: str,
         filter: dict[str, str] | None = ...,
         resstock_version: ResStockVersion | str | None = ...,

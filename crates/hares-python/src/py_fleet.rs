@@ -116,13 +116,21 @@ impl PyFleet {
         Ok(Self { fleet })
     }
 
+    /// Build a fleet from ResStock metadata and the unpacked buildings
+    /// directory. ``buildings_dir`` must hold one directory per building,
+    /// ``bldg<id:07>``, containing that building's ``home.xml`` and
+    /// ``in.schedules.csv``: the layout ``hares.data.resstock`` unpacks the
+    /// dataset zips to. The fleet never unpacks a zip; a building whose
+    /// directory or files are missing is an error naming the building and
+    /// the fix. Each building's weather file is resolved from the FIPS code
+    /// in its own HPXML (``WeatherStation/Name``) against ``weather_dir``.
     #[classmethod]
-    #[pyo3(signature = (metadata_path, hpxml_dir, weather_dir, filter=None, resstock_version=None, duration_s=None, defaults_path=None))]
+    #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, duration_s=None, defaults_path=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn from_resstock(
         _cls: &Bound<'_, PyType>,
         metadata_path: String,
-        hpxml_dir: String,
+        buildings_dir: String,
         weather_dir: String,
         filter: Option<&Bound<'_, PyDict>>,
         resstock_version: Option<Bound<'_, PyAny>>,
@@ -156,7 +164,7 @@ impl PyFleet {
 
         let fleet = Fleet::from_resstock(
             Path::new(&metadata_path),
-            Path::new(&hpxml_dir),
+            Path::new(&buildings_dir),
             Path::new(&weather_dir),
             parsed_version,
             parsed_filter,

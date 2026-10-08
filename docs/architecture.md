@@ -569,7 +569,7 @@ Each solver returns a `DomainUpdate` containing zone state changes and optional 
 ```mermaid
 graph TD
     META["ResStock Metadata CSV"] --> Fleet["PyFleet::from_resstock()"]
-    HPXML_DIR["HPXML Directory"] --> Fleet
+    BUILDINGS_DIR["Unpacked Buildings Directory"] --> Fleet
     WX_DIR["Weather Directory"] --> Fleet
 
     Fleet --> |"Rayon par_iter"| D1["Dwelling 1"]
@@ -626,7 +626,7 @@ graph TD
 | `PyDwelling.simulate()` | Run full simulation horizon, return Polars DataFrame |
 | `PyDwelling.step()` | Advance one timestep, return telemetry dict |
 | `PyDwelling.apply_control(name, signal)` | Queue control signal for next step |
-| `PyFleet.from_resstock(metadata, hpxml_dir, weather_dir)` | Load building portfolio |
+| `PyFleet.from_resstock(metadata, buildings_dir, weather_dir)` | Load building portfolio |
 | `PyFleet.simulate(n_threads)` | Parallel simulation with aggregated results |
 
 ---

@@ -139,6 +139,20 @@ impl Fleet {
 
     /// Constructs a fleet from ResStock metadata and local data directories.
     ///
+    /// # Layout policy: the unpacked buildings directory is required
+    ///
+    /// `buildings_dir` must hold one directory per building, named
+    /// `bldg<bldg_id:07>`, containing that building's `home.xml` and
+    /// `in.schedules.csv`: the layout `hares.data.resstock` unpacks every
+    /// dataset zip to, and the committed `tests/fixtures/resstock/<version>`
+    /// buildings carry. The engine never reads HPXML or schedules out of the
+    /// dataset's zip archives, so the fleet does not unpack either; a
+    /// building whose directory or files are missing (as when the dataset
+    /// root with its zip archives is passed) is a typed error naming the
+    /// building, the missing element and the fix. Each building's weather
+    /// file is resolved from the FIPS code in its own HPXML
+    /// (`WeatherStation/Name`) against `weather_dir`.
+    ///
     /// `resstock_version` defaults to the latest known schema when `None`.
     /// `duration` overrides the default 24-hour simulation duration;
     /// when `None`, the default of 24 hours is used for backward compatibility.
@@ -148,7 +162,7 @@ impl Fleet {
     /// column an equipment maps to fails construction naming the setting.
     pub fn from_resstock(
         metadata_path: &Path,
-        hpxml_dir: &Path,
+        buildings_dir: &Path,
         weather_dir: &Path,
         resstock_version: Option<ResStockVersion>,
         filter: Option<HashMap<String, String>>,
@@ -156,7 +170,7 @@ impl Fleet {
         defaults_path: Option<&Path>,
     ) -> Result<Self> {
         let version = resstock_version.unwrap_or(DEFAULT_RESSTOCK_VERSION);
-        let buildings = parse_resstock_metadata(metadata_path, version, hpxml_dir)
+        let buildings = parse_resstock_metadata(metadata_path, version, buildings_dir)
             .map_err(|err| FleetError::ResStock(err.to_string()))?;
 
         let sim_config = resstock_sim_config(duration);
@@ -2184,7 +2198,7 @@ mod tests {
         );
     }
 
-    fn write_resstock_parquet_v2025(path: &Path) {
+    fn write_resstock_parquet_v2025(path: &Path, bldg_id: i64) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("building_id", DataType::Int64, false),
             Field::new("weight", DataType::Float64, false),
@@ -2194,7 +2208,7 @@ mod tests {
         let batch = RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(Int64Array::from(vec![1])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![bldg_id])) as ArrayRef,
                 Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
                 Arc::new(Int64Array::from(vec![0])) as ArrayRef,
                 Arc::new(StringArray::from(vec!["CO"])) as ArrayRef,
@@ -2207,11 +2221,42 @@ mod tests {
         writer.close().expect("close");
     }
 
+    /// Write one building in the extracted layout the constructor requires:
+    /// `root/bldg{bldg_id:07}/home.xml` and `in.schedules.csv`.
+    fn write_extracted_building(root: &Path, bldg_id: i64, weather_station_name: &str) {
+        let dir = root.join(format!("bldg{bldg_id:07}"));
+        fs::create_dir_all(&dir).expect("create building dir");
+        write_temp_file(
+            &dir.join("home.xml"),
+            &format!(
+                r#"<?xml version='1.0' encoding='UTF-8'?>
+<HPXML xmlns='http://hpxmlonline.com/2023/09' schemaVersion='4.0'>
+  <Building>
+    <BuildingDetails>
+      <ClimateandRiskZones>
+        <WeatherStation>
+          <SystemIdentifier id='WeatherStation'/>
+          <Name>{weather_station_name}</Name>
+        </WeatherStation>
+      </ClimateandRiskZones>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#
+            ),
+        );
+        write_temp_file(&dir.join("in.schedules.csv"), "occupants\n1\n");
+    }
+
+    fn resstock_fixtures_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/resstock")
+    }
+
     #[test]
     fn from_resstock_default_duration() {
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
-        write_resstock_parquet_v2025(&pq);
+        write_resstock_parquet_v2025(&pq, 1);
+        write_extracted_building(tmp.path(), 1, "G0800130");
 
         let fleet = Fleet::from_resstock(
             &pq,
@@ -2238,70 +2283,63 @@ mod tests {
     }
 
     /// The ResStock constructor's `defaults_path` reaches every dwelling it
-    /// configures. The BEopt example schedule has no lighting or plug-load
-    /// columns, so its dwelling builds with the defaults directory and fails
-    /// naming `defaults_path` without one. The constructor points each
-    /// building at its dataset zip archive, which construction does not
-    /// unpack, so the test points the entries at unpacked files.
+    /// configures, built through the public path: the committed fixture
+    /// building's own HPXML, schedule and weather, with no swapped-in files.
+    /// The dwelling builds with the defaults directory and fails naming
+    /// `defaults_path` without one.
     #[test]
     fn from_resstock_passes_the_defaults_directory_to_each_dwelling() {
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
-        write_resstock_parquet_v2025(&pq);
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // bldg0019694 is a committed fixture building whose weather station
+        // (G5300330) has a fixture weather file.
+        write_resstock_parquet_v2025(&pq, 19_694);
+        let fixtures = resstock_fixtures_root().join("2025.1");
 
-        let configs_with = |defaults_path: Option<&Path>| -> Vec<DwellingConfig> {
-            Fleet::from_resstock(
-                &pq,
-                tmp.path(),
-                tmp.path(),
-                Some(ResStockVersion::V2025_1),
-                None,
-                None,
-                defaults_path,
-            )
-            .expect("fleet construction")
-            .entries
-            .into_iter()
-            .map(|entry| DwellingConfig {
-                hpxml_path: fixture_hpxml_path(),
-                schedule_path: Some(root.join("data/examples/BEopt_example_schedule.csv")),
-                weather_path: root.join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-                initialization_duration: None,
-                ..entry.config
-            })
-            .collect()
-        };
+        let fleet = Fleet::from_resstock(
+            &pq,
+            &fixtures,
+            &fixtures.join("weather"),
+            Some(ResStockVersion::V2025_1),
+            None,
+            None,
+            None,
+        )
+        .expect("fleet construction");
+        assert_eq!(fleet.entries.len(), 1);
 
         let defaults = repo_defaults_path();
-        let with_defaults = configs_with(Some(&defaults));
-        assert!(!with_defaults.is_empty(), "the fleet must have an entry");
-        for config in with_defaults {
-            assert_eq!(config.defaults_path.as_deref(), Some(defaults.as_path()));
-            if let Err(err) = Dwelling::from_config(config) {
-                panic!("a dwelling given the defaults directory must build, got: {err}");
-            }
+        let with_defaults = fleet.entries[0].config.clone();
+        assert_eq!(
+            with_defaults.defaults_path.as_deref(),
+            None,
+            "the constructor without a defaults_path must leave it unset"
+        );
+        let with_defaults = DwellingConfig {
+            defaults_path: Some(defaults.clone()),
+            ..with_defaults
+        };
+        if let Err(err) = Dwelling::from_config(with_defaults) {
+            panic!("a dwelling given the defaults directory must build, got: {err}");
         }
 
-        let without_defaults = configs_with(None);
-        assert!(!without_defaults.is_empty(), "the fleet must have an entry");
-        for config in without_defaults {
-            let message = match Dwelling::from_config(config) {
-                Err(err) => err.to_string(),
-                Ok(_) => panic!("a config with no defaults directory must fail at the store load"),
-            };
-            assert!(
-                message.contains("defaults load failed"),
-                "the error must name the defaults load failure, got: {message}"
-            );
-        }
+        let without_defaults = fleet.entries[0].config.clone();
+        let message = match Dwelling::from_config(without_defaults) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("a config with no defaults directory must fail at the store load"),
+        };
+        assert!(
+            message.contains("defaults load failed"),
+            "the error must name the defaults load failure, got: {message}"
+        );
     }
 
     #[test]
     fn from_resstock_with_custom_duration() {
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
-        write_resstock_parquet_v2025(&pq);
+        write_resstock_parquet_v2025(&pq, 1);
+        write_extracted_building(tmp.path(), 1, "G0800130");
 
         let fleet = Fleet::from_resstock(
             &pq,
@@ -2326,5 +2364,119 @@ mod tests {
                 d = 365
             );
         }
+    }
+
+    /// The constructor resolves the committed fixture's extracted layout to
+    /// real files and the building's own HPXML weather station to the weather
+    /// file: no file swaps.
+    #[test]
+    fn resstock_fleet_reads_the_extracted_layout() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("test.parquet");
+        write_resstock_parquet_v2025(&pq, 19_694);
+        let fixtures = resstock_fixtures_root().join("2025.1");
+
+        let fleet = Fleet::from_resstock(
+            &pq,
+            &fixtures,
+            &fixtures.join("weather"),
+            Some(ResStockVersion::V2025_1),
+            None,
+            None,
+            None,
+        )
+        .expect("fleet construction");
+        assert_eq!(fleet.entries.len(), 1);
+
+        let config = &fleet.entries[0].config;
+        assert_eq!(config.hpxml_path, fixtures.join("bldg0019694/home.xml"));
+        assert_eq!(
+            config.schedule_path.as_deref(),
+            Some(fixtures.join("bldg0019694/in.schedules.csv").as_path())
+        );
+        let weather = config.weather_path.as_path();
+        assert_eq!(
+            weather,
+            fixtures.join("weather/G5300330_2018.csv").as_path(),
+            "the FIPS read from the building's own HPXML must resolve the weather file"
+        );
+        assert!(weather.exists(), "the resolved weather file must exist");
+    }
+
+    /// The acceptance: a fleet built from the unpacked dataset fixture builds
+    /// AND runs a dwelling end to end through the public path, the weather
+    /// resolved (no file swaps).
+    #[test]
+    fn resstock_fleet_builds_and_runs_a_dwelling_with_resolved_weather() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("test.parquet");
+        write_resstock_parquet_v2025(&pq, 19_694);
+        let fixtures = resstock_fixtures_root().join("2025.1");
+
+        let fleet = Fleet::from_resstock(
+            &pq,
+            &fixtures,
+            &fixtures.join("weather"),
+            Some(ResStockVersion::V2025_1),
+            None,
+            None,
+            Some(&repo_defaults_path()),
+        )
+        .expect("fleet construction");
+        assert_eq!(fleet.entries.len(), 1);
+
+        let outcomes = fleet.simulate(1);
+        assert_eq!(outcomes.len(), 1);
+        let outcome = outcomes
+            .into_iter()
+            .next()
+            .expect("one outcome")
+            .expect("the fixture dwelling must run without a simulation error");
+        match &outcome.status {
+            SimStatus::Ok => {}
+            // The fleet's sim config writes no output, so the missing
+            // recorder's note is the one benign flag; anything else is a
+            // run that did not go to completion cleanly.
+            SimStatus::Flagged(message) if message.contains("no output recorder") => {}
+            status => panic!("the dwelling must run to completion, got: {status:?}"),
+        }
+        assert!(
+            outcome.result.elapsed > std::time::Duration::ZERO,
+            "the dwelling must have stepped"
+        );
+    }
+
+    /// The dataset-as-distributed shape (zip archives where the extracted
+    /// building directories belong) is a typed error naming the fix.
+    #[test]
+    fn resstock_fleet_rejects_the_dataset_zip() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("test.parquet");
+        write_resstock_parquet_v2025(&pq, 19_694);
+        fs::write(
+            tmp.path().join("bldg0019694.zip"),
+            "a zip archive, not the unpacked building",
+        )
+        .expect("write zip stand-in");
+
+        let err = Fleet::from_resstock(
+            &pq,
+            tmp.path(),
+            tmp.path(),
+            Some(ResStockVersion::V2025_1),
+            None,
+            None,
+            None,
+        )
+        .expect_err("a zip archive is not the unpacked layout");
+        let message = err.to_string();
+        assert!(
+            message.contains("19694"),
+            "must name the building: {message}"
+        );
+        assert!(
+            message.contains("unpacked buildings directory"),
+            "must name the fix: {message}"
+        );
     }
 }

@@ -13,6 +13,29 @@ ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
 HARES_DEFAULTS = ROOT / "defaults"
 
+_RESSTOCK_HPXML = """<?xml version="1.0" encoding="UTF-8"?>
+<HPXML xmlns="http://hpxmlonline.com/2023/09" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <ClimateandRiskZones>
+        <WeatherStation>
+          <SystemIdentifier id="WeatherStation"/>
+          <Name>G0800130</Name>
+        </WeatherStation>
+      </ClimateandRiskZones>
+    </BuildingDetails>
+  </Building>
+</HPXML>"""
+
+
+def _write_extracted_building(buildings_dir: Path, bldg_id: int) -> Path:
+    """Write one building in the extracted layout from_resstock requires."""
+    bldg_dir = buildings_dir / f"bldg{bldg_id:07d}"
+    bldg_dir.mkdir(parents=True, exist_ok=True)
+    (bldg_dir / "home.xml").write_text(_RESSTOCK_HPXML)
+    (bldg_dir / "in.schedules.csv").write_text("occupants\n1\n")
+    return buildings_dir
+
 
 def _create_minimal_dwelling_config(tmp_path: Path):
     """Create minimal HPXML, schedule, and weather files for testing."""
@@ -180,6 +203,7 @@ def test_from_resstock_accepts_enum(tmp_path: Path) -> None:
         }
     )
     pq.write_table(table, metadata)
+    _write_extracted_building(tmp_path, 12345)
 
     from ochre_next import ResStockVersion
 
@@ -205,6 +229,7 @@ def test_from_resstock_accepts_string(tmp_path: Path) -> None:
         }
     )
     pq.write_table(table, metadata)
+    _write_extracted_building(tmp_path, 12345)
 
     fleet = PyFleet.from_resstock(
         str(metadata),
@@ -228,6 +253,7 @@ def test_from_resstock_default_version_is_2025_1(tmp_path: Path) -> None:
         }
     )
     pq.write_table(table, metadata)
+    _write_extracted_building(tmp_path, 12345)
 
     fleet = PyFleet.from_resstock(
         str(metadata),
@@ -251,6 +277,7 @@ def test_from_resstock_accepts_a_defaults_path(tmp_path: Path) -> None:
         }
     )
     pq.write_table(table, metadata)
+    _write_extracted_building(tmp_path, 12345)
 
     fleet = PyFleet.from_resstock(
         str(metadata),
@@ -260,6 +287,31 @@ def test_from_resstock_accepts_a_defaults_path(tmp_path: Path) -> None:
     )
 
     assert len(fleet) == 1
+
+
+def test_from_resstock_hpxml_dir_keyword_is_removed(tmp_path: Path) -> None:
+    """The parameter is buildings_dir; the old hpxml_dir keyword is gone."""
+    metadata = tmp_path / "metadata.parquet"
+    table = pa.table(
+        {
+            "building_id": pa.array([12345]),
+            "upgrade_id": pa.array([0]),
+            "weight": pa.array([1.0]),
+            "in.state": pa.array(["CO"]),
+        }
+    )
+    pq.write_table(table, metadata)
+    _write_extracted_building(tmp_path, 12345)
+
+    # The static surface no longer carries the removed keyword, so the call
+    # goes through getattr on purpose.
+    legacy_from_resstock = getattr(PyFleet, "from_resstock")
+    with pytest.raises(TypeError, match="hpxml_dir"):
+        legacy_from_resstock(
+            str(metadata),
+            hpxml_dir=str(tmp_path),
+            weather_dir=str(tmp_path),
+        )
 
 
 def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
