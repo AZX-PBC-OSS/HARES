@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
+use quick_xml::events::BytesStart;
 use quick_xml::events::Event;
+use quick_xml::events::attributes::AttrError;
 
 use hares_types::{Warning, normalize_ascii, parse_trimmed_f64};
 
@@ -438,6 +440,80 @@ fn byte_to_line_col(input: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
+/// Parse one start (or empty) tag's attributes into the node's map.
+///
+/// An attribute the reader rejects (a missing quote, a duplicated name) or a
+/// value it cannot unescape (an undefined entity) fails the parse naming the
+/// element, the attribute and the byte position. Nothing is dropped: the
+/// rejected attribute previously vanished from the map and the unescape
+/// failure became the empty string, and the element parsed as if the
+/// attribute were absent or empty.
+fn parse_attributes(
+    xml: &str,
+    tag: &BytesStart<'_>,
+    position: usize,
+) -> Result<HashMap<String, String>, HpxmlError> {
+    let element = normalize_name(tag.name().as_ref());
+    let mut attrs = HashMap::new();
+    for attr in tag.attributes() {
+        let attr = match attr {
+            Ok(attr) => attr,
+            Err(err) => {
+                // The reader reports a duplicated name by the name's offset
+                // into the tag content, so the name is recoverable; the other
+                // rejections (a missing `=` or quote) give no name.
+                let attribute = match &err {
+                    AttrError::Duplicated(offset, _) => duplicated_attribute_name(tag, *offset),
+                    _ => None,
+                };
+                let detail = attribute
+                    .map(|name| format!("attribute `{name}`: {err}"))
+                    .unwrap_or_else(|| format!("attribute: {err}"));
+                let (line, column) = byte_to_line_col(xml, position);
+                return Err(HpxmlError::Parse(ParseError {
+                    message: format!("element <{element}> has a malformed {detail}"),
+                    byte_offset: position,
+                    line,
+                    column,
+                    element_name: Some(element.clone()),
+                }));
+            }
+        };
+        let key = normalize_name(attr.key.as_ref());
+        let value = attr
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|err| {
+                let (line, column) = byte_to_line_col(xml, position);
+                HpxmlError::Parse(ParseError {
+                    message: format!(
+                        "element <{element}> has an attribute `{key}` whose value \
+                         cannot be unescaped: {err}"
+                    ),
+                    byte_offset: position,
+                    line,
+                    column,
+                    element_name: Some(element.clone()),
+                })
+            })?;
+        attrs.insert(key, value.into_owned());
+    }
+    Ok(attrs)
+}
+
+/// Recover a duplicated attribute's name from the tag's raw attributes. The
+/// reader reports the name's start offset relative to the tag content, which
+/// begins with the tag's own name; the name ends at the next whitespace or
+/// `=`.
+fn duplicated_attribute_name(tag: &BytesStart<'_>, offset: usize) -> Option<String> {
+    let raw = tag.attributes_raw();
+    let start = offset.checked_sub(tag.name().as_ref().len())?;
+    let rest = raw.get(start..)?;
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '=')
+        .unwrap_or(rest.len());
+    (end > 0).then(|| rest[..end].to_string())
+}
+
 pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -450,15 +526,7 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(tag)) => {
                 let name = normalize_name(tag.name().as_ref());
-                let mut attrs = HashMap::new();
-                for attr in tag.attributes().flatten() {
-                    let key = normalize_name(attr.key.as_ref());
-                    let value = attr
-                        .normalized_value(XmlVersion::Implicit1_0)
-                        .map(|v| v.into_owned())
-                        .unwrap_or_default();
-                    attrs.insert(key, value);
-                }
+                let attrs = parse_attributes(xml, &tag, reader.buffer_position() as usize)?;
                 stack.push(XmlNode {
                     name,
                     attrs,
@@ -468,15 +536,7 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
             }
             Ok(Event::Empty(tag)) => {
                 let name = normalize_name(tag.name().as_ref());
-                let mut attrs = HashMap::new();
-                for attr in tag.attributes().flatten() {
-                    let key = normalize_name(attr.key.as_ref());
-                    let value = attr
-                        .normalized_value(XmlVersion::Implicit1_0)
-                        .map(|v| v.into_owned())
-                        .unwrap_or_default();
-                    attrs.insert(key, value);
-                }
+                let attrs = parse_attributes(xml, &tag, reader.buffer_position() as usize)?;
                 let node = XmlNode {
                     name,
                     attrs,
@@ -3681,6 +3741,61 @@ mod tests {
     };
     use crate::hpxml::xml_helpers::assert_reads_xs_boolean;
 
+    /// Attribute values and text normalize per XML 1.0, as the parser's
+    /// quick-xml 0.42 dependency implements: a literal tab or line break in an
+    /// attribute value becomes a space (a CR LF is one line end, so one
+    /// space), a character reference keeps its character, and CR LF in text
+    /// becomes LF. No checked-in fixture carries such input, so the goldens
+    /// stay bitwise; this pins the behaviour the parser now has.
+    #[test]
+    fn xml_attribute_and_line_end_normalization_follow_xml_1_0() {
+        let xml = "<root a=\"x\ty\r\nz&#9;w&amp;v\"><text>a\r\nb</text></root>";
+        let node = parse_xml_document(xml).expect("the document must parse");
+        assert_eq!(node.attrs["a"], "x y z\tw&v");
+        let text = node
+            .child("text")
+            .expect("the text element must be in the tree");
+        assert_eq!(text.text, "a\nb");
+    }
+
+    /// An attribute the reader rejects (a duplicated name) or a value it
+    /// cannot unescape (an undefined entity) fails the parse naming the
+    /// element and the attribute, instead of the attribute being dropped or
+    /// emptied.
+    #[test]
+    fn malformed_hpxml_attribute_is_a_parse_error() {
+        let base = include_str!("../../../../tests/fixtures/hpxml/ochre_samples/base.xml");
+
+        let duplicated = base.replace(
+            "schemaVersion='4.0'",
+            "schemaVersion='4.0' schemaVersion='4.0'",
+        );
+        let err = crate::hpxml::parse_hpxml_str(&duplicated)
+            .expect_err("a duplicated attribute must fail the parse");
+        let shown = format!("{err}");
+        assert!(
+            matches!(err, HpxmlError::Parse(_)),
+            "a duplicated attribute must be a parse error: {shown}"
+        );
+        assert!(
+            shown.contains("<HPXML>") && shown.contains("`schemaVersion`"),
+            "the error must name the element and the attribute: {shown}"
+        );
+
+        let undefined_entity = base.replace("schemaVersion='4.0'", "schemaVersion='&bogus;'");
+        let err = crate::hpxml::parse_hpxml_str(&undefined_entity)
+            .expect_err("an undefined entity must fail the parse");
+        let shown = format!("{err}");
+        assert!(
+            matches!(err, HpxmlError::Parse(_)),
+            "an unescapable value must be a parse error: {shown}"
+        );
+        assert!(
+            shown.contains("<HPXML>") && shown.contains("`schemaVersion`"),
+            "the error must name the element and the attribute: {shown}"
+        );
+    }
+
     /// HPXML's site types parse whatever their case and spacing; any other
     /// value is an error that keeps the file's own text.
     #[test]
@@ -6767,12 +6882,15 @@ mod tests {
 
     #[test]
     fn parse_malformed_xml_includes_position_info() {
-        // Illegal bare `<` in text content.
+        // Illegal bare `<` in text content. The tokenizer reads `< broken</child>`
+        // as a start tag and the reader rejects its malformed attribute, which
+        // the parse now names at line 3 instead of reaching the later end-tag
+        // mismatch on line 4.
         let xml = "<?xml version=\"1.0\"?>\n<root>\n  <child>value < broken</child>\n</root>";
         let err = parse_xml_document(xml).expect_err("malformed XML should fail to parse");
         let msg = err.to_string();
         assert!(
-            msg.contains("line 4"),
+            msg.contains("line 3"),
             "error should include position context, got: {msg}"
         );
     }

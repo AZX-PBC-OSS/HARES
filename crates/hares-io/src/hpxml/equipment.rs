@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn heat_pump_air_to_air_splits_to_ashp_heater_and_cooler() {
         let xml = r#"
-<HPXML xmlns=\"http://hpxmlonline.com/2019/10\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://hpxmlonline.com/2019/10\" schemaVersion=\"4.0\">
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
   <Building>
     <BuildingDetails>
       <BuildingSummary>
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn heat_pump_mini_split_splits_to_mshp_heater_and_cooler() {
         let xml = r#"
-<HPXML xmlns=\"http://hpxmlonline.com/2019/10\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://hpxmlonline.com/2019/10\" schemaVersion=\"4.0\">
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
   <Building>
     <BuildingDetails>
       <BuildingSummary>
