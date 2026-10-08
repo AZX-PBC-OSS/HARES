@@ -42,6 +42,7 @@ use hares_types::{
 use crate::py_enums::{
     PyDutyCycleComponent, PyEvConnectionState, PyIdealCapacityMode, PyInverterPriority,
 };
+use crate::utils::validate_thermal_setpoint_band;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -105,15 +106,19 @@ impl hares_core::Actor for PyActorWrapper {
         self.last_error.is_none()
     }
 
+    fn health_detail(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         Python::attach(|py| {
             let obj = self.obj.bind(py);
 
             // Refresh cached name in case Python code updated it
-            if let Ok(n) = obj.getattr("name").and_then(|v| v.extract::<String>()) {
-                if n.as_str() != &*self.name {
-                    self.name = Arc::from(n);
-                }
+            if let Ok(n) = obj.getattr("name").and_then(|v| v.extract::<String>())
+                && n.as_str() != &*self.name
+            {
+                self.name = Arc::from(n);
             }
 
             let env_dict = environment_to_py_dict(py, env);
@@ -123,7 +128,18 @@ impl hares_core::Actor for PyActorWrapper {
                 Ok(result) => match result.extract::<Vec<PyDispatchRequest>>() {
                     Ok(requests) => {
                         for req in requests {
-                            out.push(req.into_dispatch_request());
+                            match req.into_dispatch_request() {
+                                Ok(dr) => out.push(dr),
+                                Err(e) => {
+                                    let msg = format!("decide() returned invalid signal: {e}");
+                                    tracing::error!(
+                                        actor = %self.name,
+                                        error = %e,
+                                        "Python actor decide() returned invalid signal"
+                                    );
+                                    self.last_error = Some(msg);
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -147,15 +163,6 @@ impl hares_core::Actor for PyActorWrapper {
                 }
             }
         });
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            debug_assert!(
-                Python::try_attach(|py| py.import("sys").is_ok()).unwrap_or(false),
-                "Python interpreter unreachable after PyActorWrapper::decide() — \
-                 Python init state may be corrupted"
-            );
-        }
     }
 }
 
@@ -365,17 +372,26 @@ pub enum PyPriority {
 }
 
 impl PyDispatchRequest {
-    pub fn into_dispatch_request(self) -> DispatchRequest {
-        DispatchRequest {
+    pub fn into_dispatch_request(self) -> pyo3::PyResult<DispatchRequest> {
+        Ok(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from(self.target)),
-            signal: self.signal.into_control_signal(),
+            signal: self.signal.into_control_signal()?,
             priority: self.priority.into_priority_tier(),
-        }
+        })
     }
 }
 
 impl PySignal {
-    pub fn into_control_signal(self) -> ControlSignal {
+    pub fn into_control_signal(self) -> pyo3::PyResult<ControlSignal> {
+        // A DutyCycle on_fraction is a user value: an out-of-range one is a
+        // Python value error at the boundary, not a debug-only assert.
+        if let PySignal::DutyCycle { on_fraction, .. } = &self
+            && (!on_fraction.is_finite() || !(0.0..=1.0).contains(on_fraction))
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "DutyCycle on_fraction must be finite in [0.0, 1.0], got {on_fraction}"
+            )));
+        }
         let result = match self {
             PySignal::ThermalSetpoint {
                 heating_c,
@@ -495,25 +511,6 @@ impl PySignal {
                 ControlSignal::MaxCapacityFraction { fraction }
             }
         };
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            debug_assert_ne!(
-                result.required_capability().bits(),
-                0,
-                "PySignal variant mapped to zero-capability ControlSignal"
-            );
-            if let ControlSignal::DutyCycle {
-                component: Some(_),
-                on_fraction,
-                ..
-            } = &result
-            {
-                debug_assert!(
-                    on_fraction.is_finite() && (0.0..=1.0).contains(on_fraction),
-                    "DutyCycle with component field has invalid on_fraction: {on_fraction}"
-                );
-            }
-        }
         #[cfg(feature = "observe")]
         {
             dispatch_observer::record_dispatch(&result);
@@ -526,7 +523,7 @@ impl PySignal {
                 dispatch_observer::record_duty_cycle_component(*comp, *on_fraction);
             }
         }
-        result
+        Ok(result)
     }
 }
 
@@ -536,7 +533,7 @@ mod dispatch_observer {
 
     use hares_types::{ControlSignal, DutyCycleComponent};
 
-    static COUNTERS: LazyLock<Mutex<[u64; 25]>> = LazyLock::new(|| Mutex::new([0; 25]));
+    static COUNTERS: LazyLock<Mutex<[u64; 26]>> = LazyLock::new(|| Mutex::new([0; 26]));
     static DUTY_CYCLE_COMPONENT_EVENTS: LazyLock<Mutex<Vec<(DutyCycleComponent, f64)>>> =
         LazyLock::new(|| Mutex::new(Vec::new()));
 
@@ -567,6 +564,7 @@ mod dispatch_observer {
             ControlSignal::EvSetReadyBy { .. } => 22,
             ControlSignal::EventDelay { .. } => 23,
             ControlSignal::MaxCapacityFraction { .. } => 24,
+            ControlSignal::NonHvacZoneInput { .. } => 25,
         }
     }
 
@@ -638,6 +636,7 @@ impl PyDispatchRequest {
         deadband_c: Option<f64>,
         priority: Option<PyPriority>,
     ) -> PyResult<Self> {
+        validate_thermal_setpoint_band(heating_c, cooling_c, deadband_c)?;
         Ok(Self {
             target,
             signal: PySignal::ThermalSetpoint {
@@ -1033,11 +1032,23 @@ impl PySignal {
         heating_c: Option<f64>,
         cooling_c: Option<f64>,
         deadband_c: Option<f64>,
-    ) -> Self {
-        PySignal::ThermalSetpoint {
+    ) -> PyResult<Self> {
+        validate_thermal_setpoint_band(heating_c, cooling_c, deadband_c)?;
+        Ok(PySignal::ThermalSetpoint {
             heating_c,
             cooling_c,
             deadband_c,
+        })
+    }
+
+    /// The release form of `thermal_setpoint`: hands both setpoints back to
+    /// the schedule and the band back to its configured value.
+    #[staticmethod]
+    fn thermal_setpoint_release() -> Self {
+        PySignal::ThermalSetpoint {
+            heating_c: None,
+            cooling_c: None,
+            deadband_c: None,
         }
     }
 
@@ -1464,10 +1475,56 @@ mod tests {
     use super::*;
     use hares_core::Actor;
 
+    /// Every `PySignal` variant maps to a `ControlSignal` with a non-zero
+    /// required capability: a variant mapping to zero would be silently
+    /// undeliverable. Replaced the gated dispatch-time assert: the variant
+    /// set is static, so the property is a unit test.
+    #[test]
+    fn every_py_signal_variant_maps_to_a_nonzero_capability() {
+        let signals: Vec<PySignal> = vec![
+            PySignal::ThermalSetpoint {
+                heating_c: Some(20.0),
+                cooling_c: Some(25.0),
+                deadband_c: None,
+            },
+            PySignal::ThermalSetpointDelta {
+                heating_delta_c: None,
+                cooling_delta_c: Some(1.0),
+            },
+            PySignal::DutyCycle {
+                on_fraction: 0.5,
+                period_s: None,
+                component: None,
+            },
+            PySignal::LoadFraction { fraction: 0.7 },
+            PySignal::PowerSetpoint {
+                active_power_kw: 2.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            PySignal::PowerLimit { max_kw: 3.0 },
+            PySignal::ModeOverride {
+                mode: PyMode::Cooling,
+            },
+            PySignal::MaxCapacityFraction { fraction: 0.9 },
+        ];
+        for signal in signals {
+            let cs = signal
+                .into_control_signal()
+                .expect("signal converts to a control signal");
+            assert_ne!(
+                cs.required_capability().bits(),
+                0,
+                "PySignal variant mapped to zero-capability ControlSignal: {cs:?}"
+            );
+        }
+    }
+
     #[test]
     fn max_capacity_fraction_signal_converts_to_control_signal() {
         let signal = PySignal::MaxCapacityFraction { fraction: 0.8 };
-        let cs = signal.into_control_signal();
+        let cs = signal.into_control_signal().unwrap();
         assert!(matches!(
             cs,
             ControlSignal::MaxCapacityFraction { fraction: f } if f == 0.8
@@ -1481,7 +1538,7 @@ mod tests {
             signal: PySignal::MaxCapacityFraction { fraction: 0.6 },
             priority: PyPriority::UserOverride,
         };
-        let dr = req.into_dispatch_request();
+        let dr = req.into_dispatch_request().unwrap();
         assert!(matches!(
             dr.target,
             DispatchTarget::ByName(ref name) if name.as_ref() == "test_equip"
@@ -1499,7 +1556,7 @@ mod tests {
             period_s: None,
             component: Some(PyDutyCycleComponent::Compressor),
         };
-        let cs = signal.into_control_signal();
+        let cs = signal.into_control_signal().unwrap();
         assert!(matches!(
             cs,
             ControlSignal::DutyCycle {
@@ -1517,7 +1574,7 @@ mod tests {
             period_s: None,
             component: Some(PyDutyCycleComponent::BackupElement),
         };
-        let cs = signal.into_control_signal();
+        let cs = signal.into_control_signal().unwrap();
         assert!(matches!(
             cs,
             ControlSignal::DutyCycle {
@@ -1535,7 +1592,7 @@ mod tests {
             period_s: Some(300.0),
             component: None,
         };
-        let cs = signal.into_control_signal();
+        let cs = signal.into_control_signal().unwrap();
         assert!(matches!(
             cs,
             ControlSignal::DutyCycle {
@@ -1557,7 +1614,7 @@ mod tests {
             },
             priority: PyPriority::Schedule,
         };
-        let dr = req.into_dispatch_request();
+        let dr = req.into_dispatch_request().unwrap();
         assert!(matches!(
             dr.target,
             DispatchTarget::ByName(ref name) if name.as_ref() == "hpwh"
@@ -1618,6 +1675,11 @@ mod tests {
                 "PyActorWrapper should have last_error set after decide() raises"
             );
             let err_msg = wrapper.last_error.as_ref().unwrap();
+            assert_eq!(
+                wrapper.health_detail(),
+                Some(err_msg.as_str()),
+                "the step error carries the Python exception"
+            );
             assert!(
                 err_msg.contains("AttributeError"),
                 "last_error should contain AttributeError, got: {err_msg}"
@@ -1662,6 +1724,11 @@ mod tests {
                 "PyActorWrapper should have last_error set after decide() raises"
             );
             let err_msg = wrapper.last_error.as_ref().unwrap();
+            assert_eq!(
+                wrapper.health_detail(),
+                Some(err_msg.as_str()),
+                "the step error carries the Python exception"
+            );
             assert!(
                 err_msg.contains("AttributeError"),
                 "last_error should contain AttributeError, got: {err_msg}"

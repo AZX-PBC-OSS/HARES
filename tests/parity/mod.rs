@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, Float64Array};
 use corpus::{DiscoveredFixture, ParityFixture, discover_fixtures};
@@ -14,7 +13,6 @@ use hares_io::{SimulationConfig, parse_hpxml, resolve_equipment};
 use hares_io::{defaults::DefaultsStore, hpxml::ZoneType};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
-use serde_json::json;
 use tolerance::{
     ANNUAL_WATER_HEATER_ENERGY_REL_PCT_MAX, BATTERY_SOC_MAE_ABS_MAX,
     EQUIPMENT_MODE_CYCLE_COUNT_REL_PCT_MAX, MetricCheck, PEAK_HVAC_POWER_REL_PCT_MAX,
@@ -33,84 +31,56 @@ const METRIC_PEAK_HVAC_POWER: &str = "peak_hvac_power_relative_percent";
 const METRIC_BATTERY_SOC: &str = "battery_soc_mae_absolute";
 const METRIC_EQUIPMENT_MODE_CYCLES: &str = "equipment_mode_cycle_count_relative_percent";
 
-/// Per-fixture tolerance override for metrics whose residual exceeds the
-/// short-window defaults. The step-0 ideal-capacity back-solve in
-/// `crates/hares-envelope/src/thermal_solver/stepping.rs:24-66` produces a
-/// larger initial demand than OCHRE for some envelopes, which dominates the
-/// 1-hour integrals and instantaneous peak for a handful of fixtures.
-/// Once that back-solve is aligned the overrides should drop back to the
-/// defaults defined in `tolerance.rs`.
+/// Per-fixture tolerance override for a metric whose residual exceeds the
+/// default band of `tolerance.rs` for a cause established with evidence.
+/// OCHRE is a comparison point, not a correctness oracle
+/// (tests/fixtures/parity/README.md); an override stands only on a
+/// measured cause, written beside it.
+///
+/// The comparison itself is fair first: both sides start each window from
+/// the same indoor temperature (each fixture's `[ochre]
+/// initial_temp_setpoint_c`, the generator's pin on OCHRE's unseeded
+/// draw), and HVAC energy counts each fuel once, from the end-use totals
+/// where a frame has them.
 fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
     match (fixture_id, metric) {
-        // cz2a_pv_ev: observed HVAC energy 46.67 % and total site 42.31 %
-        // over a single cooling cycle -- the step-0 ideal-capacity back-solve
-        // in `crates/hares-envelope/src/thermal_solver/stepping.rs:24-66`
-        // drives a higher initial demand than OCHRE, so the integrated
-        // 1-hour window diverges. Bands are sized to observed residual plus
-        // a 1 % margin (no headroom beyond evidence); once the back-solve is
-        // aligned they drop to the defaults in `tolerance.rs`.
-
-        // ── Accumulated-drift overrides (2026-09-11) ─────────────────────
-        //
-        // These fixtures were never exercised in CI: the reference parquets
-        // were swept up by the global `*.parquet` gitignore, so the corpus
-        // was silently incomplete and the suite vacuously passed. The first
-        // real run showed accumulated model drift vs the OCHRE *ballpark*
-        // references (see tests/fixtures/parity/README.md — OCHRE is a
-        // comparison point, not a correctness oracle; HARES deliberately
-        // targets better-than-OCHRE physics per ASHRAE HoF / E+ Eng. Ref.).
-        // Bands below are sized to the observed residual plus ~1% margin and
-        // exist to LOCK the drift (any worsening fails loudly) while the
-        // underlying conformance items are worked; they are not a judgement
-        // that the current residuals are physically correct. Root causes:
-        // zone-temp residuals → T-0075 envelope conformance; HVAC-energy
-        // residuals → step-0 ideal-capacity back-solve noted above.
-        ("cz2a_gas_furnace_ac_res_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.70),
-        ("cz2a_gas_furnace_ac_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(45.5),
-        // cz2a_pv_ev: step-0 ideal-capacity back-solve justification above;
-        // values re-sized to observed residual + ~1% on the first real run.
-        ("cz2a_pv_ev", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.91),
-        ("cz2a_pv_ev", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(208.0),
-        ("cz2a_pv_ev", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(48.2),
-        ("cz4a_ashp_hpwh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.93),
-        ("cz4a_ashp_hpwh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(168.5),
-        ("cz4a_ashp_hpwh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(30.7),
-        ("cz4a_battery_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.89),
-        ("cz4a_battery_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(111.2),
-        ("cz4a_pv_battery", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.86),
-        ("cz4a_pv_battery", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(102.1),
-        ("cz4a_pv_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.90),
-        ("cz4a_pv_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(157.5),
-        // Lighting-parity correction (2026-09-13): garage lighting is no
-        // longer created for garage-less buildings (OCHRE hpxml.py:1703-1709)
-        // and lighting schedules now honor HPXML extension fractions
-        // (OCHRE add_simple_schedule_params). Residuals re-measured and bands
-        // re-sized to observed + ~1%.
-        ("cz4a_pv_only", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(26.0),
-        ("cz5a_ev_only", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.89),
-        ("cz5a_ev_only", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(111.2),
-        // cz5a_ev_charging: the charging-EV fixture — same building as
-        // cz5a_ev_only, so the same inherited drift (zone-temp → T-0075
-        // envelope conformance; HVAC energy → the step-0 ideal-capacity
-        // back-solve), sized to observed residual + ~1% exactly like its
-        // sibling. The metric this fixture exists for — short-window total
-        // site energy, now dominated by the EV's 11.5 kW charge — passes at
-        // the 25% DEFAULT band (measured 1.36%): the EV charging power
-        // cross-check against OCHRE's event-driven charge needs no override.
-        ("cz5a_ev_charging", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.90),
-        ("cz5a_ev_charging", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(112.0),
-        // Lighting-parity correction (2026-09-13), see cz4a_pv_only note.
-        ("cz5a_minisplit_gas_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(1.75),
-        ("cz5a_minisplit_gas_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(64.9),
-        ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(92.5),
-        ("cz6b_pv_battery_ev", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.88),
-        ("cz6b_pv_battery_ev", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(102.1),
-        ("cz6b_resistance_res_wh", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.75),
-        // Lighting-parity correction (2026-09-13), see cz4a_pv_only note:
-        // removing phantom garage lighting shifts this January midnight
-        // window's small HVAC integral (step-0 back-solve dominated).
-        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(59.0),
+        // cz5a_minisplit_gas_wh: the peak's residual is the pinned-start
+        // recovery minute's maximum electric draw at the -19 C design
+        // temperature: HARES's heat pump draws 17.84 kW there and OCHRE's
+        // 14.81 kW, while the window's HVAC energies agree to 1.2 % (the
+        // fixture's orphan air distribution system is gone from both sides'
+        // inputs, so the old 33.6 % / 32.3 % residuals are closed at 1.2 %
+        // and 1.2 %, inside the default bands). Which side's maximum draw
+        // the reference tools support is not yet established; the defect
+        // ledger carries the open question.
+        ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(21.5),
+        // cz6b_resistance_res_wh: both models cycle the resistance element
+        // at its rating from the same pinned start, but the two envelope
+        // models put the same total capacitance in different places, the
+        // cycling phase differs, and the one-hour window ends mid-cycle:
+        // HARES delivers 22.06 % less HVAC energy and 20.89 % less total
+        // site than OCHRE over the window (24 on-minutes against 30, plus
+        // the blower power OCHRE's end-use column carries and HARES puts
+        // outside it). The indoor temperatures agree to 0.41 C, inside the
+        // 0.6 C band. Class (a): OCHRE's fitted RC network is its own
+        // simplification of the constructions HARES follows
+        // (DIVERGENCES D-012); the bands are the measured residuals plus
+        // margin.
+        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(23.1),
+        ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(21.9),
+        // resstock_bldg0112631_24h: a lock on a 24 h window that predates
+        // this triage, measured 25.4 %; its cause is not yet established;
+        // the defect ledger carries the open question.
         ("resstock_bldg0112631_24h", METRIC_PEAK_HVAC_POWER) => Some(25.7),
+        // resstock_bldg0112631_24h: the zone temperature band is re-sized to
+        // the observed residual plus margin. The fixture's
+        // SimulationControl/TemperatureCapacitanceMultiplier (1.0) is the
+        // pre-v1.11 element OS-HPXML v1.12 no longer reads, so the zone
+        // takes the default multiplier 7 (OCHRE applies 7 to every zone
+        // too), and the appliance, plug-load and lighting radiant split
+        // (D-005, D-006, D-007) enters with it: the residual moved 0.441 to
+        // 0.616 C. The attic's non-gable roofs take OS-HPXML's square hip.
+        ("resstock_bldg0112631_24h", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.63),
         _ => None,
     }
 }
@@ -131,6 +101,18 @@ struct FixtureConfig {
     /// deterministically in-window.
     #[serde(default)]
     ev: Option<EvFixturePolicy>,
+    /// The reference generator's pins on OCHRE (see
+    /// `tests/python/generate_parity_reference.py`).
+    #[serde(default)]
+    ochre: Option<OchrePins>,
+}
+
+/// The generator's pins on OCHRE. `initial_temp_setpoint_c` is the indoor
+/// temperature HARES starts the window from, to which OCHRE's unseeded
+/// starting draw is pinned; the harness checks both still hold it.
+#[derive(Debug, Deserialize, Default)]
+struct OchrePins {
+    initial_temp_setpoint_c: Option<f64>,
 }
 
 /// The per-fixture `[ev]` section: keys merged into the `"Electric
@@ -288,7 +270,7 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
             }
         };
         let equipment =
-            match resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None) {
+            match resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()) {
                 Ok(specs) => specs,
                 Err(err) => {
                     failures.push(format!(
@@ -349,13 +331,13 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
             ));
         }
 
-        if let Some(expected_conditioned) = expectations.conditioned_zone_count {
-            if conditioned != expected_conditioned {
-                failures.push(format!(
-                    "fixture={} conditioned zone count mismatch: expected={} actual={}",
-                    fixture_id, expected_conditioned, conditioned
-                ));
-            }
+        if let Some(expected_conditioned) = expectations.conditioned_zone_count
+            && conditioned != expected_conditioned
+        {
+            failures.push(format!(
+                "fixture={} conditioned zone count mismatch: expected={} actual={}",
+                fixture_id, expected_conditioned, conditioned
+            ));
         }
     }
 
@@ -457,14 +439,16 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     let config = parse_fixture_config(&config_contents)?;
 
     let mut sim_config = parse_simulation_config(&config_contents, &config)?;
-    let output_path = unique_temp_path(&fixture.id, "parquet");
+    let output_dir =
+        tempfile::tempdir().map_err(|err| format!("failed to create output directory: {err}"))?;
+    let output_path = output_dir.path().join(format!("{}.parquet", fixture.id));
     sim_config.output_format = hares_io::OutputFormat::Parquet;
     sim_config.output_path = Some(output_path.clone());
 
     let defaults_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
     let dwelling_config = DwellingConfig {
         hpxml_path: fixture.building_xml.clone(),
-        schedule_path: fixture.schedule_csv.clone(),
+        schedule_path: Some(fixture.schedule_csv.clone()),
         weather_path: fixture.weather_epw.clone(),
         sim_config,
         defaults_path: Some(defaults_path),
@@ -484,6 +468,29 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
         resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
+
+    // A pinned start must still be the temperature HARES starts from, or the
+    // reference no longer starts where HARES does.
+    let pinned_start_c = config
+        .ochre
+        .as_ref()
+        .and_then(|o| o.initial_temp_setpoint_c);
+    if let Some(pinned_c) = pinned_start_c {
+        let dwelling = hares_core::Dwelling::from_config(dwelling_config.clone())
+            .map_err(|err| format!("dwelling for the start check: {err}"))?;
+        let start_c = dwelling
+            .latest_env()
+            .zones
+            .first()
+            .map(|zone| zone.temperature_c)
+            .ok_or("the dwelling has no zone")?;
+        if (start_c - pinned_c).abs() > 1e-9 {
+            return Err(format!(
+                "HARES starts the window at {start_c} C, but the reference is pinned to \
+                 {pinned_c} C: re-pin [ochre] initial_temp_setpoint_c and regenerate the reference"
+            ));
+        }
+    }
 
     let engine = SimulationEngine::new();
     let outcome = engine
@@ -506,14 +513,38 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
             .unwrap_or(output_path.as_path()),
     )?;
     let reference_columns = read_parquet_columns(&fixture.reference_output_parquet)?;
+    if let Some(pinned_c) = pinned_start_c {
+        let reference_start_c = reference_columns
+            .get("Temperature - Indoor (C)")
+            .and_then(|series| series.first().copied())
+            .ok_or("the reference has no indoor temperature")?;
+        if (reference_start_c - pinned_c).abs() > 1e-9 {
+            return Err(format!(
+                "the reference starts at {reference_start_c} C, not the pinned {pinned_c} C: \
+                 regenerate it with tests/python/generate_parity_reference.py"
+            ));
+        }
+    }
 
     let checks = compare_metrics(&actual_columns, &reference_columns, &fixture.id);
+
+    // TEMP TRIAGE: keep the harness's HARES output for inspection.
+    if let Some(keep) = std::env::var_os("PARITY_KEEP_OUTPUT") {
+        let dst = Path::new(&keep).join(format!("hares-{}.parquet", fixture.id));
+        if let Some(src) = outcome
+            .timeseries_path
+            .as_deref()
+            .or(Some(output_path.as_path()))
+        {
+            let _ = fs::copy(src, &dst);
+            eprintln!("[parity] kept {}", dst.display());
+        }
+    }
+
     let skipped_metrics = expected_metrics()
         .into_iter()
         .filter(|metric| !checks.iter().any(|check| check.metric == *metric))
         .collect::<Vec<_>>();
-
-    let _ = fs::remove_file(output_path);
 
     Ok(FixtureRunResult {
         fixture_id: fixture.id.clone(),
@@ -784,26 +815,44 @@ fn annual_energy_for_prefixes(
     columns: &BTreeMap<String, Vec<f64>>,
     prefixes: &[&str],
 ) -> Option<f64> {
-    let mut total_kwh = 0.0;
-    let mut found = false;
+    /// kWh in a therm (ASHRAE HoF 2021 Ch. 38: 100 000 Btu).
+    const KWH_PER_THERM: f64 = 29.307_107;
 
     let is_hvac_query = prefixes.contains(&"heat pump");
-
-    for (name, series) in columns {
-        let lowered = name.to_ascii_lowercase();
-        let is_candidate = lowered.ends_with("electric power (kw)")
-            || lowered.ends_with("gas power (therms/hour)");
-        if !is_candidate {
-            continue;
-        }
-
-        let matched = if is_hvac_query {
-            matches_hvac_prefix(&lowered, prefixes)
-        } else {
-            prefixes.iter().any(|prefix| lowered.contains(prefix))
-        };
-        if matched {
-            total_kwh += integrate_kw_series(series);
+    let mut total_kwh = 0.0;
+    let mut found = false;
+    // Each fuel on its own, in its own unit: electric power in kW, gas in
+    // therms/hour converted to kW. A frame that reports a fuel's HVAC
+    // end-use totals ("HVAC Heating ...", "HVAC Cooling ...") also reports
+    // each HVAC unit's own columns of that fuel, which the totals already
+    // sum, so it counts the totals only, as OCHRE's frame, which has only the
+    // totals, does; a fuel with no total counts the unit columns.
+    let is_end_use_total =
+        |name: &str| name.starts_with("hvac heating ") || name.starts_with("hvac cooling ");
+    for (suffix, kw_per_column_unit) in [
+        ("electric power (kw)", 1.0),
+        ("gas power (therms/hour)", KWH_PER_THERM),
+    ] {
+        let matched: Vec<(String, &Vec<f64>)> = columns
+            .iter()
+            .filter_map(|(name, series)| {
+                let lowered = name.to_ascii_lowercase();
+                let matched = lowered.ends_with(suffix)
+                    && if is_hvac_query {
+                        matches_hvac_prefix(&lowered, prefixes)
+                    } else {
+                        prefixes.iter().any(|prefix| lowered.contains(prefix))
+                    };
+                matched.then_some((lowered, series))
+            })
+            .collect();
+        let has_end_use_totals =
+            is_hvac_query && matched.iter().any(|(name, _)| is_end_use_total(name));
+        for (name, series) in matched {
+            if has_end_use_totals && !is_end_use_total(&name) {
+                continue;
+            }
+            total_kwh += integrate_kw_series(series) * kw_per_column_unit;
             found = true;
         }
     }
@@ -880,16 +929,6 @@ fn integrate_kw_series(series: &[f64]) -> f64 {
     series.iter().sum::<f64>() * MINUTE_STEP_HOURS
 }
 
-fn unique_temp_path(fixture_id: &str, extension: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before unix epoch")
-        .as_nanos();
-    path.push(format!("hares-parity-{fixture_id}-{nanos}.{extension}"));
-    path
-}
-
 #[cfg(test)]
 mod hvac_prefix_matcher_tests {
     use super::{annual_energy_for_prefixes, matches_hvac_prefix};
@@ -947,6 +986,63 @@ mod hvac_prefix_matcher_tests {
         assert!(
             (hvac_total - expected).abs() < 1.0,
             "HVAC total {hvac_total} should equal {expected} (HPWH excluded)"
+        );
+    }
+
+    /// A frame with both a unit's own column and the HVAC end-use total that
+    /// sums it counts the energy once, from the total, as a frame with only
+    /// the total does.
+    #[test]
+    fn hvac_energy_counts_end_use_totals_once() {
+        let minutes = 60;
+        let mut both: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        both.insert(
+            "MSHP Heater Electric Power (kW)".to_string(),
+            vec![3.0; minutes],
+        );
+        both.insert(
+            "HVAC Heating End Use Electric Power (kW)".to_string(),
+            vec![3.0; minutes],
+        );
+        let mut totals_only: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        totals_only.insert(
+            "HVAC Heating Electric Power (kW)".to_string(),
+            vec![3.0; minutes],
+        );
+        let with_units = annual_energy_for_prefixes(&both, HVAC_PREFIXES).expect("total");
+        let reference = annual_energy_for_prefixes(&totals_only, HVAC_PREFIXES).expect("total");
+        assert!(
+            (with_units - reference).abs() < 1e-9 && (reference - 3.0).abs() < 1e-9,
+            "{with_units} kWh against {reference} kWh"
+        );
+
+        // A gas furnace: HARES reports the electric end-use total and the
+        // unit's gas, OCHRE the electric and gas totals. Each fuel counts
+        // once, gas in kWh.
+        let mut hares: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        hares.insert("Gas Furnace Electric Power (kW)".into(), vec![0.2; minutes]);
+        hares.insert(
+            "Gas Furnace Gas Power (therms/hour)".into(),
+            vec![1.0; minutes],
+        );
+        hares.insert(
+            "HVAC Heating End Use Electric Power (kW)".into(),
+            vec![0.2; minutes],
+        );
+        let mut ochre: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        ochre.insert(
+            "HVAC Heating Electric Power (kW)".into(),
+            vec![0.2; minutes],
+        );
+        ochre.insert(
+            "HVAC Heating Gas Power (therms/hour)".into(),
+            vec![1.0; minutes],
+        );
+        let hares_kwh = annual_energy_for_prefixes(&hares, HVAC_PREFIXES).expect("total");
+        let ochre_kwh = annual_energy_for_prefixes(&ochre, HVAC_PREFIXES).expect("total");
+        assert!(
+            (hares_kwh - ochre_kwh).abs() < 1e-9 && (ochre_kwh - (0.2 + 29.307_107)).abs() < 1e-6,
+            "{hares_kwh} kWh against {ochre_kwh} kWh"
         );
     }
 

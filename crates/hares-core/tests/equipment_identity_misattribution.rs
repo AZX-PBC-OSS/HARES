@@ -59,13 +59,14 @@ fn sim_config(
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: false,
         rotation: hares_io::RotationPolicy::None,
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
 
 fn dwelling_config(hpxml: &Path, sim: hares_core::SimulationConfig) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: hpxml.to_path_buf(),
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: project_root()
             .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         defaults_path: Some(project_root().join("defaults")),
@@ -320,6 +321,7 @@ fn malformed_equipment_id_rejection_names_the_received_value() {
         fuel_type: FuelType::Electric,
         parameters: serde_json::Map::new(),
         zip_params: None,
+        typed_overrides: serde_json::Map::new(),
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,
@@ -372,7 +374,7 @@ fn equipment_named_total_at_build_time_never_silences_the_aggregate_total() {
         hares_equipment::ConfigPayload::Typed {
             type_name: "Dehumidifier".to_string(),
             version: 1,
-            data: serde_json::json!({}),
+            data: serde_json::json!({"zone_id": 1}),
         },
     );
     blueprint
@@ -382,6 +384,7 @@ fn equipment_named_total_at_build_time_never_silences_the_aggregate_total() {
             fuel_type: FuelType::Electric,
             parameters: serde_json::Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(typed),
             system_id: None,
             related_hvac_idref: None,
@@ -397,8 +400,8 @@ fn equipment_named_total_at_build_time_never_silences_the_aggregate_total() {
             .equipment()
             .iter()
             .any(|eq| eq.descriptor().name == "Total"),
-        "precondition: the equipment named 'Total' must have assembled (a \
-         non-critical init failure would drop it and make this test vacuous)"
+        "precondition: the equipment named 'Total' must have assembled (an \
+         init failure would stop construction and make this test vacuous)"
     );
 
     dwelling.simulate().expect("2-day simulate");

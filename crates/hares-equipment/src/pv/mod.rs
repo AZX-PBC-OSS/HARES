@@ -17,9 +17,8 @@ mod lut;
 pub mod shading;
 pub mod soiling;
 
-use array_config::normalize_azimuth;
 pub use array_config::{ArrayType, ModuleType, PvArray, PvArraySpec, surface_id_for_orientation};
-pub use config::PvConfig;
+pub use config::{PvConfig, PvOrientation};
 use lut::{InterpolationMethod, PvLut};
 
 use std::borrow::Cow;
@@ -33,7 +32,8 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, InverterPriority, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, telemetry_keys as tk,
+    PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, Warning,
+    telemetry_keys as tk,
     zip::{ResolvedZip, ZipLoad},
 };
 use serde::{Deserialize, Serialize};
@@ -127,16 +127,10 @@ fn cell_temperature_noct_wind(
 
 /// Compute direct-path (non-LUT) DC and AC power for a single array.
 ///
-/// Used by the invariant check and observer histogram to compare LUT-path
-/// results against the equivalent direct computation. Only compiled when
-/// at least one of `test`, `debug_assertions`, `check_invariants`, or
-/// `observe` is active — in stripped release builds the function is dead.
-#[cfg(any(
-    test,
-    debug_assertions,
-    feature = "check_invariants",
-    feature = "observe"
-))]
+/// Used by the observer histogram to compare LUT-path results against the
+/// equivalent direct computation. Only compiled when at least one of `test`
+/// or `observe` is active: in stripped release builds the function is dead.
+#[cfg(any(test, feature = "observe"))]
 #[inline]
 fn compute_direct_power(
     array: &PvArray,
@@ -162,23 +156,15 @@ fn compute_direct_power(
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(
-    not(feature = "observe"),
-    allow(dead_code)
-    // Why: fields dc_power_kw_before_losses and lut_path_active are only read
-    // inside #[cfg(feature = "observe")] blocks in step(). Without the feature
-    // they are written but never read, triggering dead_code. Gating the fields
-    // themselves behind #[cfg(feature = "observe")] would require conditional
-    // construction at every call site (LUT path, non-LUT path, test helpers),
-    // which is more invasive than a single suppression.
-)]
 struct ArrayStepOutput {
     dc_power_kw: f64,
     ac_power_kw: f64,
     irradiance_w_m2: f64,
     cell_temp_c: f64,
     interp_method: Option<InterpolationMethod>,
+    #[cfg(any(test, feature = "observe"))]
     dc_power_kw_before_losses: f64,
+    #[cfg(any(test, feature = "observe"))]
     lut_path_active: bool,
 }
 
@@ -259,6 +245,8 @@ pub struct PV {
     soiling_state: Option<soiling::SoilingState>,
     shading_model: shading::ShadingModel,
     init_error: Option<HaresError>,
+    /// Warnings raised since the last drain (init-time LUT and loss checks).
+    warnings: Vec<Warning>,
 }
 
 impl PV {
@@ -346,6 +334,7 @@ impl PV {
             soiling_state: None,
             shading_model,
             init_error,
+            warnings: Vec::new(),
         }
     }
 
@@ -476,70 +465,6 @@ impl PV {
                 (dc_soiled, ac_power_kw)
             };
 
-            // T-0107 invariant check: warn when system_losses_fraction
-            // deviates from the PVWatts v5 default by more than
-            // 1 percentage point. The LUT embeds the SAM default losses;
-            // a large deviation may cause inconsistent results between
-            // LUT and non-LUT paths.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                let abs_diff = (self.system_losses_fraction - DEFAULT_SYSTEM_LOSSES_FRACTION).abs();
-                if abs_diff > 0.01 {
-                    // Why: gated behind check_invariants — using
-                    // tracing::warn! because this is a diagnostic, not
-                    // a correctness guarantee. The user may deliberately
-                    // configure a different loss value.
-                    tracing::warn!(
-                        system_losses_fraction = self.system_losses_fraction,
-                        pvwatts_default = DEFAULT_SYSTEM_LOSSES_FRACTION,
-                        abs_diff = abs_diff,
-                        "PV system_losses_fraction deviates from PVWatts v5 default \
-                         by >1pp. If the SAM LUT was generated with default losses, the \
-                         LUT and non-LUT paths may produce inconsistent results.",
-                    );
-                }
-            }
-
-            // Invariant check: in debug/invariant builds, compare LUT-path
-            // AC against the direct-path AC computed from the same array
-            // specification. This catches metadata-aware correction bugs.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                let (_, ac_direct) = compute_direct_power(
-                    array,
-                    irradiance_w_m2,
-                    ambient_temp_c,
-                    env.weather.wind_speed_m_s,
-                    self.effective_system_losses_fraction,
-                    self.inverter_efficiency,
-                );
-                let diff = if ac_direct > 0.0 {
-                    (ac_power_kw - ac_direct).abs() / ac_direct
-                } else if ac_power_kw > 0.0 {
-                    1.0
-                } else {
-                    0.0
-                };
-                // T-0086 requires 0.1% relative tolerance. SAM's PVWatts v8
-                // uses the same NOCT cell temperature model as HARES and the
-                // same DC = capacity*(POA/STC)*temp_derate formula, so the
-                // two paths should agree closely when SAM_inv_eff ≈ HARES_inv_eff
-                // and SAM_losses ≈ HARES_losses. The LUT transposition from
-                // GHI/DNI/DHI to POA may differ from the weather file's POA.
-                if diff >= 0.001 {
-                    // Why: this is gated behind check_invariants — using
-                    // tracing::error! instead of assert! because the feature
-                    // can be enabled in release builds and an invariant
-                    // diagnostic should not abort the simulation.
-                    tracing::error!(
-                        lut_ac_kw = ac_power_kw,
-                        direct_ac_kw = ac_direct,
-                        diff_ratio = diff,
-                        "PV LUT vs direct AC power mismatch {diff:.6} exceeds 0.1% threshold",
-                    );
-                }
-            }
-
             // Observer capture: record LUT vs direct AC power ratio.
             #[cfg(feature = "observe")]
             {
@@ -585,15 +510,15 @@ impl PV {
             // rather than in dc_no_losses so the before-losses value is
             // comparable with the non-LUT path (where irradiance already
             // includes soiling).
-            let dc_before_losses = dc_soiled;
-
             return ArrayStepOutput {
                 dc_power_kw,
                 ac_power_kw,
                 irradiance_w_m2,
                 cell_temp_c,
                 interp_method: Some(interp_method),
-                dc_power_kw_before_losses: dc_before_losses,
+                #[cfg(any(test, feature = "observe"))]
+                dc_power_kw_before_losses: dc_soiled,
+                #[cfg(any(test, feature = "observe"))]
                 lut_path_active: true,
             };
         }
@@ -619,7 +544,9 @@ impl PV {
             irradiance_w_m2,
             cell_temp_c,
             interp_method: None,
+            #[cfg(any(test, feature = "observe"))]
             dc_power_kw_before_losses: dc_before_losses,
+            #[cfg(any(test, feature = "observe"))]
             lut_path_active: false,
         }
     }
@@ -715,87 +642,62 @@ impl PV {
         let c = config.require_typed::<PvConfig>("PV")?;
         c.validate()?;
 
-        // Determine which path to use: multi-array or single-array.
-        if let Some(ref array_specs) = c.arrays {
-            // Multi-array path: create one PvArray per PvArraySpec.
-            let base = PvArray::default();
-            self.arrays = array_specs
-                .iter()
-                .map(|spec| {
-                    let tilt_deg = spec.tilt_deg.unwrap_or(base.tilt_deg);
-                    let azimuth_deg =
-                        normalize_azimuth(spec.azimuth_deg.unwrap_or(base.azimuth_deg));
-                    let module_type = spec
-                        .module_type
-                        .as_deref()
-                        .map(ModuleType::from_str)
-                        .transpose()?
-                        .unwrap_or(base.module_type);
-                    let array_type = spec
-                        .array_type
-                        .as_deref()
-                        .map(ArrayType::from_str)
-                        .transpose()?
-                        .unwrap_or(base.array_type);
-                    let noct_c = spec.noct_c.unwrap_or(array_type.noct_c());
-                    let array = PvArray {
-                        tilt_deg,
-                        azimuth_deg,
-                        capacity_kw: spec.capacity_kw,
-                        noct_c,
-                        module_type,
-                        array_type,
-                        surface_id: None,
-                        sam_lut_path: spec.sam_lut_path.clone(),
-                        attached_boundary_id: spec.attached_boundary_id,
-                    };
-                    array.validate()?;
-                    Ok(array)
-                })
-                .collect::<crate::Result<Vec<_>>>()?;
-        } else {
-            // Single-array path: existing behaviour, backward-compatible.
-            let base = PvArray::default();
-            let tilt_deg = c.tilt_deg.unwrap_or(base.tilt_deg);
-            let azimuth_deg = normalize_azimuth(c.azimuth_deg.unwrap_or(base.azimuth_deg));
-            let module_type = c
-                .module_type
-                .as_deref()
-                .map(ModuleType::from_str)
-                .transpose()?
-                .unwrap_or(base.module_type);
-            let array_type = c
-                .array_type
-                .as_deref()
-                .map(ArrayType::from_str)
-                .transpose()?
-                .unwrap_or(base.array_type);
-            let noct_c = c.noct_c.unwrap_or(array_type.noct_c());
-
-            let array = PvArray {
-                tilt_deg,
-                azimuth_deg,
-                capacity_kw: c.capacity_kw,
-                noct_c,
-                module_type,
-                array_type,
-                surface_id: None,
-                sam_lut_path: c.sam_lut_path.clone(),
-                attached_boundary_id: None,
-            };
-            array.validate()?;
-
-            self.arrays = vec![array];
-        }
-
-        self.surface_resolution_deg = c
-            .surface_resolution_deg
-            .unwrap_or(DEFAULT_SURFACE_RESOLUTION_DEG);
+        self.surface_resolution_deg = c.surface_resolution_deg();
         if !self.surface_resolution_deg.is_finite() || self.surface_resolution_deg <= 0.0 {
             return Err(HaresError::Equipment(
                 "PV surface_resolution_deg must be finite and > 0".to_string(),
             ));
         }
+        let orientations = c.array_orientations(&self.descriptor.name)?;
+        let single_array;
+        let array_specs = match &c.arrays {
+            Some(specs) => specs.as_slice(),
+            None => {
+                single_array = [PvArraySpec {
+                    capacity_kw: c.capacity_kw,
+                    tilt_deg: c.tilt_deg,
+                    azimuth_deg: c.azimuth_deg,
+                    module_type: c.module_type.clone(),
+                    noct_c: c.noct_c,
+                    array_type: c.array_type.clone(),
+                    sam_lut_path: c.sam_lut_path.clone(),
+                    attached_boundary_id: None,
+                }];
+                &single_array[..]
+            }
+        };
+        self.arrays = array_specs
+            .iter()
+            .zip(&orientations)
+            .map(|(spec, orientation)| {
+                // OS-HPXML defaults.rb apply_pv_systems: module type Standard.
+                let module_type = spec
+                    .module_type
+                    .as_deref()
+                    .map(ModuleType::from_str)
+                    .transpose()?
+                    .unwrap_or(ModuleType::Standard);
+                let array_type = spec
+                    .array_type
+                    .as_deref()
+                    .map(ArrayType::from_str)
+                    .transpose()?
+                    .unwrap_or(ArrayType::OpenRack);
+                let array = PvArray {
+                    tilt_deg: orientation.tilt_deg,
+                    azimuth_deg: orientation.azimuth_deg,
+                    capacity_kw: spec.capacity_kw,
+                    noct_c: spec.noct_c.unwrap_or(array_type.noct_c()),
+                    module_type,
+                    array_type,
+                    surface_id: Some(orientation.surface_id),
+                    sam_lut_path: spec.sam_lut_path.clone(),
+                    attached_boundary_id: spec.attached_boundary_id,
+                };
+                array.validate()?;
+                Ok(array)
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
 
         self.inverter_efficiency = c
             .inverter_efficiency
@@ -815,15 +717,27 @@ impl PV {
         self.system_losses_fraction = c
             .system_losses_fraction
             .unwrap_or(DEFAULT_SYSTEM_LOSSES_FRACTION);
+        // Diagnostic, once at init: the LUT embeds the SAM default
+        // losses, so a configured loss value far from the PVWatts v5 default
+        // may produce inconsistent results between the LUT and non-LUT paths.
+        // The user may deliberately configure a different loss value.
+        let abs_diff = (self.system_losses_fraction - DEFAULT_SYSTEM_LOSSES_FRACTION).abs();
+        if abs_diff > 0.01 {
+            self.warnings.push(Warning::new(
+                self.descriptor.name.as_str(),
+                format!(
+                    "PV system_losses_fraction ({}) deviates from the PVWatts v5 \
+                     default ({DEFAULT_SYSTEM_LOSSES_FRACTION}) by >1pp. If the SAM \
+                     LUT was generated with default losses, the LUT and non-LUT \
+                     paths may produce inconsistent results.",
+                    self.system_losses_fraction
+                ),
+            ));
+        }
 
         self.luts_by_surface.clear();
-        for array in &mut self.arrays {
-            let surface_id = surface_id_for_orientation(
-                array.tilt_deg,
-                array.azimuth_deg,
-                self.surface_resolution_deg,
-            )?;
-            array.surface_id = Some(surface_id);
+        for (array, orientation) in self.arrays.iter().zip(&orientations) {
+            let surface_id = orientation.surface_id;
             let Some(_entry) = env
                 .weather
                 .solar_irradiance
@@ -837,10 +751,8 @@ impl PV {
             };
             if let Some(path) = array.sam_lut_path.as_deref() {
                 let lut = PvLut::from_path(Path::new(path))?;
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                check_lut_location(&lut, path);
-                #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-                let _ = path;
+                let source = self.descriptor.name.clone();
+                check_lut_location(&lut, path, &mut self.warnings, &source);
 
                 // T-0086: warn once at load time if the LUT lacks SAM's
                 // internal inverter efficiency and system losses metadata.
@@ -886,7 +798,7 @@ impl PV {
         }
 
         // Invariant check: arrays must exist and have positive capacity.
-        self.check_invariants()?;
+        self.check_arrays()?;
 
         // Resolve inverter capacity default.
         // OCHRE PV.py:122 defaults inverter_capacity to capacity (1:1 DC/AC
@@ -972,7 +884,9 @@ impl PV {
         };
 
         // T-0423 invariant: soiling_config and soiling_state must agree.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Debug-build staging check: init_typed() constructs SoilingState
+        // from the config above.
+        #[cfg(debug_assertions)]
         {
             if self.soiling_config.is_some() && self.soiling_state.is_none() {
                 panic!(
@@ -1006,11 +920,8 @@ impl PV {
     /// Validate that the PV model is in a consistent state.
     ///
     /// Checks that at least one array exists and every array has positive
-    /// capacity. Gated behind `cfg(any(debug_assertions, feature =
-    /// "check_invariants"))` so it compiles to nothing in production release
-    /// builds without the feature flag.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn check_invariants(&self) -> crate::Result<()> {
+    /// capacity. Runs in every build profile at init.
+    fn check_arrays(&self) -> crate::Result<()> {
         if self.arrays.is_empty() {
             return Err(HaresError::InvariantViolation {
                 check_name: "pv_has_arrays".to_string(),
@@ -1023,37 +934,24 @@ impl PV {
         }
         Ok(())
     }
-
-    /// Stub for unchecked builds — the body is eliminated by the compiler.
-    #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-    fn check_invariants(&self) -> crate::Result<()> {
-        Ok(())
-    }
 }
 
 /// Validate LUT location metadata on load.
 ///
-/// Gated behind `debug_assertions` or `feature = "check_invariants"` so the
-/// check compiles to nothing in production release builds. Logs the embedded
-/// latitude/longitude; warns if metadata is absent (both ≈ 0.0) since that
-/// indicates a pre-T-0085 LUT that was regenerated without location metadata.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn check_lut_location(lut: &PvLut, path: &str) {
+/// Pushes a warning when the embedded latitude/longitude are absent (both
+/// ≈ 0.0): that indicates a LUT generated without location metadata. Runs in
+/// every build profile.
+fn check_lut_location(lut: &PvLut, path: &str, warnings: &mut Vec<Warning>, source: &str) {
     let lut_lat = lut.latitude_deg();
     let lut_lon = lut.longitude_deg();
     if lut_lat.abs() < 1e-9 && lut_lon.abs() < 1e-9 {
-        tracing::warn!(
-            lut_path = %path,
-            "PV LUT missing location metadata (lat/lon ≈ 0.0); \
-             re-generate with updated sam_pv.py adapter",
-        );
-    } else {
-        tracing::info!(
-            lut_path = %path,
-            lut_latitude_deg = lut_lat,
-            lut_longitude_deg = lut_lon,
-            "PV LUT loaded with location metadata",
-        );
+        warnings.push(Warning::new(
+            source,
+            format!(
+                "PV LUT at '{path}' is missing location metadata (lat/lon ≈ 0.0); \
+                 re-generate with updated sam_pv.py adapter"
+            ),
+        ));
     }
 }
 
@@ -1071,7 +969,12 @@ impl Equipment for PV {
         if let Some(e) = self.init_error.take() {
             return Err(e);
         }
+        self.warnings.clear();
         self.init_typed(config, env)
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
@@ -1117,32 +1020,16 @@ impl Equipment for PV {
         );
 
         // T-0108 invariant: when soiling is active, verify the soiling ratio
-        // is plausible and that combined soiling (dynamic + any residual static)
-        // does not exceed 35%, which would indicate a likely misconfiguration.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !(0.0..=1.0).contains(&soiling_ratio) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "pv_soiling_ratio_bounds".to_string(),
-                    value: soiling_ratio,
-                    tolerance: 0.0,
-                });
-            }
-            let static_soiling_in_losses = if self.soiling_config.is_some() {
-                0.0 // removed by reconciliation
-            } else {
-                PVWATTS_SOILING_COMPONENT
-            };
-            let combined = soiling_ratio * (1.0 - static_soiling_in_losses);
-            if combined < 0.65 {
-                tracing::warn!(
-                    soiling_ratio = soiling_ratio,
-                    static_soiling_removed = self.soiling_config.is_some(),
-                    combined = combined,
-                    "PV combined soiling exceeds 35% (>{:.2}); check soiling config and loss parameters",
-                    1.0 - combined,
-                );
-            }
+        // is plausible (in [0, 1], a typed error in every build). Combined
+        // soiling above 35% is legitimate (heavy soiling configs), so the
+        // former warn on it is deleted: the ratio is published in
+        // `SOILING_RATIO` telemetry.
+        if !(0.0..=1.0).contains(&soiling_ratio) {
+            return Err(HaresError::InvariantViolation {
+                check_name: "pv_soiling_ratio_bounds".to_string(),
+                value: soiling_ratio,
+                tolerance: 0.0,
+            });
         }
 
         let mut total_dc_power_kw = 0.0;
@@ -1261,7 +1148,8 @@ impl Equipment for PV {
         // ReactiveSetpoint), then reactive_power_kvar must be 0.0 and no PF
         // override may have occurred. This guards against the original bug
         // where q_setpoint_kvar = 0.0 was indistinguishable from "unset".
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Debug-build control-logic check.
+        #[cfg(debug_assertions)]
         {
             // q_setpoint_source == 1 is ReactiveSetpoint.
             if self.q_setpoint_active
@@ -1676,6 +1564,10 @@ fn telemetry_fields() -> Vec<TelemetryField> {
 }
 
 #[cfg(test)]
+#[path = "../../../../tests/support/temp_file.rs"]
+mod temp_file;
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1717,6 +1609,7 @@ mod tests {
         wind_speed_m_s: f64,
     ) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -1742,7 +1635,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1796,22 +1690,8 @@ mod tests {
         assert!((a - b).abs() < 1e-9, "left={a}, right={b}");
     }
 
-    fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
-        // See hares-core/tests/engine.rs: pid + monotonic counter + nanos for
-        // uniqueness by construction (the pid alone does not separate threads
-        // allocating within the same nanosecond).
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "{prefix}_{}_{}_{seq}.{ext}",
-            std::process::id(),
-            nanos
-        ))
+    fn temp_lut_path(prefix: &str, ext: &str) -> (tempfile::TempDir, PathBuf) {
+        super::temp_file::temp_file(&format!("{prefix}.{ext}"))
     }
 
     fn write_pv_lut_csv(path: &Path, ac_power_kw: f64) {
@@ -1927,6 +1807,31 @@ mod tests {
         let env = env_with_surfaces(vec![], 25.0);
         let err = pv.init(&config_single(), &env).unwrap_err();
         assert!(err.to_string().contains("no matching SurfaceIrradiance"));
+    }
+
+    /// Before, a missing tilt silently became 30°.
+    #[test]
+    fn init_without_a_tilt_is_a_missing_input() {
+        let mut cfg = base_pv_typed_config();
+        cfg.tilt_deg = None;
+        let config =
+            EquipmentConfig::from_typed("PV South".to_string(), "PV".to_string(), cfg).unwrap();
+        let mut pv = PV::new(config.clone());
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        assert!(matches!(
+            pv.init(&config, &env).unwrap_err(),
+            hares_types::HaresError::MissingInput { ref field, .. } if field == "tilt_deg"
+        ));
     }
 
     #[test]
@@ -2889,7 +2794,7 @@ mod tests {
         );
         env.weather.solar_altitude_deg = 60.0;
         env.weather.solar_azimuth_deg = 180.0;
-        let path = unique_temp_path("pv_lut", "csv");
+        let (_dir, path) = temp_lut_path("pv_lut", "csv");
         write_pv_lut_csv(&path, 2.75);
 
         let mut typed = base_pv_typed_config();
@@ -2920,7 +2825,7 @@ mod tests {
         );
         env.weather.solar_altitude_deg = 60.0;
         env.weather.solar_azimuth_deg = 180.0;
-        let path = unique_temp_path("pv_lut", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut", "parquet");
         write_pv_lut_parquet(&path, 3.10);
 
         let mut typed = base_pv_typed_config();
@@ -3124,7 +3029,7 @@ mod tests {
         // the telemetry method is set to 1.0 and the fallback count
         // increments.
 
-        let path = unique_temp_path("pv_lut_nn_telemetry", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_nn_telemetry", "parquet");
         // Write a sparse Parquet LUT with only 2 entries in a 6-element grid.
         let schema = Arc::new(Schema::new(vec![
             Field::new("solar_zenith_deg", DataType::Float64, false),
@@ -4152,7 +4057,7 @@ mod tests {
     /// lat=lon=0.0, which the invariant check emits a warning for.
     #[test]
     fn lut_csv_defaults_location_to_zero() {
-        let path = unique_temp_path("pv_lut_no_meta", "csv");
+        let (_dir, path) = temp_lut_path("pv_lut_no_meta", "csv");
         write_pv_lut_csv(&path, 2.5);
         let lut = PvLut::from_path(&path).expect("load csv lut");
         approx_eq(lut.latitude_deg(), 0.0);
@@ -4172,7 +4077,7 @@ mod tests {
         // so AC power = 0.0. Use a single entry for simplicity.
         // The correction math: AC_corrected = AC_lut / inv_eff / (1-losses) * (1-losses) * inv_eff
         // When SAM and HARES values match, this simplifies to AC_lut.
-        let path = unique_temp_path("pv_lut_t0086_match", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0086_match", "parquet");
         let lut_ac = 3.80;
         write_pv_lut_parquet_with_meta(&path, lut_ac, 0.96, 0.14);
 
@@ -4220,7 +4125,7 @@ mod tests {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
 
         let lu_ac = 3.80;
-        let path = unique_temp_path("pv_lut_t0086_diff", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0086_diff", "parquet");
         write_pv_lut_parquet_with_meta(&path, lu_ac, 0.96, 0.14);
 
         let mut typed = base_pv_typed_config();
@@ -4266,7 +4171,7 @@ mod tests {
     fn legacy_lut_no_metadata_falls_back_to_old_behavior() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
 
-        let path = unique_temp_path("pv_lut_t0086_legacy", "csv");
+        let (_dir, path) = temp_lut_path("pv_lut_t0086_legacy", "csv");
         write_pv_lut_csv(&path, 2.75);
 
         let mut typed = base_pv_typed_config();
@@ -4305,7 +4210,7 @@ mod tests {
     /// Parquet file written with SAM configuration embedded.
     #[test]
     fn lut_parquet_reads_sam_metadata() {
-        let path = unique_temp_path("pv_lut_t0086_read_meta", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0086_read_meta", "parquet");
         write_pv_lut_parquet_with_meta(&path, 2.5, 0.92, 0.12);
         let lut = PvLut::from_path(&path).expect("load lut");
         approx_eq(lut.sam_inv_eff(), 0.92);
@@ -4316,7 +4221,7 @@ mod tests {
     /// metadata support in CSV format).
     #[test]
     fn lut_csv_defaults_sam_metadata_to_zero() {
-        let path = unique_temp_path("pv_lut_t0086_csv", "csv");
+        let (_dir, path) = temp_lut_path("pv_lut_t0086_csv", "csv");
         write_pv_lut_csv(&path, 1.0);
         let lut = PvLut::from_path(&path).expect("load csv lut");
         approx_eq(lut.sam_inv_eff(), 0.0);
@@ -4530,7 +4435,7 @@ mod tests {
         env.weather.solar_azimuth_deg = 180.0;
         env.weather.wind_speed_m_s = 1.0;
 
-        let path = unique_temp_path("pv_lut", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut", "parquet");
         write_pv_lut_parquet_with_array_type(&path, 3.0, 0.96, 0.14, 1);
 
         let mut cfg = base_pv_typed_config();
@@ -4656,7 +4561,7 @@ mod tests {
 
         // LUT AC output at the matching coordinates: set to expected_ac so
         // the LUT correction is identity.
-        let path = unique_temp_path("pv_lut_t0107_parity", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0107_parity", "parquet");
         write_pv_lut_parquet_with_meta(&path, expected_ac, sam_inv_eff, sam_losses);
 
         // Non-LUT PV: no LUT path, confirms baseline.
@@ -4771,7 +4676,7 @@ mod tests {
         // HARES DC = dc_true * (1 - hares_losses) = dc_no_losses * (1 - 0.05)
         // This should exactly match the non-LUT path.
 
-        let path = unique_temp_path("pv_lut_t0107_custom", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0107_custom", "parquet");
         write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
 
         // LUT PV.
@@ -4861,7 +4766,7 @@ mod tests {
         let sam_losses = DEFAULT_SYSTEM_LOSSES_FRACTION;
         let sam_inv_eff = DEFAULT_INVERTER_EFFICIENCY;
         let ac_lut = expected_dc_no_losses * (1.0 - sam_losses) * sam_inv_eff;
-        let path = unique_temp_path("pv_lut_before_losses", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_before_losses", "parquet");
         write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
 
         let mut cfg_lut = base_pv_typed_config();
@@ -5098,7 +5003,7 @@ mod tests {
         // SAM would produce AC = dc_no_losses * (1 - sam_losses) * sam_inv_eff
         let ac_lut = dc_no_losses_expected * (1.0 - sam_losses) * sam_inv_eff;
 
-        let path = unique_temp_path("pv_lut_t0422_soiling_dc", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0422_soiling_dc", "parquet");
         write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
 
         let mut cfg = base_pv_typed_config();
@@ -5258,7 +5163,7 @@ mod tests {
         let derate_soiled = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell_soiled - 25.0);
         let target_dc_no_losses = capacity_kw * (1000.0 / 1000.0) * derate_soiled;
         let ac_lut = target_dc_no_losses * (1.0 - sam_losses) * sam_inv_eff;
-        let path = unique_temp_path("pv_lut_t0422_parity", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0422_parity", "parquet");
         write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
 
         let mut cfg_lut = base_pv_typed_config();
@@ -5340,7 +5245,7 @@ mod tests {
         let hares_inv_eff = 0.97;
         let hares_losses = 0.14;
 
-        let path = unique_temp_path("pv_lut_t0556_nondefault", "parquet");
+        let (_dir, path) = temp_lut_path("pv_lut_t0556_nondefault", "parquet");
         write_pv_lut_parquet_with_meta(&path, lut_ac, sam_inv_eff, sam_losses);
 
         let mut typed = base_pv_typed_config();

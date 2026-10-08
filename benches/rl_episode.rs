@@ -1,39 +1,27 @@
 mod common;
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::hint::black_box;
+use std::path::Path;
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hares_core::Dwelling;
+use hares_types::alloc_count::{CountingAllocator, thread_allocations};
 use rayon::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Allocation tracking
 // ---------------------------------------------------------------------------
-// Benchmarks instrument allocations via a global allocator wrapper.
-// Snapshot before / after each iter_custom measurement to compute
-// per-episode allocation counts reported alongside wall-clock timing.
+// The bench installs the workspace's shared per-thread counting allocator.
+// The parallel groups time uncounted; per-episode allocation counts come
+// from the sequential counting pass in `bench_episode_vec`, which runs on
+// the bench thread outside the timed loop and says so in its label.
 
 #[global_allocator]
-static GLOBAL: TrackingAllocator = TrackingAllocator;
-
-static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
-
-struct TrackingAllocator;
-
-unsafe impl GlobalAlloc for TrackingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
+static GLOBAL: CountingAllocator = CountingAllocator;
 
 fn alloc_snapshot() -> u64 {
-    ALLOC_COUNT.load(Ordering::Relaxed)
+    thread_allocations().expect("the bench installs the counting allocator")
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +78,6 @@ duration_s = {duration_s}
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.0
@@ -119,8 +106,8 @@ write_output = false
     )
 }
 
-fn make_dwelling(duration_s: i64, time_res_s: i64) -> Dwelling {
-    let path = common::unique_temp_path("hares-bench-rl-episode", "toml");
+fn make_dwelling(dir: &Path, duration_s: i64, time_res_s: i64) -> Dwelling {
+    let path = common::numbered_path(dir, "hares-bench-rl-episode", "toml");
     std::fs::write(&path, synthetic_toml(duration_s, time_res_s)).expect("write TOML");
     Dwelling::from_toml_config_with_write_output(&path, Some(false)).expect("create dwelling")
 }
@@ -130,15 +117,17 @@ fn make_dwelling(duration_s: i64, time_res_s: i64) -> Dwelling {
 // ---------------------------------------------------------------------------
 
 fn bench_rl_episode(c: &mut Criterion) {
-    bench_reset(c);
-    bench_observation_vec(c);
-    bench_episode_single(c);
-    bench_episode_vec(c);
-    bench_batch_step(c);
+    let temp = tempfile::tempdir().expect("benchmark directory");
+    let dir = temp.path();
+    bench_reset(c, dir);
+    bench_observation_vec(c, dir);
+    bench_episode_single(c, dir);
+    bench_episode_vec(c, dir);
+    bench_batch_step(c, dir);
 }
 
 /// Benchmark: Dwelling construction (the "reset" path).
-fn bench_reset(c: &mut Criterion) {
+fn bench_reset(c: &mut Criterion, dir: &Path) {
     let mut group = c.benchmark_group("rl_episode/reset");
     group.sample_size(30);
     group.warm_up_time(Duration::from_secs(1));
@@ -146,7 +135,7 @@ fn bench_reset(c: &mut Criterion) {
 
     group.bench_function("from_toml_config", |b| {
         b.iter_batched(
-            || common::unique_temp_path("hares-bench-rl-reset", "toml"),
+            || common::numbered_path(dir, "hares-bench-rl-reset", "toml"),
             |path| {
                 std::fs::write(&path, synthetic_toml(86_400, 60)).expect("write TOML");
                 black_box(
@@ -162,16 +151,16 @@ fn bench_reset(c: &mut Criterion) {
 }
 
 /// Benchmark: `to_observation_vec` with narrow (5) and wide (55) field sets.
-fn bench_observation_vec(c: &mut Criterion) {
+fn bench_observation_vec(c: &mut Criterion, dir: &Path) {
     let mut group = c.benchmark_group("rl_episode/observation_vec");
     group.sample_size(40);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(2));
     group.throughput(Throughput::Elements(1));
 
-    let mut dwelling = make_dwelling(86_400, 60);
+    let mut dwelling = make_dwelling(dir, 86_400, 60);
     dwelling.step().expect("step");
-    let telemetry = dwelling.telemetry();
+    let telemetry = dwelling.telemetry().unwrap();
 
     group.bench_function("narrow_5_fields", |b| {
         b.iter(|| black_box(telemetry.to_observation_vec(NARROW_FIELDS).expect("obs")));
@@ -190,7 +179,7 @@ fn bench_observation_vec(c: &mut Criterion) {
 /// Each episode: create dwelling → step N times (with telemetry + observation
 /// after each step).  Measured at 96 steps (1 day / 15-min) and 8 760 steps
 /// (1 year / 1-hour).
-fn bench_episode_single(c: &mut Criterion) {
+fn bench_episode_single(c: &mut Criterion, dir: &Path) {
     let mut group = c.benchmark_group("rl_episode/episode_single");
     group.throughput(Throughput::Elements(1));
 
@@ -221,10 +210,10 @@ fn bench_episode_single(c: &mut Criterion) {
                 let before_alloc = alloc_snapshot();
                 let start = std::time::Instant::now();
                 for _ in 0..iters {
-                    let mut dwelling = make_dwelling(duration_s, time_res_s);
+                    let mut dwelling = make_dwelling(dir, duration_s, time_res_s);
                     for _ in 0..num_steps {
                         dwelling.step().expect("step");
-                        let t = dwelling.telemetry();
+                        let t = dwelling.telemetry().unwrap();
                         black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
                     }
                 }
@@ -252,7 +241,7 @@ fn bench_episode_single(c: &mut Criterion) {
 /// (not per-step). This measures episode-end observation overhead rather than
 /// per-step observation cost. Contrast with `bench_episode_single` where observation
 /// is collected at every step. Both are valid measurements for different RL workflows.
-fn bench_episode_vec(c: &mut Criterion) {
+fn bench_episode_vec(c: &mut Criterion, dir: &Path) {
     let mut group = c.benchmark_group("rl_episode/episode_vec");
 
     let configs: &[(usize, i64, i64, &str)] = &[
@@ -271,21 +260,45 @@ fn bench_episode_vec(c: &mut Criterion) {
         group.warm_up_time(Duration::from_secs(if is_large { 10 } else { 3 }));
         group.measurement_time(Duration::from_secs(if is_large { 30 } else { 10 }));
 
+        // Per-thread counting cannot see allocations on rayon worker
+        // threads, so the allocations-per-episode figure comes from a
+        // separate counting pass that steps the same dwellings sequentially
+        // with `iter_mut()` on the bench thread, outside the timed loop.
+        // The timed loop below stays parallel and uncounted.
+        let num_steps: usize = if duration_s == 86_400 {
+            EPISODE_96
+        } else {
+            EPISODE_8760
+        };
+        let allocs_per_episode = {
+            let before_alloc = alloc_snapshot();
+            let mut dwellings: Vec<Dwelling> = (0..num_dwellings)
+                .map(|_| make_dwelling(dir, duration_s, time_res_s))
+                .collect();
+            for _ in 0..num_steps {
+                dwellings.iter_mut().for_each(|dwelling| {
+                    dwelling.step().expect("step");
+                });
+            }
+            for dwelling in &dwellings {
+                let t = dwelling.telemetry().unwrap();
+                black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
+            }
+            alloc_snapshot().saturating_sub(before_alloc)
+        };
+        eprintln!(
+            "rl_episode/episode_vec/{label}: ~{allocs_per_episode} allocs/episode (counted on the sequential pass outside the timed loop)"
+        );
+
         group.bench_with_input(
             BenchmarkId::new("full_episode", label),
             &label,
             |b, _label| {
                 b.iter_custom(|iters| {
-                    let before_alloc = alloc_snapshot();
                     let start = std::time::Instant::now();
-                    let num_steps: usize = if duration_s == 86_400 {
-                        EPISODE_96
-                    } else {
-                        EPISODE_8760
-                    };
                     for _ in 0..iters {
                         let mut dwellings: Vec<Dwelling> = (0..num_dwellings)
-                            .map(|_| make_dwelling(duration_s, time_res_s))
+                            .map(|_| make_dwelling(dir, duration_s, time_res_s))
                             .collect();
                         for _ in 0..num_steps {
                             dwellings.par_iter_mut().for_each(|dwelling| {
@@ -293,17 +306,11 @@ fn bench_episode_vec(c: &mut Criterion) {
                             });
                         }
                         for dwelling in &dwellings {
-                            let t = dwelling.telemetry();
+                            let t = dwelling.telemetry().unwrap();
                             black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
                         }
                     }
-                    let elapsed = start.elapsed();
-                    let after_alloc = alloc_snapshot();
-                    let allocs_per_episode = (after_alloc.saturating_sub(before_alloc)) / iters;
-                    eprintln!(
-                        "rl_episode/episode_vec/{label}: ~{allocs_per_episode} allocs/episode"
-                    );
-                    elapsed
+                    start.elapsed()
                 });
             },
         );
@@ -317,7 +324,7 @@ fn bench_episode_vec(c: &mut Criterion) {
 /// Mirrors what Python `batch_step_py()` does: each dwelling is stepped and its
 /// observation vector collected in one parallel pass.  Benchmarked for 16, 64,
 /// and 256 dwellings at a single timestep to isolate the batching overhead.
-fn bench_batch_step(c: &mut Criterion) {
+fn bench_batch_step(c: &mut Criterion, dir: &Path) {
     let mut group = c.benchmark_group("rl_episode/batch_step");
 
     let time_res_s = 900;
@@ -336,13 +343,13 @@ fn bench_batch_step(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         (0..num_dwellings)
-                            .map(|_| make_dwelling(duration_s, time_res_s))
+                            .map(|_| make_dwelling(dir, duration_s, time_res_s))
                             .collect::<Vec<_>>()
                     },
                     |mut dwellings| {
                         dwellings.par_iter_mut().for_each(|dwelling| {
                             black_box(dwelling.step().expect("step"));
-                            let t = dwelling.telemetry();
+                            let t = dwelling.telemetry().unwrap();
                             black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
                         });
                     },

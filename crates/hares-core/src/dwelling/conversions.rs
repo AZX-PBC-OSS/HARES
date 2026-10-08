@@ -10,7 +10,6 @@ use hares_envelope::longwave_radiation::{
 };
 use hares_envelope::{BoundaryInput, ExteriorTarget, LayerInput, ZoneInput};
 use hares_equipment::{ConfigPayload, EquipmentConfig, config::ConfigValue};
-use hares_io::hpxml::ZoneType;
 use hares_io::{Building, DefaultsStore, SimulationConfig};
 use hares_types::{DomainUpdate, EnvironmentState, ExecutionStage, HaresError, ZoneId};
 use serde_json::{Map, Value};
@@ -19,80 +18,21 @@ use super::{DwellingConfig, Result};
 
 const DEFAULT_R_M2_K_W: f64 = hares_envelope::boundary_rc::DEFAULT_R_M2_K_W;
 
-/// Interior mass multiplier by zone type.
-///
-/// Conditioned space has furniture, partition walls, etc. that store heat;
-/// the 7.0 multiplier captures this implicitly. All other zone types use
-/// 1.0 (air capacitance only). OCHRE uses 7.0 for all zones, which
-/// overstates foundation thermal mass.
-///
-/// **IMPORTANT**: EnergyPlus uses EITHER `ZoneCapacitanceMultiplier` (default
-/// 1.0) OR explicit `InternalMass` objects — never both. When furniture RC
-/// boundaries are present for a zone, `building_to_zone_inputs` overrides
-/// this multiplier to 1.0 so the furniture thermal mass is counted only once
-/// (via the explicit RC nodes). See E+ InputOutputRef, ZoneCapacitanceMultiplier.
-pub fn mass_multiplier_for_zone(zone_type: &ZoneType) -> f64 {
-    match zone_type {
-        ZoneType::Conditioned => 7.0,
-        ZoneType::Foundation
-        | ZoneType::Attic
-        | ZoneType::Garage
-        | ZoneType::Outdoor
-        | ZoneType::Ground
-        | ZoneType::Adjacent
-        | ZoneType::Other(_) => 1.0,
-    }
-}
-
-/// Check if the building has auto-generated furniture boundaries for the given zone type.
-///
-/// Furniture boundaries are same-zone boundaries (interior == exterior) whose `id`
-/// contains "furniture", e.g. "conditioned_furniture", "garage_furniture".
-/// When these exist, they provide explicit RC thermal-mass nodes that replace the
-/// implicit mass captured by `mass_multiplier > 1.0`.
-///
-/// Per EnergyPlus convention, `ZoneCapacitanceMultiplier` (default 1.0) and
-/// `InternalMass` objects are mutually exclusive; the furniture boundary is the
-/// HARES equivalent of an E+ InternalMass object.
-fn zone_has_furniture_boundaries(building: &Building, zone_type: &ZoneType) -> bool {
-    building.boundaries.iter().any(|bd| {
-        bd.id.contains("furniture")
-            && bd.interior_zone.as_ref() == Some(zone_type)
-            && bd.exterior_zone.as_ref() == Some(zone_type)
-    })
-}
-
 /// Convert building zones to envelope-crate ZoneInput.
 ///
-/// When furniture RC boundaries exist for a zone (same-zone boundaries whose `id`
-/// contains "furniture"), the mass multiplier is set to 1.0 (air capacitance only)
-/// because the furniture thermal mass is already modeled via explicit RC nodes.
-/// This avoids double-counting: E+ uses EITHER ZoneCapacitanceMultiplier (default
-/// 1.0) OR InternalMass objects, never both.
+/// Every zone's air capacitance takes the building's one temperature
+/// capacitance multiplier, as OS-HPXML applies its
+/// `ZoneCapacitanceMultiplier:ResearchSpecial` to all zones
+/// (simcontrols.rb:27-28) alongside the furniture and partition-wall
+/// InternalMass it also models (constructions.rb:1817, 1835).
 pub fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneInput> {
     (0..n_zones)
         .map(|idx| {
             let zone = building.zones.get(idx);
-            let mass_multiplier = building.mass_multiplier_override.unwrap_or_else(|| {
-                let zone_type_mult = zone
-                    .map(|z| mass_multiplier_for_zone(&z.zone_type))
-                    .unwrap_or(1.0);
-                // When furniture RC boundaries exist for this zone, the furniture
-                // thermal mass is modeled explicitly via RC nodes (equivalent to
-                // EnergyPlus InternalMass objects). The ZoneCapacitanceMultiplier
-                // must be 1.0 (air capacitance only) to avoid double-counting.
-                // Ref: E+ InputOutputRef ZoneCapacitanceMultiplier default=1.0;
-                // E+ InternalMass and ZoneCapacitanceMultiplier are mutually exclusive.
-                if zone.is_some_and(|z| zone_has_furniture_boundaries(building, &z.zone_type)) {
-                    1.0
-                } else {
-                    zone_type_mult
-                }
-            });
             ZoneInput {
                 floor_area_m2: zone.and_then(|z| z.floor_area_m2),
                 volume_m3: zone.and_then(|z| z.volume_m3),
-                mass_multiplier,
+                temperature_capacitance_multiplier: building.temperature_capacitance_multiplier,
             }
         })
         .collect()
@@ -113,7 +53,7 @@ pub fn building_to_boundary_inputs(
 ) -> Result<Vec<BoundaryInput>> {
     use hares_envelope::PrecomputedRCLayer;
     use hares_io::hpxml::{BoundaryType, ZoneType};
-    use hares_physics::film_coefficients::{film_resistances, surface_roughness_from_finish_type};
+    use hares_physics::film_coefficients::film_resistances;
     use hares_physics::ground::f2_coefficient;
     use hares_physics::solar::window_u_factor_decomposition;
 
@@ -128,8 +68,8 @@ pub fn building_to_boundary_inputs(
 
             // Film resistances first -- needed to strip from assembly R-value.
             let tilt_deg = bd.tilt_deg.unwrap_or(90.0);
-            let interior_label = zone_type_to_label(bd.interior_zone.as_ref());
-            let exterior_label = zone_type_to_label(bd.exterior_zone.as_ref());
+            let interior_label = zone_type_to_label(&bd.id, bd.interior_zone.as_ref())?;
+            let exterior_label = zone_type_to_label(&bd.id, bd.exterior_zone.as_ref())?;
             let (r_film_int, r_film_ext) = film_resistances(
                 tilt_deg,
                 interior_label,
@@ -137,7 +77,7 @@ pub fn building_to_boundary_inputs(
                 avg_wind_m_s,
                 avg_ground_c,
                 avg_ambient_c,
-                surface_roughness_from_finish_type(bd.finish_type.as_deref()),
+                boundary_outside_roughness(bd, exterior_label)?.0,
             );
 
             // fallback_r is material-only R (no film). HPXML AssemblyEffectiveRValue
@@ -383,7 +323,11 @@ pub fn building_to_boundary_inputs(
             // pre-computed RC layers from the envelope LUT.  They use the
             // Window struct's U-factor code path (EnergyPlus Simple Window
             // Model Step 1), not the LUT.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            // Fenestration boundaries (windows, skylights) must not receive
+            // pre-computed RC layers from the envelope LUT; they use the
+            // Window struct's U-factor code path. Debug-build check of the
+            // assembler logic.
+            #[cfg(debug_assertions)]
             if matches!(
                 bd.boundary_type,
                 BoundaryType::Window | BoundaryType::Skylight
@@ -428,12 +372,19 @@ pub fn building_to_boundary_inputs(
 }
 
 /// Map HPXML ZoneType to film-coefficient ZoneLabel.
+///
+/// An unrecognised zone type is an error naming the boundary and the input's
+/// text: no label may be substituted for a location the input does not name,
+/// the same rule `resolve_exterior` applies to the exterior side. An absent
+/// zone type is the outdoors (a boundary the input gives no adjacency for,
+/// which no attached wall derives one from).
 pub(crate) fn zone_type_to_label(
+    boundary_id: &str,
     zt: Option<&hares_io::hpxml::ZoneType>,
-) -> hares_physics::film_coefficients::ZoneLabel {
+) -> Result<hares_physics::film_coefficients::ZoneLabel> {
     use hares_io::hpxml::ZoneType;
     use hares_physics::film_coefficients::ZoneLabel;
-    match zt {
+    Ok(match zt {
         Some(ZoneType::Conditioned) => ZoneLabel::Conditioned,
         Some(ZoneType::Attic) => ZoneLabel::Attic,
         Some(ZoneType::Garage) => ZoneLabel::Garage,
@@ -442,13 +393,12 @@ pub(crate) fn zone_type_to_label(
         Some(ZoneType::Adjacent) => ZoneLabel::Conditioned,
         Some(ZoneType::Outdoor) | None => ZoneLabel::Outdoor,
         Some(ZoneType::Other(raw)) => {
-            tracing::warn!(
-                zone_type = %raw,
-                "Unrecognised zone type; mapping to ZoneLabel::Outdoor"
-            );
-            ZoneLabel::Outdoor
+            return Err(HaresError::Dwelling(format!(
+                "boundary '{boundary_id}': unrecognised zone type '{raw}'; no zone label \
+                 may be substituted for a location the input does not name"
+            )));
         }
-    }
+    })
 }
 
 /// Find zone index by zone identity.
@@ -485,13 +435,14 @@ pub(crate) fn find_zone_idx(
 
     // Adjacent zones are rewritten to the non-Adjacent side's type during
     // HPXML parsing (building.rs:rewrite_adjacent_zone_pair). If an Adjacent
-    // zone reaches this function, it indicates a bug in that rewrite.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            !matches!(target, hares_io::hpxml::ZoneType::Adjacent),
-            "Adjacent zone type reached find_zone_idx — the rewrite in building.rs was not applied"
-        );
+    // zone reaches this function, it indicates a bug in that rewrite:
+    // an unconditional typed error (the function already returns Result).
+    if matches!(target, hares_io::hpxml::ZoneType::Adjacent) {
+        return Err(HaresError::Dwelling(format!(
+            "Adjacent zone type reached find_zone_idx (boundary '{bid}'): the \
+             rewrite in building.rs was not applied",
+            bid = boundary_id.unwrap_or("<unknown>")
+        )));
     }
 
     // Primary: match by boundary ID + zone type for disambiguation when
@@ -552,25 +503,20 @@ pub(crate) fn resolve_exterior(
     match boundary.exterior_zone.as_ref() {
         Some(hares_io::hpxml::ZoneType::Outdoor) => Ok(ExteriorTarget::Outdoor),
         Some(hares_io::hpxml::ZoneType::Ground) => Ok(ExteriorTarget::Ground),
-        Some(hares_io::hpxml::ZoneType::Other(raw)) => {
-            tracing::warn!(
-                boundary_id = %boundary.id,
-                zone_type = %raw,
-                "Unrecognised exterior zone type; defaulting to Outdoor"
-            );
-            Ok(ExteriorTarget::Outdoor)
-        }
+        Some(hares_io::hpxml::ZoneType::Other(raw)) => Err(HaresError::Dwelling(format!(
+            "boundary '{}': unrecognised exterior zone text '{raw}'; no zone may be \
+             substituted for a location the input does not name",
+            boundary.id
+        ))),
         Some(zt) => {
             let idx = find_zone_idx(building, Some(&boundary.id), Some(zt), n_zones)?;
             Ok(ExteriorTarget::Zone(idx))
         }
-        None => {
-            tracing::warn!(
-                boundary_id = %boundary.id,
-                "Boundary has no exterior zone; defaulting to Outdoor"
-            );
-            Ok(ExteriorTarget::Outdoor)
-        }
+        None => Err(HaresError::Dwelling(format!(
+            "boundary '{}': no exterior zone; the boundary names neither its exterior \
+             adjacency nor a wall to derive it from",
+            boundary.id
+        ))),
     }
 }
 
@@ -632,7 +578,7 @@ pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update:
         .equipment_telemetry
         .remove(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY)
         .unwrap_or_default();
-    for chunk in payload.chunks_exact(7) {
+    for chunk in payload.as_chunks::<7>().0 {
         let zone_raw = chunk[0];
         let humidity_ratio = chunk[1];
         // chunk[2] and chunk[3] are relative_humidity and wet_bulb_c — no longer
@@ -662,33 +608,313 @@ pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update:
     );
 }
 
-pub(crate) fn equipment_config_from_spec(spec: &hares_io::EquipmentSpec) -> EquipmentConfig {
+pub(crate) fn equipment_config_from_spec(
+    spec: &hares_io::EquipmentSpec,
+) -> Result<EquipmentConfig> {
     if let Some(typed) = &spec.typed_config {
-        let mut cfg = typed.clone();
-        if let Some(ref instance_name) = spec.instance_name {
-            cfg.name = instance_name.clone();
-        }
         // Typed payloads are #[serde(deny_unknown_fields)], so ZIP parameters
         // travel in the sidecar instead of the payload. Prefer the spec's
         // zip_params (the defaults/zip_parameters.toml lookup); keep any
         // sidecar already present on the typed config when the spec carries
         // none.
-        cfg.zip = spec.zip_params.or(cfg.zip);
-        return cfg;
+        let zip = spec.zip_params.or(typed.zip);
+        return spec_config_from_typed(
+            typed,
+            spec,
+            zip,
+            hares_io::hpxml::OverrideLayers::default(),
+        );
     }
 
-    let raw_config: HashMap<String, ConfigValue> = spec
-        .parameters
-        .iter()
-        .filter_map(|(k, v)| json_value_to_config_value(v).map(|cv| (k.clone(), cv)))
-        .collect();
+    // A parameter a load reads must hold the kind it reads it as: any other
+    // value (a string for a number, a null, an object) would read as absent
+    // and run the load on its default. Other keys are the resolver's own
+    // state, which the load does not read.
+    let params = hares_equipment::raw_params_for_class(&spec.name);
+    let lookup = |name: &str| spec.parameters.get(name);
+    let mut raw_config: HashMap<String, ConfigValue> =
+        HashMap::with_capacity(spec.parameters.len());
+    for (key, value) in &spec.parameters {
+        let config_value = json_value_to_config_value(value);
+        if let Some(param) = params.and_then(|params| params.param(key, &lookup))
+            && !config_value
+                .as_ref()
+                .is_some_and(|config_value| param.kind.holds(config_value))
+        {
+            return Err(HaresError::InvalidEquipmentParameter {
+                equipment: spec.instance_name.as_ref().unwrap_or(&spec.name).clone(),
+                key: key.clone(),
+                reason: format!("must be {}, got {value}", param.kind.describe()),
+            });
+        }
+        if let Some(config_value) = config_value {
+            raw_config.insert(key.clone(), config_value);
+        }
+    }
 
     let display_name = spec.instance_name.as_ref().unwrap_or(&spec.name).clone();
     let mut cfg = EquipmentConfig::raw(display_name, spec.name.clone(), raw_config);
     // ZIP parameters travel exclusively in the sidecar for raw and typed
     // equipment alike; `hares_equipment::resolve_zip` is the single consumer.
     cfg.zip = spec.zip_params;
-    cfg
+    Ok(cfg)
+}
+
+/// Land a spec's own typed overrides onto its typed payload as an override
+/// layer, one key at a time, validating the payload against its typed
+/// struct as each key lands.
+///
+/// This is the blueprint entrance's spec-level override channel: a
+/// caller-built spec carries its overrides in
+/// [`hares_io::EquipmentSpec::typed_overrides`], deliberately apart from
+/// the parameter bag (the bag mixes the resolver's machinery keys with the
+/// serialized payload and cannot diagnose a caller's typo), and every
+/// override lands on the payload whether or not the payload's serialized
+/// data carries the field: an override of an unset optional reaches the
+/// schema. The conversion paths then read the landed payload as
+/// the one config generation. The bag keeps the one encoding its producer
+/// writes (the Python builders' human fuel spellings ("natural gas",
+/// "electric"), the HPXML resolvers' raw text), and the landing translates
+/// it into the canonical vocabulary the payload's serde deserializer
+/// reads: a raw-text value the shared fuel parser can read lands in its
+/// canonical form ("Gas"). A value that neither lands nor normalizes fails
+/// the build naming the equipment, the field, and the offending value.
+///
+/// An override key the payload's schema does not read is an error naming
+/// the equipment and the field: the bag is never consulted for overrides,
+/// so nothing else can be mistaken for one. The reserved `equipment_id`
+/// is the identity channel the assembly's assignment pass and the
+/// four-way malformed-id classifier own, and a spec-bag id (malformed
+/// included) must keep reaching that classifier, whose diagnosis names
+/// the channel and the value.
+///
+/// A raw spec has no payload to land on and is returned unchanged: its
+/// bag IS its config.
+pub(crate) fn apply_spec_bag_to_typed_config(spec: &mut hares_io::EquipmentSpec) -> Result<()> {
+    let Some(typed) = spec.typed_config.as_mut() else {
+        return Ok(());
+    };
+    let (type_name, current) = match &typed.payload {
+        ConfigPayload::Typed {
+            type_name, data, ..
+        } => (type_name.clone(), data.clone()),
+        _ => return Ok(()),
+    };
+    let mut landed = match current {
+        Value::Object(obj) => obj,
+        _ => {
+            return Err(HaresError::Equipment(format!(
+                "equipment '{}': its typed payload's data is not a JSON object and \
+                 cannot carry the spec's parameter overrides",
+                spec.name
+            )));
+        }
+    };
+    let before = landed.clone();
+    land_spec_parameters(&mut landed, spec, &type_name)?;
+    if landed == before {
+        // Nothing landed: the payload is the caller's own, unchanged, and
+        // keeps the init-time semantics it always had (a payload the init
+        // rejects fails there, stopping construction).
+        return Ok(());
+    }
+    if let ConfigPayload::Typed { data, .. } = &mut spec
+        .typed_config
+        .as_mut()
+        .expect("the typed config existed above and cannot have been removed in between")
+        .payload
+    {
+        *data = Value::Object(landed);
+    }
+    Ok(())
+}
+
+/// Merge a spec's own typed overrides onto a typed payload's data as an
+/// override layer, one key at a time.
+///
+/// An override key lands whether or not the payload's serialized data
+/// carries it: the schema decides. Three key classes never land:
+///
+/// - `equipment_id`: the identity channel the assembly's assignment pass
+///   and the four-way malformed-id classifier own.
+/// - A key the payload's schema does not read: an error naming the
+///   equipment and the key. The probe is the schema itself
+///   ([`hares_equipment::typed_payload_reads`]), so an unset optional
+///   (`Option` skipped in the serialized payload) is overridable while a
+///   typo is rejected.
+///
+/// Each landing is validated against the typed struct before it is kept,
+/// so the error for a rejected value names the field that failed (serde's
+/// own path when the payload's schema can report one, the bag key when the
+/// flattened heat-pump configs' schema cannot).
+///
+/// A raw-text value the shared fuel parser can read lands in its canonical
+/// form: the bags' fuel vocabulary is the human/HPXML spelling the Python
+/// builders and HPXML resolvers write (and the raw channel parses), while
+/// the payload's serde deserializer reads only the canonical spellings. The
+/// schema gates the normalization: a normalized form is kept only when the
+/// payload then validates against it.
+fn land_spec_parameters(
+    landed: &mut Map<String, Value>,
+    spec: &hares_io::EquipmentSpec,
+    type_name: &str,
+) -> Result<()> {
+    let display_name = spec.instance_name.as_ref().unwrap_or(&spec.name);
+    for (key, value) in &spec.typed_overrides {
+        if key.as_str() == hares_equipment::config::KEY_EQUIPMENT_ID {
+            continue;
+        }
+        let reads =
+            hares_equipment::typed_payload_reads(type_name, landed, key, value).map_err(|err| {
+                HaresError::Equipment(format!(
+                    "equipment '{display_name}': its typed config type '{type_name}' \
+                     is not registered, so the override '{key}' cannot be checked: {err}"
+                ))
+            })?;
+        if !reads {
+            return Err(HaresError::InvalidEquipmentParameter {
+                equipment: display_name.clone(),
+                key: key.clone(),
+                reason: format!(
+                    "no field of the equipment's typed config '{type_name}' reads \
+                     this key; the parameter bag's machinery keys are not overrides"
+                ),
+            });
+        }
+        let mut trial = landed.clone();
+        let single: Map<String, Value> = [(key.clone(), value.clone())].into_iter().collect();
+        hares_io::hpxml::nested_update(&mut trial, &single);
+        if trial == *landed {
+            // The override agrees with the payload: nothing to land, and the
+            // payload keeps the init-time semantics it always had.
+            continue;
+        }
+        match hares_equipment::validate_typed_payload_detailed(
+            type_name,
+            &Value::Object(trial.clone()),
+        ) {
+            Ok(()) => *landed = trial,
+            Err(failure) => {
+                let normalized_retry = match value
+                    .as_str()
+                    .and_then(hares_equipment::normalize_enum_text)
+                {
+                    Some(canonical) if canonical != *value => {
+                        let mut retry = landed.clone();
+                        let canonical_single: Map<String, Value> =
+                            [(key.clone(), canonical)].into_iter().collect();
+                        hares_io::hpxml::nested_update(&mut retry, &canonical_single);
+                        match hares_equipment::validate_typed_payload_detailed(
+                            type_name,
+                            &Value::Object(retry.clone()),
+                        ) {
+                            Ok(()) => Some(retry),
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
+                match normalized_retry {
+                    Some(retry) => *landed = retry,
+                    None => {
+                        return Err(HaresError::Equipment(format!(
+                            "equipment '{display_name}': its typed config rejected the spec's \
+                             parameters: '{}': {}",
+                            failure.path.unwrap_or_else(|| key.to_string()),
+                            failure.message,
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build the typed [`EquipmentConfig`] for a spec from its payload plus the
+/// dwelling-level override layer and one ZIP sidecar value, validating the
+/// merged payload against the typed struct the payload's type name
+/// registers when the overrides landed something.
+///
+/// The layers, lowest first: the typed payload's own data, then the
+/// dwelling-level override layers that reach this spec (in the canonical
+/// vocabulary the payload's serde deserializer reads, applied by
+/// [`apply_typed_overrides`]). A merged result that fails its schema is an error naming the
+/// equipment and the offending field when serde's path tracking can see it
+/// (the flattened heat-pump configs' members cannot be pathed; their
+/// failures carry the deserialization problem alone), at the conversion
+/// that applied the override; a payload no override touched is returned
+/// unvalidated and is checked at init, whose rejection fails the build.
+fn spec_config_from_typed(
+    typed: &EquipmentConfig,
+    spec: &hares_io::EquipmentSpec,
+    base_zip: Option<hares_types::zip::ZipLoad>,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+) -> Result<EquipmentConfig> {
+    let ConfigPayload::Typed {
+        type_name,
+        version,
+        data,
+    } = &typed.payload
+    else {
+        // A spec carrying a non-typed EquipmentConfig is the raw channel;
+        // the caller's raw branch handles it.
+        return Err(HaresError::Equipment(format!(
+            "equipment '{}': the spec's typed config does not carry a typed payload",
+            spec.name
+        )));
+    };
+    let Value::Object(mut merged) = data.clone() else {
+        return Err(HaresError::Equipment(format!(
+            "equipment '{}': its typed payload's data is not a JSON object and \
+             cannot be override-merged",
+            spec.name
+        )));
+    };
+    let before_overrides = merged.clone();
+    apply_typed_overrides(&mut merged, layers, type_name, &spec.name)?;
+    // Validation rides the override delta: a value the schema rejects must
+    // error at the merge that applied it, but a payload that carried its
+    // defect before any override reached it keeps the init-time semantics
+    // (the init fails the build): the merge changed nothing, so the merge
+    // reports nothing.
+    let overrides_landed = merged != before_overrides;
+    // Peel the reserved "zip" override object (it travels inside the
+    // override map) into the sidecar so deny_unknown_fields payloads never
+    // see it; it is merged field-wise into the ZIP base.
+    let zip_override = merged.remove("zip");
+    let zip = merge_zip_override(
+        base_zip,
+        zip_override.as_ref(),
+        &typed.ochre_class,
+        &spec.name,
+    )?;
+    let merged_data = Value::Object(merged);
+    if overrides_landed {
+        hares_equipment::validate_typed_payload(type_name, &merged_data).map_err(|err| {
+            HaresError::Equipment(format!(
+                "equipment '{}': its typed config rejected the merged \
+                 parameters: {err}",
+                spec.instance_name.as_ref().unwrap_or(&spec.name)
+            ))
+        })?;
+    }
+    let display_name = spec
+        .instance_name
+        .clone()
+        .unwrap_or_else(|| typed.name.clone());
+    let mut eq_cfg = EquipmentConfig::with_payload(
+        display_name,
+        typed.ochre_class.clone(),
+        ConfigPayload::Typed {
+            type_name: type_name.clone(),
+            version: *version,
+            data: merged_data,
+        },
+    );
+    eq_cfg.setpoints_reconciled = typed.setpoints_reconciled.clone();
+    eq_cfg.zip = zip;
+    Ok(eq_cfg)
 }
 
 /// Valid field names for the reserved `"zip"` override object, matching the
@@ -756,11 +982,10 @@ fn merge_zip_override(
     // Magnitude bounds, not a point probe, at the override channel's
     // earliest stage: a cancelling row (e.g. zp = 1.79e308, ip = -1.79e308)
     // passes finiteness, the sum checks, and any single-voltage probe, but
-    // NaNs real power across the service band — and downstream, equipment
-    // init rejections for non-critical loads are deliberately
-    // skip-and-warn, so this boundary is where the typo must fail the
-    // build. Shared bounds live in `hares_types::zip` (single source of
-    // truth with the init backstop).
+    // NaNs real power across the service band, and an init that reads the
+    // row fails the build for the same reason: the typo is rejected at the
+    // earliest boundary that sees it. Shared bounds live in
+    // `hares_types::zip` (single source of truth with the init backstop).
     hares_types::zip::validate_plausible_magnitudes(&zip).map_err(|err| {
         HaresError::Equipment(format!(
             "equipment '{equipment_name}': \"zip\" \
@@ -770,50 +995,30 @@ fn merge_zip_override(
     Ok(Some(zip))
 }
 
+/// The config of `spec` with the dwelling's equipment overrides applied:
+/// the wildcard's parameters the equipment reads, then its own entry.
+///
+/// # Errors
+///
+/// A malformed override map ([`hares_io::hpxml::override_layers`]), the
+/// reserved `equipment_id` in a layer, a parameter the equipment cannot take
+/// (a typed config's schema or a load's parameter list rejects it), or a
+/// malformed `zip` override.
 pub(crate) fn merged_equipment_config(
     spec: &hares_io::EquipmentSpec,
     overrides: &Value,
 ) -> Result<EquipmentConfig> {
+    let Value::Object(root) = overrides else {
+        return Err(non_object_overrides(overrides));
+    };
+    let layers = hares_io::hpxml::override_layers(root, &spec.name)?;
     if let Some(typed) = &spec.typed_config
-        && let ConfigPayload::Typed {
-            type_name,
-            version,
-            data,
-        } = &typed.payload
-        && let Value::Object(base) = data
+        && matches!(typed.payload, ConfigPayload::Typed { .. })
     {
-        let mut merged = base.clone();
-        apply_equipment_overrides(&mut merged, overrides, &spec.name)?;
-        // Peel the reserved "zip" override object out of the merged map
-        // before typed deserialization so #[serde(deny_unknown_fields)]
-        // payloads never see it; it is merged field-wise into the sidecar.
-        let zip_override = merged.remove("zip");
-        let zip = merge_zip_override(
-            spec.zip_params.or(typed.zip),
-            zip_override.as_ref(),
-            &typed.ochre_class,
-            &spec.name,
-        )?;
-        let display_name = spec
-            .instance_name
-            .clone()
-            .unwrap_or_else(|| typed.name.clone());
-        let mut eq_cfg = EquipmentConfig::with_payload(
-            display_name,
-            typed.ochre_class.clone(),
-            ConfigPayload::Typed {
-                type_name: type_name.clone(),
-                version: *version,
-                data: Value::Object(merged),
-            },
-        );
-        eq_cfg.setpoints_reconciled = typed.setpoints_reconciled.clone();
-        eq_cfg.zip = zip;
-        return Ok(eq_cfg);
+        return spec_config_from_typed(typed, spec, spec.zip_params.or(typed.zip), layers);
     }
 
-    let mut merged = spec.parameters.clone();
-    apply_equipment_overrides(&mut merged, overrides, &spec.name)?;
+    let mut merged = raw_load_parameters(spec, layers)?;
     // Raw equipment honor the reserved "zip" override object too, for
     // consistency with typed equipment: it is merged field-wise over the
     // spec's zip_params base and folded back into `zip_params`, which
@@ -831,13 +1036,241 @@ pub(crate) fn merged_equipment_config(
         name: spec.name.clone(),
         fuel_type: spec.fuel_type,
         parameters: merged,
+        typed_overrides: spec.typed_overrides.clone(),
         zip_params,
         typed_config: spec.typed_config.clone(),
         system_id: spec.system_id.clone(),
         related_hvac_idref: spec.related_hvac_idref.clone(),
         primary_role: spec.primary_role.clone(),
     };
-    Ok(equipment_config_from_spec(&merged_spec))
+    equipment_config_from_spec(&merged_spec)
+}
+
+/// The reserved override object that carries an equipment's ZIP
+/// coefficients, which every equipment takes.
+const RESERVED_ZIP_OVERRIDE: &str = "zip";
+
+fn non_object_overrides(overrides: &Value) -> HaresError {
+    HaresError::Equipment(format!(
+        "equipment overrides payload must be a JSON object mapping \
+         equipment names to override fields, got: {overrides}; a \
+         non-object payload can never match an equipment name and \
+         would silently no-op every override"
+    ))
+}
+
+/// Rejects the reserved `equipment_id` in the override layer `source`:
+/// equipment ids are assigned by the dwelling.
+fn reject_reserved_key(source: &str, key: &str, equipment: &str) -> Result<()> {
+    if key == hares_equipment::config::KEY_EQUIPMENT_ID {
+        return Err(HaresError::InvalidEquipmentParameter {
+            equipment: equipment.to_string(),
+            key: key.to_string(),
+            reason: format!(
+                "in the '{source}' override is rejected: equipment ids are \
+                 assigned by the dwelling, not configurable; remove the field"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The value a load's parameter `key` has once the override layers that
+/// reach it are applied: its own entry's, else the wildcard's, else its
+/// resolved value.
+fn layered_value<'v>(
+    resolved: &'v Map<String, Value>,
+    layers: hares_io::hpxml::OverrideLayers<'v>,
+    key: &str,
+) -> Option<&'v Value> {
+    layers
+        .own
+        .and_then(|own| own.get(key))
+        .or_else(|| layers.wildcard.and_then(|(_, wildcard)| wildcard.get(key)))
+        .or_else(|| resolved.get(key))
+}
+
+/// Whether the typed config `type_name` with payload `data` has the field
+/// `key` (given `value`).
+fn typed_reads(
+    type_name: &str,
+    data: &Map<String, Value>,
+    key: &str,
+    value: &Value,
+    equipment: &str,
+) -> Result<bool> {
+    hares_equipment::typed_payload_reads(type_name, data, key, value)
+        .map_err(|err| HaresError::Equipment(format!("equipment '{equipment}': {err}")))
+}
+
+/// Whether the equipment `spec` reads the wildcard parameter `key` (given
+/// `value`) once the override layers of `root` that reach it are applied: a
+/// typed config whose schema has the field, or a raw-parameter load whose
+/// list holds it. A raw spec of a class no list declares vouches for no
+/// parameter.
+fn spec_reads(
+    spec: &hares_io::EquipmentSpec,
+    root: &Map<String, Value>,
+    key: &str,
+    value: &Value,
+) -> Result<bool> {
+    if let Some(EquipmentConfig {
+        payload: ConfigPayload::Typed {
+            type_name, data, ..
+        },
+        ..
+    }) = &spec.typed_config
+    {
+        return match data.as_object() {
+            Some(data) => typed_reads(type_name, data, key, value, &spec.name),
+            None => Ok(false),
+        };
+    }
+    let Some(params) = hares_equipment::raw_params_for_class(&spec.name) else {
+        return Ok(false);
+    };
+    let layers = hares_io::hpxml::override_layers(root, &spec.name)?;
+    Ok(params.reads(key, &|name| layered_value(&spec.parameters, layers, name)))
+}
+
+/// Checks the wildcard override (`all` or `*`) against the whole
+/// population: every parameter it gives is read by some equipment of the
+/// dwelling. Each equipment then takes the wildcard parameters it reads and
+/// skips the rest, which other equipment read.
+///
+/// # Errors
+///
+/// Both wildcard spellings, a wildcard that is not an object, the reserved
+/// `equipment_id`, a fraction under both of its spellings, or a parameter no
+/// equipment reads (a misspelling).
+pub(crate) fn validate_wildcard_override(
+    overrides: &Value,
+    population: &[&hares_io::EquipmentSpec],
+) -> Result<()> {
+    let Value::Object(root) = overrides else {
+        return Err(non_object_overrides(overrides));
+    };
+    let Some((source, wildcard)) = hares_io::hpxml::wildcard_override(root)? else {
+        return Ok(());
+    };
+    let every_equipment = format!("every equipment (the '{source}' override)");
+    hares_equipment::check_one_gain_spelling(wildcard, &every_equipment)?;
+    for (key, value) in wildcard {
+        reject_reserved_key(source, key, &every_equipment)?;
+        let key = hares_equipment::canonical_gain_key(key);
+        if key == RESERVED_ZIP_OVERRIDE {
+            continue;
+        }
+        let mut read = false;
+        for spec in population {
+            if spec_reads(spec, root, key, value)? {
+                read = true;
+                break;
+            }
+        }
+        if read {
+            continue;
+        }
+        return Err(HaresError::InvalidEquipmentParameter {
+            equipment: every_equipment,
+            key: key.to_string(),
+            reason: format!("in the '{source}' override is read by no equipment of this dwelling"),
+        });
+    }
+    Ok(())
+}
+
+/// The parameters of a raw-parameter load with the overrides that reach it
+/// applied: the wildcard's parameters the load reads once every layer is
+/// applied (the rest are other equipment's, checked by
+/// [`validate_wildcard_override`]), then its own entry, each HPXML gain
+/// spelling rewritten to the parameter it stands for so that it replaces
+/// the resolved value.
+///
+/// # Errors
+///
+/// The reserved `equipment_id`; a fraction under both spellings in one
+/// layer; a parameter of its own entry the load does not read (named in the
+/// error with the list it reads). A raw spec of a class no list declares
+/// takes the whole wildcard and its own entry unchecked, and vouches for no
+/// wildcard parameter.
+fn raw_load_parameters(
+    spec: &hares_io::EquipmentSpec,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+) -> Result<Map<String, Value>> {
+    use hares_equipment::canonical_gain_key;
+    use hares_io::hpxml::nested_insert;
+
+    let params = hares_equipment::raw_params_for_class(&spec.name);
+    let mut merged = spec.parameters.clone();
+    hares_equipment::canonicalize_gain_params(&mut merged, &spec.name)?;
+    if let Some((source, wildcard)) = layers.wildcard {
+        hares_equipment::check_one_gain_spelling(wildcard, &spec.name)?;
+        let lookup = |name: &str| layered_value(&spec.parameters, layers, name);
+        for (key, value) in wildcard {
+            reject_reserved_key(source, key, &spec.name)?;
+            let key = canonical_gain_key(key);
+            if key == RESERVED_ZIP_OVERRIDE
+                || params.is_none_or(|params| params.reads(key, &lookup))
+            {
+                nested_insert(&mut merged, key, value);
+            }
+        }
+    }
+    let Some(own) = layers.own else {
+        return Ok(merged);
+    };
+    hares_equipment::check_one_gain_spelling(own, &spec.name)?;
+    for (key, value) in own {
+        reject_reserved_key(&spec.name, key, &spec.name)?;
+        nested_insert(&mut merged, canonical_gain_key(key), value);
+    }
+    if let Some(params) = params
+        && let Some(key) = own.keys().map(|key| canonical_gain_key(key)).find(|key| {
+            *key != RESERVED_ZIP_OVERRIDE && !params.reads(key, &|name| merged.get(name))
+        })
+    {
+        return Err(HaresError::InvalidEquipmentParameter {
+            equipment: spec.name.clone(),
+            key: key.to_string(),
+            reason: format!(
+                "in the '{}' override is not a parameter a {} reads; it reads: {}",
+                spec.name,
+                params.kind,
+                params.describe()
+            ),
+        });
+    }
+    Ok(merged)
+}
+
+/// Applies the overrides that reach a typed config to its payload: the
+/// wildcard's parameters its schema has (the rest are other equipment's,
+/// checked by [`validate_wildcard_override`]), then its own entry, which
+/// the schema validates after the merge.
+fn apply_typed_overrides(
+    merged: &mut Map<String, Value>,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+    type_name: &str,
+    equipment: &str,
+) -> Result<()> {
+    use hares_io::hpxml::nested_insert;
+
+    if let Some((source, wildcard)) = layers.wildcard {
+        for (key, value) in wildcard {
+            reject_reserved_key(source, key, equipment)?;
+            if key == RESERVED_ZIP_OVERRIDE
+                || typed_reads(type_name, merged, key, value, equipment)?
+            {
+                nested_insert(merged, key, value);
+            }
+        }
+    }
+    for (key, value) in layers.own.into_iter().flatten() {
+        reject_reserved_key(equipment, key, equipment)?;
+        nested_insert(merged, key, value);
+    }
+    Ok(())
 }
 
 /// Validate equipment-override keys against the equipment population at
@@ -871,15 +1304,10 @@ pub(crate) fn validate_equipment_override_keys(
     // and is rejected with everything else non-object. The same rule the
     // `zip` override channel already enforces ("must be an object", above).
     let Value::Object(root) = overrides else {
-        return Err(HaresError::Equipment(format!(
-            "equipment overrides payload must be a JSON object mapping \
-             equipment names to override fields, got: {overrides} — a \
-             non-object payload can never match an equipment name and \
-             would silently no-op every override"
-        )));
+        return Err(non_object_overrides(overrides));
     };
     for key in root.keys() {
-        if key == "all" || key == "*" {
+        if hares_io::hpxml::WILDCARD_OVERRIDE_KEYS.contains(&key.as_str()) {
             continue;
         }
         if overridable_names.contains(&key.as_str()) {
@@ -899,46 +1327,6 @@ pub(crate) fn validate_equipment_override_keys(
              names: {}",
             overridable_names.join(", ")
         )));
-    }
-    Ok(())
-}
-
-fn apply_equipment_overrides(
-    base: &mut Map<String, Value>,
-    overrides: &Value,
-    name: &str,
-) -> Result<()> {
-    let Value::Object(root) = overrides else {
-        return Ok(());
-    };
-    // `equipment_id` is reserved: ids are assigned by the dwelling assembly
-    // (and auto-assigned by `add_equipment`), never configurable. The check
-    // sits on the override *delta* — not the merged result, whose base
-    // already carries the assembly-injected id — so a user-supplied id is
-    // rejected here, loudly, instead of being silently clobbered by the
-    // injection or silently overriding it. A wildcard ("all"/"*") form
-    // would assign one id to every equipment and is covered by the same
-    // check.
-    for (source, obj) in [
-        ("all", root.get("all")),
-        ("*", root.get("*")),
-        (name, root.get(name)),
-    ] {
-        if let Some(Value::Object(fields)) = obj
-            && fields.contains_key("equipment_id")
-        {
-            return Err(HaresError::Equipment(format!(
-                "equipment '{name}': the 'equipment_id' field in the '{source}' \
-                 override is rejected — equipment ids are assigned by the \
-                 dwelling, not configurable; remove the field"
-            )));
-        }
-    }
-    if let Some(Value::Object(all)) = root.get("all").or_else(|| root.get("*")) {
-        hares_io::hpxml::nested_update(base, all);
-    }
-    if let Some(Value::Object(eq)) = root.get(name) {
-        hares_io::hpxml::nested_update(base, eq);
     }
     Ok(())
 }
@@ -1043,31 +1431,126 @@ pub(crate) fn validate_sim_config(sim_config: &SimulationConfig) -> Result<()> {
     Ok(())
 }
 
-/// Map HPXML `<SiteType>` to [`TerrainClass`] for AIM-2 wind correction.
+/// Map HPXML `<SiteType>` to [`TerrainClass`] for the wind on every leakage
+/// path. A file without one is suburban, OS-HPXML v1.12.0's default
+/// (defaults.rb:817-818). The parser rejects a value outside HPXML's rural,
+/// suburban and urban, so no other case reaches the resolver.
 pub(crate) fn site_type_to_terrain(
-    site_type: &Option<hares_io::hpxml::SiteType>,
+    site_type: Option<&hares_io::hpxml::SiteType>,
 ) -> hares_physics::infiltration::TerrainClass {
     use hares_io::hpxml::SiteType;
     use hares_physics::infiltration::TerrainClass;
     match site_type {
         Some(SiteType::Rural) => TerrainClass::Rural,
         Some(SiteType::Urban) => TerrainClass::Urban,
-        _ => TerrainClass::Suburban,
+        Some(SiteType::Suburban) | None => TerrainClass::Suburban,
     }
 }
 
-/// Map HPXML `<ShieldingOfHome>` string to [`ShieldingClass`].
+/// The convective roughness class of a boundary's outside face, and a
+/// warning when its HPXML names no material. Only an outdoor face reads it
+/// (any other face has no forced convection, and the class returned for it
+/// is never used). Walls and rim joists read their `Siding`, roofs their
+/// `RoofType`, foundation walls their `Type`
+/// ([`hares_physics::film_coefficients::outside_layer_roughness`]). Glazing
+/// is glass, the Engineering Reference's Very Smooth example (its films come
+/// from the U-factor decomposition in any case). Doors, floors and slabs
+/// have no material element in HPXML and take OS-HPXML v1.12.0's `Rough`
+/// (model.rb:49, :95) without a warning, since no input is missing.
+fn boundary_outside_roughness(
+    bd: &hares_io::hpxml::Boundary,
+    exterior: hares_physics::film_coefficients::ZoneLabel,
+) -> Result<(
+    hares_physics::film_coefficients::SurfaceRoughness,
+    Option<String>,
+)> {
+    use hares_io::hpxml::BoundaryType;
+    use hares_physics::film_coefficients::{
+        OutsideLayer, SurfaceRoughness, ZoneLabel, outside_layer_roughness,
+    };
+    if exterior != ZoneLabel::Outdoor {
+        return Ok((SurfaceRoughness::Rough, None));
+    }
+    let layer = match &bd.boundary_type {
+        BoundaryType::Wall | BoundaryType::RimJoist => OutsideLayer::Siding,
+        BoundaryType::Roof => OutsideLayer::Roof,
+        BoundaryType::FoundationWall => OutsideLayer::FoundationWall,
+        BoundaryType::Window | BoundaryType::Skylight => {
+            return Ok((SurfaceRoughness::VerySmooth, None));
+        }
+        BoundaryType::Door | BoundaryType::Floor | BoundaryType::Slab => {
+            return Ok((SurfaceRoughness::Rough, None));
+        }
+        BoundaryType::Other(kind) => {
+            return Err(HaresError::Dwelling(format!(
+                "boundary '{}' of unrecognised type '{kind}' faces outdoors; its outside \
+                 convection is undefined",
+                bd.id
+            )));
+        }
+    };
+    let (class, warning) = outside_layer_roughness(layer, bd.finish_type.as_deref())
+        .map_err(|e| HaresError::Physics(format!("boundary '{}': {e}", bd.id)))?;
+    Ok((class, warning.map(|w| format!("boundary '{}': {w}", bd.id))))
+}
+
+/// The construction warnings the envelope's inputs raise: each outdoor
+/// boundary whose HPXML names no outside material, a site with no
+/// `SiteType` (suburban, OS-HPXML's default, defaults.rb:817-818) and one
+/// with no `ShieldingofHome` (OS-HPXML's default, defaults.rb:822-830).
 ///
-/// HPXML values: "normal", "exposed", "well-shielded".
+/// # Errors
+///
+/// An outdoor boundary's material that is not an HPXML value.
+pub(crate) fn envelope_input_warnings(building: &Building) -> Result<Vec<hares_types::Warning>> {
+    let mut warnings = Vec::new();
+    for bd in &building.boundaries {
+        let exterior = zone_type_to_label(&bd.id, bd.exterior_zone.as_ref())?;
+        if let (_, Some(message)) = boundary_outside_roughness(bd, exterior)? {
+            warnings.push(hares_types::Warning::new("envelope", message));
+        }
+    }
+    if building.site.site_type.is_none() {
+        warnings.push(hares_types::Warning::new(
+            "envelope",
+            "the building gives no SiteType; the wind terrain is suburban, OS-HPXML's default \
+             (defaults.rb:817-818)",
+        ));
+    }
+    if building.site.shielding_of_home.is_none() {
+        let shielding = shielding_to_class(None, building.residential_facility_type.as_deref());
+        warnings.push(hares_types::Warning::new(
+            "envelope",
+            format!(
+                "the building gives no ShieldingofHome; the shielding is {shielding:?}, OS-HPXML's \
+                 default for this facility type (defaults.rb:822-830)"
+            ),
+        ));
+    }
+    Ok(warnings)
+}
+
+/// Map HPXML `<ShieldingofHome>` to [`ShieldingClass`].
+///
 /// Walker & Wilson (1998) Table 3; ResStock `airflow.get_aim2_shelter_coefficient`.
-pub(crate) fn shielding_str_to_class(
-    s: Option<&str>,
+/// A file without one takes OS-HPXML v1.12.0's default (defaults.rb:822-830):
+/// well-shielded for an apartment unit or single-family attached home,
+/// normal otherwise; [`envelope_input_warnings`] reports it. The parser
+/// rejects any other value.
+pub(crate) fn shielding_to_class(
+    shielding: Option<&hares_io::hpxml::ShieldingOfHome>,
+    residential_facility_type: Option<&str>,
 ) -> hares_physics::infiltration::ShieldingClass {
+    use hares_io::hpxml::ShieldingOfHome;
     use hares_physics::infiltration::ShieldingClass;
-    match s {
-        Some("exposed") => ShieldingClass::Exposed,
-        Some("well-shielded") => ShieldingClass::WellShielded,
-        _ => ShieldingClass::Normal,
+    match shielding {
+        Some(ShieldingOfHome::Exposed) => ShieldingClass::Exposed,
+        Some(ShieldingOfHome::WellShielded) => ShieldingClass::WellShielded,
+        Some(ShieldingOfHome::Normal) => ShieldingClass::Normal,
+        None => match residential_facility_type {
+            Some("apartment unit" | "single-family attached") => ShieldingClass::WellShielded,
+            _ => ShieldingClass::Normal,
+        },
     }
 }
 
@@ -1100,7 +1583,7 @@ pub(crate) fn json_value_to_config_value(value: &serde_json::Value) -> Option<Co
 }
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Map, Value, json};
 
     use hares_equipment::{
         SetpointReconciliation,
@@ -1110,41 +1593,13 @@ mod tests {
     use hares_types::FuelType;
 
     use super::{
-        building_to_boundary_inputs, building_to_zone_inputs, chrono_to_std_duration,
-        duration_to_u32_secs, equipment_config_from_spec, find_zone_idx, mass_multiplier_for_zone,
-        merged_equipment_config, resolve_exterior, zone_has_furniture_boundaries,
-        zone_type_to_label,
+        apply_spec_bag_to_typed_config, building_to_boundary_inputs, building_to_zone_inputs,
+        chrono_to_std_duration, duration_to_u32_secs, equipment_config_from_spec, find_zone_idx,
+        merged_equipment_config, resolve_exterior, validate_wildcard_override, zone_type_to_label,
     };
     use hares_types::HaresError;
 
-    // ── mass_multiplier_for_zone tests ─────────────────────────────────
-
-    #[test]
-    fn mass_multiplier_conditioned_is_7() {
-        assert!((mass_multiplier_for_zone(&ZoneType::Conditioned) - 7.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn mass_multiplier_non_conditioned_is_1() {
-        for zt in [
-            ZoneType::Attic,
-            ZoneType::Garage,
-            ZoneType::Foundation,
-            ZoneType::Outdoor,
-            ZoneType::Ground,
-            ZoneType::Adjacent,
-            ZoneType::Other("Custom".to_string()),
-        ] {
-            assert!(
-                (mass_multiplier_for_zone(&zt) - 1.0).abs() < 1e-12,
-                "expected 1.0 for {:?}, got {}",
-                zt,
-                mass_multiplier_for_zone(&zt)
-            );
-        }
-    }
-
-    // ── zone_has_furniture_boundaries tests ────────────────────────────
+    // ── zone capacitance multiplier tests ──────────────────────────────
 
     fn minimal_building(zones: Vec<Zone>, boundaries: Vec<Boundary>) -> hares_io::Building {
         hares_io::Building {
@@ -1165,7 +1620,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -1176,21 +1631,24 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            conditioned_volume_m3: 400.0,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: "root".into(),
                 attrs: Default::default(),
                 text: String::new(),
-                children: Vec::new(),
+                children: vec![],
             },
+            parse_warnings: Vec::new(),
         }
     }
 
@@ -1221,11 +1679,23 @@ mod tests {
         }
     }
 
+    /// OS-HPXML's one temperature capacitance multiplier applies to every
+    /// zone, attic, garage and foundation included, whether or not the zone
+    /// also carries furniture mass (simcontrols.rb:27-28, and the furniture
+    /// InternalMass of constructions.rb:1835 alongside it).
     #[test]
-    fn furniture_boundaries_detected_for_conditioned() {
-        let building = minimal_building(
-            vec![Zone {
-                zone_type: ZoneType::Conditioned,
+    fn every_zone_takes_the_building_capacitance_multiplier() {
+        let zone_types = [
+            ZoneType::Conditioned,
+            ZoneType::Attic,
+            ZoneType::Garage,
+            ZoneType::Foundation,
+            ZoneType::Other("Custom".to_string()),
+        ];
+        let zones = zone_types
+            .iter()
+            .map(|zone_type| Zone {
+                zone_type: zone_type.clone(),
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
                 attached_wall_ids: Vec::new(),
@@ -1233,127 +1703,25 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
-            }],
-            vec![furniture_boundary(
-                "conditioned_furniture",
-                ZoneType::Conditioned,
-            )],
-        );
-        assert!(zone_has_furniture_boundaries(
-            &building,
-            &ZoneType::Conditioned
-        ));
-        assert!(!zone_has_furniture_boundaries(&building, &ZoneType::Attic));
-    }
-
-    #[test]
-    fn no_furniture_boundaries_returns_false() {
-        let building = minimal_building(
-            vec![Zone {
-                zone_type: ZoneType::Conditioned,
-                floor_area_m2: Some(100.0),
-                volume_m3: Some(250.0),
-                attached_wall_ids: Vec::new(),
-                duct_systems: Vec::new(),
-                vented: false,
-                ventilation_ach: None,
-                ventilation_sla: None,
-            }],
-            Vec::new(),
-        );
-        assert!(!zone_has_furniture_boundaries(
-            &building,
-            &ZoneType::Conditioned
-        ));
-    }
-
-    // ── building_to_zone_inputs furniture override tests ──────────────
-
-    #[test]
-    fn furniture_override_reduces_conditioned_multiplier_to_1() {
-        let building = minimal_building(
-            vec![Zone {
-                zone_type: ZoneType::Conditioned,
-                floor_area_m2: Some(100.0),
-                volume_m3: Some(250.0),
-                attached_wall_ids: Vec::new(),
-                duct_systems: Vec::new(),
-                vented: false,
-                ventilation_ach: None,
-                ventilation_sla: None,
-            }],
-            vec![furniture_boundary(
-                "conditioned_furniture",
-                ZoneType::Conditioned,
-            )],
-        );
-        let zone_inputs = building_to_zone_inputs(&building, 1);
-        assert!(
-            (zone_inputs[0].mass_multiplier - 1.0).abs() < 1e-12,
-            "expected 1.0 (furniture override), got {}",
-            zone_inputs[0].mass_multiplier
-        );
-    }
-
-    #[test]
-    fn no_furniture_uses_default_conditioned_multiplier() {
-        let building = minimal_building(
-            vec![Zone {
-                zone_type: ZoneType::Conditioned,
-                floor_area_m2: Some(100.0),
-                volume_m3: Some(250.0),
-                attached_wall_ids: Vec::new(),
-                duct_systems: Vec::new(),
-                vented: false,
-                ventilation_ach: None,
-                ventilation_sla: None,
-            }],
-            Vec::new(),
-        );
-        let zone_inputs = building_to_zone_inputs(&building, 1);
-        assert!(
-            (zone_inputs[0].mass_multiplier - 7.0).abs() < 1e-12,
-            "expected 7.0 (no furniture), got {}",
-            zone_inputs[0].mass_multiplier
-        );
-    }
-
-    #[test]
-    fn mass_multiplier_override_takes_precedence_over_furniture() {
+                height_m: None,
+                hpxml_location: None,
+            })
+            .collect();
         let mut building = minimal_building(
-            vec![Zone {
-                zone_type: ZoneType::Conditioned,
-                floor_area_m2: Some(100.0),
-                volume_m3: Some(250.0),
-                attached_wall_ids: Vec::new(),
-                duct_systems: Vec::new(),
-                vented: false,
-                ventilation_ach: None,
-                ventilation_sla: None,
-            }],
-            vec![furniture_boundary(
-                "conditioned_furniture",
-                ZoneType::Conditioned,
-            )],
+            zones,
+            vec![
+                furniture_boundary("conditioned_furniture", ZoneType::Conditioned),
+                furniture_boundary("garage_furniture", ZoneType::Garage),
+            ],
         );
-        building.mass_multiplier_override = Some(5.0);
-        let zone_inputs = building_to_zone_inputs(&building, 1);
-        assert!(
-            (zone_inputs[0].mass_multiplier - 5.0).abs() < 1e-12,
-            "expected 5.0 (explicit override), got {}",
-            zone_inputs[0].mass_multiplier
-        );
-    }
-
-    #[test]
-    fn missing_zone_defaults_to_multiplier_1() {
-        let building = minimal_building(Vec::new(), Vec::new());
-        let zone_inputs = building_to_zone_inputs(&building, 1);
-        assert!(
-            (zone_inputs[0].mass_multiplier - 1.0).abs() < 1e-12,
-            "expected 1.0 (no zone → air only), got {}",
-            zone_inputs[0].mass_multiplier
-        );
+        building.temperature_capacitance_multiplier = 5.0;
+        let zone_inputs = building_to_zone_inputs(&building, zone_types.len());
+        for (zone_type, input) in zone_types.iter().zip(&zone_inputs) {
+            assert_eq!(
+                input.temperature_capacitance_multiplier, 5.0,
+                "{zone_type:?}"
+            );
+        }
     }
 
     // ── equipment override tests ───────────────────────────────────────
@@ -1382,6 +1750,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 hares_equipment::EquipmentConfig::from_typed(
                     "Gas Furnace".to_string(),
@@ -1405,10 +1774,8 @@ mod tests {
             }
         });
 
-        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
-        let err = merged
-            .require_typed::<GasFurnaceConfig>("Gas Furnace")
-            .expect_err("unknown override keys must fail");
+        let err = merged_equipment_config(&spec, &overrides)
+            .expect_err("unknown override keys must fail the merge that applies them");
         let msg = err.to_string();
 
         assert!(msg.contains("Gas Furnace"), "missing equipment name: {msg}");
@@ -1432,6 +1799,571 @@ mod tests {
 
         assert!((cfg.afue - 0.96).abs() < 1e-12);
         assert!((cfg.capacity_w - 12_000.0).abs() < 1e-12);
+    }
+
+    // ── the spec's parameter bag as an override layer on typed specs ────
+
+    /// A typed spec whose bag mirrors the payload (the shape every
+    /// `build_typed_spec` resolver produces), with one bag key changed the
+    /// way a blueprint caller overrides a single field.
+    fn pv_spec_with_bag_override(override_kw: f64) -> hares_io::EquipmentSpec {
+        let typed_cfg = hares_equipment::PvConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kw: 5.0,
+            tilt_deg: Some(30.0),
+            azimuth_deg: Some(180.0),
+            module_type: None,
+            noct_c: None,
+            array_type: None,
+            system_losses_fraction: None,
+            inverter_efficiency: None,
+            inverter_capacity_kw: None,
+            power_factor: None,
+            surface_resolution_deg: None,
+            sam_lut_path: None,
+            soiling: None,
+            arrays: None,
+        };
+        let mut parameters = serde_json::to_value(&typed_cfg)
+            .expect("serializable PV config")
+            .as_object()
+            .cloned()
+            .expect("PV config object");
+        parameters.insert("capacity_kw".to_string(), json!(override_kw));
+        let mut typed_overrides = serde_json::Map::new();
+        typed_overrides.insert("capacity_kw".to_string(), json!(override_kw));
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "PV".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters,
+            typed_overrides,
+            zip_params: None,
+            typed_config: Some(
+                hares_equipment::EquipmentConfig::from_typed(
+                    "PV".to_string(),
+                    "PV".to_string(),
+                    typed_cfg,
+                )
+                .unwrap(),
+            ),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }
+    }
+
+    #[test]
+    fn spec_parameter_override_on_typed_spec_reaches_the_typed_config() {
+        let mut spec = pv_spec_with_bag_override(9.0);
+        apply_spec_bag_to_typed_config(&mut spec).expect("the spec's overrides must land");
+        let overrides = serde_json::Value::Object(serde_json::Map::new());
+
+        let merged = merged_equipment_config(&spec, &overrides)
+            .expect("the spec's own parameter override must merge cleanly");
+        let cfg = merged
+            .require_typed::<hares_equipment::PvConfig>("PV")
+            .expect("the merged payload must deserialize as PvConfig");
+
+        assert!(
+            (cfg.capacity_kw - 9.0).abs() < 1e-12,
+            "an override the caller set on the spec must reach the typed \
+             config instead of being dropped, got capacity_kw {}",
+            cfg.capacity_kw
+        );
+    }
+
+    #[test]
+    fn spec_parameter_bag_in_agreement_with_typed_payload_merges_unchanged() {
+        let mut spec = pv_spec_with_bag_override(5.0);
+        apply_spec_bag_to_typed_config(&mut spec).expect("the spec's overrides must land");
+        let overrides = serde_json::Value::Object(serde_json::Map::new());
+
+        let merged = merged_equipment_config(&spec, &overrides)
+            .expect("a mirror bag in agreement with the payload must merge cleanly");
+        let cfg = merged
+            .require_typed::<hares_equipment::PvConfig>("PV")
+            .expect("the merged payload must deserialize as PvConfig");
+
+        assert!((cfg.capacity_kw - 5.0).abs() < 1e-12);
+        assert!((cfg.tilt_deg.unwrap() - 30.0).abs() < 1e-12);
+    }
+
+    /// The bag-encoding disagreement case the Python builders write: the
+    /// override carries the human fuel spelling ("natural gas", the same
+    /// text the raw channel parses) while the typed payload carries the
+    /// canonical serde form ("Gas"). The landing must translate the raw
+    /// text into the canonical form, not reject the spec.
+    #[test]
+    fn spec_bag_raw_text_fuel_lands_the_canonical_form() {
+        let typed_cfg: hares_equipment::GasWaterHeaterConfig = serde_json::from_value(json!({
+            "fuel_type": "Gas",
+            "tank_volume_m3": 0.3,
+            "heating_capacity_w": 4000.0,
+        }))
+        .expect("minimal GasWaterHeaterConfig");
+        let mut typed_overrides = serde_json::Map::new();
+        typed_overrides.insert("fuel_type".to_string(), json!("natural gas"));
+        let mut spec = hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "Gas Water Heater".to_string(),
+            fuel_type: FuelType::Gas,
+            parameters: serde_json::to_value(&typed_cfg)
+                .expect("serializable gas water heater config")
+                .as_object()
+                .cloned()
+                .expect("gas water heater config object"),
+            typed_overrides,
+            zip_params: None,
+            typed_config: Some(
+                hares_equipment::EquipmentConfig::from_typed(
+                    "Gas Water Heater".to_string(),
+                    "Gas Water Heater".to_string(),
+                    typed_cfg,
+                )
+                .unwrap(),
+            ),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        };
+
+        apply_spec_bag_to_typed_config(&mut spec).expect("the raw-text fuel must land normalized");
+
+        let merged = merged_equipment_config(&spec, &Value::Object(Map::new()))
+            .expect("the normalized payload must merge cleanly");
+        let cfg = merged
+            .require_typed::<hares_equipment::GasWaterHeaterConfig>("Gas Water Heater")
+            .expect("the landed payload must deserialize");
+        assert_eq!(
+            cfg.fuel_type,
+            FuelType::Gas,
+            "the override's raw text must land as the canonical enum the payload's \
+             deserializer reads"
+        );
+    }
+
+    /// Same disagreement on a flattened config, where serde's path tracking
+    /// cannot see the failing field: the raw-text backup fuel must still
+    /// land in its canonical form.
+    #[test]
+    fn spec_bag_raw_text_backup_fuel_lands_canonical_on_the_flattened_config() {
+        for (raw, canonical) in [
+            ("natural gas", FuelType::Gas),
+            ("gas", FuelType::Gas),
+            ("electric", FuelType::Electric),
+        ] {
+            let mut spec = heat_pump_heater_spec_with_backup_fuel(FuelType::Gas);
+            spec.typed_overrides
+                .insert("backup_fuel".to_string(), json!(raw));
+
+            apply_spec_bag_to_typed_config(&mut spec)
+                .unwrap_or_else(|err| panic!("the raw text '{raw}' must land normalized: {err}"));
+
+            let merged = merged_equipment_config(&spec, &Value::Object(Map::new()))
+                .expect("the normalized payload must merge cleanly");
+            let cfg = merged
+                .require_typed::<hares_equipment::HeatPumpHeaterConfig>("ASHP Heater")
+                .expect("the landed payload must deserialize");
+            assert_eq!(
+                cfg.common.backup_fuel,
+                Some(canonical),
+                "the bag's raw text '{raw}' must land as the canonical enum"
+            );
+        }
+    }
+
+    /// A bag value no parser can read is a build error naming the
+    /// equipment, the field, and the offending value.
+    #[test]
+    fn spec_bag_unparseable_fuel_text_errors_naming_field_and_value() {
+        let typed_cfg: hares_equipment::GasWaterHeaterConfig = serde_json::from_value(json!({
+            "fuel_type": "Gas",
+            "tank_volume_m3": 0.3,
+            "heating_capacity_w": 4000.0,
+        }))
+        .expect("minimal GasWaterHeaterConfig");
+        let mut typed_overrides = serde_json::to_value(&typed_cfg)
+            .expect("serializable gas water heater config")
+            .as_object()
+            .cloned()
+            .expect("gas water heater config object");
+        typed_overrides.insert("fuel_type".to_string(), json!("ban gas"));
+        let mut spec = hares_io::EquipmentSpec {
+            instance_name: Some("Hot Water".to_string()),
+            name: "Gas Water Heater".to_string(),
+            fuel_type: FuelType::Gas,
+            parameters: serde_json::to_value(&typed_cfg)
+                .expect("serializable gas water heater config")
+                .as_object()
+                .cloned()
+                .expect("gas water heater config object"),
+            typed_overrides,
+            zip_params: None,
+            typed_config: Some(
+                hares_equipment::EquipmentConfig::from_typed(
+                    "Gas Water Heater".to_string(),
+                    "Gas Water Heater".to_string(),
+                    typed_cfg,
+                )
+                .unwrap(),
+            ),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        };
+
+        let err = apply_spec_bag_to_typed_config(&mut spec)
+            .expect_err("a bag value the schema rejects must fail the landing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Hot Water"),
+            "the error must name the equipment instance, got: {msg}"
+        );
+        assert!(
+            msg.contains("'fuel_type'"),
+            "the error must name the field, got: {msg}"
+        );
+        assert!(
+            msg.contains("ban gas"),
+            "the error must carry the offending value, got: {msg}"
+        );
+    }
+
+    /// On a flattened config serde's path tracking reports no field, so the
+    /// landing must name the field from the bag key it just landed.
+    #[test]
+    fn spec_bag_unparseable_fuel_on_flattened_config_names_the_bag_key() {
+        let mut spec = heat_pump_heater_spec_with_backup_fuel(FuelType::Gas);
+        spec.typed_overrides
+            .insert("backup_fuel".to_string(), json!("ban gas"));
+
+        let err = apply_spec_bag_to_typed_config(&mut spec)
+            .expect_err("a bag value the schema rejects must fail the landing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'backup_fuel'"),
+            "the flattened config's fieldless serde path must be replaced by \
+             the bag key, got: {msg}"
+        );
+        assert!(
+            msg.contains("ban gas"),
+            "the error must carry the offending value, got: {msg}"
+        );
+    }
+
+    /// A spec whose typed payload is the schema-valid JSON `data`, with one
+    /// override on the dedicated override field.
+    fn spec_with_payload(
+        type_name: &str,
+        data: serde_json::Value,
+        field: &str,
+        value: serde_json::Value,
+    ) -> hares_io::EquipmentSpec {
+        let mut typed_overrides = serde_json::Map::new();
+        typed_overrides.insert(field.to_string(), value);
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: type_name.to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: data.as_object().cloned().unwrap_or_default(),
+            typed_overrides,
+            zip_params: None,
+            typed_config: Some(hares_equipment::EquipmentConfig::with_payload(
+                type_name.to_string(),
+                type_name.to_string(),
+                hares_equipment::ConfigPayload::Typed {
+                    type_name: type_name.to_string(),
+                    version: 1,
+                    data,
+                },
+            )),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }
+    }
+
+    /// Every registered config class takes an override of an unset
+    /// optional field: the field is absent from the payload's serialized
+    /// data (`skip_serializing_if`), and the schema still reads it. The
+    /// pre-fix landing keyed off the payload's carried keys and dropped
+    /// every one of these silently.
+    #[test]
+    fn an_override_of_an_unset_optional_lands_on_every_config_class() {
+        let cases: Vec<(&str, &str, serde_json::Value, serde_json::Value)> = vec![
+            (
+                "Gas Furnace",
+                "fan_power_w",
+                json!({"afue": 1.0, "capacity_w": 1.0}),
+                json!(350.0),
+            ),
+            (
+                "Electric Furnace",
+                "fan_power_w",
+                json!({"capacity_w": 1.0, "eir": 1.0, "setpoint": {}}),
+                json!(350.0),
+            ),
+            (
+                "Gas Boiler",
+                "fan_power_w",
+                json!({"afue": 1.0, "capacity_w": 1.0}),
+                json!(350.0),
+            ),
+            (
+                "Electric Boiler",
+                "fan_power_w",
+                json!({"capacity_w": 1.0, "eir": 1.0}),
+                json!(350.0),
+            ),
+            (
+                "Electric Baseboard",
+                "zone_id",
+                json!({"capacity_w": 1.0, "eir": 1.0}),
+                json!(1),
+            ),
+            ("Ideal HVAC", "shr", json!({}), json!(0.5)),
+            (
+                "Central AC",
+                "fan_power_w",
+                json!({"capacity_w": 1.0, "eir": 1.0}),
+                json!(350.0),
+            ),
+            (
+                "Room AC",
+                "shr",
+                json!({"capacity_w": 1.0, "eir": 1.0}),
+                json!(0.5),
+            ),
+            ("Dehumidifier", "zone_id", json!({}), json!(1)),
+            ("ASHP Heater", "backup_fuel", json!({}), json!("Gas")),
+            ("ASHP Cooler", "zone_id", json!({}), json!(1)),
+            (
+                "Gas Water Heater",
+                "ua_w_per_k",
+                json!({"fuel_type": "Gas"}),
+                json!(5.0),
+            ),
+            (
+                "Electric Resistance Water Heater",
+                "ua_w_per_k",
+                json!({}),
+                json!(5.0),
+            ),
+            (
+                "Tankless Water Heater",
+                "zone_id",
+                json!({"fuel_type": "Gas"}),
+                json!(1),
+            ),
+            ("Indirect Tank", "ua_w_per_k", json!({}), json!(5.0)),
+            ("Heat Pump Water Heater", "cop", json!({}), json!(3.0)),
+            ("PV", "noct_c", json!({"capacity_kw": 1.0}), json!(45.0)),
+            (
+                "Battery",
+                "self_discharge_pct_per_day",
+                json!({"capacity_kwh": 1.0, "max_charge_kw": 1.0, "max_discharge_kw": 1.0}),
+                json!(0.1),
+            ),
+            (
+                "EV",
+                "charging_level",
+                json!({"capacity_kwh": 1.0, "max_charging_power_kw": 1.0}),
+                json!("L2"),
+            ),
+            (
+                "Generator",
+                "zone_id",
+                json!({"rated_power_kw": 1.0}),
+                json!(1),
+            ),
+            (
+                "Ventilation Fan",
+                "sensible_effectiveness",
+                json!({"flow_rate_m3_s": 1.0}),
+                json!(0.7),
+            ),
+        ];
+        for (type_name, field, payload, value) in cases {
+            let mut spec = spec_with_payload(type_name, payload, field, value.clone());
+            apply_spec_bag_to_typed_config(&mut spec).unwrap_or_else(|err| {
+                panic!("{type_name}: the unset optional '{field}' must land: {err}")
+            });
+            let hares_equipment::ConfigPayload::Typed { data, .. } =
+                &spec.typed_config.as_ref().expect("typed").payload
+            else {
+                panic!("{type_name}: typed payload expected");
+            };
+            assert_eq!(
+                data.get(field),
+                Some(&value),
+                "{type_name}: the override of the unset optional '{field}' must reach the payload"
+            );
+        }
+    }
+
+    /// A typo'd override key on a spec errors naming the equipment and the
+    /// field: the dedicated override field has no machinery keys to hide
+    /// behind, so the whole channel is strict (the acceptance test).
+    #[test]
+    fn a_typo_override_key_errors_naming_the_equipment_and_field() {
+        let mut spec = spec_with_payload(
+            "Gas Furnace",
+            json!({"afue": 1.0, "capacity_w": 1.0}),
+            "afuee",
+            json!(0.96),
+        );
+        let err = apply_spec_bag_to_typed_config(&mut spec)
+            .expect_err("a typo'd override key must fail the landing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Gas Furnace"),
+            "the error must name the equipment, got: {msg}"
+        );
+        assert!(
+            msg.contains("afuee"),
+            "the error must name the field, got: {msg}"
+        );
+    }
+
+    /// An ASHP heater spec whose payload carries the backup fuel, the shape
+    /// the Python `ASHPHeater` builder produces for `autosize=False`.
+    fn heat_pump_heater_spec_with_backup_fuel(fuel: FuelType) -> hares_io::EquipmentSpec {
+        let typed_cfg = hares_equipment::HeatPumpHeaterConfig {
+            common: hares_equipment::HeatPumpCommonConfig {
+                backup_fuel: Some(fuel),
+                ..hares_equipment::HeatPumpCommonConfig::default()
+            },
+            ..hares_equipment::HeatPumpHeaterConfig::default()
+        };
+        let parameters = serde_json::to_value(&typed_cfg)
+            .expect("serializable heater config")
+            .as_object()
+            .cloned()
+            .expect("heater config object");
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "ASHP Heater".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters,
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: Some(
+                hares_equipment::EquipmentConfig::from_typed(
+                    "ASHP Heater".to_string(),
+                    "ASHP Heater".to_string(),
+                    typed_cfg,
+                )
+                .unwrap(),
+            ),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }
+    }
+
+    fn heat_pump_heater_spec() -> hares_io::EquipmentSpec {
+        let typed_cfg = hares_equipment::HeatPumpHeaterConfig::default();
+        let parameters = serde_json::to_value(&typed_cfg)
+            .expect("serializable heater config")
+            .as_object()
+            .cloned()
+            .expect("heater config object");
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "ASHP Heater".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters,
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: Some(
+                hares_equipment::EquipmentConfig::from_typed(
+                    "ASHP Heater".to_string(),
+                    "ASHP Heater".to_string(),
+                    typed_cfg,
+                )
+                .unwrap(),
+            ),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }
+    }
+
+    #[test]
+    fn unknown_override_field_on_heat_pump_heater_errors_at_the_merge() {
+        let spec = heat_pump_heater_spec();
+        let overrides = json!({
+            "ASHP Heater": {
+                "backup_fuell": 1.0
+            }
+        });
+
+        let err = merged_equipment_config(&spec, &overrides)
+            .expect_err("the flattened heater config must reject unknown override keys");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ASHP Heater"),
+            "the error must name the equipment, got: {msg}"
+        );
+        assert!(
+            msg.contains("backup_fuell"),
+            "the error must name the unknown field, got: {msg}"
+        );
+    }
+
+    fn dehumidifier_spec() -> hares_io::EquipmentSpec {
+        let typed_cfg: hares_equipment::DehumidifierConfig =
+            serde_json::from_value(json!({ "zone_id": 1 })).expect("minimal DehumidifierConfig");
+        let parameters = serde_json::to_value(&typed_cfg)
+            .expect("serializable dehumidifier config")
+            .as_object()
+            .cloned()
+            .expect("dehumidifier config object");
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "Dehumidifier".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters,
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: Some(
+                hares_equipment::EquipmentConfig::from_typed(
+                    "Dehumidifier".to_string(),
+                    "Dehumidifier".to_string(),
+                    typed_cfg,
+                )
+                .unwrap(),
+            ),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }
+    }
+
+    #[test]
+    fn invalid_override_value_errors_at_the_merge_call() {
+        let spec = dehumidifier_spec();
+        let overrides = json!({
+            "Dehumidifier": {
+                "capacity_liters_per_day": "lots"
+            }
+        });
+
+        let err = merged_equipment_config(&spec, &overrides).expect_err(
+            "a value the typed config's schema rejects must fail at the \
+                         override application",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Dehumidifier"),
+            "the error must name the equipment, got: {msg}"
+        );
+        assert!(
+            msg.contains("capacity_liters_per_day"),
+            "the error must name the field, got: {msg}"
+        );
     }
 
     // ── setpoints_reconciled propagation through merged_equipment_config ─
@@ -1469,6 +2401,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(eq_cfg),
             system_id: None,
             related_hvac_idref: None,
@@ -1542,7 +2475,7 @@ mod tests {
         let zip = hares_types::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
         spec.zip_params = Some(zip);
 
-        let cfg = equipment_config_from_spec(&spec);
+        let cfg = equipment_config_from_spec(&spec).expect("spec conversion must succeed");
         assert_eq!(
             cfg.zip,
             Some(zip),
@@ -1669,6 +2602,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: serde_json::Map::new(),
             zip_params: hares_types::zip::zip_defaults_for_class("ASHP Heater"),
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1689,7 +2623,7 @@ mod tests {
         assert_eq!((zip.zq, zip.iq, zip.pq), (base.zq, base.iq, base.pq));
         // The reserved "zip" key must not leak into the raw parameter map.
         assert!(
-            !merged.raw_data().expect("raw payload").contains_key("zip"),
+            !raw_keys(&merged).iter().any(|key| *key == "zip"),
             "reserved \"zip\" key must be peeled from raw parameters"
         );
         // End-to-end through the resolver.
@@ -1705,16 +2639,15 @@ mod tests {
         let spec = raw_ashp_spec();
         let base = spec.zip_params.expect("toml base");
 
-        let cfg = equipment_config_from_spec(&spec);
+        let cfg = equipment_config_from_spec(&spec).expect("spec conversion must succeed");
         // The sidecar is the single ZIP channel.
         assert_eq!(cfg.zip, Some(base));
         assert_eq!(hares_equipment::resolve_zip(&cfg).zip, base);
         // No legacy zip_* keys anywhere in the raw payload.
-        let raw = cfg.raw_data().expect("raw payload");
+        let keys = raw_keys(&cfg);
         assert!(
-            raw.keys().all(|k| !k.starts_with("zip")),
-            "raw payload must carry no zip_* keys, got: {:?}",
-            raw.keys().collect::<Vec<_>>()
+            keys.iter().all(|k| !k.starts_with("zip")),
+            "raw payload must carry no zip_* keys, got: {keys:?}"
         );
     }
 
@@ -1726,6 +2659,7 @@ mod tests {
             ElectricalSummary, GridState, PriceSignal, SurfaceIrradiance, WeatherState, ZoneState,
         };
         hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: hares_types::ZoneId(zone_id),
                 temperature_c: 22.0,
@@ -1767,7 +2701,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -1910,6 +2845,100 @@ mod tests {
         }
     }
 
+    /// Only boundaries whose HPXML element carries a material read it: an
+    /// outdoor door, floor or window has none to read and takes OS-HPXML's
+    /// Rough or glass's Very Smooth with no warning. A wall, rim joist,
+    /// roof or foundation wall reads its own element, and one that names
+    /// none takes OS-HPXML's default material with a warning naming the
+    /// boundary. An outdoor wall's unknown material is an error naming it.
+    #[test]
+    fn only_material_bearing_boundaries_read_their_material() {
+        use hares_physics::film_coefficients::{SurfaceRoughness, ZoneLabel};
+        let outdoor = |boundary_type: BoundaryType, finish: Option<&str>| Boundary {
+            id: "b-1".to_string(),
+            boundary_type,
+            exterior_zone: Some(ZoneType::Outdoor),
+            finish_type: finish.map(str::to_string),
+            ..slab_boundary(None, None)
+        };
+        for (boundary_type, finish, class, warns) in [
+            (
+                BoundaryType::Door,
+                Some("diamond plate"),
+                SurfaceRoughness::Rough,
+                false,
+            ),
+            (
+                BoundaryType::Floor,
+                Some("diamond plate"),
+                SurfaceRoughness::Rough,
+                false,
+            ),
+            (
+                BoundaryType::Window,
+                Some("diamond plate"),
+                SurfaceRoughness::VerySmooth,
+                false,
+            ),
+            (
+                BoundaryType::Skylight,
+                None,
+                SurfaceRoughness::VerySmooth,
+                false,
+            ),
+            (
+                BoundaryType::Roof,
+                Some("asphalt or fiberglass shingles"),
+                SurfaceRoughness::VeryRough,
+                false,
+            ),
+            (BoundaryType::Roof, None, SurfaceRoughness::VeryRough, true),
+            (
+                BoundaryType::Wall,
+                Some("vinyl siding"),
+                SurfaceRoughness::Smooth,
+                false,
+            ),
+            (BoundaryType::Wall, None, SurfaceRoughness::Rough, true),
+            (BoundaryType::RimJoist, None, SurfaceRoughness::Rough, true),
+            (
+                BoundaryType::FoundationWall,
+                Some("double brick"),
+                SurfaceRoughness::MediumRough,
+                false,
+            ),
+            (
+                BoundaryType::FoundationWall,
+                None,
+                SurfaceRoughness::MediumRough,
+                true,
+            ),
+        ] {
+            let (got, warning) = super::boundary_outside_roughness(
+                &outdoor(boundary_type.clone(), finish),
+                ZoneLabel::Outdoor,
+            )
+            .unwrap();
+            assert_eq!(got, class, "{boundary_type:?} {finish:?}");
+            assert_eq!(warning.is_some(), warns, "{boundary_type:?} {finish:?}");
+            if let Some(warning) = warning {
+                assert!(warning.contains("b-1"), "{warning}");
+            }
+        }
+        let err = super::boundary_outside_roughness(
+            &outdoor(BoundaryType::Wall, Some("diamond plate")),
+            ZoneLabel::Outdoor,
+        )
+        .expect_err("an unknown wall material must fail");
+        assert!(err.to_string().contains("b-1"), "{err}");
+        let err = super::boundary_outside_roughness(
+            &outdoor(BoundaryType::Other("Canopy".into()), None),
+            ZoneLabel::Outdoor,
+        )
+        .expect_err("an unrecognised outdoor boundary type must fail");
+        assert!(err.to_string().contains("Canopy"), "{err}");
+    }
+
     /// A slab boundary without perimeter derives P ≈ 4 × √(area)
     /// and produces a precomputed RC layer with resistance matching F2 × P.
     #[test]
@@ -1926,6 +2955,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -1985,6 +3016,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2030,6 +3063,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2049,6 +3084,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2107,6 +3144,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2166,6 +3205,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2186,11 +3227,30 @@ mod tests {
         );
     }
 
-    /// Exterior film resistance varies with finish_type: stucco (VeryRough)
-    /// must produce lower R_ext than vinyl siding (Smooth) at the same wind speed.
-    /// This is the regression test for the hardcoded `SurfaceRoughness::Rough` bug.
-    /// If `surface_roughness_from_finish_type` were bypassed, both boundaries
-    /// would get identical R_ext and this test would fail.
+    /// The site's HPXML terrain drives the wind on every leakage path, as in
+    /// OS-HPXML (airflow.rb:200-221); OCHRE assumes rural terrain whatever
+    /// the site (utils/envelope.py:648-649). A file without a site type is
+    /// OS-HPXML's default suburban (defaults.rb:817-818); the parser rejects
+    /// any other value (`hpxml::building` tests).
+    #[test]
+    fn the_site_type_sets_the_terrain() {
+        use hares_io::hpxml::SiteType;
+        use hares_physics::infiltration::TerrainClass;
+        for (site, terrain) in [
+            (Some(SiteType::Rural), TerrainClass::Rural),
+            (Some(SiteType::Suburban), TerrainClass::Suburban),
+            (Some(SiteType::Urban), TerrainClass::Urban),
+            (None, TerrainClass::Suburban),
+        ] {
+            assert_eq!(super::site_type_to_terrain(site.as_ref()), terrain);
+        }
+    }
+
+    /// Exterior film resistance varies with finish_type: fiber cement siding
+    /// (Very Rough, the dataset's cement siding record) must produce lower
+    /// R_ext than vinyl siding (Smooth, the hollow-backed siding) at the same
+    /// wind speed. If the finish type were bypassed, both boundaries would
+    /// get identical R_ext and this test would fail.
     #[test]
     fn finish_type_roughness_changes_exterior_film_resistance() {
         let building = hares_io::Building {
@@ -2220,7 +3280,7 @@ mod tests {
                     foundation_depth_m: None,
                 },
                 Boundary {
-                    id: "wall-stucco".to_string(),
+                    id: "wall-fiber-cement".to_string(),
                     boundary_type: BoundaryType::Wall,
                     area_m2: 20.0,
                     azimuth_deg: Some(180.0),
@@ -2231,7 +3291,7 @@ mod tests {
                     material_layers: Vec::new(),
                     framing_factor: None,
                     construction_type: None,
-                    finish_type: Some("stucco".to_string()),
+                    finish_type: Some("fiber cement siding".to_string()),
                     insulation_details: None,
                     has_radiant_barrier: false,
                     solar_absorptance: None,
@@ -2254,6 +3314,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2263,21 +3325,19 @@ mod tests {
             .expect("building_to_boundary_inputs");
         assert_eq!(inputs.len(), 2);
         let r_vinyl = inputs[0].r_film_exterior_m2_k_w;
-        let r_stucco = inputs[1].r_film_exterior_m2_k_w;
+        let r_cement = inputs[1].r_film_exterior_m2_k_w;
         assert!(
-            r_stucco < r_vinyl,
-            "stucco (VeryRough, Rf=2.17) R_ext={r_stucco:.5} must be < vinyl siding (Smooth, Rf=1.11) R_ext={r_vinyl:.5}; \
-             hardcoded Rough would give identical values"
+            r_cement < r_vinyl,
+            "fiber cement (VeryRough, Rf=2.17) R_ext={r_cement:.5} must be < vinyl siding \
+             (Smooth, Rf=1.11) R_ext={r_vinyl:.5}; one roughness for both would give identical values"
         );
     }
 
-    /// `find_zone_idx` must assert when passed an Adjacent zone type: the rewrite
-    /// in `building.rs` should eliminate all Adjacent references before this
-    /// function is called.
+    /// `find_zone_idx` must reject an Adjacent zone type with a typed error:
+    /// the rewrite in `building.rs` should eliminate all Adjacent references
+    /// before this function is called.
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    #[should_panic(expected = "Adjacent zone type reached find_zone_idx")]
-    fn find_zone_idx_panics_on_adjacent_input() {
+    fn find_zone_idx_errors_on_adjacent_input() {
         let building = minimal_building(
             vec![Zone {
                 zone_type: ZoneType::Conditioned,
@@ -2288,13 +3348,21 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             Vec::new(),
         );
         // Adjacent is filtered from the zones vec in building.rs and should
         // never reach find_zone_idx after the rewrite. This call asserts
         // that invariant.
-        let _ = find_zone_idx(&building, None, Some(&ZoneType::Adjacent), 1);
+        let err = find_zone_idx(&building, None, Some(&ZoneType::Adjacent), 1)
+            .expect_err("an Adjacent zone input must be a typed error");
+        assert!(
+            err.to_string()
+                .contains("Adjacent zone type reached find_zone_idx"),
+            "got: {err}"
+        );
     }
 
     /// `find_zone_idx` with boundary ID resolves the correct zone when two
@@ -2311,6 +3379,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let zone_b = Zone {
             zone_type: ZoneType::Conditioned,
@@ -2321,6 +3391,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone_a, zone_b], Vec::new());
 
@@ -2349,6 +3421,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let zone_b = Zone {
             zone_type: ZoneType::Conditioned,
@@ -2359,6 +3433,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone_a, zone_b], Vec::new());
 
@@ -2387,6 +3463,8 @@ mod tests {
             vented: true,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
         // No boundary ID provided — uses type-only fallback.
@@ -2422,6 +3500,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
         assert_eq!(find_zone_idx(&building, Some("Door1"), None, 1).unwrap(), 0);
@@ -2440,6 +3520,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
         let result = find_zone_idx(&building, Some("Roof1"), Some(&ZoneType::Attic), 1);
@@ -2461,6 +3543,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
         assert_eq!(
@@ -2482,6 +3566,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
         let result =
@@ -2558,6 +3644,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2638,6 +3726,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2714,6 +3804,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2785,6 +3877,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -2877,6 +3971,8 @@ mod tests {
                         vented: false,
                         ventilation_ach: None,
                         ventilation_sla: None,
+                        height_m: None,
+                        hpxml_location: None,
                     }],
                     vec![],
                 )
@@ -2969,6 +4065,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -3027,6 +4125,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 }],
                 Vec::new(),
             )
@@ -3125,12 +4225,17 @@ mod tests {
     // ── zone_type_to_label tests ──────────────────────────────────────
 
     #[test]
-    fn zone_type_to_label_other_maps_to_outdoor() {
-        let result = zone_type_to_label(Some(&ZoneType::Other("Bogus".to_string())));
-        assert_eq!(
-            result,
-            hares_physics::film_coefficients::ZoneLabel::Outdoor,
-            "unrecognised zone type must map to Outdoor label"
+    fn zone_type_to_label_other_is_an_error() {
+        let err = zone_type_to_label("wall_1", Some(&ZoneType::Other("Bogus".to_string())))
+            .expect_err("an unrecognised zone type must be an error, not a substituted label");
+        let message = err.to_string();
+        assert!(
+            message.contains("Bogus"),
+            "the error must name the unrecognised text, got: {message}"
+        );
+        assert!(
+            message.contains("wall_1"),
+            "the error must name the boundary, got: {message}"
         );
     }
 
@@ -3148,6 +4253,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             Vec::new(),
         );
@@ -3176,10 +4283,13 @@ mod tests {
             foundation_depth_m: None,
         };
         let result = resolve_exterior(&building, &boundary, 1);
-        assert_eq!(
-            result.unwrap(),
-            hares_envelope::ExteriorTarget::Outdoor,
-            "None exterior zone must default to Outdoor target"
+        // An exterior adjacency the boundary neither states nor can derive
+        // from a wall is an error: the pre-fix code defaulted to
+        // Outdoor and the boundary's true adjacency was lost.
+        let err = result.expect_err("a boundary with no exterior zone is an error");
+        assert!(
+            err.to_string().contains("none_ext"),
+            "the error must name the boundary, got: {err}"
         );
     }
 
@@ -3195,6 +4305,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             Vec::new(),
         );
@@ -3223,10 +4335,359 @@ mod tests {
             foundation_depth_m: None,
         };
         let result = resolve_exterior(&building, &boundary, 1);
-        assert_eq!(
-            result.unwrap(),
-            hares_envelope::ExteriorTarget::Outdoor,
-            "unrecognised exterior zone type must map to Outdoor target"
+        // Unrecognised exterior zone text is an error naming it:
+        // the pre-fix code defaulted to Outdoor and the input's text was
+        // silently discarded.
+        let err = result.expect_err("unrecognised exterior zone text is an error");
+        let message = err.to_string();
+        assert!(
+            message.contains("Foobar"),
+            "the error must name the unrecognised text, got: {message}"
+        );
+        assert!(
+            message.contains("other_ext"),
+            "the error must name the boundary, got: {message}"
+        );
+    }
+
+    // ── overrides of raw-parameter loads ────────────────────────────────
+
+    /// A load of each kind, by a class registered as that kind, resolved
+    /// with a four-phase cycle so the wet appliance's phase keys exist.
+    const LOAD_OF_EACH_KIND: [&str; 3] = ["Plug Loads", "Cooking Range", "Dishwasher"];
+
+    fn raw_load_spec(class: &str) -> hares_io::EquipmentSpec {
+        let Value::Object(parameters) = json!({ "sensible_gain_fraction": 0.5, "phase_len": 4 })
+        else {
+            unreachable!()
+        };
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: class.to_string(),
+            fuel_type: FuelType::Electric,
+            parameters,
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }
+    }
+
+    /// A key of each form on `params`'s list, a numbered one by its first
+    /// member, with the kind the load reads it as.
+    fn listed_keys(
+        params: &hares_equipment::RawParams,
+    ) -> Vec<(String, hares_equipment::ParamKind)> {
+        params
+            .params()
+            .map(|param| {
+                let key = match param.form {
+                    hares_equipment::ParamForm::Key(name) => name.to_string(),
+                    hares_equipment::ParamForm::Indexed { prefix, suffix, .. } => {
+                        format!("{prefix}0{suffix}")
+                    }
+                };
+                (key, param.kind)
+            })
+            .collect()
+    }
+
+    /// A value of `kind`, and one of another kind.
+    fn values_of(kind: hares_equipment::ParamKind) -> (Value, Value) {
+        use hares_equipment::ParamKind;
+        match kind {
+            ParamKind::Number => (json!(1.0), json!("1")),
+            ParamKind::Text => (json!("constant"), json!(1.0)),
+            ParamKind::Bool => (json!(true), json!(1.0)),
+            ParamKind::NumberList => (json!([1.0]), json!(1.0)),
+        }
+    }
+
+    /// The keys of a raw config's parameters.
+    fn raw_keys(cfg: &hares_equipment::EquipmentConfig) -> Vec<&String> {
+        match &cfg.payload {
+            hares_equipment::ConfigPayload::Raw { data } => data.keys().collect(),
+            hares_equipment::ConfigPayload::Typed { .. } => panic!("a raw payload"),
+        }
+    }
+
+    fn rejected_key(spec: &hares_io::EquipmentSpec, overrides: &Value) -> Option<String> {
+        match merged_equipment_config(spec, overrides) {
+            Ok(_) => None,
+            Err(HaresError::InvalidEquipmentParameter { key, .. }) => Some(key),
+            Err(other) => panic!("{}: not a parameter error: {other}", spec.name),
+        }
+    }
+
+    /// Derived from the lists, so a key added to a load's list is covered:
+    /// every key a load kind reads takes an override of the kind it reads
+    /// (`equipment_id` aside, which ids reserve) and rejects one of another
+    /// kind, and every other key is rejected by name: the other kinds' keys
+    /// this kind does not read, a misspelling of each of its own, and a
+    /// numbered key past its family's count.
+    #[test]
+    fn a_load_takes_an_override_of_exactly_the_parameters_it_reads() {
+        for class in LOAD_OF_EACH_KIND {
+            let spec = raw_load_spec(class);
+            let params = hares_equipment::raw_params_for_class(class).expect("a load class");
+            let own = listed_keys(params);
+            for (key, kind) in &own {
+                let (value, wrong) = values_of(*kind);
+                let rejected = rejected_key(&spec, &json!({ class: { key.as_str(): value } }));
+                if key == hares_equipment::config::KEY_EQUIPMENT_ID {
+                    assert_eq!(rejected.as_deref(), Some(key.as_str()), "{class}");
+                    continue;
+                }
+                assert_eq!(rejected, None, "{class} must take an override of {key}");
+                assert_eq!(
+                    rejected_key(&spec, &json!({ class: { key.as_str(): wrong } })).as_deref(),
+                    Some(key.as_str()),
+                    "{class} must reject {key} given {wrong}"
+                );
+            }
+            let mut others: Vec<String> = hares_equipment::raw_params::ALL
+                .iter()
+                .flat_map(|other| listed_keys(other))
+                .map(|(key, _)| key)
+                .filter(|key| !params.names(key))
+                .collect();
+            others.extend(own.iter().map(|(key, _)| format!("{key}x")));
+            others.extend([
+                "month_multiplier_12".to_string(),
+                "phase_4_power_kw".to_string(),
+            ]);
+            others.push("fuel_type".to_string());
+            for key in others
+                .iter()
+                .filter(|key| !params.reads(key, &|name| spec.parameters.get(name)))
+            {
+                let overrides = json!({ class: { key.as_str(): 1.0 } });
+                assert_eq!(
+                    rejected_key(&spec, &overrides).as_deref(),
+                    Some(key.as_str()),
+                    "{class} must reject an override of {key}"
+                );
+            }
+        }
+    }
+
+    /// The rejection names the parameters the load does read.
+    #[test]
+    fn a_rejected_override_lists_what_the_load_reads() {
+        let err = merged_equipment_config(
+            &raw_load_spec("Plug Loads"),
+            &json!({ "Plug Loads": { "usage_multiplir": 2.0 } }),
+        )
+        .expect_err("a misspelt parameter");
+        let message = err.to_string();
+        for key in [
+            "usage_multiplier",
+            "power_constant_kw",
+            "month_multiplier_<n>",
+        ] {
+            assert!(message.contains(key), "{key} missing from: {message}");
+        }
+    }
+
+    /// A wildcard parameter a load does not read is skipped for that load;
+    /// one it reads reaches it, under either wildcard spelling.
+    #[test]
+    fn a_wildcard_reaches_the_loads_that_read_its_parameters() {
+        for wildcard in ["all", "*"] {
+            let overrides = json!({ wildcard: { "usage_multiplier": 2.0, "n_units": 3.0 } });
+            let plug = merged_equipment_config(&raw_load_spec("Plug Loads"), &overrides)
+                .expect("the scheduled load takes the usage multiplier");
+            assert_eq!(plug.get_f64("usage_multiplier"), Some(2.0), "{wildcard}");
+            assert!(!raw_keys(&plug).iter().any(|key| *key == "n_units"));
+            let washer = merged_equipment_config(&raw_load_spec("Dishwasher"), &overrides)
+                .expect("the wet appliance takes the unit count");
+            assert_eq!(washer.get_f64("n_units"), Some(3.0), "{wildcard}");
+            assert!(
+                !raw_keys(&washer)
+                    .iter()
+                    .any(|key| *key == "usage_multiplier")
+            );
+        }
+    }
+
+    /// A numbered wildcard key reaches a load only within its family's
+    /// count as every layer leaves it: a four-phase dishwasher skips a
+    /// fifth phase unless the wildcard also lengthens its cycle.
+    #[test]
+    fn a_wildcard_numbered_key_reaches_a_load_within_its_count() {
+        let washer = raw_load_spec("Dishwasher");
+        let short =
+            merged_equipment_config(&washer, &json!({ "all": { "phase_4_power_kw": 1.0 } }))
+                .expect("skipped for a four-phase cycle");
+        assert!(
+            !raw_keys(&short)
+                .iter()
+                .any(|key| *key == "phase_4_power_kw")
+        );
+        let long = merged_equipment_config(
+            &washer,
+            &json!({ "all": { "phase_len": 5, "phase_4_power_kw": 1.0 } }),
+        )
+        .expect("the fifth phase exists");
+        assert_eq!(long.get_f64("phase_4_power_kw"), Some(1.0));
+    }
+
+    /// Both wildcard spellings are an error, never one shadowing the other.
+    #[test]
+    fn both_wildcard_spellings_are_an_error() {
+        let overrides = json!({ "all": { "usage_multiplier": 2.0 }, "*": { "zone_id": 1 } });
+        let err = merged_equipment_config(&raw_load_spec("Plug Loads"), &overrides)
+            .expect_err("two wildcards");
+        assert!(err.to_string().contains("both 'all' and '*'"), "{err}");
+        let err = validate_wildcard_override(&overrides, &[&raw_load_spec("Plug Loads")])
+            .expect_err("two wildcards");
+        assert!(err.to_string().contains("both 'all' and '*'"), "{err}");
+    }
+
+    /// A wildcard parameter no equipment of the dwelling reads is a
+    /// misspelling, rejected by name; one some equipment reads is not.
+    #[test]
+    fn a_wildcard_parameter_must_be_read_by_some_equipment() {
+        let plug = raw_load_spec("Plug Loads");
+        let washer = raw_load_spec("Dishwasher");
+        let furnace = gas_furnace_spec();
+        let population = [&plug, &washer, &furnace];
+        for overrides in [
+            json!({ "all": { "usage_multiplier": 2.0 } }),
+            json!({ "*": { "n_units": 2.0 } }),
+            json!({ "all": { "afue": 0.9 } }),
+            json!({ "all": { "frac_sensible": 0.4 } }),
+            json!({ "all": { "zip": { "pf": 0.9 } } }),
+        ] {
+            validate_wildcard_override(&overrides, &population)
+                .unwrap_or_else(|err| panic!("{overrides}: {err}"));
+        }
+        for (wildcard, key) in [
+            ("all", "usage_multiplir"),
+            ("*", "afuee"),
+            ("all", "month_multiplier_12"),
+            ("*", "phase_4_power_kw"),
+        ] {
+            let err = validate_wildcard_override(&json!({ wildcard: { key: 2.0 } }), &population)
+                .expect_err("read by no equipment");
+            assert!(
+                matches!(&err, HaresError::InvalidEquipmentParameter { key: k, .. } if k == key),
+                "{err}"
+            );
+            assert!(err.to_string().contains(wildcard), "{err}");
+        }
+        let err = validate_wildcard_override(&json!({ "all": { "n_units": 2.0 } }), &[&plug])
+            .expect_err("no wet appliance reads it here");
+        assert!(err.to_string().contains("n_units"), "{err}");
+        validate_wildcard_override(
+            &json!({ "all": { "phase_4_power_kw": 1.0 }, "Dishwasher": { "phase_len": 5 } }),
+            &population,
+        )
+        .expect("the dishwasher's own entry gives it a fifth phase");
+        let raw_ev = raw_load_spec("EV");
+        let err =
+            validate_wildcard_override(&json!({ "all": { "soc_max": 0.9 } }), &[&plug, &raw_ev])
+                .expect_err("a raw spec no list declares vouches for no parameter");
+        assert!(err.to_string().contains("soc_max"), "{err}");
+    }
+
+    /// The typed furnace takes the wildcard parameters its schema has and
+    /// skips the loads' ones.
+    #[test]
+    fn a_typed_config_takes_the_wildcard_parameters_its_schema_has() {
+        let overrides = json!({ "all": { "afue": 0.9, "usage_multiplier": 2.0 } });
+        let merged = merged_equipment_config(&gas_furnace_spec(), &overrides)
+            .expect("the furnace skips the load parameter");
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("typed");
+        assert!((cfg.afue - 0.9).abs() < 1e-12);
+    }
+
+    /// The reserved `zip` object reaches a load from its own entry and from
+    /// a wildcard; `equipment_id` is rejected from either.
+    #[test]
+    fn reserved_override_keys() {
+        for overrides in [
+            json!({ "Plug Loads": { "zip": { "pf": 0.9 } } }),
+            json!({ "all": { "zip": { "pf": 0.9 } } }),
+        ] {
+            let merged = merged_equipment_config(&raw_load_spec("Plug Loads"), &overrides)
+                .unwrap_or_else(|err| panic!("{overrides}: {err}"));
+            assert_eq!(merged.zip.map(|zip| zip.pf), Some(0.9), "{overrides}");
+        }
+        for (source, overrides) in [
+            ("Plug Loads", json!({ "Plug Loads": { "equipment_id": 3 } })),
+            ("all", json!({ "all": { "equipment_id": 3 } })),
+        ] {
+            let err = merged_equipment_config(&raw_load_spec("Plug Loads"), &overrides)
+                .expect_err("ids are the dwelling's");
+            assert!(
+                matches!(&err, HaresError::InvalidEquipmentParameter { key, .. } if key == "equipment_id")
+                    && err.to_string().contains(&format!("'{source}' override")),
+                "{err}"
+            );
+        }
+    }
+
+    /// An override may add a parameter the resolver left out: the usage
+    /// multiplier and the zone.
+    #[test]
+    fn an_override_adds_a_parameter_the_resolver_left_out() {
+        let spec = raw_load_spec("Plug Loads");
+        assert!(!spec.parameters.contains_key("usage_multiplier"));
+        assert!(!spec.parameters.contains_key("zone_id"));
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({ "Plug Loads": { "usage_multiplier": 1.5, "zone_id": 2 } }),
+        )
+        .expect("both are parameters the load reads");
+        assert_eq!(merged.get_f64("usage_multiplier"), Some(1.5));
+        assert_eq!(merged.get_f64("zone_id"), Some(2.0));
+    }
+
+    /// A parameter a load reads, given a value no config value holds (an
+    /// object, a null, a list with a non-number), is rejected by name rather
+    /// than read as absent.
+    #[test]
+    fn a_parameter_value_no_config_holds_is_rejected() {
+        for value in [json!({ "nested": 0.5 }), Value::Null, json!([1.0, "two"])] {
+            for key in [
+                "radiant_share_of_sensible",
+                "month_multiplier_3",
+                "usage_multiplier",
+            ] {
+                let overrides = json!({ "Plug Loads": { key: value.clone() } });
+                assert_eq!(
+                    rejected_key(&raw_load_spec("Plug Loads"), &overrides).as_deref(),
+                    Some(key),
+                    "{key} = {value}"
+                );
+            }
+        }
+    }
+
+    /// The HPXML spelling of a fraction in an override replaces the resolved
+    /// fraction; both spellings in one layer are an error.
+    #[test]
+    fn an_hpxml_gain_spelling_replaces_the_resolved_fraction() {
+        let merged = merged_equipment_config(
+            &raw_load_spec("Plug Loads"),
+            &json!({ "all": { "frac_latent": 0.1 }, "Plug Loads": { "frac_sensible": 0.3 } }),
+        )
+        .expect("both spellings are read");
+        assert_eq!(merged.get_f64("sensible_gain_fraction"), Some(0.3));
+        assert_eq!(merged.get_f64("latent_gain_fraction"), Some(0.1));
+        let err = merged_equipment_config(
+            &raw_load_spec("Plug Loads"),
+            &json!({ "Plug Loads": { "frac_sensible": 0.3, "sensible_gain_fraction": 0.2 } }),
+        )
+        .expect_err("one fraction twice");
+        assert!(
+            matches!(&err, HaresError::InvalidEquipmentParameter { key, .. } if key == "frac_sensible"),
+            "{err}"
         );
     }
 }

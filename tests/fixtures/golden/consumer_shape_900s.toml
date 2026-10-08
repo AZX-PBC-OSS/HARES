@@ -1,0 +1,21 @@
+kind = "dwelling"
+features = []
+defaults = "defaults"
+
+[defaults_files]
+"envelope/Envelope Materials.csv" = "tests/fixtures/golden/consumer_shape_envelope_materials.csv"
+
+[simulation]
+start_time = "2018-01-01T00:00:00-08:00"
+duration = 31536000
+time_res = 900
+output_verbosity = 2
+master_seed = 0
+
+[[home]]
+bldg_id = 176227
+hpxml = "tests/fixtures/resstock/2025.1/bldg0176227/home.xml"
+schedule = "tests/fixtures/resstock/2025.1/bldg0176227/in.schedules.csv"
+weather = "tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv"
+initialization_duration_s = 0
+overrides = { "Gas Water Heater" = { ua_w_per_k = 2.0 } }

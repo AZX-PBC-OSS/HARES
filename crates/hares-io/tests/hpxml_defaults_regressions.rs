@@ -1,15 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
-
 use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
 use hares_equipment::hvac::cooling_config::DehumidifierConfig;
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml::equipment::resolve_equipment;
 use hares_io::hpxml::validation::validate_hpxml_schema;
-use hares_io::hpxml::{BoundaryType, HpxmlError, ZoneType, parse_hpxml_str};
+use hares_io::hpxml::{BoundaryType, ZoneType, parse_hpxml_str};
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/hpxml/ochre_samples")
@@ -39,6 +37,7 @@ fn minimal_hpxml_with_systems(systems_xml: &str) -> String {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -58,7 +57,7 @@ fn base_fixture_preserves_summary_fields_and_imperial_unit_defaults() {
         Some("single-family detached"),
         "fixture residential facility type should not be silently dropped"
     );
-    assert_eq!(building.floors_above_grade, Some(1.0));
+    assert_eq!(building.floors_above_grade, 1.0);
 
     let conditioned = building
         .zones
@@ -68,18 +67,18 @@ fn base_fixture_preserves_summary_fields_and_imperial_unit_defaults() {
     let floor_area_m2 = conditioned
         .floor_area_m2
         .expect("conditioned area expected");
-    let volume_m3 = building
-        .conditioned_volume_m3
-        .expect("conditioned volume expected");
-    let ceiling_height_m = building.ceiling_height_m.expect("ceiling height expected");
+    let volume_m3 = building.conditioned_volume_m3;
+    let ceiling_height_m = building.ceiling_height_m;
 
-    let expected_floor_area_m2 = (2700.0 * 0.092_903_04) * 0.5;
+    let expected_floor_area_m2 = 2700.0 * 0.092_903_04;
     let expected_volume_m3 = 21600.0 * 0.028_316_846_592;
     let expected_ceiling_height_m = 8.0 * 0.3048;
 
     assert!(
         (floor_area_m2 - expected_floor_area_m2).abs() < 0.01,
-        "Conditioned zone area should use HPXML/OCHRE imperial defaults and basement split"
+        "Conditioned zone area should use HPXML/OCHRE imperial defaults; the \
+         conditioned basement is merged into it, so the area is the full \
+         ConditionedFloorArea (OS-HPXML geometry.rb:1704-1716)"
     );
     assert!(
         (volume_m3 - expected_volume_m3).abs() < 0.01,
@@ -146,12 +145,20 @@ fn garage_basement_fixture_preserves_explicit_zone_adjacency() {
             .any(|zone| matches!(zone.zone_type, ZoneType::Garage)),
         "garage zone should be created from explicit garage adjacencies"
     );
+    // The fixture's basement is declared conditioned: OS-HPXML merges it
+    // into the conditioned space (geometry.rb `create_or_get_space`,
+    // 1704-1716), so it builds no Foundation zone of its own.
     assert!(
         building
             .zones
             .iter()
-            .any(|zone| matches!(zone.zone_type, ZoneType::Foundation)),
-        "foundation zone should be created from explicit basement foundation data"
+            .all(|zone| !matches!(zone.zone_type, ZoneType::Foundation)),
+        "a conditioned basement must merge into the conditioned space, not build \
+         a separate unheated Foundation zone"
+    );
+    assert!(
+        building.conditioned_foundation_merged,
+        "the conditioned basement must be recorded as merged"
     );
 
     let wall_to_garage = building
@@ -162,8 +169,9 @@ fn garage_basement_fixture_preserves_explicit_zone_adjacency() {
         })
         .expect("Wall3 should exist in garage fixture");
     assert!(
-        matches!(wall_to_garage.interior_zone, Some(ZoneType::Foundation)),
-        "Wall3 interior adjacency should stay mapped to the conditioned basement/foundation zone"
+        matches!(wall_to_garage.interior_zone, Some(ZoneType::Conditioned)),
+        "Wall3 interior adjacency (the conditioned basement) should map to the \
+         conditioned zone it merged into"
     );
     assert!(
         matches!(wall_to_garage.exterior_zone, Some(ZoneType::Garage)),
@@ -219,32 +227,18 @@ fn missing_hvac_type_tags_fail_resolution_instead_of_defaulting() {
     for (label, systems_xml, missing_field) in cases {
         let xml = minimal_hpxml_with_systems(systems_xml);
         let building = parse_building(&xml).expect("minimal fixture should parse");
-        let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None);
-        match missing_field {
-            "HeatingSystemType" | "CoolingSystemType" => {
-                // Empty/missing HVAC type tags are now skipped gracefully
-                // (valid ResStock 2025.1 buildings with portable heaters, no central HVAC)
-                let specs = result.expect("empty HVAC type should be skipped, not rejected");
-                assert!(
-                    specs
-                        .iter()
-                        .all(|s| s.name != "Gas Furnace" && s.name != "Air Conditioner"),
-                    "{label}: no HVAC equipment should be generated from empty type tag"
-                );
-            }
-            _ => {
-                let err = result.expect_err(
-                    "resolve_equipment must fail when required HVAC type tags are absent",
-                );
-                match err {
-                    HpxmlError::Parse(message) => assert!(
-                        message.to_string().contains(missing_field),
-                        "{label} case should mention missing {missing_field}, got: {message}"
-                    ),
-                    other => panic!("{label} case should return HpxmlError::Parse, got {other:?}"),
-                }
-            }
-        }
+        let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
+        // Every missing HVAC type tag fails resolution: an HVAC
+        // system whose type the input does not state is an input defect,
+        // not a system to skip. ResStock homes that encode "no central
+        // HVAC" as an empty type tag are such input defects, to record.
+        let err = result
+            .expect_err("resolve_equipment must fail when required HVAC type tags are absent");
+        let message = err.to_string();
+        assert!(
+            message.contains(missing_field) || message.contains("type"),
+            "{label} case should mention {missing_field}, got: {message}"
+        );
     }
 }
 
@@ -257,7 +251,7 @@ fn base_fixture_resolves_expected_typed_specs_with_repo_defaults() {
     // without triggering the no-silent-defaults guard.
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
-    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
         .expect("base fixture equipment should resolve with repo defaults");
 
     let furnace = specs
@@ -298,7 +292,7 @@ fn dehumidifier_capacity_pints_to_liters_conversion_uses_correct_factor() {
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
 
-    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
         .expect("dehumidifier fixture equipment should resolve");
 
     let dehumidifier_spec = specs
@@ -363,7 +357,7 @@ fn central_ac_seer_18_two_stage_populates_per_stage_data() {
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
 
-    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
         .expect("AC equipment should resolve");
 
     let ac_spec = specs
@@ -435,7 +429,7 @@ fn central_ac_seer_22_fallback_4_speed_populates_per_stage_data() {
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
 
-    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
         .expect("AC 4-speed equipment should resolve");
 
     let ac_spec = specs

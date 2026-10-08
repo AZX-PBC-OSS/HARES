@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_types::ControlSignal;
+use hares_types::{ControlSignal, HaresError};
 
 use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
 
@@ -97,6 +97,44 @@ impl ChargingComposer {
             .unwrap_or(true)
     }
 
+    /// The hysteresis latch of every gating preference, in stack order:
+    /// the composer's decision state.
+    pub fn gate_latches(&self) -> Vec<bool> {
+        self.preferences
+            .iter()
+            .filter_map(|p| p.charging_allowed())
+            .collect()
+    }
+
+    /// Restores latches saved by [`Self::gate_latches`].
+    ///
+    /// # Errors
+    ///
+    /// `HaresError::Io` when the count differs from this stack's gating
+    /// preferences: the latches were saved from another strategy.
+    pub fn restore_gate_latches(&mut self, latches: &[bool]) -> Result<(), HaresError> {
+        let gates = self
+            .preferences
+            .iter()
+            .filter(|p| p.charging_allowed().is_some())
+            .count();
+        if gates != latches.len() {
+            return Err(HaresError::Io(format!(
+                "EV driver gate state holds {} latches but the charging strategy has {gates} gates",
+                latches.len()
+            )));
+        }
+        for (preference, &allowed) in self
+            .preferences
+            .iter_mut()
+            .filter(|p| p.charging_allowed().is_some())
+            .zip(latches)
+        {
+            preference.restore_charging_allowed(allowed);
+        }
+        Ok(())
+    }
+
     /// The most recent needed-charge-hours estimate from preferences
     /// (minimum across all preferences), in the telemetry channel's
     /// encoding: finite when any preference produced a finite estimate —
@@ -120,14 +158,16 @@ impl ChargingComposer {
     /// equipment SOC (telemetry truth) — `evaluate` deliberately does not
     /// fold, because its context carries the driver's perceived SOC for
     /// dispatch and would clobber the observed-based estimate.
-    pub(super) fn refresh_needed_charge_hours(&mut self, ctx: &DecisionContext) {
-        let fold = |ctx: &DecisionContext| {
-            self.preferences
-                .iter()
-                .map(|p| p.needed_charge_hours(ctx))
-                .fold(f64::INFINITY, f64::min)
-        };
-        let observed = fold(ctx);
+    pub(super) fn refresh_needed_charge_hours(
+        &mut self,
+        ctx: &DecisionContext,
+    ) -> Result<(), hares_types::HaresError> {
+        let mut fold_value = f64::INFINITY;
+        for pref in &self.preferences {
+            let hours = pref.needed_charge_hours(ctx)?;
+            fold_value = fold_value.min(hours);
+        }
+        let observed = fold_value;
         // +∞ from the observed-capability estimate means charging is
         // physically impossible right now (the equipment's published
         // derate is 0 — pack at/below the plating cutoff, preconditioning
@@ -146,8 +186,14 @@ impl ChargingComposer {
                 observed_charge_derate: None,
                 ..ctx.clone()
             };
-            fold(&fallback)
+            let mut fold_value = f64::INFINITY;
+            for pref in &self.preferences {
+                let hours = pref.needed_charge_hours(&fallback)?;
+                fold_value = fold_value.min(hours);
+            }
+            fold_value
         };
+        Ok(())
     }
 
     /// Record the time-to-charge estimate for a plan resolved outside the
@@ -415,7 +461,7 @@ impl ChargingComposer {
                 );
             }
 
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            #[cfg(debug_assertions)]
             {
                 // Invariant: when a strategy sets min_soc or max_soc on a discharge
                 // vote, the emitted PowerSetpoint must carry that constraint. Strategies
@@ -970,8 +1016,11 @@ mod tests {
                     label: "fixed",
                 }
             }
-            fn needed_charge_hours(&self, _ctx: &DecisionContext) -> f64 {
-                self.0
+            fn needed_charge_hours(
+                &self,
+                _ctx: &DecisionContext,
+            ) -> Result<f64, hares_types::HaresError> {
+                Ok(self.0)
             }
             fn name(&self) -> &'static str {
                 "fixed_hours"
@@ -984,7 +1033,7 @@ mod tests {
             Box::new(FixedHours(7.0)),
         ];
         let mut composer = ChargingComposer::new(prefs, "ev1");
-        composer.refresh_needed_charge_hours(&ctx);
+        composer.refresh_needed_charge_hours(&ctx).unwrap();
 
         assert!(
             (composer.last_needed_charge_hours() - 3.0).abs() < 1e-9,
@@ -1000,7 +1049,7 @@ mod tests {
 
         let prefs: Vec<Box<dyn ChargingPreference>> = vec![];
         let mut composer = ChargingComposer::new(prefs, "ev1");
-        composer.refresh_needed_charge_hours(&ctx);
+        composer.refresh_needed_charge_hours(&ctx).unwrap();
 
         assert_eq!(
             composer.last_needed_charge_hours(),

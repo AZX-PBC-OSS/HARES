@@ -3,10 +3,8 @@
 
 use std::borrow::Cow;
 use std::fs;
-use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_core::Dwelling;
@@ -18,23 +16,7 @@ use hares_types::{
     TelemetryField, telemetry_keys as tk,
 };
 
-fn nanos_suffix() -> String {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    std::thread::current().id().hash(&mut h);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos();
-    format!("{nanos}-{:x}", h.finish())
-}
-
-fn unique_temp_toml(tag: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("hares-multi-inst-{tag}-{}.toml", nanos_suffix()));
-    path
-}
-
-fn write_minimal_toml(path: &PathBuf) {
+fn write_minimal_toml(path: &Path) {
     let content = r#"building_id = 4242
 
 [simulation]
@@ -45,7 +27,6 @@ duration_s = 600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -58,6 +39,9 @@ outdoor_temp_c = 20.0
 dew_point_c = 10.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.0
 
 [schedule]
 occupancy = 0.0
@@ -73,11 +57,10 @@ master_seed = 0
 }
 
 fn build_dwelling(tag: &str) -> Dwelling {
-    let path = unique_temp_toml(tag);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(format!("{tag}.toml"));
     write_minimal_toml(&path);
-    let dwelling = Dwelling::from_toml_config(&path).expect("synthetic TOML must load");
-    let _ = fs::remove_file(&path);
-    dwelling
+    Dwelling::from_toml_config(&path).expect("synthetic TOML must load")
 }
 
 /// Minimal equipment stub that records telemetry on receiving a control signal.

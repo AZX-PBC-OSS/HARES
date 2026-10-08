@@ -31,11 +31,11 @@ use syn::visit::Visit;
 /// Files authorized to contain `set_equipment_id` call sites in workspace
 /// `src`:
 /// - `hares-equipment/src/macros.rs` — the `delegate_equipment!` forwarding;
-/// - `hares-core/src/dwelling/mod.rs` — `Dwelling`'s entrance logic
+/// - `hares-core/src/dwelling/roster.rs`: `Dwelling`'s entrance logic
 ///   (`assign_equipment_identity`), the authorized caller.
 const AUTHORIZED_FILES: [&str; 2] = [
     "hares-equipment/src/macros.rs",
-    "hares-core/src/dwelling/mod.rs",
+    "hares-core/src/dwelling/roster.rs",
 ];
 
 fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {

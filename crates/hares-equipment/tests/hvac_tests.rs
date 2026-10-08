@@ -5,8 +5,9 @@ use hares_equipment::hvac::heating_config::IdealCapacityModeConfig;
 use hares_equipment::{
     CentralAirConditionerConfig, DefrostConfig, DefrostControl, DefrostStrategy, DuctConfig,
     ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig, EquipmentConfig,
-    EquipmentRegistry, GasFurnaceConfig, HeatPumpCommonConfig, HeatPumpHeaterConfig,
-    HvacSetpointConfig, IdealHvacConfig,
+    EquipmentRegistry, GasBoilerConfig, GasFurnaceConfig, HeatPumpCommonConfig,
+    HeatPumpHeaterConfig, HvacSetpointConfig, IdealHvacConfig, RejectUnknownKeys,
+    hvac::ThermostatConfig,
 };
 use hares_types::{
     ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType,
@@ -20,6 +21,7 @@ use hares_types::{
 
 fn env_with_zone_temp(temp_c: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: temp_c,
@@ -55,7 +57,8 @@ fn env_with_zone_temp(temp_c: f64) -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
@@ -173,6 +176,43 @@ fn electric_boiler_config(name: &str) -> EquipmentConfig {
     .unwrap()
 }
 
+fn electric_baseboard_config(name: &str) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        name.to_string(),
+        "Electric Baseboard".to_string(),
+        ElectricBaseboardConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 3_000.0,
+            eir: 1.0,
+            setpoint: HvacSetpointConfig::default(),
+        },
+    )
+    .unwrap()
+}
+
+fn gas_boiler_config(name: &str) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        name.to_string(),
+        "Gas Boiler".to_string(),
+        GasBoilerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: Some(1),
+            capacity_w: 10_000.0,
+            afue: 0.8,
+            flow_rate_kg_s: 0.5,
+            return_temp_c: 70.0,
+            fluid_type: FluidType::Water,
+            fan_power_w: None,
+            number_of_speeds: 1,
+            setpoint: HvacSetpointConfig::default(),
+            condensing: false,
+        },
+    )
+    .unwrap()
+}
+
 fn ports_for_zone1() -> PortSlots {
     PortSlots {
         thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -215,17 +255,12 @@ fn furnace_heats_when_below_setpoint() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression: zone_id=0 must not silently drop thermal output
-//
-// Before the fix, zone_id=0 was accepted as a valid ZoneId, but the thermal
-// solver's zone_sensible_input_indices had no entry for ZoneId(0), so the
-// heating contribution was silently dropped — the equipment reported
-// hvac_heating_w = 0 with no error. Now zone_id=0 is rejected by
-// zone_id_from_config, equipment defaults to ZoneId(1), and thermal output
-// is correctly routed.
+// zone_id=0 names no thermal zone (zones are 1-indexed): the solver has no
+// input for ZoneId(0), so a unit wired there would drop its heat silently.
+// It is rejected, and with no other zone to serve init fails naming the unit.
 // ---------------------------------------------------------------------------
 #[test]
-fn zone_id_0_equipment_produces_nonzero_thermal_output() {
+fn zone_id_0_equipment_fails_init_naming_the_unit() {
     let cfg = EquipmentConfig::from_typed(
         "furnace_z0".to_string(),
         "Gas Furnace".to_string(),
@@ -239,17 +274,12 @@ fn zone_id_0_equipment_produces_nonzero_thermal_output() {
     .unwrap();
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
-    let env = env_with_zone_temp(18.0);
-    eq.init(&cfg, &env).unwrap();
-
-    let mut ports = ports_for_zone1();
-    eq.update_control(&env);
-    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-
+    let err = eq
+        .init(&cfg, &env_with_zone_temp(18.0))
+        .expect_err("zone_id 0 with no other zone must fail init");
     assert!(
-        ports.thermal[0].sensible_gain_w > 1e-6,
-        "thermal output must be > 0 when zone_id=0 is rejected and equipment defaults to ZoneId(1), got {:.3} W",
-        ports.thermal[0].sensible_gain_w,
+        err.to_string().contains("furnace_z0"),
+        "the error must name the unit, got: {err}"
     );
 }
 
@@ -269,6 +299,7 @@ fn discrete_defrost_no_phantom_draw_when_compressor_off() {
         "ashp_defrost_phantom_draw".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -476,6 +507,7 @@ fn ashp_heating_cop_above_unity() {
         "ashp".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1101,6 +1133,7 @@ fn ashp_sub_consumption_telemetry() {
         "ashp_sub".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1248,6 +1281,7 @@ fn ashp_defaults_match_reference() {
         "ashp_lockout".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1343,6 +1377,7 @@ fn ashp_defaults_match_reference() {
         "ashp_er_lockout".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1443,6 +1478,7 @@ fn mshp_defaults_match_reference() {
         "mshp_defaults".to_string(),
         "MSHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -1576,6 +1612,7 @@ fn bang_bang_single_speed_cycles_within_deadband() {
         "ashp_bb".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2005,6 +2042,7 @@ fn defrost_discrete_cycle_starts_in_accumulating() {
         "ashp_defrost_discrete".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2108,6 +2146,7 @@ fn defrost_discrete_cycle_transitions_to_defrosting() {
         "ashp_defrost_fsm_transition".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2209,6 +2248,7 @@ fn defrost_discrete_cycle_returns_to_accumulating() {
         "ashp_defrost_fsm_return".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2306,6 +2346,7 @@ fn defrost_discrete_peak_power_exceeds_continuous_average() {
         "ashp_defrost_peak_power".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2412,6 +2453,7 @@ fn defrost_no_spurious_defrost_after_warm_hiatus() {
         "ashp_defrost_hiatus".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2549,6 +2591,7 @@ fn heating_latent_always_zero_during_normal_heating() {
         "ashp_normal_heat".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2640,6 +2683,7 @@ fn heating_latent_nonzero_during_defrost_with_sub1_shr() {
         "ashp_defrost_latent".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2733,6 +2777,7 @@ fn heating_latent_zero_with_default_shr_during_defrost() {
         "ashp_defrost_shr1".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2810,6 +2855,7 @@ fn heating_latent_telemetry_key_present() {
         "ashp_latent_telemetry".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2888,6 +2934,7 @@ fn heating_sensible_plus_latent_equals_total_thermal_output() {
         "ashp_energy_balance".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -2995,6 +3042,7 @@ fn defrost_accumulating_applies_continuous_multiplier() {
         "ashp_defrost_continuous".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -3121,6 +3169,7 @@ fn mshp_load_above_stage1_runs_continuously() {
         "mshp_stage1_above".to_string(),
         "MSHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -3149,7 +3198,7 @@ fn mshp_load_above_stage1_runs_continuously() {
                     cooling_setpoint_c: Some(26.0),
                     cooling_setpoint_source: None,
                 },
-                hysteresis_c: Some(0.0),
+                hysteresis_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
                 duct: DuctConfig::default(),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
@@ -3307,6 +3356,7 @@ fn defrost_typed_config_propagates_to_heater_init() {
         "ashp_defrost_typed_timed".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -3456,6 +3506,7 @@ fn defrost_time_fraction_validation_rejects_out_of_range() {
 #[test]
 fn defrost_config_serde_round_trip() {
     let cfg = HeatPumpHeaterConfig {
+        reject_unknown_keys: RejectUnknownKeys,
         common: HeatPumpCommonConfig {
             equipment_id: Some(1),
             zone_id: Some(1),
@@ -4561,6 +4612,7 @@ fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
         "mshp_er_cross".to_string(),
         "MSHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -4692,4 +4744,396 @@ fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
         "ER must eventually cycle off as zone temperature rises above ER turn-on; \
          still drawing {er_kw_final:.4} kW after 20 steps"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The thermostat band behind the HVAC equivalent battery's energy window
+// (zone capacitance x hysteresis): every source of it keeps the window open.
+// ---------------------------------------------------------------------------
+#[test]
+fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
+    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+
+    let mut cfg = electric_furnace_config("furnace_release");
+    cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Electric Furnace", cfg.clone()).unwrap();
+    // Zone above the heating setpoint: the thermostat idles in Deadband,
+    // exactly as it does between the release and the next mode crossing.
+    let env_warm = env_with_zone_temp(22.0);
+    eq.init(&cfg, &env_warm).unwrap();
+
+    // The actuate sequence: an event setback, then the release form.
+    eq.apply_control(&ControlSignal::ThermalSetpointDelta {
+        heating_delta_c: Some(-4.0),
+        cooling_delta_c: Some(4.0),
+    })
+    .unwrap();
+    eq.apply_control(&ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: None,
+        cooling_setpoint_c: None,
+        deadband_c: None,
+    })
+    .expect("the release form must be accepted and leave no state behind");
+
+    // After the release the zone drops below the heating setpoint: the next
+    // step runs in Heating mode, where the EBM is constructed.
+    let env_cold = env_with_zone_temp(18.0);
+    eq.update_control(&env_cold);
+    let mut ports = ports_for_zone1();
+    eq.step(&env_cold, Duration::from_secs(60), &mut ports)
+        .expect("a heating step after the release must not degenerate the EBM");
+
+    // The booked electrical power must reconcile with the port contribution
+    // (the dwelling-level consistency check's equipment half).
+    let core = eq.core_output();
+    let core_kw = core
+        .flows
+        .electric_kw
+        .expect("a heating furnace step must report its electric power")
+        .net_consumption_kw();
+    assert!(
+        core_kw > 0.0,
+        "the furnace must draw positive power in heating mode, got {core_kw}"
+    );
+    assert!(
+        (ports.electrical.load_power_w - core_kw * 1000.0).abs() < 1e-6,
+        "core_output electric power must equal the port contribution exactly once: \
+         port {} W vs core {} W",
+        ports.electrical.load_power_w,
+        core_kw * 1000.0
+    );
+
+    // The EBM window must still span capacitance * hysteresis: the release
+    // must not have written a zero hysteresis.
+    let t = eq.telemetry();
+    let ebm_min = t.get(tk::EBM_MIN_ENERGY_KWH).unwrap_or(f64::NAN);
+    let ebm_max = t.get(tk::EBM_MAX_ENERGY_KWH).unwrap_or(f64::NAN);
+    let range = ebm_max - ebm_min;
+    let expected = ZONE_CAPACITANCE_KWH_PER_K * ThermostatConfig::default().hysteresis_c;
+    assert!(
+        (range - expected).abs() < 1e-9,
+        "the EBM energy window must stay capacitance * hysteresis ({expected} kWh), got {range}"
+    );
+}
+
+/// Every band below a thermostat's resolution, down to the subnormals, is
+/// rejected at application; the unit then still heats with an open window.
+#[test]
+fn sub_band_deadbands_are_rejected_and_the_unit_keeps_heating() {
+    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+    let mut cfg = electric_furnace_config("furnace_subband");
+    cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Electric Furnace", cfg.clone()).unwrap();
+    eq.init(&cfg, &env_with_zone_temp(22.0)).unwrap();
+
+    for db in [
+        0.0,
+        5e-324,
+        f64::MIN_POSITIVE,
+        1e-300,
+        1e-17,
+        1e-16,
+        2e-16,
+        1e-15,
+        1e-12,
+    ] {
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: None,
+            deadband_c: Some(db),
+        })
+        .expect_err("a band below a thermostat's resolution must be rejected");
+    }
+    eq.apply_control(&ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: None,
+        cooling_setpoint_c: None,
+        deadband_c: Some(0.0),
+    })
+    .expect_err("the release form carries no deadband");
+
+    let env_cold = env_with_zone_temp(18.0);
+    eq.update_control(&env_cold);
+    let mut ports = ports_for_zone1();
+    eq.step(&env_cold, Duration::from_secs(60), &mut ports)
+        .expect("a step after the rejected signals must succeed");
+    let ebm_min = eq
+        .telemetry()
+        .get(tk::EBM_MIN_ENERGY_KWH)
+        .unwrap_or(f64::NAN);
+    let ebm_max = eq
+        .telemetry()
+        .get(tk::EBM_MAX_ENERGY_KWH)
+        .unwrap_or(f64::NAN);
+    let expected = ZONE_CAPACITANCE_KWH_PER_K * ThermostatConfig::default().hysteresis_c;
+    assert!(
+        (ebm_max - ebm_min - expected).abs() < 1e-9,
+        "the EBM window must equal capacitance * default hysteresis ({expected} kWh), got {}",
+        ebm_max - ebm_min
+    );
+}
+
+#[test]
+fn configured_hysteresis_below_a_thermostat_band_is_rejected() {
+    for hysteresis_c in [0.0, 1e-17] {
+        let result = EquipmentConfig::from_typed(
+            "ashp_zero_hysteresis".to_string(),
+            "ASHP Heater".to_string(),
+            HeatPumpHeaterConfig {
+                common: HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    heating_capacity_w: Some(8_000.0),
+                    heating_eir: Some(0.3),
+                    backup_capacity_w: Some(0.0),
+                    hysteresis_c: Some(hysteresis_c),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .and_then(|mut cfg| {
+            cfg.zone_capacitance_kwh_per_k = 2.0;
+            let registry = EquipmentRegistry::new();
+            let mut eq = registry.create("ASHP Heater", cfg.clone())?;
+            eq.init(&cfg, &env_with_zone_temp(15.0))
+        });
+        let err = result.expect_err("a sub-band hysteresis must be rejected");
+        assert!(
+            matches!(err, hares_types::HaresError::ThermostatBand { .. }),
+            "{hysteresis_c}: {err}"
+        );
+    }
+}
+
+/// A band a named signal set for an event survives a checkpoint taken
+/// during the event: the restored unit's EBM window equals the continuous
+/// one.
+#[test]
+fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
+    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+    const BAND_C: f64 = 0.25;
+    let cases = [
+        ("Electric Furnace", electric_furnace_config("ef_band")),
+        ("Gas Furnace", gas_furnace_config("gf_band")),
+        ("Electric Baseboard", electric_baseboard_config("bb_band")),
+        ("Electric Boiler", electric_boiler_config("eb_band")),
+        ("Gas Boiler", gas_boiler_config("gb_band")),
+    ];
+    let registry = EquipmentRegistry::new();
+    let env_warm = env_with_zone_temp(22.0);
+    let env_cold = env_with_zone_temp(18.0);
+    for (kind, mut cfg) in cases {
+        cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
+        let mut continuous = registry.create(kind, cfg.clone()).unwrap();
+        continuous.init(&cfg, &env_warm).unwrap();
+        continuous
+            .apply_control(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: None,
+                deadband_c: Some(BAND_C),
+            })
+            .unwrap();
+        continuous.update_control(&env_warm);
+        continuous
+            .step(
+                &env_warm,
+                Duration::from_secs(60),
+                &mut ports_for_zone1_with_water_loop(),
+            )
+            .unwrap();
+
+        let mut restored = registry.create(kind, cfg.clone()).unwrap();
+        restored.init(&cfg, &env_warm).unwrap();
+        restored
+            .load_state(&continuous.save_state().unwrap())
+            .unwrap();
+
+        let mut windows = [0.0; 2];
+        for (window, eq) in windows.iter_mut().zip([&mut continuous, &mut restored]) {
+            eq.update_control(&env_cold);
+            eq.step(
+                &env_cold,
+                Duration::from_secs(60),
+                &mut ports_for_zone1_with_water_loop(),
+            )
+            .unwrap();
+            let t = eq.telemetry();
+            *window =
+                t.get(tk::EBM_MAX_ENERGY_KWH).unwrap() - t.get(tk::EBM_MIN_ENERGY_KWH).unwrap();
+        }
+        let expected = ZONE_CAPACITANCE_KWH_PER_K * BAND_C;
+        assert!(
+            (windows[0] - expected).abs() < 1e-9 && windows[1] == windows[0],
+            "{kind}: continuous window {} kWh, restored {} kWh, expected {expected}",
+            windows[0],
+            windows[1]
+        );
+    }
+}
+
+/// The telemetry a failed step must not have written.
+const STEP_TELEMETRY: [&str; 5] = [
+    tk::ELECTRIC_KW,
+    tk::THERMAL_OUTPUT_W,
+    tk::OPERATING_MODE,
+    tk::EBM_MIN_ENERGY_KWH,
+    tk::EBM_MAX_ENERGY_KWH,
+];
+
+/// A step whose equivalent battery model fails (a 0.1 C band on a
+/// 1e-15 kWh/K zone puts the window below f64 resolution) leaves no state
+/// behind: the checkpoint, the core output and the step telemetry are what
+/// they were before it.
+#[test]
+fn a_failed_hvac_step_leaves_no_partial_state() {
+    let ashp = EquipmentConfig::from_typed(
+        "ashp_partial".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                zone_id: Some(1),
+                heating_capacity_w: Some(8_000.0),
+                heating_eir: Some(0.3),
+                backup_capacity_w: Some(0.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let ac = EquipmentConfig::from_typed(
+        "ac_partial".to_string(),
+        "Air Conditioner".to_string(),
+        CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 10_000.0,
+            eir: 0.25,
+            shr: Some(0.75),
+            number_of_speeds: 1,
+            stage_capacities_w: None,
+            stage_eirs: None,
+            stage_shrs: None,
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
+            fraction_load_served: Some(1.0),
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: DuctConfig::default(),
+            system_type: None,
+            startup_cd: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
+        },
+    )
+    .unwrap();
+    let heat_signal = ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: Some(21.0),
+        cooling_setpoint_c: None,
+        deadband_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
+    };
+    let cool_signal = ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: None,
+        cooling_setpoint_c: Some(24.0),
+        deadband_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
+    };
+    let cases = [
+        (
+            "Electric Furnace",
+            electric_furnace_config("ef_partial"),
+            &heat_signal,
+            env_with_zone_temp(18.0),
+        ),
+        (
+            "Gas Furnace",
+            gas_furnace_config("gf_partial"),
+            &heat_signal,
+            env_with_zone_temp(18.0),
+        ),
+        (
+            "Electric Boiler",
+            electric_boiler_config("eb_partial"),
+            &heat_signal,
+            env_with_zone_temp(18.0),
+        ),
+        (
+            "Gas Boiler",
+            gas_boiler_config("gb_partial"),
+            &heat_signal,
+            env_with_zone_temp(18.0),
+        ),
+        (
+            "Electric Baseboard",
+            electric_baseboard_config("bb_partial"),
+            &heat_signal,
+            env_with_zone_temp(18.0),
+        ),
+        ("ASHP Heater", ashp, &heat_signal, env_with_zone_temp(18.0)),
+        (
+            "Air Conditioner",
+            ac,
+            &cool_signal,
+            env_with_zone_temp_hot(28.0),
+        ),
+    ];
+    let registry = EquipmentRegistry::new();
+    for (kind, mut cfg, signal, env) in cases {
+        cfg.zone_capacitance_kwh_per_k = 1e-15;
+        let mut eq = registry.create(kind, cfg.clone()).unwrap();
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(signal).unwrap();
+        eq.update_control(&env);
+        let state = eq.save_state().unwrap();
+        let core = eq.core_output().clone();
+        let telemetry = STEP_TELEMETRY.map(|key| eq.telemetry().get(key));
+
+        eq.step(
+            &env,
+            Duration::from_secs(60),
+            &mut ports_for_zone1_with_water_loop(),
+        )
+        .expect_err("the window is below f64 resolution");
+
+        assert_eq!(
+            eq.save_state().unwrap(),
+            state,
+            "{kind}: checkpointed state changed"
+        );
+        assert_eq!(*eq.core_output(), core, "{kind}: core output changed");
+        assert_eq!(
+            STEP_TELEMETRY.map(|key| eq.telemetry().get(key)),
+            telemetry,
+            "{kind}: step telemetry changed"
+        );
+    }
+}
+
+/// The equivalent battery reads the equipment's own zone: a step whose zone
+/// is missing from the environment errors instead of assuming 20 C.
+#[test]
+fn a_step_without_its_zone_errors_instead_of_assuming_a_temperature() {
+    let mut cfg = electric_baseboard_config("bb_no_zone");
+    cfg.zone_capacitance_kwh_per_k = 2.0;
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Electric Baseboard", cfg.clone()).unwrap();
+    eq.init(&cfg, &env_with_zone_temp(18.0)).unwrap();
+    let mut env = env_with_zone_temp(18.0);
+    env.zones.clear();
+    let err = eq
+        .step(&env, Duration::from_secs(60), &mut ports_for_zone1())
+        .expect_err("the zone temperature is required");
+    assert!(err.to_string().contains("not found"), "{err}");
 }

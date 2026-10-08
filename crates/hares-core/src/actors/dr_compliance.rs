@@ -33,7 +33,7 @@
 //! let mut actor = DrCompliance::new("DRResponder")
 //!     .with_compliance_model(AlwaysComply)
 //!     .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
-//!     .with_hvac_action(DrAction::SetpointAdjust { delta_c: 2.0 });
+//!     .with_hvac_action(DrAction::setpoint_delta(2.0));
 //!
 //! // In the dwelling loop, the actor will dispatch signals when DR is active
 //! let mut requests = Vec::new();
@@ -46,9 +46,12 @@ use serde::{Deserialize, Serialize};
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::telemetry_keys as tk;
-use hares_types::{ControlSignal, DRLevel, EnvironmentState, HaresError, OperatingMode, Telemetry};
+use hares_types::{
+    ControlCapabilities, ControlSignal, DRLevel, EnvironmentState, HaresError, OperatingMode,
+    Telemetry, ThermostatAxes, ThermostatAxis,
+};
 
-use crate::Actor;
+use crate::{Actor, ActorEquipment, ActorTarget};
 
 use super::constants::DEFAULT_FREEZE_THRESHOLD_C;
 
@@ -200,15 +203,41 @@ impl Probabilistic {
 pub enum DrAction {
     /// Reduce load by a fraction (0.0 = full curtailment, 1.0 = no change).
     LoadCurtailment { fraction: f64 },
-    /// Adjust thermostat setpoint by a delta relative to current effective
-    /// setpoints. Positive `delta_c` raises heating and lowers cooling.
-    SetpointAdjust { delta_c: f64 },
+    /// Adjust the thermostat by `delta_c` relative to its schedule.
+    ///
+    /// A positive delta pre-conditions: it moves one setpoint, since moving
+    /// both would narrow the gap and be rejected. The axis is never guessed:
+    /// an end-use target and a single-purpose unit name it, and a unit
+    /// serving both takes it from `direction` (pre-heat or pre-cool). An
+    /// end-use target reaches every unit serving that end use, a unit
+    /// serving both included, whatever mode the unit is in.
+    ///
+    /// A dwelling refuses, with [`HaresError::PreconditioningAxis`] and
+    /// itself untouched, registering or supplying an actor with an event
+    /// it cannot serve: an event naming no axis for a unit serving both, a
+    /// direction the unit does not serve, a target without a thermostat, or
+    /// a named target not in the dwelling (the actor is registered after
+    /// its equipment). It also refuses a replacement under the target's
+    /// name that leaves it so. Removing the target evicts the actor instead
+    /// (see [`Actor::dispatch_targets`]). An actor no dwelling holds sends
+    /// nothing for such a target and counts it in its
+    /// `preconditioning_unserved` telemetry.
+    ///
+    /// A negative delta relaxes: it lowers heating and raises cooling, which
+    /// widens the gap for any unit, so it takes no direction (one is
+    /// refused). The override is released when the event ends.
+    SetpointAdjust {
+        delta_c: f64,
+        direction: Option<ThermostatAxis>,
+    },
     /// Override thermostat to absolute setpoints.
     AbsoluteSetpoint {
         heating_c: Option<f64>,
         cooling_c: Option<f64>,
     },
-    /// Turn equipment off.
+    /// Turn equipment off. Like every whole-unit action (a power limit, a
+    /// curtailment, a DR level), on an end-use target it reaches a unit
+    /// serving both setpoints only while that unit's mode is the end use's.
     TurnOff,
     /// Limit power draw to a maximum.
     PowerLimit { max_kw: f64 },
@@ -238,11 +267,29 @@ impl DrAction {
         Self::LoadCurtailment { fraction }
     }
 
-    /// Creates a setpoint adjustment action (delta from current setpoints).
-    ///
-    /// Positive delta raises heating setpoint / lowers cooling setpoint.
+    /// Creates a setpoint adjustment action whose axis the target names (see
+    /// [`DrAction::SetpointAdjust`]).
     pub fn setpoint_delta(delta_c: f64) -> Self {
-        Self::SetpointAdjust { delta_c }
+        Self::SetpointAdjust {
+            delta_c,
+            direction: None,
+        }
+    }
+
+    /// Pre-heats by `delta_c > 0`: the heating setpoint up.
+    pub fn preheat(delta_c: f64) -> Self {
+        Self::SetpointAdjust {
+            delta_c,
+            direction: Some(ThermostatAxis::Heating),
+        }
+    }
+
+    /// Pre-cools by `delta_c > 0`: the cooling setpoint down.
+    pub fn precool(delta_c: f64) -> Self {
+        Self::SetpointAdjust {
+            delta_c,
+            direction: Some(ThermostatAxis::Cooling),
+        }
     }
 
     /// Creates an absolute setpoint override action.
@@ -254,6 +301,35 @@ impl DrAction {
         Self::AbsoluteSetpoint {
             heating_c: Some(heating_c),
             cooling_c: Some(cooling_c),
+        }
+    }
+
+    /// Whether the action leaves state in the equipment that the end of the
+    /// event must clear.
+    fn is_sticky(&self) -> bool {
+        matches!(
+            self,
+            Self::PowerLimit { .. }
+                | Self::TurnOff
+                | Self::SetpointAdjust { .. }
+                | Self::AbsoluteSetpoint { .. }
+        )
+    }
+
+    /// The capabilities a target must declare to accept every signal this
+    /// action sends it: the action's own and, for a setpoint action, the
+    /// release that ends it.
+    fn required_capabilities(&self) -> ControlCapabilities {
+        match self {
+            Self::LoadCurtailment { .. } => ControlCapabilities::LOAD_FRACTION,
+            Self::SetpointAdjust { .. } => {
+                ControlCapabilities::THERMAL_SETPOINT_DELTA | ControlCapabilities::THERMAL_SETPOINT
+            }
+            Self::AbsoluteSetpoint { .. } => ControlCapabilities::THERMAL_SETPOINT,
+            Self::TurnOff => ControlCapabilities::MODE_OVERRIDE,
+            Self::PowerLimit { .. } => ControlCapabilities::POWER_LIMIT,
+            Self::DemandResponse { .. } => ControlCapabilities::DEMAND_RESPONSE,
+            Self::None => ControlCapabilities::empty(),
         }
     }
 
@@ -309,6 +385,9 @@ pub struct DrCompliance {
     hvac_action: DrAction,
     /// Additional equipment targets for load curtailment.
     load_targets: Vec<(DispatchTarget, DrAction)>,
+    /// Every target with the capabilities its action sends, the HVAC
+    /// target first.
+    declared_targets: Vec<ActorTarget>,
     /// Current DR level. `Normal` means no DR event is active.
     current_dr_level: DRLevel,
     /// Freeze-risk threshold in °C. When any zone temperature is below this
@@ -324,6 +403,18 @@ pub struct DrCompliance {
     /// Used to dispatch clear/reset signals when the DR event ends
     /// (current_dr_level transitions to Normal).
     last_dispatched: Vec<(DispatchTarget, DrAction)>,
+    /// The pre-conditioning axis of `hvac_target` and of each load target,
+    /// resolved against the dwelling's equipment on every identity refresh.
+    hvac_target_axis: AxisResolution,
+    load_target_axes: Vec<AxisResolution>,
+    /// The axis each target's pre-conditioning has displaced in this event
+    /// (part of the checkpoint): a change of axis releases the old one first.
+    displaced_axes: Vec<(DispatchTarget, ThermostatAxis)>,
+    /// Whether this event has already warned of a pre-conditioning delta
+    /// it could not send.
+    warned_unserved: bool,
+    /// Axis releases dispatched this step, each beside its target's delta.
+    axis_releases_this_step: u64,
     /// Count of clear signals dispatched this timestep (observability gate).
     #[cfg(feature = "observe")]
     clear_signals_dispatched_count: u64,
@@ -336,7 +427,7 @@ pub struct DrCompliance {
 impl DrCompliance {
     /// Creates a new DR compliance actor with the default compliance model.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(11);
+        let mut telemetry = Telemetry::with_capacity(12);
         // Why: telemetry initialises count and flag fields to 0.0 for
         // "not yet occurred / not active." demand_response_duration_s = 0.0
         // means "no DemandResponse action with a duration was dispatched
@@ -354,16 +445,23 @@ impl DrCompliance {
         telemetry.insert("effective_compliance_rate", 0.0);
         telemetry.insert("demand_response_level", 0.0);
         telemetry.insert("demand_response_duration_s", 0.0);
+        telemetry.insert("preconditioning_unserved", 0.0);
         Self {
             name: Arc::from(name),
             model: Box::new(AlwaysComply),
             hvac_target: None,
             hvac_action: DrAction::None,
             load_targets: Vec::new(),
+            declared_targets: Vec::new(),
             current_dr_level: DRLevel::Normal,
             freeze_risk_threshold_c: DEFAULT_FREEZE_THRESHOLD_C,
             telemetry,
             last_dispatched: Vec::new(),
+            hvac_target_axis: Ok(None),
+            load_target_axes: Vec::new(),
+            displaced_axes: Vec::new(),
+            warned_unserved: false,
+            axis_releases_this_step: 0,
             #[cfg(feature = "observe")]
             clear_signals_dispatched_count: 0,
             #[cfg(feature = "observe")]
@@ -382,12 +480,16 @@ impl DrCompliance {
         self.hvac_target = Some(target);
         self.telemetry
             .set("targets_configured", self.load_targets.len() as f64 + 1.0);
+        self.resolve_axes(&[]);
+        self.declare_targets();
         self
     }
 
     /// Sets the HVAC action to take when complying.
     pub fn with_hvac_action(mut self, action: DrAction) -> Self {
         self.hvac_action = action;
+        self.resolve_axes(&[]);
+        self.declare_targets();
         self
     }
 
@@ -398,7 +500,59 @@ impl DrCompliance {
             "targets_configured",
             self.hvac_target.is_some() as u8 as f64 + self.load_targets.len() as f64,
         );
+        self.resolve_axes(&[]);
+        self.declare_targets();
         self
+    }
+
+    /// Rebuilds [`Actor::dispatch_targets`] from the configured targets. A
+    /// turn-off the freeze guard can downgrade (on the HVAC target, or on
+    /// an HVAC end-use load target) also sends a heating setpoint.
+    fn declare_targets(&mut self) {
+        let hvac = self
+            .hvac_target
+            .iter()
+            .map(|target| (target, &self.hvac_action, true));
+        let loads = self.load_targets.iter().map(|(target, action)| {
+            let hvac_end_use = matches!(target, DispatchTarget::ByEndUse(eu) if eu.is_hvac());
+            (target, action, hvac_end_use)
+        });
+        self.declared_targets = hvac
+            .chain(loads)
+            .map(|(target, action, freeze_guarded)| {
+                let mut required = action.required_capabilities();
+                if freeze_guarded && matches!(action, DrAction::TurnOff) {
+                    required |= ControlCapabilities::THERMAL_SETPOINT;
+                }
+                ActorTarget {
+                    target: target.clone(),
+                    required,
+                }
+            })
+            .collect();
+    }
+
+    /// Each configured target with its action, the HVAC target first.
+    fn targets(&self) -> impl Iterator<Item = (&DispatchTarget, &DrAction)> {
+        self.hvac_target
+            .iter()
+            .map(|target| (target, &self.hvac_action))
+            .chain(self.load_targets.iter().map(|(t, a)| (t, a)))
+    }
+
+    /// Resolves each target's pre-conditioning axis against `equipment`,
+    /// keeping the reason a target has none. A dwelling refuses any roster
+    /// change that leaves a reason (`validate_equipment`), so a reason
+    /// survives only in an actor no dwelling holds.
+    fn resolve_axes(&mut self, equipment: &[ActorEquipment<'_>]) {
+        self.hvac_target_axis = self.hvac_target.as_ref().map_or(Ok(None), |target| {
+            preconditioning_axis(target, &self.hvac_action, equipment)
+        });
+        self.load_target_axes = self
+            .load_targets
+            .iter()
+            .map(|(target, action)| preconditioning_axis(target, action, equipment))
+            .collect();
     }
 
     /// Sets the DR level. `DRLevel::Normal` clears the DR event.
@@ -472,10 +626,11 @@ impl DrCompliance {
             // CoreOutput gains a tank temperature field — CoreState has
             // none, and water-heater freeze protection must not wait for
             // one.
-            if let Some(tank_temp) = telem.get(tk::TANK_AVG_TEMP_C) {
-                if tank_temp.is_finite() && tank_temp < WH_FREEZE_THRESHOLD_C {
-                    return true;
-                }
+            if let Some(tank_temp) = telem.get(tk::TANK_AVG_TEMP_C)
+                && tank_temp.is_finite()
+                && tank_temp < WH_FREEZE_THRESHOLD_C
+            {
+                return true;
             }
         }
         false
@@ -489,19 +644,47 @@ impl DrCompliance {
     /// `From<&ControlSignal> for PriorityTier` mapping — a DR-induced
     /// setpoint adjustment or mode override is categorically a grid action,
     /// not a user or schedule action.
+    ///
+    /// `axis` is the target's resolved pre-conditioning axis. Returns `false`
+    /// when a pre-conditioning delta was not sent because the target has no
+    /// axis for it, which only an actor no dwelling holds can reach.
     fn dispatch_for_action(
+        &mut self,
         target: &DispatchTarget,
         action: &DrAction,
+        axis: AxisResolution,
         out: &mut Vec<DispatchRequest>,
-    ) {
+    ) -> bool {
         let signal = match action {
             DrAction::LoadCurtailment { fraction } => ControlSignal::LoadFraction {
                 fraction: *fraction,
             },
-            DrAction::SetpointAdjust { delta_c } => ControlSignal::ThermalSetpointDelta {
-                heating_delta_c: Some(*delta_c),
-                cooling_delta_c: Some(-delta_c),
-            },
+            DrAction::SetpointAdjust { delta_c, .. } if *delta_c > 0.0 => {
+                let axis = match axis {
+                    Ok(Some(axis)) => axis,
+                    unserved => {
+                        if !self.warned_unserved {
+                            self.warned_unserved = true;
+                            tracing::warn!(
+                                actor = %self.name,
+                                ?target,
+                                reason = unserved.err().as_deref().unwrap_or("no axis resolved"),
+                                "DR pre-conditioning not sent: the target has no axis for it"
+                            );
+                        }
+                        return false;
+                    }
+                };
+                self.release_a_changed_axis(target, axis, out);
+                preconditioning_signal(axis, *delta_c)
+            }
+            DrAction::SetpointAdjust { delta_c, .. } if *delta_c < 0.0 => {
+                ControlSignal::ThermalSetpointDelta {
+                    heating_delta_c: Some(*delta_c),
+                    cooling_delta_c: Some(-delta_c),
+                }
+            }
+            DrAction::SetpointAdjust { .. } => return true,
             DrAction::AbsoluteSetpoint {
                 heating_c,
                 cooling_c,
@@ -517,20 +700,11 @@ impl DrCompliance {
                 max_power_kw: *max_kw,
                 ramp_rate_kw_per_s: None,
             },
-            DrAction::DemandResponse { level, duration_s } => {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    debug_assert!(
-                        duration_s.is_none_or(|d| d > 0.0),
-                        "DemandResponse duration_s must be positive or None, got {duration_s:?}"
-                    );
-                }
-                ControlSignal::DemandResponse {
-                    level: *level,
-                    duration_s: *duration_s,
-                }
-            }
-            DrAction::None => return,
+            DrAction::DemandResponse { level, duration_s } => ControlSignal::DemandResponse {
+                level: *level,
+                duration_s: *duration_s,
+            },
+            DrAction::None => return true,
         };
 
         out.push(DispatchRequest {
@@ -538,6 +712,31 @@ impl DrCompliance {
             signal,
             priority: PriorityTier::Grid,
         });
+        true
+    }
+
+    /// Only one axis is ever displaced: when a target's pre-conditioning
+    /// axis changes within an event (its equipment was replaced), the old
+    /// axis is released back to its schedule and band before the new delta.
+    fn release_a_changed_axis(
+        &mut self,
+        target: &DispatchTarget,
+        axis: ThermostatAxis,
+        out: &mut Vec<DispatchRequest>,
+    ) {
+        match self.displaced_axes.iter_mut().find(|(t, _)| t == target) {
+            Some((_, displaced)) if *displaced == axis => {}
+            Some((_, displaced)) => {
+                out.push(DispatchRequest {
+                    target: target.clone(),
+                    signal: ControlSignal::thermal_release(),
+                    priority: PriorityTier::Grid,
+                });
+                *displaced = axis;
+                self.axis_releases_this_step += 1;
+            }
+            None => self.displaced_axes.push((target.clone(), axis)),
+        }
     }
 
     /// Dispatches clear/reset signals for all previously-dispatched targets
@@ -548,13 +747,21 @@ impl DrCompliance {
         for (target, action) in &self.last_dispatched {
             match action {
                 DrAction::PowerLimit { .. } => {
-                    Self::dispatch_for_action(
-                        target,
-                        &DrAction::PowerLimit {
-                            max_kw: f64::INFINITY,
+                    out.push(DispatchRequest {
+                        target: target.clone(),
+                        signal: ControlSignal::PowerLimit {
+                            max_power_kw: f64::INFINITY,
+                            ramp_rate_kw_per_s: None,
                         },
-                        out,
-                    );
+                        priority: PriorityTier::Grid,
+                    });
+                }
+                DrAction::SetpointAdjust { .. } | DrAction::AbsoluteSetpoint { .. } => {
+                    out.push(DispatchRequest {
+                        target: target.clone(),
+                        signal: ControlSignal::thermal_release(),
+                        priority: PriorityTier::Grid,
+                    });
                 }
                 DrAction::TurnOff => {
                     // ModeOverride clearing via ControlSignal is not currently
@@ -565,17 +772,8 @@ impl DrCompliance {
                     // Full clearing requires equipment-side changes to
                     // apply_dr_level(DRLevel::Normal).
                     // See Implementation Notes / Known Limitations.
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        tracing::debug!(
-                            target = ?target,
-                            "TurnOff ModeOverride cannot be cleared via actor-side signal; equipment ctrl_mode_override remains sticky"
-                        );
-                    }
                 }
                 DrAction::LoadCurtailment { .. }
-                | DrAction::SetpointAdjust { .. }
-                | DrAction::AbsoluteSetpoint { .. }
                 | DrAction::DemandResponse { .. }
                 | DrAction::None => {
                     // Non-sticky actions are filtered by track_dispatched;
@@ -590,8 +788,7 @@ impl DrCompliance {
 
     /// Records a dispatched action for later clearing if it creates sticky state.
     fn track_dispatched(&mut self, target: &DispatchTarget, action: &DrAction) {
-        let is_sticky = matches!(action, DrAction::PowerLimit { .. } | DrAction::TurnOff);
-        if !is_sticky {
+        if !action.is_sticky() {
             return;
         }
         // Use conflicts_with for dedup: same-target new entry replaces old.
@@ -610,6 +807,27 @@ impl Actor for DrCompliance {
         Some(&self.telemetry)
     }
 
+    fn dispatch_targets(&self) -> &[ActorTarget] {
+        &self.declared_targets
+    }
+
+    fn validate_equipment(&self, equipment: &[ActorEquipment<'_>]) -> Result<(), HaresError> {
+        for (target, action) in self.targets() {
+            preconditioning_axis(target, action, equipment).map_err(|reason| {
+                HaresError::PreconditioningAxis {
+                    actor: self.name.to_string(),
+                    target: format!("{target:?}"),
+                    reason,
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    fn resolve_equipment(&mut self, equipment: &[ActorEquipment<'_>]) {
+        self.resolve_axes(equipment);
+    }
+
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         // Populate telemetry regardless of DR activity.
         self.telemetry
@@ -618,28 +836,23 @@ impl Actor for DrCompliance {
             .set("dr_active", if self.is_dr_active() { 1.0 } else { 0.0 });
 
         if self.current_dr_level == DRLevel::Normal {
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                // All tracked entries must be sticky actions (PowerLimit or
-                // TurnOff). Non-sticky actions create no clearing obligation
-                // and indicate a track_dispatched filtering bug.
-                debug_assert!(
-                    self.last_dispatched
-                        .iter()
-                        .all(|(_, a)| matches!(a, DrAction::PowerLimit { .. } | DrAction::TurnOff)),
-                    "DR actor '{}' last_dispatched contains non-sticky entries",
-                    self.name,
-                );
-            }
+            debug_assert!(
+                self.last_dispatched.iter().all(|(_, a)| a.is_sticky()),
+                "DR actor '{}' last_dispatched contains non-sticky entries",
+                self.name,
+            );
             let clear_count = if !self.last_dispatched.is_empty() {
                 self.dispatch_clear_signals(out)
             } else {
                 0
             };
+            self.displaced_axes.clear();
+            self.warned_unserved = false;
             self.telemetry.set("dr_complied", 0.0);
             self.telemetry.set("signals_count", clear_count as f64);
             self.telemetry.set("signals_rejected", 0.0);
             self.telemetry.set("dr_freeze_guard", 0.0);
+            self.telemetry.set("preconditioning_unserved", 0.0);
             #[cfg(feature = "observe")]
             {
                 self.clear_signals_dispatched_count = clear_count as u64;
@@ -679,6 +892,7 @@ impl Actor for DrCompliance {
             self.telemetry.set("signals_count", 0.0);
             self.telemetry.set("signals_rejected", 0.0);
             self.telemetry.set("dr_freeze_guard", 0.0);
+            self.telemetry.set("preconditioning_unserved", 0.0);
             return;
         }
 
@@ -692,23 +906,23 @@ impl Actor for DrCompliance {
 
         let before = out.len();
         let mut rejected: u64 = 0;
+        let mut unserved: u32 = 0;
+        self.axis_releases_this_step = 0;
 
-        if let Some(target) = &self.hvac_target {
+        if let Some(target) = self.hvac_target.clone() {
+            let target = &target;
+            let hvac_action = self.hvac_action.clone();
             // Protected-state check: equipment in defrost or WH freeze protection
             // blocks DR control signals. This runs before the freeze-protection guard
             // so telemetry correctly records the rejection rather than a downgrade.
-            if self.should_reject_dispatch(target, &self.hvac_action, env) {
+            if self.should_reject_dispatch(target, &hvac_action, env) {
                 rejected = rejected.saturating_add(1);
-            } else if matches!(&self.hvac_action, DrAction::TurnOff)
-                && self.any_zone_below_freeze(env)
-            {
+            } else if matches!(&hvac_action, DrAction::TurnOff) && self.any_zone_below_freeze(env) {
                 // Freeze-protection guard: when DR TurnOff targets HVAC and any
                 // zone is below the freeze-risk threshold, downgrade to a
                 // minimum-heating ThermalSetpoint instead of ModeOverride::Off.
                 // This prevents equipment/building damage from freezing during
-                // DR events. Long-term: the Safety actor (T-0052) will provide
-                // an independent freeze-protection layer at Safety tier, at
-                // which point this guard can be relaxed.
+                // DR events.
                 out.push(DispatchRequest {
                     target: target.clone(),
                     signal: ControlSignal::ThermalSetpoint {
@@ -726,11 +940,17 @@ impl Actor for DrCompliance {
                     threshold_c = self.freeze_risk_threshold_c,
                     "DR TurnOff downgraded to minimum-heating setpoint: zone temp below freeze-risk threshold"
                 );
+            } else if !self.dispatch_for_action(
+                target,
+                &hvac_action,
+                self.hvac_target_axis.clone(),
+                out,
+            ) {
+                unserved += 1;
             } else {
-                Self::dispatch_for_action(target, &self.hvac_action, out);
                 #[cfg(feature = "observe")]
                 {
-                    if let DrAction::DemandResponse { level, duration_s } = &self.hvac_action {
+                    if let DrAction::DemandResponse { level, duration_s } = &hvac_action {
                         self.telemetry
                             .set("demand_response_level", dr_level_as_f64(*level));
                         // Why: None duration = indefinite DR event; 0.0
@@ -740,9 +960,7 @@ impl Actor for DrCompliance {
                             .set("demand_response_duration_s", duration_s.unwrap_or(0.0));
                     }
                 }
-                let t = target.clone();
-                let a = self.hvac_action.clone();
-                self.track_dispatched(&t, &a);
+                self.track_dispatched(target, &hvac_action);
             }
         }
 
@@ -754,7 +972,7 @@ impl Actor for DrCompliance {
             .map(|(t, a)| (t.clone(), a.clone()))
             .collect();
 
-        for (target, action) in &load_pairs {
+        for (idx, (target, action)) in load_pairs.iter().enumerate() {
             // Protected-state check: skip dispatch for equipment in defrost
             // or WH freeze protection. Recording rejection rather than
             // dispatching prevents fire-and-forget signals that equipment
@@ -782,8 +1000,14 @@ impl Actor for DrCompliance {
                     threshold_c = self.freeze_risk_threshold_c,
                     "DR load-target TurnOff downgraded to minimum-heating setpoint: zone temp below freeze-risk threshold and target is HVAC"
                 );
+            } else if !self.dispatch_for_action(
+                target,
+                action,
+                self.load_target_axes[idx].clone(),
+                out,
+            ) {
+                unserved += 1;
             } else {
-                Self::dispatch_for_action(target, action, out);
                 #[cfg(feature = "observe")]
                 {
                     if let DrAction::DemandResponse { level, duration_s } = action {
@@ -803,12 +1027,14 @@ impl Actor for DrCompliance {
         self.telemetry
             .set("signals_count", (out.len() - before) as f64);
         self.telemetry.set("signals_rejected", rejected as f64);
+        self.telemetry
+            .set("preconditioning_unserved", f64::from(unserved));
         #[cfg(feature = "observe")]
         {
             self.signals_rejected_count = rejected;
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             // Invariant: when any TurnOff action targets HVAC equipment and zone
             // temperature is below the freeze-risk threshold, no TurnOff should be
@@ -841,8 +1067,9 @@ impl Actor for DrCompliance {
             // output. Every rejection counted in `signals_rejected` must
             // correspond to a signal that was NOT pushed to `out`.
             let dispatched_and_rejected = rejected + (out.len() - before) as u64;
-            let expected_accepted =
-                (self.hvac_target.is_some() as u64).saturating_add(self.load_targets.len() as u64);
+            let expected_accepted = (self.hvac_target.is_some() as u64)
+                .saturating_add(self.load_targets.len() as u64)
+                .saturating_add(self.axis_releases_this_step);
             debug_assert!(
                 dispatched_and_rejected <= expected_accepted,
                 "DR actor '{}' dispatched+rejected ({dispatched_and_rejected}) exceeds configured targets ({expected_accepted})",
@@ -851,8 +1078,18 @@ impl Actor for DrCompliance {
         }
     }
 
+    /// v2: the snapshot carries the axis each target's pre-conditioning has
+    /// displaced.
+    fn checkpoint_version(&self) -> u32 {
+        2
+    }
+
     fn save_state(&self) -> Result<Vec<u8>, HaresError> {
-        let data = (&self.current_dr_level, &self.last_dispatched);
+        let data = (
+            &self.current_dr_level,
+            &self.last_dispatched,
+            &self.displaced_axes,
+        );
         postcard::to_allocvec(&data)
             .map_err(|e| HaresError::Io(format!("DrCompliance save_state: {e}")))
     }
@@ -861,12 +1098,94 @@ impl Actor for DrCompliance {
         if data.is_empty() {
             return Ok(());
         }
-        let (level, dispatched): (DRLevel, Vec<(DispatchTarget, DrAction)>) =
-            postcard::from_bytes(data)
-                .map_err(|e| HaresError::Io(format!("DrCompliance load_state: {e}")))?;
+        type State = (
+            DRLevel,
+            Vec<(DispatchTarget, DrAction)>,
+            Vec<(DispatchTarget, ThermostatAxis)>,
+        );
+        let (level, dispatched, displaced): State = postcard::from_bytes(data)
+            .map_err(|e| HaresError::Io(format!("DrCompliance load_state: {e}")))?;
         self.current_dr_level = level;
         self.last_dispatched = dispatched;
+        self.displaced_axes = displaced;
         Ok(())
+    }
+}
+
+/// The axis a target's pre-conditioning moves, or why it has none.
+type AxisResolution = Result<Option<ThermostatAxis>, String>;
+
+/// The axis a positive pre-conditioning delta on `target` moves, from what
+/// the target is, never from the weather or a mode: `Ok(None)` when the
+/// action moves no single axis; `Err(reason)` when the target has no
+/// single axis for it, a named target is not in `equipment`, or the
+/// action names a direction for a delta that is not a positive
+/// pre-conditioning one.
+fn preconditioning_axis(
+    target: &DispatchTarget,
+    action: &DrAction,
+    equipment: &[ActorEquipment<'_>],
+) -> AxisResolution {
+    let DrAction::SetpointAdjust { delta_c, direction } = action else {
+        return Ok(None);
+    };
+    if !delta_c.is_finite() {
+        return Err(format!("the delta {delta_c} C is not finite"));
+    }
+    if *delta_c <= 0.0 {
+        return match direction {
+            None => Ok(None),
+            Some(named) => Err(format!(
+                "a {named:?} direction names the axis a positive delta pre-conditions; \
+                 the delta {delta_c} C relaxes, which widens both setpoints and takes none"
+            )),
+        };
+    }
+    let axes = match target {
+        DispatchTarget::ByEndUse(end_use) => ThermostatAxis::of_end_use(end_use)
+            .map(ThermostatAxes::One)
+            .ok_or_else(|| format!("end use '{}' has no thermostat setpoint", end_use.as_str()))?,
+        DispatchTarget::ByName(name) => equipment
+            .iter()
+            .find(|e| *e.descriptor.name == **name)
+            .ok_or_else(|| {
+                format!(
+                    "no equipment named '{name}' is in the dwelling; \
+                     register the actor after the equipment it names"
+                )
+            })?
+            .thermostat_axes
+            .ok_or_else(|| "it has no thermostat setpoint".to_string())?,
+    };
+    match (axes.select(*direction), axes, direction) {
+        (Some(axis), _, _) => Ok(Some(axis)),
+        (None, ThermostatAxes::Both, _) => Err(
+            "it serves heating and cooling, so the event must name its direction \
+             (DrAction::preheat or DrAction::precool)"
+                .to_string(),
+        ),
+        (None, ThermostatAxes::One(serves), Some(named)) => Err(format!(
+            "it serves only the {serves:?} setpoint, not the {named:?} setpoint the event names"
+        )),
+        (None, ThermostatAxes::One(serves), None) => Err(format!(
+            "it serves only the {serves:?} setpoint, which the event does not name"
+        )),
+    }
+}
+
+/// Pre-conditioning by `delta_c > 0`: the heating setpoint up, or the
+/// cooling setpoint down. Only this axis moves; the converging pair would
+/// narrow the gap and be rejected.
+fn preconditioning_signal(axis: ThermostatAxis, delta_c: f64) -> ControlSignal {
+    match axis {
+        ThermostatAxis::Heating => ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: Some(delta_c),
+            cooling_delta_c: None,
+        },
+        ThermostatAxis::Cooling => ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: None,
+            cooling_delta_c: Some(-delta_c),
+        },
     }
 }
 
@@ -882,7 +1201,7 @@ fn dr_level_as_f64(level: DRLevel) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use hares_types::EndUse;
+    use hares_types::{ControlCapabilities, EndUse, EquipmentDescriptor, EquipmentId};
 
     use super::*;
     use crate::actor::testing::test_env;
@@ -1075,7 +1394,7 @@ mod tests {
     fn dr_compliance_multiple_targets_dispatches_multiple_signals() {
         let mut actor = DrCompliance::new("Test")
             .with_compliance_model(AlwaysComply)
-            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_target(DispatchTarget::ByEndUse(EndUse::HVAC_HEATING))
             .with_hvac_action(DrAction::setpoint_delta(2.0))
             .with_load_target(
                 DispatchTarget::ByName("Lights".into()),
@@ -1091,9 +1410,9 @@ mod tests {
 
         assert_eq!(requests.len(), 2);
 
-        let hvac_signal = requests
-            .iter()
-            .any(|r| matches!(&r.target, DispatchTarget::ByName(n) if &**n == "HVAC"));
+        let hvac_signal = requests.iter().any(
+            |r| matches!(&r.target, DispatchTarget::ByEndUse(eu) if *eu == EndUse::HVAC_HEATING),
+        );
         let lights_signal = requests
             .iter()
             .any(|r| matches!(&r.target, DispatchTarget::ByName(n) if &**n == "Lights"));
@@ -1228,29 +1547,370 @@ mod tests {
         );
     }
 
-    #[test]
-    fn setpoint_adjust_dispatches_delta_signal() {
+    const AC_ID: EquipmentId = EquipmentId(11);
+    const FURNACE_ID: EquipmentId = EquipmentId(12);
+    const IDEAL_ID: EquipmentId = EquipmentId(13);
+
+    fn descriptor(
+        name: &str,
+        id: EquipmentId,
+        end_use: EndUse,
+        control_capabilities: ControlCapabilities,
+    ) -> EquipmentDescriptor {
+        EquipmentDescriptor {
+            id,
+            name: name.to_string(),
+            end_use,
+            equipment_type: std::borrow::Cow::Borrowed("Test"),
+            zone: None,
+            fuel: hares_types::FuelType::Electric,
+            stage: hares_types::ExecutionStage::Thermal,
+            control_capabilities,
+            core_capabilities: hares_types::CoreCapabilities::ELECTRIC,
+            telemetry_fields: vec![],
+            zone_type: None,
+        }
+    }
+
+    const LIGHTS_ID: EquipmentId = EquipmentId(14);
+
+    /// An AC, a furnace, an ideal unit (which serves both) and lights.
+    fn descriptors() -> Vec<EquipmentDescriptor> {
+        vec![
+            descriptor(
+                "Air Conditioner",
+                AC_ID,
+                EndUse::HVAC_COOLING,
+                ControlCapabilities::THERMAL_SETPOINT,
+            ),
+            descriptor(
+                "Gas Furnace",
+                FURNACE_ID,
+                EndUse::HVAC_HEATING,
+                ControlCapabilities::THERMAL_SETPOINT,
+            ),
+            descriptor(
+                "Ideal HVAC",
+                IDEAL_ID,
+                EndUse::HVAC_HEATING,
+                ControlCapabilities::IDEAL_CAPACITY | ControlCapabilities::THERMAL_SETPOINT,
+            ),
+            descriptor(
+                "Lights",
+                LIGHTS_ID,
+                EndUse::LIGHTING,
+                ControlCapabilities::LOAD_FRACTION,
+            ),
+        ]
+    }
+
+    /// What each of [`descriptors`] declares its thermostat serves.
+    fn equipment(descriptors: &[EquipmentDescriptor]) -> Vec<ActorEquipment<'_>> {
+        use ThermostatAxis::{Cooling, Heating};
+        descriptors
+            .iter()
+            .map(|descriptor| ActorEquipment {
+                descriptor,
+                thermostat_axes: match descriptor.id {
+                    AC_ID => Some(ThermostatAxes::One(Cooling)),
+                    FURNACE_ID => Some(ThermostatAxes::One(Heating)),
+                    IDEAL_ID => Some(ThermostatAxes::Both),
+                    _ => None,
+                },
+            })
+            .collect()
+    }
+
+    /// A registered actor: validated and resolved against [`descriptors`].
+    fn setpoint_actor(target: DispatchTarget, action: DrAction) -> DrCompliance {
         let mut actor = DrCompliance::new("Test")
             .with_compliance_model(AlwaysComply)
-            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
-            .with_hvac_action(DrAction::setpoint_delta(2.0));
+            .with_hvac_target(target)
+            .with_hvac_action(action);
+        let descriptors = descriptors();
+        let equipment = equipment(&descriptors);
+        actor
+            .validate_equipment(&equipment)
+            .expect("the event has an axis for its target");
+        actor.resolve_equipment(&equipment);
+        actor
+    }
 
+    /// An environment whose weather says the opposite season to the unit:
+    /// the axis must not come from it.
+    fn env_with(outdoor_c: f64) -> EnvironmentState {
+        test_env().outdoor_temp(outdoor_c).zone_temp(24.0).build()
+    }
+
+    fn decide_once(actor: &mut DrCompliance, env: &EnvironmentState) -> Vec<DispatchRequest> {
         actor.set_dr_level(DRLevel::High);
-
-        let env = test_env().build();
         let mut requests = Vec::new();
-        actor.decide(&env, &mut requests);
+        actor.decide(env, &mut requests);
+        requests
+    }
 
-        assert_eq!(requests.len(), 1);
-        match &requests[0].signal {
-            ControlSignal::ThermalSetpointDelta {
-                heating_delta_c,
-                cooling_delta_c,
-            } => {
-                assert_eq!(*heating_delta_c, Some(2.0));
-                assert_eq!(*cooling_delta_c, Some(-2.0));
-            }
-            other => panic!("expected ThermalSetpointDelta, got {other:?}"),
+    fn setpoint_adjust_signal_in(target: DispatchTarget, action: DrAction) -> Vec<DispatchRequest> {
+        decide_once(&mut setpoint_actor(target, action), &env_with(18.0))
+    }
+
+    fn delta_of(requests: &[DispatchRequest]) -> (Option<f64>, Option<f64>) {
+        match requests {
+            [
+                DispatchRequest {
+                    signal:
+                        ControlSignal::ThermalSetpointDelta {
+                            heating_delta_c,
+                            cooling_delta_c,
+                        },
+                    ..
+                },
+            ] => (*heating_delta_c, *cooling_delta_c),
+            other => panic!("expected one ThermalSetpointDelta, got {other:?}"),
+        }
+    }
+
+    /// Pre-conditioning moves the one axis the target serves, whatever the
+    /// weather (outdoor 18 °C under a 24 °C zone: an evening an AC is still
+    /// cooling); the converging pair would narrow the gap and be rejected.
+    #[test]
+    fn preconditioning_moves_the_axis_the_target_serves() {
+        for (target, expected) in [
+            (
+                DispatchTarget::ByName("Air Conditioner".into()),
+                (None, Some(-2.0)),
+            ),
+            (
+                DispatchTarget::ByEndUse(EndUse::HVAC_COOLING),
+                (None, Some(-2.0)),
+            ),
+            (
+                DispatchTarget::ByName("Gas Furnace".into()),
+                (Some(2.0), None),
+            ),
+            (
+                DispatchTarget::ByEndUse(EndUse::HVAC_HEATING),
+                (Some(2.0), None),
+            ),
+        ] {
+            assert_eq!(
+                delta_of(&setpoint_adjust_signal_in(
+                    target.clone(),
+                    DrAction::setpoint_delta(2.0)
+                )),
+                expected,
+                "{target:?}"
+            );
+        }
+    }
+
+    /// A unit serving both moves the axis the event names, every step,
+    /// whatever its mode; a direction a single-purpose unit serves is
+    /// accepted.
+    #[test]
+    fn a_dual_mode_target_preconditions_on_the_named_axis() {
+        let ideal = DispatchTarget::ByName("Ideal HVAC".into());
+        let mut actor = setpoint_actor(ideal.clone(), DrAction::precool(2.0));
+        for outdoor_c in [30.0, 5.0, 30.0] {
+            assert_eq!(
+                delta_of(&decide_once(&mut actor, &env_with(outdoor_c))),
+                (None, Some(-2.0))
+            );
+        }
+        assert_eq!(
+            delta_of(&setpoint_adjust_signal_in(ideal, DrAction::preheat(2.0))),
+            (Some(2.0), None)
+        );
+        assert_eq!(
+            delta_of(&setpoint_adjust_signal_in(
+                DispatchTarget::ByName("Gas Furnace".into()),
+                DrAction::preheat(2.0)
+            )),
+            (Some(2.0), None)
+        );
+    }
+
+    /// An event that names no single axis for its target is refused when
+    /// the actor is registered: a dual-mode unit without a direction, a
+    /// direction the unit does not serve, a target without a thermostat, a
+    /// named target not among the equipment, a direction on a relaxation,
+    /// and a delta that is not finite.
+    #[test]
+    fn an_event_without_an_axis_for_its_target_is_refused_at_registration() {
+        let descriptors = descriptors();
+        let equipment = equipment(&descriptors);
+        for (target, action) in [
+            (
+                DispatchTarget::ByName("Ideal HVAC".into()),
+                DrAction::setpoint_delta(2.0),
+            ),
+            (
+                DispatchTarget::ByName("Gas Furnace".into()),
+                DrAction::precool(2.0),
+            ),
+            (
+                DispatchTarget::ByEndUse(EndUse::HVAC_COOLING),
+                DrAction::preheat(2.0),
+            ),
+            (
+                DispatchTarget::ByName("Lights".into()),
+                DrAction::setpoint_delta(2.0),
+            ),
+            (
+                DispatchTarget::ByEndUse(EndUse::LIGHTING),
+                DrAction::setpoint_delta(2.0),
+            ),
+            (
+                DispatchTarget::ByName("Idael HVAC".into()),
+                DrAction::precool(2.0),
+            ),
+            (
+                DispatchTarget::ByName("Ideal HVAC".into()),
+                DrAction::preheat(-2.0),
+            ),
+            (
+                DispatchTarget::ByEndUse(EndUse::HVAC_COOLING),
+                DrAction::precool(0.0),
+            ),
+            (
+                DispatchTarget::ByName("Gas Furnace".into()),
+                DrAction::setpoint_delta(f64::NAN),
+            ),
+        ] {
+            let actor = DrCompliance::new("Test")
+                .with_hvac_target(target.clone())
+                .with_hvac_action(action.clone());
+            assert!(
+                matches!(
+                    actor.validate_equipment(&equipment),
+                    Err(HaresError::PreconditioningAxis { .. })
+                ),
+                "{target:?} {action:?}"
+            );
+        }
+    }
+
+    /// An actor no dwelling holds has not resolved a named target, so it
+    /// sends no pre-conditioning delta for it and counts it; the counter
+    /// clears when the event ends and when the actor stops complying.
+    #[test]
+    fn an_unserved_preconditioning_delta_is_counted_and_the_count_clears() {
+        let unresolved = || {
+            DrCompliance::new("Test")
+                .with_compliance_model(AlwaysComply)
+                .with_hvac_target(DispatchTarget::ByName("Gas Furnace".into()))
+                .with_hvac_action(DrAction::setpoint_delta(2.0))
+        };
+        let count =
+            |actor: &DrCompliance| actor.telemetry().unwrap().get("preconditioning_unserved");
+        let mut actor = unresolved();
+        assert!(decide_once(&mut actor, &env_with(5.0)).is_empty());
+        assert_eq!(count(&actor), Some(1.0));
+        actor.set_dr_level(DRLevel::Normal);
+        actor.decide(&env_with(5.0), &mut Vec::new());
+        assert_eq!(count(&actor), Some(0.0), "cleared when the event ends");
+
+        let mut actor = unresolved();
+        assert!(decide_once(&mut actor, &env_with(5.0)).is_empty());
+        actor.model = Box::new(NeverComply);
+        actor.decide(&env_with(5.0), &mut Vec::new());
+        assert_eq!(count(&actor), Some(0.0), "cleared when not complying");
+    }
+
+    /// When a target's axis changes within an event (its unit replaced),
+    /// the old axis is released before the new one moves, so only one axis
+    /// is ever displaced; the displaced axis is part of the checkpoint.
+    #[test]
+    fn a_change_of_axis_within_an_event_releases_the_old_axis_first() {
+        let unit = DispatchTarget::ByName("Unit".into());
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(unit.clone())
+            .with_hvac_action(DrAction::setpoint_delta(2.0));
+        let as_unit = |id: EquipmentId, end_use: EndUse| {
+            let mut d = descriptor("Unit", id, end_use, ControlCapabilities::THERMAL_SETPOINT);
+            d.name = "Unit".to_string();
+            d
+        };
+        let furnace = [as_unit(FURNACE_ID, EndUse::HVAC_HEATING)];
+        let ac = [as_unit(AC_ID, EndUse::HVAC_COOLING)];
+        actor.resolve_equipment(&equipment(&furnace));
+        assert_eq!(
+            delta_of(&decide_once(&mut actor, &env_with(5.0))),
+            (Some(2.0), None)
+        );
+
+        let checkpoint = actor.save_state().unwrap();
+        let mut restored = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(unit.clone())
+            .with_hvac_action(DrAction::setpoint_delta(2.0));
+        restored.load_state(&checkpoint).unwrap();
+        for actor in [&mut actor, &mut restored] {
+            actor.resolve_equipment(&equipment(&ac));
+            let requests = decide_once(actor, &env_with(5.0));
+            assert_eq!(requests.len(), 2, "{requests:?}");
+            assert_eq!(requests[0].signal, ControlSignal::thermal_release());
+            assert_eq!(delta_of(&requests[1..]), (None, Some(-2.0)));
+            assert_eq!(
+                delta_of(&decide_once(actor, &env_with(5.0))),
+                (None, Some(-2.0)),
+                "released once"
+            );
+        }
+    }
+
+    /// The snapshot gained the displaced axes, so a blob of the first
+    /// layout does not decode and the schema version has moved past it:
+    /// the dwelling refuses such a blob by version before decoding it.
+    #[test]
+    fn the_snapshot_schema_version_moved_with_the_displaced_axes() {
+        let first_layout =
+            postcard::to_allocvec(&(DRLevel::High, Vec::<(DispatchTarget, DrAction)>::new()))
+                .unwrap();
+        let mut actor = DrCompliance::new("Test");
+        assert!(actor.load_state(&first_layout).is_err());
+        assert_eq!(actor.checkpoint_version(), 2);
+    }
+
+    /// Relaxation widens the gap on both axes, which is valid for any unit.
+    #[test]
+    fn relaxation_widens_both_axes() {
+        assert_eq!(
+            delta_of(&setpoint_adjust_signal_in(
+                DispatchTarget::ByName("Lights".into()),
+                DrAction::setpoint_delta(-2.0)
+            )),
+            (Some(-2.0), Some(2.0))
+        );
+    }
+
+    /// A setpoint action leaves a runtime override in the thermostat, so
+    /// the end of the event hands both axes back with the release form.
+    #[test]
+    fn setpoint_actions_are_released_when_the_event_ends() {
+        for action in [
+            DrAction::setpoint_delta(2.0),
+            DrAction::absolute_setpoint(18.0, 28.0),
+        ] {
+            let mut actor =
+                setpoint_actor(DispatchTarget::ByName("Gas Furnace".into()), action.clone());
+            let env = env_with(0.0);
+            let mut requests = decide_once(&mut actor, &env);
+            assert_eq!(requests.len(), 1, "{action:?}");
+
+            actor.set_dr_level(DRLevel::Normal);
+            requests.clear();
+            actor.decide(&env, &mut requests);
+            assert_eq!(requests.len(), 1, "{action:?}: the release is dispatched");
+            assert_eq!(requests[0].signal, ControlSignal::thermal_release());
+            assert_eq!(
+                requests[0].target,
+                DispatchTarget::ByName("Gas Furnace".into())
+            );
+
+            requests.clear();
+            actor.decide(&env, &mut requests);
+            assert!(requests.is_empty(), "{action:?}: released once");
         }
     }
 
@@ -1463,7 +2123,7 @@ mod tests {
     fn non_turn_off_hvac_action_not_affected_by_freeze_guard() {
         let mut actor = DrCompliance::new("Test")
             .with_compliance_model(AlwaysComply)
-            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_target(DispatchTarget::ByEndUse(EndUse::HVAC_HEATING))
             .with_hvac_action(DrAction::setpoint_delta(2.0));
 
         actor.set_dr_level(DRLevel::Critical);
@@ -2288,7 +2948,12 @@ mod tests {
             duration_s: Some(3600.0),
         };
         let mut out = Vec::new();
-        DrCompliance::dispatch_for_action(&target, &action, &mut out);
+        assert!(DrCompliance::new("Test").dispatch_for_action(
+            &target,
+            &action,
+            Ok(None),
+            &mut out
+        ));
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].target, target);
@@ -2458,7 +3123,7 @@ mod tests {
         let mut actor = DrCompliance::new("Test")
             .with_compliance_model(AlwaysComply)
             .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
-            .with_hvac_action(DrAction::SetpointAdjust { delta_c: 2.0 });
+            .with_hvac_action(DrAction::setpoint_delta(2.0));
         actor.set_dr_level(DRLevel::High);
         actor.last_dispatched.push((
             DispatchTarget::ByName("HVAC".into()),

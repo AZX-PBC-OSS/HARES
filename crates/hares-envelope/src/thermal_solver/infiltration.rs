@@ -1,16 +1,15 @@
 use std::collections::HashMap;
 
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_physics::air_properties::check_air_density_plausible;
 use hares_physics::air_properties::moist_air_density_kg_m3;
 use hares_physics::constants::CP_DRY_AIR_J_KG_K;
 use hares_physics::infiltration::{
-    ach_infiltration, ashrae_wind_stack, duct_leakage_infiltration_m3_s, ela_infiltration,
-    natural_ventilation_flow_m3_s,
+    NaturalVentilationInputs, ach_infiltration, ashrae_wind_stack, duct_leakage_infiltration_m3_s,
+    ela_infiltration, natural_ventilation_flow_m3_s,
 };
 #[cfg(feature = "observe")]
 use hares_physics::infiltration::{compute_natural_ventilation_cw, wind_incidence_angle_deg};
-use hares_types::{EnvironmentState, ZoneId};
+use hares_types::{EnvironmentState, HaresError, ZoneId};
 
 use super::H_FG_J_PER_KG;
 use super::config::{InfiltrationMethod, ThermalSolverConfig};
@@ -38,10 +37,6 @@ pub(crate) struct InfiltrationCoupling {
     pub h_inf_w_k: f64,
     /// Outdoor temperature driving the sensible forcing [°C].
     pub t_forcing_c: f64,
-    /// Latent gain [W] computed from current-step humidity ratio (explicit value).
-    /// Retained for diagnostic parity with q_sensible_diagnostic_w.
-    #[allow(dead_code)]
-    pub q_latent_w: f64,
     /// Diagnostic sensible gain [W] = h_inf * (T_out - T_zone) for reporting.
     /// Accessed in thermal_solver/mod.rs for component_gains.
     pub q_sensible_diagnostic_w: f64,
@@ -53,11 +48,6 @@ pub(crate) struct InfiltrationCoupling {
     pub q_natural_vent_w: f64,
     /// Combined sensible flow [m³/s] -- infiltration + ventilation after quadrature.
     pub combined_flow_m3_s: f64,
-    /// Latent flow [m³/s] -- may differ from sensible flow when balanced ventilation
-    /// has different sensible/latent recovery efficiencies. Retained for diagnostic
-    /// inspection; the humidity solver uses m_dot_lat_kg_s directly.
-    #[allow(dead_code)]
-    pub latent_flow_m3_s: f64,
     /// Latent mass flow rate [kg/s] = rho * latent_flow_m3_s.
     /// Stored directly (not re-derived from volume flow × density) to avoid
     /// recomputing density in format_domain_update, which lacks env access.
@@ -99,13 +89,15 @@ pub(crate) struct InfiltrationCoupling {
 /// infiltration rate is adjusted per ASHRAE 152 §9.3.
 ///
 /// Returns per-zone `InfiltrationCoupling` structs for semi-implicit treatment.
+/// The air density screen is unconditional: non-finite density from bad weather
+/// pressure or temperature is a typed error in every build profile.
 pub(crate) fn apply_infiltration_and_ventilation(
     config: &ThermalSolverConfig,
     env: &EnvironmentState,
     hvac_active: bool,
     latent_out: &mut HashMap<ZoneId, f64>,
     couplings: &mut Vec<InfiltrationCoupling>,
-) {
+) -> Result<(), HaresError> {
     couplings.clear();
     let p_pa = env.weather.pressure_pa();
     let t_out = env.weather.outdoor_temp_c;
@@ -113,8 +105,7 @@ pub(crate) fn apply_infiltration_and_ventilation(
     // moist_air_density_kg_m3 inverts ASHRAE HOF 2021 Ch.1 Eq.28 specific volume
     // (v = R_da·T·(1+W/ε)/p [m³/kg_da]), so it already yields kg_da/m³.
     let rho = moist_air_density_kg_m3(p_pa, t_out, w_out);
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    check_air_density_plausible(rho, "infiltration mass flow");
+    check_air_density_plausible(rho, "infiltration mass flow")?;
 
     for zone in &env.zones {
         // Look up per-zone infiltration; default to zero ACH if not configured.
@@ -128,10 +119,10 @@ pub(crate) fn apply_infiltration_and_ventilation(
         // Both AshraeWindStack and Ela branches pass raw met-station wind speed
         // (env.weather.wind_speed_m_s) directly. Terrain/height correction is already
         // embedded in the pre-computed coefficients:
-        //   - AshraeWindStack: shelter_coeff via terrain_wind_speed(1.0, ...) →
-        //     aim2_coefficients_from_ach50 (hares-physics/infiltration.rs:527–532)
-        //   - Ela: wind_coeff via f_t (terrain correction factor) →
-        //     calculate_ela_coefficients (hares-physics/infiltration.rs:622–623)
+        //   - AshraeWindStack: shelter_coeff via terrain_wind_speed(1.0, ...) in
+        //     aim2_coefficients_from_ach50
+        //   - Ela: wind_coeff via OS-HPXML's sherman_grimsrud_terrain_factor in
+        //     calculate_ela_coefficients
         // Applying a second terrain correction at runtime would double-correct.
         // Per ASHRAE HoF 2021 Ch.16, AIM-2 embeds the terrain correction in shelter
         // coefficients during setup; EnergyPlus similarly corrects globally upstream
@@ -182,32 +173,34 @@ pub(crate) fn apply_infiltration_and_ventilation(
 
         // Natural ventilation is only applied to the indoor/conditioned zone.
         // Returns (q_total, q_stack_adj, q_wind_adj, cd) — all in m³/s except cd (dimensionless).
-        #[cfg_attr(not(feature = "observe"), allow(unused_variables))]
-        let (q_nat_m3_s, q_stack_m3_s, q_wind_m3_s, cd_used) = if zone.id == config.indoor_zone_id {
+        let nat_vent = if zone.id == config.indoor_zone_id {
             config
                 .natural_ventilation
                 .as_ref()
                 .map(|nv| {
-                    natural_ventilation_flow_m3_s(
-                        nv.open_area_m2,
-                        zone.temperature_c,
-                        t_out,
-                        nv.t_base_c,
-                        w_out,
-                        nv.max_outdoor_humidity_ratio,
-                        env.weather.wind_speed_m_s,
-                        zone.volume_m3,
-                        nv.opening_azimuth_deg,
-                        env.weather.wind_dir_deg,
-                        nv.dh_m,
-                        nv.opening_type,
-                        nv.zone_height_m,
-                    )
+                    natural_ventilation_flow_m3_s(NaturalVentilationInputs {
+                        open_area_m2: nv.open_area_m2,
+                        t_zone_c: zone.temperature_c,
+                        t_outdoor_c: t_out,
+                        t_base_c: nv.t_base_c,
+                        outdoor_humidity_ratio: w_out,
+                        max_outdoor_humidity_ratio: nv.max_outdoor_humidity_ratio,
+                        wind_speed_m_s: env.weather.wind_speed_m_s,
+                        zone_volume_m3: zone.volume_m3,
+                        opening_azimuth_deg: nv.opening_azimuth_deg,
+                        wind_direction_deg: env.weather.wind_dir_deg,
+                        dh_m: nv.dh_m,
+                        opening_type: nv.opening_type,
+                        zone_height_m: nv.zone_height_m,
+                    })
                 })
                 .unwrap_or((0.0, 0.0, 0.0, 0.0))
         } else {
             (0.0, 0.0, 0.0, 0.0)
         };
+        let q_nat_m3_s = nat_vent.0;
+        #[cfg(feature = "observe")]
+        let (_, q_stack_m3_s, q_wind_m3_s, cd_used) = nat_vent;
 
         // Forced mechanical ventilation flow -- only for zones with explicit flow
         // or the indoor zone (which gets the global ventilation rate).
@@ -290,13 +283,11 @@ pub(crate) fn apply_infiltration_and_ventilation(
             zone: zone.id,
             h_inf_w_k: h_inf,
             t_forcing_c: t_out,
-            q_latent_w: q_latent,
             q_sensible_diagnostic_w: q_sensible_diagnostic,
             q_infiltration_w: q_infiltration_w_scaled,
             q_forced_vent_w: q_forced_vent_w_scaled,
             q_natural_vent_w: q_natural_vent_w_scaled,
             combined_flow_m3_s: sensible_flow_m3_s,
-            latent_flow_m3_s,
             m_dot_lat_kg_s: m_dot_lat,
             w_outdoor: w_out,
             raw_inf_m3_s: q_inf_m3_s,
@@ -327,6 +318,7 @@ pub(crate) fn apply_infiltration_and_ventilation(
         });
         *latent_out.entry(zone.id).or_insert(0.0) += q_latent;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -345,6 +337,7 @@ mod tests {
 
     fn make_env(t_out_c: f64, wind_m_s: f64, zone_temp_c: f64, volume_m3: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -386,7 +379,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -438,13 +432,14 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_env(5.0, 3.0, 21.0, volume_m3);
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         assert_eq!(couplings.len(), 1);
         let coupling = &couplings[0];
@@ -488,14 +483,15 @@ mod tests {
                     n_i,
                 },
             )],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         // wind_speed = 0.0 so wind term is zero
         let env = make_env(t_out, 0.0, t_zone, 300.0);
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         assert_eq!(couplings.len(), 1);
         let flow = couplings[0].raw_inf_m3_s;
@@ -535,13 +531,14 @@ mod tests {
                     wind_coeff,
                 },
             )],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_env(t_out, wind_m_s, t_zone, 300.0);
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         assert_eq!(couplings.len(), 1);
         let flow = couplings[0].raw_inf_m3_s;
@@ -583,13 +580,14 @@ mod tests {
                     wind_coeff,
                 },
             )],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_env(t_out, 0.0, t_zone, 300.0);
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         let flow = couplings[0].raw_inf_m3_s;
         let ela_cm2 = ela_m2 * 10_000.0;
@@ -623,13 +621,14 @@ mod tests {
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
             supply_duct_leakage_m3_s: supply,
             return_duct_leakage_m3_s: ret,
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_env(5.0, 3.0, 21.0, volume_m3);
 
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
-        apply_infiltration_and_ventilation(&config, &env, true, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, true, &mut latent, &mut couplings)
+            .unwrap();
         let adjusted_flow = couplings[0].raw_inf_m3_s;
 
         // Hand-calculated expected value from ASHRAE 152 §9.3 pressurisation formula.
@@ -657,13 +656,14 @@ mod tests {
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
             supply_duct_leakage_m3_s: 0.02,
             return_duct_leakage_m3_s: 0.01,
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_env(5.0, 3.0, 21.0, volume_m3);
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         let flow = couplings[0].raw_inf_m3_s;
         let expected = ach * volume_m3 / 3600.0;
@@ -708,7 +708,7 @@ mod tests {
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
                 opening_azimuth_deg: NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
             }),
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         // zone=26°C > t_base=22.778°C > outdoor=15°C; w_out=0.005 < 0.0115
         let mut env = make_env(t_out, wind_m_s, t_zone, volume_m3);
@@ -717,7 +717,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         let nat_flow = couplings[0].nat_flow_m3_s;
 
@@ -755,7 +756,7 @@ mod tests {
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
                 opening_azimuth_deg: NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
             }),
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         // zone=18°C < outdoor=20°C → gating condition fails
         let env = make_env(20.0, 2.0, 18.0, 300.0);
@@ -763,7 +764,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         let nat_flow = couplings[0].nat_flow_m3_s;
         assert!(
@@ -794,14 +796,15 @@ mod tests {
                     NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
                 opening_azimuth_deg: NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
             }),
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = make_two_zone_env(15.0, 2.0, 26.0, 26.0, 300.0, 250.0);
 
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         assert_eq!(couplings.len(), 2);
         assert!(
@@ -843,7 +846,7 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         let mut env = make_env(t_out, 0.0, t_zone, volume_m3);
@@ -854,7 +857,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         let q_latent = latent.get(&ZoneId(1)).copied().unwrap_or(0.0);
         assert!(
@@ -900,7 +904,7 @@ mod tests {
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
             },
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         // Cold outdoor → large ΔT to produce a measurable sensible gain.
@@ -908,7 +912,8 @@ mod tests {
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
 
-        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
 
         assert_eq!(couplings.len(), 1);
         let c = &couplings[0];
@@ -971,7 +976,7 @@ mod tests {
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
             },
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         // Cold outdoor → large ΔT for a measurable load.
@@ -984,7 +989,8 @@ mod tests {
             false,
             &mut latent,
             &mut couplings,
-        );
+        )
+        .unwrap();
 
         assert_eq!(couplings.len(), 1, "expected one zone coupling");
         let c = &couplings[0];
@@ -1028,7 +1034,7 @@ mod tests {
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
             },
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         let env = make_env(-10.0, 0.0, 20.0, 200.0);
@@ -1041,7 +1047,8 @@ mod tests {
             false,
             &mut lat_bypass,
             &mut coup_bypass,
-        );
+        )
+        .unwrap();
 
         let mut lat_rated: HashMap<ZoneId, f64> = HashMap::new();
         let mut coup_rated: Vec<InfiltrationCoupling> = Vec::new();
@@ -1051,7 +1058,8 @@ mod tests {
             false,
             &mut lat_rated,
             &mut coup_rated,
-        );
+        )
+        .unwrap();
 
         let h_bypass = coup_bypass[0].h_inf_w_k;
         let h_rated = coup_rated[0].h_inf_w_k;
@@ -1090,7 +1098,7 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         // Sea-level case
@@ -1099,7 +1107,8 @@ mod tests {
 
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
-        apply_infiltration_and_ventilation(&config, &env_sea, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(&config, &env_sea, false, &mut latent, &mut couplings)
+            .unwrap();
         let h_inf_sea = couplings[0].h_inf_w_k;
 
         // Denver case
@@ -1114,7 +1123,8 @@ mod tests {
             false,
             &mut latent,
             &mut couplings,
-        );
+        )
+        .unwrap();
         let h_inf_denver = couplings[0].h_inf_w_k;
 
         let reduction_pct = (1.0 - h_inf_denver / h_inf_sea) * 100.0;

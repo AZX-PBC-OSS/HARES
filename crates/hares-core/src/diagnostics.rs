@@ -36,7 +36,8 @@ pub struct StepDiagnostics {
     pub timestamp_s: f64,
     pub outdoor_temp_c: f64,
     pub zone_temps_c: Vec<(ZoneId, f64)>,
-    /// Total thermal port sensible gain per zone [W] (HVAC + appliances combined).
+    /// Total thermal port sensible gain per zone (W) (HVAC + appliances
+    /// combined): convective, long-wave radiant and short-wave.
     pub thermal_gains_w: Vec<(ZoneId, f64)>,
     pub thermal_latent_w: Vec<(ZoneId, f64)>,
     pub electrical_net_kw: f64,
@@ -52,19 +53,22 @@ pub struct StepDiagnostics {
 pub struct EnvelopeDiag {
     pub window_solar_w: f64,
     pub opaque_solar_lwr_w: f64,
-    /// Total interior LWR exchange activity [W] (Σ|q_i|/2).
+    /// Total interior LWR exchange activity (W) (Σ|q_i|/2).
     pub interior_lwr_w: f64,
-    /// Non-HVAC internal gains [W].
+    /// Non-HVAC internal gains (W).
     pub internal_gain_w: f64,
-    /// Total port convective [W] (HVAC + appliances).
+    /// Total port convective (W) (HVAC + appliances).
     pub port_convective_w: f64,
-    /// Total port radiant [W] (HVAC + appliances distributed to surfaces).
+    /// Total port radiant (W) (HVAC + appliances distributed to surfaces).
     ///
     /// ASHRAE HoF Ch. 18: internal gains have separate convective and radiant
     /// components; reporting both enables MRT diagnosis and BESTEST comparisons.
     /// EnergyPlus exposes `OtherEquipment Radiant Heating Rate [W]` as a
     /// separate output variable (I/O Ref v8.4, Internal Gains group).
     pub port_radiant_w: f64,
+    /// Total port short-wave (visible light) (W), absorbed by the surfaces
+    /// like transmitted diffuse solar.
+    pub port_shortwave_w: f64,
     /// Outdoor moist-air density used for infiltration mass-flow conversion [kg/m³].
     pub air_density_kg_m3: f64,
     /// Global horizontal irradiance [W/m²] at this timestep.
@@ -101,6 +105,7 @@ pub fn write_header(w: &mut impl Write, n_zones: usize) {
     cols.push("electrical_net_kw".to_string());
     cols.push("electrical_net_kvar".to_string());
     cols.push("port_radiant_w".to_string());
+    cols.push("port_shortwave_w".to_string());
     cols.push("port_convective_w".to_string());
     cols.push("window_solar_w".to_string());
     cols.push("opaque_solar_lwr_w".to_string());
@@ -182,6 +187,18 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
             .map(|e| {
                 if e.port_radiant_w.is_finite() {
                     format!("{:.1}", e.port_radiant_w)
+                } else {
+                    String::new()
+                }
+            })
+            .unwrap_or_default(),
+    );
+    vals.push(
+        d.envelope
+            .as_ref()
+            .map(|e| {
+                if e.port_shortwave_w.is_finite() {
+                    format!("{:.1}", e.port_shortwave_w)
                 } else {
                     String::new()
                 }
@@ -330,124 +347,20 @@ pub fn capture(
     let thermal_gains_w: Vec<(ZoneId, f64)> = ports
         .thermal
         .iter()
-        .map(|t| (t.zone, t.sensible_gain_w))
+        .map(|t| (t.zone, t.heat().sensible_w()))
         .collect();
     let thermal_latent_w: Vec<(ZoneId, f64)> = ports
         .thermal
         .iter()
-        .map(|t| (t.zone, t.latent_gain_w))
+        .map(|t| (t.zone, t.heat().latent_w))
         .collect();
     let outdoor_temp_c = env.weather.outdoor_temp_c;
     let electrical_net_kw = power_w_to_kw(ports.electrical.net_active_w());
     let electrical_net_kvar = ports.electrical.reactive_power_kvar;
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        for &(_, temp) in &zone_temps_c {
-            if !temp.is_finite() {
-                tracing::error!(
-                    step = step,
-                    field = "zone_temp_c",
-                    value = temp,
-                    "NaN/Inf in diagnostic capture input"
-                );
-            }
-        }
-        for &(_, gain) in &thermal_gains_w {
-            if !gain.is_finite() {
-                tracing::error!(
-                    step = step,
-                    field = "thermal_gain_w",
-                    value = gain,
-                    "NaN/Inf in diagnostic capture input"
-                );
-            }
-        }
-        for &(_, latent) in &thermal_latent_w {
-            if !latent.is_finite() {
-                tracing::error!(
-                    step = step,
-                    field = "thermal_latent_w",
-                    value = latent,
-                    "NaN/Inf in diagnostic capture input"
-                );
-            }
-        }
-        if !outdoor_temp_c.is_finite() {
-            tracing::error!(
-                step = step,
-                field = "outdoor_temp_c",
-                value = outdoor_temp_c,
-                "NaN/Inf in diagnostic capture input"
-            );
-        }
-        if !electrical_net_kw.is_finite() {
-            tracing::error!(
-                step = step,
-                field = "electrical_net_kw",
-                value = electrical_net_kw,
-                "NaN/Inf in diagnostic capture input"
-            );
-        }
-        if !electrical_net_kvar.is_finite() {
-            tracing::error!(
-                step = step,
-                field = "electrical_net_kvar",
-                value = electrical_net_kvar,
-                "NaN/Inf in diagnostic capture input"
-            );
-        }
-        if let Some(ref e) = envelope {
-            if !e.window_solar_w.is_finite() {
-                tracing::error!(
-                    step = step,
-                    field = "window_solar_w",
-                    value = e.window_solar_w,
-                    "NaN/Inf in envelope diagnostic"
-                );
-            }
-            if !e.opaque_solar_lwr_w.is_finite() {
-                tracing::error!(
-                    step = step,
-                    field = "opaque_solar_lwr_w",
-                    value = e.opaque_solar_lwr_w,
-                    "NaN/Inf in envelope diagnostic"
-                );
-            }
-            if !e.interior_lwr_w.is_finite() {
-                tracing::error!(
-                    step = step,
-                    field = "interior_lwr_w",
-                    value = e.interior_lwr_w,
-                    "NaN/Inf in envelope diagnostic"
-                );
-            }
-            if !e.internal_gain_w.is_finite() {
-                tracing::error!(
-                    step = step,
-                    field = "internal_gain_w",
-                    value = e.internal_gain_w,
-                    "NaN/Inf in envelope diagnostic"
-                );
-            }
-            if !e.port_convective_w.is_finite() {
-                tracing::error!(
-                    step = step,
-                    field = "port_convective_w",
-                    value = e.port_convective_w,
-                    "NaN/Inf in envelope diagnostic"
-                );
-            }
-            if !e.port_radiant_w.is_finite() {
-                tracing::error!(
-                    step = step,
-                    field = "port_radiant_w",
-                    value = e.port_radiant_w,
-                    "NaN/Inf in envelope diagnostic"
-                );
-            }
-        }
-    }
+    // The capture is a recorder: non-finite inputs are not re-screened here.
+    // Run-path non-finite detection is the unconditional zone and electrical
+    // screens; a value that reached this recorder already passed them.
 
     StepDiagnostics {
         step,
@@ -520,11 +433,19 @@ pub struct DiagnosticAccumulator {
     zone_has_cooling: Vec<bool>,
     /// Pre-allocated scratch buffers, reused per timestep to avoid heap
     /// allocation in the hot loop.
-    scratch_zone_temps: Vec<f64>,
-    scratch_heating_sps: Vec<Option<f64>>,
-    scratch_cooling_sps: Vec<Option<f64>>,
-    scratch_equipment_modes: Vec<Option<OperatingMode>>,
-    scratch_equipment_zone_indices: Vec<Option<usize>>,
+    scratch: StepScratch,
+}
+
+/// Per-step inputs [`DiagnosticAccumulator::record_from_state`] extracts
+/// from the dwelling's state before recording them.
+#[cfg(feature = "observe")]
+#[derive(Debug, Clone, Default)]
+struct StepScratch {
+    zone_temps: Vec<f64>,
+    heating_sps: Vec<Option<f64>>,
+    cooling_sps: Vec<Option<f64>>,
+    equipment_modes: Vec<Option<OperatingMode>>,
+    equipment_zone_indices: Vec<Option<usize>>,
 }
 
 #[cfg(feature = "observe")]
@@ -572,43 +493,14 @@ impl DiagnosticAccumulator {
             simultaneous_hc_steps: vec![0; nz],
             zone_has_heating: vec![false; nz],
             zone_has_cooling: vec![false; nz],
-            scratch_zone_temps: vec![0.0; nz],
-            scratch_heating_sps: vec![None; nz],
-            scratch_cooling_sps: vec![None; nz],
-            scratch_equipment_modes: vec![None; ne],
-            scratch_equipment_zone_indices: vec![None; ne],
+            scratch: StepScratch {
+                zone_temps: vec![0.0; nz],
+                heating_sps: vec![None; nz],
+                cooling_sps: vec![None; nz],
+                equipment_modes: vec![None; ne],
+                equipment_zone_indices: vec![None; ne],
+            },
         }
-    }
-
-    /// Records one step of data. Call once per timestep when the observer is active.
-    ///
-    /// - `zone_temps_c`, `heating_setpoints_c`, `cooling_setpoints_c` are all
-    ///   indexed by zone position (not ZoneId).
-    /// - `equipment_modes` and `equipment_zone_indices` are indexed by
-    ///   equipment position. `equipment_zone_indices` maps each equipment to
-    ///   the position of its zone in the zone arrays (or `None` if unassigned).
-    pub fn record_step(
-        &mut self,
-        zone_temps_c: &[f64],
-        heating_setpoints_c: &[Option<f64>],
-        cooling_setpoints_c: &[Option<f64>],
-        equipment_modes: &[Option<OperatingMode>],
-        equipment_zone_indices: &[Option<usize>],
-    ) {
-        record_step_impl(
-            &mut self.total_steps,
-            &mut self.zone_counters,
-            &mut self.equipment_counters,
-            &mut self.prev_equipment_modes,
-            &mut self.simultaneous_hc_steps,
-            &mut self.zone_has_heating,
-            &mut self.zone_has_cooling,
-            zone_temps_c,
-            heating_setpoints_c,
-            cooling_setpoints_c,
-            equipment_modes,
-            equipment_zone_indices,
-        );
     }
 
     /// Records one step from the dwelling's live state, using pre-allocated
@@ -616,20 +508,23 @@ impl DiagnosticAccumulator {
     ///
     /// Extracts zone temperatures, heating/cooling setpoints, equipment
     /// operating modes, and equipment zone indices from the dwelling's zone
-    /// list and equipment list, then delegates to [`record_step`].
+    /// list and equipment list, then delegates to [`Self::record_step`]. The
+    /// scratch is moved out for the call and back afterwards, which moves
+    /// only the vectors' handles.
     pub fn record_from_state(&mut self, env_zones: &[ZoneState], equipment: &[Box<dyn Equipment>]) {
-        let nz = env_zones.len().min(self.scratch_zone_temps.len());
-        let ne = equipment.len().min(self.scratch_equipment_modes.len());
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let nz = env_zones.len().min(scratch.zone_temps.len());
+        let ne = equipment.len().min(scratch.equipment_modes.len());
 
         // --- Zone temperatures ---
-        self.scratch_zone_temps[..nz].fill(0.0);
+        scratch.zone_temps[..nz].fill(0.0);
         for (i, z) in env_zones.iter().take(nz).enumerate() {
-            self.scratch_zone_temps[i] = z.temperature_c;
+            scratch.zone_temps[i] = z.temperature_c;
         }
 
         // --- Heating / cooling setpoints ---
-        self.scratch_heating_sps[..nz].fill(None);
-        self.scratch_cooling_sps[..nz].fill(None);
+        scratch.heating_sps[..nz].fill(None);
+        scratch.cooling_sps[..nz].fill(None);
         for eq in equipment.iter() {
             let co = eq.core_output();
             let Some(zone_id) = eq.descriptor().zone else {
@@ -648,42 +543,36 @@ impl DiagnosticAccumulator {
                         | OperatingMode::HeatingHP
                         | OperatingMode::HeatingER
                         | OperatingMode::HeatingHPAndER,
-                    ) => self.scratch_heating_sps[zone_idx] = Some(sp),
-                    Some(OperatingMode::Cooling) => self.scratch_cooling_sps[zone_idx] = Some(sp),
+                    ) => scratch.heating_sps[zone_idx] = Some(sp),
+                    Some(OperatingMode::Cooling) => scratch.cooling_sps[zone_idx] = Some(sp),
                     _ => {}
                 }
             }
         }
 
         // --- Equipment operating modes ---
-        self.scratch_equipment_modes[..ne].fill(None);
+        scratch.equipment_modes[..ne].fill(None);
         for (i, eq) in equipment.iter().take(ne).enumerate() {
-            self.scratch_equipment_modes[i] = eq.core_output().state.operating_mode;
+            scratch.equipment_modes[i] = eq.core_output().state.operating_mode;
         }
 
         // --- Equipment → zone index mapping ---
-        self.scratch_equipment_zone_indices[..ne].fill(None);
+        scratch.equipment_zone_indices[..ne].fill(None);
         for (i, eq) in equipment.iter().take(ne).enumerate() {
-            self.scratch_equipment_zone_indices[i] = eq
+            scratch.equipment_zone_indices[i] = eq
                 .descriptor()
                 .zone
                 .and_then(|zid| env_zones.iter().position(|z| z.id == zid));
         }
 
-        record_step_impl(
-            &mut self.total_steps,
-            &mut self.zone_counters,
-            &mut self.equipment_counters,
-            &mut self.prev_equipment_modes,
-            &mut self.simultaneous_hc_steps,
-            &mut self.zone_has_heating,
-            &mut self.zone_has_cooling,
-            &self.scratch_zone_temps[..nz],
-            &self.scratch_heating_sps[..nz],
-            &self.scratch_cooling_sps[..nz],
-            &self.scratch_equipment_modes[..ne],
-            &self.scratch_equipment_zone_indices[..ne],
+        self.record_step(
+            &scratch.zone_temps[..nz],
+            &scratch.heating_sps[..nz],
+            &scratch.cooling_sps[..nz],
+            &scratch.equipment_modes[..ne],
+            &scratch.equipment_zone_indices[..ne],
         );
+        self.scratch = scratch;
     }
 
     /// Runs all four post-hoc diagnostic checks using accumulated data and
@@ -852,101 +741,104 @@ impl DiagnosticAccumulator {
     }
 }
 
-/// Core step-accumulation logic shared by [`DiagnosticAccumulator::record_step`]
-/// and [`DiagnosticAccumulator::record_from_state`].
-///
-/// Takes individual field references so callers can borrow mutable counter
-/// fields and immutable scratch/input buffers from the same `DiagnosticAccumulator`
-/// without tripping Rust's borrow checker on nested `&self` + `&mut self`.
 #[cfg(feature = "observe")]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "field-splitting is the standard Rust pattern to avoid borrow checker conflicts when a method needs both shared &[T] scratch slices and mutable counter fields from the same struct"
-)]
-fn record_step_impl(
-    total_steps: &mut u64,
-    zone_counters: &mut [ZoneDiagnosticCounters],
-    equipment_counters: &mut [EquipmentDiagnosticCounters],
-    prev_equipment_modes: &mut [Option<OperatingMode>],
-    simultaneous_hc_steps: &mut [u64],
-    zone_has_heating: &mut [bool],
-    zone_has_cooling: &mut [bool],
-    zone_temps_c: &[f64],
-    heating_setpoints_c: &[Option<f64>],
-    cooling_setpoints_c: &[Option<f64>],
-    equipment_modes: &[Option<OperatingMode>],
-    equipment_zone_indices: &[Option<usize>],
-) {
-    *total_steps += 1;
+impl DiagnosticAccumulator {
+    /// Records one step of data. Call once per timestep when the observer is active.
+    ///
+    /// - `zone_temps_c`, `heating_setpoints_c`, `cooling_setpoints_c` are all
+    ///   indexed by zone position (not ZoneId).
+    /// - `equipment_modes` and `equipment_zone_indices` are indexed by
+    ///   equipment position. `equipment_zone_indices` maps each equipment to
+    ///   the position of its zone in the zone arrays (or `None` if unassigned).
+    pub fn record_step(
+        &mut self,
+        zone_temps_c: &[f64],
+        heating_setpoints_c: &[Option<f64>],
+        cooling_setpoints_c: &[Option<f64>],
+        equipment_modes: &[Option<OperatingMode>],
+        equipment_zone_indices: &[Option<usize>],
+    ) {
+        let Self {
+            zone_counters,
+            equipment_counters,
+            prev_equipment_modes,
+            total_steps,
+            simultaneous_hc_steps,
+            zone_has_heating,
+            zone_has_cooling,
+            scratch: _,
+        } = self;
+        *total_steps += 1;
 
-    // --- Zone-level checks ---
-    for (i, zc) in zone_counters.iter_mut().enumerate() {
-        let t = zone_temps_c.get(i).copied().unwrap_or(f64::NAN);
-        if !t.is_finite() {
-            continue;
-        }
-        // Freezing check (conditioned zones only).
-        if zc.is_conditioned && t < 0.0 {
-            zc.freezing_steps += 1;
-        }
-        // Unmet hours: zone temperature vs setpoint bounds.
-        let hsp = heating_setpoints_c.get(i).copied().flatten();
-        let csp = cooling_setpoints_c.get(i).copied().flatten();
-        let has_setpoint = hsp.is_some() || csp.is_some();
-        if has_setpoint {
-            zc.steps_with_setpoint += 1;
-            if let Some(h) = hsp
-                && t < h
-            {
-                zc.unmet_heating_steps += 1;
+        // --- Zone-level checks ---
+        for (i, zc) in zone_counters.iter_mut().enumerate() {
+            let t = zone_temps_c.get(i).copied().unwrap_or(f64::NAN);
+            if !t.is_finite() {
+                continue;
             }
-            if let Some(c) = csp
-                && t > c
-            {
-                zc.unmet_cooling_steps += 1;
+            // Freezing check (conditioned zones only).
+            if zc.is_conditioned && t < 0.0 {
+                zc.freezing_steps += 1;
+            }
+            // Unmet hours: zone temperature vs setpoint bounds.
+            let hsp = heating_setpoints_c.get(i).copied().flatten();
+            let csp = cooling_setpoints_c.get(i).copied().flatten();
+            let has_setpoint = hsp.is_some() || csp.is_some();
+            if has_setpoint {
+                zc.steps_with_setpoint += 1;
+                if let Some(h) = hsp
+                    && t < h
+                {
+                    zc.unmet_heating_steps += 1;
+                }
+                if let Some(c) = csp
+                    && t > c
+                {
+                    zc.unmet_cooling_steps += 1;
+                }
             }
         }
-    }
 
-    // --- Equipment-level checks ---
-    for (i, ec) in equipment_counters.iter_mut().enumerate() {
-        let mode = equipment_modes.get(i).copied().flatten();
-        // Detect mode changes: only transitions between consecutive known
-        // states count.  Entering an active mode on the first step is the
-        // initial state, not a cycling event.
-        if let (Some(prev), Some(curr)) = (prev_equipment_modes.get(i).copied().flatten(), mode) {
-            if prev != curr {
+        // --- Equipment-level checks ---
+        for (i, ec) in equipment_counters.iter_mut().enumerate() {
+            let mode = equipment_modes.get(i).copied().flatten();
+            // Detect mode changes: only transitions between consecutive known
+            // states count.  Entering an active mode on the first step is the
+            // initial state, not a cycling event.
+            if let (Some(prev), Some(curr)) = (prev_equipment_modes.get(i).copied().flatten(), mode)
+                && prev != curr
+            {
                 ec.mode_changes += 1;
             }
+
+            prev_equipment_modes[i] = mode;
         }
 
-        prev_equipment_modes[i] = mode;
-    }
-
-    // --- Simultaneous heating + cooling detection ---
-    let n_zones = zone_counters.len();
-    zone_has_heating.fill(false);
-    zone_has_cooling.fill(false);
-    for (i, mode) in equipment_modes.iter().enumerate() {
-        let Some(zidx) = equipment_zone_indices.get(i).copied().flatten() else {
-            continue;
-        };
-        if zidx >= n_zones {
-            continue;
+        // --- Simultaneous heating + cooling detection ---
+        let n_zones = zone_counters.len();
+        zone_has_heating.fill(false);
+        zone_has_cooling.fill(false);
+        for (i, mode) in equipment_modes.iter().enumerate() {
+            let Some(zidx) = equipment_zone_indices.get(i).copied().flatten() else {
+                continue;
+            };
+            if zidx >= n_zones {
+                continue;
+            }
+            let Some(m) = mode else { continue };
+            match m {
+                OperatingMode::Heating
+                | OperatingMode::HeatingHP
+                | OperatingMode::HeatingER
+                | OperatingMode::HeatingHPAndER => zone_has_heating[zidx] = true,
+                OperatingMode::Cooling => zone_has_cooling[zidx] = true,
+                _ => {}
+            }
         }
-        let Some(m) = mode else { continue };
-        match m {
-            OperatingMode::Heating
-            | OperatingMode::HeatingHP
-            | OperatingMode::HeatingER
-            | OperatingMode::HeatingHPAndER => zone_has_heating[zidx] = true,
-            OperatingMode::Cooling => zone_has_cooling[zidx] = true,
-            _ => {}
-        }
-    }
-    for (zidx, hc) in simultaneous_hc_steps.iter_mut().enumerate() {
-        if zone_has_heating[zidx] && zone_has_cooling[zidx] {
-            *hc += 1;
+        for (zidx, hc) in simultaneous_hc_steps.iter_mut().enumerate() {
+            if zone_has_heating[zidx] && zone_has_cooling[zidx] {
+                *hc += 1;
+            }
         }
     }
 }
@@ -973,6 +865,58 @@ mod tests {
 
     use super::*;
 
+    /// `record_from_state` moves its scratch out for the step and back: the
+    /// same buffers (same allocation, same capacity) come back holding the
+    /// step's extracted zone temperatures, and the counters see those values.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn record_from_state_returns_the_same_scratch_buffers_with_the_steps_values() {
+        // One equipment slot so the equipment scratch vectors own an
+        // allocation too (the step itself passes no equipment).
+        let mut acc = DiagnosticAccumulator::new(
+            &[ZoneId(1), ZoneId(2)],
+            &[true, true],
+            &["Heater".to_owned()],
+            &[Some(ZoneId(1))],
+        );
+        let buffers = |acc: &DiagnosticAccumulator| {
+            let s = &acc.scratch;
+            [
+                (s.zone_temps.as_ptr() as usize, s.zone_temps.capacity()),
+                (s.heating_sps.as_ptr() as usize, s.heating_sps.capacity()),
+                (s.cooling_sps.as_ptr() as usize, s.cooling_sps.capacity()),
+                (
+                    s.equipment_modes.as_ptr() as usize,
+                    s.equipment_modes.capacity(),
+                ),
+                (
+                    s.equipment_zone_indices.as_ptr() as usize,
+                    s.equipment_zone_indices.capacity(),
+                ),
+            ]
+        };
+        let before = buffers(&acc);
+
+        for temps in [[-1.0, 5.0], [-2.0, -3.0]] {
+            let zones: Vec<ZoneState> = [ZoneId(1), ZoneId(2)]
+                .into_iter()
+                .zip(temps)
+                .map(|(id, t)| ZoneState::new(id, t, 0.008, 100.0))
+                .collect();
+            acc.record_from_state(&zones, &[]);
+            assert_eq!(
+                buffers(&acc),
+                before,
+                "the scratch buffers must be moved back, not replaced"
+            );
+            assert_eq!(acc.scratch.zone_temps, temps);
+        }
+
+        assert_eq!(acc.total_steps, 2);
+        let freezing: Vec<u64> = acc.zone_counters.iter().map(|z| z.freezing_steps).collect();
+        assert_eq!(freezing, [2, 1]);
+    }
+
     /// Verifies that `capture()` extracts zone temperatures, thermal gains,
     /// and electrical net power from live environment and port state, and
     /// that `write_header()` + `write_row()` produce well-formed CSV with
@@ -980,6 +924,7 @@ mod tests {
     #[test]
     fn capture_and_write_row_produce_valid_csv() {
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState::new(ZoneId(1), 22.5, 0.008, 100.0)],
             weather: WeatherState::default(),
             grid: GridState {
@@ -987,7 +932,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: DateTime::parse_from_rfc3339("2024-06-15T12:00:00Z").unwrap(),
@@ -1037,6 +983,7 @@ mod tests {
             "electrical_net_kw",
             "electrical_net_kvar",
             "port_radiant_w",
+            "port_shortwave_w",
             "port_convective_w",
             "window_solar_w",
             "opaque_solar_lwr_w",
@@ -1134,6 +1081,7 @@ mod tests {
     #[test]
     fn capture_smoke_test() {
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState::new(ZoneId(1), 18.0, 0.006, 80.0)],
             weather: WeatherState {
                 outdoor_temp_c: 12.3,
@@ -1144,7 +1092,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: DateTime::parse_from_rfc3339("2024-01-01T06:00:00Z").unwrap(),
@@ -1153,7 +1102,16 @@ mod tests {
             electrical: hares_types::ElectricalSummary::default(),
         };
 
-        let mut ports = PortSlots::default();
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator {
+                sensible_gain_w: 100.0,
+                radiant_gain_w: 300.0,
+                shortwave_gain_w: 100.0,
+                latent_gain_w: 20.0,
+                ..hares_types::ThermalAccumulator::new(ZoneId(1))
+            }],
+            ..PortSlots::default()
+        };
         ports
             .accumulate(&hares_types::PortContribution::Electrical {
                 active_power_w: 1000.0,
@@ -1168,5 +1126,11 @@ mod tests {
         assert_eq!(diag.zone_temps_c[0].0, ZoneId(1));
         assert!((diag.zone_temps_c[0].1 - 18.0).abs() < 1e-9);
         assert!((diag.electrical_net_kvar - 0.5).abs() < 1e-9);
+        assert_eq!(
+            diag.thermal_gains_w,
+            vec![(ZoneId(1), 500.0)],
+            "the sensible gain carries the convective, radiant and short-wave paths"
+        );
+        assert_eq!(diag.thermal_latent_w, vec![(ZoneId(1), 20.0)]);
     }
 }

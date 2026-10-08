@@ -13,18 +13,14 @@ from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore[no-redef]
+import tomllib
 
 try:
-    import PySAM.BatteryStateful as _battery_sam  # type: ignore[import-untyped]
-
-    _HAS_PYSAM = True
+    import PySAM.BatteryStateful as _battery_sam
 except ImportError:
     _battery_sam = None
-    _HAS_PYSAM = False
+
+_HAS_PYSAM = _battery_sam is not None
 
 LOGGER = logging.getLogger(__name__)
 
@@ -230,15 +226,21 @@ def _format_toml_value(value: Any) -> str:
     if isinstance(value, str):
         return f'"{value}"'
     if isinstance(value, list):
-        items = ", ".join(_format_toml_value(v) for v in value)
+        item_values = cast("list[object]", value)
+        items = ", ".join(_format_toml_value(v) for v in item_values)
         return f"[{items}]"
     return repr(value)
 
 
 def _dict_to_toml(data: dict[str, Any]) -> str:
     lines: list[str] = []
-    scalars = {k: v for k, v in data.items() if not isinstance(v, dict)}
-    tables = {k: v for k, v in data.items() if isinstance(v, dict)}
+    scalars: dict[str, Any] = {}
+    tables: dict[str, dict[str, Any]] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            tables[key] = value
+        else:
+            scalars[key] = value
 
     for k in sorted(scalars):
         lines.append(f"{k} = {_format_toml_value(scalars[k])}")
@@ -255,8 +257,8 @@ def _dict_to_toml(data: dict[str, Any]) -> str:
 class CellParams:
     """Battery cell parameter set."""
 
-    params: dict[str, Any] = dataclass_field(default_factory=dict)
-    metadata: dict[str, Any] = dataclass_field(default_factory=dict)
+    params: dict[str, Any] = dataclass_field(default_factory=dict[str, Any])
+    metadata: dict[str, Any] = dataclass_field(default_factory=dict[str, Any])
 
     def save(self, path: Path) -> None:
         """Write the parameters to a TOML file on disk."""
@@ -295,7 +297,15 @@ def _extract_from_sam(chemistry: str, capacity_kwh: float) -> CellParamsDict:
     """Extract cell parameters from PySAM BatteryStateful."""
     batt = _get_sam_battery(chemistry)
     base = _BUILTIN_DEFAULTS.get(chemistry, _BUILTIN_DEFAULTS["NMC"])
-    cell = {**base["cell"], "chemistry": chemistry}
+    base_cell = base["cell"]
+    cell: _CellSection = {
+        "chemistry": chemistry,
+        "v_nominal": base_cell["v_nominal"],
+        "ah_rated": base_cell["ah_rated"],
+        "r_internal_ohm": base_cell["r_internal_ohm"],
+        "n_series": base_cell["n_series"],
+        "n_parallel": base_cell["n_parallel"],
+    }
 
     v_nominal = batt.ParamsCell.Vnom_default
     if v_nominal > 0:
@@ -307,13 +317,13 @@ def _extract_from_sam(chemistry: str, capacity_kwh: float) -> CellParamsDict:
     total_ah = capacity_kwh * 1000.0 / cell["v_nominal"]
     cell["ah_rated"] = round(total_ah / cell["n_parallel"], 2)
 
-    return cast(CellParamsDict, {
-        "cell": cell,
-        "soc_ocv": {**base["soc_ocv"]},
-        "thermal": {**base["thermal"]},
-        "losses": {**base["losses"]},
-        "degradation": {**base["degradation"]},
-    })
+    return CellParamsDict(
+        cell=cell,
+        soc_ocv={**base["soc_ocv"]},
+        thermal={**base["thermal"]},
+        losses={**base["losses"]},
+        degradation={**base["degradation"]},
+    )
 
 
 def extract_cell_params(
@@ -384,5 +394,5 @@ def extract_cell_params(
 
 
 def _parse_toml_string(text: str) -> dict[str, Any]:
-    """Parse a TOML string using the standard library (3.11+) or tomli."""
+    """Parse a TOML string using the standard library."""
     return tomllib.loads(text)

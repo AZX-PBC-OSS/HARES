@@ -7,12 +7,15 @@ pub mod battery;
 pub mod config;
 pub mod ev;
 pub mod event_load;
+pub(crate) mod gain_fractions;
 pub mod generator;
 pub mod hvac;
+pub(crate) mod load_zone;
 pub mod ndinterp;
 pub(crate) mod pack_electrical;
 pub mod protocol_bridge;
 pub mod pv;
+pub mod raw_params;
 pub mod registry;
 pub(crate) mod schedule_helpers;
 pub mod scheduled_load;
@@ -22,39 +25,15 @@ pub mod water_heater;
 
 use std::time::Duration;
 
-#[cfg(feature = "observe")]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
 use hares_types::{
     BmsMode, ChargingStrategy, ControlSignal, CoreCapabilities, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, GridExportRule, HaresError, OperatingMode, PlugInPolicy,
-    PortDeclaration, PortSlots, ensure_signal_supported,
+    EquipmentDescriptor, EquipmentHealthCounts, EquipmentId, GridExportRule, HaresError,
+    OperatingMode, PlugInPolicy, PortDeclaration, PortSlots, Warning, ensure_signal_supported,
 };
-
-#[cfg(feature = "observe")]
-static REJECTED_SIGNAL_COUNT: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(feature = "observe")]
-static WARNED_REJECTED_SIGNAL: AtomicBool = AtomicBool::new(false);
-
-/// Returns the total count of control signals rejected for numeric bounds
-/// violations across all equipment types since program start.
-///
-/// Only available when the `observe` feature is enabled; returns `0` otherwise.
-pub fn control_signal_rejected_count() -> u64 {
-    #[cfg(feature = "observe")]
-    {
-        REJECTED_SIGNAL_COUNT.load(Ordering::Relaxed)
-    }
-    #[cfg(not(feature = "observe"))]
-    {
-        0
-    }
-}
 
 /// Configuration seed for auto-registering an actor for this equipment.
 /// Equipment that wants a built-in actor overrides `actor_seed()`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ActorSeed {
     Battery {
         bms_mode: BmsMode,
@@ -74,11 +53,17 @@ pub enum ActorSeed {
 
 pub use battery::{BatteryConfig, BatteryLutType, OcvTable, UNegTable};
 pub use config::{
-    ConfigPayload, EquipmentConfig, EquipmentTypedConfig, SetpointReconciliation,
-    constructor_equipment_id, equipment_id_from_config, resolve_zip,
+    ConfigPayload, EquipmentConfig, EquipmentTypedConfig, RejectUnknownKeys,
+    SetpointReconciliation, TypedPayloadError, constructor_equipment_id, equipment_id_from_config,
+    normalize_enum_text, resolve_zip, typed_payload_reads, validate_typed_payload,
+    validate_typed_payload_detailed,
 };
 pub use ev::ChargingCurveLut;
 pub use ev::EvConfig;
+pub use gain_fractions::{
+    GAIN_KEY_ALIASES, GAIN_KEYS, canonical_gain_key, canonicalize_gain_params,
+    check_one_gain_spelling,
+};
 pub use generator::GeneratorConfig;
 pub use generator::GeneratorEfficiencyCurvePoint;
 pub use hares_types::Telemetry;
@@ -101,7 +86,8 @@ pub use ndinterp::RegularGridInterpolator;
 pub use protocol_bridge::{
     JsonHandler, ProtocolBridgeConfig, config::HandlerConfig, handler::EquipmentCommand,
 };
-pub use pv::PvConfig;
+pub use pv::{PvConfig, PvOrientation};
+pub use raw_params::{IndexCount, ParamForm, ParamKind, RawParam, RawParams, raw_params_for_class};
 pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistry};
 pub use ventilation::VentilationConfig;
 pub use water_heater::DHW_DEMAND_LOOP;
@@ -161,7 +147,7 @@ pub(crate) fn linear_temp_derate(temp_c: f64, temp_min: f64, temp_max: f64) -> f
 /// [`Equipment::expected_mean_power_kw`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ExpectedMeanPower {
-    /// Known expected mean draw [kW] from the equipment's own configuration.
+    /// Known expected mean draw (kW) from the equipment's own configuration.
     Kw(f64),
     /// The draw follows a column of the dwelling's schedule data (index
     /// into the loaded schedule's columns); the mean must be computed from
@@ -254,37 +240,7 @@ pub trait Equipment: Send + Sync {
     /// numeric bounds are rejected with a typed error — no silent clamping.
     fn apply_control(&mut self, signal: &ControlSignal) -> Result<()> {
         ensure_signal_supported(self.descriptor().control_capabilities, signal)?;
-        if let Err(ref e) = signal.validate_numeric_bounds() {
-            #[cfg(feature = "observe")]
-            {
-                REJECTED_SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
-                if WARNED_REJECTED_SIGNAL
-                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    tracing::warn!(
-                        signal = ?signal,
-                        reason = %e,
-                        equipment = %self.descriptor().name,
-                        "control_signal_rejected: numeric bounds validation failed (further rejections will be counted but not logged)"
-                    );
-                }
-            }
-            return Err(e.clone());
-        }
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            // Belt-and-suspenders: re-verify that numeric bounds pass before
-            // dispatching to equipment-specific logic.  A fire here means
-            // validate_numeric_bounds is non-deterministic (should never happen).
-            if signal.validate_numeric_bounds().is_err() {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "equipment_revalidate_numeric_bounds".to_string(),
-                    value: 0.0,
-                    tolerance: 0.0,
-                });
-            }
-        }
+        signal.validate_numeric_bounds()?;
         self.apply_signal(signal)
     }
 
@@ -312,10 +268,36 @@ pub trait Equipment: Send + Sync {
         Vec::new()
     }
 
-    /// Returns whether the equipment's `zone_id` was explicitly set in its config
-    /// (true) or silently fell back to the default `ZoneId(1)` (false).
-    fn zone_id_explicit(&self) -> bool {
-        true
+    /// Read once per step, after stepping: returns and resets this
+    /// equipment's health counters.
+    ///
+    /// Health events are recorded unconditionally in every build profile and
+    /// returned with the run's result: this take is the pipe that carries a
+    /// step's worth of events (e.g. curve-index clamps) to the caller that
+    /// accumulates them into run totals. The default implementation reports
+    /// no counters; equipment with health counters overrides it.
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts::default()
+    }
+
+    /// Moves this equipment's pending [`Warning`]s into `out`.
+    ///
+    /// An equipment that raises one keeps it in a `Vec<Warning>` field and
+    /// moves it here; the default implementation raises no warnings. The
+    /// dwelling drains each equipment after its `init` at assembly, after
+    /// `add_equipment` and `replace_equipment`, and in the per-step equipment
+    /// loop beside [`Self::take_health_counts`], so a warning raised through
+    /// this channel reaches the run's log instead of living only as a
+    /// `tracing` line.
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        let _ = out;
+    }
+
+    /// The HPXML location with no modeled zone this equipment sits in, if
+    /// any. The dwelling asks the environment to compute that location's
+    /// ambient air each step while such equipment is present.
+    fn ambient_location(&self) -> Option<hares_types::AmbientLocation> {
+        None
     }
 
     /// Declares the core output capabilities this equipment type supports.
@@ -365,6 +347,12 @@ pub trait Equipment: Send + Sync {
         None
     }
 
+    /// Whether `init` draws from `EquipmentConfig::rng_stream`. The dwelling
+    /// assigns a stream only to equipment that returns `true`.
+    fn uses_rng_stream(&self) -> bool {
+        false
+    }
+
     /// Returns the per-timestep effective ventilation recovery efficiencies
     /// `(sensible, latent)` if this equipment is a ventilation device (HRV/ERV).
     ///
@@ -378,7 +366,7 @@ pub trait Equipment: Send + Sync {
     /// The primary resolved ZIP/power-factor model this equipment applies to
     /// its (primary-component) real power for reactive purposes, together
     /// with the regime it was resolved under
-    /// ([`ResolvedZip::real_power_zip_applies`]).
+    /// ([`hares_types::zip::ResolvedZip::real_power_zip_applies`]).
     ///
     /// Semantics per equipment family:
     /// - **Typed equipment** (HVAC, water heaters, ventilation, scheduled and
@@ -417,7 +405,22 @@ pub trait Equipment: Send + Sync {
         None
     }
 
-    /// How this equipment's expected mean real power [kW] over the loaded
+    /// The thermostat class a `ThermalSetpoint` deadband sent to this
+    /// equipment is held to, or `None` when it takes no band (it has no
+    /// thermostat, or, like a tankless heater, no switching band).
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        None
+    }
+
+    /// The setpoints this equipment's HVAC thermostat serves, the axes a
+    /// `ThermalSetpointDelta` moves, or `None` when it has none. A water
+    /// heater declares none: its tank setpoint is moved by an absolute
+    /// `ThermalSetpoint`, never by a delta.
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        None
+    }
+
+    /// How this equipment's expected mean real power (kW) over the loaded
     /// schedule horizon can be determined, for premise-level ZIP
     /// aggregation ([`hares_types::zip::ResolvedZip`] mixes weighted by
     /// expected draw).
@@ -445,25 +448,25 @@ pub trait Equipment: Send + Sync {
     // -----------------------------------------------------------------
 
     /// Whether this equipment has been fully registered via
-    /// [`Dwelling::add_equipment`] and is now running — LUT setters
+    /// `Dwelling::add_equipment` and is now running -- LUT setters
     /// reject calls when this returns `true`.
     fn is_initialized(&self) -> bool {
         false
     }
 
-    /// Called by [`Dwelling::add_equipment`] after successful registration.
+    /// Called by `Dwelling::add_equipment` after successful registration.
     /// Equipment that supports LUT injection must override this to gate
     /// further mutation.
     fn mark_initialized(&mut self) {}
 
-    /// Temporarily clears the initialized guard for [`Dwelling`]'s own
+    /// Temporarily clears the initialized guard for `Dwelling`'s own
     /// reconfiguration methods (`set_battery_lut`, `clear_battery_lut`,
     /// `set_ev_charging_curve_lut`, `clear_ev_charging_curve_lut`).
     /// The guard exists to block unmediated mutation via a raw
     /// `dyn Equipment` reference held outside `Dwelling`'s control;
     /// **authorized** reconfiguration through `Dwelling`'s own methods
     /// calls this first, performs the LUT mutation while the gate is
-    /// down, then calls [`mark_initialized`] to restore it.
+    /// down, then calls [`Self::mark_initialized`] to restore it.
     ///
     /// Equipment that supports LUT injection must override this to
     /// clear the flag.
@@ -568,11 +571,7 @@ pub trait Equipment: Send + Sync {
 }
 
 /// Re-export postcard CRC32 serialisation helpers from the serial module.
-#[allow(deprecated)]
-// Why: re-exporting deprecated save_versioned for backward compatibility while the deprecation warning guides new code to try_save_versioned
-pub use serial::{
-    load_postcard, load_versioned, save_versioned, try_save_postcard, try_save_versioned,
-};
+pub use serial::{load_postcard, load_versioned, try_save_postcard, try_save_versioned};
 
 #[cfg(test)]
 mod tests {
@@ -739,6 +738,7 @@ mod tests {
 
     fn sample_env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -771,7 +771,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -990,6 +991,16 @@ mod tests {
         let table = crate::battery::ocv::OcvTable::default_li_nmc();
         let err = eq.set_ocv_table(table).unwrap_err();
         assert!(err.to_string().contains("already initialized"));
+    }
+
+    #[test]
+    fn default_take_health_counts_reports_no_counters() {
+        let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        assert_eq!(
+            eq.take_health_counts(),
+            hares_types::EquipmentHealthCounts::default(),
+            "equipment without health counters takes the trait default"
+        );
     }
 
     #[test]

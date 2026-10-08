@@ -6,7 +6,10 @@
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
-use crate::{EvConnectionState, HaresError, IdealCapacityMode, OperatingMode, ProtocolId};
+use crate::{
+    EvConnectionState, HaresError, IdealCapacityMode, OperatingMode, ProtocolId, ZoneId,
+    validate_thermal_setpoint_deadband,
+};
 
 /// Target component for split duty cycle control (HPWH compressor vs backup element).
 ///
@@ -36,6 +39,17 @@ pub enum DRLevel {
 /// Typed external control signals consumed by equipment models.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ControlSignal {
+    /// Absolute thermostat override.
+    ///
+    /// A named setpoint overrides that axis; an unnamed one follows the
+    /// equipment's schedule. `deadband_c`, allowed only with a named
+    /// setpoint, is the thermostat switching band the equipment adopts for
+    /// the event, held to the range of its thermostat class (see
+    /// [`crate::thermostat_band`]), and, on HVAC, the minimum
+    /// cooling-heating gap. A signal that names no setpoint (and so no
+    /// deadband), built by [`ControlSignal::thermal_release`], is the release
+    /// form: it hands both axes back to the schedule and the band back to
+    /// its configured value.
     ThermalSetpoint {
         heating_setpoint_c: Option<f64>,
         cooling_setpoint_c: Option<f64>,
@@ -155,6 +169,18 @@ pub enum ControlSignal {
     MaxCapacityFraction {
         fraction: f64,
     },
+    /// The thermal solver's non-HVAC share of a zone's sensible input column
+    /// (W), dispatched each step to the zone's thermostat equipment. The
+    /// cycling path's band-position duty estimate reads the zone's net
+    /// response, which already carries the non-HVAC gains' effect, and the
+    /// gains also enter the zone through their own ports; netting the share
+    /// out of the delivery keeps the cycling path's integral consistent with
+    /// the ideal solve's, which applies the same correction to its own
+    /// capacity. Equipment serving another zone ignores the signal.
+    NonHvacZoneInput {
+        zone: ZoneId,
+        watts: f64,
+    },
 }
 
 /// Inverter priority mode for smart inverter Watt/Var/CPF dispatch.
@@ -194,10 +220,26 @@ bitflags! {
         const EV_SET_READY_BY = 1 << 22;
         const EVENT_DELAY = 1 << 23;
         const MAX_CAPACITY_FRACTION = 1 << 24;
+        const NON_HVAC_ZONE_INPUT = 1 << 25;
     }
 }
 
 impl ControlSignal {
+    /// The release form of [`ControlSignal::ThermalSetpoint`]: it names no
+    /// setpoint and carries no band, and hands the thermostat back to its
+    /// schedule (a water heater: its configured setpoint) and its configured
+    /// band. OCHRE keeps an external water-heater setpoint until a
+    /// `{'Setpoint': None}` (`WaterHeater.py`); this release is that reset,
+    /// applied to every thermostat alike.
+    #[must_use]
+    pub const fn thermal_release() -> Self {
+        Self::ThermalSetpoint {
+            heating_setpoint_c: None,
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        }
+    }
+
     /// Returns `true` for signals whose only effect is updating connection or
     /// mode state (idempotent assignments). These can be applied eagerly before
     /// queuing so that subsequent signals in the same timestep see the updated
@@ -222,36 +264,34 @@ impl ControlSignal {
                 cooling_setpoint_c,
                 deadband_c,
             } => {
-                if let Some(h) = heating_setpoint_c {
-                    if *h < -50.0 || *h > 100.0 || !h.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "ThermalSetpoint heating_setpoint_c invalid: {h}, expected [-50, 100] °C"
-                        )));
-                    }
+                if let Some(h) = heating_setpoint_c
+                    && (*h < -50.0 || *h > 100.0 || !h.is_finite())
+                {
+                    return Err(HaresError::Control(format!(
+                        "ThermalSetpoint heating_setpoint_c invalid: {h}, expected [-50, 100] °C"
+                    )));
                 }
-                if let Some(c) = cooling_setpoint_c {
-                    if *c < 0.0 || *c > 60.0 || !c.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "ThermalSetpoint cooling_setpoint_c invalid: {c}, expected [0, 60] °C"
-                        )));
-                    }
+                if let Some(c) = cooling_setpoint_c
+                    && (*c < 0.0 || *c > 60.0 || !c.is_finite())
+                {
+                    return Err(HaresError::Control(format!(
+                        "ThermalSetpoint cooling_setpoint_c invalid: {c}, expected [0, 60] °C"
+                    )));
                 }
-                if let Some(db) = deadband_c {
-                    if *db < 0.0 || *db > 5.0 || !db.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "ThermalSetpoint deadband_c invalid: {db}, expected [0, 5] °C"
-                        )));
-                    }
-                }
+                validate_thermal_setpoint_deadband(
+                    *heating_setpoint_c,
+                    *cooling_setpoint_c,
+                    *deadband_c,
+                )?;
                 if let (Some(h), Some(c), Some(db)) =
                     (heating_setpoint_c, cooling_setpoint_c, deadband_c)
+                    && c - h < *db
                 {
-                    if h + db >= *c {
-                        return Err(HaresError::Control(format!(
-                            "ThermalSetpoint: heating ({h}) + deadband ({db}) = {} not < cooling ({c})",
-                            h + db
-                        )));
-                    }
+                    return Err(HaresError::Control(format!(
+                        "ThermalSetpoint: the cooling-heating gap {} °C (heating {h}, cooling {c}) \
+                         is below deadband_c {db} °C",
+                        c - h
+                    )));
                 }
             }
             Self::HumiditySetpoint {
@@ -300,30 +340,30 @@ impl ControlSignal {
                         "PowerSetpoint active_power_kw must be finite, got {active_power_kw}"
                     )));
                 }
-                if let Some(r) = reactive_power_kvar {
-                    if !r.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "PowerSetpoint reactive_power_kvar must be finite, got {r}"
-                        )));
-                    }
+                if let Some(r) = reactive_power_kvar
+                    && !r.is_finite()
+                {
+                    return Err(HaresError::Control(format!(
+                        "PowerSetpoint reactive_power_kvar must be finite, got {r}"
+                    )));
                 }
                 // The SOC window carries the same semantics as SOCTarget's
                 // window (a discharge floor / charge ceiling); validate it
                 // with the same rules so a garbage window cannot reach any
                 // equipment arm and be silently substituted downstream.
-                if let Some(m) = min_soc {
-                    if *m < 0.0 || *m > 1.0 || !m.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "PowerSetpoint min_soc invalid: {m}, expected [0, 1]"
-                        )));
-                    }
+                if let Some(m) = min_soc
+                    && (*m < 0.0 || *m > 1.0 || !m.is_finite())
+                {
+                    return Err(HaresError::Control(format!(
+                        "PowerSetpoint min_soc invalid: {m}, expected [0, 1]"
+                    )));
                 }
-                if let Some(m) = max_soc {
-                    if *m < 0.0 || *m > 1.0 || !m.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "PowerSetpoint max_soc invalid: {m}, expected [0, 1]"
-                        )));
-                    }
+                if let Some(m) = max_soc
+                    && (*m < 0.0 || *m > 1.0 || !m.is_finite())
+                {
+                    return Err(HaresError::Control(format!(
+                        "PowerSetpoint max_soc invalid: {m}, expected [0, 1]"
+                    )));
                 }
                 if let (Some(min), Some(max)) = (min_soc, max_soc)
                     && min >= max
@@ -342,12 +382,12 @@ impl ControlSignal {
                         "PowerLimit max_power_kw must be finite and >= 0, got {max_power_kw}"
                     )));
                 }
-                if let Some(r) = ramp_rate_kw_per_s {
-                    if !r.is_finite() || *r < 0.0 {
-                        return Err(HaresError::Control(format!(
-                            "PowerLimit ramp_rate_kw_per_s must be finite and >= 0, got {r}"
-                        )));
-                    }
+                if let Some(r) = ramp_rate_kw_per_s
+                    && (!r.is_finite() || *r < 0.0)
+                {
+                    return Err(HaresError::Control(format!(
+                        "PowerLimit ramp_rate_kw_per_s must be finite and >= 0, got {r}"
+                    )));
                 }
             }
             Self::SOCTarget {
@@ -360,19 +400,19 @@ impl ControlSignal {
                         "SOCTarget target_soc invalid: {target_soc}, expected [0, 1]"
                     )));
                 }
-                if let Some(m) = min_soc {
-                    if *m < 0.0 || *m > 1.0 || !m.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "SOCTarget min_soc invalid: {m}, expected [0, 1]"
-                        )));
-                    }
+                if let Some(m) = min_soc
+                    && (*m < 0.0 || *m > 1.0 || !m.is_finite())
+                {
+                    return Err(HaresError::Control(format!(
+                        "SOCTarget min_soc invalid: {m}, expected [0, 1]"
+                    )));
                 }
-                if let Some(m) = max_soc {
-                    if *m < 0.0 || *m > 1.0 || !m.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "SOCTarget max_soc invalid: {m}, expected [0, 1]"
-                        )));
-                    }
+                if let Some(m) = max_soc
+                    && (*m < 0.0 || *m > 1.0 || !m.is_finite())
+                {
+                    return Err(HaresError::Control(format!(
+                        "SOCTarget max_soc invalid: {m}, expected [0, 1]"
+                    )));
                 }
                 if let (Some(min), Some(max)) = (min_soc, max_soc) {
                     if *min >= *max {
@@ -398,12 +438,12 @@ impl ControlSignal {
                         "DutyCycle on_fraction invalid: {on_fraction}, expected [0, 1]"
                     )));
                 }
-                if let Some(p) = period_s {
-                    if !p.is_finite() || *p < 0.0 {
-                        return Err(HaresError::Control(format!(
-                            "DutyCycle period_s must be finite and >= 0, got {p}"
-                        )));
-                    }
+                if let Some(p) = period_s
+                    && (!p.is_finite() || *p < 0.0)
+                {
+                    return Err(HaresError::Control(format!(
+                        "DutyCycle period_s must be finite and >= 0, got {p}"
+                    )));
                 }
             }
             Self::LoadFraction { fraction } => {
@@ -419,12 +459,12 @@ impl ControlSignal {
                 level: _,
                 duration_s,
             } => {
-                if let Some(d) = duration_s {
-                    if !d.is_finite() || *d < 0.0 {
-                        return Err(HaresError::Control(format!(
-                            "DemandResponse duration_s must be finite and >= 0, got {d}"
-                        )));
-                    }
+                if let Some(d) = duration_s
+                    && (!d.is_finite() || *d < 0.0)
+                {
+                    return Err(HaresError::Control(format!(
+                        "DemandResponse duration_s must be finite and >= 0, got {d}"
+                    )));
                 }
             }
             Self::ProtocolNative { .. } => {}
@@ -464,19 +504,19 @@ impl ControlSignal {
                 heating_delta_c,
                 cooling_delta_c,
             } => {
-                if let Some(d) = heating_delta_c {
-                    if !d.is_finite() || *d < -20.0 || *d > 20.0 {
-                        return Err(HaresError::Control(format!(
-                            "ThermalSetpointDelta heating_delta_c invalid: {d}, expected ±20 °C"
-                        )));
-                    }
+                if let Some(d) = heating_delta_c
+                    && (!d.is_finite() || *d < -20.0 || *d > 20.0)
+                {
+                    return Err(HaresError::Control(format!(
+                        "ThermalSetpointDelta heating_delta_c invalid: {d}, expected ±20 °C"
+                    )));
                 }
-                if let Some(d) = cooling_delta_c {
-                    if !d.is_finite() || *d < -20.0 || *d > 20.0 {
-                        return Err(HaresError::Control(format!(
-                            "ThermalSetpointDelta cooling_delta_c invalid: {d}, expected ±20 °C"
-                        )));
-                    }
+                if let Some(d) = cooling_delta_c
+                    && (!d.is_finite() || *d < -20.0 || *d > 20.0)
+                {
+                    return Err(HaresError::Control(format!(
+                        "ThermalSetpointDelta cooling_delta_c invalid: {d}, expected ±20 °C"
+                    )));
                 }
             }
             Self::IdealCapacityModeOverride { .. } => {}
@@ -524,6 +564,13 @@ impl ControlSignal {
                     )));
                 }
             }
+            Self::NonHvacZoneInput { watts, .. } => {
+                if !watts.is_finite() {
+                    return Err(HaresError::Control(format!(
+                        "NonHvacZoneInput watts must be finite, got {watts}"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -557,6 +604,7 @@ impl ControlSignal {
             Self::EvSetReadyBy { .. } => ControlCapabilities::EV_SET_READY_BY,
             Self::EventDelay { .. } => ControlCapabilities::EVENT_DELAY,
             Self::MaxCapacityFraction { .. } => ControlCapabilities::MAX_CAPACITY_FRACTION,
+            Self::NonHvacZoneInput { .. } => ControlCapabilities::NON_HVAC_ZONE_INPUT,
         }
     }
 }
@@ -837,22 +885,77 @@ mod tests {
 
     #[test]
     fn thermal_setpoint_deadband_out_of_range() {
-        assert_err(&ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            deadband_c: Some(-0.1),
-        });
-        assert_err(&ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            deadband_c: Some(6.0),
-        });
+        for db in [-0.1, -1e-17, 44.5, f64::INFINITY] {
+            assert_err(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: None,
+                deadband_c: Some(db),
+            });
+        }
     }
 
     #[test]
     fn thermal_setpoint_deadband_collision() {
         assert_err(&ControlSignal::ThermalSetpoint {
             heating_setpoint_c: Some(22.0),
+            cooling_setpoint_c: Some(23.0),
+            deadband_c: Some(2.0),
+        });
+    }
+
+    /// The validator cannot know the receiving device, so it holds a named
+    /// deadband to the union of the class ranges: a band below a cycling
+    /// thermostat's floor passes here (an ideal unit may hold it) and the
+    /// cycling device rejects it on application.
+    #[test]
+    fn thermal_setpoint_named_deadband_is_held_to_some_thermostat_class() {
+        for db in [0.0, 5e-324, 1e-17, 0.05, 30.0, 44.4] {
+            assert_ok(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: None,
+                deadband_c: Some(db),
+            });
+        }
+    }
+
+    #[test]
+    fn thermal_release_is_the_release_form() {
+        assert_eq!(
+            ControlSignal::thermal_release(),
+            ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                deadband_c: None,
+            }
+        );
+        assert_ok(&ControlSignal::thermal_release());
+    }
+
+    #[test]
+    fn thermal_setpoint_deadband_without_a_named_setpoint_rejected() {
+        for db in [0.0, 1.0, 5.0] {
+            assert_err(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                deadband_c: Some(db),
+            });
+        }
+    }
+
+    #[test]
+    fn thermal_setpoint_accepts_a_water_heater_deadband() {
+        // The heat pump water heater's default tank deadband, 14.7 °F.
+        assert_ok(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(51.7),
+            cooling_setpoint_c: None,
+            deadband_c: Some(8.166_666_667),
+        });
+    }
+
+    #[test]
+    fn thermal_setpoint_gap_equal_to_the_deadband_accepted() {
+        assert_ok(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
             cooling_setpoint_c: Some(23.0),
             deadband_c: Some(2.0),
         });
@@ -871,7 +974,7 @@ mod tests {
             deadband_c: None,
         });
         assert_err(&ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: None,
+            heating_setpoint_c: Some(20.0),
             cooling_setpoint_c: None,
             deadband_c: Some(f64::NAN),
         });

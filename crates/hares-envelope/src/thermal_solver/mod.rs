@@ -33,8 +33,12 @@ mod infiltration;
 mod initialization;
 mod longwave;
 mod ports;
+mod snapshot;
 mod solar;
 mod stepping;
+
+pub use snapshot::{THERMAL_SNAPSHOT_SCHEMA_VERSION, ThermalSnapshot};
+pub use stepping::SiteLocation;
 
 pub(crate) use config::Result;
 pub use config::{
@@ -42,38 +46,28 @@ pub use config::{
     ExteriorSurfaceInfo, FilmCoefficientModel, InfiltrationMethod, InteriorConvectionInjection,
     InteriorLwrZoneConfig, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
     MechanicalVentilationParams, NaturalVentilationConfig, OpeningType, StateSpaceWiring,
-    ThermalSolverConfig, ThermalSolverError, WindowSolarProperties,
+    ThermalSolverConfig, ThermalSolverError, WindowDiffuseShare, WindowSolarProperties,
 };
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use chrono::Datelike as _;
 use hares_physics::air_properties::moist_air_density_kg_m3;
 use hares_physics::constants::{KJ_TO_J, LATENT_HEAT_VAPORISATION_0C_KJ_KG};
 use hares_types::{
-    DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots, THERMAL, ThermalCategory,
-    ZoneId,
+    DomainId, DomainSolver, DomainUpdate, EnvironmentState, HaresError, PortSlots, THERMAL,
+    ThermalCategory, ZoneId,
 };
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DVector;
 
-use crate::state_space::StateSpaceModel;
+use crate::state_space::{SolveScratch, StateSpaceModel};
 
 use infiltration::{InfiltrationCoupling, apply_infiltration_and_ventilation};
 use initialization::initialize_steady_state;
+use solar::resnet_is_winter;
 
 const H_FG_J_PER_KG: f64 = LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J;
-
-/// Per-step coupled-solve state: tracks whether couplings are active and which
-/// solver path to use for the HVAC capacity solve in [`ThermalSolver::solve_ideal_capacity_for_target`].
-#[derive(Debug, Clone)]
-pub(crate) enum CoupledState {
-    /// No couplings active; use uncoupled solve path.
-    Uncoupled,
-    /// Couplings active with M = I; use closed-form O(n) diagonal-scaling solve.
-    Identity,
-    /// Couplings active with M ≠ I; use O(n³) LU factorization solve.
-    LU(nalgebra::linalg::LU<f64, nalgebra::Dyn, nalgebra::Dyn>),
-}
 
 #[derive(Debug, Clone)]
 pub struct ThermalSolver {
@@ -88,18 +82,52 @@ pub struct ThermalSolver {
     u_buf: DVector<f64>,
     /// Reusable latent-load accumulator: cleared at the start of each infiltration pass.
     latent_buf: HashMap<ZoneId, f64>,
-    /// Reusable state-step buffer: receives M⁻¹(N·x + B_eff·u).
+    /// Reusable state-step buffer: receives N·x + B_eff·u (coupling-scaled
+    /// when couplings are active).
     rhs_buf: DVector<f64>,
-    /// Pre-allocated scratch matrix for per-step modified implicit matrix (M + D).
-    m_scratch: DMatrix<f64>,
+    /// Reusable output buffer: receives C·x + D·u in `integrate_inner` via
+    /// `StateSpaceModel::output_into` (was an owned per-step `model.output`).
+    /// Swapped out during the step and given back afterwards, `u_buf`-style.
+    y_buf: DVector<f64>,
+    /// Reusable scratch for the D·u half of `StateSpaceModel::output_into`.
+    du_buf: DVector<f64>,
+    /// Reusable scratch for the per-zone ideal-capacity scalar solves
+    /// (`solve_for_scalar_input_identity_coupled` / uncoupled), sized to the
+    /// state dimension at construction. Its `n_x`/`b_u`/`rhs` half is the
+    /// step-shared prefix (filled once per step by the first
+    /// `solve_ideal_capacity_for_target` call); `tail_rhs`/`gain`/`d_agg`
+    /// are the per-call tail region.
+    solve_scratch: SolveScratch,
+    /// Whether `solve_scratch`'s prefix half (`n_x`, `b_u`, `rhs`) holds the
+    /// shared terms of the step's ideal-capacity solves. Set when a
+    /// `solve_ideal_capacity_for_target` call fills them from the step's `x`
+    /// and `last_u`; cleared by every path that mutates either
+    /// (`prepare_inputs_inner`, `integrate_inner`, `restore_state`), so the
+    /// validity window is exactly "same x and u as when the prefix was
+    /// filled".
+    shared_prefix_valid: bool,
+    /// Test-visible instrumentation for `shared_terms_computed_once_per_step`:
+    /// number of shared-prefix fills in `solve_ideal_capacity_for_target`.
+    #[cfg(test)]
+    shared_prefix_fills: usize,
+    /// Test-visible instrumentation: number of target-dependent tails run by
+    /// `solve_ideal_capacity_for_target` (one per call that reaches the solve).
+    #[cfg(test)]
+    solve_tail_calls: usize,
     /// Per-step coupling tuples: (state_idx, d_implicit, forcing). Reused each step.
     coupling_buf: Vec<(usize, f64, f64)>,
-    /// Previous coupling tuples and coupled-solve state for `solve_ideal_capacity_for_target`.
+    /// Coupling tuples of the last prepared or integrated step, read by
+    /// `solve_ideal_capacity_for_target`: non-empty selects the
+    /// identity-coupled solve, empty the uncoupled one.
     last_coupling: Vec<(usize, f64, f64)>,
-    last_coupled_state: CoupledState,
     /// Per-exterior-surface converged surface temperatures [°C] for LWR continuity.
     /// Indexed parallel to `config.exterior_surfaces`.
     exterior_surface_temps: Vec<f64>,
+    /// Persistent save buffer for `exterior_surface_temps`:
+    /// `prepare_inputs_inner` copies the temperatures in before
+    /// `build_input_vector` mutates them and copies them back afterwards
+    /// (was a per-step `Vec` clone).
+    ext_temps_save_buf: Vec<f64>,
     /// Last-step component gains for output/diagnostics.
     component_gains: EnvelopeComponentGains,
     /// Reusable buffer for interior surface temperatures in LWR calculation.
@@ -149,14 +177,20 @@ pub struct ThermalSolver {
     /// sinks. Paired with `zone_exchange_row_w`.
     zone_env_col_coeffs: Vec<(usize, f64)>,
     /// Per-step lookup: `surface_id` → slot in `env.weather.solar_irradiance`.
-    /// Rebuilt once per timestep by [`Self::refresh_solar_slot_map`] (called
+    /// Refreshed twice per timestep by [`Self::refresh_solar_slot_map`] (called
     /// from `build_input_vector` and the debug breakdown path) so the solar
     /// and exterior-LWR apply passes index directly instead of rescanning
     /// the irradiance vec per surface — O(S) per step total, not O(S²).
-    /// Capacity is retained across steps: no steady-state allocation.
+    /// The map is rebuilt only when the incoming surface-id sequence changes;
+    /// capacity is retained across steps: no steady-state allocation.
     /// Direct callers of the apply functions (tests, debug paths) must call
     /// `refresh_solar_slot_map` first (or populate the map themselves).
     solar_irr_slot_buf: HashMap<u32, usize>,
+    /// Surface-id sequence the slot map was last built from, parallel to
+    /// `env.weather.solar_irradiance`. `refresh_solar_slot_map` compares the
+    /// incoming sequence id by id (no hashing) and rebuilds the map only when
+    /// it differs, so a fixed environment rebuilds nothing per step.
+    solar_slot_map_keys: Vec<u32>,
     /// Absorbed opaque exterior solar [W] on iterative-path (rad_frac > 0)
     /// surfaces — the full skin-absorbed flux `α·A·POA`, not the
     /// rad_frac-scaled fraction injected into the RC node. Accumulated per
@@ -169,15 +203,6 @@ pub struct ThermalSolver {
     /// Pre-allocated buffer for previous-iteration interior LWR net flux values.
     /// Used for relative flux-residual convergence checking.
     lwr_net_flux_prev_buf: Vec<f64>,
-    /// Pre-allocated forcing vector for per-step interior convection correction.
-    /// Dimension equals `model.state_dim()`. Cleared before each step, populated
-    /// with ΔQ·dt/C terms for each interior boundary, then passed to
-    /// `step_into_with_forcing`. Empty (zero-length) when film model is AshraeSimple.
-    ///
-    /// Currently unused — PerStepTarp is disabled at solver_builder level pending
-    /// resolution of the Courant-condition constraint (see T-0034 Implementation Notes).
-    #[allow(dead_code)]
-    convection_forcing: DVector<f64>,
     /// Per-boundary A-matrix film resistance [m²·K/W] paralleling the
     /// `convection_injection` vec for computing per-step correction.
     /// Cached at init to avoid repeated HashMap lookups.
@@ -189,6 +214,10 @@ pub struct ThermalSolver {
     /// Reused across `distribute_radiant_lwr_surfaces` and
     /// `distribute_radiant_solar_surfaces` to avoid per-timestep allocation.
     radiant_weights_buf: Vec<f64>,
+    /// Pre-allocated buffer for the zone's windows' shares of the diffuse
+    /// short-wave distribution (`solar.rs` `fill_window_diffuse_shares`),
+    /// refilled per call, never allocated per step.
+    window_share_buf: Vec<WindowDiffuseShare>,
     /// Pre-sorted zone temperature buffer for format_domain_update; indexed parallel to sorted zone_output_indices.
     zone_temps_buf: Vec<(ZoneId, f64)>,
     latent_pairs_buf: Vec<(ZoneId, f64)>,
@@ -229,31 +258,26 @@ pub struct ThermalSolver {
     full_system_stored_energy_w: f64,
     /// Per-node external energy injection [W] from B_c × u weighted by capacitance.
     /// Single-element vec: each entry = Σ_i C_i × (B_c × u)[i] for one zone.
-    /// Populated by `integrate_inner`, consumed by check_thermal in check_invariants.
+    /// Populated by `integrate_inner`, consumed by check_thermal in check_step_invariants.
     thermal_balance_q_gains: Vec<f64>,
     /// Total envelope conduction to outdoor [W] = − Σ_i C_i × (A_c × x_prev)[i].
     /// Positive = heat leaving the system.  Populated by `integrate_inner`.
     thermal_balance_q_loss: f64,
     /// Pre-allocated working buffers for the affine-coupled balance
-    /// decomposition (populated only when check_invariants is active).
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    /// decomposition (populated by `integrate_inner` in every build profile:
+    /// the dwelling's thermal-balance invariant runs unconditionally).
     balance_buf_a: DVector<f64>,
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_buf_b: DVector<f64>,
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_buf_c: DVector<f64>,
     /// Pre-allocated per-state diagonal-damping aggregation buffer for the
     /// identity-M coupled balance decomposition. Holds `Σ d_j` for all
     /// coupling entries sharing a state index, so the semi-implicit solve
     /// applies `rhs[i] / (1 + Σ d_j)` rather than the buggy sequential
     /// `rhs[i] / Π(1 + d_j)`. Kept zeroed and refilled each invocation.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_d_agg: Vec<f64>,
     /// Zero vector for the input dimension (avoids per-step allocation).
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_u_zero: DVector<f64>,
     /// Zero vector for the state dimension (avoids per-step allocation).
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     balance_x_zero: DVector<f64>,
     /// Per-zone consecutive failure counts for `solve_ideal_capacity_for_target`.
     /// Incremented on each solve failure, reset to 0 on success. Used to throttle
@@ -265,6 +289,16 @@ pub struct ThermalSolver {
     /// `consecutive failures >= ideal_capacity_degraded_threshold`, this value
     /// is returned as a degraded fallback instead of 0.0.
     last_good_capacity_w: HashMap<ZoneId, f64>,
+    /// Per-zone non-HVAC share of the zone sensible input column [W], read
+    /// from the most recent full-step port accumulation (the integrate phase):
+    /// the column's total minus its HVAC heating/cooling/dehumidification
+    /// categories. `solve_ideal_capacity_for_target` solves for the column's
+    /// absolute value, so the capacity it hands the dispatcher is the HVAC's
+    /// own share: this step's non-HVAC gains are estimated by the last step's
+    /// (schedule-driven gains move slowly between steps). The prepare phase's
+    /// partial accumulation (occupancy gains only, before the equipment
+    /// steps) must not clobber the estimate.
+    non_hvac_zone_input_w: HashMap<ZoneId, f64>,
     /// Zones that received a degraded (last-good) capacity value during the
     /// most recent call to `solve_ideal_capacity_for_target`. Cleared at the
     /// start of each step via `begin_step_degradation_tracking`.
@@ -274,11 +308,6 @@ pub struct ThermalSolver {
     /// zone remains stuck in the degraded fallback path across many consecutive
     /// steps. Cleared on recovery, mirroring `ideal_capacity_warned_zones`.
     ideal_capacity_degraded_warned_zones: HashSet<ZoneId>,
-    /// Per-zone consecutive non-convergence count behind the `observe` feature.
-    /// Mirrors `ideal_capacity_failure_counts` but available for observer
-    /// capture when the observe feature is active.
-    #[cfg(feature = "observe")]
-    consecutive_nonconvergence_count: HashMap<ZoneId, usize>,
     /// Zones for which an ideal-capacity solve-failure warn has already been emitted
     /// during the current failure run. Guards against per-timestep log spam in
     /// pathological runs where the target is unreachable every step.
@@ -311,37 +340,42 @@ pub struct ThermalSolver {
 /// Per-component breakdown of zone air sensible contributions.
 ///
 /// Captures both the production path stages (outdoor, solar, LWR) and the
-/// port contributions split by routing path so the convective/radiant
-/// attribution is explicit. The zone-air port total equals
-/// `convective_direct_w + radiant_to_air_residual_w`.
+/// port contributions split by routing path so the convective, radiant and
+/// short-wave attribution is explicit. The zone-air port total equals
+/// `convective_direct_w + radiant_to_air_residual_w + shortwave_to_air_w`.
 ///
 /// Energy balance invariant (within floating-point rounding):
-/// `after_int_lwr_w + convective_direct_w + radiant_to_air_residual_w`
-/// equals the total zone air input at the end of the port application
-/// sequence.
+/// `after_int_lwr_w + convective_direct_w + radiant_to_air_residual_w +
+/// shortwave_to_air_w` equals the total zone air input at the end of the
+/// port application sequence.
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneSensibleBreakdown {
-    /// u[zone_air] after outdoor temperature inputs [W].
+    /// `u[zone_air]` after outdoor temperature inputs (W).
     pub after_outdoor_w: f64,
-    /// u[zone_air] after window solar inputs [W].
+    /// `u[zone_air]` after window solar inputs (W).
     pub after_window_solar_w: f64,
-    /// u[zone_air] after exterior solar inputs [W].
+    /// `u[zone_air]` after exterior solar inputs (W).
     pub after_ext_solar_w: f64,
-    /// u[zone_air] after exterior LWR inputs [W].
+    /// `u[zone_air]` after exterior LWR inputs (W).
     pub after_ext_lwr_w: f64,
-    /// u[zone_air] after interior LWR inputs (ScriptF) [W].
+    /// `u[zone_air]` after interior LWR inputs (ScriptF) (W).
     pub after_int_lwr_w: f64,
-    /// Direct convective gain from equipment sensible ports [W].
+    /// Direct convective gain from equipment sensible ports (W).
     pub convective_direct_w: f64,
-    /// Radiant-to-air convective residual after TMULT surface distribution [W].
+    /// Radiant-to-air convective residual after TMULT surface distribution (W).
     ///
     /// Radiant gain × (1 − radiation_frac) for each surface, weighted
     /// by area×emissivity per the EnergyPlus TMULT method.
     pub radiant_to_air_residual_w: f64,
-    /// Radiant gain delivered to interior surface RC nodes [W].
+    /// Radiant gain delivered to interior surface RC nodes (W).
     ///
     /// Radiant gain × radiation_frac for each surface.
     pub radiant_to_surfaces_w: f64,
+    /// Short-wave gain reaching zone air (W): the part each surface passes
+    /// on to the air, plus any the surfaces do not absorb.
+    pub shortwave_to_air_w: f64,
+    /// Short-wave gain delivered to interior surface RC nodes (W).
+    pub shortwave_to_surfaces_w: f64,
 }
 
 impl ZoneSensibleBreakdown {
@@ -356,18 +390,10 @@ impl ZoneSensibleBreakdown {
             convective_direct_w: 0.0,
             radiant_to_air_residual_w: 0.0,
             radiant_to_surfaces_w: 0.0,
+            shortwave_to_air_w: 0.0,
+            shortwave_to_surfaces_w: 0.0,
         }
     }
-}
-
-/// Captured thermal state for checkpoint save/restore.
-#[derive(Clone, Debug)]
-pub struct ThermalSnapshot {
-    pub x: Vec<f64>,
-    pub last_u: Vec<f64>,
-    pub lwr_t_prev_c: Vec<f64>,
-    pub interior_surface_temps: Vec<Vec<f64>>,
-    pub interior_surface_prev_temps: Vec<Vec<f64>>,
 }
 
 impl ThermalSolver {
@@ -396,11 +422,15 @@ impl ThermalSolver {
         &self.config
     }
 
-    /// Mutable access to the solver configuration for per-timestep
-    /// updates (e.g. ventilation recovery effectiveness from equipment
-    /// bypass/defrost state).
-    pub fn config_mut(&mut self) -> &mut ThermalSolverConfig {
-        &mut self.config
+    /// Sets the mechanical ventilation recovery effectiveness the next step
+    /// reads (the ventilation equipment's effective values after bypass and
+    /// defrost). The only part of the configuration that changes after
+    /// construction; it is part of [`ThermalSnapshot`].
+    pub fn set_ventilation_recovery(&mut self, sensible: f64, latent: f64) -> Result<()> {
+        snapshot::validate_recovery_efficiencies(sensible, latent)?;
+        self.config.ventilation.sensible_recovery_efficiency = sensible;
+        self.config.ventilation.latent_recovery_efficiency = latent;
+        Ok(())
     }
 
     /// Returns true when the zone's most recent `solve_ideal_capacity_for_target`
@@ -425,7 +455,17 @@ impl ThermalSolver {
         &self.component_gains
     }
 
-    /// Full-system stored energy rate from the most recent `resolve()` call [W].
+    /// The most recent integrate's per-zone non-HVAC share of the sensible
+    /// input column (W): the port accumulation's total less the HVAC
+    /// categories, per zone. The ideal-capacity solve subtracts the share
+    /// from its capacity; the solver-feedback actor dispatches the same
+    /// value to the zone's cycling equipment so both delivery paths net it.
+    #[must_use]
+    pub fn non_hvac_zone_inputs(&self) -> &HashMap<ZoneId, f64> {
+        &self.non_hvac_zone_input_w
+    }
+
+    /// Full-system stored energy rate from the most recent `resolve()` call (W).
     ///
     /// Computes Σ C_i × (T_next_i − T_prev_i) / dt across ALL thermal state nodes
     /// (zone air + wall-mass nodes).  This accounts for energy stored in every
@@ -438,7 +478,7 @@ impl ThermalSolver {
         self.full_system_stored_energy_w
     }
 
-    /// Per-zone energy balance residuals from the most recent `resolve()` call [W].
+    /// Per-zone energy balance residuals from the most recent `resolve()` call (W).
     ///
     /// Returns a map from zone ID to the zone-air-only residual:
     /// `|C_zone × ΔT_zone / dt − q_port_sensible|` where q_port_sensible is the
@@ -458,11 +498,11 @@ impl ThermalSolver {
     ///
     /// Returns `(q_gains_slice, delta_e_storage_w, q_loss_w)` where:
     /// - `q_gains_slice`: external energy injections computed from B_c × u
-    ///   weighted by node capacitance [W],
+    ///   weighted by node capacitance (W),
     /// - `delta_e_storage_w`: full-system stored energy rate
-    ///   Σ C_i × (T_next_i − T_prev_i) / dt [W],
+    ///   Σ C_i × (T_next_i − T_prev_i) / dt (W),
     /// - `q_loss_w`: total envelope conduction to outdoor/ground derived from
-    ///   A_c × x weighted by capacitance [W], positive when heat leaves.
+    ///   A_c × x weighted by capacitance (W), positive when heat leaves.
     ///
     /// These are computed independently inside `integrate_inner` using the
     /// continuous-time state-space matrices, the input vector `u`, and the
@@ -565,7 +605,7 @@ impl ThermalSolver {
             .unwrap_or_default()
     }
 
-    /// Returns the per-component breakdown of u[zone_sensible] for debugging.
+    /// Returns the per-component breakdown of `u[zone_sensible]` for debugging.
     ///
     /// Applies both sensible and radiant port inputs in the same sequence as
     /// the production path (`build_input_vector`), so the reported zone-air
@@ -579,12 +619,12 @@ impl ThermalSolver {
         &mut self,
         ports: &hares_types::PortSlots,
         env: &hares_types::EnvironmentState,
-    ) -> ZoneSensibleBreakdown {
+    ) -> std::result::Result<ZoneSensibleBreakdown, HaresError> {
         let n = self.model.input_dim();
         let mut u = DVector::zeros(n);
         let zone_id = self.config.indoor_zone_id;
         let Some(&z_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) else {
-            return ZoneSensibleBreakdown::zeros();
+            return Ok(ZoneSensibleBreakdown::zeros());
         };
         self.apply_outdoor_inputs(&mut u, env);
         self.refresh_solar_slot_map(env);
@@ -593,7 +633,7 @@ impl ThermalSolver {
         let after_window_solar = u[z_idx];
         self.apply_exterior_solar_inputs(&mut u, env);
         let after_ext_solar = u[z_idx];
-        self.apply_exterior_longwave_inputs_iterative(&mut u, env);
+        self.apply_exterior_longwave_inputs_iterative(&mut u, env)?;
         let after_ext_lwr = u[z_idx];
         // Interior LWR: ScriptF iterative injection only when not using
         // StarMesh (star-mesh bakes radiation conductances into the A-matrix
@@ -617,7 +657,13 @@ impl ThermalSolver {
         let total_radiant_w: f64 = ports.thermal.iter().map(|t| t.radiant_gain_w).sum();
         let radiant_to_surfaces_w = (total_radiant_w - radiant_to_air_residual_w).max(0.0);
 
-        ZoneSensibleBreakdown {
+        let shortwave_is_winter = resnet_is_winter(env.current_time.month());
+        self.apply_port_shortwave_inputs(&mut u, ports, shortwave_is_winter);
+        let shortwave_to_air_w = u[z_idx] - after_radiant;
+        let total_shortwave_w: f64 = ports.thermal.iter().map(|t| t.shortwave_gain_w).sum();
+        let shortwave_to_surfaces_w = (total_shortwave_w - shortwave_to_air_w).max(0.0);
+
+        Ok(ZoneSensibleBreakdown {
             after_outdoor_w: after_outdoor,
             after_window_solar_w: after_window_solar,
             after_ext_solar_w: after_ext_solar,
@@ -626,7 +672,9 @@ impl ThermalSolver {
             convective_direct_w,
             radiant_to_air_residual_w,
             radiant_to_surfaces_w,
-        }
+            shortwave_to_air_w,
+            shortwave_to_surfaces_w,
+        })
     }
 
     pub fn new(
@@ -643,6 +691,19 @@ impl ThermalSolver {
         config
             .validate(model.state_dim(), model.input_dim())
             .map_err(ThermalSolverError::Configuration)?;
+
+        // Thermal port wiring: every env zone must own a sensible-heat input
+        // column. Equipment may declare a thermal port on any env zone, and a
+        // zone without a column would have its contributions silently
+        // dropped, so the mapping is checked once here instead of per step.
+        for zone in &env.zones {
+            if !wiring.zone_sensible_input_indices.contains_key(&zone.id) {
+                return Err(ThermalSolverError::MissingZoneMapping {
+                    zone: zone.id,
+                    field: "zone_sensible_input_indices",
+                });
+            }
+        }
 
         // Silent plausible-value fallbacks become construction-time
         // errors. Zone-map completeness checks live in the scoped block
@@ -774,6 +835,91 @@ impl ThermalSolver {
                 }
             }
         }
+        // Coupled-solve divisor invariant, checked once here so nothing is
+        // added to the step. The identity-coupled solve divides a coupled
+        // state's update by `1 + d_i` (the closed-form diagonal solve in
+        // `StateSpaceModel`). Every coupling diagonal this solver can produce
+        // is `h·b`: a non-negative per-step conductance `h` (infiltration and
+        // linearised exterior LWR conductances are non-negative by physics,
+        // and the interior-convection correction applies only when its Δh is
+        // positive) times a model-side factor `b`. Requiring `b` finite and
+        // non-negative at every coupling site (and finite, non-negative
+        // divisor inputs on the convection injections, whose capacitances are
+        // clamped positive at the use site) is exactly the condition that
+        // every divisor `1 + d_i` stays finite and positive on every step; a
+        // violation would divide by zero or flip a state's update sign
+        // mid-simulation.
+        for zone in &env.zones {
+            let (Some(&state_idx), Some(&input_idx)) = (
+                wiring.zone_state_indices.get(&zone.id),
+                wiring.zone_sensible_input_indices.get(&zone.id),
+            ) else {
+                continue;
+            };
+            let b_coeff = model.b_eff()[(state_idx, input_idx)];
+            if !b_coeff.is_finite() || b_coeff < 0.0 {
+                return Err(ThermalSolverError::CouplingCoefficientInvalid {
+                    site: format!("zone {:?}", zone.id),
+                    state_index: state_idx,
+                    coefficient: b_coeff,
+                });
+            }
+        }
+        // Exterior LWR coupling sites: the simple (non-iterative) longwave
+        // branch linearises every non-window surface with rad_frac <= 0 and
+        // positive area into a coupling at (state_index, input_index).
+        for info in &config.exterior_surfaces {
+            if info.boundary_category == Some(config::BoundaryCategory::Window)
+                || info.rad_frac > 0.0
+                || info.area_m2 <= 0.0
+            {
+                continue;
+            }
+            let b_coeff = model.b_eff()[(info.state_index, info.input_index)];
+            if !b_coeff.is_finite() || b_coeff < 0.0 {
+                return Err(ThermalSolverError::CouplingCoefficientInvalid {
+                    site: format!("exterior surface {}", info.surface_id),
+                    state_index: info.state_index,
+                    coefficient: b_coeff,
+                });
+            }
+        }
+        // Interior-convection (TARP) coupling sites: the diagonal
+        // `dt·Δh·A/C` is finite and positive whenever applied (Δh > 0,
+        // capacitances clamped positive) as long as the area, the static
+        // film resistance and the tilt are finite and non-negative: a NaN
+        // in any of them reaches `delta_h` as NaN (NaN comparisons are
+        // false, so the `Δh > 0` gate passes it) and divides by NaN. The
+        // film resistance is the fail-fast guard for the frozen A-matrix
+        // too; the tilt is the one input `h` recomputes per step.
+        if config.film_coefficient_model == FilmCoefficientModel::PerStepTarp {
+            for inj in &config.interior_convection_injections {
+                let detail = |value: f64, what: &str| {
+                    format!("{what} {value} must be finite and non-negative")
+                };
+                if !inj.area_m2.is_finite() || inj.area_m2 < 0.0 {
+                    return Err(ThermalSolverError::ConvectionInjectionInvalid {
+                        surface_state_index: inj.surface_state_index,
+                        zone_state_index: inj.zone_state_index,
+                        detail: detail(inj.area_m2, "area"),
+                    });
+                }
+                if !inj.static_r_film_int_m2_k_w.is_finite() || inj.static_r_film_int_m2_k_w < 0.0 {
+                    return Err(ThermalSolverError::ConvectionInjectionInvalid {
+                        surface_state_index: inj.surface_state_index,
+                        zone_state_index: inj.zone_state_index,
+                        detail: detail(inj.static_r_film_int_m2_k_w, "static film resistance"),
+                    });
+                }
+                if !inj.tilt_deg.is_finite() || inj.tilt_deg < 0.0 {
+                    return Err(ThermalSolverError::ConvectionInjectionInvalid {
+                        surface_state_index: inj.surface_state_index,
+                        zone_state_index: inj.zone_state_index,
+                        detail: detail(inj.tilt_deg, "tilt"),
+                    });
+                }
+            }
+        }
         // True double-registration of a DEDICATED injection column: sharing
         // is legitimate only on a zone's sensible-heat column (windows and
         // fallback surfaces sum additively into it); any other shared
@@ -849,13 +995,9 @@ impl ThermalSolver {
         let last_u = DVector::<f64>::zeros(n_inputs);
         let u_buf = DVector::<f64>::zeros(n_inputs);
         let rhs_buf = DVector::<f64>::zeros(n_states);
-        let m_scratch = DMatrix::zeros(n_states, n_states);
-        let convection_forcing =
-            if config.film_coefficient_model == FilmCoefficientModel::PerStepTarp {
-                DVector::<f64>::zeros(n_states)
-            } else {
-                DVector::<f64>::zeros(0)
-            };
+        let y_buf = DVector::<f64>::zeros(model.output_dim());
+        let du_buf = DVector::<f64>::zeros(model.output_dim());
+        let solve_scratch = SolveScratch::new(n_states);
         let per_boundary_static_r_film = config
             .interior_convection_injections
             .iter()
@@ -863,10 +1005,10 @@ impl ThermalSolver {
             .collect();
         let coupling_buf = Vec::with_capacity(env.zones.len());
         let last_coupling = Vec::new();
-        let last_coupled_state = CoupledState::Uncoupled;
         let latent_buf = HashMap::new();
         let exterior_surface_temps =
             vec![env.weather.outdoor_temp_c; config.exterior_surfaces.len()];
+        let ext_temps_save_buf = vec![0.0; config.exterior_surfaces.len()];
         let n_lwr_zones = config.interior_lwr_zones.len();
         let max_interior_surfaces = config
             .interior_lwr_zones
@@ -979,12 +1121,19 @@ impl ThermalSolver {
             last_u,
             u_buf,
             rhs_buf,
-            m_scratch,
+            y_buf,
+            du_buf,
+            solve_scratch,
+            shared_prefix_valid: false,
+            #[cfg(test)]
+            shared_prefix_fills: 0,
+            #[cfg(test)]
+            solve_tail_calls: 0,
             coupling_buf,
             last_coupling,
-            last_coupled_state,
             latent_buf,
             exterior_surface_temps,
+            ext_temps_save_buf,
             // Pre-allocate the observe-gated per-zone jacket-loss buffer at
             // init (hot-path discipline: no per-timestep heap allocation).
             // `prepare_inputs` refills it in place each step, reusing the
@@ -1008,24 +1157,24 @@ impl ThermalSolver {
             window_exterior_lwr_w: 0.0,
             opaque_exterior_lwr_w: 0.0,
             solar_irr_slot_buf: HashMap::with_capacity(n_ext_surfaces),
+            solar_slot_map_keys: Vec::with_capacity(env.weather.solar_irradiance.len()),
             zone_exchange_row_w,
             zone_env_col_coeffs,
             opaque_exterior_solar_w: 0.0,
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_net_flux_prev_buf: Vec::with_capacity(max_interior_surfaces),
-            convection_forcing,
             per_boundary_static_r_film,
             prev_zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),
             radiant_weights_buf: Vec::with_capacity(max_radiant_surfaces),
+            window_share_buf: Vec::with_capacity(env.weather.solar_irradiance.len()),
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_linearised_warned_zones: HashSet::new(),
             energy_balance_residuals: HashMap::with_capacity(n_zones_for_latent),
             ideal_capacity_failure_counts: HashMap::with_capacity(n_zones_for_latent),
             last_good_capacity_w: HashMap::with_capacity(n_zones_for_latent),
+            non_hvac_zone_input_w: HashMap::with_capacity(n_zones_for_latent),
             ideal_capacity_degraded_zones: HashSet::new(),
             ideal_capacity_degraded_warned_zones: HashSet::new(),
-            #[cfg(feature = "observe")]
-            consecutive_nonconvergence_count: HashMap::with_capacity(n_zones_for_latent),
             ideal_capacity_warned_zones: HashSet::new(),
             zone_temps_buf,
             latent_pairs_buf: Vec::with_capacity(n_zones_for_latent),
@@ -1035,17 +1184,11 @@ impl ThermalSolver {
             full_system_stored_energy_w: 0.0,
             thermal_balance_q_gains: Vec::with_capacity(n_zones_for_latent.max(1)),
             thermal_balance_q_loss: 0.0,
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_buf_a: DVector::<f64>::zeros(n_states),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_buf_b: DVector::<f64>::zeros(n_states),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_buf_c: DVector::<f64>::zeros(n_states),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_d_agg: vec![0.0f64; n_states],
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_u_zero: DVector::<f64>::zeros(n_inputs),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             balance_x_zero: DVector::<f64>::zeros(n_states),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag_buf: Vec::with_capacity(n_ext_surfaces),
@@ -1063,135 +1206,15 @@ impl ThermalSolver {
         &self.x
     }
 
-    /// Returns checkpointable thermal state vectors.
-    ///
-    #[must_use]
-    pub fn snapshot_state(&self) -> ThermalSnapshot {
-        ThermalSnapshot {
-            x: self.x.iter().copied().collect(),
-            last_u: self.last_u.iter().copied().collect(),
-            lwr_t_prev_c: self.exterior_surface_temps.clone(),
-            interior_surface_temps: self.interior_surface_temps.clone(),
-            interior_surface_prev_temps: self.interior_surface_prev_temps.clone(),
-        }
-    }
-
-    /// Restores thermal state vectors from checkpoint payloads.
-    ///
-    /// All validation is performed before any mutation, ensuring the solver
-    /// is left unchanged if the snapshot is invalid (atomic restore).
-    pub fn restore_state(&mut self, snap: &ThermalSnapshot) -> Result<()> {
-        // ── Phase 1: validate all lengths and finiteness ─────────────────
-        if snap.x.len() != self.x.len() {
-            return Err(ThermalSolverError::Initialization(format!(
-                "invalid x state length: got {}, expected {}",
-                snap.x.len(),
-                self.x.len()
-            )));
-        }
-        for (i, &v) in snap.x.iter().enumerate() {
-            if !v.is_finite() {
-                return Err(ThermalSolverError::Initialization(format!(
-                    "non-finite x state at index {i}: {v}"
-                )));
-            }
-        }
-        if !snap.last_u.is_empty() && snap.last_u.len() != self.last_u.len() {
-            return Err(ThermalSolverError::Initialization(format!(
-                "invalid last_u length: got {}, expected {}",
-                snap.last_u.len(),
-                self.last_u.len()
-            )));
-        }
-        for (i, &v) in snap.last_u.iter().enumerate() {
-            if !v.is_finite() {
-                return Err(ThermalSolverError::Initialization(format!(
-                    "non-finite last_u at index {i}: {v}"
-                )));
-            }
-        }
-
-        if snap.lwr_t_prev_c.len() != self.exterior_surface_temps.len() {
-            return Err(ThermalSolverError::Initialization(format!(
-                "invalid lwr_t_prev_c length: got {}, expected {}",
-                snap.lwr_t_prev_c.len(),
-                self.exterior_surface_temps.len()
-            )));
-        }
-        for (i, &t) in snap.lwr_t_prev_c.iter().enumerate() {
-            if !t.is_finite() {
-                return Err(ThermalSolverError::Initialization(format!(
-                    "non-finite surface temperature at index {i}: {t}"
-                )));
-            }
-        }
-
-        if snap.interior_surface_temps.len() != self.interior_surface_temps.len() {
-            return Err(ThermalSolverError::Initialization(format!(
-                "invalid interior_surface_temps length: got {}, expected {}",
-                snap.interior_surface_temps.len(),
-                self.interior_surface_temps.len()
-            )));
-        }
-        if snap.interior_surface_prev_temps.len() != self.interior_surface_prev_temps.len() {
-            return Err(ThermalSolverError::Initialization(format!(
-                "invalid interior_surface_prev_temps length: got {}, expected {}",
-                snap.interior_surface_prev_temps.len(),
-                self.interior_surface_prev_temps.len()
-            )));
-        }
-        for (i, zone_temps) in snap.interior_surface_temps.iter().enumerate() {
-            if zone_temps.len() != self.interior_surface_temps[i].len() {
-                return Err(ThermalSolverError::Initialization(format!(
-                    "interior_surface_temps[{}] length mismatch: got {}, expected {}",
-                    i,
-                    zone_temps.len(),
-                    self.interior_surface_temps[i].len()
-                )));
-            }
-            for (j, &t) in zone_temps.iter().enumerate() {
-                if !t.is_finite() {
-                    return Err(ThermalSolverError::Initialization(format!(
-                        "non-finite interior surface temperature at zone {i}, surface {j}: {t}"
-                    )));
-                }
-            }
-        }
-        for (i, zone_temps) in snap.interior_surface_prev_temps.iter().enumerate() {
-            if zone_temps.len() != self.interior_surface_prev_temps[i].len() {
-                return Err(ThermalSolverError::Initialization(format!(
-                    "interior_surface_prev_temps[{}] length mismatch: got {}, expected {}",
-                    i,
-                    zone_temps.len(),
-                    self.interior_surface_prev_temps[i].len()
-                )));
-            }
-            for (j, &t) in zone_temps.iter().enumerate() {
-                if !t.is_finite() {
-                    return Err(ThermalSolverError::Initialization(format!(
-                        "non-finite interior surface prev temperature at zone {i}, surface {j}: {t}"
-                    )));
-                }
-            }
-        }
-
-        // ── Phase 2: all validation passed — apply mutations ─────────────
-        self.x = DVector::from_column_slice(&snap.x);
-        if snap.last_u.is_empty() {
-            self.last_u.fill(0.0);
-        } else {
-            self.last_u = DVector::from_column_slice(&snap.last_u);
-        }
-        self.exterior_surface_temps
-            .copy_from_slice(&snap.lwr_t_prev_c);
-        for (i, zone_temps) in snap.interior_surface_temps.iter().enumerate() {
-            self.interior_surface_temps[i].copy_from_slice(zone_temps);
-        }
-        for (i, zone_temps) in snap.interior_surface_prev_temps.iter().enumerate() {
-            self.interior_surface_prev_temps[i].copy_from_slice(zone_temps);
-        }
-
-        Ok(())
+    /// Clears the shared ideal-capacity solve prefix: the caller is about to
+    /// change (or has changed) the step's `x` or `last_u` that the prefix was
+    /// computed from, so a cached prefix would be stale. Called by every
+    /// mutation path of `x`/`last_u` (`prepare_inputs_inner`,
+    /// `integrate_inner`, `restore_state`), which makes the prefix's
+    /// validity window exactly "same x and u as when the prefix was filled".
+    #[inline]
+    fn invalidate_shared_prefix(&mut self) {
+        self.shared_prefix_valid = false;
     }
 
     /// Assembles the full input vector from outdoor, solar, LWR, and port
@@ -1200,11 +1223,13 @@ impl ThermalSolver {
     ///
     /// Returns `(u, latent_by_zone)` where the infiltration couplings are
     /// stored in `self.infiltration_buf` for semi-implicit coupling wiring.
+    /// Run-path checks surfaced here (air density screen) are unconditional
+    /// typed errors.
     fn build_input_vector(
         &mut self,
         ports: &PortSlots,
         env: &EnvironmentState,
-    ) -> (DVector<f64>, HashMap<ZoneId, f64>) {
+    ) -> std::result::Result<(DVector<f64>, HashMap<ZoneId, f64>), HaresError> {
         let mut u = std::mem::replace(&mut self.u_buf, DVector::zeros(0));
         let n = self.model.input_dim();
         if u.len() == n {
@@ -1218,7 +1243,8 @@ impl ThermalSolver {
 
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         self.window_solar_diag_buf.clear();
-        let window_solar_w = self.apply_solar_inputs(&mut u, env);
+        let window_solar = self.apply_solar_inputs(&mut u, env);
+        let window_solar_w = window_solar.injected_w;
 
         // Absorbed opaque exterior solar [W], both application paths. The
         // non-iterative path injects the full absorbed flux (returned
@@ -1230,7 +1256,7 @@ impl ThermalSolver {
         self.ext_surface_diag_buf.clear();
         // Also accumulates `opaque_exterior_solar_w` (iterative-path absorbed
         // solar) and `opaque_exterior_lwr_w` (net skin LWR, both paths).
-        self.apply_exterior_longwave_inputs_iterative(&mut u, env);
+        self.apply_exterior_longwave_inputs_iterative(&mut u, env)?;
         let opaque_solar_w = opaque_solar_noniter_w + self.opaque_exterior_solar_w;
         // Net exterior LWR at the opaque skins [W], both paths. Neither `u`
         // delta isolates it: the iterative injection mixes solar and LWR at
@@ -1264,20 +1290,16 @@ impl ThermalSolver {
 
         self.apply_port_convective_inputs(&mut u, ports);
         self.apply_port_radiant_inputs(&mut u, ports);
+        let shortwave_is_winter = resnet_is_winter(env.current_time.month());
+        self.apply_port_shortwave_inputs(&mut u, ports, shortwave_is_winter);
 
         let indoor_zone = self.config.indoor_zone_id;
-        let port_convective_indoor_w = ports
+        let indoor_heat = ports
             .thermal
             .iter()
             .find(|t| t.zone == indoor_zone)
-            .map(|t| t.sensible_gain_w)
-            .unwrap_or(0.0);
-        let port_radiant_indoor_w = ports
-            .thermal
-            .iter()
-            .find(|t| t.zone == indoor_zone)
-            .map(|t| t.radiant_gain_w)
-            .unwrap_or(0.0);
+            .map(hares_types::ThermalAccumulator::heat)
+            .unwrap_or_default();
 
         let mut latent_by_zone = std::mem::take(&mut self.latent_buf);
         latent_by_zone.clear();
@@ -1300,7 +1322,7 @@ impl ThermalSolver {
             hvac_active,
             &mut latent_by_zone,
             &mut self.infiltration_buf,
-        );
+        )?;
 
         let indoor_inf = self.infiltration_buf.iter().find(|c| c.zone == indoor_zone);
         let infiltration_indoor_w = indoor_inf.map(|c| c.q_infiltration_w).unwrap_or(0.0);
@@ -1320,6 +1342,7 @@ impl ThermalSolver {
             .map(|a| {
                 a.sensible_for_category(ThermalCategory::InternalGain)
                     + a.radiant_for_category(ThermalCategory::InternalGain)
+                    + a.shortwave_gain_w
             })
             .unwrap_or(0.0);
         // Jacket losses (water heater skin loss, boiler shell loss) are
@@ -1371,24 +1394,51 @@ impl ThermalSolver {
             buf
         };
 
+        // Round-trip the reusable Vecs through the struct replacement: move
+        // this step's data into the new `component_gains` and the previous
+        // struct's Vecs (capacity retained) back into the buffers. Swapping
+        // against the freshly constructed struct's `Vec::new()`s (the
+        // previous swap-and-reserve dance) handed the buffers a capacity-0
+        // Vec and re-allocated both every timestep (hot-path discipline: no
+        // per-timestep heap allocation). Same for the diagnostic buffers:
+        // they move into the struct instead of being cloned.
+        let infiltration_by_zone = std::mem::take(&mut self.infiltration_by_zone_buf);
+        let interior_lwr_by_zone = std::mem::take(&mut self.lwr_by_zone_buf);
+        let prev_infiltration_by_zone =
+            std::mem::take(&mut self.component_gains.infiltration_by_zone);
+        let prev_interior_lwr_by_zone =
+            std::mem::take(&mut self.component_gains.interior_lwr_by_zone);
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        let (ext_surface_diag, int_surface_diag, window_solar_diag) = {
+            let ext = std::mem::take(&mut self.component_gains.ext_surface_diag);
+            let int = std::mem::take(&mut self.component_gains.int_surface_diag);
+            let win = std::mem::take(&mut self.component_gains.window_solar_diag);
+            let ext_diag = std::mem::replace(&mut self.ext_surface_diag_buf, ext);
+            let int_diag = std::mem::replace(&mut self.int_surface_diag_buf, int);
+            let win_diag = std::mem::replace(&mut self.window_solar_diag_buf, win);
+            (ext_diag, int_diag, win_diag)
+        };
+
         self.component_gains = EnvelopeComponentGains {
             window_solar_w,
+            window_through_glass_w: window_solar.through_glass_w,
             opaque_solar_lwr_w,
             interior_lwr_w,
             infiltration_w: infiltration_indoor_w,
             ventilation_w,
             natural_ventilation_w,
             combined_airflow_sensible_w,
-            port_convective_w: port_convective_indoor_w,
-            port_radiant_w: port_radiant_indoor_w,
+            port_convective_w: indoor_heat.convective_w,
+            port_radiant_w: indoor_heat.radiant_w,
+            port_shortwave_w: indoor_heat.shortwave_w,
             hvac_heating_w,
             hvac_cooling_w,
             internal_gain_w: internal_gain_cat_w,
             jacket_loss_w,
             duct_loss_w,
             hvac_dehumidification_w,
-            infiltration_by_zone: Vec::new(),
-            interior_lwr_by_zone: Vec::new(),
+            infiltration_by_zone,
+            interior_lwr_by_zone,
             wall_heat_gain_w: 0.0,
             floor_heat_gain_w: 0.0,
             roof_heat_gain_w: 0.0,
@@ -1445,35 +1495,19 @@ impl ThermalSolver {
                 )
             },
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
-            ext_surface_diag: self.ext_surface_diag_buf.clone(),
+            ext_surface_diag,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
-            int_surface_diag: self.int_surface_diag_buf.clone(),
+            int_surface_diag,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
-            window_solar_diag: self.window_solar_diag_buf.clone(),
+            window_solar_diag,
             #[cfg(feature = "observe")]
             jacket_loss_by_zone,
         };
 
-        std::mem::swap(
-            &mut self.infiltration_by_zone_buf,
-            &mut self.component_gains.infiltration_by_zone,
-        );
-        std::mem::swap(
-            &mut self.lwr_by_zone_buf,
-            &mut self.component_gains.interior_lwr_by_zone,
-        );
-        // After swap, the buf fields hold the empty Vecs from the freshly
-        // constructed struct. Reserve capacity so the next step avoids realloc.
-        let n_inf = self.component_gains.infiltration_by_zone.len();
-        let n_lwr = self.component_gains.interior_lwr_by_zone.len();
-        if self.infiltration_by_zone_buf.capacity() < n_inf {
-            self.infiltration_by_zone_buf.reserve(n_inf);
-        }
-        if self.lwr_by_zone_buf.capacity() < n_lwr {
-            self.lwr_by_zone_buf.reserve(n_lwr);
-        }
+        self.infiltration_by_zone_buf = prev_infiltration_by_zone;
+        self.lwr_by_zone_buf = prev_interior_lwr_by_zone;
 
-        (u, latent_by_zone)
+        Ok((u, latent_by_zone))
     }
 
     /// Formats solver outputs into `out` in-place, reusing its allocations.
@@ -1547,8 +1581,11 @@ impl ThermalSolver {
 
     /// Rebuilds the per-step `surface_id` → irradiance-slot lookup used by
     /// the solar and exterior-LWR apply passes. Called once per timestep from
-    /// `build_input_vector` before any of those passes run; capacity is
-    /// retained across steps so this performs no steady-state allocation.
+    /// `build_input_vector` before any of those passes run. The rebuild
+    /// happens only when the incoming surface-id sequence differs from the
+    /// one the map was last built from (compared id by id, no hashing), so
+    /// a fixed environment performs no rebuild and no allocation per call;
+    /// capacity is retained across steps.
     ///
     /// Duplicate `surface_id`s in the weather vector resolve FIRST-WINS —
     /// the same resolution the pre-slot-map linear `.find()` gave, so this
@@ -1558,12 +1595,23 @@ impl ThermalSolver {
     /// `exterior_surfaces`; a weather producer emitting duplicates is
     /// malformed input, and first-wins keeps its handling deterministic.
     fn refresh_solar_slot_map(&mut self, env: &EnvironmentState) {
+        if self.solar_slot_map_keys.len() == env.weather.solar_irradiance.len()
+            && self
+                .solar_slot_map_keys
+                .iter()
+                .zip(env.weather.solar_irradiance.iter())
+                .all(|(id, irr)| *id == irr.surface_id)
+        {
+            return;
+        }
         self.solar_irr_slot_buf.clear();
+        self.solar_slot_map_keys.clear();
         for (slot, irr) in env.weather.solar_irradiance.iter().enumerate() {
             // `or_insert` = first-wins: a key already mapped keeps its slot.
             self.solar_irr_slot_buf
                 .entry(irr.surface_id)
                 .or_insert(slot);
+            self.solar_slot_map_keys.push(irr.surface_id);
         }
     }
 
@@ -1606,24 +1654,33 @@ impl ThermalSolver {
         }
     }
 
-    pub fn prepare_inputs(&mut self, ports: &PortSlots, env: &EnvironmentState) {
+    pub fn prepare_inputs(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+    ) -> std::result::Result<(), HaresError> {
         debug_assert!(
             (env.time_step_secs() - self.dt_s).abs() < 1e-6,
             "ThermalSolver: runtime dt ({:.3}s) != configured dt ({:.3}s); re-discretize or use constant timestep",
             env.time_step_secs(),
             self.dt_s
         );
-        self.prepare_inputs_inner(ports, env);
+        self.prepare_inputs_inner(ports, env)
     }
 
-    pub fn integrate(&mut self, ports: &PortSlots, env: &EnvironmentState, out: &mut DomainUpdate) {
+    pub fn integrate(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+        out: &mut DomainUpdate,
+    ) -> std::result::Result<(), HaresError> {
         debug_assert!(
             (env.time_step_secs() - self.dt_s).abs() < 1e-6,
             "ThermalSolver: runtime dt ({:.3}s) != configured dt ({:.3}s); re-discretize or use constant timestep",
             env.time_step_secs(),
             self.dt_s
         );
-        self.integrate_inner(ports, env, out);
+        self.integrate_inner(ports, env, out)
     }
 }
 
@@ -1638,20 +1695,19 @@ impl DomainSolver for ThermalSolver {
         env: &EnvironmentState,
         dt: Duration,
         out: &mut DomainUpdate,
-    ) {
+    ) -> std::result::Result<(), HaresError> {
         debug_assert!(
             (dt.as_secs_f64() - self.dt_s).abs() < 1e-6,
             "ThermalSolver: runtime dt ({:.3}s) != configured dt ({:.3}s); re-discretize or use constant timestep",
             dt.as_secs_f64(),
             self.dt_s
         );
-        self.resolve_internal(ports, env, out);
+        self.resolve_internal(ports, env, out)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::needless_update)]
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -1662,19 +1718,21 @@ mod tests {
     };
     use nalgebra::{DMatrix, DVector};
 
+    use crate::THERMAL_SNAPSHOT_SCHEMA_VERSION;
     use crate::ThermalSnapshot;
     use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
-        BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, ExteriorSurfaceInfo,
-        FilmCoefficientModel, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
+        BoundaryCategory, DrivingTemp, ExteriorSurfaceInfo, FilmCoefficientModel,
+        InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
         InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
         NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
-        WindowSolarProperties,
+        ThermalSolverError, WindowSolarProperties,
     };
 
     fn env_for_temp(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp,
@@ -1716,7 +1774,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -1759,6 +1818,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -1853,6 +1913,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![interior_lwr_zone],
             infiltration: vec![],
@@ -1883,7 +1944,9 @@ mod tests {
 
         let mut t_last = 20.0;
         for _ in 0..60 {
-            let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+            let update = solver
+                .resolve_new(&ports, &env, Duration::from_secs(60))
+                .unwrap();
             t_last = update.zone_temperatures_c[0].1;
             env.zones[0].temperature_c = t_last;
         }
@@ -1910,7 +1973,9 @@ mod tests {
             let t = (k as f64) * dt_s;
             env.weather.outdoor_temp_c = 15.0 + 10.0 * (omega * t).sin();
             outdoor.push(env.weather.outdoor_temp_c);
-            let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+            let update = solver
+                .resolve_new(&ports, &env, Duration::from_secs(60))
+                .unwrap();
             let t_zone = update.zone_temperatures_c[0].1;
             env.zones[0].temperature_c = t_zone;
             indoor.push(t_zone);
@@ -1948,7 +2013,9 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()
         };
-        let update = boxed.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = boxed
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         assert_eq!(update.domain_id, hares_types::THERMAL);
     }
 
@@ -1990,6 +2057,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -2087,6 +2155,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -2110,7 +2179,9 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()
         };
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
 
         // Extract latent load from custom_payload
         let payload = update
@@ -2151,7 +2222,9 @@ mod tests {
         let dt = 60.0;
         for _ in 0..20 {
             let t_prev = solver.state()[0];
-            let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+            let update = solver
+                .resolve_new(&ports, &env, Duration::from_secs(60))
+                .unwrap();
             let t_next = update.zone_temperatures_c[0].1;
             let q_gain = 0.0;
             let d_e_storage = c * (t_next - t_prev) / dt;
@@ -2161,6 +2234,37 @@ mod tests {
             assert!(lhs < rhs, "lhs={lhs}, rhs={rhs}");
             env.zones[0].temperature_c = t_next;
         }
+    }
+
+    /// The interior surface diagnostic holds one (surface temperature, net
+    /// long-wave flux) pair per surface, in the zone's surface order, each the
+    /// converged value the injection used.
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    #[test]
+    fn interior_surface_diagnostic_pairs_follow_surface_order() {
+        let env = env_for_temp(21.0, 10.0);
+        let mut solver = interior_lwr_solver(&env);
+        solver.x = DVector::from_row_slice(&[21.0, 35.0, 5.0]);
+
+        let mut u = DVector::zeros(3);
+        solver.apply_interior_longwave_inputs(&mut u, &env);
+
+        let pairs: Vec<(f64, f64)> = solver
+            .int_surface_diag_buf
+            .iter()
+            .map(|d| (d.surface_temp_c, d.lwr_flux_w))
+            .collect();
+        let expected: Vec<(f64, f64)> = solver.interior_surface_temps[0]
+            .iter()
+            .copied()
+            .zip(solver.lwr_net_flux_buf.iter().copied())
+            .collect();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs, expected);
+        assert!(
+            pairs[0].0 > pairs[1].0 && pairs[0].1 < 0.0 && pairs[1].1 > 0.0,
+            "the warm surface (first) loses long-wave to the cold one: {pairs:?}"
+        );
     }
 
     #[test]
@@ -2300,9 +2404,9 @@ mod tests {
         // Envelope UA values (W/K)
         let ua_windows = 3.0 * 12.0; // 36 W/K
         let ua_walls = 0.514 * 68.0; // 34.95 W/K
+        // 0.318 W/m²K is the BESTEST roof U-value, not an approximation of 1/π.
         #[allow(clippy::approx_constant)]
-        #[allow(clippy::approx_constant)]
-        let ua_roof = 0.318 * 48.0; // 15.26 W/K -- U-value, not 1/π -- U-value, not 1/π
+        let ua_roof = 0.318 * 48.0; // 15.26 W/K
         let ua_envelope = ua_windows + ua_walls + ua_roof; // ~86.2 W/K (walls+roof+windows to outdoor)
         let ua_floor = 0.039 * 48.0; // 1.872 W/K (floor to ground)
 
@@ -2547,6 +2651,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -2602,6 +2707,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![(ZoneId(1), method)],
@@ -2639,7 +2745,9 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         let t_next = update.zone_temperatures_c[0].1;
 
         let h_inf = 1.2 * ach_infiltration(ach, env.zones[0].volume_m3) * CP_DRY_AIR_J_KG_K;
@@ -2673,6 +2781,7 @@ mod tests {
             solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_inf = solver_no_inf
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -2688,6 +2797,7 @@ mod tests {
         );
         let t_with_inf = solver_inf
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -2720,6 +2830,7 @@ mod tests {
             solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_inf = solver_no_inf
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -2734,6 +2845,7 @@ mod tests {
         );
         let t_ela = solver_ela
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -2745,13 +2857,119 @@ mod tests {
         assert!(delta > 1e-3, "ELA effect too small: delta={delta:.6} C");
     }
 
+    /// One-zone solver for the ideal-capacity contract tests: R = 2 K/W,
+    /// C = 50 MJ/K (13.9 kWh/K), 1-hour steps. Large enough capacitance that
+    /// a multi-kW input moves the zone less than a degree per step, the
+    /// dwelling-like regime.
+    fn ideal_contract_solver(dt_s: i64, zone_temp: f64, outdoor_temp: f64) -> ThermalSolver {
+        let r = 2.0;
+        let c = 5.0e7;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, dt_s as f64, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..StateSpaceWiring::default()
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            ..ThermalSolverConfig::new(ZoneId(1))
+        };
+        let env = env_for_temp(zone_temp, outdoor_temp);
+        let mut solver =
+            ThermalSolver::new(model, wiring, config, dt_s as f64, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+        solver
+    }
+
+    /// Steps the solver once with `hvac_w` delivered as the HVAC heating
+    /// category and `non_hvac_w` as an internal gain, returning the zone
+    /// temperature after the step.
+    fn step_with_gains(
+        solver: &mut ThermalSolver,
+        hvac_w: f64,
+        non_hvac_w: f64,
+        zone_temp: f64,
+        outdoor_temp: f64,
+        dt: i64,
+    ) -> f64 {
+        let env = env_for_temp(zone_temp, outdoor_temp);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        ports.thermal[0].add(hvac_w, 0.0, 0.0, hares_types::ThermalCategory::HvacHeating);
+        ports.thermal[0].add(
+            non_hvac_w,
+            0.0,
+            0.0,
+            hares_types::ThermalCategory::InternalGain,
+        );
+        let mut update = DomainUpdate::empty(hares_types::domain_solver::THERMAL);
+        DomainSolver::resolve(
+            solver,
+            &ports,
+            &env,
+            std::time::Duration::from_secs(dt as u64),
+            &mut update,
+        )
+        .unwrap();
+        update.zone_temperatures_c[0].1
+    }
+
+    /// The ideal-capacity contract across steps: after a step that already
+    /// delivered a nonzero input, solving for a new target and delivering the
+    /// returned value must land the zone on that target. The dispatcher
+    /// (`SolverFeedbackActor`) hands the return to equipment that delivers
+    /// exactly it, so a returned value short by the previous step's input
+    /// leaves the zone permanently off its setpoint. The non-HVAC gains
+    /// (appliances, plug loads) ride in the same zone sensible column: the
+    /// solve's return is the HVAC's own share, the non-HVAC part estimated
+    /// from the previous step's split.
+    #[test]
+    fn ideal_capacity_delivered_on_the_step_after_a_delivery_reaches_its_target() {
+        let dt = 3600;
+        let mut solver = ideal_contract_solver(dt, 18.0, -5.0);
+
+        // A prior step that already delivered heat (a running boiler) plus a
+        // steady internal gain.
+        let t1 = step_with_gains(&mut solver, 6000.0, 500.0, 18.0, -5.0, dt);
+        assert!(t1 > 18.0, "the prior delivery must have warmed the zone");
+
+        let target = 21.0;
+        let q = solver.solve_ideal_capacity_for_target(ZoneId(1), target);
+        assert!(q > 0.0, "heating toward the target must be positive: {q}");
+        let t2 = step_with_gains(&mut solver, q, 500.0, t1, -5.0, dt);
+        assert!(
+            (t2 - target).abs() < 0.05,
+            "delivering the returned capacity must land the zone on the target: \
+             t={t2:.4}, target={target}, q={q:.0} W"
+        );
+
+        // Holding at the same target the next step: the hold capacity, not a
+        // delta over the previous delivery.
+        let q_hold = solver.solve_ideal_capacity_for_target(ZoneId(1), target);
+        let t3 = step_with_gains(&mut solver, q_hold, 500.0, t2, -5.0, dt);
+        assert!(
+            (t3 - target).abs() < 0.05,
+            "holding the target step over step must hold: t={t3:.4}, target={target}"
+        );
+    }
+
     #[test]
     fn solve_ideal_capacity_for_target_returns_correct_load() {
         let zone_temp = 18.0;
         let outdoor_temp = -5.0;
         let target_c = 21.0;
         let env = env_for_temp(zone_temp, outdoor_temp);
-
         let r = 2.0;
         let c = 50_000.0;
         let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
@@ -2779,6 +2997,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -2809,7 +3028,9 @@ mod tests {
             ..Default::default()
         };
         ports.thermal[0].sensible_gain_w = q_ideal;
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         let t_after = update.zone_temperatures_c[0].1;
 
         assert!(
@@ -2851,6 +3072,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -2907,6 +3129,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -2967,6 +3190,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -2997,7 +3221,9 @@ mod tests {
             ..Default::default()
         };
         ports.thermal[0].sensible_gain_w = q_ideal;
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         let t_after = update.zone_temperatures_c[0].1;
 
         assert!(
@@ -3047,6 +3273,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3110,6 +3337,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3183,6 +3411,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3259,6 +3488,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3300,18 +3530,16 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()
         };
-        solver.prepare_inputs(&ports, &env);
+        solver.prepare_inputs(&ports, &env).unwrap();
         assert!(
             !solver.zone_capacity_degraded(ZoneId(1)),
             "degraded flag must be cleared at start of new step"
         );
     }
 
-    /// When the observe feature is active, the consecutive non-convergence count
-    /// must be incremented on each solve failure and cleared on recovery.
+    /// The consecutive failure count is incremented on each solve failure.
     #[test]
-    #[cfg(feature = "observe")]
-    fn consecutive_nonconvergence_count_incremented_on_failure() {
+    fn ideal_capacity_failure_count_incremented_on_failure() {
         let zone_temp = 20.0;
         let outdoor_temp = 10.0;
         let env = env_for_temp(zone_temp, outdoor_temp);
@@ -3342,6 +3570,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -3362,16 +3591,16 @@ mod tests {
 
         solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
         assert_eq!(
-            solver.consecutive_nonconvergence_count.get(&ZoneId(1)),
+            solver.ideal_capacity_failure_counts.get(&ZoneId(1)),
             Some(&1),
-            "consecutive_nonconvergence_count must increment to 1 after first failure"
+            "the failure count must increment to 1 after the first failure"
         );
 
         solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
         assert_eq!(
-            solver.consecutive_nonconvergence_count.get(&ZoneId(1)),
+            solver.ideal_capacity_failure_counts.get(&ZoneId(1)),
             Some(&2),
-            "consecutive_nonconvergence_count must increment to 2 after second failure"
+            "the failure count must increment to 2 after the second failure"
         );
     }
 
@@ -3396,6 +3625,7 @@ mod tests {
 
         let make_env = |solar_w_m2: f64| -> EnvironmentState {
             EnvironmentState {
+                ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
                 zones: vec![ZoneState {
                     id: ZoneId(1),
                     temperature_c: zone_temp,
@@ -3437,7 +3667,8 @@ mod tests {
                     frequency_hz: 60.0,
                     island_bus_voltage_pu: None,
                 },
-                custom_domains: vec![],
+                schedule_row: None,
+                domains: hares_types::DomainSlots::default(),
                 equipment_telemetry: std::collections::HashMap::new(),
                 current_time: FixedOffset::east_opt(0)
                     .unwrap()
@@ -3469,6 +3700,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 42,
                     state_index: 0,
@@ -3517,12 +3749,14 @@ mod tests {
         let mut solver_no = make_solver(&env_no_solar);
         let t_no_solar = solver_no
             .resolve_new(&ports, &env_no_solar, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let mut solver_with = make_solver(&env_solar);
         let t_solar = solver_with
             .resolve_new(&ports, &env_solar, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3557,6 +3791,7 @@ mod tests {
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
 
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp,
@@ -3598,7 +3833,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
@@ -3629,6 +3865,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 1,
                     state_index: 0,
@@ -3674,18 +3911,21 @@ mod tests {
         let mut solver_full = make_solver(1.0);
         let t_full = solver_full
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let mut solver_060 = make_solver(0.60);
         let t_060 = solver_060
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let mut solver_005 = make_solver(0.05);
         let t_005 = solver_005
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3727,6 +3967,7 @@ mod tests {
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
 
         let make_env = || EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp,
@@ -3768,7 +4009,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
@@ -3799,6 +4041,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
 
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 0,
@@ -3846,10 +4089,12 @@ mod tests {
 
         let t_dark = make_solver(0.25)
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
         let t_light = make_solver(0.60)
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3896,6 +4141,7 @@ mod tests {
         let mut solver_low = solver_with_infiltration(&env_low_wind, method);
         let t_low_wind = solver_low
             .resolve_new(&ports, &env_low_wind, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3904,6 +4150,7 @@ mod tests {
         let mut solver_high = solver_with_infiltration(&env_high_wind, method);
         let t_high_wind = solver_high
             .resolve_new(&ports, &env_high_wind, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3944,6 +4191,7 @@ mod tests {
         let mut solver_low = solver_with_infiltration(&env_low_wind, method);
         let t_low_wind = solver_low
             .resolve_new(&ports, &env_low_wind, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -3952,6 +4200,7 @@ mod tests {
         let mut solver_high = solver_with_infiltration(&env_high_wind, method);
         let t_high_wind = solver_high
             .resolve_new(&ports, &env_high_wind, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4083,6 +4332,7 @@ mod tests {
 
         let make_env = |solar_w_m2: f64| -> EnvironmentState {
             EnvironmentState {
+                ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
                 zones: vec![ZoneState {
                     id: ZoneId(1),
                     temperature_c: zone_temp,
@@ -4124,7 +4374,8 @@ mod tests {
                     frequency_hz: 60.0,
                     island_bus_voltage_pu: None,
                 },
-                custom_domains: vec![],
+                schedule_row: None,
+                domains: hares_types::DomainSlots::default(),
                 equipment_telemetry: std::collections::HashMap::new(),
                 current_time: FixedOffset::east_opt(0)
                     .unwrap()
@@ -4156,6 +4407,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 7,
                     state_index: 0,
@@ -4201,18 +4453,21 @@ mod tests {
         let env_base = make_env(0.0);
         let t_base = make_solver(&env_base)
             .resolve_new(&ports, &env_base, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let env_low = make_env(300.0);
         let t_low = make_solver(&env_low)
             .resolve_new(&ports, &env_low, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let env_high = make_env(600.0);
         let t_high = make_solver(&env_high)
             .resolve_new(&ports, &env_high, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4255,6 +4510,7 @@ mod tests {
         let mut solver_no_nv = solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_nv = solver_no_nv
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4286,6 +4542,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -4308,6 +4565,7 @@ mod tests {
 
         let t_nv = solver_nv
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4341,6 +4599,7 @@ mod tests {
         let mut solver_no_nv = solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_nv = solver_no_nv
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4372,6 +4631,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -4394,6 +4654,7 @@ mod tests {
 
         let t_nv = solver_nv
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4474,6 +4735,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
 
                 exterior_surfaces,
                 interior_lwr_zones: vec![],
@@ -4504,11 +4766,13 @@ mod tests {
 
         let t_no_lw = make_solver(false, &env)
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let t_with_lw = make_solver(true, &env)
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4561,6 +4825,7 @@ mod tests {
         // 500 W/m² direct irradiance, no diffuse or reflected.
         let make_env = |aoi_rad: f64| -> EnvironmentState {
             EnvironmentState {
+                ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
                 zones: vec![ZoneState {
                     id: ZoneId(1),
                     temperature_c: zone_temp,
@@ -4602,7 +4867,8 @@ mod tests {
                     frequency_hz: 60.0,
                     island_bus_voltage_pu: None,
                 },
-                custom_domains: vec![],
+                schedule_row: None,
+                domains: hares_types::DomainSlots::default(),
                 equipment_telemetry: std::collections::HashMap::new(),
                 current_time: FixedOffset::east_opt(0)
                     .unwrap()
@@ -4634,6 +4900,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::from([(window_surface_id, win_props)]),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
                 exterior_surfaces: vec![],
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
@@ -4666,11 +4933,13 @@ mod tests {
 
         let t_normal = make_solver(&env_normal)
             .resolve_new(&ports, &env_normal, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let t_oblique = make_solver(&env_oblique)
             .resolve_new(&ports, &env_oblique, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -4691,6 +4960,128 @@ mod tests {
         assert!(
             delta_oblique < delta_normal * 0.95,
             "oblique gain must be less than 95% of normal gain: delta_oblique={delta_oblique:.6}, delta_normal={delta_normal:.6}"
+        );
+    }
+
+    /// The reported "Window Transmitted Solar Gain" quantity is the
+    /// through-glass flux only, excluding the inward-flowing share of the
+    /// glass-absorbed solar: `through_glass = A·τ·POA` and
+    /// `injected = through_glass + A·(SHGC − τ)·N_i·POA` per window. The
+    /// through-glass value is what OCHRE reports under the same name
+    /// (Envelope.py:1160: `transmitted_gain = solar_gain × transmittance`).
+    #[test]
+    fn window_transmitted_report_excludes_absorbed_inward_share() {
+        use hares_physics::solar::{GlazingCurve, calculate_window_parameters, window_iam};
+
+        let zone_temp = 18.0_f64;
+        let outdoor_temp = 5.0_f64;
+        let r = 2.0_f64;
+        let c = 50_000.0_f64;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 3, &[1.0 / (r * c), 1.0 / c, 1.0 / c]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let window_surface_id: u32 = 55;
+        let shgc = 0.4_f64;
+        let u = 1.8_f64;
+        let area_m2 = 2.0_f64;
+        let (transmittance, radiation_frac) = calculate_window_parameters(shgc, u, 0.01);
+        let win_props = WindowSolarProperties {
+            shgc,
+            winter_shgc: shgc,
+            u_factor_w_m2_k: u,
+            area_m2,
+            transmittance,
+            winter_transmittance: transmittance,
+            radiation_frac,
+            glazing_curve: GlazingCurve::from_u_shgc(u, shgc),
+            tilt_deg: 90.0,
+            azimuth_deg: 180.0,
+        };
+
+        let mut env = env_for_temp(zone_temp, outdoor_temp);
+        env.weather.solar_irradiance = vec![SurfaceIrradiance {
+            surface_id: window_surface_id,
+            direct_w_m2: 500.0,
+            diffuse_w_m2: 0.0,
+            reflected_w_m2: 0.0,
+            angle_of_incidence_rad: 5.0_f64.to_radians(),
+        }];
+        env.current_time = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
+            .single()
+            .unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let cfg = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::from([(window_surface_id, win_props)]),
+            window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            ideal_capacity_degraded_threshold: 3,
+        };
+        let mut solver = ThermalSolver::new(model, wiring, cfg, 60.0, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+        {
+            let ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..Default::default()
+            };
+            solver.prepare_inputs(&ports, &env).unwrap();
+        }
+
+        let gains = solver.component_gains();
+        let iam = window_iam(5.0_f64.to_radians(), GlazingCurve::from_u_shgc(u, shgc));
+        let poa_beam = 500.0 * iam;
+        let expected_through_glass = area_m2 * transmittance * poa_beam;
+        let expected_absorbed = area_m2 * (shgc - transmittance) * radiation_frac * poa_beam;
+
+        assert!(
+            (gains.window_through_glass_w - expected_through_glass).abs() < 1e-9,
+            "through-glass {} != area·τ·POA {}",
+            gains.window_through_glass_w,
+            expected_through_glass
+        );
+        assert!(
+            (gains.window_solar_w - (expected_through_glass + expected_absorbed)).abs() < 1e-9,
+            "injected {} != through-glass + absorbed-inward {}",
+            gains.window_solar_w,
+            expected_through_glass + expected_absorbed
+        );
+        assert!(
+            gains.window_solar_w > gains.window_through_glass_w,
+            "the absorbed-inward share must be part of the injection total only"
         );
     }
 
@@ -4754,6 +5145,7 @@ mod tests {
                     indoor_zone_id: ZoneId(1),
                     window_properties: HashMap::new(),
                     window_zone_ids: HashMap::new(),
+                    window_ids_sorted: Vec::new(),
 
                     exterior_surfaces,
                     interior_lwr_zones: vec![],
@@ -5110,6 +5502,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![lwr_zone.clone()],
             infiltration: vec![],
@@ -5180,6 +5573,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -5226,6 +5620,7 @@ mod tests {
         );
         let t_no_recovery = solver_no_recovery
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -5242,6 +5637,7 @@ mod tests {
         );
         let t_hrv = solver_hrv
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -5289,7 +5685,9 @@ mod tests {
         // No recovery
         let mut solver_no =
             solver_with_ventilation(&env, MechanicalVentilationParams::default(), vent_flow);
-        let update_no = solver_no.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update_no = solver_no
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         let latent_no = extract_latent(&update_no);
 
         // ERV: 70% sensible, 30% latent recovery
@@ -5303,7 +5701,9 @@ mod tests {
             },
             vent_flow,
         );
-        let update_erv = solver_erv.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update_erv = solver_erv
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         let latent_erv = extract_latent(&update_erv);
 
         // Outdoor humidity (0.004) < indoor (0.008) → latent gain is negative.
@@ -5335,6 +5735,7 @@ mod tests {
             solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.5 });
         let t_inf_only = solver_inf_only
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -5368,6 +5769,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.5 })],
@@ -5398,6 +5800,7 @@ mod tests {
         solver_combined.x[0] = env.zones[0].temperature_c;
         let t_combined = solver_combined
             .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -5467,6 +5870,7 @@ mod tests {
         let make_env = |year_month: (i32, u32)| -> EnvironmentState {
             let (year, month) = year_month;
             EnvironmentState {
+                ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
                 zones: vec![ZoneState {
                     id: ZoneId(1),
                     temperature_c: zone_temp,
@@ -5508,7 +5912,8 @@ mod tests {
                     frequency_hz: 60.0,
                     island_bus_voltage_pu: None,
                 },
-                custom_domains: vec![],
+                schedule_row: None,
+                domains: hares_types::DomainSlots::default(),
                 equipment_telemetry: std::collections::HashMap::new(),
                 current_time: FixedOffset::east_opt(0)
                     .unwrap()
@@ -5540,6 +5945,7 @@ mod tests {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::from([(window_surface_id, win_props)]),
                 window_zone_ids: HashMap::new(),
+                window_ids_sorted: Vec::new(),
                 exterior_surfaces: vec![],
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
@@ -5572,11 +5978,13 @@ mod tests {
 
         let t_jan = make_solver(&env_jan)
             .resolve_new(&ports, &env_jan, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
         let t_jul = make_solver(&env_jul)
             .resolve_new(&ports, &env_jul, Duration::from_secs(60))
+            .unwrap()
             .zone_temperatures_c[0]
             .1;
 
@@ -5624,7 +6032,7 @@ mod tests {
 
         // Now change outdoor to 0 C and only call prepare_inputs.
         let env_cold = env_for_temp(20.0, 0.0);
-        solver.prepare_inputs(&ports, &env_cold);
+        solver.prepare_inputs(&ports, &env_cold).unwrap();
 
         // Ideal capacity to hold 20 C should be positive (heating needed)
         // because prepare_inputs updated the background to use 0 C outdoor.
@@ -5647,13 +6055,17 @@ mod tests {
 
         let mut solver_single = one_zone_solver(&env);
         solver_single.x[0] = 20.0;
-        let update_single = solver_single.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update_single = solver_single
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
 
         let mut solver_split = one_zone_solver(&env);
         solver_split.x[0] = 20.0;
-        solver_split.prepare_inputs(&ports, &env);
+        solver_split.prepare_inputs(&ports, &env).unwrap();
         let mut out_split = DomainUpdate::empty(hares_types::THERMAL);
-        solver_split.integrate(&ports, &env, &mut out_split);
+        solver_split
+            .integrate(&ports, &env, &mut out_split)
+            .unwrap();
 
         let t_single = update_single.zone_temperatures_c[0].1;
         let t_split = out_split.zone_temperatures_c[0].1;
@@ -5676,22 +6088,26 @@ mod tests {
         // Baseline: no HVAC
         let mut solver_base = one_zone_solver(&env);
         solver_base.x[0] = 20.0;
-        solver_base.prepare_inputs(&ports_zero, &env);
+        solver_base.prepare_inputs(&ports_zero, &env).unwrap();
         let mut out_base = DomainUpdate::empty(hares_types::THERMAL);
-        solver_base.integrate(&ports_zero, &env, &mut out_base);
+        solver_base
+            .integrate(&ports_zero, &env, &mut out_base)
+            .unwrap();
         let t_base = out_base.zone_temperatures_c[0].1;
 
         // With heating: add 1000 W between phases
         let mut solver_heat = one_zone_solver(&env);
         solver_heat.x[0] = 20.0;
-        solver_heat.prepare_inputs(&ports_zero, &env);
+        solver_heat.prepare_inputs(&ports_zero, &env).unwrap();
         let mut ports_heat = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()
         };
         ports_heat.thermal[0].sensible_gain_w = 1000.0;
         let mut out_heat = DomainUpdate::empty(hares_types::THERMAL);
-        solver_heat.integrate(&ports_heat, &env, &mut out_heat);
+        solver_heat
+            .integrate(&ports_heat, &env, &mut out_heat)
+            .unwrap();
         let t_heat = out_heat.zone_temperatures_c[0].1;
 
         assert!(
@@ -5720,6 +6136,7 @@ mod tests {
                 sensible_gain_w: 0.0,
                 radiant_gain_w: radiant_w,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
                 radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
@@ -5767,6 +6184,124 @@ mod tests {
             total_deposited,
             radiant_w
         );
+    }
+
+    /// Deposits 80 W of short-wave internal gain on zone 1 of `solver` and
+    /// checks it against `surfaces` (input index, area, inside solar
+    /// absorptance, radiation fraction): each surface takes its share of area
+    /// × absorptance, passes its radiation fraction to its node and the rest
+    /// to the zone air, and every watt is deposited.
+    fn assert_shortwave_absorbed_like_diffuse_solar(
+        solver: &mut ThermalSolver,
+        surfaces: &[(usize, f64, f64, f64)],
+    ) {
+        let zone = ZoneId(1);
+        let shortwave_w = 80.0;
+        let mut accumulator = hares_types::ThermalAccumulator::new(zone);
+        accumulator.shortwave_gain_w = shortwave_w;
+        let ports = PortSlots {
+            thermal: vec![accumulator],
+            ..Default::default()
+        };
+
+        let mut u = DVector::zeros(3);
+        solver.apply_port_shortwave_inputs(&mut u, &ports, false);
+
+        let total_weight: f64 = surfaces.iter().map(|&(_, a, abs, _)| a * abs).sum();
+        assert!(total_weight > 0.0);
+        let air_idx = solver.wiring.zone_sensible_input_indices[&zone];
+        let mut air_expected = 0.0;
+        for &(input_index, area, absorptance, radiation_frac) in surfaces {
+            let q = shortwave_w * area * absorptance / total_weight;
+            assert_ne!(input_index, air_idx);
+            assert!(
+                (u[input_index] - q * radiation_frac).abs() < 1e-9,
+                "surface input_index={input_index} receives {}, got {}",
+                q * radiation_frac,
+                u[input_index]
+            );
+            air_expected += q * (1.0 - radiation_frac);
+        }
+        assert!((u[air_idx] - air_expected).abs() < 1e-9);
+        assert!(
+            (u.iter().sum::<f64>() - shortwave_w).abs() < 1e-9,
+            "every short-wave watt is deposited"
+        );
+    }
+
+    const SHORTWAVE_TEST_SURFACES: [(f64, f64); 2] = [(0.7, 0.8), (0.5, 0.9)];
+
+    /// Short-wave internal gain (the visible part of lighting) is absorbed by
+    /// the zone's interior surfaces as transmitted diffuse solar is, in
+    /// proportion to area × inside solar absorptance, and every watt reaches
+    /// a surface node or the zone air (ScriptF interior exchange).
+    #[test]
+    fn shortwave_gains_are_absorbed_like_transmitted_diffuse_solar() {
+        let env = env_for_temp(20.0, 10.0);
+        let mut solver = interior_lwr_solver(&env);
+        for (surface, (absorptance, radiation_frac)) in solver.config.interior_lwr_zones[0]
+            .surfaces
+            .iter_mut()
+            .zip(SHORTWAVE_TEST_SURFACES)
+        {
+            surface.solar_absorptance = absorptance;
+            surface.radiation_frac = radiation_frac;
+        }
+        let surfaces: Vec<_> = solver.config.interior_lwr_zones[0]
+            .surfaces
+            .iter()
+            .map(|s| {
+                (
+                    s.input_index,
+                    s.area_m2,
+                    s.solar_absorptance,
+                    s.radiation_frac,
+                )
+            })
+            .collect();
+        assert_shortwave_absorbed_like_diffuse_solar(&mut solver, &surfaces);
+    }
+
+    /// The same deposit in the default StarMesh mode, where the zone's
+    /// surfaces reach the distribution through `interior_solar_zones` and
+    /// `interior_lwr_zones` is empty.
+    #[test]
+    fn shortwave_gains_are_absorbed_like_transmitted_diffuse_solar_in_star_mesh_mode() {
+        let env = env_for_temp(20.0, 10.0);
+        let mut solver = interior_lwr_solver(&env);
+        let lwr_zone = solver.config.interior_lwr_zones.remove(0);
+        let surfaces: Vec<InteriorSolarSurfaceInfo> = lwr_zone
+            .surfaces
+            .iter()
+            .zip(SHORTWAVE_TEST_SURFACES)
+            .map(
+                |(s, (solar_absorptance, radiation_frac))| InteriorSolarSurfaceInfo {
+                    input_index: Some(s.input_index),
+                    area_m2: s.area_m2,
+                    solar_absorptance,
+                    radiation_frac,
+                    is_floor: s.is_floor,
+                    tilt_deg: s.tilt_deg,
+                    azimuth_deg: s.azimuth_deg,
+                },
+            )
+            .collect();
+        let expected: Vec<_> = surfaces
+            .iter()
+            .map(|s| {
+                (
+                    s.input_index.expect("surface input"),
+                    s.area_m2,
+                    s.solar_absorptance,
+                    s.radiation_frac,
+                )
+            })
+            .collect();
+        solver.config.interior_solar_zones = vec![InteriorSolarZoneConfig {
+            zone_id: lwr_zone.zone_id,
+            surfaces,
+        }];
+        assert_shortwave_absorbed_like_diffuse_solar(&mut solver, &expected);
     }
 
     #[test]
@@ -5865,6 +6400,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![interior_lwr_zone],
             infiltration: vec![],
@@ -5890,6 +6426,7 @@ mod tests {
                 sensible_gain_w: 0.0,
                 radiant_gain_w: radiant_w,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
                 radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
@@ -6008,6 +6545,7 @@ mod tests {
             indoor_zone_id: zone,
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![interior_lwr_zone],
             infiltration: vec![],
@@ -6278,6 +6816,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -6304,6 +6843,7 @@ mod tests {
                 sensible_gain_w: 0.0,
                 radiant_gain_w: radiant_w,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
                 radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
@@ -6410,6 +6950,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -6420,7 +6961,7 @@ mod tests {
             return_duct_leakage_m3_s: 0.0,
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
-            boundary_diagnostics: vec![BoundaryDiagnosticInfo::RCNode {
+            boundary_diagnostics: vec![crate::thermal_solver::BoundaryDiagnosticInfo::RCNode {
                 inner_state_index: 1, // wall node
                 area_m2,
                 tilt_deg,
@@ -6445,7 +6986,9 @@ mod tests {
         };
 
         let mut update = DomainUpdate::empty(hares_types::THERMAL);
-        solver.resolve(&ports, &env, Duration::from_secs(60), &mut update);
+        solver
+            .resolve(&ports, &env, Duration::from_secs(60), &mut update)
+            .unwrap();
 
         let wall_gain = solver.component_gains().wall_heat_gain_w;
 
@@ -6500,6 +7043,7 @@ mod tests {
                 sensible_gain_w: convect,
                 radiant_gain_w: radiant,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: [0.0; hares_types::THERMAL_CATEGORY_COUNT],
                 radiant_by_category: [0.0; hares_types::THERMAL_CATEGORY_COUNT],
                 latent_by_category: [0.0; hares_types::THERMAL_CATEGORY_COUNT],
@@ -6509,10 +7053,9 @@ mod tests {
             fluid: vec![],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         };
 
-        solver.prepare_inputs(&ports, &env);
+        solver.prepare_inputs(&ports, &env).unwrap();
         let gains = solver.component_gains();
 
         assert!(
@@ -6590,6 +7133,7 @@ mod tests {
             indoor_zone_id: indoor,
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -6628,6 +7172,7 @@ mod tests {
                     sensible_gain_w: indoor_jacket,
                     radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
+                    shortwave_gain_w: 0.0,
                     sensible_by_category: {
                         let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                         a[ThermalCategory::JacketLoss.index()] = indoor_jacket;
@@ -6641,6 +7186,7 @@ mod tests {
                     sensible_gain_w: garage_jacket,
                     radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
+                    shortwave_gain_w: 0.0,
                     sensible_by_category: {
                         let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                         a[ThermalCategory::JacketLoss.index()] = garage_jacket;
@@ -6653,7 +7199,7 @@ mod tests {
             ..Default::default()
         };
 
-        solver.prepare_inputs(&ports, &env);
+        solver.prepare_inputs(&ports, &env).unwrap();
         let gains = solver.component_gains();
 
         let expected_total = indoor_jacket + garage_jacket;
@@ -6673,6 +7219,7 @@ mod tests {
                 sensible_gain_w: indoor_jacket,
                 radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: {
                     let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                     a[ThermalCategory::JacketLoss.index()] = indoor_jacket;
@@ -6684,7 +7231,7 @@ mod tests {
             ..Default::default()
         };
 
-        solver.prepare_inputs(&ports_indoor_only, &env);
+        solver.prepare_inputs(&ports_indoor_only, &env).unwrap();
         let gains = solver.component_gains();
 
         assert!(
@@ -6701,6 +7248,7 @@ mod tests {
                 sensible_gain_w: garage_jacket,
                 radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
+                shortwave_gain_w: 0.0,
                 sensible_by_category: {
                     let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                     a[ThermalCategory::JacketLoss.index()] = garage_jacket;
@@ -6712,7 +7260,7 @@ mod tests {
             ..Default::default()
         };
 
-        solver.prepare_inputs(&ports_garage_only, &env);
+        solver.prepare_inputs(&ports_garage_only, &env).unwrap();
         let gains = solver.component_gains();
 
         assert!(
@@ -6782,6 +7330,7 @@ mod tests {
             indoor_zone_id: indoor,
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             infiltration: vec![],
@@ -6820,6 +7369,7 @@ mod tests {
                     sensible_gain_w: indoor_jacket,
                     radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
+                    shortwave_gain_w: 0.0,
                     sensible_by_category: {
                         let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                         a[ThermalCategory::JacketLoss.index()] = indoor_jacket;
@@ -6833,6 +7383,7 @@ mod tests {
                     sensible_gain_w: garage_jacket,
                     radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
+                    shortwave_gain_w: 0.0,
                     sensible_by_category: {
                         let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
                         a[ThermalCategory::JacketLoss.index()] = garage_jacket;
@@ -6845,7 +7396,7 @@ mod tests {
             ..Default::default()
         };
 
-        solver.prepare_inputs(&ports, &env);
+        solver.prepare_inputs(&ports, &env).unwrap();
         let gains = solver.component_gains();
 
         let by_zone: std::collections::HashMap<ZoneId, f64> =
@@ -6903,6 +7454,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             interior_solar_zones: Vec::new(),
@@ -6936,7 +7488,7 @@ mod tests {
 
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 26.0).unwrap();
         solver.x[0] = 26.0;
-        solver.prepare_inputs(&ports, &env);
+        solver.prepare_inputs(&ports, &env).unwrap();
         let gains = solver.component_gains();
 
         assert!(
@@ -6958,78 +7510,324 @@ mod tests {
 
     // ── restore_state atomicity: validation before mutation ──────────────
 
-    /// `restore_state` must validate ALL fields before mutating any state.
-    /// If any field is non-finite, the solver's existing state must be
-    /// left completely unchanged (atomic restore).
+    /// Asserts `restore_state` rejects `bad_snap` with an error naming
+    /// `expected_in_error` and, because it validates every field before
+    /// mutating any, leaves every piece of snapshotted state as it was.
+    fn assert_restore_rejected_atomically(
+        solver: &mut ThermalSolver,
+        bad_snap: &ThermalSnapshot,
+        expected_in_error: &str,
+    ) {
+        let before = solver.snapshot_state();
+        let err = solver
+            .restore_state(bad_snap)
+            .expect_err("an invalid snapshot must be rejected");
+        assert!(
+            err.to_string().contains(expected_in_error),
+            "the rejection must name '{expected_in_error}'; got: {err}"
+        );
+        assert!(
+            matches!(
+                err,
+                ThermalSolverError::InvalidSnapshot(_)
+                    | ThermalSolverError::InvalidVentilationRecovery { .. }
+            ),
+            "a restore must reject with a snapshot error, got: {err:?}"
+        );
+        assert_eq!(
+            solver.snapshot_state(),
+            before,
+            "solver state must be unchanged after a rejected restore (atomicity)"
+        );
+    }
+
     #[test]
     fn restore_state_rejects_non_finite_x_and_leaves_solver_unchanged() {
         let env = env_for_temp(22.0, 5.0);
         let mut solver = one_zone_solver(&env);
-        let original_x = solver.x[0];
-
         let bad_snap = ThermalSnapshot {
             x: vec![f64::NAN],
-            last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
+            ..solver.snapshot_state()
         };
-
-        let result = solver.restore_state(&bad_snap);
-        assert!(result.is_err(), "restore with NaN x must return Err");
-
-        assert_eq!(
-            solver.x[0], original_x,
-            "solver state must be unchanged after rejected restore (atomicity)"
-        );
+        assert_restore_rejected_atomically(&mut solver, &bad_snap, "non-finite x[0]");
     }
 
     #[test]
     fn restore_state_rejects_non_finite_last_u_and_leaves_solver_unchanged() {
         let env = env_for_temp(22.0, 5.0);
         let mut solver = one_zone_solver(&env);
-        let original_x = solver.x[0];
-
         let bad_snap = ThermalSnapshot {
-            x: vec![25.0],
             last_u: vec![f64::NAN, 0.0],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
+            ..solver.snapshot_state()
         };
+        assert_restore_rejected_atomically(&mut solver, &bad_snap, "non-finite last_u[0]");
+    }
 
-        let result = solver.restore_state(&bad_snap);
-        assert!(result.is_err(), "restore with NaN last_u must return Err");
+    #[test]
+    fn restore_state_rejects_a_last_u_of_the_wrong_length() {
+        let env = env_for_temp(22.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        let bad_snap = ThermalSnapshot {
+            last_u: vec![],
+            ..solver.snapshot_state()
+        };
+        assert_restore_rejected_atomically(&mut solver, &bad_snap, "last_u length");
+    }
 
+    #[test]
+    fn restore_state_rejects_invalid_coupling_state_and_leaves_solver_unchanged() {
+        let env = env_for_temp(22.0, 5.0);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let mut solver = solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.5 });
+        solver.prepare_inputs(&ports, &env).unwrap();
+        let valid = solver.snapshot_state();
+        let n_states = valid.x.len();
+
+        for (bad_couplings, expected_in_error) in [
+            (vec![(n_states, 0.1, 1.0)], "last_coupling[0]"),
+            (vec![(0, -0.1, 1.0)], "last_coupling[0]"),
+            (vec![(0, f64::NAN, 1.0)], "last_coupling[0]"),
+            (vec![(0, 0.1, f64::INFINITY)], "last_coupling[0]"),
+            // Finite, but no envelope temperature implies it: the solve
+            // overflows to an infinite capacity.
+            (vec![(0, 0.1, f64::MAX)], "last_coupling[0]"),
+            // A forcing with no implicit coefficient to carry it.
+            (vec![(0, 0.0, 1.0)], "last_coupling[0]"),
+            // Each coupling finite; together they overflow the divisor.
+            (
+                vec![(0, f64::MAX, 0.0), (0, f64::MAX, 0.0)],
+                "aggregates to a non-finite coefficient",
+            ),
+            // Damping that leaves the zone's gain below what any solve can
+            // divide by.
+            (vec![(0, 1.0e300, 0.0)], "damps zone"),
+        ] {
+            let bad_snap = ThermalSnapshot {
+                last_coupling: bad_couplings,
+                ..valid.clone()
+            };
+            assert_restore_rejected_atomically(&mut solver, &bad_snap, expected_in_error);
+        }
+    }
+
+    #[test]
+    fn restore_state_rejects_invalid_ventilation_recovery_and_leaves_solver_unchanged() {
+        let env = env_for_temp(22.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        let valid = solver.snapshot_state();
+        for (sensible, latent) in [(-0.1, 0.5), (1.1, 0.5), (0.5, f64::NAN)] {
+            let bad_snap = ThermalSnapshot {
+                sensible_recovery_efficiency: sensible,
+                latent_recovery_efficiency: latent,
+                ..valid.clone()
+            };
+            assert_restore_rejected_atomically(&mut solver, &bad_snap, "is outside [0, 1]");
+        }
+    }
+
+    /// A snapshot written against another version of the snapshot schema
+    /// does not describe a state this build's solver can hold, so the
+    /// restore rejects it before any mutation.
+    #[test]
+    fn restore_state_rejects_a_foreign_snapshot_schema_version() {
+        let env = env_for_temp(22.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        let valid = solver.snapshot_state();
+        for wrong in [THERMAL_SNAPSHOT_SCHEMA_VERSION + 1, 0] {
+            let bad_snap = ThermalSnapshot {
+                schema_version: wrong,
+                ..valid.clone()
+            };
+            assert_restore_rejected_atomically(
+                &mut solver,
+                &bad_snap,
+                &format!("schema version: got {wrong}, expected {THERMAL_SNAPSHOT_SCHEMA_VERSION}"),
+            );
+        }
+    }
+
+    #[test]
+    fn restore_state_rejects_invalid_fallback_state_and_leaves_solver_unchanged() {
+        let env = env_for_temp(22.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        let valid = solver.snapshot_state();
+        for (bad_snap, expected_in_error) in [
+            (
+                ThermalSnapshot {
+                    ideal_capacity_failure_counts: vec![(ZoneId(9), 1)],
+                    ..valid.clone()
+                },
+                "does not solve",
+            ),
+            (
+                ThermalSnapshot {
+                    ideal_capacity_failure_counts: vec![(ZoneId(1), 0)],
+                    ..valid.clone()
+                },
+                "ideal_capacity_failure_counts[0]",
+            ),
+            (
+                ThermalSnapshot {
+                    last_good_capacity_w: vec![(ZoneId(1), f64::INFINITY)],
+                    ..valid.clone()
+                },
+                "last_good_capacity_w[0]",
+            ),
+            (
+                ThermalSnapshot {
+                    last_good_capacity_w: vec![(ZoneId(1), 1.0), (ZoneId(1), 2.0)],
+                    ..valid.clone()
+                },
+                "strictly increasing zone order",
+            ),
+        ] {
+            assert_restore_rejected_atomically(&mut solver, &bad_snap, expected_in_error);
+        }
+    }
+
+    /// Forces the next `solve_ideal_capacity_for_target` on zone 1 to fail
+    /// with a zero effective gain and restores the solver's own couplings
+    /// afterwards; returns the solve's capacity.
+    fn failing_zone_one_solve(solver: &mut ThermalSolver) -> f64 {
+        let couplings = std::mem::replace(&mut solver.last_coupling, vec![(0, 1.0e300, 0.0)]);
+        let capacity = solver.solve_ideal_capacity_for_target(ZoneId(1), 21.0);
+        solver.last_coupling = couplings;
+        capacity
+    }
+
+    /// The consecutive-failure counts and last-good capacities decide what a
+    /// failing solve returns (zero below the degraded threshold, the
+    /// last-good capacity at or above it), so a restored solver must fall
+    /// back exactly as the solver its snapshot came from.
+    #[test]
+    fn restore_state_restores_ideal_capacity_fallback_state() {
+        let env = env_for_temp(20.0, 5.0);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let mut original = solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.5 });
+        original.prepare_inputs(&ports, &env).unwrap();
+        let last_good = original.solve_ideal_capacity_for_target(ZoneId(1), 21.0);
+        assert_ne!(last_good, 0.0, "the healthy solve must deliver a capacity");
+        let threshold = original.config.ideal_capacity_degraded_threshold;
+        for _ in 1..threshold {
+            assert_eq!(
+                failing_zone_one_solve(&mut original),
+                0.0,
+                "a failure below the threshold returns zero"
+            );
+        }
+        let snap = original.snapshot_state();
+
+        let mut restored = solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.5 });
+        restored.restore_state(&snap).unwrap();
+
+        let expected = failing_zone_one_solve(&mut original);
+        let actual = failing_zone_one_solve(&mut restored);
         assert_eq!(
-            solver.x[0], original_x,
-            "solver state must be unchanged after rejected restore (atomicity)"
+            expected.to_bits(),
+            last_good.to_bits(),
+            "the failure reaching the threshold returns the last-good capacity"
         );
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "the restored solver's failing solve ({actual} W) is not the snapshot \
+             source's ({expected} W)"
+        );
+        assert!(restored.zone_capacity_degraded(ZoneId(1)));
+    }
+
+    /// The ventilation recovery effectiveness set by the dwelling after one
+    /// step is read by the next step's input build, so a restored solver
+    /// must hold the snapshot's values, not its own.
+    #[test]
+    fn restore_state_restores_ventilation_recovery() {
+        let env = env_for_temp(20.0, 5.0);
+        let mut original = one_zone_solver(&env);
+        original.set_ventilation_recovery(0.34, 0.12).unwrap();
+        let snap = original.snapshot_state();
+
+        let mut restored = one_zone_solver(&env);
+        restored.set_ventilation_recovery(0.72, 0.5).unwrap();
+        restored.restore_state(&snap).unwrap();
+        let ventilation = &restored.config().ventilation;
+        assert_eq!(ventilation.sensible_recovery_efficiency, 0.34);
+        assert_eq!(ventilation.latent_recovery_efficiency, 0.12);
+    }
+
+    #[test]
+    fn set_ventilation_recovery_rejects_values_outside_unit_interval() {
+        let env = env_for_temp(20.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        for (sensible, latent) in [(1.5, 0.0), (0.0, -0.5), (f64::NAN, 0.0)] {
+            let err = solver
+                .set_ventilation_recovery(sensible, latent)
+                .expect_err("an efficiency outside [0, 1] must be rejected");
+            assert!(err.to_string().contains("is outside [0, 1]"), "got: {err}");
+        }
+    }
+
+    /// The ideal-capacity solve reads the coupling terms of the step as well
+    /// as `x` and `last_u`, so a restored solver must solve exactly as the
+    /// solver the snapshot was taken from. Covered both ways the coupling
+    /// state can differ: a coupled snapshot restored onto a solver holding
+    /// other coupling values, and an uncoupled snapshot restored onto a
+    /// coupled solver.
+    #[test]
+    fn restore_state_restores_coupling_state() {
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let mild_env = env_for_temp(20.0, 5.0);
+        let cold_env = env_for_temp(20.0, -15.0);
+        let target_c = 21.0;
+
+        for (scenario, prepare_original) in [
+            ("coupled snapshot onto other couplings", true),
+            ("uncoupled snapshot onto a coupled solver", false),
+        ] {
+            let mut original =
+                solver_with_infiltration(&mild_env, InfiltrationMethod::Ach { ach: 0.5 });
+            if prepare_original {
+                original.prepare_inputs(&ports, &mild_env).unwrap();
+            }
+            let snap = original.snapshot_state();
+
+            let mut restored = original.clone();
+            restored.prepare_inputs(&ports, &cold_env).unwrap();
+            assert_ne!(
+                restored.last_coupling, original.last_coupling,
+                "{scenario}: the solver restored onto must hold different couplings"
+            );
+            restored.restore_state(&snap).unwrap();
+
+            let expected = original.solve_ideal_capacity_for_target(ZoneId(1), target_c);
+            let actual = restored.solve_ideal_capacity_for_target(ZoneId(1), target_c);
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{scenario}: the solve after restore_state ({actual} W) is not bitwise \
+                 the snapshot source's ({expected} W)"
+            );
+        }
     }
 
     #[test]
     fn restore_state_rejects_non_finite_interior_surface_temps_and_leaves_solver_unchanged() {
         let env = env_for_temp(22.0, 5.0);
-        let mut solver = one_zone_solver(&env);
-        let original_x = solver.x[0];
-
-        let bad_snap = ThermalSnapshot {
-            x: vec![25.0],
-            last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![vec![20.0, f64::NAN]],
-            interior_surface_prev_temps: vec![],
-        };
-
-        let result = solver.restore_state(&bad_snap);
-        assert!(
-            result.is_err(),
-            "restore with NaN interior surface temp must return Err"
-        );
-
-        assert_eq!(
-            solver.x[0], original_x,
-            "solver state must be unchanged after rejected restore (atomicity)"
+        let mut solver = interior_lwr_solver(&env);
+        let mut bad_snap = solver.snapshot_state();
+        bad_snap.interior_surface_temps[0][1] = f64::NAN;
+        assert_restore_rejected_atomically(
+            &mut solver,
+            &bad_snap,
+            "non-finite interior_surface_temps[0][1]",
         );
     }
 
@@ -7076,10 +7874,7 @@ mod tests {
             outdoor_temp_input_indices: vec![0],
             ..Default::default()
         };
-        let config = ThermalSolverConfig {
-            indoor_zone_id: ZoneId(1),
-            ..Default::default()
-        };
+        let config = ThermalSolverConfig::new(ZoneId(1));
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).expect("solver");
         solver.refresh_solar_slot_map(&env);
@@ -7091,5 +7886,421 @@ mod tests {
              {:?} (last-wins would be slot 1)",
             solver.solar_irr_slot_buf.get(&7)
         );
+    }
+
+    /// The per-step slot map is rebuilt only when the incoming surface-id
+    /// sequence differs from the one it was built from. Over 100 steps with a
+    /// fixed surface list the map is rebuilt exactly once (its first
+    /// refresh); a changed list rebuilds it again. Detected with a sentinel
+    /// entry a rebuild would clear: `solar_irr_slot_buf` is otherwise only
+    /// mutated inside `refresh_solar_slot_map`.
+    #[test]
+    fn solar_slot_map_rebuilt_only_on_surface_change() {
+        let mut env = env_for_temp(20.0, 10.0);
+        env.weather.solar_irradiance = vec![
+            SurfaceIrradiance {
+                surface_id: 3,
+                direct_w_m2: 100.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            },
+            SurfaceIrradiance {
+                surface_id: 5,
+                direct_w_m2: 200.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            },
+        ];
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1e-4]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1e-4, 1e-5]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).expect("model");
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
+        };
+        let config = ThermalSolverConfig::new(ZoneId(1));
+        let mut solver =
+            ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).expect("solver");
+
+        // The first refresh builds the map once.
+        solver.refresh_solar_slot_map(&env);
+        assert_eq!(solver.solar_irr_slot_buf.get(&3), Some(&0));
+        assert_eq!(solver.solar_irr_slot_buf.get(&5), Some(&1));
+
+        // 100 more refreshes over the SAME surface sequence must not rebuild:
+        // the sentinel survives every one of them.
+        solver.solar_irr_slot_buf.insert(u32::MAX, usize::MAX);
+        for _ in 0..100 {
+            solver.refresh_solar_slot_map(&env);
+            assert_eq!(
+                solver.solar_irr_slot_buf.get(&u32::MAX),
+                Some(&usize::MAX),
+                "slot map was rebuilt although the surface-id sequence did \
+                 not change: refresh_solar_slot_map must compare the \
+                 incoming sequence and rebuild only on difference"
+            );
+        }
+
+        // A changed surface list rebuilds the map: the sentinel is gone and
+        // the new ids are mapped.
+        env.weather.solar_irradiance = vec![SurfaceIrradiance {
+            surface_id: 9,
+            direct_w_m2: 50.0,
+            diffuse_w_m2: 0.0,
+            reflected_w_m2: 0.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        solver.refresh_solar_slot_map(&env);
+        assert_eq!(
+            solver.solar_irr_slot_buf.get(&u32::MAX),
+            None,
+            "a changed surface-id sequence must rebuild the slot map"
+        );
+        assert_eq!(solver.solar_irr_slot_buf.get(&9), Some(&0));
+    }
+
+    /// The coupled solve divides a coupled state's update by `1 + d_i`. The
+    /// divisor's model-side factor (the B_eff coefficient at every coupling
+    /// site) is checked once at construction: a negative coefficient lets
+    /// `1 + d_i` reach zero or go negative under a physical conductance, and
+    /// a non-finite coefficient makes the divisor non-finite, so construction
+    /// fails with the state named; a healthy model constructs, at the zone
+    /// sensible site and at an exterior surface's LWR site alike.
+    #[test]
+    fn coupled_solve_divisor_checked_at_construction() {
+        // 1-state model: state 0 = zone air; inputs 0 = outdoor temp,
+        // 1 = zone sensible heat. The infiltration coupling site is
+        // (state 0, input 1); `b_coeff` is the B_eff coefficient there.
+        fn one_zone_solver_result(
+            b_coeff: f64,
+        ) -> std::result::Result<ThermalSolver, ThermalSolverError> {
+            let a_d = DMatrix::from_row_slice(1, 1, &[0.99]);
+            let b_d = DMatrix::from_row_slice(1, 2, &[1.0e-4, b_coeff]);
+            let c = DMatrix::from_row_slice(1, 1, &[1.0]);
+            let d = DMatrix::from_row_slice(1, 2, &[0.0, 0.0]);
+            let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).expect("model");
+            let wiring = StateSpaceWiring {
+                zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+                outdoor_temp_input_indices: vec![0],
+                ..Default::default()
+            };
+            let config = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
+                // Non-zero ACH keeps a coupling entry alive on every step, so
+                // the coupled solve runs with the divisor this checks.
+                infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.5 })],
+                ..ThermalSolverConfig::new(ZoneId(1))
+            };
+            let env = env_for_temp(20.0, 10.0);
+            ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0)
+        }
+
+        // A healthy model constructs.
+        assert!(
+            one_zone_solver_result(1.0 / 50_000.0).is_ok(),
+            "a model whose coupling coefficients are finite and non-negative \
+             must construct"
+        );
+
+        let expect_coefficient_error =
+            |b_coeff: f64, scenario: &str| match one_zone_solver_result(b_coeff) {
+                Err(ThermalSolverError::CouplingCoefficientInvalid {
+                    site,
+                    state_index,
+                    coefficient,
+                }) => {
+                    assert_eq!(state_index, 0, "{scenario}: wrong state named");
+                    assert_eq!(
+                        coefficient.to_bits(),
+                        b_coeff.to_bits(),
+                        "{scenario}: wrong coefficient reported"
+                    );
+                    assert_eq!(site, "zone ZoneId(1)", "{scenario}: wrong site named");
+                }
+                Err(other) => panic!(
+                    "{scenario}: expected Err(CouplingCoefficientInvalid) with the \
+                     state named, but got {other:?}"
+                ),
+                Ok(_) => panic!(
+                    "{scenario}: expected construction to fail with \
+                     Err(CouplingCoefficientInvalid); a coupling coefficient of \
+                     {b_coeff} lets the coupled solve's divisor 1 + d_i reach \
+                     zero, go negative or become non-finite"
+                ),
+            };
+
+        // b_coeff = -1: with a physical conductance h = 1 W/K the divisor is
+        // exactly 1 + 1·(-1) = 0.
+        expect_coefficient_error(-1.0, "divisor zero");
+        // b_coeff = -2: with h = 1 W/K the divisor is 1 + 1·(-2) = -1 < 0.
+        expect_coefficient_error(-2.0, "divisor negative");
+        // A non-finite coefficient makes the divisor non-finite.
+        expect_coefficient_error(f64::NAN, "divisor non-finite");
+        expect_coefficient_error(f64::NEG_INFINITY, "divisor non-finite (-inf)");
+
+        // 2-state model: state 0 = zone air, state 1 = surface node; inputs
+        // 0 = outdoor temp, 1 = zone sensible heat, 2 = surface heat. A
+        // rad_frac = 0 wall linearises into an LWR coupling at
+        // (state 1, input 2); `surface_b` is the B_eff coefficient there.
+        fn surface_solver_result(
+            surface_b: f64,
+        ) -> std::result::Result<ThermalSolver, ThermalSolverError> {
+            let a_d = DMatrix::from_row_slice(2, 2, &[0.99, 0.0, 0.0, 0.98]);
+            let b_d = DMatrix::from_row_slice(
+                2,
+                3,
+                &[
+                    1.0e-4,
+                    1.0 / 50_000.0,
+                    0.0, // zone air: outdoor + HVAC sensible drive
+                    0.0,
+                    0.0,
+                    surface_b, // surface node: surface heat input
+                ],
+            );
+            let c = DMatrix::identity(2, 2);
+            let d = DMatrix::zeros(2, 3);
+            let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).expect("model");
+            let wiring = StateSpaceWiring {
+                zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+                outdoor_temp_input_indices: vec![0],
+                ..Default::default()
+            };
+            let config = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
+                exterior_surfaces: vec![ExteriorSurfaceInfo {
+                    surface_id: 11,
+                    state_index: 1,
+                    input_index: 2,
+                    area_m2: 10.0,
+                    emissivity: 0.9,
+                    tilt_deg: 90.0,
+                    azimuth_deg: 180.0,
+                    rad_frac: 0.0,
+                    rad_res_k_w: 0.0,
+                    n_iter: 1,
+                    absorptance: 0.7,
+                    boundary_category: Some(BoundaryCategory::Wall),
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 0.0,
+                }],
+                ..ThermalSolverConfig::new(ZoneId(1))
+            };
+            let env = env_for_temp(20.0, 10.0);
+            ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0)
+        }
+
+        // A healthy surface coupling site constructs.
+        assert!(
+            surface_solver_result(1.0 / 30_000.0).is_ok(),
+            "a model whose surface coupling coefficient is finite and \
+             non-negative must construct"
+        );
+        match surface_solver_result(-0.5) {
+            Err(ThermalSolverError::CouplingCoefficientInvalid {
+                site,
+                state_index,
+                coefficient,
+            }) => {
+                assert_eq!(state_index, 1, "wrong state named for the surface site");
+                assert_eq!(coefficient, -0.5);
+                assert_eq!(site, "exterior surface 11", "wrong site named");
+            }
+            Err(other) => panic!(
+                "expected Err(CouplingCoefficientInvalid) naming the exterior \
+                 surface, but got {other:?}"
+            ),
+            Ok(_) => panic!(
+                "expected construction to fail for a negative surface coupling \
+                 coefficient; its divisor 1 + d_i is not guaranteed positive"
+            ),
+        }
+    }
+
+    /// The ideal-capacity solves of one step share the prefix (`N·x`,
+    /// `B_eff·u`, rhs): exactly one prefix fill per step no matter how many
+    /// targets run against the unchanged solver state, one target-dependent
+    /// tail per target, and every returned capacity is bitwise the per-call
+    /// computation's (same-run A/B against the full solve with a local
+    /// scratch). Runs twice, once with couplings active (the identity-coupled
+    /// tail) and once with none (the uncoupled tail). Each invalidation
+    /// window is exercised separately: a solve after `integrate` (before the
+    /// next prepare), after `prepare_inputs` with changed weather, and after
+    /// `restore_state`; each must refill exactly once and match a per-call
+    /// recomputation from the new state; a stale prefix would fail the
+    /// bitwise A/B.
+    #[test]
+    fn shared_terms_computed_once_per_step() {
+        for (scenario, coupled) in [
+            ("no couplings (uncoupled tail)", false),
+            ("couplings active (identity-coupled tail)", true),
+        ] {
+            let env = env_for_temp(20.0, 0.0);
+            let mut solver = if coupled {
+                solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.5 })
+            } else {
+                one_zone_solver(&env)
+            };
+            let ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..Default::default()
+            };
+            let cold_env = env_for_temp(20.0, -10.0);
+            let mut out = DomainUpdate::empty(hares_types::THERMAL);
+
+            let input_idx = solver.wiring().zone_sensible_input_indices[&ZoneId(1)];
+            let output_idx = solver.wiring().zone_output_indices[&ZoneId(1)];
+            let n_states = solver.model_dims().0;
+            let mut reference_scratch = crate::state_space::SolveScratch::new(n_states);
+
+            // Per-call recomputation: the full solve with a local scratch,
+            // from the same (x, last_u, last_coupling), minus the same
+            // `last_u[input_idx]` baseline the solver subtracts. Asserts the
+            // shared path's capacity is bitwise identical.
+            let mut assert_bitwise_reference = |solver: &mut ThermalSolver, target: f64| {
+                let raw = if coupled {
+                    solver
+                        .model
+                        .solve_for_scalar_input_identity_coupled(
+                            &solver.x,
+                            &solver.last_u,
+                            crate::state_space::ScalarSolveTarget {
+                                y_target: target,
+                                output_index: output_idx,
+                                input_index: input_idx,
+                            },
+                            &solver.last_coupling,
+                            &mut reference_scratch,
+                        )
+                        .unwrap()
+                } else {
+                    solver
+                        .model
+                        .solve_for_output_input(
+                            &solver.x,
+                            &solver.last_u,
+                            target,
+                            output_idx,
+                            input_idx,
+                            &mut reference_scratch,
+                        )
+                        .unwrap()
+                };
+                raw - solver.last_u[input_idx]
+            };
+            // Three equipment in one zone: three targets resolved against the
+            // same step state, as `SolverFeedbackActor::collect_and_solve`
+            // does per step.
+            let targets = [20.0, 21.0, 22.0];
+            let mut mid_snapshot: Option<ThermalSnapshot> = None;
+
+            for step in 0..2 {
+                solver.prepare_inputs(&ports, &env).unwrap();
+                solver.shared_prefix_fills = 0;
+                solver.solve_tail_calls = 0;
+
+                for &target in &targets {
+                    let capacity = solver.solve_ideal_capacity_for_target(ZoneId(1), target);
+                    let expected = assert_bitwise_reference(&mut solver, target);
+                    assert_eq!(
+                        capacity.to_bits(),
+                        expected.to_bits(),
+                        "{scenario}: step {step} target {target}: shared-path capacity \
+                         {capacity} is not bitwise the per-call computation's {expected}"
+                    );
+                }
+
+                assert_eq!(
+                    solver.shared_prefix_fills,
+                    1,
+                    "{scenario}: step {step} must fill the shared prefix exactly once \
+                     for {} targets",
+                    targets.len()
+                );
+                assert_eq!(
+                    solver.solve_tail_calls,
+                    targets.len(),
+                    "{scenario}: step {step} must run one target-dependent tail per target"
+                );
+
+                // Step the solver: integrate changes x and last_u.
+                solver.integrate(&ports, &env, &mut out).unwrap();
+                if step == 0 {
+                    mid_snapshot = Some(solver.snapshot_state());
+                }
+            }
+
+            // Window 1: a solve between integrate and the next prepare (the
+            // public API allows it) must refill from the new x and last_u.
+            solver.shared_prefix_fills = 0;
+            solver.solve_tail_calls = 0;
+            let capacity = solver.solve_ideal_capacity_for_target(ZoneId(1), 21.5);
+            let expected = assert_bitwise_reference(&mut solver, 21.5);
+            assert_eq!(
+                capacity.to_bits(),
+                expected.to_bits(),
+                "{scenario}: the post-integrate solve is not bitwise the per-call \
+                 computation's: the prefix survived across integrate"
+            );
+            assert_eq!(
+                solver.shared_prefix_fills, 1,
+                "{scenario}: the first solve after integrate must refill the prefix"
+            );
+            assert_eq!(solver.solve_tail_calls, 1);
+
+            // Window 2: prepare_inputs with changed weather rebuilds last_u;
+            // the first solve after it must refill.
+            solver.prepare_inputs(&ports, &cold_env).unwrap();
+            solver.shared_prefix_fills = 0;
+            solver.solve_tail_calls = 0;
+            let capacity = solver.solve_ideal_capacity_for_target(ZoneId(1), 21.5);
+            let expected = assert_bitwise_reference(&mut solver, 21.5);
+            assert_eq!(
+                capacity.to_bits(),
+                expected.to_bits(),
+                "{scenario}: the post-prepare solve is not bitwise the per-call \
+                 computation's: the prefix survived across prepare_inputs"
+            );
+            assert_eq!(
+                solver.shared_prefix_fills, 1,
+                "{scenario}: the first solve after prepare_inputs must refill the prefix"
+            );
+            assert_eq!(solver.solve_tail_calls, 1);
+
+            // Window 3: restore_state replaces x and last_u (here with the
+            // step-0 values, which differ from the current ones); the first
+            // solve after it must refill.
+            let snap = mid_snapshot.expect("step 0 ran");
+            solver.restore_state(&snap).unwrap();
+            solver.shared_prefix_fills = 0;
+            solver.solve_tail_calls = 0;
+            let capacity = solver.solve_ideal_capacity_for_target(ZoneId(1), 21.5);
+            let expected = assert_bitwise_reference(&mut solver, 21.5);
+            assert_eq!(
+                capacity.to_bits(),
+                expected.to_bits(),
+                "{scenario}: the post-restore solve is not bitwise the per-call \
+                 computation's: the prefix survived across restore_state"
+            );
+            assert_eq!(
+                solver.shared_prefix_fills, 1,
+                "{scenario}: the first solve after restore_state must refill the prefix"
+            );
+            assert_eq!(solver.solve_tail_calls, 1);
+        }
     }
 }

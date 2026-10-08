@@ -101,8 +101,10 @@ def main() -> None:
                 print(f"  inf_heat = {zone.inf_heat:.2f} W")
             if hasattr(zone, 'inf_flow'):
                 print(f"  inf_flow = {zone.inf_flow:.6f} m³/s")
-            if hasattr(zone, 'vent_heat'):
-                print(f"  vent_heat = {zone.vent_heat:.2f} W")
+            if hasattr(zone, 'nat_vent_heat'):
+                print(f"  nat_vent_heat = {zone.nat_vent_heat:.2f} W")
+            if hasattr(zone, 'forced_vent_heat'):
+                print(f"  forced_vent_heat = {zone.forced_vent_heat:.2f} W")
 
             # Per-surface details
             print(f"  Interior surfaces ({len(zone.surfaces)}):")

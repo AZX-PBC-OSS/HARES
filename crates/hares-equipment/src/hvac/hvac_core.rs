@@ -15,7 +15,7 @@ use super::core_config::{
     parse_speed_control_mode,
 };
 use super::default_curves::{BiquadraticCurveSource, maybe_substitute_defaults};
-use super::helpers::validate_zone_id;
+use super::helpers::{resolve_served_zone, validate_zone_id};
 use super::speed_control::{SpeedControlMode, StartupConfig};
 use super::staging::{
     DEFAULT_LOW_SPEED_CAPACITY_FRACTION, DEFAULT_PLF_DEGRADATION_COEFF, DEFAULT_STARTUP_CD,
@@ -352,7 +352,9 @@ impl PartialEq for ClampState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HvacConfig {
     pub equipment_type: HvacEquipmentType,
-    pub zone_id: ZoneId,
+    /// The zone the unit conditions; `None` until `HvacEquipment::init`
+    /// resolves it.
+    pub zone_id: Option<ZoneId>,
     pub shr: f64,
     pub fan_power_w_per_m3_s: f64,
     pub duct_dse: f64,
@@ -443,6 +445,13 @@ pub struct HvacRuntimeState {
     /// setpoints without mutating `runtime_setpoints` (which is reserved
     /// for `ThermalSetpoint`/`ThermalSetpointDelta` signals).
     pub dr_setpoint_offset_c: f64,
+    /// The served zone's non-HVAC share of the sensible input column (W),
+    /// dispatched every step by the solver-feedback actor. The cycling duty
+    /// arms net it out of the band-position estimate; the ideal path applies
+    /// the same correction inside the solver's capacity dispatch. Not
+    /// checkpointed: the actor re-dispatches every step, so a restored run
+    /// refills it before the next duty evaluation.
+    pub non_hvac_input_w: f64,
 }
 
 /// Control-signal state modified by external control signals.
@@ -472,10 +481,27 @@ pub struct HvacEquipment {
     pub thermostat_fsm: ThermostatFsm,
     pub runtime: HvacRuntimeState,
     pub control: HvacControlState,
+    /// A control error the dwelling loop cannot see (`update_control`
+    /// returns a mode): the following step fails with it before changing
+    /// any state, the IdealHvac contract.
+    control_error: Option<HaresError>,
+}
+
+impl HvacConfig {
+    /// The zone the unit conditions; an error before `init` has resolved it.
+    pub fn served_zone(&self) -> crate::Result<ZoneId> {
+        self.zone_id.ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{:?}: served zone not resolved; init must run before stepping",
+                self.equipment_type
+            ))
+        })
+    }
 }
 
 impl HvacEquipment {
-    pub fn new(equipment_type: HvacEquipmentType, zone_id: ZoneId) -> Self {
+    pub fn new(equipment_type: HvacEquipmentType, zone_id: impl Into<Option<ZoneId>>) -> Self {
+        let zone_id = zone_id.into();
         let default_cd = match equipment_type {
             HvacEquipmentType::MiniSplitHeat | HvacEquipmentType::MiniSplitCool => 0.0,
             _ => DEFAULT_PLF_DEGRADATION_COEFF,
@@ -508,7 +534,7 @@ impl HvacEquipment {
                     | HvacEquipmentType::Baseboard
                     | HvacEquipmentType::Other => AIRFLOW_HEATING_M3_S_PER_W,
                 },
-                zone_heat_fractions: vec![(zone_id, 1.0)],
+                zone_heat_fractions: zone_id.map(|zone| (zone, 1.0)).into_iter().collect(),
                 biquadratic_coeffs: vec![DEFAULT_BIQUADRATIC_COEFFS],
                 biquadratic_x1_bounds: DEFAULT_BIQUADRATIC_X1_BOUNDS,
                 biquadratic_x2_bounds: DEFAULT_BIQUADRATIC_X2_BOUNDS,
@@ -545,6 +571,7 @@ impl HvacEquipment {
                 time_at_current_speed_s: 0.0,
                 prev_zone_temp_c: None,
                 dr_setpoint_offset_c: 0.0,
+                non_hvac_input_w: 0.0,
             },
             control: HvacControlState {
                 max_capacity_fraction: 1.0,
@@ -552,10 +579,27 @@ impl HvacEquipment {
                 speed_count: 0,
                 max_enabled_speed: 0,
             },
+            control_error: None,
         }
     }
 
+    /// Records a control error for the following step to fail with.
+    ///
+    /// `update_control` returns a mode the dwelling loop reads without an
+    /// error channel, so an error there is stashed here instead; the step
+    /// that follows takes it and fails before changing any state.
+    pub fn record_control_error(&mut self, err: HaresError) {
+        self.control_error = Some(err);
+    }
+
+    /// Takes the recorded control error, if any.
+    pub fn take_control_error(&mut self) -> Option<HaresError> {
+        self.control_error.take()
+    }
+
     pub fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        self.config.zone_id = Some(resolve_served_zone(config, self.config.zone_id)?);
+        self.update_zone_heat_fractions()?;
         self.thermostat_fsm.thermostat = ThermostatConfig {
             hysteresis_c: extract_numeric(config, "hysteresis_c").unwrap_or(1.0),
             cutout_ratio: extract_numeric(config, "cutout_ratio").unwrap_or(DEFAULT_CUTOUT_RATIO),
@@ -563,8 +607,9 @@ impl HvacEquipment {
                 .unwrap_or(DEFAULT_MIN_CYCLE_TIME_S),
             use_ideal_capacity: extract_bool(config, "use_ideal_capacity").unwrap_or(false),
             deadband_offset: extract_numeric(config, "deadband_offset").unwrap_or(0.2),
+            band_class: hares_types::ThermostatBandClass::Cycling,
         };
-        self.thermostat_fsm.thermostat.validate(env)?;
+        self.thermostat_fsm.validate_configuration(env)?;
 
         if let Some(value) = extract_numeric(config, "heating_setpoint_c") {
             self.thermostat_fsm.static_setpoints.heating_c = value;
@@ -776,15 +821,15 @@ impl HvacEquipment {
             extract_numeric(config, "min_off_time_s").unwrap_or(0.0);
 
         // Flow-fraction quadratic coefficients: OCHRE HVAC.py `cap_ff` / `eir_ff`.
-        if let Some(raw) = extract_text(config, "cap_ff_coeffs") {
-            if let Ok(arr) = parse_f64_array_3(raw) {
-                self.config.cap_ff_coeffs = arr;
-            }
+        if let Some(raw) = extract_text(config, "cap_ff_coeffs")
+            && let Ok(arr) = parse_f64_array_3(raw)
+        {
+            self.config.cap_ff_coeffs = arr;
         }
-        if let Some(raw) = extract_text(config, "eir_ff_coeffs") {
-            if let Ok(arr) = parse_f64_array_3(raw) {
-                self.config.eir_ff_coeffs = arr;
-            }
+        if let Some(raw) = extract_text(config, "eir_ff_coeffs")
+            && let Ok(arr) = parse_f64_array_3(raw)
+        {
+            self.config.eir_ff_coeffs = arr;
         }
 
         // Flow-fraction clamping bounds: applied before ff quadratic evaluation.
@@ -838,7 +883,7 @@ impl HvacEquipment {
         // Evaluate initial thermostat mode from zone temperature so the
         // FSM doesn't start stuck in Deadband when the zone is already
         // outside the comfort band (cold-start fix).
-        if let Ok(zone_temp) = lookup_zone_temp(env, self.config.zone_id) {
+        if let Ok(zone_temp) = lookup_zone_temp(env, self.config.served_zone()?) {
             let sp = self.thermostat_fsm.effective_setpoints();
             let hysteresis = self.thermostat_fsm.thermostat.hysteresis_c;
             let offset = self
@@ -875,6 +920,13 @@ impl HvacEquipment {
         if let ControlSignal::MaxCapacityFraction { fraction } = signal {
             self.control.max_capacity_fraction = *fraction;
         }
+        if let ControlSignal::NonHvacZoneInput { zone, watts } = signal {
+            // A share addressed to another zone's equipment is ignored: the
+            // dispatcher sends every zone's share to every thermostat unit.
+            if self.config.zone_id == Some(*zone) {
+                self.runtime.non_hvac_input_w = *watts;
+            }
+        }
         Ok(())
     }
 
@@ -891,7 +943,10 @@ impl HvacEquipment {
     }
 
     pub fn update_mode(&mut self, env: &EnvironmentState) -> crate::Result<ThermostatMode> {
-        self.thermostat_fsm.update_mode(env, self.config.zone_id)
+        let zone = self.config.served_zone()?;
+        self.thermostat_fsm.update_mode(env, zone).map_err(|err| {
+            HaresError::Equipment(format!("{:?}: {err}", self.config.equipment_type))
+        })
     }
 
     pub fn use_ideal_capacity(&self, env: &EnvironmentState) -> bool {
@@ -1070,7 +1125,7 @@ impl HvacEquipment {
     /// Returns the number of times `evaluate_biquadratic` clamped an out-of-bounds
     /// curve index during the current timestep, then resets to zero. Callers should
     /// invoke this once per timestep (after all curve evaluations) to feed the
-    /// `biquadratic_index_clamped` observe counter.
+    /// `curve_index_clamps` health counter.
     pub fn take_biquadratic_clamp_count(&self) -> u64 {
         self.config
             .biquadratic_clamp
@@ -1142,6 +1197,7 @@ mod tests {
 
     fn env(zone_temp_c: f64, time_res_s: i64, second: i64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -1174,7 +1230,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -2341,7 +2398,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 1.0;
         hvac.config.duct_zone_id = None;
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
         assert_eq!(hvac.config.zone_heat_fractions, vec![(ZoneId(1), 1.0)]);
     }
 
@@ -2352,7 +2409,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 0.7;
         hvac.config.duct_zone_id = None;
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
         assert_eq!(hvac.config.zone_heat_fractions, vec![(ZoneId(1), 0.7)]);
     }
 
@@ -2363,7 +2420,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 0.7;
         hvac.config.duct_zone_id = Some(ZoneId(2));
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
         assert_eq!(hvac.config.zone_heat_fractions.len(), 2);
         assert!((hvac.config.zone_heat_fractions[0].1 - 0.7).abs() < 1e-12);
         assert!((hvac.config.zone_heat_fractions[1].1 - 0.3).abs() < 1e-12);
@@ -2378,7 +2435,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 0.7;
         hvac.config.duct_zone_id = Some(ZoneId(2));
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
 
         let mut ports = PortSlots {
             thermal: vec![
@@ -2434,7 +2491,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 0.7;
         hvac.config.duct_zone_id = None;
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -2462,7 +2519,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.config.duct_dse = 0.7;
         hvac.config.duct_zone_id = Some(ZoneId(1)); // same as conditioned zone
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
         // Only one entry since duct_zone == zone_id.
         assert_eq!(hvac.config.zone_heat_fractions.len(), 1);
         assert!(
@@ -2484,7 +2541,7 @@ mod tests {
         hvac.config.duct_zone_id = Some(ZoneId(3));
         hvac.config.basement_heat_frac = 0.2;
         hvac.config.basement_zone_id = Some(ZoneId(2));
-        hvac.update_zone_heat_fractions();
+        hvac.update_zone_heat_fractions().unwrap();
 
         assert_eq!(hvac.config.zone_heat_fractions.len(), 3);
         let fracs: std::collections::HashMap<ZoneId, f64> =
@@ -3278,13 +3335,15 @@ mod tests {
     }
 
     #[test]
-    fn schedule_setpoints_cleared_when_source_returns_none_after_valid_step() {
+    fn schedule_source_out_of_bounds_data_is_a_read_error() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.thermostat_fsm.static_setpoints = ThermalSetpoints {
             heating_c: 20.0,
             cooling_c: 25.0,
         };
-        // One-element shared source: step 0 returns a value, step 1 errors → None.
+        // One-element shared source with the Error boundary: step 0 returns
+        // a value, step 1's read is out of bounds. The read failure is an
+        // error, not a silent fall-through to the static setpoints.
         hvac.thermostat_fsm.heating_setpoint_source = Some(ScheduleSource::Shared {
             data: std::sync::Arc::from(vec![21.0]),
             cursor: 0,
@@ -3292,21 +3351,20 @@ mod tests {
         });
 
         hvac.thermostat_fsm
-            .resolve_profile_setpoints(&env(20.0, 60, 0));
-        assert!(
-            hvac.thermostat_fsm.schedule_setpoints.is_some(),
-            "step 0: source returned a value, schedule_setpoints must be Some"
-        );
+            .resolve_profile_setpoints(&env(20.0, 60, 0))
+            .expect("step 0: the source has data");
         assert_eq!(
             hvac.thermostat_fsm.schedule_setpoints.unwrap().heating_c,
             Some(21.0)
         );
 
-        hvac.thermostat_fsm
-            .resolve_profile_setpoints(&env(20.0, 60, 60));
+        let err = hvac
+            .thermostat_fsm
+            .resolve_profile_setpoints(&env(20.0, 60, 60))
+            .expect_err("step 1: the read is out of bounds and must fail");
         assert!(
-            hvac.thermostat_fsm.schedule_setpoints.is_none(),
-            "step 1: source returned None (out of bounds), schedule_setpoints must be cleared"
+            err.to_string().contains("out of bounds"),
+            "the error names the failed read: {err}"
         );
     }
 
@@ -3721,33 +3779,50 @@ mod tests {
         );
     }
 
+    /// The single-speed ASHP default curves are the OS-HPXML v1.12.0 RESNET
+    /// Addendum 82 anchor model, not the shipped OCHRE CSV's `Single_1`
+    /// column: the OD fix replaced the DOE-2 fit (whose quadratic extrapolation
+    /// below the 17 °F anchor read unphysical COPs) with the reference's
+    /// anchor model. The anchors are pinned exactly in
+    /// `default_curves::tests`; this test keeps the multi-speed arrays
+    /// (still the OCHRE CSV columns, outside the fix's scope) from drifting.
     #[test]
-    fn ashp_default_cap_curve_matches_ochre_csv_single_1() {
+    fn ashp_default_multi_speed_curves_match_ochre_csv_columns() {
         use super::super::default_curves::default_biquadratic_coeffs;
-        let defaults = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 1).unwrap();
-        let expected_cap: [f64; 6] = [
-            0.878143655,
-            -0.002914855,
-            -0.00003337,
-            0.022386661,
-            0.000163944,
-            -0.00002187,
-        ];
-        let expected_eir: [f64; 6] = [
-            0.716518071,
-            0.010275901,
-            0.000460734,
-            -0.006480365,
-            0.000456354,
-            -0.00069764,
-        ];
+
+        // The single-speed default is the RESNET anchor model:
+        // linear capacity through (8.333 °C, 1.0) and (-8.333 °C, 0.626),
+        // pinned exactly in `default_curves::tests`.
+        let single = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 1)
+            .expect("ASHP single-speed defaults exist");
         assert_eq!(
-            defaults[0], expected_cap,
-            "ASHP capacity coefficients must match CSV"
+            single[0],
+            [0.813, 0.0, 0.0, 0.02244, 0.0, 0.0],
+            "single-speed capacity default must be the RESNET anchor line"
         );
         assert_eq!(
-            defaults[1], expected_eir,
-            "ASHP EIR coefficients must match CSV"
+            single[1],
+            [1.1007334853, 0.0, 0.0, -0.02136, 0.001112637825, 0.0],
+            "single-speed EIR default must be the RESNET anchor quadratic"
+        );
+
+        // Two- and four-speed defaults remain the OCHRE CSV columns
+        // (interleaved [cap_0, eir_0, cap_1, eir_1, ...]).
+        let two_speed = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 2)
+            .expect("ASHP two-speed defaults exist");
+        assert_eq!(
+            two_speed[0][0], 0.84077409,
+            "Double_1 capacity c0 must match CSV"
+        );
+        assert_eq!(
+            two_speed[2][0], 0.831506971,
+            "Double_2 capacity c0 must match CSV"
+        );
+        let four_speed = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly, 4)
+            .expect("ASHP four-speed defaults exist");
+        assert_eq!(
+            four_speed[4][0], 0.96205422,
+            "Variable_3 capacity c0 must match CSV"
         );
     }
 

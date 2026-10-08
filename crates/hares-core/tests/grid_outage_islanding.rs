@@ -15,8 +15,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 use hares_core::Dwelling;
 use hares_equipment::battery::Battery;
@@ -25,26 +24,7 @@ use hares_equipment::scheduled_load::ScheduledLoad;
 use hares_equipment::{BatteryConfig, Equipment, EquipmentConfig};
 use hares_types::EndUse;
 
-fn nanos_suffix() -> String {
-    // Uniqueness by construction: pid + monotonic counter + nanos
-    // (see hares-core/tests/engine.rs).
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{nanos}-{seq}", std::process::id())
-}
-
-fn unique_temp_toml(tag: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("hares-outage-island-{tag}-{}.toml", nanos_suffix()));
-    path
-}
-
-fn write_minimal_toml(path: &PathBuf) {
+fn write_minimal_toml(path: &Path) {
     let content = r#"building_id = 9401
 
 [simulation]
@@ -55,7 +35,6 @@ duration_s = 1200
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -68,6 +47,9 @@ outdoor_temp_c = 20.0
 dew_point_c = 10.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.0
 
 [schedule]
 occupancy = 0.0
@@ -84,16 +66,17 @@ master_seed = 0
 
 /// Dwelling with a 1.5 kW constant-power scheduled load.
 fn build_dwelling_with_base_load(tag: &str) -> Dwelling {
-    let toml_path = unique_temp_toml(tag);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let toml_path = dir.path().join(format!("{tag}.toml"));
     write_minimal_toml(&toml_path);
     let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
-    let _ = fs::remove_file(&toml_path);
 
     let env = dwelling.latest_env().clone();
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
     raw.insert("power_constant_kw".to_string(), 1.5.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
+    raw.insert("zone_id".to_string(), 1.0.into());
     let config = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Lighting");
     eq.init(&config, &env).expect("init ScheduledLoad");
@@ -271,7 +254,7 @@ fn islanded_load_beyond_discharge_capability_reports_unserved() {
 
     // Nominal operation: grid-connected, no island accounting.
     dwelling.step().expect("nominal step");
-    let telem = dwelling.telemetry();
+    let telem = dwelling.telemetry().unwrap();
     assert_eq!(
         telem.island_unserved_kw, 0.0,
         "island_unserved_kw must be 0.0 during nominal (grid-connected) operation"
@@ -291,7 +274,7 @@ fn islanded_load_beyond_discharge_capability_reports_unserved() {
     );
 
     dwelling.step().expect("second islanded step");
-    let telem = dwelling.telemetry();
+    let telem = dwelling.telemetry().unwrap();
     assert!(
         telem.island_unserved_kw > 0.5,
         "load beyond max_discharge_kw must be reported as unserved, got {} kW",

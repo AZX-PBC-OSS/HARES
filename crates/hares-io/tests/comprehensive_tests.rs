@@ -35,14 +35,17 @@ use hares_types::FuelType;
 // Test helpers
 // ---------------------------------------------------------------------------
 
+#[path = "../../../tests/support/fixture_start.rs"]
+mod fixture_start;
+
 fn test_config(deadband: Option<f64>) -> SimulationConfig {
     SimulationConfig {
-        start_time: chrono::Utc::now().fixed_offset(),
+        start_time: fixture_start::fixture_start(),
         duration: Duration::hours(1),
         time_res: Duration::hours(1),
         output_verbosity: 0,
         output_path: None,
-        write_output: true,
+        write_output: false,
         output_format: OutputFormat::Csv,
         output_chunk_size: 16,
         master_seed: 0,
@@ -51,6 +54,7 @@ fn test_config(deadband: Option<f64>) -> SimulationConfig {
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: false,
         rotation: hares_io::RotationPolicy::None,
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
 
@@ -61,6 +65,7 @@ fn make_spec(name: &str, fuel: FuelType) -> hares_io::EquipmentSpec {
         fuel_type: fuel,
         parameters: serde_json::Map::new(),
         zip_params: None,
+        typed_overrides: serde_json::Map::new(),
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,
@@ -321,8 +326,9 @@ fn gas_annual_energy_therms_is_non_none_with_gas_column() {
     calc.accumulate(&build_batch(vec![
         ("Total Electric Power (kW)", vec![1.0, 2.0]),
         ("Total Gas Power (therms/hour)", vec![0.5, 1.5]),
-    ]));
-    let metrics = calc.finish();
+    ]))
+    .unwrap();
+    let metrics = calc.finish().unwrap();
 
     assert!(
         metrics.gas_energy.is_some(),
@@ -343,8 +349,9 @@ fn total_energy_includes_both_electric_and_gas() {
     calc.accumulate(&build_batch(vec![
         ("Total Electric Power (kW)", vec![1.0]),
         ("Total Gas Power (therms/hour)", vec![1.0]),
-    ]));
-    let metrics = calc.finish();
+    ]))
+    .unwrap();
+    let metrics = calc.finish().unwrap();
 
     let electric_kwh = metrics.total_energy_kwh.net_energy_kwh;
     let gas = metrics.gas_energy.as_ref().unwrap();
@@ -562,6 +569,30 @@ fn csv_writer_finish_on_read_only_path_propagates_io_error() {
 // 8. hvac_coefficients split
 // ===========================================================================
 
+/// Fixture helper: a defaults tree whose EV mapping is not the subject of
+/// the test still needs a complete one, because a missing or malformed
+/// vehicle mapping CSV fails the defaults load.
+fn write_complete_ev_mapping(dir: &std::path::Path) {
+    let ev_dir = dir.join("ev");
+    std::fs::create_dir_all(&ev_dir).unwrap();
+    let mut csv_content = String::from(
+        "profile_column,vehicle_type,profile_file,capacity_kwh,charger_power_kw,efficiency\n",
+    );
+    for i in 1..=35 {
+        csv_content.push_str(&format!(
+            "Vehicle {i},MY2030_BEV_SUV,pdf_Veh{},117.6,10.26,0.9\n",
+            ((i - 1) % 4) + 1
+        ));
+    }
+    for i in 36..=50 {
+        csv_content.push_str(&format!(
+            "Vehicle {i},MY2030_PHEV_SUV,pdf_Veh{},14.8,7.2,0.9\n",
+            ((i - 1) % 4) + 1
+        ));
+    }
+    std::fs::write(ev_dir.join("vehicle_mapping.csv"), csv_content).unwrap();
+}
+
 #[test]
 fn hvac_cooling_and_heating_coefficients_return_independent_results() {
     let dir = tempfile::tempdir().unwrap();
@@ -634,6 +665,14 @@ tdb_bounds = [-20.0, 30.0]
     ] {
         std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
     }
+    // The generator efficiency curve is mandatory at load.
+    write_complete_ev_mapping(dir.path());
+    std::fs::write(
+        dir.path().join("generator").join("efficiency_curve.toml"),
+        "[[points]]\ncapacity_ratio = 0.0\nefficiency_ratio = 0.0\n\
+         [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
+    )
+    .unwrap();
 
     let store = hares_io::DefaultsStore::load(dir.path()).expect("load defaults");
 
@@ -732,6 +771,14 @@ tdb_bounds = [-25.0, 25.0]
     ] {
         std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
     }
+    // The generator efficiency curve is mandatory at load.
+    write_complete_ev_mapping(dir.path());
+    std::fs::write(
+        dir.path().join("generator").join("efficiency_curve.toml"),
+        "[[points]]\ncapacity_ratio = 0.0\nefficiency_ratio = 0.0\n\
+         [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
+    )
+    .unwrap();
 
     let store = hares_io::DefaultsStore::load(dir.path()).expect("load");
 

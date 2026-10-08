@@ -117,6 +117,7 @@ fn layer(thickness_m: f64, k_w_m_k: f64, density: f64, cp: f64) -> LayerInput {
 
 fn base_env() -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZONE,
             temperature_c: T_AIR_C,
@@ -158,7 +159,8 @@ fn base_env() -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: HashMap::new(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()
@@ -185,7 +187,7 @@ fn run_to_steady_state(
         &[ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(129.6),
-            mass_multiplier: 1.0,
+            temperature_capacitance_multiplier: 1.0,
         }],
         101_325.0,
     )
@@ -274,7 +276,7 @@ fn run_to_steady_state(
             u_factor_w_m2_k: 0.0,
             h_out_w_m2_k: 1.0 / R_FILM_EXTERIOR_M2_K_W,
         }],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver =
@@ -285,7 +287,9 @@ fn run_to_steady_state(
     let mut calm_steps = 0usize;
     let mut gains = solver.component_gains().clone();
     for _ in 0..100_000usize {
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(DT_S as u64))
+            .unwrap();
         let t_next = update
             .zone_temperatures_c
             .iter()
@@ -339,7 +343,7 @@ fn skin_solve_is_timestep_independent_across_dt() {
             &[ZoneInput {
                 floor_area_m2: Some(48.0),
                 volume_m3: Some(129.6),
-                mass_multiplier: 1.0,
+                temperature_capacitance_multiplier: 1.0,
             }],
             101_325.0,
         )
@@ -425,7 +429,7 @@ fn skin_solve_is_timestep_independent_across_dt() {
                 u_factor_w_m2_k: 0.0,
                 h_out_w_m2_k: 1.0 / R_FILM_EXTERIOR_M2_K_W,
             }],
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         let mut solver =
@@ -436,7 +440,9 @@ fn skin_solve_is_timestep_independent_across_dt() {
         let steps = (6.0 * 3600.0 / dt_s) as usize;
         let mut t_zone = T_AIR_C;
         for _ in 0..steps {
-            let update = solver.resolve_new(&ports, &env, Duration::from_secs(dt_s as u64));
+            let update = solver
+                .resolve_new(&ports, &env, Duration::from_secs(dt_s as u64))
+                .unwrap();
             t_zone = update
                 .zone_temperatures_c
                 .iter()
@@ -601,7 +607,7 @@ fn fallback_r_exterior_wall_steady_state_matches_exact_skin_balance() {
         &[ZoneInput {
             floor_area_m2: Some(48.0),
             volume_m3: Some(129.6),
-            mass_multiplier: 1.0,
+            temperature_capacitance_multiplier: 1.0,
         }],
         101_325.0,
     )
@@ -685,7 +691,7 @@ fn fallback_r_exterior_wall_steady_state_matches_exact_skin_balance() {
             u_factor_w_m2_k: 0.0,
             h_out_w_m2_k: 1.0 / R_FILM_EXTERIOR_M2_K_W,
         }],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver =
@@ -696,7 +702,9 @@ fn fallback_r_exterior_wall_steady_state_matches_exact_skin_balance() {
     let mut calm_steps = 0usize;
     let mut gains = solver.component_gains().clone();
     for _ in 0..100_000usize {
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(DT_S as u64))
+            .unwrap();
         let t_next = update
             .zone_temperatures_c
             .iter()

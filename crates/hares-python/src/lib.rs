@@ -157,6 +157,16 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<py_dwelling::FatalDwellingError>(),
     )?;
 
+    m.add("MIN_THERMOSTAT_BAND_C", hares_types::MIN_THERMOSTAT_BAND_C)?;
+    m.add(
+        "MAX_HVAC_THERMOSTAT_BAND_C",
+        hares_types::MAX_HVAC_THERMOSTAT_BAND_C,
+    )?;
+    m.add(
+        "MAX_TANK_THERMOSTAT_BAND_C",
+        hares_types::MAX_TANK_THERMOSTAT_BAND_C,
+    )?;
+
     m.add("OperatingMode", m.getattr("Mode")?)?;
     m.add("Mode", m.getattr("Mode")?)?;
     m.add("PyMode", m.getattr("Mode")?)?;

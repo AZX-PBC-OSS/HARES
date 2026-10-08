@@ -18,6 +18,8 @@
 //! - Engineers Edge surface heat transfer coefficients (citing ASHRAE
 //!   peak-load convention): 34.0 W/(m²·°C) winter, 22.7 W/(m²·°C) summer.
 
+use hares_types::HaresError;
+
 /// Combined exterior film coefficient [W/(m²·K)] — ASHRAE conventional
 /// (convective + radiative) peak-load value at ~15 mph (6.7 m/s) wind for
 /// opaque outer surfaces. Commonly applied to fenestration in simplified
@@ -89,45 +91,278 @@ impl SurfaceRoughness {
     }
 }
 
-/// Map HPXML `<Siding>` finish type string to a [`SurfaceRoughness`] class.
-///
-/// Mapping derived from EnergyPlus Engineering Reference "DOE-2 Model"
-/// surface roughness examples and the HPXML v4.2 `<Siding>` enumeration.
-/// Unknown or absent finish types fall back to [`SurfaceRoughness::MediumRough`]
-/// with a `tracing::warn!` — bare OSB/sheathing as the conservative default.
-///
-/// # References
-/// - EnergyPlus Engineering Reference, "DOE-2 Model" section under Outside
-///   Surface Heat Balance — roughness multiplier table (Walton 1981).
-/// - HPXML Data Dictionary v4.2, `<Siding>` enumeration.
-pub fn surface_roughness_from_finish_type(finish_type: Option<&str>) -> SurfaceRoughness {
-    match finish_type {
-        // Stucco is VeryRough per EnergyPlus material library examples.
-        Some("stucco") | Some("synthetic stucco") => SurfaceRoughness::VeryRough,
-        // Brick is Rough per EnergyPlus material library (not VeryRough).
-        Some("brick veneer") => SurfaceRoughness::Rough,
-        // Wood siding, fiber cement, and other composite siding products
-        // are medium-rough: rougher than smooth vinyl/aluminum but smoother
-        // than rough-sawn lumber (Rough) or stucco (VeryRough).
-        Some("wood siding")
-        | Some("fiber cement siding")
-        | Some("asbestos siding")
-        | Some("masonite siding")
-        | Some("composite shingle siding") => SurfaceRoughness::MediumRough,
-        // Vinyl and aluminum siding are smooth manufactured products.
-        Some("vinyl siding") | Some("aluminum siding") => SurfaceRoughness::Smooth,
-        // "none" means bare sheathing/OSB; "other" is HPXML catch-all.
-        // Absent finish_type (None) likewise defaults to MediumRough.
-        None | Some("none") | Some("other") | Some(_) => {
-            let value = finish_type.unwrap_or("<absent>");
-            tracing::warn!(
-                finish_type = value,
-                roughness = ?SurfaceRoughness::MediumRough,
-                "unknown or absent exterior finish type; defaulting to MediumRough"
-            );
-            SurfaceRoughness::MediumRough
+/// The HPXML element whose material an outside surface's roughness comes
+/// from: `Siding` on a wall or rim joist, `RoofType` on a roof, `Type` on a
+/// foundation wall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutsideLayer {
+    Siding,
+    Roof,
+    FoundationWall,
+}
+
+impl OutsideLayer {
+    /// The material OS-HPXML v1.12.0 gives this layer when the HPXML names
+    /// none, and where it does so.
+    fn os_hpxml_default(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Siding => ("wood siding", "defaults.rb:1338, :1379"),
+            Self::Roof => ("asphalt or fiberglass shingles", "defaults.rb:1268"),
+            Self::FoundationWall => ("solid concrete", "defaults.rb:1431-1433"),
         }
     }
+
+    /// The values of this layer's HPXML element that name no material.
+    fn names_no_material(self, value: &str) -> bool {
+        match self {
+            Self::Siding => matches!(value, "none" | "other" | "unknown" | "not present"),
+            Self::Roof => matches!(value, "other" | "no one major type" | "cool roof"),
+            Self::FoundationWall => false,
+        }
+    }
+}
+
+/// One HPXML outside material and the EnergyPlus record its roughness comes
+/// from.
+#[derive(Debug, Clone, Copy)]
+pub struct MaterialRoughness {
+    pub layer: OutsideLayer,
+    /// The HPXML enumeration value.
+    pub material: &'static str,
+    /// The record's name in EnergyPlus v24.2.0's
+    /// `datasets/ASHRAE_2005_HOF_Materials.idf`, or the source that stands
+    /// in for one.
+    pub record: &'static str,
+    /// The line of the record's name in that file; 0 where the source is
+    /// not a dataset record.
+    pub line: u32,
+    pub class: SurfaceRoughness,
+}
+
+const fn row(
+    layer: OutsideLayer,
+    material: &'static str,
+    record: &'static str,
+    line: u32,
+    class: SurfaceRoughness,
+) -> MaterialRoughness {
+    MaterialRoughness {
+        layer,
+        material,
+        record,
+        line,
+        class,
+    }
+}
+
+/// Every HPXML outside material and its roughness class.
+///
+/// One rule: a material takes the roughness of the record that names it in
+/// EnergyPlus v24.2.0's `datasets/ASHRAE_2005_HOF_Materials.idf`, searched
+/// family by family: the siding records (`Siding:`, lines 2022-2077) for a
+/// siding; the shingle records (`Shingles:`, 2002-2017) and then the roofing
+/// records (1887-1912) for a roof; then the exterior finish layers (F06-F15,
+/// 116-188), the masonry records (M01-M09, 332-396) and the concrete
+/// records (1018-1218). Where the material is a kind of a named one, it
+/// takes that record: vinyl and aluminum siding are the hollow-backed
+/// siding, fiber-cement siding the cement siding, composite shingle siding
+/// and generic shingles the asphalt shingles, a single-ply sheeting the
+/// built-up roofing (the roofing family's only membrane), concrete tiles
+/// the slate or tile layer. A green roof has no record and takes
+/// `Material:RoofVegetation`'s default roughness (v24.2.0
+/// `idd/Energy+.idd.in`, lines 5064-5072).
+///
+/// The Engineering Reference's Walton table lists stucco and brick as its
+/// Very Rough and Rough examples; the dataset's stucco (F07) is Smooth and
+/// its brick (M01) Medium Rough, and the dataset is followed. Every row
+/// departs from OS-HPXML v1.12.0, which gives every surface `Rough`
+/// (`model.rb:49`, `:95`).
+pub const MATERIAL_ROUGHNESS: &[MaterialRoughness] = {
+    use OutsideLayer::{FoundationWall as F, Roof as R, Siding as S};
+    use SurfaceRoughness::*;
+    &[
+        row(
+            S,
+            "wood siding",
+            "Siding: Wood - bevel 13 by 200mm - lapped",
+            2047,
+            Rough,
+        ),
+        row(S, "stucco", "F07 25mm stucco", 124, Smooth),
+        row(S, "synthetic stucco", "F06 EIFS finish", 116, Smooth),
+        row(S, "vinyl siding", "Siding: Hollow-backed", 2062, Smooth),
+        row(S, "aluminum siding", "Siding: Hollow-backed", 2062, Smooth),
+        row(S, "brick veneer", "M01 100mm brick", 332, MediumRough),
+        row(S, "stone veneer", "F10 25mm stone", 148, MediumRough),
+        row(
+            S,
+            "asbestos siding",
+            "Siding: Asbestos-cement 6.4mm",
+            2022,
+            VeryRough,
+        ),
+        row(
+            S,
+            "fiber cement siding",
+            "Siding: Asbestos-cement 6.4mm",
+            2022,
+            VeryRough,
+        ),
+        row(
+            S,
+            "composite shingle siding",
+            "Asphalt shingles",
+            1897,
+            VeryRough,
+        ),
+        row(
+            S,
+            "masonite siding",
+            "Siding: Hardboard 11mm",
+            2037,
+            MediumSmooth,
+        ),
+        row(
+            R,
+            "asphalt or fiberglass shingles",
+            "Asphalt shingles",
+            1897,
+            VeryRough,
+        ),
+        row(R, "shingles", "Asphalt shingles", 1897, VeryRough),
+        row(
+            R,
+            "wood shingles or shakes",
+            "Shingles: Wood 400mm - 190-mm exposure",
+            2007,
+            MediumRough,
+        ),
+        row(R, "slate or tile shingles", "Slate - 13mm", 1907, VeryRough),
+        row(R, "concrete tiles", "F14 Slate or tile", 180, VeryRough),
+        row(R, "metal surfacing", "F08 Metal surface", 132, Smooth),
+        row(
+            R,
+            "plastic/rubber/synthetic sheeting",
+            "Built-up roofing - 10mm",
+            1902,
+            VeryRough,
+        ),
+        row(
+            R,
+            "expanded polystyrene sheathing",
+            "Insulation: Expanded polystyrene - molded beads - 16kg/m3 density",
+            810,
+            VeryRough,
+        ),
+        row(
+            R,
+            "concrete",
+            "Concrete: Sand and gravel or stone aggregate concretes - 2400 kg/m3 - 51mm",
+            1018,
+            MediumRough,
+        ),
+        row(
+            R,
+            "green roof",
+            "Material:RoofVegetation (Energy+.idd.in:5064-5072)",
+            0,
+            MediumRough,
+        ),
+        row(
+            F,
+            "solid concrete",
+            "Concrete: Sand and gravel or stone aggregate concretes - 2400 kg/m3 - 51mm",
+            1018,
+            MediumRough,
+        ),
+        row(
+            F,
+            "concrete block",
+            "M05 200mm concrete block",
+            364,
+            MediumRough,
+        ),
+        row(
+            F,
+            "concrete block foam core",
+            "M05 200mm concrete block",
+            364,
+            MediumRough,
+        ),
+        row(
+            F,
+            "concrete block perlite core",
+            "M05 200mm concrete block",
+            364,
+            MediumRough,
+        ),
+        row(
+            F,
+            "concrete block vermiculite core",
+            "M05 200mm concrete block",
+            364,
+            MediumRough,
+        ),
+        row(
+            F,
+            "concrete block solid core",
+            "M05 200mm concrete block",
+            364,
+            MediumRough,
+        ),
+        row(F, "double brick", "M01 100mm brick", 332, MediumRough),
+        row(
+            F,
+            "wood",
+            "Siding: Wood - plywood 9.5mm - lapped",
+            2057,
+            Rough,
+        ),
+    ]
+};
+
+/// The roughness class of an outside surface whose `layer` is `material`
+/// ([`MATERIAL_ROUGHNESS`]), with a warning when the HPXML names no
+/// material: the layer then takes the material OS-HPXML v1.12.0 defaults
+/// an absent element to (wood siding, asphalt shingles, solid concrete).
+/// An explicit value that names no material ("other", "unknown", "not
+/// present", "none", "no one major type", "cool roof") is treated as
+/// absent; OS-HPXML itself defaults only an absent element.
+///
+/// # Errors
+///
+/// A `material` that is not a value of the layer's HPXML element.
+pub fn outside_layer_roughness(
+    layer: OutsideLayer,
+    material: Option<&str>,
+) -> Result<(SurfaceRoughness, Option<String>), HaresError> {
+    let (default, source) = layer.os_hpxml_default();
+    let (material, warning) = match material {
+        Some(value) if !layer.names_no_material(value) => (value, None),
+        given => (
+            default,
+            Some(match given {
+                None => format!(
+                    "the outside {layer:?} layer names no material; its roughness is that of \
+                     OS-HPXML's default for an absent element, {default} ({source})"
+                ),
+                Some(value) => format!(
+                    "the outside {layer:?} layer's '{value}' names no material; it is treated \
+                     as absent and takes the roughness of OS-HPXML's default for an absent \
+                     element, {default} ({source})"
+                ),
+            }),
+        ),
+    };
+    let row = MATERIAL_ROUGHNESS
+        .iter()
+        .find(|row| row.layer == layer && row.material == material)
+        .ok_or_else(|| {
+            HaresError::Physics(format!(
+                "outside material '{material}' is not an HPXML value for a {layer:?}"
+            ))
+        })?;
+    Ok((row.class, warning))
 }
 
 /// Typical zone temperatures [°C] for each [`ZoneLabel`] variant.
@@ -264,13 +499,16 @@ pub fn film_resistances(
     // EnergyPlus ConvectionCoefficients.cc CalcASHRAESimpleIntConvCoeff returns
     // these convection-only values derived from ASHRAE 1985 Table 1 surface
     // conductances at ε = 0.9, minus the radiative component
-    // (1.02 × 0.9 = 0.918 BTU/h·ft²·°F), converted to SI.  These are the
-    // default interior convection coefficients in E+ and match OCHRE's
-    // TARP-at-12.9°C-floor result (envelope.py:374) to within 0.12%.
+    // (1.02 × 0.9 = 0.918 BTU/h·ft²·°F), converted to SI.
     //
-    // For a vertical surface: h_conv = 3.076 W/(m²·K).  Combined with
-    // h_rad ≈ 5.14 at ε = 0.9, T_ref = 293.15 K, the total h_si = 8.22
-    // is consistent with ASHRAE 140-2017 Table 25 (h_si = 8.29).
+    // Vertical: h_conv = 3.076 W/(m²·K), which is OCHRE's frozen TARP value
+    // (1.31·12.9^(1/3) = 3.0759, envelope.py:374) to within 0.003%. The
+    // horizontal and tilted values are NOT OCHRE's: its frozen film is the
+    // TARP model at the clamped ΔT of 12.9 K (1.782 horizontal reduced
+    // against 0.948 here, 3.566 horizontal enhanced against 4.040); the
+    // divergence is registered in docs/alignment/DIVERGENCES.md. Combined
+    // with h_rad ≈ 5.14 at ε = 0.9, T_ref = 293.15 K, the vertical total
+    // h_si = 8.22 is consistent with ASHRAE 140-2017 Table 25 (h_si = 8.29).
     //
     // References:
     // - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, p 79.
@@ -457,6 +695,32 @@ mod tests {
         assert_approx(h, 0.948, 1e-10);
     }
 
+    /// The attic floor's frozen films (the ceiling under an attic, both
+    /// sides) are the ASHRAE Simple horizontal values at the typical zone
+    /// temperatures' direction. With the attic colder than the conditioned
+    /// space there (16.67 against 20 at the anchors), the direction is
+    /// reduced: h = 0.948 W/(m²·K), R ≈ 1.055 m²·K/W on both sides.
+    /// OCHRE's frozen film instead freezes the TARP model at the clamped
+    /// ΔT of 12.9 K (h = 1.782, R ≈ 0.561, its committed winter oracle
+    /// output's "Attic Floor ... Film Coefficient" columns), and
+    /// OS-HPXML v1.12.0 runs the TARP model per step (simcontrols.rb:24-25).
+    /// This test fails if the frozen films silently take OCHRE's values;
+    /// the divergence of record is docs/alignment/DIVERGENCES.md's.
+    #[test]
+    fn the_attic_floor_s_frozen_films_are_the_ashrae_simple_horizontal_values() {
+        let (r_int, r_ext) = film_resistances(
+            0.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Attic,
+            2.0,  // wind: never read away from the outdoors
+            10.0, // typical ground
+            10.0, // typical ambient: the attic interpolates to 16.67
+            SurfaceRoughness::Rough,
+        );
+        assert_approx(r_int, 1.0 / 0.948, 1e-9);
+        assert_approx(r_ext, 1.0 / 0.948, 1e-9);
+    }
+
     /// When delta_t=0, all TARP formulas produce h=0 (cbrt(0)=0).
     /// This is physically correct: no temperature difference means no
     /// buoyancy-driven convection.
@@ -511,102 +775,240 @@ mod tests {
         );
     }
 
-    // --- surface_roughness_from_finish_type tests ---
+    // --- outside material roughness tests ---
 
+    /// Every HPXML siding, roof and foundation wall material takes the
+    /// roughness of its EnergyPlus v24.2.0 `ASHRAE_2005_HOF_Materials.idf`
+    /// record, transcribed here from the dataset (record name, line of the
+    /// name, its Roughness field). Each HPXML enumeration value is listed
+    /// once, so a material the table drops, or a record it changes, fails.
     #[test]
-    fn surface_roughness_vinyl_siding_maps_to_smooth() {
+    fn every_hpxml_material_takes_its_energyplus_roughness() {
+        use OutsideLayer::{FoundationWall as F, Roof as R, Siding as S};
+        use SurfaceRoughness::*;
+        let expected: &[(OutsideLayer, &str, &str, u32, SurfaceRoughness)] = &[
+            (
+                S,
+                "wood siding",
+                "Siding: Wood - bevel 13 by 200mm - lapped",
+                2047,
+                Rough,
+            ),
+            (S, "stucco", "F07 25mm stucco", 124, Smooth),
+            (S, "synthetic stucco", "F06 EIFS finish", 116, Smooth),
+            (S, "vinyl siding", "Siding: Hollow-backed", 2062, Smooth),
+            (S, "aluminum siding", "Siding: Hollow-backed", 2062, Smooth),
+            (S, "brick veneer", "M01 100mm brick", 332, MediumRough),
+            (S, "stone veneer", "F10 25mm stone", 148, MediumRough),
+            (
+                S,
+                "asbestos siding",
+                "Siding: Asbestos-cement 6.4mm",
+                2022,
+                VeryRough,
+            ),
+            (
+                S,
+                "fiber cement siding",
+                "Siding: Asbestos-cement 6.4mm",
+                2022,
+                VeryRough,
+            ),
+            (
+                S,
+                "composite shingle siding",
+                "Asphalt shingles",
+                1897,
+                VeryRough,
+            ),
+            (
+                S,
+                "masonite siding",
+                "Siding: Hardboard 11mm",
+                2037,
+                MediumSmooth,
+            ),
+            (
+                R,
+                "asphalt or fiberglass shingles",
+                "Asphalt shingles",
+                1897,
+                VeryRough,
+            ),
+            (R, "shingles", "Asphalt shingles", 1897, VeryRough),
+            (
+                R,
+                "wood shingles or shakes",
+                "Shingles: Wood 400mm - 190-mm exposure",
+                2007,
+                MediumRough,
+            ),
+            (R, "slate or tile shingles", "Slate - 13mm", 1907, VeryRough),
+            (R, "concrete tiles", "F14 Slate or tile", 180, VeryRough),
+            (R, "metal surfacing", "F08 Metal surface", 132, Smooth),
+            (
+                R,
+                "plastic/rubber/synthetic sheeting",
+                "Built-up roofing - 10mm",
+                1902,
+                VeryRough,
+            ),
+            (
+                R,
+                "expanded polystyrene sheathing",
+                "Insulation: Expanded polystyrene - molded beads - 16kg/m3 density",
+                810,
+                VeryRough,
+            ),
+            (
+                R,
+                "concrete",
+                "Concrete: Sand and gravel or stone aggregate concretes - 2400 kg/m3 - 51mm",
+                1018,
+                MediumRough,
+            ),
+            (
+                R,
+                "green roof",
+                "Material:RoofVegetation (Energy+.idd.in:5064-5072)",
+                0,
+                MediumRough,
+            ),
+            (
+                F,
+                "solid concrete",
+                "Concrete: Sand and gravel or stone aggregate concretes - 2400 kg/m3 - 51mm",
+                1018,
+                MediumRough,
+            ),
+            (
+                F,
+                "concrete block",
+                "M05 200mm concrete block",
+                364,
+                MediumRough,
+            ),
+            (
+                F,
+                "concrete block foam core",
+                "M05 200mm concrete block",
+                364,
+                MediumRough,
+            ),
+            (
+                F,
+                "concrete block perlite core",
+                "M05 200mm concrete block",
+                364,
+                MediumRough,
+            ),
+            (
+                F,
+                "concrete block vermiculite core",
+                "M05 200mm concrete block",
+                364,
+                MediumRough,
+            ),
+            (
+                F,
+                "concrete block solid core",
+                "M05 200mm concrete block",
+                364,
+                MediumRough,
+            ),
+            (F, "double brick", "M01 100mm brick", 332, MediumRough),
+            (
+                F,
+                "wood",
+                "Siding: Wood - plywood 9.5mm - lapped",
+                2057,
+                Rough,
+            ),
+        ];
         assert_eq!(
-            surface_roughness_from_finish_type(Some("vinyl siding")),
-            SurfaceRoughness::Smooth
+            MATERIAL_ROUGHNESS.len(),
+            expected.len(),
+            "one row per material"
         );
+        for &(layer, material, record, line, class) in expected {
+            let row = MATERIAL_ROUGHNESS
+                .iter()
+                .find(|row| row.layer == layer && row.material == material)
+                .unwrap_or_else(|| panic!("{layer:?} '{material}' has no row"));
+            assert_eq!((row.record, row.line), (record, line), "{material}");
+            let (got, warning) = outside_layer_roughness(layer, Some(material)).unwrap();
+            assert_eq!(got, class, "{material}");
+            assert!(warning.is_none(), "{material} names its material");
+        }
+    }
+
+    /// A layer that names no material takes the material OS-HPXML defaults
+    /// it to, with a warning: wood siding (Rough), asphalt shingles (Very
+    /// Rough), solid concrete (Medium Rough). Not a blanket Rough.
+    #[test]
+    fn a_layer_without_a_material_takes_os_hpxml_default_material() {
+        use OutsideLayer::{FoundationWall, Roof, Siding};
+        for (layer, given, class, default) in [
+            (Siding, None, SurfaceRoughness::Rough, "wood siding"),
+            (
+                Siding,
+                Some("not present"),
+                SurfaceRoughness::Rough,
+                "wood siding",
+            ),
+            (
+                Siding,
+                Some("other"),
+                SurfaceRoughness::Rough,
+                "wood siding",
+            ),
+            (Roof, None, SurfaceRoughness::VeryRough, "asphalt"),
+            (
+                Roof,
+                Some("cool roof"),
+                SurfaceRoughness::VeryRough,
+                "asphalt",
+            ),
+            (
+                Roof,
+                Some("no one major type"),
+                SurfaceRoughness::VeryRough,
+                "asphalt",
+            ),
+            (
+                FoundationWall,
+                None,
+                SurfaceRoughness::MediumRough,
+                "solid concrete",
+            ),
+        ] {
+            let (got, warning) = outside_layer_roughness(layer, given).unwrap();
+            assert_eq!(got, class, "{layer:?} {given:?}");
+            let warning = warning.expect("a defaulted material is a warning");
+            assert!(warning.contains(default), "{warning}");
+        }
+    }
+
+    /// A value outside a layer's HPXML enumeration is an error, including a
+    /// material of another layer.
+    #[test]
+    fn a_material_outside_the_layer_enumeration_is_an_error() {
+        for (layer, material) in [
+            (OutsideLayer::Siding, "diamond plate"),
+            (OutsideLayer::Siding, "metal surfacing"),
+            (OutsideLayer::Roof, "wood siding"),
+            (OutsideLayer::FoundationWall, "stucco"),
+        ] {
+            let err = outside_layer_roughness(layer, Some(material)).unwrap_err();
+            assert!(err.to_string().contains(material), "{err}");
+        }
     }
 
     #[test]
-    fn surface_roughness_aluminum_siding_maps_to_smooth() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("aluminum siding")),
-            SurfaceRoughness::Smooth
-        );
-    }
-
-    #[test]
-    fn surface_roughness_brick_veneer_maps_to_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("brick veneer")),
-            SurfaceRoughness::Rough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_stucco_maps_to_very_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("stucco")),
-            SurfaceRoughness::VeryRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_synthetic_stucco_maps_to_very_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("synthetic stucco")),
-            SurfaceRoughness::VeryRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_wood_siding_maps_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("wood siding")),
-            SurfaceRoughness::MediumRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_fiber_cement_siding_maps_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("fiber cement siding")),
-            SurfaceRoughness::MediumRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_none_finish_defaults_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("none")),
-            SurfaceRoughness::MediumRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_absent_finish_type_defaults_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(None),
-            SurfaceRoughness::MediumRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_unknown_finish_defaults_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("diamond plate")),
-            SurfaceRoughness::MediumRough
-        );
-    }
-
-    #[test]
-    fn surface_roughness_other_finish_defaults_to_medium_rough() {
-        assert_eq!(
-            surface_roughness_from_finish_type(Some("other")),
-            SurfaceRoughness::MediumRough
-        );
-    }
-
-    #[test]
-    fn vinyl_siding_smooth_gives_higher_r_ext_than_brick_veneer_rough_at_same_wind() {
-        // Smooth (Rf=1.11) produces less forced convection → higher exterior R
-        // than Rough (Rf=1.67). This confirms the fix: replacing the hardcoded
-        // Rough with the correct finish-type-derived roughness class.
-        let (_, r_vinyl) = film_resistances(
+    fn smooth_gives_higher_r_ext_than_rough_at_same_wind() {
+        // Smooth (Rf=1.11) produces less forced convection, so a higher
+        // exterior R, than Rough (Rf=1.67).
+        let (_, r_smooth) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
             ZoneLabel::Outdoor,
@@ -615,7 +1017,7 @@ mod tests {
             10.0,
             SurfaceRoughness::Smooth,
         );
-        let (_, r_brick) = film_resistances(
+        let (_, r_rough) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
             ZoneLabel::Outdoor,
@@ -625,16 +1027,16 @@ mod tests {
             SurfaceRoughness::Rough,
         );
         assert!(
-            r_vinyl > r_brick,
-            "Vinyl (Smooth) R_ext={r_vinyl:.6} must exceed Brick (Rough) R_ext={r_brick:.6}"
+            r_smooth > r_rough,
+            "Smooth R_ext={r_smooth:.6} must exceed Rough R_ext={r_rough:.6}"
         );
     }
 
     #[test]
-    fn stucco_very_rough_gives_lower_r_ext_than_brick_veneer_rough_at_same_wind() {
-        // VeryRough (Rf=2.17) produces more forced convection → lower exterior R
-        // than Rough (Rf=1.67).
-        let (_, r_stucco) = film_resistances(
+    fn very_rough_gives_lower_r_ext_than_rough_at_same_wind() {
+        // VeryRough (Rf=2.17) produces more forced convection, so a lower
+        // exterior R, than Rough (Rf=1.67).
+        let (_, r_very_rough) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
             ZoneLabel::Outdoor,
@@ -643,7 +1045,7 @@ mod tests {
             10.0,
             SurfaceRoughness::VeryRough,
         );
-        let (_, r_brick) = film_resistances(
+        let (_, r_rough) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
             ZoneLabel::Outdoor,
@@ -653,8 +1055,8 @@ mod tests {
             SurfaceRoughness::Rough,
         );
         assert!(
-            r_stucco < r_brick,
-            "Stucco (VeryRough) R_ext={r_stucco:.6} must be less than Brick (Rough) R_ext={r_brick:.6}"
+            r_very_rough < r_rough,
+            "VeryRough R_ext={r_very_rough:.6} must be less than Rough R_ext={r_rough:.6}"
         );
     }
 

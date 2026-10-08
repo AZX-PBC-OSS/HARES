@@ -23,7 +23,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId, ZoneRole,
+    PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -50,17 +50,17 @@ pub struct VentilationConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
     pub flow_rate_m3_s: f64,
-    /// Total combined fan power [W] for exhaust + supply fans.
+    /// Total combined fan power (W) for exhaust + supply fans.
     /// For balanced systems (HRV/ERV) when supply/exhaust fan power is not
     /// provided separately, this is assumed to be the total and is split
     /// equally between supply and exhaust fans. For exhaust-only systems
     /// this is the single exhaust fan power.
     pub fan_power_w: Option<f64>,
-    /// Rated supply fan power [W] for balanced systems.
+    /// Rated supply fan power (W) for balanced systems.
     /// When both supply and exhaust fan power are provided, fan_power_w
     /// is ignored. For exhaust-only systems this should be None or 0.
     pub supply_fan_power_w: Option<f64>,
-    /// Rated exhaust fan power [W]. See supply_fan_power_w for interaction rules.
+    /// Rated exhaust fan power (W). See supply_fan_power_w for interaction rules.
     pub exhaust_fan_power_w: Option<f64>,
     pub sensible_effectiveness: Option<f64>,
     pub latent_effectiveness: Option<f64>,
@@ -112,23 +112,23 @@ impl VentilationConfig {
                 "ventilation flow_rate_m3_s must be finite and >= 0".to_string(),
             ));
         }
-        if let Some(power) = self.fan_power_w {
-            if !power.is_finite() || power < 0.0 {
-                return Err(HaresError::Equipment(
-                    "ventilation fan_power_w must be finite and >= 0".to_string(),
-                ));
-            }
+        if let Some(power) = self.fan_power_w
+            && (!power.is_finite() || power < 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "ventilation fan_power_w must be finite and >= 0".to_string(),
+            ));
         }
         for (name, val) in [
             ("supply_fan_power_w", self.supply_fan_power_w),
             ("exhaust_fan_power_w", self.exhaust_fan_power_w),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() || v < 0.0 {
-                    return Err(HaresError::Equipment(format!(
-                        "ventilation {name} must be finite and >= 0"
-                    )));
-                }
+            if let Some(v) = val
+                && (!v.is_finite() || v < 0.0)
+            {
+                return Err(HaresError::Equipment(format!(
+                    "ventilation {name} must be finite and >= 0"
+                )));
             }
         }
         // The defrost threshold must be finite: a NaN makes
@@ -150,21 +150,20 @@ impl VentilationConfig {
                 self.defrost_initial_time_fraction,
             ),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() || !(0.0..=1.0).contains(&v) {
-                    return Err(HaresError::Equipment(format!(
-                        "ventilation {name} must be finite and within [0, 1]"
-                    )));
-                }
+            if let Some(v) = val
+                && (!v.is_finite() || !(0.0..=1.0).contains(&v))
+            {
+                return Err(HaresError::Equipment(format!(
+                    "ventilation {name} must be finite and within [0, 1]"
+                )));
             }
         }
-        if let Some(rate) = self.defrost_time_increase_rate_per_k {
-            if !rate.is_finite() || rate < 0.0 {
-                return Err(HaresError::Equipment(
-                    "ventilation defrost_time_increase_rate_per_k must be finite and >= 0"
-                        .to_string(),
-                ));
-            }
+        if let Some(rate) = self.defrost_time_increase_rate_per_k
+            && (!rate.is_finite() || rate < 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "ventilation defrost_time_increase_rate_per_k must be finite and >= 0".to_string(),
+            ));
         }
         if let Some(hours) = self.hours_in_operation
             && (!hours.is_finite() || !(0.0..=24.0).contains(&hours))
@@ -177,8 +176,8 @@ impl VentilationConfig {
     }
 }
 
-use crate::config::KEY_ZONE_ID;
 use crate::config::constructor_equipment_id;
+use crate::hvac::helpers::{resolve_served_zone, served_zone_ports, zone_id_from_config};
 
 /// Default rated fan power [W].
 ///
@@ -323,7 +322,8 @@ pub struct Ventilation {
     zip: ResolvedZip,
 
     ventilation_type: VentilationType,
-    zone_id: ZoneId,
+    /// The zone the unit exchanges air with; `None` until `init` resolves it.
+    zone_id: Option<ZoneId>,
     /// Rated supply fan power [W] for balanced systems; 0 for exhaust-only.
     supply_fan_power_w: f64,
     /// Rated exhaust fan power [W].
@@ -360,19 +360,9 @@ impl Ventilation {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let equipment_id = constructor_equipment_id(&config);
-        // Resolve zone: explicit config value first, then ZoneMap, then
-        // ZoneId(1) as last-resort default (overridden by init_typed() when
-        // ZoneMap is available after dwelling construction).
-        let zone_id = config
-            .get_f64(KEY_ZONE_ID)
-            .map(|v| ZoneId(v as u16))
-            .or_else(|| {
-                config
-                    .zone_map
-                    .as_ref()
-                    .and_then(|zm| zm.get(ZoneRole::Indoor))
-            })
-            .unwrap_or(ZoneId(1));
+        // The zone resolves at init, where the dwelling's zone map is
+        // available; the constructor knows only an explicit zone_id.
+        let zone_id = zone_id_from_config(&config);
 
         let ventilation_type = match parse_ventilation_type(config.get_str("ventilation_type")) {
             Ok(vt) => vt,
@@ -393,7 +383,7 @@ impl Ventilation {
                 VentilationType::Hrv => "HRV",
                 VentilationType::Erv => "ERV",
             }),
-            zone: Some(zone_id),
+            zone: zone_id,
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::MODE_OVERRIDE
@@ -406,10 +396,7 @@ impl Ventilation {
             zone_type: None,
         };
 
-        let ports = vec![
-            PortDeclaration::electrical(),
-            PortDeclaration::thermal(zone_id),
-        ];
+        let ports = served_zone_ports(&[PortDeclaration::electrical()], zone_id, false);
 
         Self {
             descriptor,
@@ -553,20 +540,11 @@ impl Ventilation {
         self.effective_sensible_effectiveness = self.sensible_effectiveness;
         self.effective_latent_effectiveness = self.latent_effectiveness;
 
-        // Resolve zone from ZoneMap when available. Ventilation equipment
-        // routes thermal contributions to the indoor conditioned zone. The
-        // ZoneMap provides the correct ZoneId from the building envelope
-        // configuration, replacing the hardcoded ZoneId(1) default set in new().
-        if let Some(zone_map) = &config.zone_map {
-            if let Some(resolved_id) = zone_map.get(ZoneRole::Indoor) {
-                self.zone_id = resolved_id;
-                self.descriptor.zone = Some(resolved_id);
-                self.ports = vec![
-                    PortDeclaration::electrical(),
-                    PortDeclaration::thermal(resolved_id),
-                ];
-            }
-        }
+        // Ventilation exchanges the conditioned zone's air with outdoors.
+        let zone = resolve_served_zone(config, self.zone_id)?;
+        self.zone_id = Some(zone);
+        self.descriptor.zone = Some(zone);
+        self.ports = served_zone_ports(&[PortDeclaration::electrical()], Some(zone), false);
 
         Ok(())
     }
@@ -610,6 +588,18 @@ impl Equipment for Ventilation {
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        let zone_id = self.zone_id.ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{}: zone not resolved; init must run before stepping",
+                self.descriptor.name
+            ))
+        })?;
+        let zone = env.zones.iter().find(|z| z.id == zone_id).ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{}: zone {} is not in this step's environment",
+                self.descriptor.name, zone_id.0
+            ))
+        })?;
         // Grid outage: a de-energized bus removes the fan supply, so the unit
         // cannot run (no airflow, no recovery, no draw) — gated at the root
         // of the on/off decision (WH precedent). Islanded homes keep an
@@ -658,7 +648,7 @@ impl Equipment for Ventilation {
                 performance: CorePerformance::default(),
             };
 
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            #[cfg(debug_assertions)]
             {
                 if self.effective_sensible_effectiveness != 0.0 {
                     return Err(HaresError::InvariantViolation {
@@ -728,9 +718,8 @@ impl Equipment for Ventilation {
         }
 
         let t_outdoor_c = env.weather.outdoor_temp_c;
-        let zone = env.zones.iter().find(|z| z.id == self.zone_id);
-        let t_indoor_c = zone.map(|z| z.temperature_c).unwrap_or(20.0);
-        let w_indoor = zone.map(|z| z.humidity_ratio).unwrap_or(0.008);
+        let t_indoor_c = zone.temperature_c;
+        let w_indoor = zone.humidity_ratio;
         let w_outdoor = env.weather.outdoor_humidity_ratio;
 
         let eff_s = self.compute_effective_sensible_effectiveness(t_outdoor_c);
@@ -848,7 +837,6 @@ impl Equipment for Ventilation {
             );
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             if !(0.0..=1.0).contains(&defrost_fraction) {
                 return Err(HaresError::InvariantViolation {
@@ -1087,6 +1075,7 @@ mod tests {
 
     fn env(outdoor_c: f64, indoor_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: indoor_c,
@@ -1103,7 +1092,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1639,7 +1629,7 @@ mod tests {
     fn minimal_ventilation_config() -> VentilationConfig {
         VentilationConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             flow_rate_m3_s: 0.035,
             fan_power_w: None,
             supply_fan_power_w: None,
@@ -2226,7 +2216,7 @@ mod tests {
         // conditioned zone rather than hardcoding ZoneId(1). This test uses
         // ZoneId(5) for the conditioned zone to prove the mapping works
         // independent of zone sort order.
-        let mut cfg = hrv_config();
+        let mut cfg = hrv_config_without_zone();
         let mut zone_map = ZoneMap::new();
         zone_map.insert(ZoneRole::Indoor, ZoneId(5));
         cfg.zone_map = Some(zone_map);
@@ -2245,6 +2235,48 @@ mod tests {
             has_thermal_port_for_zone_5,
             "ventilation ports should include thermal port for resolved ZoneId(5)"
         );
+    }
+
+    fn hrv_config_without_zone() -> EquipmentConfig {
+        let mut cfg = hrv_config();
+        if let crate::ConfigPayload::Typed { data, .. } = &mut cfg.payload {
+            data["zone_id"] = serde_json::Value::Null;
+        }
+        cfg
+    }
+
+    /// With neither a zone_id nor a zone map the unit has no zone to
+    /// exchange air with: init must fail naming it.
+    #[test]
+    fn ventilation_init_errors_without_a_zone() {
+        let cfg = hrv_config_without_zone();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let err = hrv
+            .init(&cfg, &env(0.0, 20.0))
+            .expect_err("no zone_id and no zone map must fail init");
+        assert!(
+            err.to_string().contains("HRV"),
+            "the error must name the unit, got: {err}"
+        );
+    }
+
+    /// A step whose environment does not carry the unit's zone must fail
+    /// instead of exchanging air with an assumed 20 °C indoor state.
+    #[test]
+    fn ventilation_step_errors_when_its_zone_is_missing() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(0.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+        let mut missing = e.clone();
+        missing.zones.clear();
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.update_control(&missing);
+        hrv.step(&missing, Duration::from_secs(300), &mut ports)
+            .expect_err("a missing zone must fail the step");
     }
 
     #[test]
@@ -2366,6 +2398,7 @@ mod tests {
     #[test]
     fn ventilation_and_scheduled_load_fan_same_reactive_power() {
         let e = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 20.0,
@@ -2382,7 +2415,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)

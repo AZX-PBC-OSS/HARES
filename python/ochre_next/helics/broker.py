@@ -22,6 +22,17 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
 
 _PORT_BY_BROKER: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
 
+# Port pairs are drawn from 24200-29999. Below it sit the HELICS default
+# ports (23404-23415 zmq, 23500, 23901 udp, 24160 tcp), which a stock broker
+# on this host may hold; above it the Kubernetes NodePort range (30000-32767)
+# and the default kernel ephemeral ranges (Linux 32768-60999, macOS and
+# Windows 49152-65535). Hosts that widen their ephemeral range are covered by
+# the bind probe and create_broker's connected check, not by the range.
+_PORT_RANGE_START = 24200
+_PORT_RANGE_END = 29999
+_PORT_PROBE_ATTEMPTS = 128
+_BROKER_PORT_ATTEMPTS = 16
+
 
 def create_broker(
     n_federates: int,
@@ -54,31 +65,26 @@ def create_broker(
         HELICS broker handle.
     """
 
-    if not isinstance(n_federates, int) or isinstance(n_federates, bool):
+    # type() rather than isinstance(): bool is an int subclass, and
+    # create_broker(True) would silently mean one federate.
+    if type(n_federates) is not int:
         raise TypeError("n_federates must be an int")
     if n_federates <= 0:
         raise ValueError("n_federates must be positive")
 
     if port is not None:
-        broker = _create_broker_for_port(n_federates=n_federates, core_type=core_type, port=port)
-        _set_cached_broker_port(broker, port)
-        return broker
+        return _create_listening_broker(n_federates=n_federates, core_type=core_type, port=port)
 
     last_error: Exception | None = None
-    for _ in range(16):
-        selected_port = allocate_ephemeral_port()
+    for _ in range(_BROKER_PORT_ATTEMPTS):
         try:
-            broker = _create_broker_for_port(
+            return _create_listening_broker(
                 n_federates=n_federates,
                 core_type=core_type,
-                port=selected_port,
+                port=allocate_ephemeral_port(),
             )
         except Exception as exc:
             last_error = exc
-            continue
-        _set_cached_broker_port(broker, selected_port)
-        return broker
-
     raise RuntimeError("Unable to create broker on an ephemeral port") from last_error
 
 
@@ -175,10 +181,21 @@ def get_broker_port(broker: helics.HelicsBroker) -> int:
     raise RuntimeError("Unable to determine broker port from HELICS broker handle")
 
 
-def _create_broker_for_port(n_federates: int, core_type: str, port: int) -> Any:
+def _create_listening_broker(n_federates: int, core_type: str, port: int) -> Any:
+    """Create a broker on ``port``; raise if it could not bind its sockets.
+
+    HELICS binds while creating the broker, and a failed bind does not raise:
+    it logs, returns an unconnected broker, and every federate joining it then
+    waits out its registration timeout.
+    """
     broker_name = f"hares_broker_{os.getpid()}_{port}"
     init_string = f"--federates={n_federates} --port={port}"
-    return _create_broker_handle(core_type, broker_name, init_string)
+    broker = _create_broker_handle(core_type, broker_name, init_string)
+    if not _broker_is_connected(broker):
+        destroy_broker(broker)
+        raise RuntimeError(f"HELICS broker {broker_name} could not listen on port {port}")
+    _set_cached_broker_port(broker, port)
+    return broker
 
 
 def _get_cached_broker_port(broker: Any) -> int | None:
@@ -196,26 +213,32 @@ def _set_cached_broker_port(broker: Any, port: int) -> None:
 
 
 def allocate_ephemeral_port() -> int:
-    # TOCTOU: the socket is closed before the port is returned, so another
-    # process can claim it before create_broker() binds.  The 16-retry loop
-    # in create_broker() mitigates this race; switching to SO_REUSEPORT or
-    # passing the bound socket directly is not possible with the HELICS API.
-    #
-    # Using bind(0) once per fresh worker/process can repeatedly return the same
-    # first ephemeral port in isolated network namespaces. Probe a random free
-    # port first to avoid deterministic collisions under xdist workers.
-    for _ in range(128):
-        candidate = random.randint(20000, 60999)
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    """Return a port ``p`` with ``p`` and ``p + 1`` both free on localhost.
+
+    A ZMQ broker or core binds two sockets, its port and the next one, so both
+    are probed. Candidates come from a range clear of ports with other owners
+    (see ``_PORT_RANGE_START``): kernel ephemeral ports in particular are
+    handed to outgoing connections, including the federates' own connections
+    to a broker, so a free probe gives no protection against them. The probe
+    sockets close before the port is returned, so another process can still
+    claim it first; :func:`create_broker` detects that and moves on.
+    """
+    for _ in range(_PORT_PROBE_ATTEMPTS):
+        candidate = random.randint(_PORT_RANGE_START, _PORT_RANGE_END - 1)
+        with (
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM) as first,
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM) as second,
+        ):
             try:
-                sock.bind(("127.0.0.1", candidate))
+                first.bind(("127.0.0.1", candidate))
+                second.bind(("127.0.0.1", candidate + 1))
             except OSError:
                 continue
-            return int(candidate)
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+            return candidate
+    raise RuntimeError(
+        f"No free localhost port pair in {_PORT_RANGE_START}-{_PORT_RANGE_END} "
+        f"after {_PORT_PROBE_ATTEMPTS} attempts"
+    )
 
 
 def _create_broker_handle(core_type: str, broker_name: str, init_string: str) -> Any:

@@ -191,15 +191,14 @@ impl FleetAggregation {
 #[cfg(test)]
 fn temp_field_with_unit(name: &str) -> arrow::datatypes::Field {
     let field = arrow::datatypes::Field::new(name, DataType::Float64, true);
-    if let Some(start) = name.rfind('(') {
-        if let Some(end) = name[start..].find(')') {
-            if end > 1 {
-                let unit = &name[start + 1..start + end];
-                let mut metadata = std::collections::HashMap::new();
-                metadata.insert("unit".to_string(), unit.to_string());
-                return field.with_metadata(metadata);
-            }
-        }
+    if let Some(start) = name.rfind('(')
+        && let Some(end) = name[start..].find(')')
+        && end > 1
+    {
+        let unit = &name[start + 1..start + end];
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("unit".to_string(), unit.to_string());
+        return field.with_metadata(metadata);
     }
     field
 }
@@ -249,11 +248,6 @@ pub fn aggregate(
     results: &[DwellingOutcome],
     resolution: AggregationResolution,
 ) -> Result<FleetResults, FleetError> {
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        check_unit_aggregation_mapping_invariant();
-    }
-
     let per_dwelling_metrics = results
         .iter()
         .map(|outcome| DwellingMetrics {
@@ -357,11 +351,11 @@ pub fn aggregate(
 
     // Read only by the invariant block below, so the binding carries the
     // same compile-time gate; plain release builds compile both away.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     let n_successful = successful.len();
     let aggregate_timeseries = build_aggregate_batch(successful);
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     {
         if aggregate_timeseries.num_rows() == 0 && n_successful > 0 {
             tracing::error!(
@@ -644,20 +638,15 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
         let mut has_null = vec![false; column_count];
 
         for (sample_weight, _cols, buckets) in &successful {
-            // assert!, not debug_assert!: this block is only compiled under
-            // debug_assertions or check_invariants, and debug_assert! is a
-            // no-op in release builds even here — leaving the documented
-            // check_invariants contract (see
-            // check_unit_aggregation_mapping_invariant's doc comment) inert
-            // in the CI release configuration.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                assert!(
-                    sample_weight.is_finite() && *sample_weight >= 0.0,
-                    "sample_weight {} must be finite and >= 0.0",
-                    sample_weight
-                );
-            }
+            // Only compiled under debug_assertions: `aggregate` has already
+            // rejected invalid weights (FleetError::InvalidAggregationWeight),
+            // so this is a debug-build tripwire, not a release check.
+            #[cfg(debug_assertions)]
+            assert!(
+                sample_weight.is_finite() && *sample_weight >= 0.0,
+                "sample_weight {} must be finite and >= 0.0",
+                sample_weight
+            );
 
             let Some(values) = buckets.get(&bucket) else {
                 has_null.fill(true);
@@ -671,20 +660,6 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
                         total_weight[idx] += *sample_weight;
                     }
                     None => has_null[idx] = true,
-                }
-            }
-        }
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            for (idx, &tw) in total_weight.iter().enumerate() {
-                if !tw.is_finite() || tw < 0.0 {
-                    tracing::error!(
-                        column = idx,
-                        total_weight = tw,
-                        bucket = bucket,
-                        "fleet aggregation invariant violated: total_weight is non-finite or negative",
-                    );
                 }
             }
         }
@@ -736,44 +711,6 @@ fn empty_batch() -> RecordBatch {
     RecordBatch::try_new(schema, arrays).expect("empty aggregate record batch")
 }
 
-/// Invariant check: verifies that every recognized unit in the aggregation
-/// mapping tables maps to a valid aggregation strategy.
-///
-/// This runs at startup in debug builds or when
-/// `feature = "check_invariants"` is enabled.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub fn check_unit_aggregation_mapping_invariant() {
-    let all_units: &[&str] = &[
-        "kWh",
-        "kW",
-        "C",
-        "\u{b0}C",
-        "-",
-        "W",
-        "therms/hour",
-        "kVAR",
-        "kWh/mi",
-        "s",
-        "enum",
-        "W/m2",
-        "deg",
-    ];
-    for unit in all_units {
-        if column_aggregation_for_unit(unit).is_none() {
-            tracing::error!(
-                unit = unit,
-                "unit missing from ColumnAggregation mapping table"
-            );
-        }
-        if fleet_aggregation_for_unit(unit).is_none() {
-            tracing::error!(
-                unit = unit,
-                "unit missing from FleetAggregation mapping table"
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,6 +723,40 @@ mod tests {
         GridInteractionMetrics, PeakPowerKw, Reliability, RollingPeakKw, SimulationCoverage,
         SimulationMetrics, TotalEnergyKwh,
     };
+
+    /// Every unit spelling the fleet's output can carry maps to both
+    /// aggregation tables. This replaced the gated startup scan
+    /// (`check_unit_aggregation_mapping_invariant`): the tables are static,
+    /// so the property is a unit test over the same unit list the runtime
+    /// check enumerated.
+    #[test]
+    fn every_known_unit_maps_to_an_aggregation() {
+        let all_units: &[&str] = &[
+            "kWh",
+            "kW",
+            "C",
+            "\u{b0}C",
+            "-",
+            "W",
+            "therms/hour",
+            "kVAR",
+            "kWh/mi",
+            "s",
+            "enum",
+            "W/m2",
+            "deg",
+        ];
+        for unit in all_units {
+            assert!(
+                column_aggregation_for_unit(unit).is_some(),
+                "unit '{unit}' missing from ColumnAggregation mapping table"
+            );
+            assert!(
+                fleet_aggregation_for_unit(unit).is_some(),
+                "unit '{unit}' missing from FleetAggregation mapping table"
+            );
+        }
+    }
 
     fn sample_metrics(energy: f64, peak: f64) -> SimulationMetrics {
         SimulationMetrics {
@@ -1532,15 +1503,16 @@ mod tests {
         );
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "sample_weight")]
     fn build_aggregate_batch_debug_assert_catches_invalid_weight() {
         let columns = vec![temp_field_with_unit("Total Electric Power (kW)")];
         let mut buckets: BTreeMap<i64, Vec<Option<f64>>> = BTreeMap::new();
         buckets.insert(0, vec![Some(1.0)]);
-        // Direct call bypasses aggregate()'s guard — only the invariant check
-        // in build_aggregate_batch can catch this. Must panic in debug mode.
+        // Direct call bypasses aggregate()'s guard: only the debug-build
+        // tripwire in build_aggregate_batch can catch this. Must panic in
+        // debug mode.
         let _ = build_aggregate_batch(vec![(f64::NAN, columns, buckets)]);
     }
 

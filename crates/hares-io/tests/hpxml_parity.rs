@@ -29,7 +29,6 @@ use hares_types::{
     EnvironmentState, FuelType, GridState, HumidityAccumulator, PortSlots, ThermalAccumulator,
     WeatherState, ZoneId, ZoneState,
 };
-use serde_json::json;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -46,6 +45,7 @@ fn minimal_xml(systems_xml: &str) -> String {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -62,7 +62,7 @@ fn resolve(xml: &str) -> Vec<hares_io::EquipmentSpec> {
 
 fn resolve_with_defaults(xml: &str, defaults: &DefaultsStore) -> Vec<hares_io::EquipmentSpec> {
     let building = parse_building(xml).expect("should parse");
-    resolve_equipment(&building, defaults, &json!({}), None)
+    resolve_equipment(&building, defaults, None, &mut Vec::new())
         .expect("resolve_equipment should succeed")
 }
 
@@ -92,6 +92,7 @@ fn parity_fixture_xml(fixture_name: &str) -> String {
 
 fn make_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: zone_temp_c,
@@ -116,7 +117,8 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: HashMap::new(),
         equipment_core: HashMap::new(),
         current_time: FixedOffset::east_opt(0)
@@ -434,6 +436,7 @@ fn duct_parameters_extracted_for_hvac_equipment() {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -671,7 +674,7 @@ fn heat_pump_typed_config_for_mini_split_sets_four_speeds() {
 
     let defaults = repo_defaults();
     let building = parse_building(&xml).expect("should parse");
-    let resolved = resolve_equipment(&building, &defaults, &json!({}), None)
+    let resolved = resolve_equipment(&building, &defaults, None, &mut Vec::new())
         .expect("resolve_equipment should succeed");
     let cooler_spec = resolved
         .iter()
@@ -749,6 +752,7 @@ fn ashp_backup_lockout_temperature_extracted() {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -765,7 +769,7 @@ fn ashp_backup_lockout_temperature_extracted() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let heater = specs
@@ -818,6 +822,7 @@ fn switchover_only_maps_to_both_lockouts_ochre_parity() {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -834,7 +839,7 @@ fn switchover_only_maps_to_both_lockouts_ochre_parity() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
     let heater = specs
         .iter()
@@ -879,6 +884,7 @@ fn separate_compressor_and_backup_lockouts_independent() {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -896,7 +902,7 @@ fn separate_compressor_and_backup_lockouts_independent() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
     let heater = specs
         .iter()
@@ -947,6 +953,7 @@ fn no_lockout_fields_emits_no_lockout_params() {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -962,7 +969,7 @@ fn no_lockout_fields_emits_no_lockout_params() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
     let heater = specs
         .iter()
@@ -992,7 +999,7 @@ fn cz4a_ashp_fixture_preserves_single_stage_compressor_intent() {
     building.site.latitude_deg.get_or_insert(39.29);
     building.site.longitude_deg.get_or_insert(-76.61);
     let specs =
-        resolve_equipment(&building, &defaults, &json!({}), None).expect("resolve_equipment");
+        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("resolve_equipment");
 
     let heater = specs
         .iter()
@@ -1022,12 +1029,13 @@ fn propane_storage_water_heater_resolves_and_inits_as_propane() {
             <WaterHeatingSystem>
                 <FuelType>propane</FuelType>
                 <WaterHeaterType>storage water heater</WaterHeaterType>
+                <Location>conditioned space</Location>
                 <HotWaterTemperature>125.0</HotWaterTemperature>
             </WaterHeatingSystem>
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let wh = specs
@@ -1055,12 +1063,13 @@ fn natural_gas_tankless_water_heater_resolves_and_inits_as_gas() {
             <WaterHeatingSystem>
                 <FuelType>natural gas</FuelType>
                 <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                <Location>conditioned space</Location>
                 <HeatingCapacity>20000</HeatingCapacity>
             </WaterHeatingSystem>
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let wh = specs
@@ -1095,7 +1104,7 @@ fn hpwh_heating_capacity_populates_backup_element_power() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let wh = specs
@@ -1142,7 +1151,7 @@ fn low_power_hpwh_auto_detected_from_uef_without_hardcoded_presets() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let wh = specs
@@ -1212,7 +1221,7 @@ fn high_uef_hpwh_cop_derived_from_uef_not_hardcoded() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let wh = specs
@@ -1275,8 +1284,8 @@ fn propane_furnace_resolves_to_gas_furnace_config_with_propane_fuel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
-        .expect("propane furnace should resolve without error (ticket #079)");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
+        .expect("propane furnace should resolve without error");
 
     let furnace = specs
         .iter()
@@ -1314,8 +1323,8 @@ fn fuel_oil_2_boiler_resolves_to_gas_boiler_config_with_oil_fuel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
-        .expect("fuel oil 2 boiler should resolve without error (ticket #079)");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
+        .expect("fuel oil 2 boiler should resolve without error");
 
     let boiler = specs
         .iter()
@@ -1509,7 +1518,7 @@ fn resolve_ochre_fixture(fixture_name: &str) -> Vec<hares_io::EquipmentSpec> {
     let xml = ochre_fixture_xml(fixture_name);
     let building = parse_building(&xml).expect("should parse");
     let defaults = repo_defaults();
-    resolve_equipment(&building, &defaults, &json!({}), None)
+    resolve_equipment(&building, &defaults, None, &mut Vec::new())
         .expect("resolve_equipment should succeed")
 }
 
@@ -2108,7 +2117,7 @@ fn multifamily_shared_boiler_fixture_resolves_equipment() {
     );
 
     let defaults = repo_defaults();
-    let specs = resolve_equipment(&building, &defaults, &json!({}), None)
+    let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
         .expect("shared boiler fixture should resolve equipment");
 
     let gas_boiler = specs

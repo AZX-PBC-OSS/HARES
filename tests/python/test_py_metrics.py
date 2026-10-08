@@ -4,6 +4,9 @@ import math
 
 import pytest
 from pathlib import Path
+from typing import NotRequired, TypedDict
+
+from conftest import output_in_test_dir
 
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
@@ -14,6 +17,17 @@ WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 from ochre_next import Dwelling, SimulationMetrics
+
+
+class _OutputKwargs(TypedDict):
+    write_output: bool
+    output_path: NotRequired[str]
+
+
+# metrics() and the simulate() DataFrame read the output pipeline, so these
+# tests run with write_output=True.
+_OUTPUT: _OutputKwargs = {"write_output": True}
+_output_in_test_dir = output_in_test_dir(_OUTPUT, "dwelling_0.csv")
 
 
 class TestMetrics:
@@ -29,6 +43,7 @@ class TestMetrics:
             bldg_id=42,
             master_seed=0,
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -83,6 +98,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -94,7 +110,7 @@ class TestMetrics:
         assert isinstance(repr(metrics.grid_interaction), str)
         assert isinstance(repr(metrics.efficiency), str)
 
-    def test_metrics_before_simulate_raises(self):
+    def test_metrics_before_simulate_raises(self, tmp_path):
         dw = Dwelling.from_hpxml(
             HPXML,
             SCHEDULE,
@@ -103,6 +119,8 @@ class TestMetrics:
             duration_s=3600,
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
+            write_output=True,
+            output_path=str(tmp_path / "dwelling_0.csv"),
         )
         dw.initialize()
 
@@ -119,6 +137,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=0,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -127,7 +146,7 @@ class TestMetrics:
 
         assert metrics.envelope_loads_kwh is None
 
-    def test_envelope_loads_present_at_high_verbosity(self):
+    def test_envelope_loads_present_at_high_verbosity(self, tmp_path):
         dw = Dwelling.from_hpxml(
             HPXML,
             SCHEDULE,
@@ -137,6 +156,8 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=6,
+            write_output=True,
+            output_path=str(tmp_path / "dwelling_0.csv"),
         )
         dw.initialize()
         dw.simulate()
@@ -176,6 +197,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -198,6 +220,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -221,6 +244,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -252,6 +276,7 @@ class TestMetrics:
             time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()
@@ -289,6 +314,7 @@ class TestMetrics:
             time_res_s=900,
             defaults_path=str(HARES_DEFAULTS),
             output_verbosity=1,
+            **_OUTPUT,
         )
         dw.initialize()
         dw.simulate()

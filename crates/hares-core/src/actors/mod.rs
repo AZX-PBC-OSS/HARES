@@ -9,12 +9,12 @@ mod occupant;
 mod safety_monitor;
 mod solver_feedback;
 
-pub use bms::BatteryManagementActor;
+pub use bms::{BatteryManagementActor, BmsParams};
 pub use constants::DEFAULT_FREEZE_THRESHOLD_C;
 pub use dr_compliance::{
     AlwaysComply, ComplianceModel, DrAction, DrCompliance, NeverComply, Probabilistic,
 };
-pub use ev_driver::EvDriverActor;
+pub use ev_driver::{EvDriverActor, EvDriverParams};
 pub use ideal_thermostat::{IdealThermostat, OverrideState};
 pub use occupant::{EquipmentBehavior, Occupant, Presence};
 pub use safety_monitor::SafetyMonitor;

@@ -9,11 +9,6 @@ mod tests {
     use hares_core::Dwelling;
     use rayon::prelude::*;
     use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
     // Synthetic dwelling (furnace + electricity) produces zone "Indoor" and
     // equipment "Electric Furnace" (canonical HPXML heating name).
@@ -24,17 +19,6 @@ mod tests {
         "equipment_power[Electric Furnace]",
         "setpoint_heat[Indoor]",
     ];
-
-    fn temp_path(prefix: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_nanos();
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        path.push(format!("hares-test-batchstep-{prefix}-{nanos}-{id}.toml"));
-        path
-    }
 
     fn synthetic_toml(duration_s: i64, time_res_s: i64) -> String {
         format!(
@@ -48,7 +32,6 @@ duration_s = {duration_s}
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.0
@@ -64,6 +47,9 @@ dew_point_c = 4.0
 rel_humidity_pct = 55.0
 pressure_kpa = 101.325
 
+[infiltration]
+ach = 0.0
+
 [schedule]
 occupancy = 1.0
 
@@ -77,8 +63,9 @@ write_output = false
         )
     }
 
-    fn make_dwelling(duration_s: i64, time_res_s: i64, idx: usize) -> Dwelling {
-        let path = temp_path(&format!("{idx}"));
+    fn make_dwelling(duration_s: i64, time_res_s: i64) -> Dwelling {
+        let dir = tempfile::tempdir().expect("create TOML directory");
+        let path = dir.path().join("dwelling.toml");
         fs::write(&path, synthetic_toml(duration_s, time_res_s)).expect("write TOML");
         Dwelling::from_toml_config_with_write_output(&path, Some(false)).expect("create dwelling")
     }
@@ -86,8 +73,7 @@ write_output = false
     #[test]
     fn batch_step_n_dwellings_yields_n_observations() {
         for n in [1usize, 4, 16] {
-            let mut dwellings: Vec<Dwelling> =
-                (0..n).map(|i| make_dwelling(3_600, 900, i)).collect();
+            let mut dwellings: Vec<Dwelling> = (0..n).map(|_| make_dwelling(3_600, 900)).collect();
 
             // Batch-step: step all in parallel, then collect observations.
             dwellings.par_iter_mut().for_each(|dwelling| {
@@ -98,6 +84,7 @@ write_output = false
                 .map(|dwelling| {
                     dwelling
                         .telemetry()
+                        .unwrap()
                         .to_observation_vec(NARROW_FIELDS)
                         .expect("observation")
                 })
@@ -122,11 +109,11 @@ write_output = false
     fn batch_step_single_pass_step_and_observe() {
         // Mirrors the inner loop of batch_step_py: step + observe in one pass.
         let n = 4usize;
-        let mut dwellings: Vec<Dwelling> = (0..n).map(|i| make_dwelling(3_600, 900, i)).collect();
+        let mut dwellings: Vec<Dwelling> = (0..n).map(|_| make_dwelling(3_600, 900)).collect();
 
         dwellings.par_iter_mut().for_each(|dwelling| {
             let _ = dwelling.step().expect("step");
-            let t = dwelling.telemetry();
+            let t = dwelling.telemetry().unwrap();
             let obs = t.to_observation_vec(NARROW_FIELDS).expect("obs");
             assert_eq!(
                 obs.len(),
@@ -137,7 +124,7 @@ write_output = false
 
         // After stepping, all dwellings should have advanced by one timestep.
         for dwelling in &dwellings {
-            let t = dwelling.telemetry();
+            let t = dwelling.telemetry().unwrap();
             assert_eq!(
                 t.timestep_index, 1,
                 "dwelling should have advanced to timestep 1 after a single step"

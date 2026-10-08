@@ -27,6 +27,7 @@ const ZONE2: ZoneId = ZoneId(2);
 
 fn two_zone_env(zone1_temp_c: f64, zone2_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![
             ZoneState {
                 id: ZONE1,
@@ -70,7 +71,8 @@ fn two_zone_env(zone1_temp_c: f64, zone2_temp_c: f64, outdoor_temp_c: f64) -> En
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()
@@ -179,7 +181,7 @@ fn test_two_zone_coupled_wall_heat_direction() {
     let env = two_zone_env(t1_init, t2_init, outdoor);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE1,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_two_zone_solver(&env, t1_init, config);
@@ -193,7 +195,9 @@ fn test_two_zone_coupled_wall_heat_direction() {
 
     let ports = two_zone_ports();
 
-    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&ports, &env, Duration::from_secs(60))
+        .unwrap();
 
     let t1_after = update
         .zone_temperatures_c
@@ -249,7 +253,7 @@ fn initialize_steady_state_pins_only_configured_indoor_zone() {
     let env = two_zone_env(indoor_setpoint, outdoor, outdoor);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE1,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let solver = build_two_zone_solver(&env, indoor_setpoint, config);
@@ -411,7 +415,7 @@ fn radiant_port_in_non_indoor_zone_reaches_zone_surface() {
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE1,
         interior_lwr_zones: vec![zone2_lwr],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = ThermalSolver::new(model, wiring, config, dt, &env, 20.0)
@@ -433,7 +437,9 @@ fn radiant_port_in_non_indoor_zone_reaches_zone_surface() {
         ..Default::default()
     };
 
-    solver.resolve_new(&ports, &env, Duration::from_secs(60));
+    solver
+        .resolve_new(&ports, &env, Duration::from_secs(60))
+        .unwrap();
 
     // After the step, last_u[2] must contain the radiant gain routed to the
     // ZONE2 surface.  With the bug it is 0.0 — the radiant path never visits ZONE2.
@@ -495,10 +501,14 @@ fn oob_input_index_in_radiant_lwr_distribution_does_not_panic() {
     };
     use hares_types::{PortSlots, ThermalAccumulator};
 
-    // 1-state, 2-input model: [T_out, Q_zone1].
-    // Input vector len = 2 throughout.
+    // 1-state, 3-input model: [T_out, Q_zone1, Q_zone2].
+    // Input vector len = 3 throughout.
     let a_c = nalgebra::DMatrix::from_row_slice(1, 1, &[-1.0 / (2.0 * 50_000.0)]);
-    let b_c = nalgebra::DMatrix::from_row_slice(1, 2, &[1.0 / (2.0 * 50_000.0), 1.0 / 50_000.0]);
+    let b_c = nalgebra::DMatrix::from_row_slice(
+        1,
+        3,
+        &[1.0 / (2.0 * 50_000.0), 1.0 / 50_000.0, 1.0 / 50_000.0],
+    );
     let mapping = OutputMapping {
         output_count: 1,
         node_to_output: vec![(0, 0, 1.0)],
@@ -509,7 +519,7 @@ fn oob_input_index_in_radiant_lwr_distribution_does_not_panic() {
     let wiring = StateSpaceWiring {
         zone_state_indices: HashMap::from([(ZONE1, 0)]),
         zone_output_indices: HashMap::from([(ZONE1, 0)]),
-        zone_sensible_input_indices: HashMap::from([(ZONE1, 1)]),
+        zone_sensible_input_indices: HashMap::from([(ZONE1, 1), (ZONE2, 2)]),
         outdoor_temp_input_indices: vec![0],
         ground_temp_input_indices: vec![],
         ground_temp_input_depths_m: vec![],
@@ -547,7 +557,7 @@ fn oob_input_index_in_radiant_lwr_distribution_does_not_panic() {
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE1,
         interior_lwr_zones: vec![lwr_zone],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0)
@@ -568,7 +578,9 @@ fn oob_input_index_in_radiant_lwr_distribution_does_not_panic() {
     };
 
     // Must NOT panic (the bug the ticket described would panic here).
-    solver.resolve_new(&ports, &env, Duration::from_secs(60));
+    solver
+        .resolve_new(&ports, &env, Duration::from_secs(60))
+        .unwrap();
 
     // The key property: no panic occurred.  The OOB surface's share was
     // silently dropped (it cannot reach input 99, and radiation_frac=1.0
@@ -577,11 +589,11 @@ fn oob_input_index_in_radiant_lwr_distribution_does_not_panic() {
     // converting this into a loud constructor error instead (which is NOT
     // yet implemented; see "Not Legitimate" verdict in audit section).
     let last_u = solver.last_u_debug();
-    // u[99] is obviously inaccessible; verify u vector length stayed at 2.
+    // u[99] is obviously inaccessible; verify u vector length stayed at 3.
     assert_eq!(
         last_u.len(),
-        2,
-        "input vector must still have length 2 after step with OOB surface"
+        3,
+        "input vector must still have length 3 after step with OOB surface"
     );
     // No panic == the critical assertion: execution reached this line.
 }

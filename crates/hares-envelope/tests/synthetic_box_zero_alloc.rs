@@ -3,24 +3,9 @@
 //! This is in a separate test binary because `#[global_allocator]` applies to
 //! the entire binary and would interfere with other tests.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use hares_envelope::{OutputMapping, StateSpaceModel};
+use hares_types::alloc_count::{CountingAllocator, thread_allocations};
 use nalgebra::{DMatrix, DVector};
-
-struct CountingAllocator;
-static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
 
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
@@ -50,15 +35,17 @@ fn test_step_into_zero_allocations() {
     model.step_into(&x, &u, &mut buf);
     std::mem::swap(&mut x, &mut buf);
 
-    // Reset counter and run the hot loop
-    ALLOC_COUNT.store(0, Ordering::SeqCst);
+    // The per-thread counter cannot be reset, so the hot loop is counted as
+    // a delta between two reads on this thread.
+    let before = thread_allocations().expect("the test installs the counting allocator");
 
     for _ in 0..100 {
         model.step_into(&x, &u, &mut buf);
         std::mem::swap(&mut x, &mut buf);
     }
 
-    let allocs = ALLOC_COUNT.load(Ordering::SeqCst);
+    let after = thread_allocations().expect("the test installs the counting allocator");
+    let allocs = after - before;
     assert!(
         allocs == 0,
         "step_into allocated {allocs} times during 100 steps; expected 0"

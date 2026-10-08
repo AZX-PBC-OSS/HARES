@@ -308,6 +308,7 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         source_step_secs: step_secs,
         midpoint_offset_secs: 0,
         has_embedded_location: true,
+        station_wmo: None,
     };
 
     Ok(WeatherTimeSeries {

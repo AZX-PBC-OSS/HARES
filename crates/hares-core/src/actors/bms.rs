@@ -10,15 +10,37 @@ use serde::{Deserialize, Serialize};
 use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
-    BmsAction, BmsMode, BmsScheduleWindow, ControlSignal, EnvironmentState, EquipmentId,
-    GridExportRule, HaresError, StormWatchTrigger, Telemetry,
+    BmsAction, BmsMode, BmsScheduleWindow, ControlCapabilities, ControlSignal, EnvironmentState,
+    EquipmentId, GridExportRule, HaresError, StormWatchTrigger, Telemetry,
 };
 
-use crate::Actor;
+use crate::{Actor, ActorTarget};
+
+/// BMS configuration parameters for the `BatteryManagementActor`
+/// constructors, grouped so the constructors read as identity + config.
+pub struct BmsParams {
+    pub bms_mode: BmsMode,
+    pub grid_export_rule: GridExportRule,
+    pub max_charge_kw: f64,
+    pub max_discharge_kw: f64,
+    /// Day-ahead price schedule the BMS compares its price thresholds against.
+    pub price_schedule: Option<Arc<[f64]>>,
+    pub steps_per_day: usize,
+    pub min_dwell_steps: usize,
+}
+
+/// SelfConsumption mode parameters for [`BatteryManagementActor`]'s PV
+/// re-evaluator, mirroring the `BmsMode::SelfConsumption` variant fields.
+struct SelfConsumptionPolicy {
+    min_soc: f64,
+    max_soc: f64,
+    solar_only_charging: bool,
+    surplus_deadband_kw: f64,
+}
 
 pub struct BatteryManagementActor {
     name: String,
-    dispatch_target: DispatchTarget,
+    battery: ActorTarget,
     equipment_id: Option<EquipmentId>,
     bms_mode: BmsMode,
     grid_export_rule: GridExportRule,
@@ -41,20 +63,31 @@ pub struct BatteryManagementActor {
 }
 
 impl BatteryManagementActor {
-    #[allow(clippy::too_many_arguments)] // Why: all fields are distinct BMS configuration parameters; introducing a builder adds complexity for no structural benefit
-    pub fn new(
-        battery_name: &str,
-        bms_mode: BmsMode,
-        grid_export_rule: GridExportRule,
-        max_charge_kw: f64,
-        max_discharge_kw: f64,
-        price_schedule: Option<Arc<[f64]>>,
-        steps_per_day: usize,
-        min_dwell_steps: usize,
-    ) -> Self {
+    /// Takes over the decision state and telemetry of the actor this one
+    /// is rebuilt to replace (with new prices): the dwell timer, action
+    /// hysteresis, storm-watch and demand-response latches and counters
+    /// carry over, and only the cached day and its price thresholds are
+    /// dropped, so they are recomputed from this actor's prices on the
+    /// next decision.
+    pub(crate) fn take_over(&mut self, predecessor: &dyn Actor) -> Result<(), HaresError> {
+        self.load_state(&predecessor.save_state()?)?;
+        self.current_day_ordinal0 = u32::MAX;
+        if let Some(telemetry) = predecessor.telemetry() {
+            self.telemetry.clone_from(telemetry);
+        }
+        Ok(())
+    }
+
+    pub fn new(battery_name: &str, params: BmsParams) -> Self {
         Self::with_name(
             &format!("BatteryManagementActor:{battery_name}"),
             battery_name,
+            params,
+        )
+    }
+
+    pub fn with_name(name: &str, battery_name: &str, params: BmsParams) -> Self {
+        let BmsParams {
             bms_mode,
             grid_export_rule,
             max_charge_kw,
@@ -62,21 +95,7 @@ impl BatteryManagementActor {
             price_schedule,
             steps_per_day,
             min_dwell_steps,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)] // Why: all fields are distinct BMS configuration parameters; introducing a builder adds complexity for no structural benefit
-    pub fn with_name(
-        name: &str,
-        battery_name: &str,
-        bms_mode: BmsMode,
-        grid_export_rule: GridExportRule,
-        max_charge_kw: f64,
-        max_discharge_kw: f64,
-        price_schedule: Option<Arc<[f64]>>,
-        steps_per_day: usize,
-        min_dwell_steps: usize,
-    ) -> Self {
+        } = params;
         let mut telemetry = Telemetry::with_capacity(8);
         // Why: soc = 0.0 as init sentinel means "no SOC reading yet" — the
         // BMS reads SOC from equipment_core on the first decide() call and
@@ -95,7 +114,14 @@ impl BatteryManagementActor {
         telemetry.insert("bms_dwell_blocked", 0.0);
         Self {
             name: name.to_string(),
-            dispatch_target: DispatchTarget::ByName(Arc::from(battery_name)),
+            battery: ActorTarget {
+                target: DispatchTarget::ByName(Arc::from(battery_name)),
+                required: ControlCapabilities::POWER_SETPOINT
+                    | ControlCapabilities::SOC_TARGET
+                    | ControlCapabilities::POWER_LIMIT
+                    | ControlCapabilities::GRID_CONNECT
+                    | ControlCapabilities::SELF_CONSUMPTION,
+            },
             equipment_id: None,
             bms_mode,
             grid_export_rule,
@@ -143,10 +169,16 @@ impl BatteryManagementActor {
         // `PowerLimit` is a charge-rate cap within a scheduled mode, not a
         // grid-imposed power constraint.
         out.push(DispatchRequest {
-            target: self.dispatch_target.clone(),
+            target: self.battery.target.clone(),
             signal,
             priority: PriorityTier::Schedule,
         });
+        // Every signal leaves through here; see `check_declared_signals`.
+        debug_assert!(
+            crate::actor::check_declared_signals(self, &out[out.len() - 1..]).is_ok(),
+            "the battery manager sent {:?}, which its declared control capabilities omit",
+            out[out.len() - 1].signal
+        );
     }
 
     /// Clamp discharge power (negative `active_power_kw`) based on grid export rule.
@@ -710,21 +742,20 @@ impl BatteryManagementActor {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    // Why: all arguments are distinct SelfConsumption configuration parameters
-    // and per-step context; bundling them into a struct would add indirection
-    // for no structural benefit.
     /// Re-evaluate SelfConsumption decision with actual (not prior-step) PV.
     fn reevaluate_self_consumption(
         &mut self,
         pv_kw: f64,
         env: &EnvironmentState,
-        min_soc: f64,
-        max_soc: f64,
-        solar_only_charging: bool,
-        surplus_deadband_kw: f64,
+        policy: SelfConsumptionPolicy,
         out: &mut Vec<DispatchRequest>,
     ) {
+        let SelfConsumptionPolicy {
+            min_soc,
+            max_soc,
+            solar_only_charging,
+            surplus_deadband_kw,
+        } = policy;
         let Some(soc) = self.read_soc(env) else {
             return;
         };
@@ -882,10 +913,12 @@ impl BatteryManagementActor {
                 self.reevaluate_self_consumption(
                     pv_kw,
                     env,
-                    *min_soc,
-                    *max_soc,
-                    *solar_only_charging,
-                    *surplus_deadband_kw,
+                    SelfConsumptionPolicy {
+                        min_soc: *min_soc,
+                        max_soc: *max_soc,
+                        solar_only_charging: *solar_only_charging,
+                        surplus_deadband_kw: *surplus_deadband_kw,
+                    },
                     out,
                 );
             }
@@ -999,15 +1032,12 @@ impl Actor for BatteryManagementActor {
         Some(&self.telemetry)
     }
 
-    fn dispatch_target_name(&self) -> Option<&str> {
-        match &self.dispatch_target {
-            DispatchTarget::ByName(n) => Some(n.as_ref()),
-            DispatchTarget::ByEndUse(_) => None,
-        }
+    fn dispatch_targets(&self) -> &[ActorTarget] {
+        std::slice::from_ref(&self.battery)
     }
 
     fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
-        let battery_name = match &self.dispatch_target {
+        let battery_name = match &self.battery.target {
             DispatchTarget::ByName(n) => n.as_ref(),
             DispatchTarget::ByEndUse(_) => return,
         };
@@ -1154,6 +1184,54 @@ mod tests {
     use super::*;
     use crate::actor::testing::TestEnvBuilder;
 
+    /// [`bms`] with a caller-chosen price schedule.
+    fn bms_priced(bms_mode: BmsMode, price_schedule: Option<Arc<[f64]>>) -> BatteryManagementActor {
+        bms_priced_with(bms_mode, GridExportRule::Unrestricted, price_schedule)
+    }
+
+    /// [`bms`] with caller-chosen export rule and price schedule.
+    fn bms_priced_with(
+        bms_mode: BmsMode,
+        grid_export_rule: GridExportRule,
+        price_schedule: Option<Arc<[f64]>>,
+    ) -> BatteryManagementActor {
+        BatteryManagementActor::new(
+            "bat1",
+            BmsParams {
+                bms_mode,
+                grid_export_rule,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+                price_schedule,
+                steps_per_day: 24,
+                min_dwell_steps: 0,
+            },
+        )
+    }
+
+    /// A `BatteryManagementActor` on "bat1" with the common test parameters
+    /// (unrestricted export, 5 kW charge/discharge, no price schedule, 24
+    /// steps/day) and the given mode.
+    fn bms(bms_mode: BmsMode) -> BatteryManagementActor {
+        bms_with(bms_mode, GridExportRule::Unrestricted)
+    }
+
+    /// [`bms`] with a caller-chosen export rule.
+    fn bms_with(bms_mode: BmsMode, grid_export_rule: GridExportRule) -> BatteryManagementActor {
+        BatteryManagementActor::new(
+            "bat1",
+            BmsParams {
+                bms_mode,
+                grid_export_rule,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+                price_schedule: None,
+                steps_per_day: 24,
+                min_dwell_steps: 0,
+            },
+        )
+    }
+
     fn set_soc(
         actor: &mut BatteryManagementActor,
         env: &mut EnvironmentState,
@@ -1178,16 +1256,7 @@ mod tests {
 
     #[test]
     fn bms_manual_no_dispatch() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::Manual,
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::Manual);
         let env = TestEnvBuilder::new().build();
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1196,21 +1265,12 @@ mod tests {
 
     #[test]
     fn bms_missing_equipment_core_entry_is_graceful() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut id_by_name = std::collections::HashMap::new();
         id_by_name.insert("bat1".to_string(), EquipmentId(1));
         actor.resolve_equipment_id(&id_by_name);
@@ -1228,21 +1288,12 @@ mod tests {
 
     #[test]
     fn bms_self_consumption_pv_surplus_charges() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 5.0,
@@ -1265,21 +1316,12 @@ mod tests {
 
     #[test]
     fn bms_self_consumption_deficit_discharges() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 1.0,
@@ -1307,21 +1349,12 @@ mod tests {
 
     #[test]
     fn bms_self_consumption_solar_only_blocks_grid() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: true,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: true,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 0.0,
@@ -1344,8 +1377,7 @@ mod tests {
     #[test]
     fn bms_tou_low_price_charges() {
         let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.2,
                 charge_threshold_percentile: 0.25,
@@ -1354,12 +1386,7 @@ mod tests {
                 price_deadband: 0.0,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1388,8 +1415,7 @@ mod tests {
     #[test]
     fn bms_tou_high_price_discharges() {
         let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.2,
                 charge_threshold_percentile: 0.25,
@@ -1398,12 +1424,7 @@ mod tests {
                 price_deadband: 0.0,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1432,8 +1453,7 @@ mod tests {
     #[test]
     fn bms_tou_respects_reserve_soc() {
         let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.2,
                 charge_threshold_percentile: 0.25,
@@ -1442,12 +1462,7 @@ mod tests {
                 price_deadband: 0.0,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1467,21 +1482,12 @@ mod tests {
 
     #[test]
     fn bms_backup_reserve_charges_to_target() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::BackupReserve {
-                target_soc: 0.8,
-                charge_from_grid: true,
-                charge_rate_fraction: 0.5,
-                soc_deadband: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::BackupReserve {
+            target_soc: 0.8,
+            charge_from_grid: true,
+            charge_rate_fraction: 0.5,
+            soc_deadband: 0.0,
+        });
 
         let mut env = TestEnvBuilder::new().build();
         set_soc(&mut actor, &mut env, "bat1", 0.3);
@@ -1515,21 +1521,12 @@ mod tests {
 
     #[test]
     fn bms_backup_reserve_idle_above_target() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::BackupReserve {
-                target_soc: 0.8,
-                charge_from_grid: true,
-                charge_rate_fraction: 0.5,
-                soc_deadband: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::BackupReserve {
+            target_soc: 0.8,
+            charge_from_grid: true,
+            charge_rate_fraction: 0.5,
+            soc_deadband: 0.0,
+        });
 
         let mut env = TestEnvBuilder::new().build();
         set_soc(&mut actor, &mut env, "bat1", 0.9);
@@ -1543,8 +1540,7 @@ mod tests {
     #[test]
     fn bms_demand_response_active() {
         let prices: Vec<f64> = vec![0.10; 24];
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::DemandResponse {
                 base_mode: Box::new(BmsMode::Manual),
                 dr_discharge_rate: 0.8,
@@ -1552,12 +1548,7 @@ mod tests {
                 dr_deactivation_multiplier: 0.0,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1585,8 +1576,7 @@ mod tests {
     #[test]
     fn bms_demand_response_delegates_to_base() {
         let prices: Vec<f64> = vec![0.10; 24];
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::DemandResponse {
                 base_mode: Box::new(BmsMode::SelfConsumption {
                     min_soc: 0.1,
@@ -1599,12 +1589,7 @@ mod tests {
                 dr_deactivation_multiplier: 0.0,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1632,25 +1617,16 @@ mod tests {
 
     #[test]
     fn bms_scheduled_charge_window() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::Scheduled {
-                windows: vec![BmsScheduleWindow {
-                    time_window: BmsTimeWindow {
-                        day: DayFilter::Any,
-                        start_minute: 0,
-                        end_minute: 1440,
-                    },
-                    action: BmsAction::Charge { rate_fraction: 0.5 },
-                }],
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::Scheduled {
+            windows: vec![BmsScheduleWindow {
+                time_window: BmsTimeWindow {
+                    day: DayFilter::Any,
+                    start_minute: 0,
+                    end_minute: 1440,
+                },
+                action: BmsAction::Charge { rate_fraction: 0.5 },
+            }],
+        });
 
         let env = TestEnvBuilder::new().hour(6).build();
         let mut out = Vec::new();
@@ -1669,25 +1645,16 @@ mod tests {
 
     #[test]
     fn bms_scheduled_no_matching_window() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::Scheduled {
-                windows: vec![BmsScheduleWindow {
-                    time_window: BmsTimeWindow {
-                        day: DayFilter::Weekends,
-                        start_minute: 0,
-                        end_minute: 360,
-                    },
-                    action: BmsAction::Charge { rate_fraction: 1.0 },
-                }],
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::Scheduled {
+            windows: vec![BmsScheduleWindow {
+                time_window: BmsTimeWindow {
+                    day: DayFilter::Weekends,
+                    start_minute: 0,
+                    end_minute: 360,
+                },
+                action: BmsAction::Charge { rate_fraction: 1.0 },
+            }],
+        });
 
         // 2026-01-05 is a Monday (weekday), so weekend window won't match
         let env = TestEnvBuilder::new().date(2026, 1, 5).hour(3).build();
@@ -1699,21 +1666,12 @@ mod tests {
 
     #[test]
     fn bms_storm_watch_active_full_charge() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::StormWatch {
-                target_soc: 1.0,
-                trigger: StormWatchTrigger::ManualEnable,
-                base_mode: Box::new(BmsMode::Manual),
-                min_duration_steps: None,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::StormWatch {
+            target_soc: 1.0,
+            trigger: StormWatchTrigger::ManualEnable,
+            base_mode: Box::new(BmsMode::Manual),
+            min_duration_steps: None,
+        });
 
         let env = TestEnvBuilder::new().build();
         let mut out = Vec::new();
@@ -1730,24 +1688,15 @@ mod tests {
 
     #[test]
     fn bms_storm_watch_weather_signal_high_wind_activates() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::StormWatch {
-                target_soc: 1.0,
-                trigger: StormWatchTrigger::WeatherSignal {
-                    wind_speed_threshold_m_s: 25.0,
-                    wind_speed_deactivation_threshold_m_s: 0.0,
-                },
-                base_mode: Box::new(BmsMode::Manual),
-                min_duration_steps: None,
+        let mut actor = bms(BmsMode::StormWatch {
+            target_soc: 1.0,
+            trigger: StormWatchTrigger::WeatherSignal {
+                wind_speed_threshold_m_s: 25.0,
+                wind_speed_deactivation_threshold_m_s: 0.0,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+            base_mode: Box::new(BmsMode::Manual),
+            min_duration_steps: None,
+        });
 
         let env = TestEnvBuilder::new()
             .with_weather(WeatherState {
@@ -1764,29 +1713,20 @@ mod tests {
 
     #[test]
     fn bms_storm_watch_inactive_delegates() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::StormWatch {
-                target_soc: 1.0,
-                trigger: StormWatchTrigger::WeatherSignal {
-                    wind_speed_threshold_m_s: 25.0,
-                    wind_speed_deactivation_threshold_m_s: 0.0,
-                },
-                base_mode: Box::new(BmsMode::SelfConsumption {
-                    min_soc: 0.1,
-                    max_soc: 0.95,
-                    solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
-                }),
-                min_duration_steps: None,
+        let mut actor = bms(BmsMode::StormWatch {
+            target_soc: 1.0,
+            trigger: StormWatchTrigger::WeatherSignal {
+                wind_speed_threshold_m_s: 25.0,
+                wind_speed_deactivation_threshold_m_s: 0.0,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+            base_mode: Box::new(BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
+            }),
+            min_duration_steps: None,
+        });
 
         let mut env = TestEnvBuilder::new()
             .with_weather(WeatherState {
@@ -1814,8 +1754,7 @@ mod tests {
     #[test]
     fn bms_tou_threshold_recomputed_only_on_day_boundary() {
         let prices: Vec<f64> = (0..48).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.2,
                 charge_threshold_percentile: 0.25,
@@ -1824,12 +1763,7 @@ mod tests {
                 price_deadband: 0.0,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1855,11 +1789,48 @@ mod tests {
         assert!((actor.discharge_price_threshold - discharge_threshold_after_first).abs() < 1e-15,);
     }
 
+    /// A manager rebuilt with new prices takes over its predecessor's state
+    /// but recomputes the current day's thresholds from its own prices on
+    /// its next decision, not at the next midnight.
+    #[test]
+    fn take_over_recomputes_the_day_thresholds_from_the_new_prices() {
+        let tou = || BmsMode::TimeOfUseOptimization {
+            reserve_soc: 0.2,
+            charge_threshold_percentile: 0.25,
+            discharge_threshold_percentile: 0.75,
+            solar_only_charging: false,
+            price_deadband: 0.0,
+            min_duration_steps: None,
+        };
+        let prices: Vec<f64> = (0..48).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
+        let tripled: Vec<f64> = prices.iter().map(|p| p * 3.0).collect();
+        let manager = |prices: &[f64]| {
+            bms_priced_with(tou(), GridExportRule::Unrestricted, Some(prices.into()))
+        };
+        let mut env = TestEnvBuilder::new().hour(3).build();
+        let mut predecessor = manager(&prices);
+        set_soc(&mut predecessor, &mut env, "bat1", 0.5);
+        predecessor.decide(&env, &mut Vec::new());
+
+        let mut rebuilt = manager(&tripled);
+        rebuilt.take_over(&predecessor).expect("take over");
+        set_soc(&mut rebuilt, &mut env, "bat1", 0.5);
+        rebuilt.decide(&env, &mut Vec::new());
+
+        assert_eq!(
+            rebuilt.charge_price_threshold,
+            compute_percentile(&tripled[..24], 0.25)
+        );
+        assert_eq!(
+            rebuilt.discharge_price_threshold,
+            compute_percentile(&tripled[..24], 0.75)
+        );
+    }
+
     #[test]
     fn bms_tou_soc_at_reserve_does_not_discharge() {
         let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.2,
                 charge_threshold_percentile: 0.25,
@@ -1868,12 +1839,7 @@ mod tests {
                 price_deadband: 0.0,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1893,21 +1859,12 @@ mod tests {
 
     #[test]
     fn bms_self_consumption_soc_at_min_does_not_discharge() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 1.0,
@@ -1925,21 +1882,12 @@ mod tests {
 
     #[test]
     fn bms_backup_reserve_soc_at_target_idles() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::BackupReserve {
-                target_soc: 0.8,
-                charge_from_grid: true,
-                charge_rate_fraction: 1.0,
-                soc_deadband: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::BackupReserve {
+            target_soc: 0.8,
+            charge_from_grid: true,
+            charge_rate_fraction: 1.0,
+            soc_deadband: 0.0,
+        });
 
         let mut env = TestEnvBuilder::new().build();
         set_soc(&mut actor, &mut env, "bat1", 0.8);
@@ -1952,21 +1900,12 @@ mod tests {
 
     #[test]
     fn bms_no_soc_telemetry_emits_nothing() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 5.0,
@@ -1985,8 +1924,7 @@ mod tests {
     #[test]
     fn bms_tou_solar_only_blocks_grid_charging() {
         let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.2,
                 charge_threshold_percentile: 0.25,
@@ -1995,12 +1933,7 @@ mod tests {
                 price_deadband: 0.0,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2033,16 +1966,7 @@ mod tests {
 
     #[test]
     fn bms_last_action_tracks_decisions() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::Manual,
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::Manual);
         let env = TestEnvBuilder::new().build();
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -2054,8 +1978,7 @@ mod tests {
         // Battery wants to discharge 5 kW, but home load is only 2 kW.
         // With Disabled export rule, discharge should be clamped to 2 kW.
         let prices = vec![0.10_f64; 24];
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced_with(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.1,
                 charge_threshold_percentile: 0.3,
@@ -2065,11 +1988,7 @@ mod tests {
                 min_duration_steps: None,
             },
             GridExportRule::Disabled,
-            5.0,
-            5.0,
             Some(Arc::from(prices.as_slice())),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2109,8 +2028,7 @@ mod tests {
     fn bms_disabled_export_allows_full_discharge_when_load_exceeds() {
         // Home load 8 kW > max discharge 5 kW → no clamping needed.
         let prices = vec![0.10_f64; 24];
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced_with(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.1,
                 charge_threshold_percentile: 0.3,
@@ -2120,11 +2038,7 @@ mod tests {
                 min_duration_steps: None,
             },
             GridExportRule::Disabled,
-            5.0,
-            5.0,
             Some(Arc::from(prices.as_slice())),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2164,8 +2078,7 @@ mod tests {
     fn bms_unrestricted_export_no_clamping() {
         // Unrestricted: full 5 kW discharge regardless of home load.
         let prices = vec![0.10_f64; 24];
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.1,
                 charge_threshold_percentile: 0.3,
@@ -2174,12 +2087,7 @@ mod tests {
                 price_deadband: 0.0,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(Arc::from(prices.as_slice())),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2219,8 +2127,7 @@ mod tests {
         // SolarOnly: discharge clamped to home load + PV generation.
         // Home load 2 kW, PV 1 kW → max discharge 3 kW.
         let prices = vec![0.10_f64; 24];
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced_with(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.1,
                 charge_threshold_percentile: 0.3,
@@ -2230,11 +2137,7 @@ mod tests {
                 min_duration_steps: None,
             },
             GridExportRule::SolarOnly,
-            5.0,
-            5.0,
             Some(Arc::from(prices.as_slice())),
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2274,8 +2177,7 @@ mod tests {
         // SelfConsumption + Disabled: deficit is 3 kW (load 5, PV 2).
         // Raw discharge = min(deficit=3, max_discharge=5) = 3 kW.
         // Export clamp = min(3, load=5) = 3 kW. Deficit is the binding constraint.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_with(
             BmsMode::SelfConsumption {
                 min_soc: 0.1,
                 max_soc: 0.9,
@@ -2283,11 +2185,6 @@ mod tests {
                 surplus_deadband_kw: 0.0,
             },
             GridExportRule::Disabled,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2322,8 +2219,7 @@ mod tests {
     fn bms_self_consumption_disabled_export_clamps_to_load_when_no_pv() {
         // SelfConsumption + Disabled: PV=0, load=2, max_discharge=5.
         // Deficit = 2 kW. Clamped to min(2, 2) = 2. (load only, no export)
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_with(
             BmsMode::SelfConsumption {
                 min_soc: 0.1,
                 max_soc: 0.9,
@@ -2331,11 +2227,6 @@ mod tests {
                 surplus_deadband_kw: 0.0,
             },
             GridExportRule::Disabled,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2368,21 +2259,12 @@ mod tests {
     #[test]
     fn bms_self_consumption_unrestricted_uses_self_consumption_signal() {
         // SelfConsumption + Unrestricted: should emit SelfConsumption signal (not PowerSetpoint)
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.9,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.9,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
 
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2410,8 +2292,7 @@ mod tests {
         // Deficit = 3 kW. SolarOnly max = load + PV = 5.
         // raw_discharge = min(3, 5) = 3. clamped = min(3, 5) = 3.
         // Here the deficit is the binding constraint, not the export rule.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_with(
             BmsMode::SelfConsumption {
                 min_soc: 0.1,
                 max_soc: 0.9,
@@ -2419,11 +2300,6 @@ mod tests {
                 surplus_deadband_kw: 0.0,
             },
             GridExportRule::SolarOnly,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2462,18 +2338,20 @@ mod tests {
         // Now set max_discharge=0.5 so hardware cap binds:
         let mut actor = BatteryManagementActor::new(
             "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.9,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+            BmsParams {
+                bms_mode: BmsMode::SelfConsumption {
+                    min_soc: 0.1,
+                    max_soc: 0.9,
+                    solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
+                },
+                grid_export_rule: GridExportRule::Disabled,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 0.5, // max_discharge_kw is small
+                price_schedule: None,
+                steps_per_day: 24,
+                min_dwell_steps: 0,
             },
-            GridExportRule::Disabled,
-            5.0,
-            0.5, // max_discharge_kw is small
-            None,
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2510,18 +2388,20 @@ mod tests {
         // not grid, even when solar_only_charging is false in the BmsMode config.
         let mut actor = BatteryManagementActor::new(
             "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.9,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0, // user says allow grid charging
+            BmsParams {
+                bms_mode: BmsMode::SelfConsumption {
+                    min_soc: 0.1,
+                    max_soc: 0.9,
+                    solar_only_charging: false, // user says allow grid charging
+                    surplus_deadband_kw: 0.0,
+                },
+                grid_export_rule: GridExportRule::Disabled, // but export rule says no grid interaction
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+                price_schedule: None,
+                steps_per_day: 24,
+                min_dwell_steps: 0,
             },
-            GridExportRule::Disabled, // but export rule says no grid interaction
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2554,21 +2434,12 @@ mod tests {
     #[test]
     fn bms_self_consumption_unrestricted_respects_user_solar_only_false() {
         // Unrestricted: user's solar_only_charging=false should be preserved.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.9,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.9,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
 
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2600,24 +2471,15 @@ mod tests {
     #[test]
     fn bms_storm_watch_custom_threshold_triggers_and_does_not_trigger() {
         let make_actor = || {
-            BatteryManagementActor::new(
-                "bat1",
-                BmsMode::StormWatch {
-                    target_soc: 1.0,
-                    trigger: StormWatchTrigger::WeatherSignal {
-                        wind_speed_threshold_m_s: 20.0,
-                        wind_speed_deactivation_threshold_m_s: 0.0,
-                    },
-                    base_mode: Box::new(BmsMode::Manual),
-                    min_duration_steps: None,
+            bms(BmsMode::StormWatch {
+                target_soc: 1.0,
+                trigger: StormWatchTrigger::WeatherSignal {
+                    wind_speed_threshold_m_s: 20.0,
+                    wind_speed_deactivation_threshold_m_s: 0.0,
                 },
-                GridExportRule::Unrestricted,
-                5.0,
-                5.0,
-                None,
-                24,
-                0,
-            )
+                base_mode: Box::new(BmsMode::Manual),
+                min_duration_steps: None,
+            })
         };
 
         // 22 m/s exceeds 20 m/s threshold → storm watch activates
@@ -2656,16 +2518,7 @@ mod tests {
 
     #[test]
     fn resolve_equipment_id_missing_name_sets_equipment_id_to_none() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::Manual,
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::Manual);
         let id_by_name: HashMap<String, EquipmentId> = HashMap::new();
         actor.resolve_equipment_id(&id_by_name);
         assert!(
@@ -2676,16 +2529,7 @@ mod tests {
 
     #[test]
     fn resolve_equipment_id_found_name_sets_equipment_id() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::Manual,
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::Manual);
         let mut id_by_name = HashMap::new();
         id_by_name.insert("bat1".to_string(), EquipmentId(42));
         actor.resolve_equipment_id(&id_by_name);
@@ -2703,21 +2547,12 @@ mod tests {
         // pv_generation_kw=10.0 (forecast), actual_pv_kw=3.0 (observed).
         // Load=5.0 → deficit = 5.0 - 3.0 = 2.0 → should discharge.
         // With forecast alone (10.0) there'd be surplus=5.0 → would charge.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 10.0,
@@ -2749,21 +2584,12 @@ mod tests {
     fn bms_self_consumption_solar_only_disconnects_when_actual_pv_is_zero() {
         // pv_generation_kw=5.0 (forecast), actual_pv_kw=0.0 (actual).
         // solar_only_charging=true → should grid-disconnect because actual PV is zero.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: true,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: true,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 5.0,
@@ -2792,8 +2618,7 @@ mod tests {
         // SolarOnly clamp: max = load + actual_pv = 4.0 + 2.0 = 6.0.
         // 2.0 < 6.0 → discharge passes clamp. With forecast PV alone
         // (10.0), there'd be surplus = 6.0 → would charge instead.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_with(
             BmsMode::SelfConsumption {
                 min_soc: 0.1,
                 max_soc: 0.95,
@@ -2801,11 +2626,6 @@ mod tests {
                 surplus_deadband_kw: 0.0,
             },
             GridExportRule::SolarOnly,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2838,21 +2658,12 @@ mod tests {
     fn adjust_for_pv_stale_surplus_actual_deficit_switches_to_discharge() {
         // Stale PV=4 kW, load=2 kW → surplus=+2 → decide() charges.
         // Actual PV=1 kW, load=2 kW → deficit=-1 → adjust_for_pv should discharge.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 4.0,
@@ -2888,21 +2699,12 @@ mod tests {
     fn adjust_for_pv_stale_deficit_actual_surplus_switches_to_charge() {
         // Stale PV=1 kW, load=4 kW → deficit=-3 → decide() discharges.
         // Actual PV=6 kW, load=4 kW → surplus=+2 → adjust_for_pv should charge.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 1.0,
@@ -2934,21 +2736,12 @@ mod tests {
     fn adjust_for_pv_surplus_unchanged_no_re_emit() {
         // Stale PV=4 kW, load=2 kW → surplus=+2 → decide() charges.
         // Actual PV=4.1 kW, load=2 kW → surplus still positive → no re-emit needed.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 4.0,
@@ -2977,21 +2770,12 @@ mod tests {
         // Actual PV=2 kW, load=2 kW → surplus=0, was_charging, deadband=0.0.
         // With hysteresis: surplus >= -deadband → stays charging (no idle).
         // To trigger idle, use surplus that crosses below the exit threshold.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 4.0,
@@ -3029,21 +2813,12 @@ mod tests {
         // Stale PV=0, load=5 → deficit=-5 → decide() may idle or discharge.
         // Actual PV=10 kW (full-rated), load=5 → surplus=+5 → should charge.
         // Batter max_charge_kw=5, so PV=10 exceeds it but that's fine.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 0.0,
@@ -3072,21 +2847,12 @@ mod tests {
     #[test]
     fn adjust_for_pv_solar_only_actual_pv_zero_disconnects() {
         // Stale PV=3 kW (solar_only), actual PV=0 → should disconnect grid.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: true,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: true,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 3.0,
@@ -3116,21 +2882,12 @@ mod tests {
     fn adjust_for_pv_solar_only_actual_pv_restored_reconnects() {
         // Stale PV=0, solar_only → decide() disconnected grid.
         // Actual PV=5 → should reconnect grid.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: true,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: true,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 0.0,
@@ -3158,16 +2915,7 @@ mod tests {
     #[test]
     fn adjust_for_pv_manual_mode_no_op() {
         // Manual mode never emits in decide or adjust_for_pv.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::Manual,
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::Manual);
         let env = TestEnvBuilder::new().build();
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -3180,21 +2928,12 @@ mod tests {
 
     #[test]
     fn adjust_for_pv_telemetry_populated() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 4.0,
@@ -3234,21 +2973,12 @@ mod tests {
     fn adjust_for_pv_stale_zero_actual_surplus_starts_charging() {
         // Stale PV=0 (night), load=2 → decide() may idle or discharge.
         // Actual PV=5 → adjust_for_pv should initiate charge.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 0.0,
@@ -3281,8 +3011,7 @@ mod tests {
         // When DR is inactive, the base mode should be re-evaluated with
         // actual-step PV — not re-read from the stale env.
         let prices: Vec<f64> = vec![0.10; 24];
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::DemandResponse {
                 base_mode: Box::new(BmsMode::SelfConsumption {
                     min_soc: 0.1,
@@ -3295,12 +3024,7 @@ mod tests {
                 dr_deactivation_multiplier: 0.0,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
 
         // Stale PV=4, load=2 → surplus=2 → decide() charges via base SelfConsumption.
@@ -3347,29 +3071,20 @@ mod tests {
         // StormWatch with a PV-dependent base (SelfConsumption).
         // When StormWatch is inactive (wind below threshold), the base mode
         // should be re-evaluated with actual-step PV.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::StormWatch {
-                target_soc: 1.0,
-                trigger: StormWatchTrigger::WeatherSignal {
-                    wind_speed_threshold_m_s: 25.0,
-                    wind_speed_deactivation_threshold_m_s: 0.0,
-                },
-                base_mode: Box::new(BmsMode::SelfConsumption {
-                    min_soc: 0.1,
-                    max_soc: 0.95,
-                    solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
-                }),
-                min_duration_steps: None,
+        let mut actor = bms(BmsMode::StormWatch {
+            target_soc: 1.0,
+            trigger: StormWatchTrigger::WeatherSignal {
+                wind_speed_threshold_m_s: 25.0,
+                wind_speed_deactivation_threshold_m_s: 0.0,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+            base_mode: Box::new(BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
+            }),
+            min_duration_steps: None,
+        });
 
         // Wind below threshold → storm watch inactive → delegates to SelfConsumption.
         // Stale PV=4, load=2 → surplus=2 → decide() charges.
@@ -3417,21 +3132,12 @@ mod tests {
         // must apply the same deadband hysteresis as the main `evaluate_mode` path.
         // Without this fix, actual PV that oscillates within the deadband zone causes
         // charge/discharge toggling on every step.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.5,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.5,
+        });
         // decide() with surplus=0.0 → idle (0.0 not > 0.5 deadband)
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -3538,8 +3244,7 @@ mod tests {
     #[test]
     fn save_state_load_state_round_trip_preserves_to_thresholds() {
         let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.2,
                 charge_threshold_percentile: 0.25,
@@ -3548,12 +3253,7 @@ mod tests {
                 price_deadband: 0.0,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
         // Force state to a known non-default value
         actor.daily_avg_price = 0.15;
@@ -3568,23 +3268,14 @@ mod tests {
             "stateful actor must produce non-empty blob"
         );
 
-        let mut restored = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::TimeOfUseOptimization {
-                reserve_soc: 0.2,
-                charge_threshold_percentile: 0.25,
-                discharge_threshold_percentile: 0.75,
-                solar_only_charging: false,
-                price_deadband: 0.0,
-                min_duration_steps: None,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut restored = bms(BmsMode::TimeOfUseOptimization {
+            reserve_soc: 0.2,
+            charge_threshold_percentile: 0.25,
+            discharge_threshold_percentile: 0.75,
+            solar_only_charging: false,
+            price_deadband: 0.0,
+            min_duration_steps: None,
+        });
         restored
             .load_state(&blob)
             .expect("load_state should succeed");
@@ -3600,21 +3291,12 @@ mod tests {
 
     #[test]
     fn self_consumption_hysteresis_stays_charging_within_deadband() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.5,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.5,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 5.0,
@@ -3671,8 +3353,7 @@ mod tests {
             0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30,
             0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30,
         ];
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::TimeOfUseOptimization {
                 reserve_soc: 0.2,
                 charge_threshold_percentile: 0.25,
@@ -3681,12 +3362,7 @@ mod tests {
                 price_deadband: 0.05,
                 min_duration_steps: None,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
         let mut env = TestEnvBuilder::new()
             .hour(14)
@@ -3723,24 +3399,15 @@ mod tests {
     #[test]
     fn storm_watch_schmitt_trigger_activates_and_deactivates_at_separate_thresholds() {
         let make_actor = || {
-            BatteryManagementActor::new(
-                "bat1",
-                BmsMode::StormWatch {
-                    target_soc: 1.0,
-                    trigger: StormWatchTrigger::WeatherSignal {
-                        wind_speed_threshold_m_s: 20.0,
-                        wind_speed_deactivation_threshold_m_s: 15.0,
-                    },
-                    base_mode: Box::new(BmsMode::Manual),
-                    min_duration_steps: None,
+            bms(BmsMode::StormWatch {
+                target_soc: 1.0,
+                trigger: StormWatchTrigger::WeatherSignal {
+                    wind_speed_threshold_m_s: 20.0,
+                    wind_speed_deactivation_threshold_m_s: 15.0,
                 },
-                GridExportRule::Unrestricted,
-                5.0,
-                5.0,
-                None,
-                24,
-                0,
-            )
+                base_mode: Box::new(BmsMode::Manual),
+                min_duration_steps: None,
+            })
         };
 
         // Wind at 22 m/s: above activation threshold → active
@@ -3790,21 +3457,12 @@ mod tests {
     #[test]
     fn backup_reserve_hysteresis_starts_below_target_minus_deadband_stops_above_target_plus_deadband()
      {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::BackupReserve {
-                target_soc: 0.8,
-                charge_from_grid: true,
-                charge_rate_fraction: 1.0,
-                soc_deadband: 0.05,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::BackupReserve {
+            target_soc: 0.8,
+            charge_from_grid: true,
+            charge_rate_fraction: 1.0,
+            soc_deadband: 0.05,
+        });
 
         // SOC at 0.73 (0.8 - 0.05 = 0.75): below target - deadband → charge
         let mut env = TestEnvBuilder::new().build();
@@ -3834,21 +3492,12 @@ mod tests {
 
     #[test]
     fn bms_toggled_telemetry_set_on_action_change() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::SelfConsumption {
-                min_soc: 0.1,
-                max_soc: 0.95,
-                solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
+        });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
                 pv_generation_kw: 5.0,
@@ -3887,38 +3536,20 @@ mod tests {
 
     #[test]
     fn bms_save_load_preserves_storm_watch_and_dr_state() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::StormWatch {
-                target_soc: 1.0,
-                trigger: StormWatchTrigger::WeatherSignal {
-                    wind_speed_threshold_m_s: 20.0,
-                    wind_speed_deactivation_threshold_m_s: 0.0,
-                },
-                base_mode: Box::new(BmsMode::Manual),
-                min_duration_steps: None,
+        let mut actor = bms(BmsMode::StormWatch {
+            target_soc: 1.0,
+            trigger: StormWatchTrigger::WeatherSignal {
+                wind_speed_threshold_m_s: 20.0,
+                wind_speed_deactivation_threshold_m_s: 0.0,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+            base_mode: Box::new(BmsMode::Manual),
+            min_duration_steps: None,
+        });
         actor.storm_watch_active = true;
         actor.dr_active = true;
 
         let blob = actor.save_state().expect("save_state should succeed");
-        let mut restored = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::Manual,
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+        let mut restored = bms(BmsMode::Manual);
         restored
             .load_state(&blob)
             .expect("load_state should succeed");
@@ -3933,8 +3564,7 @@ mod tests {
         // DemandResponse with min_duration_steps=3: a price spike that lasts
         // 1 step should keep DR active for at least 3 steps.
         let prices: Vec<f64> = vec![0.10; 24];
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
+        let mut actor = bms_priced(
             BmsMode::DemandResponse {
                 base_mode: Box::new(BmsMode::Manual),
                 dr_discharge_rate: 0.8,
@@ -3942,12 +3572,7 @@ mod tests {
                 dr_deactivation_multiplier: 0.0,
                 min_duration_steps: Some(3),
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
             Some(prices.into()),
-            24,
-            0,
         );
 
         // Step 1: price spike → DR activates.
@@ -4022,24 +3647,15 @@ mod tests {
         // StormWatch with min_duration_steps=3: a single-step wind gust
         // (wind above threshold for 1 step, then drops) should keep
         // storm watch active for at least 3 steps.
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::StormWatch {
-                target_soc: 1.0,
-                trigger: StormWatchTrigger::WeatherSignal {
-                    wind_speed_threshold_m_s: 25.0,
-                    wind_speed_deactivation_threshold_m_s: 0.0,
-                },
-                base_mode: Box::new(BmsMode::Manual),
-                min_duration_steps: Some(3),
+        let mut actor = bms(BmsMode::StormWatch {
+            target_soc: 1.0,
+            trigger: StormWatchTrigger::WeatherSignal {
+                wind_speed_threshold_m_s: 25.0,
+                wind_speed_deactivation_threshold_m_s: 0.0,
             },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-            0,
-        );
+            base_mode: Box::new(BmsMode::Manual),
+            min_duration_steps: Some(3),
+        });
 
         // Step 1: high wind → storm watch activates.
         let env_high = TestEnvBuilder::new()

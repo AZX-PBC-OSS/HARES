@@ -5,10 +5,14 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::checksum;
+use hares_envelope::ThermalSnapshot;
 use hares_types::{ElectricalSummary, HaresError, ZoneId};
 use serde::{Deserialize, Serialize};
 
-/// Bump whenever checkpoint schema or state encoding changes.
+/// Bump whenever checkpoint schema or state encoding changes. The test
+/// `checkpoint_shape_is_pinned_to_its_version` pins a fingerprint of the
+/// type-derived serde schema to this version, so a schema change fails it
+/// until the version is bumped and the fingerprint re-pinned.
 ///
 /// v7: `actor_states` entries became [`ActorStateCheckpoint`] records
 /// carrying a per-actor schema version, and `EvDriverSnapshot` gained the
@@ -19,7 +23,40 @@ use serde::{Deserialize, Serialize};
 /// records carrying the equipment's name and id, and restore validates
 /// both against the live equipment — checkpoints written by v7 builds
 /// (positionally-indexed opaque blobs) are rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 8;
+///
+/// v10 (the fold of the two v9-claiming branches): event-load equipment
+/// state records its random stream (key and stream nonce) instead of the
+/// key alone, and the thermal solver's state became one
+/// [`ThermalSnapshot`] record, which carries the last step's coupling
+/// terms the ideal-capacity solve reads, the ventilation recovery
+/// effectiveness the next step reads, and the ideal-capacity failure
+/// counts and last-good capacities its degraded fallback reads; the
+/// snapshot carries its own `schema_version`
+/// ([`hares_envelope::THERMAL_SNAPSHOT_SCHEMA_VERSION`]), validated
+/// independently of this constant.
+///
+/// v11: `next_ev_driver_stream` carries the built-in EV driver stream
+/// cursor; checkpoints written by v10 builds are rejected by the version
+/// gate.
+///
+/// v12: `tariff_state` carries the tariff evaluator's full mutable state
+/// (the tariff, its horizon, the price-index position and the open billing
+/// period with its accruals and demand-window history) as a versioned
+/// JSON payload, for runs with a tariff attached, so a resumed dwelling
+/// prices and bills the post-resume steps exactly as the continuous run;
+/// a mid-run attached or replaced tariff bills from the period containing
+/// the attach or switch step. Checkpoints written by v11 builds are
+/// rejected by the version gate. The payload carries its own schema
+/// version ([`hares_tariff::TARIFF_SNAPSHOT_SCHEMA_VERSION`]), validated
+/// independently of this constant.
+///
+/// v14: the thermal snapshot carries the per-zone non-HVAC share of the
+/// zone sensible input column the next ideal-capacity solve estimates from
+/// (the `ThermalSnapshot`'s `non_hvac_zone_input_w`; the snapshot's own
+/// schema version is unchanged at 1 because v1 was never released in a
+/// build without the field).
+/// Checkpoints written by v13 builds are rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 14;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -40,6 +77,8 @@ pub struct EquipmentStateCheckpoint {
     /// is direct evidence the equipment set or its order changed between
     /// save and restore.
     pub equipment_id: u32,
+    /// Consecutive failed steps of this equipment at save time.
+    pub consecutive_step_failures: u32,
     /// Opaque state blob from `Equipment::save_state()`.
     pub blob: Vec<u8>,
 }
@@ -81,21 +120,15 @@ pub struct DwellingCheckpoint {
     /// `Equipment::load_state` (see [`EquipmentStateCheckpoint`]).
     pub equipment_states: Vec<EquipmentStateCheckpoint>,
     pub rng_state: [u8; 32],
-    pub envelope_state: Vec<f64>,
+    /// The thermal solver's complete mutable state, as
+    /// [`ThermalSolver::snapshot_state`](hares_envelope::ThermalSolver::snapshot_state)
+    /// captures it.
+    pub thermal: ThermalSnapshot,
     /// Per-zone humidity ratios. Each entry is `(ZoneId, humidity_ratio)`.
     pub humidity_states: Vec<(ZoneId, f64)>,
     pub fluid_states: Vec<f64>,
     pub rng_stream: u64,
     pub rng_word_pos: u128,
-    pub thermal_last_u: Vec<f64>,
-    /// Per-exterior-surface converged LWR surface temperatures [°C].
-    pub lwr_t_prev_c: Vec<f64>,
-    /// Per-zone interior LWR surface temperatures [°C] (ScriptF warm-start).
-    /// Outer vec indexed by zone, inner vec by surface.
-    pub interior_surface_temps: Vec<Vec<f64>>,
-    /// Previous-step per-zone interior LWR surface temperatures [°C]
-    /// (heavy-ball damping warm-start). Same shape as `interior_surface_temps`.
-    pub interior_surface_prev_temps: Vec<Vec<f64>>,
     /// Actor decision-state, one per registered actor. Each entry carries
     /// the actor's name, its snapshot schema version, and its opaque state
     /// blob; the version is validated on restore before the blob is handed
@@ -105,6 +138,21 @@ pub struct DwellingCheckpoint {
     /// so the first post-restore step sees the same env.electrical that
     /// the original continuous run would have at the same step index.
     pub prior_electrical_summary: ElectricalSummary,
+    /// Offset of the next unused built-in EV driver RNG stream. A dwelling
+    /// rebuilt to resume replays only the surviving roster, not its history,
+    /// so without this a driver built after the resume could take the
+    /// stream of a restored driver.
+    pub next_ev_driver_stream: u64,
+    /// The tariff evaluator's complete mutable state, when a tariff is
+    /// attached: the tariff, the horizon, the price-index position, the open
+    /// billing period and its accruals and demand-window history, as a
+    /// versioned JSON payload ([`hares_tariff::TariffSnapshot`]). `None`
+    /// when the run has no tariff, and a dwelling restored from such a
+    /// checkpoint has none either. The payload carries its own schema
+    /// version ([`hares_tariff::TARIFF_SNAPSHOT_SCHEMA_VERSION`]) validated
+    /// on restore, independently of this constant (the [`ThermalSnapshot`]
+    /// pattern).
+    pub tariff_state: Option<Vec<u8>>,
 }
 
 impl DwellingCheckpoint {
@@ -214,56 +262,184 @@ mod tests {
     use super::{
         ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
     };
+    use hares_envelope::{THERMAL_SNAPSHOT_SCHEMA_VERSION, ThermalSnapshot};
     use hares_types::{ElectricalSummary, ZoneId};
 
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let tid = std::thread::current().id();
-        format!("{base}_{nanos}_{tid:?}.{ext}")
-    }
-
-    struct TempFile(std::path::PathBuf);
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
+    fn empty_thermal() -> ThermalSnapshot {
+        ThermalSnapshot {
+            schema_version: THERMAL_SNAPSHOT_SCHEMA_VERSION,
+            x: vec![],
+            last_u: vec![],
+            lwr_t_prev_c: vec![],
+            interior_surface_temps: vec![],
+            interior_surface_prev_temps: vec![],
+            last_coupling: vec![],
+            sensible_recovery_efficiency: 0.0,
+            latent_recovery_efficiency: 0.0,
+            ideal_capacity_failure_counts: vec![],
+            last_good_capacity_w: vec![],
+            non_hvac_zone_input_w: vec![],
         }
     }
 
-    #[test]
-    fn save_then_load_round_trip() {
-        let cp = DwellingCheckpoint {
+    fn checkpoint_path() -> (tempfile::TempDir, std::path::PathBuf) {
+        crate::temp_file::temp_file("checkpoint.json")
+    }
+
+    /// A checkpoint with every field holding a distinct, non-default value.
+    fn populated_checkpoint() -> DwellingCheckpoint {
+        DwellingCheckpoint {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 7,
             timestep_index: 12,
             equipment_states: vec![EquipmentStateCheckpoint {
                 name: "EV".into(),
                 equipment_id: 3,
+                consecutive_step_failures: 1,
                 blob: vec![1, 2, 3],
             }],
             rng_state: [42; 32],
-            envelope_state: vec![1.0, 2.0],
+            thermal: ThermalSnapshot {
+                schema_version: THERMAL_SNAPSHOT_SCHEMA_VERSION,
+                x: vec![1.0, 2.0],
+                last_u: vec![0.1],
+                lwr_t_prev_c: vec![15.0, 18.0],
+                interior_surface_temps: vec![vec![20.0, 21.0], vec![22.0]],
+                interior_surface_prev_temps: vec![vec![19.5, 20.5], vec![21.5]],
+                last_coupling: vec![(0, 0.25, 3.5), (1, 0.0, -1.25)],
+                sensible_recovery_efficiency: 0.34,
+                latent_recovery_efficiency: 0.12,
+                ideal_capacity_failure_counts: vec![(ZoneId(1), 2)],
+                last_good_capacity_w: vec![(ZoneId(1), 5537.98)],
+                non_hvac_zone_input_w: vec![(ZoneId(1), 412.5)],
+            },
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![1.0, 2.0, 3.0],
             rng_stream: 3,
             rng_word_pos: 8,
-            thermal_last_u: vec![0.1],
-            lwr_t_prev_c: vec![15.0, 18.0],
-            interior_surface_temps: vec![vec![20.0, 21.0], vec![22.0]],
-            interior_surface_prev_temps: vec![vec![19.5, 20.5], vec![21.5]],
             actor_states: vec![ActorStateCheckpoint {
                 name: "test_actor".into(),
                 schema_version: 1,
                 blob: vec![1, 2, 3],
             }],
             prior_electrical_summary: ElectricalSummary::default(),
-        };
+            next_ev_driver_stream: 0,
+            tariff_state: None,
+        }
+    }
 
-        let path =
-            std::env::temp_dir().join(unique_temp_name("hares_core_checkpoint_roundtrip", "json"));
-        let _guard = TempFile(path.clone());
+    /// The serde schema of `T` and every type it nests, derived from the
+    /// types (not from a sample value), as canonical JSON: each container's
+    /// field names in order, every primitive's exact type (`F64`, `U64`,
+    /// `U128`, ...), tuple arity and element order, enum variant names and
+    /// payloads, and `Option` inner types.
+    fn type_schema<T: serde::Deserialize<'static>>() -> String {
+        type_schema_with(|tracer| tracer.trace_simple_type::<T>().map(|(format, _)| format))
+    }
+
+    /// [`type_schema`] for a type that nests enums: `trace` traces each
+    /// nested enum before the root so every variant is recorded.
+    fn type_schema_with(
+        trace: impl FnOnce(
+            &mut serde_reflection::Tracer,
+        ) -> serde_reflection::Result<serde_reflection::Format>,
+    ) -> String {
+        let mut tracer = serde_reflection::Tracer::new(serde_reflection::TracerConfig::default());
+        let root = trace(&mut tracer).expect("trace the type");
+        let registry = tracer.registry().expect("every traced type is complete");
+        serde_json::to_string(&(root, registry)).expect("serialize the schema")
+    }
+
+    fn sha256_hex(text: &str) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
+    /// [`type_schema`]`::<DwellingCheckpoint>()`.
+    const PINNED_VERSION: u32 = 14;
+    const PINNED_SCHEMA_SHA256: &str =
+        "5a7267067360d5101e69165bdfd7afa08847c8a96057d0f67af6a545ac1683a3";
+
+    /// The checkpoint's serde schema, including the embedded
+    /// `ThermalSnapshot` and every type it nests, is the one pinned for the
+    /// current `CHECKPOINT_VERSION`. Any field added, removed, renamed,
+    /// reordered or retyped changes the schema, and the version gate is only
+    /// sound if that change comes with a version bump: bump
+    /// `CHECKPOINT_VERSION` and re-pin both constants together.
+    #[test]
+    fn checkpoint_shape_is_pinned_to_its_version() {
+        let schema = type_schema::<DwellingCheckpoint>();
+        let fingerprint = sha256_hex(&schema);
+        assert_eq!(
+            fingerprint, PINNED_SCHEMA_SHA256,
+            "the checkpoint schema changed: bump CHECKPOINT_VERSION and re-pin \
+             PINNED_VERSION and PINNED_SCHEMA_SHA256 together. Actual fingerprint: \
+             {fingerprint}. Schema:\n{schema}"
+        );
+        assert_eq!(
+            CHECKPOINT_VERSION, PINNED_VERSION,
+            "CHECKPOINT_VERSION changed: re-pin PINNED_SCHEMA_SHA256 for the new version"
+        );
+    }
+
+    /// Each kind of change the tripwire must catch, as the field type before
+    /// and after the change: the schemas differ for every pair, and a
+    /// field's schema is part of its container's, so the pinned fingerprint
+    /// fails on each.
+    #[test]
+    fn type_schema_distinguishes_every_kind_of_retype() {
+        mod before {
+            #[derive(serde::Deserialize)]
+            pub enum Mode {
+                Heat,
+                Cool,
+            }
+        }
+        mod after {
+            #[derive(serde::Deserialize)]
+            pub enum Mode {
+                Heat,
+                Off,
+            }
+        }
+
+        for (change, before, after) in [
+            ("f64 to u64", type_schema::<f64>(), type_schema::<u64>()),
+            ("u32 to i64", type_schema::<u32>(), type_schema::<i64>()),
+            (
+                "tuple arity in a Vec element",
+                type_schema::<Vec<(usize, f64, f64)>>(),
+                type_schema::<Vec<(usize, f64)>>(),
+            ),
+            (
+                "tuple element order in a Vec element",
+                type_schema::<Vec<(usize, f64, f64)>>(),
+                type_schema::<Vec<(f64, usize, f64)>>(),
+            ),
+            (
+                "unit enum variant rename",
+                type_schema::<before::Mode>(),
+                type_schema::<after::Mode>(),
+            ),
+            (
+                "Option inner type",
+                type_schema::<Option<f64>>(),
+                type_schema::<Option<u64>>(),
+            ),
+        ] {
+            assert_ne!(before, after, "the schema must change on a {change}");
+        }
+    }
+
+    #[test]
+    fn save_then_load_round_trip() {
+        let cp = populated_checkpoint();
+
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded, cp);
@@ -283,22 +459,18 @@ mod tests {
             timestep_index: 100,
             equipment_states: vec![],
             rng_state: [0; 32],
-            envelope_state: vec![],
+            thermal: empty_thermal(),
             humidity_states: vec![(ZoneId(1), 0.008), (ZoneId(2), 0.012), (ZoneId(3), 0.006)],
             fluid_states: vec![],
             rng_stream: 0,
             rng_word_pos: 0,
-            thermal_last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
+            next_ev_driver_stream: 0,
+            tariff_state: None,
         };
 
-        let path =
-            std::env::temp_dir().join(unique_temp_name("hares_core_checkpoint_multizone", "json"));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded.humidity_states.len(), 3);
@@ -315,22 +487,18 @@ mod tests {
             timestep_index: 0,
             equipment_states: vec![],
             rng_state: [0; 32],
-            envelope_state: vec![],
+            thermal: empty_thermal(),
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![],
             rng_stream: 0,
             rng_word_pos: 0,
-            thermal_last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
+            next_ev_driver_stream: 0,
+            tariff_state: None,
         };
 
-        let path =
-            std::env::temp_dir().join(unique_temp_name("hares_core_checkpoint_version", "json"));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).unwrap();
 
         let err = DwellingCheckpoint::load(&path).unwrap_err();
@@ -377,11 +545,7 @@ mod tests {
         let json_bytes = serde_json::to_vec(&body).expect("serialize test fixture");
         let file_bytes = crate::checksum::write_with_sha256(&json_bytes);
 
-        let path = std::env::temp_dir().join(unique_temp_name(
-            "hares_core_checkpoint_old_version",
-            "json",
-        ));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         std::fs::write(&path, &file_bytes).expect("write test fixture");
 
         let err = DwellingCheckpoint::load(&path).unwrap_err();
@@ -391,6 +555,57 @@ mod tests {
                 && msg.contains("file=6")
                 && msg.contains(&format!("expected={CHECKPOINT_VERSION}")),
             "a pre-v7 checkpoint must be rejected by the version gate with both versions named; got: {msg}"
+        );
+        assert!(
+            !msg.contains("parse failed"),
+            "the rejection must come from the version gate, not schema parsing; got: {msg}"
+        );
+    }
+
+    /// A checkpoint from the schema immediately before
+    /// `consecutive_step_failures` joined `EquipmentStateCheckpoint`
+    /// (format_version 12, equipment states without the field) must be
+    /// rejected by the version gate with both versions named. The body is
+    /// otherwise exactly this build's schema, so a full parse that ran
+    /// before the gate would report a missing field instead of the
+    /// actionable version mismatch.
+    #[test]
+    fn v12_checkpoint_without_step_failures_rejected_by_the_version_gate() {
+        let mut body: serde_json::Value =
+            serde_json::to_value(populated_checkpoint()).expect("serialize the checkpoint");
+        body["format_version"] = serde_json::json!(12);
+        let mut removed = 0;
+        for state in body["equipment_states"]
+            .as_array_mut()
+            .expect("equipment_states is an array")
+            .iter_mut()
+        {
+            if state
+                .as_object_mut()
+                .expect("each equipment state is an object")
+                .remove("consecutive_step_failures")
+                .is_some()
+            {
+                removed += 1;
+            }
+        }
+        assert!(
+            removed > 0,
+            "the fixture must carry the field for its removal to be the schema change under test"
+        );
+        let json_bytes = serde_json::to_vec(&body).expect("serialize the v12 blob");
+        let file_bytes = crate::checksum::write_with_sha256(&json_bytes);
+
+        let (_dir, path) = checkpoint_path();
+        std::fs::write(&path, &file_bytes).expect("write the v12 blob");
+
+        let err = DwellingCheckpoint::load(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("checkpoint version mismatch")
+                && msg.contains("file=12")
+                && msg.contains(&format!("expected={CHECKPOINT_VERSION}")),
+            "a v12 checkpoint must be rejected by the version gate with both versions named; got: {msg}"
         );
         assert!(
             !msg.contains("parse failed"),
@@ -442,24 +657,18 @@ mod tests {
             timestep_index: 0,
             equipment_states: vec![],
             rng_state: [0; 32],
-            envelope_state: vec![],
+            thermal: empty_thermal(),
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![],
             rng_stream: 0,
             rng_word_pos: 0,
-            thermal_last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
+            next_ev_driver_stream: 0,
+            tariff_state: None,
         };
 
-        let path = std::env::temp_dir().join(unique_temp_name(
-            "hares_core_checkpoint_sha256_corrupt",
-            "json",
-        ));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).unwrap();
 
         // Corrupt one byte in the JSON body (after the `sha256:` prefix line)
@@ -495,27 +704,96 @@ mod tests {
             timestep_index: 12,
             equipment_states: vec![],
             rng_state: [0; 32],
-            envelope_state: vec![],
+            thermal: empty_thermal(),
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![],
             rng_stream: 0,
             rng_word_pos: 0,
-            thermal_last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: summary.clone(),
+            next_ev_driver_stream: 0,
+            tariff_state: None,
         };
 
-        let path = std::env::temp_dir().join(unique_temp_name(
-            "hares_core_checkpoint_electrical_summary",
-            "json",
-        ));
-        let _guard = TempFile(path.clone());
+        let (_dir, path) = checkpoint_path();
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded.prior_electrical_summary, summary);
+    }
+
+    /// A checkpoint file returns every float bit for bit: 14.829037328432975
+    /// is a value serde_json parses one unit in the last place off unless
+    /// its exact round-trip parsing is enabled for every crate.
+    #[test]
+    fn checkpoint_file_round_trips_floats_exactly() {
+        let state = 14.829_037_328_432_975_f64;
+        let mut cp = populated_checkpoint();
+        cp.thermal.x = vec![state];
+
+        let (_dir, path) = checkpoint_path();
+        cp.save(&path).unwrap();
+        let loaded = DwellingCheckpoint::load(&path).unwrap();
+        assert_eq!(loaded.thermal.x[0].to_bits(), state.to_bits());
+    }
+
+    /// A checkpoint file's tariff state returns every float bit for bit:
+    /// the blob re-encodes to the same bytes, so a resumed evaluator bills
+    /// with exactly the accruals the interrupted run held.
+    #[test]
+    fn tariff_state_round_trips_through_the_file_bitwise() {
+        use chrono::TimeZone;
+        let start = chrono_tz::America::New_York
+            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .earliest()
+            .expect("start");
+        let mut tariff = hares_tariff::ElectricTariff::default();
+        tariff.fixed_charges.monthly_usd = 10.0;
+        let mut evaluator = hares_tariff::TariffEvaluator::new(
+            tariff,
+            start,
+            start + chrono::Duration::hours(48),
+            3600,
+        )
+        .expect("evaluator");
+        for i in 0..30u32 {
+            let step_end = start + chrono::Duration::hours(i as i64 + 1);
+            evaluator.step(2.5, 0.0, 3600.0, step_end);
+        }
+        let blob = evaluator
+            .snapshot_state()
+            .to_blob()
+            .expect("encode the snapshot");
+
+        let cp = DwellingCheckpoint {
+            format_version: CHECKPOINT_VERSION,
+            bldg_id: 1,
+            timestep_index: 30,
+            equipment_states: vec![],
+            rng_state: [0; 32],
+            thermal: empty_thermal(),
+            humidity_states: vec![],
+            fluid_states: vec![],
+            rng_stream: 0,
+            rng_word_pos: 0,
+            actor_states: vec![],
+            prior_electrical_summary: ElectricalSummary::default(),
+            next_ev_driver_stream: 0,
+            tariff_state: Some(blob),
+        };
+
+        let (_dir, path) = checkpoint_path();
+        cp.save(&path).expect("save the checkpoint");
+        let loaded = DwellingCheckpoint::load(&path).expect("load the checkpoint");
+        let saved_blob = cp.tariff_state.as_ref().expect("saved blob");
+        let loaded_blob = loaded.tariff_state.as_ref().expect("loaded blob");
+        assert_eq!(saved_blob, loaded_blob, "the tariff blob is byte-identical");
+        let snapshot =
+            hares_tariff::TariffSnapshot::from_blob(loaded_blob).expect("decode the loaded blob");
+        assert_eq!(
+            hares_tariff::TariffSnapshot::from_blob(saved_blob).expect("decode the saved blob"),
+            snapshot
+        );
+        assert_eq!(snapshot.billing.steps_in_period, 30);
     }
 
     #[test]
@@ -526,17 +804,15 @@ mod tests {
             timestep_index: 0,
             equipment_states: vec![],
             rng_state: [0; 32],
-            envelope_state: vec![],
+            thermal: empty_thermal(),
             humidity_states: vec![(ZoneId(1), 0.005)],
             fluid_states: vec![],
             rng_stream: 0,
             rng_word_pos: 0,
-            thermal_last_u: vec![],
-            lwr_t_prev_c: vec![],
-            interior_surface_temps: vec![],
-            interior_surface_prev_temps: vec![],
             actor_states: vec![],
             prior_electrical_summary: ElectricalSummary::default(),
+            next_ev_driver_stream: 0,
+            tariff_state: None,
         };
 
         let path = std::path::PathBuf::from("/nonexistent-dir-xyz/cp.json");

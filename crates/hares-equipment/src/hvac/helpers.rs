@@ -9,15 +9,16 @@
 
 use hares_types::normalize_ascii;
 use hares_types::{
-    ControlSignal, EnvironmentState, FuelType, HaresError, LoopId, OperatingMode, Telemetry, ZoneId,
+    ControlSignal, EnvironmentState, FuelType, HaresError, LoopId, OperatingMode, PortDeclaration,
+    Telemetry, ZoneId,
 };
 
 use crate::{ConfigPayload, EquipmentConfig};
 
+use super::equivalent_battery::EquivalentBatteryWindow;
 use super::hvac_core::MAX_CONDITIONED_ZONE_TEMP_C;
+use super::thermostat::lookup_zone_temp;
 
-// Re-exported from crate root; used by `apply_heating_control_unchecked`
-// and `update_heating_control`.
 use crate::HvacEquipment;
 
 #[doc(hidden)]
@@ -51,42 +52,43 @@ pub fn zone_id_from_config(config: &EquipmentConfig) -> Option<ZoneId> {
     Some(ZoneId(raw as u16))
 }
 
-/// Resolve `ZoneId` from config, falling back to `ZoneId(1)` when absent.
-///
-/// Returns `(ZoneId, bool)` where the bool is `true` when `zone_id` was
-/// explicitly present in the config and `false` when the fallback was used.
-///
-/// When `zone_id` is missing from the equipment's typed config, HPXML parsing
-/// did not inject the conditioned-zone identifier. Logging the fallback makes
-/// this gap visible during development and integration testing.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub fn zone_id_from_config_or_default(
+/// The zone a unit that conditions the dwelling's own air serves: the
+/// config's zone_id, else the zone the unit already carries, else the
+/// dwelling zone map's indoor (conditioned) zone. A unit with none of these
+/// has no zone to condition: a typed error naming it.
+pub(crate) fn resolve_served_zone(
     config: &EquipmentConfig,
-    equipment_name: &str,
-) -> (ZoneId, bool) {
-    match zone_id_from_config(config) {
-        Some(id) => (id, true),
-        None => {
-            tracing::warn!(
-                equipment = %equipment_name,
-                key = crate::config::KEY_ZONE_ID,
-                "zone_id not present in equipment config; falling back to ZoneId(1) — \
-                 HPXML parsing may not have propagated conditioned_zone_id"
-            );
-            (ZoneId(1), false)
-        }
-    }
+    current: Option<ZoneId>,
+) -> crate::Result<ZoneId> {
+    zone_id_from_config(config)
+        .or(current)
+        .or_else(|| {
+            config
+                .zone_map
+                .as_ref()
+                .and_then(|map| map.get(hares_types::ZoneRole::Indoor))
+        })
+        .ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{}: no zone_id and no conditioned zone in the dwelling zone map; \
+                 the unit has no zone to serve",
+                config.name
+            ))
+        })
 }
 
-#[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-pub fn zone_id_from_config_or_default(
-    config: &EquipmentConfig,
-    _equipment_name: &str,
-) -> (ZoneId, bool) {
-    match zone_id_from_config(config) {
-        Some(id) => (id, true),
-        None => (ZoneId(1), false),
-    }
+/// `leading` followed by the served zone's thermal (and, for units that
+/// move moisture, humidity) port; no zone port while the zone is unresolved.
+pub(crate) fn served_zone_ports(
+    leading: &[PortDeclaration],
+    zone: Option<ZoneId>,
+    humidity: bool,
+) -> Vec<PortDeclaration> {
+    let zone_ports = zone.into_iter().flat_map(|zone| {
+        std::iter::once(PortDeclaration::thermal(zone))
+            .chain(humidity.then(|| PortDeclaration::humidity(zone)))
+    });
+    leading.iter().copied().chain(zone_ports).collect()
 }
 
 /// Parse an optional `ZoneId` from a named config key.
@@ -135,10 +137,12 @@ pub fn parse_fuel_type(raw: Option<&str>) -> Option<FuelType> {
         "oil" | "fuel_oil" | "fuel oil" | "fuel oil 1" | "fuel oil 2" | "fuel oil 4"
         | "fuel oil 5/6" | "kerosene" | "diesel" => Some(FuelType::Oil),
         "wood" => Some(FuelType::Wood),
-        "wood pellets" | "wood_pellets" => Some(FuelType::WoodPellet),
+        "wood pellets" | "wood_pellets" | "wood pellet" | "woodpellet" | "wood_pellet" => {
+            Some(FuelType::WoodPellet)
+        }
         "coal" | "anthracite coal" | "anthracite_coal" | "bituminous coal" | "bituminous_coal"
         | "coke" => Some(FuelType::Coal),
-        "none" | "no_fuel" | "no fuel" => Some(FuelType::None),
+        "none" | "no_fuel" | "no fuel" | "nofuel" => Some(FuelType::None),
         _ => None,
     }
 }
@@ -166,31 +170,108 @@ pub fn outage_forces_off(hvac: &mut HvacEquipment, env: &EnvironmentState) -> bo
     true
 }
 
+/// Floor for the band span a cycling unit's runtime fraction divides by, so
+/// a narrow hysteresis does not saturate the fraction a hair's breadth past
+/// the release edge.
+pub const MIN_LOAD_FRACTION_DEADBAND_C: f64 = 0.5;
+
+/// The runtime fraction of rated capacity a cycling unit delivers within the
+/// step: the zone's position between the thermostat's release edge (fraction
+/// 0) and its full-capacity edge (fraction 1), clamped to [0, 1].
+///
+/// A cycling unit no longer runs whole steps at full capacity or off: it
+/// delivers within the step the fraction of capacity the zone needs to reach
+/// and hold the setpoint band, and its electric or fuel input follows the
+/// runtime fraction with the part-load degradation applied where the
+/// reference applies one (EnergyPlus `DXCoils.cc:9859`:
+/// `CoolingCoilRuntimeFraction = PartLoadRatio / PLF`, the PLF curve clamped
+/// to [0.7, 1]; fuel and resistance coils scale their delivered load and
+/// energy by the part-load ratio per `HeatingCoils.cc:1873-1874`). OCHRE
+/// runs the same part-load delivery through duty-cycle control at sub-hourly
+/// resolution (HVAC.py:315-317, 328-333).
+///
+/// `released_c` is the threshold the unit's mode releases at (the heating
+/// turn-off, the cooling turn-off) and `full_c` the one it turns on at (the
+/// heating turn-on, the cooling turn-on): one formula for both axes, the
+/// band signed so the fraction runs 0 at the release edge to 1 at the call
+/// edge. The span is held to at least [`MIN_LOAD_FRACTION_DEADBAND_C`] so a
+/// narrow hysteresis modulates over the same 0.5 C the wider bands do.
+#[must_use]
+pub fn cycling_load_fraction(zone_temp_c: f64, released_c: f64, full_c: f64) -> f64 {
+    let band = full_c - released_c;
+    if band.abs() <= f64::EPSILON {
+        // A degenerate band resolves no fraction; the thresholds are
+        // validated to at least MIN_THERMOSTAT_BAND_C apart at construction.
+        return 0.0;
+    }
+    let span = band.signum() * band.abs().max(MIN_LOAD_FRACTION_DEADBAND_C);
+    ((zone_temp_c - released_c) / span).clamp(0.0, 1.0)
+}
+
+/// Nets the zone's non-HVAC port share out of a cycling unit's band-position
+/// duty estimate.
+///
+/// The band-position fraction reads the zone's net response, which already
+/// carries the non-HVAC gains' effect, and those gains also enter the zone
+/// through their own ports in the same step. The HVAC's own share of the
+/// delivery therefore excludes them: the delivery is the band estimate less
+/// the share, the same netting `solve_ideal_capacity_for_target` applies to
+/// its capacity. Netting shifts the controller's settling point up by the
+/// share over the effective capacity, which is what aligns the cycling
+/// path's hold with the ideal path's.
+///
+/// A saturated band estimate (1.0) stays 1.0: the unit is at capacity, so
+/// there is no part-load estimate to correct and the thermostat's
+/// full-fraction pin keeps its exact value.
+#[must_use]
+pub fn netted_cycling_duty(
+    band_fraction: f64,
+    non_hvac_input_w: f64,
+    rated_capacity_w: f64,
+) -> f64 {
+    if band_fraction >= 1.0 || band_fraction <= 0.0 {
+        return band_fraction.clamp(0.0, 1.0);
+    }
+    if rated_capacity_w <= 0.0 {
+        return band_fraction;
+    }
+    (band_fraction - non_hvac_input_w / rated_capacity_w).clamp(0.0, 1.0)
+}
+
 /// Shared `update_control` logic for simple heating equipment.
 ///
 /// Runs the thermostat FSM and returns the resulting `OperatingMode`.
-/// On a `Heating` call the duty cycle is set to 1.0 for cycling (on/off) mode,
-/// or preserved from an ideal-capacity solver for coarse timesteps (>=300 s) or
-/// when `use_ideal_capacity` is configured. All other modes set duty to 0.0 and
-/// return `Off`.
-pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) -> OperatingMode {
+/// On a `Heating` call a cycling unit's duty cycle is the runtime fraction
+/// the zone needs ([`cycling_load_fraction`]); an ideal-capacity unit's duty
+/// is preserved for the solver's dispatch to set. All other modes set duty
+/// to 0.0 and return `Off`.
+///
+/// A thermostat control error (a setpoint source whose schedule read
+/// fails, a zone the environment lost) is an error naming the equipment;
+/// the caller records it for the following step to fail with.
+pub fn update_heating_control(
+    hvac: &mut HvacEquipment,
+    env: &EnvironmentState,
+    equipment_name: &str,
+) -> crate::Result<OperatingMode> {
     // Safety cutoff: prevent simulation runaway where zone temperatures
     // reach physically impossible levels (e.g. 49.5 °C indoors in January).
     // Only the served (conditioned) zone is checked; duct zones in attics
     // or garages are not subject to this limit because they can legitimately
     // reach high temperatures without heating equipment running.
-    if let Ok(zone) = lookup_zone(env, hvac.config.zone_id) {
-        if zone.temperature_c > MAX_CONDITIONED_ZONE_TEMP_C {
-            tracing::warn!(
-                zone_temp_c = zone.temperature_c,
-                equipment_type = ?hvac.config.equipment_type,
-                zone_id = hvac.config.zone_id.0,
-                max_safe_temp = MAX_CONDITIONED_ZONE_TEMP_C,
-                "Safety cutoff: conditioned zone temperature exceeds max safe limit; forcing heating equipment Off"
-            );
-            hvac.runtime.duty_cycle = 0.0;
-            return OperatingMode::Off;
-        }
+    if let Some(zone_id) = hvac.config.zone_id
+        && let Ok(zone) = lookup_zone(env, zone_id)
+        && zone.temperature_c > MAX_CONDITIONED_ZONE_TEMP_C
+    {
+        tracing::warn!(
+            zone_temp_c = zone.temperature_c,
+            equipment_type = ?hvac.config.equipment_type,
+            zone_id = zone_id.0,
+            max_safe_temp = MAX_CONDITIONED_ZONE_TEMP_C,
+            "Safety cutoff: conditioned zone temperature exceeds max safe limit; forcing heating equipment Off"
+        );
+        hvac.runtime.duty_cycle = 0.0;
+        return Ok(OperatingMode::Off);
     }
 
     // Apply DR setpoint offset (set by apply_simple_mode_override_in_control)
@@ -213,39 +294,37 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
     let result = match hvac.update_mode(env) {
         Ok(super::thermostat::ThermostatMode::Heating) => {
             if !hvac.use_ideal_capacity(env) {
-                hvac.runtime.duty_cycle = 1.0;
+                // Cycling (on/off) mode: deliver the runtime fraction the
+                // zone needs to reach and hold the setpoint band.
+                let zone_temp_c = hvac
+                    .config
+                    .zone_id
+                    .and_then(|zone| lookup_zone(env, zone).ok())
+                    .map(|zone| zone.temperature_c)
+                    .unwrap_or(f64::NAN);
+                let ((heat_zero, heat_full), _) = hvac.thermostat_fsm.duty_bands();
+                let band_fraction = cycling_load_fraction(zone_temp_c, heat_zero, heat_full);
+                hvac.runtime.duty_cycle = netted_cycling_duty(
+                    band_fraction,
+                    hvac.runtime.non_hvac_input_w,
+                    hvac.rated_capacity_w(super::thermostat::ThermostatMode::Heating),
+                );
             } else {
                 hvac.runtime.duty_cycle = hvac.runtime.duty_cycle.clamp(0.0, 1.0);
             }
-            OperatingMode::Heating
+            Ok(OperatingMode::Heating)
         }
-        _ => {
+        Ok(_) => {
             if !hvac.use_ideal_capacity(env) {
                 hvac.runtime.duty_cycle = 0.0;
             }
-            OperatingMode::Off
+            Ok(OperatingMode::Off)
         }
+        Err(err) => Err(HaresError::Equipment(format!("{equipment_name}: {err}"))),
     };
 
     hvac.thermostat_fsm.runtime_setpoints = saved_runtime_setpoints;
     result
-}
-
-/// Shared `apply_control_unchecked` logic for heating equipment that uses
-pub fn apply_heating_control_unchecked(
-    hvac: &mut HvacEquipment,
-    signal: &ControlSignal,
-    _equipment_name: &str,
-) -> crate::Result<()> {
-    hvac.apply_control_signal(signal)?;
-    if let ControlSignal::ThermalSetpoint {
-        deadband_c: Some(deadband_c),
-        ..
-    } = signal
-    {
-        hvac.thermostat_fsm.thermostat.hysteresis_c = *deadband_c;
-    }
-    Ok(())
 }
 
 /// Apply solver-driven ideal heating capacity for simple heating equipment.
@@ -270,7 +349,7 @@ pub fn apply_simple_heating_ideal_capacity_control(
 
 /// Apply `ModeOverride` and `DemandResponse` signals for simple heating-only
 /// equipment. Returns `true` when the signal was consumed; the caller should
-/// not forward it to `apply_heating_control_unchecked`.
+/// not forward it to `HvacEquipment::apply_control_signal`.
 pub fn apply_simple_mode_override_and_dr(
     mode_override: &mut Option<OperatingMode>,
     dr_level: &mut hares_types::DRLevel,
@@ -385,23 +464,29 @@ pub struct DuctDseContext {
     pub is_heat_pump: bool,
 }
 
-pub fn resolve_duct_dse(config: &EquipmentConfig, ctx: &DuctDseContext) -> f64 {
+pub fn resolve_duct_dse(config: &EquipmentConfig, ctx: &DuctDseContext) -> crate::Result<f64> {
     // Direct override takes priority.
     if let Some(dse) = first_f64(config, &["duct_dse", "duct_distribution_efficiency"]) {
-        return dse.clamp(0.0, 1.0);
+        return Ok(dse.clamp(0.0, 1.0));
     }
 
     // Check for raw duct params from ASHRAE 152 passthrough.
     let Some(zone_type_str) = config.get_str("duct_zone_type") else {
-        return 1.0;
+        return Ok(1.0);
     };
     let Some(zone_type) = parse_ashrae152_zone_type(zone_type_str) else {
-        return 1.0;
+        return Ok(1.0);
     };
 
     let lat = config.get_f64("duct_latitude_deg").unwrap_or(40.0);
     let lon = config.get_f64("duct_longitude_deg").unwrap_or(-100.0);
-    let house_vol = config.get_f64("duct_house_volume_m3").unwrap_or(400.0);
+    let house_vol = config.get_f64("duct_house_volume_m3").ok_or_else(|| {
+        HaresError::Equipment(format!(
+            "{}: duct_zone_type is set but duct_house_volume_m3 is not; the duct \
+             distribution efficiency needs the conditioned volume",
+            config.name
+        ))
+    })?;
     let supply_leak = config
         .get_f64("duct_supply_leakage_frac")
         .unwrap_or(0.0)
@@ -417,7 +502,7 @@ pub fn resolve_duct_dse(config: &EquipmentConfig, ctx: &DuctDseContext) -> f64 {
 
     // Need positive capacity and fan flow for meaningful DSE calculation.
     if ctx.capacity_w <= 0.0 || ctx.fan_flow_m3_s <= 0.0 {
-        return 1.0;
+        return Ok(1.0);
     }
 
     let (supply_class, return_class) = zone_type.default_leakage_class(ctx.is_heating);
@@ -498,47 +583,64 @@ pub fn register_ebm_telemetry_keys(telemetry: &mut Telemetry) {
     telemetry.insert(hares_types::telemetry_keys::EBM_MAX_POWER_KW, 0.0);
 }
 
-/// Compute the equivalent battery model and write results to telemetry.
+/// The step's equivalent battery window, or `None` when the zone capacitance
+/// (`hvac.config.zone_capacitance_kwh_per_k`, set by the dwelling from the
+/// envelope solver) is zero and the model is disabled.
 ///
-/// Called at the end of each equipment `step()`. Uses the zone capacitance
-/// stored on `hvac.config.zone_capacitance_kwh_per_k` (set by the dwelling
-/// from envelope solver zone capacitances during construction). When
-/// `zone_capacitance_kwh_per_k <= 0.0` (EBM disabled), returns immediately
-/// without writing — the pre-registered 0.0 placeholders remain.
+/// A step computes it first, before it commits any state, so a failure here
+/// leaves the equipment exactly as it was; [`write_ebm_telemetry`] completes
+/// it with the step's load once the step has run.
 ///
-/// `capacity_ideal_w` is the current thermal load being served [W], passed
-/// from the equipment's step() as the actual delivered thermal output
-/// (sensible + latent cooling for AC, heating W for heating equipment).
-/// This is used as the EBM's `capacity_ideal` input (OCHRE HVAC.py:640),
-/// yielding `baseline_power_kw = capacity_ideal_w * rated_eir / 1000`.
+/// # Errors
 ///
-/// OCHRE computes `capacity_ideal` from a per-step steady-state solve
-/// (`self.solve_ideal_capacity()`, HVAC.py:434-435) called unconditionally.
-/// HARES uses the delivered thermal output as a proxy — it equals the
-/// steady-state load when the thermostat is maintaining setpoint, and is
-/// zero when the equipment is off (no load being served). A proper
-/// `solve_ideal_capacity()` that computes the hold load even during off
-/// cycles is deferred to T-1711.
-pub fn compute_and_write_ebm_telemetry(
+/// The window's own errors, and an error when the equipment's zone is not
+/// in `env`.
+pub(crate) fn step_equivalent_battery(
     hvac: &HvacEquipment,
-    zone_temp_c: f64,
-    capacity_ideal_w: f64,
-    telemetry: &mut Telemetry,
-) {
-    use hares_types::telemetry_keys as tk;
-
+    env: &EnvironmentState,
+) -> crate::Result<Option<EquivalentBatteryWindow>> {
     let cap_kwh = hvac.config.zone_capacitance_kwh_per_k;
     if cap_kwh <= 0.0 {
-        return;
+        return Ok(None);
     }
-    let rated_eir = hvac.eir_at_stage(0);
-    let ebm = hvac.make_equivalent_battery_model(zone_temp_c, cap_kwh, rated_eir, capacity_ideal_w);
+    let zone_temp_c = lookup_zone_temp(env, hvac.config.served_zone()?)?;
+    hvac.equivalent_battery_window(zone_temp_c, cap_kwh, hvac.eir_at_stage(0))
+        .map(Some)
+}
+
+/// Completes a step's equivalent battery window with the step's load and
+/// publishes it; a disabled model leaves the pre-registered 0.0
+/// placeholders.
+///
+/// `capacity_ideal_w` is the thermal output the step delivers [W] (sensible
+/// plus latent cooling for an AC, heating for a heater), the EBM's
+/// `capacity_ideal` input (OCHRE HVAC.py:640), giving
+/// `baseline_power_kw = capacity_ideal_w * rated_eir / 1000`. OCHRE solves
+/// the steady-state hold load every step (`solve_ideal_capacity()`,
+/// HVAC.py:434-435); the delivered output equals it while the thermostat
+/// holds the setpoint and is zero while the unit is off.
+///
+/// # Errors
+///
+/// [`EquivalentBatteryWindow::with_load`]'s error for a negative load.
+pub(crate) fn write_ebm_telemetry(
+    window: Option<EquivalentBatteryWindow>,
+    capacity_ideal_w: f64,
+    telemetry: &mut Telemetry,
+) -> crate::Result<()> {
+    use hares_types::telemetry_keys as tk;
+
+    let Some(window) = window else {
+        return Ok(());
+    };
+    let ebm = window.with_load(capacity_ideal_w)?;
     telemetry.set(tk::EBM_EFFICIENCY, ebm.efficiency);
     telemetry.set(tk::EBM_BASELINE_POWER_KW, ebm.baseline_power_kw);
     telemetry.set(tk::EBM_ENERGY_KWH, ebm.energy_kwh.unwrap_or(0.0));
     telemetry.set(tk::EBM_MIN_ENERGY_KWH, ebm.min_energy_kwh);
     telemetry.set(tk::EBM_MAX_ENERGY_KWH, ebm.max_energy_kwh.unwrap_or(0.0));
     telemetry.set(tk::EBM_MAX_POWER_KW, ebm.max_power_kw.unwrap_or(0.0));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -553,10 +655,42 @@ mod tests {
     use crate::config::{ConfigPayload, ConfigValue};
 
     use super::{
-        DuctDseContext, compute_and_write_ebm_telemetry, loop_id_from_config, parse_fuel_type,
-        parse_zone_id_key, register_ebm_telemetry_keys, resolve_duct_dse, zone_id_from_config,
-        zone_id_from_config_or_default,
+        DuctDseContext, cycling_load_fraction, loop_id_from_config, netted_cycling_duty,
+        parse_fuel_type, parse_zone_id_key, register_ebm_telemetry_keys, resolve_duct_dse,
+        step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
     };
+
+    /// The fraction runs 0 at the release edge, 1 at the call edge, and
+    /// clamps outside; one formula covers both axes (the heating band's
+    /// edges arrive descending, the cooling's ascending).
+    #[test]
+    fn cycling_load_fraction_runs_zero_at_the_release_edge_to_one_at_the_call_edge() {
+        // Cooling: release 23.8, full call 24.8.
+        assert!((cycling_load_fraction(23.8, 23.8, 24.8)).abs() < 1e-12);
+        assert!((cycling_load_fraction(24.3, 23.8, 24.8) - 0.5).abs() < 1e-12);
+        assert!((cycling_load_fraction(24.8, 23.8, 24.8) - 1.0).abs() < 1e-12);
+        assert!((cycling_load_fraction(26.0, 23.8, 24.8) - 1.0).abs() < 1e-12);
+        assert!((cycling_load_fraction(23.0, 23.8, 24.8)).abs() < 1e-12);
+        // Heating: release 20.2 (descending to the call edge 19.2).
+        assert!((cycling_load_fraction(20.2, 20.2, 19.2)).abs() < 1e-12);
+        assert!((cycling_load_fraction(19.7, 20.2, 19.2) - 0.5).abs() < 1e-12);
+        assert!((cycling_load_fraction(19.0, 20.2, 19.2) - 1.0).abs() < 1e-12);
+        // A narrow hysteresis modulates over the floored 0.5 C span.
+        assert!((cycling_load_fraction(24.2, 23.98, 24.08) - 0.44).abs() < 1e-12);
+    }
+
+    /// The netting keeps the saturated edges exact (a full-fraction step
+    /// stays full for the RTF pin, a released step stays zero), subtracts
+    /// the non-HVAC share over rated capacity in the part-load region, and
+    /// clamps at zero when the share exceeds the estimate.
+    #[test]
+    fn netted_cycling_duty_keeps_the_edges_and_nets_the_share() {
+        assert!((netted_cycling_duty(1.0, 500.0, 7_000.0) - 1.0).abs() < 1e-12);
+        assert!(netted_cycling_duty(0.0, 500.0, 7_000.0).abs() < 1e-12);
+        assert!((netted_cycling_duty(0.5, 700.0, 7_000.0) - 0.4).abs() < 1e-12);
+        assert!(netted_cycling_duty(0.05, 700.0, 7_000.0).abs() < 1e-12);
+        assert!((netted_cycling_duty(0.5, 700.0, 0.0) - 0.5).abs() < 1e-12);
+    }
 
     #[test]
     fn parse_fuel_type_covers_all_variants() {
@@ -586,9 +720,13 @@ mod tests {
             ("coke", FuelType::Coal),
             ("wood pellets", FuelType::WoodPellet),
             ("wood_pellets", FuelType::WoodPellet),
+            ("wood pellet", FuelType::WoodPellet),
+            ("woodpellet", FuelType::WoodPellet),
+            ("wood_pellet", FuelType::WoodPellet),
             ("none", FuelType::None),
             ("no_fuel", FuelType::None),
             ("no fuel", FuelType::None),
+            ("nofuel", FuelType::None),
         ];
 
         for &(input, expected) in cases {
@@ -752,56 +890,6 @@ mod tests {
     }
 
     #[test]
-    fn zone_id_from_config_or_default_falls_back_to_zone_1_with_explicit_false() {
-        let config = EquipmentConfig::from_typed(
-            "ZN".to_string(),
-            "Gas Furnace".to_string(),
-            GasFurnaceConfig {
-                zone_id: None,
-                capacity_w: 10_000.0,
-                afue: 0.96,
-                ..GasFurnaceConfig::default()
-            },
-        )
-        .unwrap();
-        let (zone_id, explicit) = zone_id_from_config_or_default(&config, &config.name);
-        assert_eq!(
-            zone_id,
-            hares_types::ZoneId(1),
-            "fallback must be ZoneId(1) when zone_id key is absent"
-        );
-        assert!(
-            !explicit,
-            "zone_id_explicit must be false when fallback is used"
-        );
-    }
-
-    #[test]
-    fn zone_id_from_config_or_default_returns_explicit_true_when_present() {
-        let config = EquipmentConfig::from_typed(
-            "Z5".to_string(),
-            "Gas Furnace".to_string(),
-            GasFurnaceConfig {
-                zone_id: Some(5),
-                capacity_w: 10_000.0,
-                afue: 0.96,
-                ..GasFurnaceConfig::default()
-            },
-        )
-        .unwrap();
-        let (zone_id, explicit) = zone_id_from_config_or_default(&config, &config.name);
-        assert_eq!(
-            zone_id,
-            hares_types::ZoneId(5),
-            "zone_id must be ZoneId(5) when present in config"
-        );
-        assert!(
-            explicit,
-            "zone_id_explicit must be true when zone_id is present in config"
-        );
-    }
-
-    #[test]
     fn zero_explicit_leakage_defaults_to_zone_type_class() {
         use std::collections::HashMap;
 
@@ -848,8 +936,8 @@ mod tests {
             )
         };
 
-        let attic_dse = resolve_duct_dse(&make_config("attic_unvented"), &ctx);
-        let basement_dse = resolve_duct_dse(&make_config("unins_basement"), &ctx);
+        let attic_dse = resolve_duct_dse(&make_config("attic_unvented"), &ctx).unwrap();
+        let basement_dse = resolve_duct_dse(&make_config("unins_basement"), &ctx).unwrap();
 
         assert!(
             attic_dse < basement_dse,
@@ -863,6 +951,43 @@ mod tests {
         assert!(
             (0.0..1.0).contains(&basement_dse),
             "basement DSE {basement_dse} must be in (0,1) — class-default leakage must not be zero"
+        );
+    }
+
+    /// Duct parameters with no conditioned volume are an error naming the
+    /// unit, not a 400 m3 house.
+    #[test]
+    fn duct_dse_without_a_house_volume_errors() {
+        use std::collections::HashMap;
+
+        let ctx = DuctDseContext {
+            is_heating: true,
+            capacity_w: 12_000.0,
+            fan_flow_m3_s: 0.5,
+            n_speeds: 1,
+            capacity_low_w: None,
+            fan_flow_low_m3_s: None,
+            is_heat_pump: false,
+        };
+        let config = EquipmentConfig::with_payload(
+            "Unhoused".to_string(),
+            "Gas Furnace".to_string(),
+            ConfigPayload::Raw {
+                data: HashMap::from([
+                    (
+                        "duct_zone_type".to_string(),
+                        ConfigValue::Text("attic_unvented".to_string()),
+                    ),
+                    ("duct_latitude_deg".to_string(), ConfigValue::Float(40.0)),
+                    ("duct_longitude_deg".to_string(), ConfigValue::Float(-105.0)),
+                ]),
+            },
+        );
+        let err = resolve_duct_dse(&config, &ctx).expect_err("no house volume must fail");
+        assert!(
+            err.to_string().contains("Unhoused")
+                && err.to_string().contains("duct_house_volume_m3"),
+            "got: {err}"
         );
     }
 
@@ -892,7 +1017,9 @@ mod tests {
         let mut telemetry = Telemetry::new();
         register_ebm_telemetry_keys(&mut telemetry);
 
-        compute_and_write_ebm_telemetry(&hvac, 18.0, 3000.0, &mut telemetry);
+        let env = crate::hvac::thermostat::tests::env_with_zone_temp(18.0);
+        let window = step_equivalent_battery(&hvac, &env).unwrap();
+        write_ebm_telemetry(window, 3000.0, &mut telemetry).unwrap();
 
         let efficiency = telemetry.get(tk::EBM_EFFICIENCY).unwrap();
         let baseline = telemetry.get(tk::EBM_BASELINE_POWER_KW).unwrap();
@@ -921,7 +1048,10 @@ mod tests {
         let mut telemetry = Telemetry::new();
         register_ebm_telemetry_keys(&mut telemetry);
 
-        compute_and_write_ebm_telemetry(&hvac, 20.0, 5000.0, &mut telemetry);
+        let env = crate::hvac::thermostat::tests::env_with_zone_temp(20.0);
+        let window = step_equivalent_battery(&hvac, &env).unwrap();
+        assert!(window.is_none());
+        write_ebm_telemetry(window, 5000.0, &mut telemetry).unwrap();
 
         let baseline = telemetry.get(tk::EBM_BASELINE_POWER_KW).unwrap();
         assert_eq!(

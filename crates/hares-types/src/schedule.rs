@@ -53,6 +53,7 @@ impl DayFilter {
 /// declaration order and the first match wins. Overlapping windows are allowed
 /// -- use ordering to express priority.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimeWindow {
     pub day: DayFilter,
     pub start_minute: u16,
@@ -155,7 +156,7 @@ impl TimeWindow {
     }
 }
 
-/// Canonical custom-domain id used for schedule payloads in `EnvironmentState.custom_domains`.
+/// Canonical domain id of the schedule payload's slot in `EnvironmentState.domains`.
 pub const SCHEDULE_DOMAIN_ID: DomainId = DomainId(u16::MAX);
 
 /// Out-of-range index behavior for schedule-backed sources.
@@ -172,6 +173,7 @@ pub enum BoundaryPolicy {
 
 /// Parameters for a specific probability distribution.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum DistributionKind {
     /// Gaussian (normal): result = mean + std_dev × N(0,1).
     Gaussian { mean: f64, std_dev: f64 },
@@ -297,6 +299,7 @@ impl PartialEq for StochasticState {
 /// A lazily-evaluated source for schedule values.
 #[non_exhaustive]
 #[derive(Clone, Debug)]
+// value_at reads the profile arrays every step; boxing them would add a pointer chase to each read.
 #[allow(clippy::large_enum_variant)]
 pub enum ScheduleSource {
     /// Fixed scalar value.
@@ -377,6 +380,7 @@ pub enum ScheduleSource {
 /// emit exact variant fields; there is no type-level guard available here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// Mirrors ScheduleSource variant for variant, so into_runtime moves the arrays without allocating.
 #[allow(clippy::large_enum_variant)]
 pub enum ScheduleSourceConfig {
     Constant(f64),
@@ -628,13 +632,13 @@ impl ScheduleSource {
             }
             Self::ColumnRef { col_idx, boundary } => {
                 let payload = env
-                    .custom_domains
-                    .iter()
-                    .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
+                    .domains
+                    .schedule
+                    .get()
                     .and_then(|d| d.custom_payload.as_ref())
                     .ok_or_else(|| {
                         HaresError::Equipment(
-                            "schedule domain payload not found in environment custom domains"
+                            "schedule domain payload not found in the environment's schedule slot"
                                 .to_string(),
                         )
                     })?;
@@ -893,7 +897,7 @@ pub enum SeasonFilter {
     Summer,
     Winter,
     /// Shoulder / intermediate season (e.g. spring and fall). When no shoulder
-    /// month range is configured, this behaves identically to [`All`].
+    /// month range is configured, this behaves identically to [`SeasonFilter::All`].
     Shoulder,
 }
 
@@ -929,6 +933,7 @@ impl SeasonFilter {
 /// where summer might be Nov–Feb). The shoulder range (spring/fall intermediate
 /// season) is optional — without it, the split is binary summer/winter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SeasonalSplit {
     /// First month of summer (1-indexed, inclusive).
     pub summer_start_month: u8,
@@ -1063,7 +1068,7 @@ impl SeasonalSplit {
 
     /// Returns `true` if the given 1-indexed month is in the shoulder range.
     ///
-    /// Handles wrapping the same way as [`is_summer`]. Returns `false` if
+    /// Handles wrapping the same way as [`Self::is_summer`]. Returns `false` if
     /// shoulder is not configured.
     pub fn is_shoulder(&self, month: u8) -> bool {
         debug_assert!((1..=12).contains(&month), "month out of range: {month}");
@@ -1143,6 +1148,7 @@ pub enum BillingCycle {
 
 /// A named time-of-use period with day/time windows and season applicability.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TouPeriod {
     pub name: String,
     pub schedule: Vec<TimeWindow>,
@@ -1339,11 +1345,11 @@ mod tests {
     #[test]
     fn column_ref_reads_schedule_domain_payload() {
         let mut env = default_env();
-        env.custom_domains = vec![DomainUpdate {
+        env.domains.schedule.set_from(&DomainUpdate {
             domain_id: SCHEDULE_DOMAIN_ID,
             zone_temperatures_c: vec![(ZoneId(1), 21.0)],
             custom_payload: Some(vec![2.0, 4.0, 6.0]),
-        }];
+        });
 
         let mut source = ScheduleSource::ColumnRef {
             col_idx: 1,

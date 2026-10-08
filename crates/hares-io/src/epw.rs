@@ -84,7 +84,7 @@ pub struct EpwRecord {
     pub horizontal_infrared_w_m2: f64,
     pub sky_temp_c: f64,
     pub ground_temp_c: f64,
-    /// Liquid precipitation depth [m]. Zero when EPW field 33 is absent or invalid.
+    /// Liquid precipitation depth (m). Zero when EPW field 33 is absent or invalid.
     pub liquid_precip_m: f64,
 }
 
@@ -128,6 +128,31 @@ pub fn parse_epw_location_state<P: AsRef<Path>>(path: P) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Extract the WMO station number from an EPW file's LOCATION header.
+///
+/// Reads only the first line of the file. Returns the station number
+/// (e.g. `"725650"`) from field index 5 of the LOCATION header per the
+/// EPW Data Dictionary (the same value `parse_weather` puts on
+/// [`crate::WeatherMeta::station_wmo`]), or `None` if the file is missing,
+/// unreadable, or the field is absent.
+pub fn parse_epw_station_wmo<P: AsRef<Path>>(path: P) -> Option<String> {
+    let path_ref = path.as_ref();
+    if path_ref.extension()?.to_str()? != "epw" {
+        return None;
+    }
+    let first_line =
+        std::io::BufRead::lines(std::io::BufReader::new(fs::File::open(path_ref).ok()?))
+            .next()?
+            .ok()?;
+
+    if !first_line.starts_with("LOCATION") {
+        return None;
+    }
+    let fields: Vec<&str> = first_line.split(',').collect();
+    let wmo = fields.get(5)?.trim();
+    (!wmo.is_empty()).then(|| wmo.to_string())
 }
 
 fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
@@ -347,27 +372,20 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
 
     let is_leap_year = records.len() == EXPECTED_RECORDS_LEAP;
 
-    // Invariant: if the file has 8784 records but the header says "No" for
-    // leap year observation, Feb 29 must have been stripped.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        if records.len() == EXPECTED_RECORDS_LEAP && !wf_allows_leap_years {
-            panic!(
-                "EPW invariant violation: 8784 records present but wf_allows_leap_years is false. \
-                 Feb 29 data should have been stripped."
-            );
-        }
-        // Also assert: if records.len() == 8784 and wf_allows_leap_years is true,
-        // there must be at least one Feb 29 record (the file is a leap year).
-        if records.len() == EXPECTED_RECORDS_LEAP && wf_allows_leap_years {
-            let has_feb29 = record_datetimes
-                .iter()
-                .any(|(date, _)| date.month() == 2 && date.day() == 29);
-            assert!(
-                has_feb29,
-                "EPW invariant violation: 8784 records with wf_allows_leap_years=true \
-                 but no Feb 29 record found."
-            );
+    // A leap-year file that claims leap observation must actually carry a
+    // Feb 29 record; an 8784-record file without leap observation cannot
+    // exist because the strip loop above removed Feb 29 when the header
+    // said No.
+    if records.len() == EXPECTED_RECORDS_LEAP && wf_allows_leap_years {
+        let has_feb29 = record_datetimes
+            .iter()
+            .any(|(date, _)| date.month() == 2 && date.day() == 29);
+        if !has_feb29 {
+            return Err(WeatherError::Validation(
+                "EPW file has 8784 records with leap year observed=true \
+                 but no Feb 29 record"
+                    .to_string(),
+            ));
         }
     }
 
@@ -415,6 +433,9 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
     let longitude = parse_f64_field(fields[7], "location longitude")?;
     let timezone_offset_h = parse_f64_field(fields[8], "location timezone")?;
     let elevation_m = parse_f64_field(fields[9], "location elevation")?;
+    let station_wmo = Some(fields[5].trim())
+        .filter(|wmo| !wmo.is_empty())
+        .map(str::to_string);
 
     Ok(WeatherMeta {
         location,
@@ -428,6 +449,7 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         // Subtract half-period (30 min) from sim time to read the correct period.
         midpoint_offset_secs: 1800,
         has_embedded_location: true,
+        station_wmo,
     })
 }
 
@@ -674,33 +696,6 @@ pub(crate) fn doe2_ground_temp_from_monthly_avg(monthly_avg: &[f64; 12]) -> [f64
         result[i] = t_avg - dt_monthly * gm * argument.cos();
     }
 
-    // Invariant: the DOE-2 damped ground temperature must have strictly less
-    // seasonal amplitude than the outdoor air temperature. If ground amplitude
-    // equals or exceeds the air amplitude, the depth is too shallow or soil
-    // diffusivity is implausibly low.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let result_min = result.iter().copied().fold(f64::INFINITY, f64::min);
-        let result_max = result.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let ground_pp = result_max - result_min;
-        let air_pp = t_max - t_min;
-        if ground_pp >= air_pp {
-            tracing::error!(
-                ground_peak_to_peak_c = ground_pp,
-                air_peak_to_peak_c = air_pp,
-                beta = beta,
-                depth_m = DOE2_GROUND_REFERENCE_DEPTH_M,
-                "DOE-2 ground temperature amplitude ({ground_pp_c:.2}°C) is not \
-                 strictly less than outdoor air temperature amplitude ({air_pp_c:.2}°C); \
-                 the DOE-2 fallback depth ({depth_m} m) may be too shallow or soil \
-                 diffusivity is implausibly low",
-                ground_pp_c = ground_pp,
-                air_pp_c = air_pp,
-                depth_m = DOE2_GROUND_REFERENCE_DEPTH_M,
-            );
-        }
-    }
-
     // Observer capture: record the DOE-2 fallback configuration and resulting
     // seasonal amplitude for diagnostic analysis.
     #[cfg(feature = "observe")]
@@ -823,9 +818,10 @@ pub fn clark_allen_sky_emissivity(dew_point_c: f64) -> f64 {
 /// Cite: Clark, G. and Allen, C. (1978), "The Estimation of Atmospheric
 /// Radiation for Clear and Cloudy Skies", Proc. 2nd National Passive Solar
 /// Conference (AS/ISES), pp. 675-678.
-// Why: used by test code in epw.rs, tmy3.rs, psm3.rs, weather.rs for
-// direct Clark-Allen comparison against the compute_sky_temp_c cascade.
-#[allow(dead_code)]
+// Read only by this crate's test modules (epw.rs, tmy3.rs, psm3.rs,
+// resstock_csv.rs) for direct Clark-Allen comparison against the
+// compute_sky_temp_c cascade; compiled only for tests.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn clark_allen_sky_temp_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
     let emissivity = clark_allen_sky_emissivity(dew_point_c);
@@ -1228,7 +1224,16 @@ fn parse_cooling_design_db(fields: &[&str]) -> Option<f64> {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// The EPW LOCATION header's sixth field is the station's WMO number.
+    #[test]
+    fn location_header_carries_the_station_wmo() {
+        let meta = super::parse_location_header(
+            "LOCATION,Denver Intl Ap,CO,USA,TMY3,725650,39.83,-104.65,-7.0,1650.0",
+        )
+        .expect("valid header");
+        assert_eq!(meta.station_wmo.as_deref(), Some("725650"));
+    }
 
     use tracing_subscriber;
 
@@ -1241,15 +1246,13 @@ mod tests {
         sky_temp_from_emissivity, walton_cloud_correction,
     };
 
-    fn write_temp_epw(epw_contents: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before UNIX_EPOCH")
-            .as_nanos();
-        path.push(format!("hares-io-epw-test-{nanos}.epw"));
+    /// Writes the EPW into a directory removed when the returned `TempDir`
+    /// drops (panics included).
+    fn write_temp_epw(epw_contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("weather.epw");
         fs::write(&path, epw_contents).expect("failed to write temporary EPW");
-        path
+        (dir, path)
     }
 
     fn build_synthetic_epw(
@@ -1450,9 +1453,8 @@ mod tests {
     #[test]
     fn parse_epw_reads_from_path() {
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
-        let path = write_temp_epw(&epw);
+        let (_dir, path) = write_temp_epw(&epw);
         let result = parse_epw(&path);
-        let _ = fs::remove_file(path);
         assert!(result.is_ok());
     }
 
@@ -2267,7 +2269,7 @@ mod tests {
 
         // Build a synthetic EPW whose LOCATION header embeds Denver, CO (39.74, -104.99).
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
-        let path = write_temp_epw(&epw);
+        let (_dir, path) = write_temp_epw(&epw);
 
         // Supply Phoenix, AZ coordinates — differ by ~6.3° lat and ~7.1° lon.
         let caller_lat = 33.45_f64;
@@ -2282,7 +2284,6 @@ mod tests {
             caller_lon,
             caller_tz,
         );
-        let _ = fs::remove_file(path);
         let weather = result.expect("EPW should parse without error");
 
         // File's embedded location remains authoritative — the caller coordinates
@@ -2304,11 +2305,10 @@ mod tests {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
-        let path = write_temp_epw(&epw);
+        let (_dir, path) = write_temp_epw(&epw);
 
         // All-zero caller coordinates (no HPXML site data).
         let result = crate::weather::parse_weather_with_location(&path, 0.0, 0.0, 0.0, 0.0);
-        let _ = fs::remove_file(path);
         let weather = result.expect("EPW should parse without error");
 
         // File coords are used since caller provided no location.
@@ -2319,7 +2319,7 @@ mod tests {
     #[test]
     fn epw_override_location_replaces_all_meta_fields() {
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
-        let path = write_temp_epw(&epw);
+        let (_dir, path) = write_temp_epw(&epw);
 
         // Override with Phoenix, AZ coordinates and elevation.
         let override_lat = 33.45_f64;
@@ -2334,7 +2334,6 @@ mod tests {
             override_elev,
             override_tz,
         );
-        let _ = fs::remove_file(path);
         let weather = result.expect("EPW should parse without error");
 
         // All four meta fields must match the caller-provided override values exactly.

@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_envelope::{
-    InteriorLwrZoneConfig, InteriorSurfaceInfo, OutputMapping, StateSpaceModel, StateSpaceWiring,
-    ThermalSolver, ThermalSolverConfig,
+    InteriorLwrZoneConfig, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
+    OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
 };
 use hares_types::{
     DomainSolver, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
@@ -27,6 +27,7 @@ const DT_S: f64 = 300.0;
 
 fn make_env(zone_temp: f64, outdoor_temp: f64, ground_temp: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZONE,
             temperature_c: zone_temp,
@@ -62,7 +63,8 @@ fn make_env(zone_temp: f64, outdoor_temp: f64, ground_temp: f64) -> EnvironmentS
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()
@@ -136,7 +138,7 @@ fn ground_temperature_drives_zone() {
 
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let ground_temp = 12.0;
@@ -153,9 +155,9 @@ fn ground_temperature_drives_zone() {
     let dt = Duration::from_secs_f64(DT_S);
 
     // Run 48 hours to approach steady state.
-    let mut last_update = solver.resolve_new(&ports, &env, dt);
+    let mut last_update = solver.resolve_new(&ports, &env, dt).unwrap();
     for _ in 1..576 {
-        last_update = solver.resolve_new(&ports, &env, dt);
+        last_update = solver.resolve_new(&ports, &env, dt).unwrap();
     }
 
     let t_zone = zone_temp(&last_update);
@@ -293,7 +295,7 @@ fn interior_solar_distribution_damps_peak_temp() {
 
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
     let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, init_temp).unwrap();
 
@@ -310,7 +312,7 @@ fn interior_solar_distribution_damps_peak_temp() {
             ..Default::default()
         };
         ports.thermal[0].sensible_gain_w = if step < solar_steps { solar_w } else { 0.0 };
-        let update = solver.resolve_new(&ports, &env, dt);
+        let update = solver.resolve_new(&ports, &env, dt).unwrap();
         let t = zone_temp(&update);
         peak = peak.max(t);
     }
@@ -330,14 +332,18 @@ fn interior_solar_distribution_damps_peak_temp() {
     );
 
     // After solar ends (10h cooldown), zone should approach outdoor temp
-    let t_final = zone_temp(&solver.resolve_new(
-        &PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZONE)],
-            ..Default::default()
-        },
-        &env,
-        dt,
-    ));
+    let t_final = zone_temp(
+        &solver
+            .resolve_new(
+                &PortSlots {
+                    thermal: vec![ThermalAccumulator::new(ZONE)],
+                    ..Default::default()
+                },
+                &env,
+                dt,
+            )
+            .unwrap(),
+    );
     assert!(
         t_final < peak,
         "zone should cool after solar ends: final={t_final:.1}°C, peak={peak:.1}°C"
@@ -357,7 +363,7 @@ fn rc_network_exposes_ground_column() {
     let zones = vec![ZoneInput {
         floor_area_m2: Some(48.0),
         volume_m3: Some(129.6),
-        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
     }];
     let zone_caps =
         derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA).unwrap();
@@ -452,8 +458,26 @@ fn rc_network_exposes_ground_column() {
 /// inputs, matching the production path in `build_input_vector`. The breakdown
 /// attributes convective direct, radiant-to-air residual, and radiant-to-surfaces
 /// components separately.
-#[test]
-fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
+/// How the one interior surface reaches the solver: through the ScriptF
+/// exchange (`interior_lwr_zones`) or, as in the default StarMesh mode,
+/// through the solar distribution alone (`interior_solar_zones`).
+#[derive(Clone, Copy, Debug)]
+enum InteriorMode {
+    ScriptF,
+    StarMesh,
+}
+
+/// A one-zone solver with one opaque interior surface (10 m², emissivity
+/// 0.9, inside solar absorptance 0.6, radiation_frac 0.5) on input 1 and
+/// zone air on input 2.
+fn one_surface_solver(
+    mode: InteriorMode,
+) -> (
+    ThermalSolver,
+    hares_types::EnvironmentState,
+    InteriorSurfaceInfo,
+    f64,
+) {
     // 1-state model: [zone_air]
     // 3 inputs: [T_outdoor(0), Q_surface(1), Q_zone_air(2)]
     // The surface RC node is purely an input sink (no state); we only care
@@ -503,25 +527,48 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
         driving_temp: None,
     };
 
-    let lwr_zone = InteriorLwrZoneConfig {
-        zone_id: ZONE,
-        surfaces: vec![surface],
-        scriptf: None,
-    };
-
-    let config = ThermalSolverConfig {
-        indoor_zone_id: ZONE,
-        interior_lwr_zones: vec![lwr_zone],
-        ..ThermalSolverConfig::default()
+    let config = match mode {
+        InteriorMode::ScriptF => ThermalSolverConfig {
+            indoor_zone_id: ZONE,
+            interior_lwr_zones: vec![InteriorLwrZoneConfig {
+                zone_id: ZONE,
+                surfaces: vec![surface],
+                scriptf: None,
+            }],
+            ..ThermalSolverConfig::new(ZoneId(1))
+        },
+        InteriorMode::StarMesh => ThermalSolverConfig {
+            indoor_zone_id: ZONE,
+            interior_solar_zones: vec![InteriorSolarZoneConfig {
+                zone_id: ZONE,
+                surfaces: vec![InteriorSolarSurfaceInfo {
+                    input_index: Some(surface.input_index),
+                    area_m2: surface.area_m2,
+                    solar_absorptance: surface.solar_absorptance,
+                    radiation_frac: surface.radiation_frac,
+                    is_floor: surface.is_floor,
+                    tilt_deg: surface.tilt_deg,
+                    azimuth_deg: surface.azimuth_deg,
+                }],
+            }],
+            ..ThermalSolverConfig::new(ZoneId(1))
+        },
     };
 
     let env = make_env(20.0, -5.0, 10.0);
-    let mut solver =
-        ThermalSolver::new(model, wiring, config, dt, &env, 20.0).expect("solver init");
+    let solver = ThermalSolver::new(model, wiring, config, dt, &env, 20.0).expect("solver init");
+    (solver, env, surface, dt)
+}
 
-    // Port: 700 W convective + 300 W radiant (30/70 split, BESTEST 900/600).
+#[test]
+fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
+    let (mut solver, env, surface, _) = one_surface_solver(InteriorMode::ScriptF);
+
+    // Port: 700 W convective + 300 W radiant (30/70 split, BESTEST 900/600)
+    // + 100 W short-wave.
     let convective_w = 700.0_f64;
     let radiant_w = 300.0_f64;
+    let shortwave_w = 100.0_f64;
     let mut acc = ThermalAccumulator::new(ZONE);
     acc.add(
         convective_w,
@@ -529,12 +576,13 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
         0.0,
         hares_types::ThermalCategory::InternalGain,
     );
+    acc.shortwave_gain_w = shortwave_w;
     let ports = PortSlots {
         thermal: vec![acc],
         ..Default::default()
     };
 
-    let breakdown = solver.zone_sensible_breakdown_debug(&ports, &env);
+    let breakdown = solver.zone_sensible_breakdown_debug(&ports, &env).unwrap();
 
     // With radiation_frac = 0.5:
     //   300 W radiant × (1 - 0.5) = 150 W returned to zone air
@@ -561,10 +609,20 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
         surface_radiant_w,
     );
 
+    // The one surface absorbs all of the short-wave (it is the zone's only
+    // absorber) and passes radiation_frac of it to its node.
+    let air_shortwave_w = shortwave_w * (1.0 - surface.radiation_frac);
+    assert!((breakdown.shortwave_to_air_w - air_shortwave_w).abs() < 1e-6);
+    assert!(
+        (breakdown.shortwave_to_surfaces_w - shortwave_w * surface.radiation_frac).abs() < 1e-6
+    );
+
     // Energy balance: total port contribution to zone air equals
-    // convective + radiant-to-air residual.
-    let zone_air_port_total = breakdown.convective_direct_w + breakdown.radiant_to_air_residual_w;
-    let expected_zone_air = convective_w + air_radiant_residual_w;
+    // convective + radiant-to-air residual + short-wave to air.
+    let zone_air_port_total = breakdown.convective_direct_w
+        + breakdown.radiant_to_air_residual_w
+        + breakdown.shortwave_to_air_w;
+    let expected_zone_air = convective_w + air_radiant_residual_w + air_shortwave_w;
     assert!(
         (zone_air_port_total - expected_zone_air).abs() < 1e-6,
         "zone air port total = {:.3} W, expected {:.3} W",
@@ -582,6 +640,75 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
         breakdown.radiant_to_surfaces_w,
         radiant_w,
     );
+}
+
+/// The production step injects short-wave gain into the zone (a zone given
+/// 400 W of short-wave ends warmer than one given none), and the component
+/// gains report it as an indoor internal gain on the short-wave path, in
+/// both interior modes.
+#[test]
+fn production_step_injects_shortwave_gain() {
+    for mode in [InteriorMode::ScriptF, InteriorMode::StarMesh] {
+        assert_production_step_injects_shortwave_gain(mode);
+    }
+}
+
+/// In the default StarMesh mode the short-wave gain is split at its one
+/// absorbing surface as in ScriptF mode: the radiation fraction to the
+/// surface node, the rest to the zone air.
+#[test]
+fn star_mesh_breakdown_splits_shortwave_between_surface_and_air() {
+    let (mut solver, env, surface, _) = one_surface_solver(InteriorMode::StarMesh);
+    let shortwave_w = 100.0_f64;
+    let mut acc = ThermalAccumulator::new(ZONE);
+    acc.shortwave_gain_w = shortwave_w;
+    let ports = PortSlots {
+        thermal: vec![acc],
+        ..Default::default()
+    };
+    let breakdown = solver.zone_sensible_breakdown_debug(&ports, &env).unwrap();
+    assert!(
+        (breakdown.shortwave_to_air_w - shortwave_w * (1.0 - surface.radiation_frac)).abs() < 1e-6
+    );
+    assert!(
+        (breakdown.shortwave_to_surfaces_w - shortwave_w * surface.radiation_frac).abs() < 1e-6
+    );
+}
+
+fn assert_production_step_injects_shortwave_gain(mode: InteriorMode) {
+    let (mut lit, env, _, dt) = one_surface_solver(mode);
+    let (mut dark, _, _, _) = one_surface_solver(mode);
+    let mut acc = ThermalAccumulator::new(ZONE);
+    acc.shortwave_gain_w = 400.0;
+    let lit_ports = PortSlots {
+        thermal: vec![acc],
+        ..Default::default()
+    };
+    let dark_ports = PortSlots {
+        thermal: vec![ThermalAccumulator::new(ZONE)],
+        ..Default::default()
+    };
+    let step = Duration::from_secs_f64(dt);
+    lit.resolve_new(&lit_ports, &env, step).unwrap();
+    dark.resolve_new(&dark_ports, &env, step).unwrap();
+
+    let zone_temp = |solver: &ThermalSolver| {
+        solver
+            .zone_temperatures_c()
+            .into_iter()
+            .find(|(zone, _)| *zone == ZONE)
+            .map(|(_, t)| t)
+            .expect("zone temperature")
+    };
+    assert!(
+        zone_temp(&lit) > zone_temp(&dark) + 1e-6,
+        "short-wave gain must reach the zone: lit {} °C, dark {} °C",
+        zone_temp(&lit),
+        zone_temp(&dark)
+    );
+    let gains = lit.component_gains();
+    assert_eq!(gains.port_shortwave_w, 400.0);
+    assert_eq!(gains.internal_gain_w, 400.0);
 }
 
 // ── Ground temperature depth correction integration test ────────────────────
@@ -633,7 +760,7 @@ fn kusuda_depth_corrected_ground_temp_used_at_2_4m_minneapolis_january() {
 
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     // ── Minneapolis January 15 environment ──────────────────────────────
@@ -644,6 +771,7 @@ fn kusuda_depth_corrected_ground_temp_used_at_2_4m_minneapolis_january() {
     let ground_temp_c = -5.0; // surface DOE-2 value (wrong, as proven below)
 
     let env = EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZONE,
             temperature_c: 20.0,
@@ -679,7 +807,8 @@ fn kusuda_depth_corrected_ground_temp_used_at_2_4m_minneapolis_january() {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()
@@ -700,7 +829,7 @@ fn kusuda_depth_corrected_ground_temp_used_at_2_4m_minneapolis_january() {
     };
     let dt = Duration::from_secs_f64(DT_S);
 
-    solver.resolve_new(&ports, &env, dt);
+    solver.resolve_new(&ports, &env, dt).unwrap();
 
     let gains = solver.component_gains();
 
@@ -763,7 +892,7 @@ fn ground_coupled_rc_steady_state_is_isothermal_at_kusuda_temperature() {
     let zones = vec![ZoneInput {
         floor_area_m2: Some(48.0),
         volume_m3: Some(129.6),
-        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
     }];
     let zone_caps =
         derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA).unwrap();

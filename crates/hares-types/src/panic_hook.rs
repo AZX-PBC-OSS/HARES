@@ -76,7 +76,7 @@ static PANIC_WITH_LOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Returns `true` when the HARES custom panic hook is believed to be installed.
 ///
-/// Used by `cfg(any(debug_assertions, feature = "check_invariants"))` assertions.
+/// Used by `cfg(debug_assertions)` assertions.
 #[inline]
 pub fn is_installed() -> bool {
     HOOK_INSTALLED.load(Ordering::Acquire)
@@ -239,7 +239,7 @@ pub fn take_panic_info() -> Option<PanicInfoCapture> {
 }
 
 /// Converts a panic payload (from [`panic::catch_unwind`]) to a string,
-/// enriched with file and line context from the thread-local [`PANIC_INFO`]
+/// enriched with file and line context from the thread-local `PANIC_INFO`
 /// cell when available.
 ///
 /// If the custom hook captured location metadata, the output has the form
@@ -456,10 +456,8 @@ mod tests {
         let _guard = PanicHookGuard::new();
 
         let result = panic::catch_unwind(AssertUnwindSafe(
+            // The literal None is unwrapped on purpose: the hook must report this site.
             #[allow(clippy::unnecessary_literal_unwrap)]
-            // Why: clippy sees `None` → `unwrap()` in the same scope; the test
-            // intentionally triggers `unwrap()` panic on `None` to verify the hook
-            // captures PanicHookInfo::location() from the actual unwrap site.
             || {
                 let x: Option<i32> = None;
                 x.unwrap();
@@ -484,10 +482,8 @@ mod tests {
         let _guard = PanicHookGuard::new();
 
         let result = panic::catch_unwind(AssertUnwindSafe(
+            // The literal Err is expected on purpose: the hook must report this site.
             #[allow(clippy::unnecessary_literal_unwrap)]
-            // Why: clippy sees `Err` → `expect()` in the same scope; the test
-            // intentionally triggers `expect()` panic on `Err` to verify the hook
-            // captures PanicHookInfo::location() from the actual expect site.
             || {
                 let r: Result<i32, &str> = Err("expect test error");
                 r.expect("custom expect message");

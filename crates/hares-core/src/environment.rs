@@ -11,7 +11,8 @@ use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherF
 use hares_physics::{
     psychrometrics::{humidity_ratio_from_tdp, moist_air_enthalpy, wet_bulb_from_humidity_ratio},
     solar::{
-        OMNI_AZIMUTH_SAMPLES, omni_directional_irradiance, perez_tilted_irradiance, solar_position,
+        OMNI_AZIMUTH_SAMPLES, SkyIrradiance, SunPosition, SurfaceOrientation,
+        omni_directional_irradiance, perez_tilted_irradiance, solar_position,
     },
     water_mains::{Hemisphere, water_mains_temperature_c},
 };
@@ -19,19 +20,18 @@ use hares_physics::{
 #[cfg(feature = "observe")]
 use hares_physics::water_mains::water_mains_raw_fahrenheit;
 use hares_types::{
-    DomainId, EnvironmentState, GridState, HaresError, SCHEDULE_DOMAIN_ID, SurfaceIrradiance,
-    WeatherState, ZoneId, ZoneState,
+    AmbientLocation, AmbientOtherSpaceTemps, EnvironmentState, GridState, HaresError,
+    SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
 };
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
 use thiserror::Error;
 
 use crate::SimClock;
+use crate::ambient_air::{MoistAir, scheduled_space_air};
 
-const DEFAULT_ZONE_VOLUME_M3: f64 = 200.0;
 const DEFAULT_GRID_VOLTAGE_PU: f64 = 1.0;
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
-const MAINS_WATER_DOMAIN_ID: DomainId = DomainId(u16::MAX - 1);
 
 /// Geometry required for solar irradiance projection.
 ///
@@ -76,6 +76,35 @@ pub enum EnvironmentManagerError {
         boundary_idx: usize,
         surface_type: String,
     },
+    #[error(transparent)]
+    MultipleConditionedZones(#[from] hares_io::hpxml::MultipleConditionedZones),
+    #[error("the building has no zones to simulate")]
+    NoZones,
+    #[error(
+        "zone {zone_idx} ({zone_type}) has no usable volume ({volume_m3:?} m3): the input gives \
+         none and neither the OCHRE geometry nor OS-HPXML's volume rule derives one"
+    )]
+    ZoneVolume {
+        zone_idx: usize,
+        zone_type: String,
+        volume_m3: Option<f64>,
+    },
+}
+
+fn check_override_carries(
+    data: &[Vec<SurfaceIrradiance>],
+    surface_id: u32,
+) -> Result<(), HaresError> {
+    match data
+        .iter()
+        .position(|row| row.iter().all(|s| s.surface_id != surface_id))
+    {
+        Some(timestep) => Err(HaresError::SolarOverrideMissingSurface {
+            timestep,
+            surface_id,
+        }),
+        None => Ok(()),
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -93,6 +122,11 @@ pub struct EnvironmentManager {
     schedule: ScheduleTimeSeries,
     pub(crate) weather_meta: WeatherMeta,
     zone_types: Vec<hares_io::hpxml::ZoneType>,
+    /// The building's one conditioned zone, if it has one.
+    conditioned_zone: Option<ZoneId>,
+    /// Scheduled-space placements some equipment occupies: their air is
+    /// computed each step, and only theirs.
+    ambient_locations: Vec<AmbientLocation>,
     surfaces: Vec<SurfaceGeometry>,
     grid_override: Option<GridState>,
     zones: Vec<ZoneState>,
@@ -135,6 +169,9 @@ pub struct EnvironmentManager {
     /// in `update()`. Indexed as `solar_override[step % len][surface_idx]`.
     /// Use for parity testing with OCHRE (pvlib) or injecting PySAM/PVWatts data.
     solar_override: Option<Vec<Vec<SurfaceIrradiance>>>,
+    /// The PV arrays' orientation surfaces, which every solar override
+    /// timestep must carry.
+    pv_surface_ids: Vec<u32>,
     /// Per-roof PV coverage fractions. When PV panels are attached to a roof
     /// surface, the covered fraction reduces incident solar irradiance on that
     /// envelope surface (shading effect).
@@ -142,9 +179,10 @@ pub struct EnvironmentManager {
     // Pre-allocated buffers reused each step to avoid per-step allocations.
     solar_irradiance_buf: Vec<SurfaceIrradiance>,
     schedule_values_buf: Vec<f64>,
-    mains_payload_buf: Vec<f64>,
-    schedule_payload_swap: Vec<f64>,
-    mains_payload_swap: Vec<f64>,
+    /// The slot writes' allocation accumulator; this crate's test build
+    /// only. The dwelling's snapshot-allocation test reads it.
+    #[cfg(test)]
+    pub(crate) slot_write_allocations: u64,
 }
 
 impl EnvironmentManager {
@@ -176,7 +214,7 @@ impl EnvironmentManager {
         )
     }
 
-    /// Like [`new`] but with optional per-column weather resampling overrides.
+    /// Like [`Self::new`] but with optional per-column weather resampling overrides.
     ///
     /// Pass `Some(ResampleOverrides::ochre_compat())` for OCHRE parity testing.
     pub fn new_with_resample(
@@ -259,6 +297,9 @@ impl EnvironmentManager {
             .iter()
             .map(|zone| zone.zone_type.clone())
             .collect();
+        let conditioned_zone = building
+            .conditioned_zone_index()?
+            .map(|idx| ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)));
         let surfaces = build_surface_geometry(building)?;
         // Use the shifted offset (with midpoint_offset_secs applied) for initial conditions
         // to match OCHRE's behavior of reading weather at the period midpoint.
@@ -275,10 +316,34 @@ impl EnvironmentManager {
             .get(init_offset)
             .copied()
             .unwrap_or(initial_outdoor_temp_c);
+        // Every zone's humidity ratio initializes to the outdoor humidity
+        // ratio at initialization, as EnergyPlus initializes a zone's air
+        // humidity ratio from `OutHumRat` (HeatBalanceSurfaceManager.cc,
+        // InitThermalSurfaces:2418-2419). No zone starts at a fixed
+        // constant: the moisture balance integrates from the weather the
+        // run actually starts in. An empty weather series falls back to the
+        // default weather state's outdoor humidity ratio (0.008 kg/kg, the
+        // documented 55.2 % RH at 20.0 °C).
+        let initial_pressure_kpa = weather
+            .pressure_kpa
+            .get(init_offset)
+            .copied()
+            .unwrap_or(101.325);
+        let initial_outdoor_humidity_ratio = weather
+            .dew_point_c
+            .get(init_offset)
+            .map(|&dew_point_c| {
+                hares_physics::psychrometrics::humidity_ratio_from_tdp(
+                    dew_point_c,
+                    initial_pressure_kpa * 1000.0,
+                )
+            })
+            .unwrap_or(DEFAULT_OUTDOOR_HUMIDITY_RATIO);
         let zones = initial_zones(
             building,
             initial_outdoor_temp_c,
             initial_ground_temp_c,
+            initial_outdoor_humidity_ratio,
             start_time,
             options.initial_rng,
             options.setpoint_deadband_c,
@@ -292,6 +357,8 @@ impl EnvironmentManager {
             schedule,
             weather_meta,
             zone_types,
+            conditioned_zone,
+            ambient_locations: Vec::new(),
             surfaces,
             grid_override: None,
             zones,
@@ -313,12 +380,12 @@ impl EnvironmentManager {
             #[cfg(feature = "dst")]
             civil_tz,
             solar_override: None,
+            pv_surface_ids: Vec::new(),
             pv_roof_coverage: std::collections::HashMap::new(),
             solar_irradiance_buf: Vec::with_capacity(num_surfaces),
             schedule_values_buf: Vec::with_capacity(num_schedule_cols),
-            mains_payload_buf: vec![0.0],
-            schedule_payload_swap: Vec::with_capacity(num_schedule_cols),
-            mains_payload_swap: Vec::with_capacity(1),
+            #[cfg(test)]
+            slot_write_allocations: 0,
         })
     }
 
@@ -330,8 +397,24 @@ impl EnvironmentManager {
     ///
     /// `data[step][surface_idx]` must match the surface geometry order from
     /// `build_surface_geometry()` (same as `building.boundaries` order).
-    pub fn set_solar_override(&mut self, data: Vec<Vec<SurfaceIrradiance>>) {
+    ///
+    /// Every timestep must carry each PV array's orientation surface: a PV
+    /// cannot step without its irradiance, so an override that lacks one is
+    /// rejected here rather than failing every PV step.
+    pub fn set_solar_override(
+        &mut self,
+        data: Vec<Vec<SurfaceIrradiance>>,
+    ) -> Result<(), HaresError> {
+        if data.is_empty() {
+            return Err(HaresError::Dwelling(
+                "a solar override needs at least one timestep".to_string(),
+            ));
+        }
+        for &surface_id in &self.pv_surface_ids {
+            check_override_carries(&data, surface_id)?;
+        }
         self.solar_override = Some(data);
+        Ok(())
     }
 
     /// Clear the solar override, reverting to built-in Perez computation.
@@ -354,11 +437,14 @@ impl EnvironmentManager {
         &self.surfaces
     }
 
-    /// Register an additional surface for Perez irradiance computation.
-    ///
-    /// Used to add PV array orientations that don't correspond to an envelope
-    /// boundary. Deduplicates by `surface_id`.
-    pub fn register_surface(&mut self, geom: SurfaceGeometry) {
+    /// Register a PV array orientation, which need not match an envelope
+    /// boundary, as a surface to compute irradiance for. Deduplicates by
+    /// `surface_id`. Rejected when an active solar override lacks it.
+    pub fn register_pv_surface(&mut self, geom: SurfaceGeometry) -> Result<(), HaresError> {
+        self.check_pv_surface(geom.surface_id)?;
+        if !self.pv_surface_ids.contains(&geom.surface_id) {
+            self.pv_surface_ids.push(geom.surface_id);
+        }
         if !self
             .surfaces
             .iter()
@@ -366,6 +452,17 @@ impl EnvironmentManager {
         {
             self.surfaces.push(geom);
             self.solar_irradiance_buf.reserve(1);
+        }
+        Ok(())
+    }
+
+    /// Whether a PV surface can be registered: an active solar override must
+    /// carry it. Checked before a panel joins, so a refused panel leaves the
+    /// dwelling as it was.
+    pub fn check_pv_surface(&self, surface_id: u32) -> Result<(), HaresError> {
+        match &self.solar_override {
+            Some(data) => check_override_carries(data, surface_id),
+            None => Ok(()),
         }
     }
 
@@ -478,33 +575,131 @@ impl EnvironmentManager {
     /// Returns the schedule column index for the occupancy column, if present.
     ///
     /// The returned index can be used to look up the occupancy value from the
-    /// schedule payload in [`EnvironmentState::custom_domains`] at domain id
-    /// [`hares_types::SCHEDULE_DOMAIN_ID`].
+    /// schedule payload in [`EnvironmentState::domains`]'s schedule slot.
+    /// Resolution lives in
+    /// `hares_io::resolve_occupancy_column`, shared with the
+    /// unknown-schedule-column check, so the check treats the column the
+    /// environment reads as read.
     #[must_use]
     pub fn occupancy_column_idx(&self) -> Option<usize> {
-        // Exact-match fast path for common lowercase keys.
-        if let Some(&idx) = self
-            .schedule
-            .column_index
-            .get("occupants")
-            .or_else(|| self.schedule.column_index.get("occupancy"))
-        {
-            return Some(idx);
+        hares_io::resolve_occupancy_column(&self.schedule.column_index).map(|(_, idx)| idx)
+    }
+
+    /// Whether this building can supply `location`'s air: every placement
+    /// defined relative to the conditioned zone needs the building's
+    /// conditioned zone.
+    pub fn check_ambient_location(&self, location: AmbientLocation) -> Result<(), HaresError> {
+        if location.needs_conditioned_zone() && self.conditioned_zone.is_none() {
+            return Err(HaresError::Dwelling(format!(
+                "{location:?} air is defined relative to the conditioned zone, but the \
+                 building has none"
+            )));
         }
-        // Case-insensitive fallback: matches "Occupancy (Persons)" and similar variants.
-        self.schedule
-            .column_index
+        Ok(())
+    }
+
+    /// Compute the air of exactly these scheduled-space placements each step
+    /// from now on.
+    pub fn set_ambient_locations(
+        &mut self,
+        locations: impl IntoIterator<Item = AmbientLocation>,
+    ) -> Result<(), HaresError> {
+        let planned = self.plan_ambient_locations(locations)?;
+        self.install_ambient_locations(planned);
+        Ok(())
+    }
+
+    /// The placements [`Self::set_ambient_locations`] would compute,
+    /// checked against this building without changing it, for a roster
+    /// change that must fail before it touches anything.
+    pub fn plan_ambient_locations(
+        &self,
+        locations: impl IntoIterator<Item = AmbientLocation>,
+    ) -> Result<Vec<AmbientLocation>, HaresError> {
+        let mut wanted: Vec<AmbientLocation> = Vec::new();
+        for location in locations {
+            self.check_ambient_location(location)?;
+            if location != AmbientLocation::OtherExterior && !wanted.contains(&location) {
+                wanted.push(location);
+            }
+        }
+        Ok(wanted)
+    }
+
+    /// Installs placements from [`Self::plan_ambient_locations`].
+    pub fn install_ambient_locations(&mut self, planned: Vec<AmbientLocation>) {
+        self.ambient_locations = planned;
+    }
+
+    /// The conditioned zone's air this step, for the placements that read
+    /// it. A missing or non-finite zone state is a broken invariant, not a
+    /// value to substitute.
+    fn conditioned_air(&self, clock: &SimClock) -> Result<MoistAir, HaresError> {
+        let zone_id = self.conditioned_zone.ok_or_else(|| {
+            HaresError::InvalidState(
+                "scheduled-space air needs the conditioned zone, but the building has none"
+                    .to_string(),
+            )
+        })?;
+        let zone = self.zones.iter().find(|z| z.id == zone_id).ok_or_else(|| {
+            HaresError::InvalidState(format!(
+                "conditioned zone {} is missing from the environment's zone state",
+                zone_id.0
+            ))
+        })?;
+        for (value_name, value) in [
+            ("conditioned zone temperature", zone.temperature_c),
+            ("conditioned zone humidity ratio", zone.humidity_ratio),
+        ] {
+            if !value.is_finite() {
+                return Err(HaresError::NanDetected {
+                    step_index: clock.current_step(),
+                    zone_id: Some(zone_id),
+                    value_name: value_name.to_string(),
+                });
+            }
+        }
+        Ok(MoistAir {
+            temperature_c: zone.temperature_c,
+            humidity_ratio: zone.humidity_ratio,
+        })
+    }
+
+    fn ambient_other_space_air(
+        &self,
+        clock: &SimClock,
+        outdoor_temp_c: f64,
+        outdoor_humidity_ratio: f64,
+        pressure_pa: f64,
+    ) -> Result<AmbientOtherSpaceTemps, HaresError> {
+        let mut air = AmbientOtherSpaceTemps::default();
+        if self.ambient_locations.is_empty() {
+            return Ok(air);
+        }
+        let outdoor = MoistAir {
+            temperature_c: outdoor_temp_c,
+            humidity_ratio: outdoor_humidity_ratio,
+        };
+        let conditioned = if self
+            .ambient_locations
             .iter()
-            .find(|(key, _)| {
-                let lower = key.to_lowercase();
-                lower.starts_with("occupan")
-            })
-            .map(|(_, &idx)| idx)
+            .any(|location| location.needs_conditioned_zone())
+        {
+            Some(self.conditioned_air(clock)?)
+        } else {
+            None
+        };
+        for &location in &self.ambient_locations {
+            if let Some(slot) = air.slot_mut(location) {
+                *slot = scheduled_space_air(location, conditioned, outdoor, pressure_pa);
+            }
+        }
+        Ok(air)
     }
 
     /// Feed zone-state feedback into the internal zone buffer.
     ///
-    /// Call this before [`update_in_place`] when the caller holds a borrow on
+    /// Call this before [`Self::update_in_place`] when the caller holds a borrow on
     /// the zone slice that would conflict with a simultaneous `&mut self`. This
     /// separates zone ingestion from the environment computation so the borrow
     /// checker can see two distinct phases.
@@ -518,7 +713,7 @@ impl EnvironmentManager {
     /// Update `state` in-place for the current clock step.
     ///
     /// Reads zone temperatures from the internal buffer (populated by a prior
-    /// [`feed_zones`] call or the previous [`update`] call). All heap-allocated
+    /// [`Self::feed_zones`] call or the previous [`Self::update`] call). All heap-allocated
     /// fields inside `state` are cleared and refilled, reusing existing
     /// capacity and eliminating per-step allocations on the hot path.
     pub fn update_in_place(
@@ -534,11 +729,7 @@ impl EnvironmentManager {
         } else {
             (step + self.weather_start_offset) % weather_len
         };
-        let schedule_idx = if self.schedule.is_empty() {
-            0
-        } else {
-            self.compute_schedule_idx(clock)
-        };
+        let schedule_idx = self.compute_schedule_idx(clock);
 
         // Step 1: weather lookup and psychrometric derivations
         let outdoor_temp_c = self.weather.get(WeatherField::DryBulbC, weather_idx);
@@ -578,23 +769,13 @@ impl EnvironmentManager {
         let dhi = self.weather.get(WeatherField::DhiWM2, weather_idx);
         let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
 
-        #[cfg(all(feature = "dst", any(debug_assertions, feature = "check_invariants")))]
+        #[cfg(all(feature = "dst", debug_assertions))]
         if let Some(ref tz) = self.civil_tz {
             let civil_ordinal = now.with_timezone(tz).ordinal();
             debug_assert!(
                 civil_ordinal == day_of_year,
                 "DST-aware civil day-of-year ({civil_ordinal}) does not match computed day_of_year ({day_of_year})"
             );
-            let raw_ordinal = now.ordinal();
-            if raw_ordinal != civil_ordinal {
-                let month = now.month();
-                tracing::warn!(
-                    raw_day_of_year = raw_ordinal,
-                    civil_day_of_year = civil_ordinal,
-                    month,
-                    "DST transition boundary: raw fixed-offset day_of_year ({raw_ordinal}) differs from civil day_of_year ({civil_ordinal})"
-                );
-            }
         }
 
         // day_of_year is computed once (above) and passed unchanged to solar_position(),
@@ -609,11 +790,8 @@ impl EnvironmentManager {
             self.mains_hemisphere,
         )?;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        debug_assert!(
-            mains_temp_c >= 0.0,
-            "water mains temperature ({mains_temp_c:.2} °C) must be ≥ 0 °C (32 °F minimum clamp)"
-        );
+        // `water_mains_temperature_c` clamps to the 32 F minimum, so the
+        // former re-check of non-negativity is deleted.
 
         let ground_albedo = self.weather.get(WeatherField::SurfaceAlbedo, weather_idx);
 
@@ -634,13 +812,13 @@ impl EnvironmentManager {
                         // three AOI terms.
                         omni_directional_irradiance(
                             surface.surface_id,
-                            ghi,
-                            dni,
-                            dhi,
-                            solar_zenith_deg,
-                            pos.azimuth_deg,
+                            SkyIrradiance { ghi, dni, dhi },
+                            SunPosition {
+                                zenith_deg: solar_zenith_deg,
+                                azimuth_deg: pos.azimuth_deg,
+                                day_of_year,
+                            },
                             surface.tilt_deg,
-                            day_of_year,
                             ground_albedo,
                             OMNI_AZIMUTH_SAMPLES,
                             self.weather_meta.elevation_m,
@@ -648,14 +826,16 @@ impl EnvironmentManager {
                     } else {
                         perez_tilted_irradiance(
                             surface.surface_id,
-                            ghi,
-                            dni,
-                            dhi,
-                            solar_zenith_deg,
-                            pos.azimuth_deg,
-                            surface.tilt_deg,
-                            surface.azimuth_deg,
-                            day_of_year,
+                            SkyIrradiance { ghi, dni, dhi },
+                            SunPosition {
+                                zenith_deg: solar_zenith_deg,
+                                azimuth_deg: pos.azimuth_deg,
+                                day_of_year,
+                            },
+                            SurfaceOrientation {
+                                tilt_deg: surface.tilt_deg,
+                                azimuth_deg: surface.azimuth_deg,
+                            },
                             ground_albedo,
                             self.weather_meta.elevation_m,
                         )
@@ -691,6 +871,24 @@ impl EnvironmentManager {
         state.zones.clear();
         state.zones.extend_from_slice(&self.zones);
 
+        // Step 4b: air of the scheduled-space placements equipment occupies,
+        // once per step (see `ambient_air`). Outdoor air enters every
+        // placement and every envelope boundary, so a non-finite outdoor
+        // dry-bulb fails the step instead of hiding behind a floor.
+        if !outdoor_temp_c.is_finite() {
+            return Err(HaresError::NanDetected {
+                step_index: clock.current_step(),
+                zone_id: None,
+                value_name: "outdoor dry-bulb".to_string(),
+            });
+        }
+        state.ambient_other_space_c = self.ambient_other_space_air(
+            clock,
+            outdoor_temp_c,
+            outdoor_humidity_ratio,
+            pressure_pa,
+        )?;
+
         // Step 5: grid defaults / overrides
         state.grid = self.grid_override.clone().unwrap_or(GridState {
             voltage_pu: DEFAULT_GRID_VOLTAGE_PU,
@@ -698,43 +896,31 @@ impl EnvironmentManager {
             island_bus_voltage_pu: None,
         });
 
-        // Step 6: custom_domains -- swap-based reuse to avoid per-step allocations.
-        self.mains_payload_buf[0] = mains_temp_c;
+        // Step 6: domain slots -- the schedule and mains payloads are
+        // written in place into their slots' retained vectors, so a
+        // steady-state step allocates nothing here.
 
-        // Recover previously-swapped Vecs from the existing DomainUpdates.
-        for du in state.custom_domains.drain(..) {
-            if du.domain_id == SCHEDULE_DOMAIN_ID {
-                if let Some(v) = du.custom_payload {
-                    self.schedule_payload_swap = v;
-                }
-            } else if du.domain_id == MAINS_WATER_DOMAIN_ID {
-                if let Some(v) = du.custom_payload {
-                    self.mains_payload_swap = v;
-                }
-            }
+        // Every slot is unwritten until this step's writer fills it: the
+        // solvers' upserts used to drain these entries out of the state
+        // and push them back.
+        #[cfg(test)]
+        let alloc_before = hares_types::alloc_count::thread_allocations();
+        state.domains.clear_step();
+
+        let schedule_payload = state.domains.schedule.payload_mut();
+        schedule_payload.clear();
+        schedule_payload.extend_from_slice(&self.schedule_values_buf);
+
+        let mains_payload = state.domains.mains_water.payload_mut();
+        mains_payload.clear();
+        mains_payload.push(mains_temp_c);
+        state.schedule_row = Some(schedule_idx);
+        #[cfg(test)]
+        if let (Some(before), Some(after)) =
+            (alloc_before, hares_types::alloc_count::thread_allocations())
+        {
+            self.slot_write_allocations += after.saturating_sub(before);
         }
-
-        self.schedule_payload_swap.clear();
-        self.schedule_payload_swap
-            .extend_from_slice(&self.schedule_values_buf);
-
-        self.mains_payload_swap.clear();
-        self.mains_payload_swap
-            .extend_from_slice(&self.mains_payload_buf);
-
-        let sched_payload = std::mem::take(&mut self.schedule_payload_swap);
-        let mains_payload = std::mem::take(&mut self.mains_payload_swap);
-
-        state.custom_domains.push(hares_types::DomainUpdate {
-            domain_id: SCHEDULE_DOMAIN_ID,
-            zone_temperatures_c: Vec::new(),
-            custom_payload: Some(sched_payload),
-        });
-        state.custom_domains.push(hares_types::DomainUpdate {
-            domain_id: MAINS_WATER_DOMAIN_ID,
-            zone_temperatures_c: Vec::new(),
-            custom_payload: Some(mains_payload),
-        });
 
         // Step 7: weather scalar fields
         state.weather.outdoor_temp_c = outdoor_temp_c;
@@ -796,7 +982,9 @@ impl EnvironmentManager {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: Vec::new(),
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: clock.current_time(),
@@ -875,9 +1063,9 @@ fn compute_schedule_offset(
     let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
     // Derive year length from the actual schedule array size so wrapping is
     // correct regardless of whether the schedule is hourly, sub-hourly, etc.
+    // An empty schedule is rejected at load (`EmptySchedule`), so the length
+    // here is positive and the former debug re-check is deleted.
     let year_secs = schedule.len() as u64 * step_secs as u64;
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    debug_assert!(year_secs > 0, "schedule has zero length or step");
     (seconds_into_year % year_secs / step_secs as u64) as usize
 }
 
@@ -1027,10 +1215,16 @@ fn build_surface_geometry(
 const OUTDOOR_HEATING_COOLING_THRESHOLD_C: f64 = 12.0;
 const DEFAULT_SETPOINT_C: f64 = 21.0;
 
+/// The default weather state's outdoor humidity ratio (0.008 kg/kg, 55.2 %
+/// RH at 20.0 °C), the fallback when a weather series is empty and the
+/// outdoor value the initial zones otherwise start from is unavailable.
+const DEFAULT_OUTDOOR_HUMIDITY_RATIO: f64 = 0.008;
+
 fn initial_zones(
     building: &Building,
     outdoor_temp_c: f64,
     ground_temp_c: f64,
+    initial_humidity_ratio: f64,
     start_time: DateTime<FixedOffset>,
     initial_rng: Option<ChaCha8Rng>,
     setpoint_deadband_c: Option<f64>,
@@ -1047,12 +1241,7 @@ fn initial_zones(
         setpoint_deadband_c,
     );
     if building.zones.is_empty() {
-        return Ok(vec![ZoneState {
-            id: ZoneId(1),
-            temperature_c: default_temp,
-            humidity_ratio: 0.008,
-            volume_m3: DEFAULT_ZONE_VOLUME_M3,
-        }]);
+        return Err(EnvironmentManagerError::NoZones);
     }
 
     let zones: Vec<ZoneState> = building
@@ -1070,39 +1259,27 @@ fn initial_zones(
                     ZoneType::Foundation => ground_temp_c,
                     _ => outdoor_temp_c,
                 };
-                let volume_m3 = match zone.volume_m3 {
-                    Some(v) => v,
-                    None => {
-                        let estimated = zone
-                            .floor_area_m2
-                            .map(|area| match zone.zone_type {
-                                ZoneType::Attic => 0.5 * area * 1.5,
-                                ZoneType::Garage | ZoneType::Foundation | ZoneType::Conditioned => {
-                                    area * 2.44
-                                }
-                                _ => DEFAULT_ZONE_VOLUME_M3,
-                            })
-                            .unwrap_or(DEFAULT_ZONE_VOLUME_M3);
-                        tracing::warn!(
-                            zone_idx = idx,
-                            zone_type = ?zone.zone_type,
-                            estimated_m3 = estimated,
-                            "zone is missing volume_m3; using geometry-based estimate"
-                        );
-                        estimated
-                    }
-                };
+                let volume_m3 = zone
+                    .volume_m3
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .ok_or_else(|| EnvironmentManagerError::ZoneVolume {
+                        zone_idx: idx,
+                        zone_type: format!("{:?}", zone.zone_type),
+                        volume_m3: zone.volume_m3,
+                    })?;
                 Ok(ZoneState {
                     id: ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)),
                     temperature_c: temp,
-                    humidity_ratio: 0.008,
+                    // EnergyPlus initializes every zone's humidity ratio from
+                    // the outdoor air (HeatBalanceSurfaceManager.cc:2418-2419).
+                    humidity_ratio: initial_humidity_ratio,
                     volume_m3,
                 })
             },
         )
         .collect::<Result<Vec<_>, _>>()?;
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     {
         // Free-float invariant: when no HVAC setpoints exist, conditioned-zone
         // initial temperature must match outdoor ambient within ±5 °C. Starting at
@@ -1255,6 +1432,7 @@ mod tests {
     use chrono::{DateTime, FixedOffset, TimeZone};
     use hares_io::hpxml::building::XmlNode;
     use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
+    use hares_physics::psychrometrics::wet_bulb_from_humidity_ratio;
     use std::collections::HashMap;
 
     fn utc_offset() -> FixedOffset {
@@ -1280,6 +1458,7 @@ mod tests {
                 source_step_secs: 3600,
                 midpoint_offset_secs: 0,
                 has_embedded_location: true,
+                station_wmo: None,
             },
             design_conditions: None,
             dry_bulb_c: vec![10.0, 20.0],
@@ -1357,12 +1536,14 @@ mod tests {
             zones: vec![Zone {
                 zone_type: ZoneType::Conditioned,
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
+                volume_m3: Some(244.0),
                 attached_wall_ids: vec![],
                 duct_systems: vec![],
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             boundaries: vec![
                 Boundary {
@@ -1421,7 +1602,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -1432,16 +1613,19 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            conditioned_volume_m3: 400.0,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml,
+            parse_warnings: Vec::new(),
         }
     }
 
@@ -1456,6 +1640,8 @@ mod tests {
             vented: true,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         });
         b
     }
@@ -1472,6 +1658,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             },
             Zone {
                 zone_type: ZoneType::Foundation,
@@ -1482,6 +1670,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             },
             Zone {
                 zone_type: ZoneType::Garage,
@@ -1492,6 +1682,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             },
         ];
         b
@@ -1520,19 +1712,222 @@ mod tests {
         assert!((env.weather.outdoor_temp_c - 10.0).abs() < 1.0e-6);
     }
 
+    fn ambient_test_manager(b: &Building) -> (EnvironmentManager, SimClock) {
+        let mut weather = weather_series();
+        weather.dry_bulb_c = vec![2.0, 30.0];
+        weather.dew_point_c = vec![0.0, 20.0];
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let manager = EnvironmentManager::new(
+            weather,
+            schedule_series(),
+            b,
+            StdDuration::from_secs(3600),
+            start,
+            None,
+        )
+        .expect("manager");
+        let sim_clock = SimClock::new(start, Duration::seconds(3600), Duration::hours(2));
+        (manager, sim_clock)
+    }
+
+    fn conditioned_zone_state(temperature_c: f64) -> Vec<ZoneState> {
+        vec![ZoneState {
+            id: ZoneId(1),
+            temperature_c,
+            humidity_ratio: 0.008,
+            volume_m3: 200.0,
+        }]
+    }
+
+    /// Each occupied scheduled-space placement gets its air once per step:
+    /// the OS-HPXML dry-bulb blend and floor, and the wet-bulb of the
+    /// blended humidity ratio at that dry-bulb. Unoccupied placements are
+    /// not computed.
     #[test]
-    fn manager_defaults_attic_volume_when_missing() {
-        let result = EnvironmentManager::new(
+    fn ambient_air_follows_the_scheduled_space_table_for_occupied_placements() {
+        let (mut manager, mut sim_clock) = ambient_test_manager(&building(Some(21.0)));
+        manager
+            .set_ambient_locations([
+                AmbientLocation::OtherHeatedSpace,
+                AmbientLocation::OtherNonFreezingSpace,
+                AmbientLocation::OtherHousingUnit,
+            ])
+            .expect("the building has a conditioned zone");
+        let zones = conditioned_zone_state(22.0);
+
+        // Step 0, outdoor 2.0 °C: heated max(0.5 x 22.0 + 0.5 x 2.0, 20.0)
+        // = 20.0, non-freezing max(2.0, 40 °F) = 4.444, housing unit 22.0.
+        let env0 = manager.update(&sim_clock, &zones).unwrap();
+        let p = env0.weather.pressure_pa();
+        let w_out = env0.weather.outdoor_humidity_ratio;
+        let heated = env0.ambient_other_space_c.other_heated_space.unwrap();
+        assert!((heated.dry_bulb_c - 20.0).abs() < 1e-12);
+        assert_eq!(
+            heated.wet_bulb_c,
+            wet_bulb_from_humidity_ratio(20.0, 0.5 * 0.008 + 0.5 * w_out, p)
+        );
+        let non_freezing = env0.ambient_other_space_c.other_non_freezing_space.unwrap();
+        assert!((non_freezing.dry_bulb_c - 40.0 / 9.0).abs() < 1e-12);
+        let housing = env0.ambient_other_space_c.other_housing_unit.unwrap();
+        assert_eq!(
+            (housing.dry_bulb_c, housing.wet_bulb_c),
+            (22.0, wet_bulb_from_humidity_ratio(22.0, 0.008, p))
+        );
+        assert_eq!(
+            env0.ambient_other_space_c.other_multifamily_buffer_space, None,
+            "an unoccupied placement is not computed"
+        );
+
+        // Step 1, outdoor 30.0 °C: heated max(26.0, 20.0) = 26.0.
+        assert_eq!(sim_clock.next(), Some(0));
+        let env1 = manager.update(&sim_clock, &zones).unwrap();
+        let heated = env1.ambient_other_space_c.other_heated_space.unwrap();
+        assert!((heated.dry_bulb_c - 26.0).abs() < 1e-12);
+        assert!(heated.wet_bulb_c < heated.dry_bulb_c);
+    }
+
+    /// A placement defined relative to the conditioned zone cannot be
+    /// occupied in a building without one; an outdoor-only placement can.
+    #[test]
+    fn ambient_placements_needing_the_conditioned_zone_are_rejected_without_one() {
+        let mut b = building_with_conditioned_foundation_and_garage();
+        b.zones
+            .retain(|zone| zone.zone_type != ZoneType::Conditioned);
+        let (mut manager, _) = ambient_test_manager(&b);
+        for location in [
+            AmbientLocation::OtherHeatedSpace,
+            AmbientLocation::OtherMultifamilyBufferSpace,
+            AmbientLocation::OtherHousingUnit,
+        ] {
+            manager
+                .set_ambient_locations([location])
+                .expect_err("no conditioned zone to blend with");
+        }
+        manager
+            .set_ambient_locations([
+                AmbientLocation::OtherNonFreezingSpace,
+                AmbientLocation::OtherExterior,
+            ])
+            .expect("outdoor-only placements need no conditioned zone");
+    }
+
+    /// A non-finite conditioned-zone state fails the step for a placement
+    /// that reads it, instead of substituting the outdoor air.
+    #[test]
+    fn ambient_air_rejects_a_non_finite_conditioned_zone() {
+        let (mut manager, sim_clock) = ambient_test_manager(&building(Some(21.0)));
+        manager
+            .set_ambient_locations([AmbientLocation::OtherHousingUnit])
+            .unwrap();
+        let err = manager
+            .update(&sim_clock, &conditioned_zone_state(f64::NAN))
+            .expect_err("a NaN conditioned zone must fail the step");
+        assert!(
+            err.to_string().contains("conditioned zone temperature"),
+            "the error must name the quantity, got: {err}"
+        );
+    }
+
+    /// A non-finite outdoor dry-bulb is invalid weather: the step fails
+    /// instead of every floored ambient series silently reading its floor.
+    #[test]
+    fn update_rejects_a_non_finite_outdoor_dry_bulb() {
+        let mut weather = weather_series();
+        weather.dry_bulb_c = vec![2.0, f64::NAN];
+        weather.dew_point_c = vec![0.0, 0.0];
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let mut manager = EnvironmentManager::new(
+            weather,
+            schedule_series(),
+            &building(Some(21.0)),
+            StdDuration::from_secs(3600),
+            start,
+            None,
+        )
+        .expect("manager");
+        let mut sim_clock = SimClock::new(start, Duration::seconds(3600), Duration::hours(2));
+        let zones = vec![ZoneState {
+            id: ZoneId(1),
+            temperature_c: 22.0,
+            humidity_ratio: 0.008,
+            volume_m3: 200.0,
+        }];
+        manager
+            .update(&sim_clock, &zones)
+            .expect("step 0 is finite");
+        assert_eq!(sim_clock.next(), Some(0));
+        let err = manager
+            .update(&sim_clock, &zones)
+            .expect_err("a NaN outdoor dry-bulb must fail the step");
+        assert!(
+            err.to_string().contains("dry-bulb"),
+            "the error must name the quantity, got: {err}"
+        );
+    }
+
+    /// HARES models one conditioned zone per dwelling unit (as OS-HPXML
+    /// does); a building declaring two is rejected rather than resolving
+    /// the conditioned zone to whichever comes first.
+    #[test]
+    fn manager_rejects_more_than_one_conditioned_zone() {
+        let mut b = building(Some(21.0));
+        let second = b.zones[0].clone();
+        b.zones.push(second);
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let err = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &b,
+            StdDuration::from_secs(3600),
+            start,
+            None,
+        )
+        .expect_err("two conditioned zones must fail construction");
+        assert!(
+            err.to_string().contains("conditioned"),
+            "the error must say why, got: {err}"
+        );
+    }
+
+    /// A building with no zones has nothing to simulate: construction fails
+    /// instead of inventing a zone.
+    #[test]
+    fn manager_rejects_a_building_with_no_zones() {
+        let mut b = building(Some(21.0));
+        b.zones.clear();
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let err = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &b,
+            StdDuration::from_secs(3600),
+            start,
+            None,
+        )
+        .expect_err("a building with no zones must fail construction");
+        assert!(
+            err.to_string().contains("no zones"),
+            "the error must say why, got: {err}"
+        );
+    }
+
+    /// A zone whose volume neither the input nor a derivation gives is a
+    /// typed error naming the zone, not a constant volume.
+    #[test]
+    fn zone_without_volume_or_derivation_errors() {
+        let err = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
             &building_with_missing_attic_volume(),
             StdDuration::from_secs(60),
             utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap(),
             None,
-        );
+        )
+        .expect_err("a zone with no volume must fail construction");
         assert!(
-            result.is_ok(),
-            "attic missing volume should fall back to DEFAULT_ZONE_VOLUME_M3, got: {result:?}"
+            matches!(&err, EnvironmentManagerError::ZoneVolume { zone_type, volume_m3: None, .. }
+                if zone_type == "Attic"),
+            "the error must name the attic and its missing volume, got: {err}"
         );
     }
 
@@ -1645,11 +2040,36 @@ mod tests {
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]).unwrap();
-        let payload = env.custom_domains[0]
-            .custom_payload
-            .clone()
+        let payload = env
+            .domains
+            .schedule
+            .get()
+            .and_then(|d| d.custom_payload.clone())
             .expect("schedule payload");
         assert!((payload[0] - 1.23).abs() < 1.0e-6);
+    }
+
+    /// The environment publishes the schedule row of the step's calendar
+    /// time, with the 365-day schedule skipping a leap year's Feb 29.
+    #[test]
+    fn environment_publishes_the_calendar_schedule_row() {
+        let row_at = |start: &str| {
+            let mut manager = EnvironmentManager::new(
+                weather_series(),
+                hourly_schedule(8760),
+                &building(Some(21.0)),
+                StdDuration::from_secs(3600),
+                utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap(),
+                None,
+            )
+            .expect("manager");
+            let start = DateTime::parse_from_rfc3339(start).expect("parse");
+            let clock = SimClock::new(start, Duration::hours(1), Duration::hours(2));
+            manager.update(&clock, &[]).expect("update").schedule_row
+        };
+        let march_2_05h = 60 * 24 + 5;
+        assert_eq!(row_at("2023-03-02T05:00:00+00:00"), Some(march_2_05h));
+        assert_eq!(row_at("2024-03-02T05:00:00+00:00"), Some(march_2_05h));
     }
 
     #[test]
@@ -1671,9 +2091,11 @@ mod tests {
             let _ = clock.next();
         }
         let env = manager.update(&clock, &[]).unwrap();
-        let payload = env.custom_domains[0]
-            .custom_payload
-            .clone()
+        let payload = env
+            .domains
+            .schedule
+            .get()
+            .and_then(|d| d.custom_payload.clone())
             .expect("schedule payload");
         assert!((payload[0] - 1.23).abs() < 1.0e-6);
     }
@@ -2067,6 +2489,7 @@ mod tests {
                 source_step_secs: 3600,
                 midpoint_offset_secs: 0,
                 has_embedded_location: true,
+                station_wmo: None,
             },
             design_conditions: None,
             dry_bulb_c: vec![20.0; n],
@@ -2107,9 +2530,9 @@ mod tests {
         for step in 0..72u64 {
             let env = mgr.update(&clock, &[]).unwrap();
             let got = env
-                .custom_domains
-                .iter()
-                .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
+                .domains
+                .schedule
+                .get()
                 .and_then(|d| d.custom_payload.as_ref())
                 .and_then(|p| p.first())
                 .copied()
@@ -2194,9 +2617,9 @@ mod tests {
             env_jan.weather.outdoor_temp_c
         );
         let mains_jan = env_jan
-            .custom_domains
-            .iter()
-            .find(|d| d.domain_id == MAINS_WATER_DOMAIN_ID)
+            .domains
+            .mains_water
+            .get()
             .and_then(|d| d.custom_payload.as_ref())
             .and_then(|p| p.first())
             .copied()
@@ -2226,9 +2649,9 @@ mod tests {
             env_jul.weather.outdoor_temp_c
         );
         let mains_jul = env_jul
-            .custom_domains
-            .iter()
-            .find(|d| d.domain_id == MAINS_WATER_DOMAIN_ID)
+            .domains
+            .mains_water
+            .get()
             .and_then(|d| d.custom_payload.as_ref())
             .and_then(|p| p.first())
             .copied()
@@ -2367,35 +2790,99 @@ mod tests {
     }
 
     #[test]
-    fn register_surface_deduplicates() {
-        let start = ts(0);
-        let mut env = EnvironmentManager::new(
+    fn register_pv_surface_deduplicates() {
+        let mut env = manager();
+        let initial_count = env.surface_count();
+        env.register_pv_surface(pv_surface(999_999)).unwrap();
+        assert_eq!(env.surface_count(), initial_count + 1);
+        env.register_pv_surface(pv_surface(999_999)).unwrap();
+        assert_eq!(env.surface_count(), initial_count + 1);
+    }
+
+    fn dark(surface_id: u32) -> SurfaceIrradiance {
+        SurfaceIrradiance {
+            surface_id,
+            direct_w_m2: 0.0,
+            diffuse_w_m2: 0.0,
+            reflected_w_m2: 0.0,
+            angle_of_incidence_rad: 0.0,
+        }
+    }
+
+    fn pv_surface(surface_id: u32) -> SurfaceGeometry {
+        SurfaceGeometry {
+            surface_id,
+            azimuth_deg: 180.0,
+            tilt_deg: 30.0,
+            area_m2: 1.0,
+            omni_directional: false,
+        }
+    }
+
+    fn override_for(env: &EnvironmentManager, skip: u32) -> Vec<Vec<SurfaceIrradiance>> {
+        let row: Vec<SurfaceIrradiance> = env
+            .surface_geometry()
+            .iter()
+            .filter(|s| s.surface_id != skip)
+            .map(|s| dark(s.surface_id))
+            .collect();
+        vec![row; 2]
+    }
+
+    fn manager() -> EnvironmentManager {
+        EnvironmentManager::new(
             weather_series(),
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(3600),
-            start,
+            ts(0),
             None,
         )
-        .unwrap();
-        let initial_count = env.surface_count();
-        env.register_surface(SurfaceGeometry {
-            surface_id: 999_999,
-            azimuth_deg: 180.0,
-            tilt_deg: 30.0,
-            area_m2: 1.0,
-            omni_directional: false,
-        });
-        assert_eq!(env.surface_count(), initial_count + 1);
-        // Duplicate should be ignored.
-        env.register_surface(SurfaceGeometry {
-            surface_id: 999_999,
-            azimuth_deg: 180.0,
-            tilt_deg: 30.0,
-            area_m2: 1.0,
-            omni_directional: false,
-        });
-        assert_eq!(env.surface_count(), initial_count + 1);
+        .unwrap()
+    }
+
+    #[test]
+    fn a_solar_override_must_carry_every_pv_surface() {
+        let mut env = manager();
+        env.register_pv_surface(pv_surface(999_999)).unwrap();
+        let err = env
+            .set_solar_override(override_for(&env, 999_999))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            HaresError::SolarOverrideMissingSurface {
+                timestep: 0,
+                surface_id: 999_999
+            }
+        );
+        assert!(!env.has_solar_override());
+        env.set_solar_override(override_for(&env, u32::MAX))
+            .expect("an override carrying the PV surface is accepted");
+        assert!(env.has_solar_override());
+    }
+
+    #[test]
+    fn a_pv_surface_the_active_override_lacks_is_rejected() {
+        let mut env = manager();
+        env.set_solar_override(override_for(&env, u32::MAX))
+            .unwrap();
+        let surfaces = env.surface_count();
+        let err = env.register_pv_surface(pv_surface(999_999)).unwrap_err();
+        assert_eq!(
+            err,
+            HaresError::SolarOverrideMissingSurface {
+                timestep: 0,
+                surface_id: 999_999
+            }
+        );
+        assert_eq!(env.surface_count(), surfaces);
+    }
+
+    #[test]
+    fn an_empty_solar_override_is_rejected() {
+        let mut env = manager();
+        assert!(env.set_solar_override(Vec::new()).is_err());
+        assert!(!env.has_solar_override());
     }
 
     #[test]
@@ -2484,6 +2971,7 @@ mod tests {
                 source_step_secs: step_secs,
                 midpoint_offset_secs: 0,
                 has_embedded_location: true,
+                station_wmo: None,
             },
             design_conditions: None,
             dry_bulb_c: dry_bulb,
@@ -2547,6 +3035,7 @@ mod tests {
                 source_step_secs: step_secs,
                 midpoint_offset_secs: 0,
                 has_embedded_location: true,
+                station_wmo: None,
             },
             design_conditions: None,
             dry_bulb_c,
@@ -2622,6 +3111,7 @@ mod tests {
                 source_step_secs: step_secs,
                 midpoint_offset_secs: 0,
                 has_embedded_location: true,
+                station_wmo: None,
             },
             design_conditions: None,
             dry_bulb_c: dry_bulb,
@@ -2699,6 +3189,7 @@ mod tests {
                     source_step_secs: 3600,
                     midpoint_offset_secs: 0,
                     has_embedded_location: true,
+                    station_wmo: None,
                 },
                 design_conditions: None,
                 dry_bulb_c: (0..n).map(|i| i as f64 * 0.01).collect(),
@@ -2721,9 +3212,9 @@ mod tests {
 
         /// Helper: extract the first schedule value from an EnvironmentState.
         fn schedule_val(env: &EnvironmentState) -> f64 {
-            env.custom_domains
-                .iter()
-                .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
+            env.domains
+                .schedule
+                .get()
                 .and_then(|d| d.custom_payload.as_ref())
                 .and_then(|p| p.first())
                 .copied()

@@ -178,23 +178,18 @@ is disabled, the gated code is excluded from the compiled binary entirely.
 Enable one or more flags with `-F` (short for `--features`):
 
 ```bash
-cargo build --release -F check_invariants
-cargo build --release -F "check_invariants,observe"
+cargo build --release -F observe
 ```
 
-### `check_invariants`
+### Invariant checks (no flag)
 
 Per-timestep conservation-law checks: energy balance, electrical balance,
-temperature bounds, humidity. These halt the simulation with a descriptive
-error when a check fails.
-
-Automatically enabled in debug builds. Use this flag to enable them in
-release builds — useful for CI or validation runs where you want both
-optimisation and correctness checking.
+temperature bounds, humidity. These run in every build profile, debug and
+release alike, and halt the simulation with a descriptive typed error
+when a check fails.
 
 ```bash
-cargo build --release -F check_invariants
-cargo nextest run --release -F check_invariants
+cargo nextest run --release
 ```
 
 See [Invariants & Observability](invariants-and-observability.md) for the
@@ -230,18 +225,13 @@ cargo build --release -F "observe,observe_detailed"
 
 ### `profiling`
 
-Timing instrumentation for the simulation loop.
+The one timing feature: it partitions each step's wall clock into phases,
+times output finalisation, and accumulates per-actor scheduler-entry
+totals over the run, all reported by `Dwelling::profiling_summary()`
+(and `PyDwelling.profiling_summary()` in Python builds).
 
 ```bash
 cargo build --release -F profiling
-```
-
-### `actor_profiling`
-
-Per-equipment step timing. More granular than `profiling`.
-
-```bash
-cargo build --release -F actor_profiling
 ```
 
 ### `dst`
@@ -255,9 +245,14 @@ cargo build --release -F dst
 ### Python-side feature flags
 
 Maturin passes `-F` flags through to Cargo, but only features defined on
-the `hares-python` crate are available. Currently that is `observe` only.
-Rust-only features like `profiling` and `actor_profiling` do not apply to
-the Python extension.
+the `hares-python` crate are available. Currently those are `observe`
+(state snapshots for Gymnasium RL environments) and `profiling` (the
+phase and per-actor timings of `Dwelling.profiling_summary()`):
+
+```bash
+uv run maturin develop --release -F observe
+uv run maturin develop --release -F profiling
+```
 
 ---
 
@@ -394,7 +389,7 @@ production.
 | EnergyPlus Docs (all versions) | https://bigladdersoftware.com/epx/docs/ | Version-specific engineering and I/O reference |
 | HPXML Specification v4.2 | https://github.com/hpxmlwg/hpxml/releases/tag/v4.2 | Residential building XML schema — HVAC equipment, duct systems, envelope |
 | HPXML Schema Definitions | https://github.com/hpxmlwg/hpxml/tree/master/schemas | XSD files for HPXML validation — field names, types, enumerations |
-| OCHRE (NREL) | https://github.com/NREL/OCHRE | Reference oracle (vendored commit `ffc8b56e99c61eb4e42af625bbbc310e198ec58d`). Published in Applied Energy (Blonsky et al. 2021, doi:10.1016/j.apenergy.2021.116732). Used for equipment-level and whole-building parity tests. |
+| OCHRE (NREL) | https://github.com/NREL/OCHRE | Reference oracle (vendored commit `58f39d8746520786c26c02ce4c08618d3053c422`). Published in Applied Energy (Blonsky et al. 2021, doi:10.1016/j.apenergy.2021.116732). Used for equipment-level and whole-building parity tests. |
 
 When citing EnergyPlus in code comments, use the following format:
 
@@ -458,8 +453,8 @@ physics equations and model descriptions.
 | Lint | `cargo clippy -- -D warnings` |
 | Format code | `cargo fmt` |
 | Build optimised | `cargo build --release` |
-| Release build with validation | `cargo build --release -F check_invariants` |
-| Release build with observer | `cargo build --release -F "check_invariants,observe"` |
+| Release build | `cargo build --release` |
+| Release build with observer | `cargo build --release -F observe` |
 | Profile the simulation loop | `cargo build --release -F profiling` |
 | Build Python bindings (dev) | `uv run maturin develop` |
 | Build Python bindings (optimised) | `uv run maturin develop --release` |

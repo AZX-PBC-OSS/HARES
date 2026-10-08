@@ -1,13 +1,10 @@
 //! Type conversions between Rust and Python.
 
-use std::sync::Arc;
-
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, FixedOffset, SecondsFormat};
 use hares_core::StepResult;
 use hares_fleet::{DwellingMetrics, FleetResults, SimStatus};
-use numpy::{IntoPyArray, PyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
@@ -145,21 +142,6 @@ pub fn dwelling_metrics_to_polars_df(
 #[must_use]
 pub fn fleet_results_to_py(results: FleetResults) -> PyFleetResults {
     PyFleetResults::new(results)
-}
-
-/// Expose contiguous `f64` observations as a NumPy array.
-#[allow(dead_code)]
-pub fn obs_to_numpy<'py>(py: Python<'py>, values: Vec<f64>) -> Bound<'py, PyArray1<f64>> {
-    values.into_pyarray(py)
-}
-
-/// Convenience helper for converting a shared Arrow batch reference into a DataFrame.
-#[allow(dead_code)]
-pub fn record_batch_arc_to_polars_df(
-    py: Python<'_>,
-    batch: &Arc<RecordBatch>,
-) -> PyResult<Py<PyAny>> {
-    record_batches_to_polars_df(py, std::slice::from_ref(batch.as_ref()))
 }
 
 pub fn chrono_to_py_datetime(py: Python<'_>, dt: DateTime<FixedOffset>) -> PyResult<Py<PyAny>> {

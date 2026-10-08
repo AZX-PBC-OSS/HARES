@@ -43,25 +43,9 @@ impl ArrayType {
     /// Default NOCT (°C) for this array type per SAM PVWatts v8.
     pub(crate) fn noct_c(self) -> f64 {
         match self {
-            Self::OpenRack => 45.0,
+            Self::OpenRack => super::DEFAULT_NOCT_C,
             Self::RoofMounted => 49.0,
             Self::InsulatedBack => 49.0,
-        }
-    }
-
-    /// SAM `array_type` integer index (0=OpenRack, 1=RoofMounted, 2=InsulatedBack).
-    /// Used by the Python LUT adapter when writing `harvest_lut_sam_array_type`
-    /// Parquet metadata; without this adapter, the method is dormant but serves
-    /// as the canonical mapping definition for the crate.
-    // Why: the Python LUT adapter (python/ochre_next/adapters/sam_pv.py) is the
-    // intended consumer; until it is updated to write harvest_lut_sam_array_type,
-    // this method is unused on the Rust side.
-    #[allow(dead_code)]
-    pub(crate) fn to_sam_index(self) -> u8 {
-        match self {
-            Self::OpenRack => 0,
-            Self::RoofMounted => 1,
-            Self::InsulatedBack => 2,
         }
     }
 
@@ -160,25 +144,6 @@ impl PvArray {
     }
 }
 
-impl Default for PvArray {
-    /// Sensible defaults for PV array geometry matching existing `init_typed()`
-    /// fallbacks: 30° tilt (typical residential roof pitch), 180° azimuth
-    /// (south-facing in northern hemisphere).
-    fn default() -> Self {
-        Self {
-            tilt_deg: 30.0,
-            azimuth_deg: 180.0,
-            capacity_kw: 1.0,
-            noct_c: super::DEFAULT_NOCT_C,
-            module_type: ModuleType::Standard,
-            array_type: ArrayType::OpenRack,
-            surface_id: None,
-            sam_lut_path: None,
-            attached_boundary_id: None,
-        }
-    }
-}
-
 /// Per-array configuration specification (serde-compatible).
 ///
 /// This is the config-time representation; `PvArray` is the runtime
@@ -221,12 +186,12 @@ impl PvArraySpec {
                 ));
             }
         }
-        if let Some(az) = self.azimuth_deg {
-            if !az.is_finite() || !(0.0..=360.0).contains(&az) {
-                return Err(HaresError::Equipment(
-                    "PvArraySpec azimuth_deg must be finite and within [0, 360]".to_string(),
-                ));
-            }
+        if let Some(az) = self.azimuth_deg
+            && (!az.is_finite() || !(0.0..=360.0).contains(&az))
+        {
+            return Err(HaresError::Equipment(
+                "PvArraySpec azimuth_deg must be finite and within [0, 360]".to_string(),
+            ));
         }
         Ok(())
     }
@@ -581,14 +546,5 @@ mod tests {
         let mut array = valid_array();
         array.azimuth_deg = 359.9;
         assert!(array.validate().is_ok());
-    }
-
-    #[test]
-    fn pv_array_default_is_valid() {
-        let array = PvArray::default();
-        assert!(array.validate().is_ok());
-        assert_eq!(array.tilt_deg, 30.0);
-        assert_eq!(array.azimuth_deg, 180.0);
-        assert_eq!(array.module_type, ModuleType::Standard);
     }
 }

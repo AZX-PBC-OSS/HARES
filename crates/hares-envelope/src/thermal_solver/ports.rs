@@ -11,22 +11,11 @@ use super::ThermalSolver;
 impl ThermalSolver {
     /// Accumulates per-zone convective sensible heat gains from equipment ports
     /// into the input vector at the corresponding zone sensible input indices.
+    ///
+    /// The wiring check this loop used to run per step (each thermal zone has
+    /// a sensible input index) moved to [`ThermalSolver::new`] as an
+    /// unconditional construction error.
     pub(super) fn apply_port_convective_inputs(&self, u: &mut DVector<f64>, ports: &PortSlots) {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            for thermal in &ports.thermal {
-                assert!(
-                    self.wiring
-                        .zone_sensible_input_indices
-                        .contains_key(&thermal.zone),
-                    "PortSlots thermal accumulator for zone {} has no corresponding entry \
-                     in zone_sensible_input_indices; this zone was declared by equipment \
-                     but is unknown to the thermal solver — thermal contributions are silently dropped",
-                    thermal.zone
-                );
-            }
-        }
-
         for thermal in &ports.thermal {
             if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&thermal.zone)
                 && idx < u.len()
@@ -127,10 +116,48 @@ impl ThermalSolver {
             }
 
             // No surface info for this zone: dump all radiant gain to zone air.
-            if let Some(idx) = zone_air_idx {
-                if idx < u.len() {
-                    u[idx] += radiant_w;
-                }
+            if let Some(idx) = zone_air_idx
+                && idx < u.len()
+            {
+                u[idx] += radiant_w;
+            }
+        }
+    }
+}
+
+impl ThermalSolver {
+    /// Distributes short-wave internal gains (the visible part of lighting)
+    /// over each zone's interior surfaces through the transmitted-solar
+    /// path, as diffuse: the pool joins the zone's diffuse distribution
+    /// where the zone's windows take their EnergyPlus shares (the
+    /// transmittance-weighted share of the lights' short-wave leaves back
+    /// out through the glazing, the absorptance-weighted share splits by
+    /// the window's inward-flowing fraction; `HeatBalanceSurfaceManager.cc`
+    /// pools the lights' visible gain with the transmitted diffuse solar,
+    /// `:3693`, and scales both by the same `solVMULT`, `:3749-3753`). The
+    /// rest: area × inside solar absorptance, normalised, to the surfaces,
+    /// the remainder to zone air. A zone with no interior surface list
+    /// takes the gain at its air node. `is_winter` selects the season's
+    /// window optics for the windows' shares.
+    pub(super) fn apply_port_shortwave_inputs(
+        &mut self,
+        u: &mut DVector<f64>,
+        ports: &PortSlots,
+        is_winter: bool,
+    ) {
+        for thermal in &ports.thermal {
+            let shortwave_w = thermal.shortwave_gain_w;
+            if shortwave_w <= 0.0 {
+                continue;
+            }
+            self.fill_window_diffuse_shares(thermal.zone, is_winter);
+            if self
+                .distribute_transmitted_solar(u, thermal.zone, 0.0, shortwave_w, 0.0, 0.0)
+                .is_none()
+                && let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&thermal.zone)
+                && idx < u.len()
+            {
+                u[idx] += shortwave_w;
             }
         }
     }
@@ -173,10 +200,10 @@ fn distribute_radiant_lwr_surfaces(
         air_from_radiant = total_radiant_w;
     }
 
-    if let Some(idx) = zone_air_idx {
-        if idx < u.len() {
-            u[idx] += air_from_radiant;
-        }
+    if let Some(idx) = zone_air_idx
+        && idx < u.len()
+    {
+        u[idx] += air_from_radiant;
     }
 }
 
@@ -219,10 +246,10 @@ fn distribute_radiant_solar_surfaces(
         for (s, &w) in surfaces.iter().zip(buf.iter()) {
             if w > 0.0 && s.input_index.is_some() {
                 let q = total_radiant_w * w / total_weight;
-                if let Some(idx) = s.input_index {
-                    if idx < u.len() {
-                        u[idx] += q * s.radiation_frac;
-                    }
+                if let Some(idx) = s.input_index
+                    && idx < u.len()
+                {
+                    u[idx] += q * s.radiation_frac;
                 }
                 air_from_radiant += q * (1.0 - s.radiation_frac);
             }
@@ -231,9 +258,9 @@ fn distribute_radiant_solar_surfaces(
         air_from_radiant = total_radiant_w;
     }
 
-    if let Some(idx) = zone_air_idx {
-        if idx < u.len() {
-            u[idx] += air_from_radiant;
-        }
+    if let Some(idx) = zone_air_idx
+        && idx < u.len()
+    {
+        u[idx] += air_from_radiant;
     }
 }

@@ -1,7 +1,8 @@
 """Tests for EquipmentDescriptor and TelemetryField Python exposure."""
 
-import pytest
 from pathlib import Path
+
+import pytest
 from ochre_next import (
     ControlCapabilities,
     ControlSignal,
@@ -33,6 +34,7 @@ def dwelling():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         master_seed=0,
+        write_output=False,
     )
     dw.initialize()
     return dw
@@ -93,9 +95,7 @@ class TestEquipmentDescriptors:
 
     def test_at_least_one_equipment_is_controllable(self, dwelling):
         descriptors = dwelling.equipment_descriptors()
-        controllable = [
-            desc for desc in descriptors if desc.control_capabilities
-        ]
+        controllable = [desc for desc in descriptors if desc.control_capabilities]
         assert len(controllable) > 0, (
             "at least one equipment must have non-empty control_capabilities"
         )
@@ -150,6 +150,23 @@ class TestEquipmentNames:
         assert names == descriptor_names, (
             "equipment_names should match descriptor names"
         )
+
+
+class TestThermostatAxes:
+    def test_each_unit_names_the_setpoints_its_thermostat_serves(self, dwelling):
+        expected = {"hvac_heating": ["Heating"], "hvac_cooling": ["Cooling"]}
+        seen = set()
+        for desc in dwelling.equipment_descriptors():
+            end_use = desc.end_use.as_str()
+            assert dwelling.thermostat_axes(desc.name) == expected.get(end_use), (
+                desc.name
+            )
+            seen.add(end_use)
+        assert {"hvac_heating", "hvac_cooling"} <= seen
+
+    def test_an_unknown_name_is_a_value_error(self, dwelling):
+        with pytest.raises(ValueError, match="not found"):
+            dwelling.thermostat_axes("No Such Unit")
 
 
 class TestRepr:
@@ -227,7 +244,9 @@ class TestIdField:
         descriptors = dwelling.equipment_descriptors()
         ids = [desc.id for desc in descriptors]
 
-        assert len(ids) > 1, "fixture must assemble multiple equipment for uniqueness to bite"
+        assert len(ids) > 1, (
+            "fixture must assemble multiple equipment for uniqueness to bite"
+        )
         assert all(i != 0 for i in ids), (
             f"no descriptor may report the unassigned sentinel 0, got {ids}"
         )

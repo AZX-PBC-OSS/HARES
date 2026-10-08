@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::EquipmentTypedConfig;
-use hares_types::{FuelType, HaresError, ScheduleSourceConfig};
+use hares_types::{
+    FuelType, HaresError, ScheduleSourceConfig, ThermostatBandClass, validate_thermostat_band_c,
+};
 
 fn check_finite(name: &str, value: Option<f64>, min: f64, strict: bool) -> crate::Result<()> {
     if let Some(v) = value {
@@ -16,6 +18,12 @@ fn check_finite(name: &str, value: Option<f64>, min: f64, strict: bool) -> crate
         }
     }
     Ok(())
+}
+
+fn check_band(name: &str, value: Option<f64>) -> crate::Result<()> {
+    value.map_or(Ok(()), |band_c| {
+        validate_thermostat_band_c(ThermostatBandClass::Tank, name, band_c)
+    })
 }
 
 fn check_range(name: &str, value: Option<f64>, min: f64, max: f64) -> crate::Result<()> {
@@ -146,7 +154,7 @@ impl GasWaterHeaterConfig {
         )?;
         check_finite("gas_wh: ua_w_per_k", self.ua_w_per_k, 0.0, true)?;
         check_range("gas_wh: setpoint_c", self.setpoint_c, 40.0, 85.0)?;
-        check_finite("gas_wh: deadband_c", self.deadband_c, 0.0, true)?;
+        check_band("gas_wh: deadband_c", self.deadband_c)?;
         check_finite(
             "gas_wh: max_tank_temp_c",
             self.max_tank_temp_c,
@@ -314,7 +322,7 @@ impl ElectricResistanceWaterHeaterConfig {
         )?;
         check_finite("resistance_wh: ua_w_per_k", self.ua_w_per_k, 0.0, true)?;
         check_range("resistance_wh: setpoint_c", self.setpoint_c, 40.0, 85.0)?;
-        check_finite("resistance_wh: deadband_c", self.deadband_c, 0.0, true)?;
+        check_band("resistance_wh: deadband_c", self.deadband_c)?;
         check_finite(
             "resistance_wh: max_tank_temp_c",
             self.max_tank_temp_c,
@@ -556,7 +564,7 @@ impl IndirectTankConfig {
             true,
         )?;
         check_range("indirect_tank: setpoint_c", self.setpoint_c, 40.0, 85.0)?;
-        check_finite("indirect_tank: deadband_c", self.deadband_c, 0.0, true)?;
+        check_band("indirect_tank: deadband_c", self.deadband_c)?;
         check_finite(
             "indirect_tank: max_tank_temp_c",
             self.max_tank_temp_c,
@@ -732,7 +740,7 @@ impl HeatPumpWaterHeaterConfig {
         )?;
         check_finite("hpwh: ua_w_per_k", self.ua_w_per_k, 0.0, true)?;
         check_range("hpwh: setpoint_c", self.setpoint_c, 40.0, 85.0)?;
-        check_finite("hpwh: deadband_c", self.deadband_c, 0.0, true)?;
+        check_band("hpwh: deadband_c", self.deadband_c)?;
         check_finite(
             "hpwh: max_tank_temp_c",
             self.max_tank_temp_c,
@@ -1145,7 +1153,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             deadband_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1180,7 +1188,7 @@ mod tests {
         ElectricResistanceWaterHeaterConfig {
             deadband_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1213,7 +1221,7 @@ mod tests {
         HeatPumpWaterHeaterConfig {
             deadband_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1258,7 +1266,7 @@ mod tests {
         IndirectTankConfig {
             deadband_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             boiler_loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1283,11 +1291,29 @@ mod tests {
     }
 
     #[test]
-    fn deadband_zero_rejected_for_storage_water_heaters() {
-        assert!(gas_wh_with_deadband(Some(0.0)).validate().is_err());
-        assert!(resistance_wh_with_deadband(Some(0.0)).validate().is_err());
-        assert!(hpwh_with_deadband(Some(0.0)).validate().is_err());
-        assert!(indirect_tank_with_deadband(Some(0.0)).validate().is_err());
+    fn deadband_below_a_thermostat_band_rejected_for_storage_water_heaters() {
+        for db in [0.0, 1e-17, 0.05] {
+            assert!(gas_wh_with_deadband(Some(db)).validate().is_err());
+            assert!(resistance_wh_with_deadband(Some(db)).validate().is_err());
+            assert!(hpwh_with_deadband(Some(db)).validate().is_err());
+            assert!(indirect_tank_with_deadband(Some(db)).validate().is_err());
+        }
+    }
+
+    /// Tank thermostats switch far wider than HVAC ones: HPWHsim's product
+    /// presets turn heat sources on 20 to 80 F (11 to 44 C) below setpoint.
+    #[test]
+    fn a_tank_deadband_spans_the_widest_tank_thermostat() {
+        for (db, ok) in [(11.1, true), (44.4, true), (45.0, false)] {
+            for validated in [
+                gas_wh_with_deadband(Some(db)).validate(),
+                resistance_wh_with_deadband(Some(db)).validate(),
+                hpwh_with_deadband(Some(db)).validate(),
+                indirect_tank_with_deadband(Some(db)).validate(),
+            ] {
+                assert_eq!(validated.is_ok(), ok, "{db}");
+            }
+        }
     }
 
     #[test]
@@ -1324,7 +1350,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             ua_w_per_k,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1359,7 +1385,7 @@ mod tests {
         ElectricResistanceWaterHeaterConfig {
             ua_w_per_k,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1392,7 +1418,7 @@ mod tests {
         HeatPumpWaterHeaterConfig {
             ua_w_per_k,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1437,7 +1463,7 @@ mod tests {
         IndirectTankConfig {
             ua_w_per_k,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             boiler_loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1466,7 +1492,7 @@ mod tests {
             hx_ua_w_per_k,
             ua_w_per_k: Some(2.0),
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             boiler_loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1527,7 +1553,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             setpoint_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1562,7 +1588,7 @@ mod tests {
         ElectricResistanceWaterHeaterConfig {
             setpoint_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1595,7 +1621,7 @@ mod tests {
         HeatPumpWaterHeaterConfig {
             setpoint_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1640,7 +1666,7 @@ mod tests {
         IndirectTankConfig {
             setpoint_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             boiler_loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1731,7 +1757,7 @@ mod tests {
             deadband_c,
             max_tank_temp_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1770,7 +1796,7 @@ mod tests {
             deadband_c,
             max_tank_temp_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1807,7 +1833,7 @@ mod tests {
             deadband_c,
             max_tank_temp_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1856,7 +1882,7 @@ mod tests {
             deadband_c,
             max_tank_temp_c,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             boiler_loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,

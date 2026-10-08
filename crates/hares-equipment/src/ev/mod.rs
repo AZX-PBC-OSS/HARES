@@ -12,7 +12,7 @@ use hares_types::{
     ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState, DRLevel,
     ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, EvConnectionState,
     ExecutionStage, FuelType, HaresError, OperatingMode, PlugInPolicy, PortContribution,
-    PortDeclaration, PortSlots, Soc, Telemetry,
+    PortDeclaration, PortSlots, Soc, Telemetry, Warning,
 };
 
 use crate::battery::ocv::{OcvTable, UNegTable};
@@ -205,6 +205,12 @@ pub struct Ev {
     /// the power setpoint would otherwise allow it. Symmetric with
     /// power_setpoint_min_soc which acts as a discharge floor.
     power_setpoint_max_soc: Option<f64>,
+    /// Warn-once flag: the Ready-By + over-rated PowerSetpoint divergence
+    /// warning fired for this EV this run. Reset by `init`, so a re-initialized
+    /// EV warns once per run again.
+    ready_by_power_warned: bool,
+    /// Warnings raised since the last drain.
+    warnings: Vec<Warning>,
     /// Demand response severity level (e.g. shed load, curtailment).
     dr_level: DRLevel,
     dr_duration_remaining_s: Option<f64>,
@@ -466,6 +472,8 @@ impl Ev {
             charging_priority,
             power_setpoint_min_soc: None,
             power_setpoint_max_soc: None,
+            ready_by_power_warned: false,
+            warnings: Vec::new(),
             dr_level: DRLevel::Normal,
             dr_duration_remaining_s: None,
             soc_target: None,
@@ -902,28 +910,6 @@ impl Ev {
                         {
                             ev_ready_by_bypassed = true;
                         }
-                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                        {
-                            let ready_by_hour = self.ready_by_hour.unwrap_or(0.0);
-                            let current_hour = now.hour() as f64
-                                + now.minute() as f64 / 60.0
-                                + now.second() as f64 / 3600.0;
-                            let hours_remaining = if ready_by_hour > current_hour {
-                                ready_by_hour - current_hour
-                            } else {
-                                24.0 - current_hour + ready_by_hour
-                            };
-                            tracing::warn!(
-                                soc = self.soc,
-                                target_soc = soc_limit,
-                                hours_remaining,
-                                power_setpoint_kw = self.power_setpoint_kw,
-                                "EV Ready‑By deadline enforcement bypassed by external \
-                                 PowerSetpoint (charging_priority = ExternalAuthority): \
-                                 external controller bears sole responsibility for \
-                                 departure SOC"
-                            );
-                        }
                     } else {
                         requested = bms_power;
                     }
@@ -931,27 +917,31 @@ impl Ev {
             }
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Ready-By active with a PowerSetpoint above the rated power: the
+        // scheduler's urgency power and the equipment's rated power disagree.
+        // Warn once per run per EV (non-fatal; the warning log bounds it).
+        if let (Some(_ready_hour), Some(sp_kw)) = (self.ready_by_hour, self.power_setpoint_kw)
+            && sp_kw > 0.0
+            && !self.ready_by_power_warned
         {
-            if let (Some(_ready_hour), Some(sp_kw)) = (self.ready_by_hour, self.power_setpoint_kw) {
-                if sp_kw > 0.0 {
-                    // When both Ready-By and PowerSetpoint are active, the
-                    // setpoint originates from the scheduler's urgency power
-                    // (ctx.max_charge_kw). It must not exceed the equipment's
-                    // rated power by more than a small tolerance — divergence
-                    // beyond 110% indicates the schedule and equipment
-                    // configuration disagree about the EV's capabilities.
-                    let max_allowed = self.rated_power_kw * 1.1;
-                    if sp_kw > max_allowed {
-                        tracing::warn!(
-                            ready_by_hour = self.ready_by_hour,
-                            power_setpoint_kw = sp_kw,
-                            rated_power_kw = self.rated_power_kw,
-                            "EV: PowerSetpoint exceeds rated power while Ready-By active — \
-                             scheduler urgency power inconsistent with equipment capabilities"
-                        );
-                    }
-                }
+            // When both Ready-By and PowerSetpoint are active, the
+            // setpoint originates from the scheduler's urgency power
+            // (ctx.max_charge_kw). It must not exceed the equipment's
+            // rated power by more than a small tolerance; divergence
+            // beyond 110% indicates the schedule and equipment
+            // configuration disagree about the EV's capabilities.
+            let max_allowed = self.rated_power_kw * 1.1;
+            if sp_kw > max_allowed {
+                self.ready_by_power_warned = true;
+                self.warnings.push(Warning::new(
+                    self.descriptor.name.as_str(),
+                    format!(
+                        "EV: PowerSetpoint ({sp_kw} kW) exceeds rated power \
+                         ({} kW) while Ready-By active: scheduler urgency \
+                         power inconsistent with equipment capabilities",
+                        self.rated_power_kw
+                    ),
+                ));
             }
         }
 
@@ -1050,7 +1040,7 @@ impl Ev {
             return derated_rated;
         };
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             if self.charging_curve_lut.is_some() {
                 assert!(
@@ -1120,48 +1110,6 @@ impl Ev {
             "effective discharge floor = {effective_floor}, interlocked = {}",
             effective_floor > reserve_floor,
         );
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let expected_min = if let (true, Some(ready_by_soc)) =
-                (self.discharge_respects_deadline, self.ready_by_soc)
-            {
-                let signal_floor = self
-                    .power_setpoint_min_soc
-                    .map_or(reserve, |ms| reserve.max(ms));
-                signal_floor.max(ready_by_soc)
-            } else {
-                reserve_floor
-            };
-            assert!(
-                effective_floor >= expected_min,
-                "{leg:?} effective discharge floor {effective_floor} less than required minimum \
-                 {expected_min} (reserve={reserve}, ready_by_soc={:?}, respects_deadline={})",
-                self.ready_by_soc,
-                self.discharge_respects_deadline,
-            );
-        }
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let interlock_prevented = effective_floor > reserve_floor
-                && self.soc <= effective_floor
-                && self.soc > reserve_floor;
-            if interlock_prevented {
-                tracing::warn!(
-                    leg = ?leg,
-                    soc = self.soc,
-                    reserve,
-                    ready_by_soc = self.ready_by_soc,
-                    effective_floor,
-                    "discharge prevented by Ready‑By deadline interlock: \
-                     SOC {:.4} below effective floor {:.4} (reserve={:.4})",
-                    self.soc,
-                    effective_floor,
-                    reserve,
-                );
-            }
-        }
 
         effective_floor
     }
@@ -1367,15 +1315,10 @@ impl Ev {
 
     /// Degradation-adjusted pack capacity [kWh] — `rated × SOH`, the
     /// temperature-independent rating (the EV's counterpart of the
-    /// Battery's `capacity_kwh_nominal`). Boundaries that consume a rating
-    /// — the driver's belief model (`actor_seed`) and the charging-LUT
-    /// c-rate divisor — use this, never the live usable capacity: the
-    /// usable capacity moves with the pack temperature (the reversible
-    /// derate) and with every degradation update, so seeding it into a
-    /// fixed one-shot value would freeze one step's weather into the
-    /// whole run (a −7 °C init would shrink the driver's believed pack
-    /// by roughly a third and raise every range-anxiety threshold with
-    /// it).
+    /// Battery's `capacity_kwh_nominal`). The charging-LUT c-rate divisor
+    /// uses this, never the live usable capacity, which moves with the
+    /// pack temperature (the reversible derate). The driver's seed
+    /// (`actor_seed`) uses the rated capacity: it is a build parameter.
     fn degradation_adjusted_capacity_kwh(&self) -> f64 {
         self.battery_capacity_kwh_rated * (1.0 - self.degradation.capacity_fade_fraction())
     }
@@ -1392,7 +1335,7 @@ impl Ev {
         };
         if current_day != self.last_daily_update_day {
             self.degradation
-                .update_daily(&self.u_neg_table, &self.rainflow);
+                .update_daily(&self.u_neg_table, &self.rainflow)?;
 
             // Feed the aged state of health back into the usable pack
             // capacity so runtime SOC arithmetic (driving, charging, V2L/V2G)
@@ -1402,15 +1345,12 @@ impl Ev {
             // undegraded divisor, understating range loss and charge duration.
             self.refresh_usable_capacity();
             let soh = 1.0 - self.degradation.capacity_fade_fraction();
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                if !(self.battery_capacity_kwh > 0.0 || soh <= 0.0) {
-                    return Err(HaresError::InvariantViolation {
-                        check_name: "ev_battery_capacity_kwh_underflow".to_string(),
-                        value: self.battery_capacity_kwh,
-                        tolerance: 0.0,
-                    });
-                }
+            if !(self.battery_capacity_kwh > 0.0 || soh <= 0.0) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "ev_battery_capacity_kwh_underflow".to_string(),
+                    value: self.battery_capacity_kwh,
+                    tolerance: 0.0,
+                });
             }
 
             self.degradation.reset_day_tracking(self.soc);
@@ -1787,7 +1727,13 @@ impl Equipment for Ev {
         if let Some(e) = self.init_error.take() {
             return Err(e);
         }
+        self.ready_by_power_warned = false;
+        self.warnings.clear();
         self.init_typed(config, env)
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
     }
 
     fn island_source_available(&self) -> bool {
@@ -2012,12 +1958,12 @@ impl Equipment for Ev {
         Some(crate::ActorSeed::Ev {
             strategy: self.charging_strategy.clone(),
             plug_in_policy: self.plug_in_policy.clone(),
-            // The degradation-adjusted rating, never the live usable
-            // capacity: the actor absorbs this once and never reassigns it,
-            // so a temperature-scaled value would freeze the init-time
-            // weather into the run's range-anxiety and needed-hours
-            // arithmetic (see `degradation_adjusted_capacity_kwh`).
-            capacity_kwh: self.degradation_adjusted_capacity_kwh(),
+            // The rated capacity, a build parameter: the seed is compared
+            // to decide whether a replacement keeps its driver, so it holds
+            // configuration, never the pack's live or aged state (a
+            // temperature-scaled value would also freeze one step's weather
+            // into the driver's range-anxiety and needed-hours arithmetic).
+            capacity_kwh: self.battery_capacity_kwh_rated,
             max_charge_kw: self.rated_power_kw,
             fuel_economy_kwh_per_mi: self.fuel_economy_kwh_per_mi,
         })
@@ -2265,12 +2211,12 @@ impl Equipment for Ev {
                 // Validate the ENTIRE signal before mutating any state so a
                 // rejected setpoint leaves no partial effect (e.g. an armed
                 // q_setpoint from a signal whose active power was refused).
-                if let Some(q) = reactive_power_kvar {
-                    if !q.is_finite() {
-                        return Err(HaresError::Control(
-                            "EV PowerSetpoint reactive_power_kvar must be finite".to_string(),
-                        ));
-                    }
+                if let Some(q) = reactive_power_kvar
+                    && !q.is_finite()
+                {
+                    return Err(HaresError::Control(
+                        "EV PowerSetpoint reactive_power_kvar must be finite".to_string(),
+                    ));
                 }
                 // Self-contained guard (see EvDrive): a non-finite active
                 // setpoint would silently disarm charging (`f64::max`

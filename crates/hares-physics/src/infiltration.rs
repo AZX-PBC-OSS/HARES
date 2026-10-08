@@ -28,10 +28,7 @@
 //! - EnergyPlus ERM 26.1 — AirflowNetwork Model: AIM-2 Enhanced Model.
 
 use crate::units::*;
-// warn! is only emitted from cfg-gated diagnostic blocks; an unconditional
-// import is an unused-import warning in plain release builds.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-use tracing::warn;
+use hares_types::HaresError;
 
 /// Opening type for natural ventilation — distinguishes single-sided (one opening)
 /// from cross-ventilation (two vertically separated openings on opposite faces).
@@ -188,10 +185,10 @@ pub fn ashrae_wind_stack(
 /// ```
 ///
 /// # Parameters
-/// - `ela_m2`: effective leakage area [m²]
+/// - `ela_m2`: effective leakage area (m²)
 /// - `stack_coeff`: ELA stack coefficient [L/(s·cm⁴·K)]
 /// - `wind_coeff`: ELA wind coefficient [L/(s·cm⁴·(m/s)²)]
-/// - `delta_t_c`: indoor–outdoor temperature difference [K]
+/// - `delta_t_c`: indoor–outdoor temperature difference (K)
 /// - `wind_speed_m_s`: wind speed at building height [m/s]
 ///
 /// Returns volumetric flow [m³/s].
@@ -298,6 +295,38 @@ pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_d
     }
 }
 
+/// Named inputs for [`natural_ventilation_flow_m3_s`], the EnergyPlus
+/// `ZoneVentilation:WindandStackOpenArea` model.
+#[derive(Debug, Clone, Copy)]
+pub struct NaturalVentilationInputs {
+    /// Ventilating open area (m²).
+    pub open_area_m2: f64,
+    /// Zone air temperature [°C].
+    pub t_zone_c: f64,
+    /// Outdoor air temperature [°C].
+    pub t_outdoor_c: f64,
+    /// Comfort base temperature below which ventilation is gated off [°C].
+    pub t_base_c: f64,
+    /// Outdoor humidity ratio [kg/kg].
+    pub outdoor_humidity_ratio: f64,
+    /// Outdoor humidity ratio above which ventilation is gated off [kg/kg].
+    pub max_outdoor_humidity_ratio: f64,
+    /// Wind speed [m/s].
+    pub wind_speed_m_s: f64,
+    /// Zone volume (m³), used only for the 20 ACH cap.
+    pub zone_volume_m3: f64,
+    /// Opening facing azimuth [°].
+    pub opening_azimuth_deg: f64,
+    /// Wind direction [°].
+    pub wind_direction_deg: f64,
+    /// Cross-ventilation height difference (m).
+    pub dh_m: f64,
+    /// Opening type, which selects the discharge coefficient and stack height.
+    pub opening_type: OpeningType,
+    /// Zone height (m), the stack height for single-sided openings.
+    pub zone_height_m: f64,
+}
+
 /// Natural ventilation flow through operable windows (EnergyPlus
 /// `ZoneVentilation:WindandStackOpenArea` model).
 ///
@@ -336,25 +365,8 @@ pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_d
 /// linear interpolation: Cw = 0.55 at 0° (perpendicular) → 0.3 at 45° → 0.0 at > 90°.
 /// ASHRAE HoF 2009 Ch. 16.14, Equation 37: Q_wind = Cw × A × U.
 ///
-/// # Parameters
-/// - `open_area_m2`: effective open window area [m²]
-/// - `t_zone_c`: zone (indoor) air temperature [°C]
-/// - `t_outdoor_c`: outdoor air temperature [°C]
-/// - `t_base_c`: comfort base temperature [°C]; no flow when `t_zone ≤ t_base`
-///   (OCHRE default: 22.78 °C = 73 °F)
-/// - `outdoor_humidity_ratio`: outdoor specific humidity [kg/kg]; flow suppressed
-///   when ≥ `max_outdoor_humidity_ratio`
-/// - `max_outdoor_humidity_ratio`: humidity threshold [kg/kg] (OCHRE default: 0.0115)
-/// - `wind_speed_m_s`: wind speed [m/s]
-/// - `zone_volume_m3`: zone volume [m³] -- used to cap at 20 ACH
-/// - `opening_azimuth_deg`: azimuth of the opening normal [°], 0° = North, clockwise
-/// - `wind_direction_deg`: outdoor wind direction azimuth [°]; `f64::NAN` to use the
-///   fallback Cw = 0.35 (average wind-direction variability)
-/// - `dh_m`: vertical separation between inlet and outlet openings [m]
-///   (EnergyPlus `DH` parameter); used for cross-ventilation stack term
-/// - `opening_type`: [`hares_envelope::OpeningType`](OpeningType) — controls
-///   the discharge coefficient Cd and whether `dh_m` drives stack flow
-/// - `zone_height_m`: characteristic opening height [m]; used for single-sided stack term
+/// Takes the fields of [`NaturalVentilationInputs`]; see that type for the
+/// per-field units and defaults.
 ///
 /// Returns volumetric flow [m³/s], or 0.0 when gating conditions are not met.
 ///
@@ -364,22 +376,23 @@ pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_d
 /// - EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area: Q = sqrt(Qw² + Qst²)
 /// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: Q_wind = Cw × A × U
 /// - ASHRAE HoF 2009 Ch. 16.14: single-sided Cd = 0.15–0.25; cross-ventilation Cd = 0.60–0.65
-#[allow(clippy::too_many_arguments)]
-pub fn natural_ventilation_flow_m3_s(
-    open_area_m2: f64,
-    t_zone_c: f64,
-    t_outdoor_c: f64,
-    t_base_c: f64,
-    outdoor_humidity_ratio: f64,
-    max_outdoor_humidity_ratio: f64,
-    wind_speed_m_s: f64,
-    zone_volume_m3: f64,
-    opening_azimuth_deg: f64,
-    wind_direction_deg: f64,
-    dh_m: f64,
-    opening_type: OpeningType,
-    zone_height_m: f64,
-) -> (f64, f64, f64, f64) {
+pub fn natural_ventilation_flow_m3_s(inputs: NaturalVentilationInputs) -> (f64, f64, f64, f64) {
+    let NaturalVentilationInputs {
+        open_area_m2,
+        t_zone_c,
+        t_outdoor_c,
+        t_base_c,
+        outdoor_humidity_ratio,
+        max_outdoor_humidity_ratio,
+        wind_speed_m_s,
+        zone_volume_m3,
+        opening_azimuth_deg,
+        wind_direction_deg,
+        dh_m,
+        opening_type,
+        zone_height_m,
+    } = inputs;
+
     // Temperature and humidity gating (OCHRE: `if w_amb >= max_oa_hr or t_zone <= t_ext or t_zone <= t_base`)
     if outdoor_humidity_ratio >= max_outdoor_humidity_ratio
         || t_zone_c <= t_outdoor_c
@@ -399,23 +412,6 @@ pub fn natural_ventilation_flow_m3_s(
 
     let cw = compute_natural_ventilation_cw(opening_azimuth_deg, wind_direction_deg);
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            (0.0..=0.55).contains(&cw),
-            "Cw {cw} out of plausible range [0.0, 0.55]"
-        );
-        if cw == 0.0 && open_area_m2 > 0.0 {
-            warn!(
-                cw,
-                open_area_m2,
-                opening_azimuth_deg,
-                wind_direction_deg,
-                "natural ventilation Cw is zero: wind is on the leeward side of the opening"
-            );
-        }
-    }
-
     // Wind-driven component: Q_wind = Cw × A × U  (ASHRAE HoF 2009 Ch.16.14 Eq.37)
     let q_wind = cw * open_area_m2 * wind_speed_m_s;
 
@@ -432,29 +428,6 @@ pub fn natural_ventilation_flow_m3_s(
     } else {
         0.0
     };
-
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            q_stack >= 0.0,
-            "Q_stack must be >= 0: got {q_stack} (cd={cd}, dh_m={dh_m}, zone_height_m={zone_height_m}, delta_t={delta_t})"
-        );
-        if opening_type == OpeningType::CrossVentilation && dh_m == 0.0 {
-            warn!(
-                opening_type = "CrossVentilation",
-                dh_m,
-                "cross-ventilation configured with zero height difference produces no stack benefit"
-            );
-        }
-        if opening_type == OpeningType::SingleSided && dh_m > 0.0 {
-            warn!(
-                opening_type = "SingleSided",
-                dh_m,
-                zone_height_m,
-                "dh_m is ignored for single-sided openings; using zone_height_m for stack computation"
-            );
-        }
-    }
 
     // Adjustment factor: how far above comfort base is the zone, relative to the delta
     let adj = ((t_zone_c - t_base_c) / (t_zone_c - t_outdoor_c)).clamp(0.0, 1.0);
@@ -489,7 +462,7 @@ pub fn natural_ventilation_flow_m3_s(
 /// - `base_infil_m3_s`: natural infiltration rate computed by the zone model [m³/s]
 /// - `supply_leakage_m3_s`: supply duct leakage flow during fan operation [m³/s]
 /// - `return_leakage_m3_s`: return duct leakage flow during fan operation [m³/s]
-/// - `house_volume_m3`: conditioned zone volume [m³]
+/// - `house_volume_m3`: conditioned zone volume (m³)
 ///
 /// Returns the adjusted infiltration flow [m³/s].  When both leakage flows are
 /// zero the function is a no-op (returns `base_infil_m3_s` unchanged).
@@ -626,11 +599,11 @@ pub enum FoundationLeakageClass {
 /// Input parameters for `aim2_coefficients_from_ach50`.
 #[derive(Clone, Debug)]
 pub struct Aim2Params {
-    /// Blower-door result at 50 Pa [ACH].
+    /// Blower-door result at 50 Pa (ACH).
     pub ach50: f64,
-    /// Conditioned volume [m³].
+    /// Conditioned volume (m³).
     pub volume_m3: f64,
-    /// Infiltration height [m] (total envelope height for stack effect).
+    /// Infiltration height (m) (total envelope height for stack effect).
     pub infiltration_height_m: f64,
     /// Foundation leakage distribution.
     pub foundation: FoundationLeakageClass,
@@ -776,10 +749,35 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
 // ASHRAE Handbook of Fundamentals 2021, Chapter 16.
 // ---------------------------------------------------------------------------
 
+/// OS-HPXML's Sherman-Grimsrud terrain factor `f_t_SG` (airflow.rb:200-221,
+/// 2766): the wind speed at `height_m` above grade on the site's terrain
+/// over that of the 32.8 ft (10 m) weather station in open terrain,
+/// `A_site (h / 32.8 ft)^γ_site / (1.0 (32.8 / 32.8)^0.15)`, with
+/// (A, γ) = (0.85, 0.20) rural, (0.67, 0.25) suburban and (0.47, 0.35)
+/// urban.
+pub fn sherman_grimsrud_terrain_factor(terrain: TerrainClass, height_m: f64) -> f64 {
+    /// The height the power laws are normalised to.
+    const REFERENCE_HEIGHT_FT: f64 = 32.8;
+    /// The weather station's anemometer height and open-terrain law.
+    const STATION_HEIGHT_FT: f64 = 32.8;
+    const STATION_MULTIPLIER: f64 = 1.0;
+    const STATION_EXPONENT: f64 = 0.15;
+    let (multiplier, exponent) = match terrain {
+        TerrainClass::Rural => (0.85, 0.20),
+        TerrainClass::Suburban => (0.67, 0.25),
+        TerrainClass::Urban => (0.47, 0.35),
+    };
+    let station =
+        STATION_MULTIPLIER * (STATION_HEIGHT_FT / REFERENCE_HEIGHT_FT).powf(STATION_EXPONENT);
+    multiplier * (crate::units::length_m_to_ft(height_m) / REFERENCE_HEIGHT_FT).powf(exponent)
+        / station
+}
+
 /// Calculates ELA stack and wind coefficients for a zone, entirely in SI.
 ///
 /// Derives `Cs` and `Cw` from the Walker-Wilson (1998) stack and wind shape
-/// factors using the full ASHRAE two-parameter terrain power law.
+/// factors, with OS-HPXML's Sherman-Grimsrud terrain factor
+/// (`calc_wind_stack_coeffs`, airflow.rb:2749-2771).
 ///
 /// # Parameters
 /// - `hor_lk_frac`: horizontal leakage fraction (fraction of total leakage in
@@ -787,8 +785,8 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
 ///   - 0.0  for conditioned zones (vertical-dominated leakage)
 ///   - 0.4  for garages (mixed)
 ///   - 0.75 for vented attics (ceiling-dominated leakage)
-/// - `zone_height_m`: zone height [m]
-/// - `zone_height_above_ground_m`: height of zone bottom above ground [m]
+/// - `zone_height_m`: zone height (m)
+/// - `zone_height_above_ground_m`: height of zone bottom above ground (m)
 /// - `terrain`: site terrain class for wind speed correction
 /// - `shielding`: shielding coefficient from Walker-Wilson (1998) Table 3:
 ///   - 0.10 (well-shielded: dense trees/buildings on all sides)
@@ -807,13 +805,13 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
 /// `Cs = f_s² × g × H / T_in × 1e-2`
 /// where `f_s = (2/3)(1 + R/2) × √(2·nl·(1-nl)) / (√nl + √(1-nl))` is the
 /// Walker-Wilson stack shape factor, `g = 9.80665 m/s²`, `H` is zone height,
-/// `T_in` is indoor temperature [K], and `1e-2` converts m²/(s²·K) →
+/// `T_in` is indoor temperature (K), and `1e-2` converts m²/(s²·K) →
 /// (L/s)²/(cm⁴·K) since `1 m² = 1e4 cm²` and `1 L²/cm⁴ = 1e6 cm²`.
 ///
 /// **Wind coefficient:**
 /// `Cw = f_w² / 100`
 /// where `f_w = s_g × (1-R)^(1/3) × f_t` is the wind shape factor,
-/// `f_t` is the ASHRAE terrain correction from `terrain_wind_speed()`,
+/// `f_t` is OS-HPXML's terrain factor ([`sherman_grimsrud_terrain_factor`]),
 /// and `/100` converts dimensionless f_w² to (L/s)²/(cm⁴·(m/s)²) units
 /// (proven from the ELA geometry: `Q = ELA_m² × f_w × v` must equal
 /// `(ELA_cm²/1000) × √(Cw × v²)`, requiring `Cw = f_w²/100`).
@@ -841,12 +839,7 @@ pub fn calculate_ela_coefficients(
     let cs_m2 = f_s * f_s * G_M_S2 * zone_height_m / T_IN_K;
     let stack_coeff = cs_m2 * 1e-2;
 
-    // Terrain wind speed correction f_t using the full ASHRAE HOF Chapter 16
-    // two-parameter power law -- the same model as terrain_wind_speed().
-    // f_t = (δ_met / h_met)^α_met × (H_total / δ_site)^α_site
-    let h_total = (zone_height_m + zone_height_above_ground_m).max(0.1);
-    let f_t = (MET_STATION_DELTA_M / MET_STATION_HEIGHT_M).powf(MET_STATION_ALPHA)
-        * (h_total / terrain.delta_m()).powf(terrain.alpha());
+    let f_t = sherman_grimsrud_terrain_factor(terrain, zone_height_m + zone_height_above_ground_m);
 
     // Wind shape factor f_w (Walker-Wilson 1998, Eq. 13).
     let f_w = shielding * (1.0 - hor_lk_frac).powf(1.0 / 3.0) * f_t;
@@ -856,7 +849,7 @@ pub fn calculate_ela_coefficients(
 
     // The returned coefficients are calibrated for raw EPW/met-station wind speed
     // input (10 m, open-country terrain). Terrain/height correction is embedded in
-    // wind_coeff via f_t (the ASHRAE power-law terrain correction at lines 622–623).
+    // wind_coeff via f_t.
     // The caller must pass the raw met-station wind speed — applying a second
     // terrain correction at runtime would double-correct.
     (stack_coeff, wind_coeff)
@@ -872,16 +865,19 @@ pub const SHIELDING_NORMAL: f64 = 0.5 / 3.0;
 /// leakage). Shielding and terrain are configurable to match the building site.
 ///
 /// # Parameters
-/// - `shielding`: site shielding class from `<ShieldingOfHome>` in HPXML.
+/// - `shielding`: site shielding class from `<ShieldingofHome>` in HPXML.
 ///   Walker & Wilson (1998) Table 3: `C' = s_g` where `s_g = raw/3`.
-/// - `terrain`: terrain class from `<SiteType>` in HPXML, driving the
-///   ASHRAE HoF 2021 Ch.16 two-parameter power-law wind correction.
+/// - `terrain`: terrain class from `<SiteType>` in HPXML, driving OS-HPXML's
+///   Sherman-Grimsrud terrain factor ([`sherman_grimsrud_terrain_factor`]).
+///
+/// Non-positive coefficients are a typed error in every build profile: the
+/// inputs are heights from user input, so a violation is reachable.
 pub fn attic_ela_coefficients(
     attic_height_m: f64,
     building_height_m: f64,
     shielding: ShieldingClass,
     terrain: TerrainClass,
-) -> (f64, f64) {
+) -> Result<(f64, f64), HaresError> {
     let (stack, wind) = calculate_ela_coefficients(
         0.75,
         attic_height_m,
@@ -890,102 +886,72 @@ pub fn attic_ela_coefficients(
         shielding.raw() / 3.0,
     );
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            stack > 0.0,
+    if stack <= 0.0 {
+        return Err(HaresError::Physics(format!(
             "attic ELA stack coefficient must be positive: {stack}"
-        );
-        assert!(
-            wind > 0.0,
+        )));
+    }
+    if wind <= 0.0 {
+        return Err(HaresError::Physics(format!(
             "attic ELA wind coefficient must be positive: {wind}"
-        );
-        // Walker & Wilson (1998) Table 3: wind_coeff ∝ s_g² where s_g = raw/3.
-        // For unchanged heights/terrain the ratio wind(worse_shielding) / wind(better_shielding)
-        // must equal (raw_worse / raw_better)². Verify against Exposed / WellShielded = (0.9/0.3)² = 9.
-        let (_, wind_exposed) = calculate_ela_coefficients(
-            0.75,
-            attic_height_m,
-            building_height_m,
-            terrain,
-            ShieldingClass::Exposed.raw() / 3.0,
-        );
-        let (_, wind_shielded) = calculate_ela_coefficients(
-            0.75,
-            attic_height_m,
-            building_height_m,
-            terrain,
-            ShieldingClass::WellShielded.raw() / 3.0,
-        );
-        let observed_ratio = wind_exposed / wind_shielded;
-        let expected_ratio =
-            (ShieldingClass::Exposed.raw() / ShieldingClass::WellShielded.raw()).powi(2);
-        assert!(
-            (observed_ratio - expected_ratio).abs() < 1e-12,
-            "attic ELA wind coefficient shielding scaling violated: \
-             expected Exposed/WellShielded ratio {expected_ratio}, got {observed_ratio} \
-             (exposed={wind_exposed}, shielded={wind_shielded})"
-        );
+        )));
     }
 
-    (stack, wind)
+    Ok((stack, wind))
 }
 
-/// ELA coefficients for a garage zone at ground level.
+/// ELA coefficients for a garage zone standing on the foundation top.
 ///
-/// Uses `hor_lk_frac = 0.4` (Walker-Wilson 1998 Table 2: mixed leakage).
+/// Uses `hor_lk_frac = 0.4` (Walker-Wilson 1998 Table 2: mixed leakage),
+/// with the wind taken at the garage's height above the foundation top as
+/// OS-HPXML does (airflow.rb:2756-2762, `space_height_ag = foundation_top`).
 /// Shielding and terrain are configurable to match the building site.
 ///
 /// # Parameters
-/// - `shielding`: site shielding class from `<ShieldingOfHome>` in HPXML.
+/// - `foundation_top_m`: the foundation top above grade.
+/// - `shielding`: site shielding class from `<ShieldingofHome>` in HPXML.
 ///   Walker & Wilson (1998) Table 3: `C' = s_g` where `s_g = raw/3`.
-/// - `terrain`: terrain class from `<SiteType>` in HPXML, driving the
-///   ASHRAE HoF 2021 Ch.16 two-parameter power-law wind correction.
+/// - `terrain`: terrain class from `<SiteType>` in HPXML, driving OS-HPXML's
+///   Sherman-Grimsrud terrain factor ([`sherman_grimsrud_terrain_factor`]).
+///
+/// Non-positive coefficients are a typed error in every build profile: the
+/// inputs are heights from user input, so a violation is reachable.
 pub fn garage_ela_coefficients(
     garage_height_m: f64,
+    foundation_top_m: f64,
     shielding: ShieldingClass,
     terrain: TerrainClass,
-) -> (f64, f64) {
-    let (stack, wind) =
-        calculate_ela_coefficients(0.4, garage_height_m, 0.0, terrain, shielding.raw() / 3.0);
+) -> Result<(f64, f64), HaresError> {
+    let (stack, wind) = calculate_ela_coefficients(
+        0.4,
+        garage_height_m,
+        foundation_top_m,
+        terrain,
+        shielding.raw() / 3.0,
+    );
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            stack > 0.0,
+    if stack <= 0.0 {
+        return Err(HaresError::Physics(format!(
             "garage ELA stack coefficient must be positive: {stack}"
-        );
-        assert!(
-            wind > 0.0,
+        )));
+    }
+    if wind <= 0.0 {
+        return Err(HaresError::Physics(format!(
             "garage ELA wind coefficient must be positive: {wind}"
-        );
-        // Walker & Wilson (1998) Table 3: wind_coeff ∝ s_g² where s_g = raw/3.
-        let (_, wind_exposed) = calculate_ela_coefficients(
-            0.4,
-            garage_height_m,
-            0.0,
-            terrain,
-            ShieldingClass::Exposed.raw() / 3.0,
-        );
-        let (_, wind_shielded) = calculate_ela_coefficients(
-            0.4,
-            garage_height_m,
-            0.0,
-            terrain,
-            ShieldingClass::WellShielded.raw() / 3.0,
-        );
-        let observed_ratio = wind_exposed / wind_shielded;
-        let expected_ratio =
-            (ShieldingClass::Exposed.raw() / ShieldingClass::WellShielded.raw()).powi(2);
-        assert!(
-            (observed_ratio - expected_ratio).abs() < 1e-12,
-            "garage ELA wind coefficient shielding scaling violated: \
-             expected Exposed/WellShielded ratio {expected_ratio}, got {observed_ratio} \
-             (exposed={wind_exposed}, shielded={wind_shielded})"
-        );
+        )));
     }
 
-    (stack, wind)
+    Ok((stack, wind))
+}
+
+/// Specific leakage area (leakage area at 4 Pa over floor area) from a
+/// blower-door ACH50 and the average ceiling height (ANSI/RESNET/ICC
+/// 301-2022 Addendum C, Appendix C2.2 Eq. 16; OpenStudio-HPXML v1.12.0
+/// airflow.rb:2820-2822, `get_infiltration_SLA_from_ACH50`):
+/// `ACH50 × 0.283316 × 4^n × h / (50^n × 60 × 144)` with `h` in ft.
+pub fn sla_from_ach50(ach50: f64, average_ceiling_height_m: f64, n_i: f64) -> f64 {
+    let height_ft = crate::units::length_m_to_ft(average_ceiling_height_m);
+    ach50 * 0.283316 * 4.0_f64.powf(n_i) * height_ft / (50.0_f64.powf(n_i) * 60.0 * 144.0)
 }
 
 #[cfg(test)]
@@ -1004,6 +970,92 @@ mod tests {
     #[test]
     fn ashrae_default_n_i_is_065() {
         approx_eq(N_I_DEFAULT, 0.65, 1e-15);
+    }
+
+    #[test]
+    fn natural_ventilation_cw_stays_in_plausible_range() {
+        // Cw interpolates 0.55 (perpendicular) down to 0.0 (leeward); the
+        // full angle sweep plus the NaN fallback must stay in [0, 0.55].
+        for opening_azimuth in 0..=360 {
+            for wind in 0..=360 {
+                let cw =
+                    compute_natural_ventilation_cw(f64::from(opening_azimuth), f64::from(wind));
+                assert!(
+                    (0.0..=0.55).contains(&cw),
+                    "Cw {cw} out of plausible range [0.0, 0.55] at \
+                     opening={opening_azimuth} wind={wind}"
+                );
+            }
+        }
+        let cw_fallback = compute_natural_ventilation_cw(0.0, f64::NAN);
+        assert!(
+            (0.0..=0.55).contains(&cw_fallback),
+            "fallback Cw {cw_fallback} out of plausible range [0.0, 0.55]"
+        );
+    }
+
+    #[test]
+    fn attic_ela_wind_coefficient_scales_with_shielding_squared() {
+        // Walker & Wilson (1998) Table 3: wind_coeff is proportional to s_g²
+        // where s_g = raw/3, so for unchanged heights/terrain the ratio
+        // wind(worse_shielding) / wind(better_shielding) must equal
+        // (raw_worse / raw_better)². Exposed / WellShielded = (0.9/0.3)² = 9.
+        for &attic_height in &[1.5, 2.5, 4.0] {
+            for &building_height in &[0.0, 4.0, 8.0] {
+                let (_, wind_exposed) = attic_ela_coefficients(
+                    attic_height,
+                    building_height,
+                    ShieldingClass::Exposed,
+                    TerrainClass::Suburban,
+                )
+                .unwrap();
+                let (_, wind_shielded) = attic_ela_coefficients(
+                    attic_height,
+                    building_height,
+                    ShieldingClass::WellShielded,
+                    TerrainClass::Suburban,
+                )
+                .unwrap();
+                let observed_ratio = wind_exposed / wind_shielded;
+                let expected_ratio =
+                    (ShieldingClass::Exposed.raw() / ShieldingClass::WellShielded.raw()).powi(2);
+                approx_eq(observed_ratio, expected_ratio, 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn garage_ela_wind_coefficient_scales_with_shielding_squared() {
+        let (_, wind_exposed) =
+            garage_ela_coefficients(2.4, 0.3, ShieldingClass::Exposed, TerrainClass::Suburban)
+                .unwrap();
+        let (_, wind_shielded) = garage_ela_coefficients(
+            2.4,
+            0.3,
+            ShieldingClass::WellShielded,
+            TerrainClass::Suburban,
+        )
+        .unwrap();
+        let observed_ratio = wind_exposed / wind_shielded;
+        let expected_ratio =
+            (ShieldingClass::Exposed.raw() / ShieldingClass::WellShielded.raw()).powi(2);
+        approx_eq(observed_ratio, expected_ratio, 1e-12);
+    }
+
+    #[test]
+    fn attic_and_garage_ela_coefficients_reject_non_positive_heights() {
+        let attic =
+            attic_ela_coefficients(0.0, 5.0, ShieldingClass::Normal, TerrainClass::Suburban);
+        assert!(
+            attic.is_err(),
+            "a zero attic height must be a typed error in every build profile"
+        );
+        let garage =
+            garage_ela_coefficients(-1.0, 0.0, ShieldingClass::Normal, TerrainClass::Suburban);
+        assert!(
+            garage.is_err(),
+            "a negative garage height must be a typed error in every build profile"
+        );
     }
 
     #[test]
@@ -1240,23 +1292,7 @@ mod tests {
 
     /// Named arguments for [`natural_ventilation_flow_m3_s`], used by tests to
     /// avoid a long positional argument list that's easy to transpose.
-    struct NatVentArgs {
-        open_area_m2: f64,
-        t_zone_c: f64,
-        t_outdoor_c: f64,
-        t_base_c: f64,
-        outdoor_humidity_ratio: f64,
-        max_outdoor_humidity_ratio: f64,
-        wind_speed_m_s: f64,
-        zone_volume_m3: f64,
-        opening_azimuth_deg: f64,
-        wind_direction_deg: f64,
-        dh_m: f64,
-        opening_type: OpeningType,
-        zone_height_m: f64,
-    }
-
-    impl NatVentArgs {
+    impl NaturalVentilationInputs {
         /// Default test parameters -- warm zone, cool outdoor, dry outdoor air,
         /// non-trivial window area.
         fn base() -> Self {
@@ -1278,30 +1314,16 @@ mod tests {
         }
 
         fn call(&self) -> (f64, f64, f64, f64) {
-            natural_ventilation_flow_m3_s(
-                self.open_area_m2,
-                self.t_zone_c,
-                self.t_outdoor_c,
-                self.t_base_c,
-                self.outdoor_humidity_ratio,
-                self.max_outdoor_humidity_ratio,
-                self.wind_speed_m_s,
-                self.zone_volume_m3,
-                self.opening_azimuth_deg,
-                self.wind_direction_deg,
-                self.dh_m,
-                self.opening_type,
-                self.zone_height_m,
-            )
+            natural_ventilation_flow_m3_s(*self)
         }
     }
 
     #[test]
     fn nat_vent_zero_when_zone_cooler_than_outdoor() {
-        let args = NatVentArgs {
+        let args = NaturalVentilationInputs {
             t_zone_c: 15.0,
             t_outdoor_c: 18.0,
-            ..NatVentArgs::base()
+            ..NaturalVentilationInputs::base()
         };
         let (q, _, _, _) = args.call();
         approx_eq(q, 0.0, 1e-15);
@@ -1310,8 +1332,8 @@ mod tests {
     #[test]
     fn nat_vent_zero_when_zone_at_comfort_base() {
         // t_zone == t_base → gated off (≤ check)
-        let base = NatVentArgs::base();
-        let args = NatVentArgs {
+        let base = NaturalVentilationInputs::base();
+        let args = NaturalVentilationInputs {
             t_zone_c: base.t_base_c,
             ..base
         };
@@ -1322,8 +1344,8 @@ mod tests {
     #[test]
     fn nat_vent_zero_when_outdoor_too_humid() {
         // humidity == threshold → gated off (>= check)
-        let base = NatVentArgs::base();
-        let args = NatVentArgs {
+        let base = NaturalVentilationInputs::base();
+        let args = NaturalVentilationInputs {
             outdoor_humidity_ratio: base.max_outdoor_humidity_ratio,
             ..base
         };
@@ -1333,9 +1355,9 @@ mod tests {
 
     #[test]
     fn nat_vent_zero_when_no_open_area() {
-        let args = NatVentArgs {
+        let args = NaturalVentilationInputs {
             open_area_m2: 0.0,
-            ..NatVentArgs::base()
+            ..NaturalVentilationInputs::base()
         };
         let (q, _, _, _) = args.call();
         approx_eq(q, 0.0, 1e-15);
@@ -1343,7 +1365,7 @@ mod tests {
 
     #[test]
     fn nat_vent_positive_under_nominal_conditions() {
-        let (q, _, _, _) = NatVentArgs::base().call();
+        let (q, _, _, _) = NaturalVentilationInputs::base().call();
         assert!(
             q > 0.0,
             "expected positive nat vent flow under nominal conditions, got {q}"
@@ -1369,21 +1391,21 @@ mod tests {
         let opening_type = OpeningType::CrossVentilation;
         let zone_height_m = 2.5_f64;
 
-        let (q, q_stack, q_wind, cd) = natural_ventilation_flow_m3_s(
+        let (q, q_stack, q_wind, cd) = natural_ventilation_flow_m3_s(NaturalVentilationInputs {
             open_area_m2,
             t_zone_c,
             t_outdoor_c,
             t_base_c,
-            outdoor_hum,
-            max_hum,
-            wind_speed,
-            volume_m3,
+            outdoor_humidity_ratio: outdoor_hum,
+            max_outdoor_humidity_ratio: max_hum,
+            wind_speed_m_s: wind_speed,
+            zone_volume_m3: volume_m3,
             opening_azimuth_deg,
             wind_direction_deg,
             dh_m,
             opening_type,
             zone_height_m,
-        );
+        });
 
         // Reproduce EnergyPlus formula step-by-step
         // G = 9.80665 m/s², C_TO_K = 273.15
@@ -1410,34 +1432,34 @@ mod tests {
     #[test]
     fn nat_vent_capped_at_20_ach() {
         // Enormous open area should hit the 20-ACH cap.
-        let (q, _, _, _) = natural_ventilation_flow_m3_s(
-            1000.0,
-            35.0,
-            10.0,
-            22.778,
-            0.001,
-            0.0115,
-            20.0,
-            100.0,
-            180.0,
-            180.0,
-            2.0,
-            OpeningType::CrossVentilation,
-            2.5,
-        );
+        let (q, _, _, _) = natural_ventilation_flow_m3_s(NaturalVentilationInputs {
+            open_area_m2: 1000.0,
+            t_zone_c: 35.0,
+            t_outdoor_c: 10.0,
+            t_base_c: 22.778,
+            outdoor_humidity_ratio: 0.001,
+            max_outdoor_humidity_ratio: 0.0115,
+            wind_speed_m_s: 20.0,
+            zone_volume_m3: 100.0,
+            opening_azimuth_deg: 180.0,
+            wind_direction_deg: 180.0,
+            dh_m: 2.0,
+            opening_type: OpeningType::CrossVentilation,
+            zone_height_m: 2.5,
+        });
         let cap = 20.0 * 100.0 / SECONDS_PER_HOUR;
         approx_eq(q, cap, 1e-10);
     }
 
     #[test]
     fn nat_vent_higher_wind_increases_flow() {
-        let base = NatVentArgs::base();
-        let (q_low, _, _, _) = NatVentArgs {
+        let base = NaturalVentilationInputs::base();
+        let (q_low, _, _, _) = NaturalVentilationInputs {
             wind_speed_m_s: 1.0,
-            ..NatVentArgs::base()
+            ..NaturalVentilationInputs::base()
         }
         .call();
-        let (q_high, _, _, _) = NatVentArgs {
+        let (q_high, _, _, _) = NaturalVentilationInputs {
             wind_speed_m_s: 8.0,
             ..base
         }
@@ -1450,13 +1472,13 @@ mod tests {
 
     #[test]
     fn nat_vent_larger_zone_outdoor_diff_increases_flow() {
-        let base = NatVentArgs::base();
-        let (q_small, _, _, _) = NatVentArgs {
+        let base = NaturalVentilationInputs::base();
+        let (q_small, _, _, _) = NaturalVentilationInputs {
             t_zone_c: 25.0,
-            ..NatVentArgs::base()
+            ..NaturalVentilationInputs::base()
         }
         .call();
-        let (q_large, _, _, _) = NatVentArgs {
+        let (q_large, _, _, _) = NaturalVentilationInputs {
             t_zone_c: 35.0,
             ..base
         }
@@ -1488,37 +1510,37 @@ mod tests {
         let wdir = 180.0;
 
         // dh_m = 1.0 → Q_stack ~ sqrt(1.0)
-        let (_, q_stack_1, _, _) = natural_ventilation_flow_m3_s(
-            open_area,
-            t_zone,
-            t_out,
-            t_base,
-            hum,
-            max_hum,
-            wind,
-            vol,
-            azimuth,
-            wdir,
-            1.0,
-            OpeningType::CrossVentilation,
-            2.5,
-        );
+        let (_, q_stack_1, _, _) = natural_ventilation_flow_m3_s(NaturalVentilationInputs {
+            open_area_m2: open_area,
+            t_zone_c: t_zone,
+            t_outdoor_c: t_out,
+            t_base_c: t_base,
+            outdoor_humidity_ratio: hum,
+            max_outdoor_humidity_ratio: max_hum,
+            wind_speed_m_s: wind,
+            zone_volume_m3: vol,
+            opening_azimuth_deg: azimuth,
+            wind_direction_deg: wdir,
+            dh_m: 1.0,
+            opening_type: OpeningType::CrossVentilation,
+            zone_height_m: 2.5,
+        });
         // dh_m = 4.0 → Q_stack ~ sqrt(4.0) = 2.0 × sqrt(1.0)
-        let (_, q_stack_4, _, _) = natural_ventilation_flow_m3_s(
-            open_area,
-            t_zone,
-            t_out,
-            t_base,
-            hum,
-            max_hum,
-            wind,
-            vol,
-            azimuth,
-            wdir,
-            4.0,
-            OpeningType::CrossVentilation,
-            2.5,
-        );
+        let (_, q_stack_4, _, _) = natural_ventilation_flow_m3_s(NaturalVentilationInputs {
+            open_area_m2: open_area,
+            t_zone_c: t_zone,
+            t_outdoor_c: t_out,
+            t_base_c: t_base,
+            outdoor_humidity_ratio: hum,
+            max_outdoor_humidity_ratio: max_hum,
+            wind_speed_m_s: wind,
+            zone_volume_m3: vol,
+            opening_azimuth_deg: azimuth,
+            wind_direction_deg: wdir,
+            dh_m: 4.0,
+            opening_type: OpeningType::CrossVentilation,
+            zone_height_m: 2.5,
+        });
 
         assert!(q_stack_1 > 0.0, "stack flow must be positive: {q_stack_1}");
         assert!(q_stack_4 > 0.0, "stack flow must be positive: {q_stack_4}");
@@ -1547,36 +1569,36 @@ mod tests {
         let wdir = 180.0;
         let zh = 2.5; // zone height for single-sided
 
-        let (_, q_stack_ss, _, _) = natural_ventilation_flow_m3_s(
-            open_area,
-            t_zone,
-            t_out,
-            t_base,
-            hum,
-            max_hum,
-            wind,
-            vol,
-            azimuth,
-            wdir,
-            0.0,
-            OpeningType::SingleSided,
-            zh,
-        );
-        let (_, q_stack_cv, _, _) = natural_ventilation_flow_m3_s(
-            open_area,
-            t_zone,
-            t_out,
-            t_base,
-            hum,
-            max_hum,
-            wind,
-            vol,
-            azimuth,
-            wdir,
-            2.5,
-            OpeningType::CrossVentilation,
-            zh,
-        );
+        let (_, q_stack_ss, _, _) = natural_ventilation_flow_m3_s(NaturalVentilationInputs {
+            open_area_m2: open_area,
+            t_zone_c: t_zone,
+            t_outdoor_c: t_out,
+            t_base_c: t_base,
+            outdoor_humidity_ratio: hum,
+            max_outdoor_humidity_ratio: max_hum,
+            wind_speed_m_s: wind,
+            zone_volume_m3: vol,
+            opening_azimuth_deg: azimuth,
+            wind_direction_deg: wdir,
+            dh_m: 0.0,
+            opening_type: OpeningType::SingleSided,
+            zone_height_m: zh,
+        });
+        let (_, q_stack_cv, _, _) = natural_ventilation_flow_m3_s(NaturalVentilationInputs {
+            open_area_m2: open_area,
+            t_zone_c: t_zone,
+            t_outdoor_c: t_out,
+            t_base_c: t_base,
+            outdoor_humidity_ratio: hum,
+            max_outdoor_humidity_ratio: max_hum,
+            wind_speed_m_s: wind,
+            zone_volume_m3: vol,
+            opening_azimuth_deg: azimuth,
+            wind_direction_deg: wdir,
+            dh_m: 2.5,
+            opening_type: OpeningType::CrossVentilation,
+            zone_height_m: zh,
+        });
 
         // Single-sided Cd=0.20, cross-ventilation Cd=0.60 → ratio = 0.20/0.60 = 1/3
         // Both use stack_height=2.5m, so the stack flows should differ by exactly the Cd ratio
@@ -1602,21 +1624,22 @@ mod tests {
         let azimuth = 180.0;
         let wdir = 180.0;
 
-        let (q_total, q_stack, q_wind, cd) = natural_ventilation_flow_m3_s(
-            open_area,
-            t_zone,
-            t_out,
-            t_base,
-            hum,
-            max_hum,
-            wind,
-            vol,
-            azimuth,
-            wdir,
-            0.0,
-            OpeningType::CrossVentilation,
-            2.5,
-        );
+        let (q_total, q_stack, q_wind, cd) =
+            natural_ventilation_flow_m3_s(NaturalVentilationInputs {
+                open_area_m2: open_area,
+                t_zone_c: t_zone,
+                t_outdoor_c: t_out,
+                t_base_c: t_base,
+                outdoor_humidity_ratio: hum,
+                max_outdoor_humidity_ratio: max_hum,
+                wind_speed_m_s: wind,
+                zone_volume_m3: vol,
+                opening_azimuth_deg: azimuth,
+                wind_direction_deg: wdir,
+                dh_m: 0.0,
+                opening_type: OpeningType::CrossVentilation,
+                zone_height_m: 2.5,
+            });
 
         assert!(
             q_stack.abs() < 1e-15,
@@ -1736,13 +1759,13 @@ mod tests {
     fn nat_vent_diagonal_wind_flow_matches_half_perpendicular() {
         // Diagonal wind (45°) produces ~(0.3/0.55) ≈ 54.5% of perpendicular flow
         // (stack component is identical for both; only wind Cw differs)
-        let base = NatVentArgs::base();
-        let (q_perp, _, _, _) = NatVentArgs {
+        let base = NaturalVentilationInputs::base();
+        let (q_perp, _, _, _) = NaturalVentilationInputs {
             wind_direction_deg: 180.0,
-            ..NatVentArgs::base()
+            ..NaturalVentilationInputs::base()
         }
         .call();
-        let (q_diag, _, _, _) = NatVentArgs {
+        let (q_diag, _, _, _) = NaturalVentilationInputs {
             wind_direction_deg: 180.0 + 45.0,
             ..base
         }
@@ -1770,9 +1793,9 @@ mod tests {
         // Wind from behind the opening (angle > 90°) → zero wind flow.
         // Stack flow may still be non-zero with dh=2.0 but Cw=0 eliminates wind.
         // Wind from 0° (North) while opening faces 180° (South) → angle 180° > 90°
-        let (q_leeward, _, _, _) = NatVentArgs {
+        let (q_leeward, _, _, _) = NaturalVentilationInputs {
             wind_direction_deg: 0.0,
-            ..NatVentArgs::base()
+            ..NaturalVentilationInputs::base()
         }
         .call();
         // With Cw=0, total flow comes entirely from stack
@@ -1801,8 +1824,13 @@ mod tests {
 
     #[test]
     fn ela_coefficients_garage_produces_positive_values() {
-        let (stack, wind) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban);
+        let (stack, wind) = super::garage_ela_coefficients(
+            2.5,
+            0.0,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+        )
+        .unwrap();
         assert!(stack > 0.0, "garage stack_coeff must be positive: {stack}");
         assert!(wind > 0.0, "garage wind_coeff must be positive: {wind}");
     }
@@ -1873,7 +1901,8 @@ mod tests {
     #[test]
     fn attic_ela_convenience_matches_raw() {
         let (s1, w1) =
-            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban);
+            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban)
+                .unwrap();
         let (s2, w2) = super::calculate_ela_coefficients(
             0.75,
             1.5,
@@ -1885,19 +1914,37 @@ mod tests {
         approx_eq(w1, w2, 1e-15);
     }
 
+    /// The garage's leakage is driven at its height above the foundation
+    /// top (airflow.rb:2756-2762, `space_height_ag = foundation_top`).
     #[test]
-    fn garage_ela_convenience_matches_raw() {
-        let (s1, w1) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban);
+    fn garage_ela_convenience_matches_raw_at_the_foundation_top() {
+        let (s1, w1) = super::garage_ela_coefficients(
+            2.5,
+            0.3,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+        )
+        .unwrap();
         let (s2, w2) = super::calculate_ela_coefficients(
             0.4,
             2.5,
-            0.0,
+            0.3,
             TerrainClass::Suburban,
             super::SHIELDING_NORMAL,
         );
         approx_eq(s1, s2, 1e-15);
         approx_eq(w1, w2, 1e-15);
+    }
+
+    /// RESNET 301 Eq. 16 at 3 ACH50 and an 8 ft average ceiling:
+    /// 3 x 0.283316 x 4^0.65 x 8 / (50^0.65 x 60 x 144).
+    #[test]
+    fn sla_from_ach50_follows_resnet_301() {
+        approx_eq(
+            super::sla_from_ach50(3.0, crate::units::length_ft_to_m(8.0), N_I_DEFAULT),
+            0.000_152_397_236_701_146_9,
+            1e-15,
+        );
     }
 
     // --- Shielding class scaling tests (Walker & Wilson 1998 Table 3) ---
@@ -1907,13 +1954,15 @@ mod tests {
         // Walker & Wilson (1998) Table 3: C'_exposed / C'_normal = 0.30 / 0.167 ≈ 1.8
         // wind_coeff ∝ C'², so wind_exposed / wind_normal ≈ 1.8² = 3.24
         let (_, w_normal) =
-            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban);
+            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban)
+                .unwrap();
         let (_, w_exposed) = super::attic_ela_coefficients(
             1.5,
             5.0,
             ShieldingClass::Exposed,
             TerrainClass::Suburban,
-        );
+        )
+        .unwrap();
         let ratio = w_exposed / w_normal;
         let expected_ratio = (ShieldingClass::Exposed.raw() / ShieldingClass::Normal.raw()).powi(2);
         // 0.9/0.5 = 1.8; 1.8² = 3.24
@@ -1925,13 +1974,15 @@ mod tests {
         // Walker & Wilson (1998) Table 3: C'_well_shielded / C'_normal = 0.096 / 0.167 ≈ 0.575
         // wind_coeff ∝ C'², so wind_shielded / wind_normal ≈ (0.3/0.5)² = 0.36
         let (_, w_normal) =
-            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban);
+            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban)
+                .unwrap();
         let (_, w_shielded) = super::attic_ela_coefficients(
             1.5,
             5.0,
             ShieldingClass::WellShielded,
             TerrainClass::Suburban,
-        );
+        )
+        .unwrap();
         let ratio = w_shielded / w_normal;
         let expected_ratio =
             (ShieldingClass::WellShielded.raw() / ShieldingClass::Normal.raw()).powi(2);
@@ -1948,13 +1999,15 @@ mod tests {
             5.0,
             ShieldingClass::WellShielded,
             TerrainClass::Suburban,
-        );
+        )
+        .unwrap();
         let (_, w_exposed) = super::attic_ela_coefficients(
             1.5,
             5.0,
             ShieldingClass::Exposed,
             TerrainClass::Suburban,
-        );
+        )
+        .unwrap();
         let ratio = w_exposed / w_shielded;
         let expected_ratio =
             (ShieldingClass::Exposed.raw() / ShieldingClass::WellShielded.raw()).powi(2);
@@ -1964,10 +2017,20 @@ mod tests {
 
     #[test]
     fn garage_ela_exposed_wind_is_larger_than_normal() {
-        let (_, w_normal) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban);
-        let (_, w_exposed) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Exposed, TerrainClass::Suburban);
+        let (_, w_normal) = super::garage_ela_coefficients(
+            2.5,
+            0.0,
+            ShieldingClass::Normal,
+            TerrainClass::Suburban,
+        )
+        .unwrap();
+        let (_, w_exposed) = super::garage_ela_coefficients(
+            2.5,
+            0.0,
+            ShieldingClass::Exposed,
+            TerrainClass::Suburban,
+        )
+        .unwrap();
         assert!(
             w_exposed > w_normal,
             "exposed wind_coeff must exceed normal: exposed={w_exposed}, normal={w_normal}"
@@ -1976,15 +2039,16 @@ mod tests {
 
     #[test]
     fn garage_ela_normal_is_intermediate_between_shielded_and_exposed() {
-        let (_, w_shielded) = super::garage_ela_coefficients(
-            2.5,
+        let [w_shielded, w_normal, w_exposed] = [
             ShieldingClass::WellShielded,
-            TerrainClass::Suburban,
-        );
-        let (_, w_normal) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Normal, TerrainClass::Suburban);
-        let (_, w_exposed) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Exposed, TerrainClass::Suburban);
+            ShieldingClass::Normal,
+            ShieldingClass::Exposed,
+        ]
+        .map(|shielding| {
+            super::garage_ela_coefficients(2.5, 0.0, shielding, TerrainClass::Suburban)
+                .unwrap()
+                .1
+        });
         assert!(
             w_shielded < w_normal,
             "well-shielded wind_coeff must be less than normal: shielded={w_shielded}, normal={w_normal}"
@@ -1998,39 +2062,58 @@ mod tests {
     #[test]
     fn garage_ela_shielding_does_not_affect_stack_coefficient() {
         // Stack coefficient depends on hor_lk_frac and zone height, not on shielding.
-        let (s_shielded, _) = super::garage_ela_coefficients(
-            2.5,
-            ShieldingClass::WellShielded,
-            TerrainClass::Suburban,
-        );
-        let (s_exposed, _) =
-            super::garage_ela_coefficients(2.5, ShieldingClass::Exposed, TerrainClass::Suburban);
+        let [s_shielded, s_exposed] =
+            [ShieldingClass::WellShielded, ShieldingClass::Exposed].map(|shielding| {
+                super::garage_ela_coefficients(2.5, 0.0, shielding, TerrainClass::Suburban)
+                    .unwrap()
+                    .0
+            });
         approx_eq(s_shielded, s_exposed, 1e-15);
+    }
+
+    /// The wind coefficient's terrain factor is OS-HPXML's Sherman-Grimsrud
+    /// `f_t_SG` (airflow.rb:200-221, 2766): the site multiplier and exponent
+    /// at the zone's top over the 32.8 ft weather station's 1.0 and 0.15,
+    /// `A ((H + H_ag) / 32.8 ft)^γ`. On BEopt_example's attic, 2.361 m of
+    /// hip above a 2.438 m walls top in suburban terrain, f_t is 0.558.
+    #[test]
+    fn ela_wind_terrain_factor_is_os_hpxml_sherman_grimsrud() {
+        let (attic_m, walls_top_m) = (2.360_970_659_726_556_5, 2.4384);
+        let height_ft = (attic_m + walls_top_m) / 0.3048;
+        for (terrain, multiplier, exponent) in [
+            (TerrainClass::Rural, 0.85, 0.20),
+            (TerrainClass::Suburban, 0.67, 0.25),
+            (TerrainClass::Urban, 0.47, 0.35),
+        ] {
+            let f_t: f64 = multiplier * (height_ft / 32.8_f64).powf(exponent);
+            let f_w = (0.5 / 3.0) * (1.0_f64 - 0.75).powf(1.0 / 3.0) * f_t;
+            let (_, wind) = super::attic_ela_coefficients(
+                attic_m,
+                walls_top_m,
+                ShieldingClass::Normal,
+                terrain,
+            )
+            .unwrap();
+            approx_eq(wind, f_w * f_w / 100.0, 1e-15);
+            if terrain == TerrainClass::Suburban {
+                assert!((f_t - 0.558).abs() < 5e-4, "suburban f_t {f_t}");
+            }
+        }
     }
 
     // --- Regression: exposed rural attic produces correct wind coefficient ---
 
     #[test]
     fn attic_ela_exposed_rural_wind_coeff_matches_reference_value() {
-        // Exposed rural attic must produce the wind coefficient derived from the
-        // ASHRAE terrain power-law, not the hardcoded suburban-normal default.
-        //
-        // Attic: hor_lk_frac = 0.75, attic_height = 1.5 m, building_height = 5.0 m.
-        // h_total = 1.5 + 5.0 = 6.5 m.
-        // ShieldingClass::Exposed: raw = 0.9, shielding = 0.9/3 = 0.3.
-        // TerrainClass::Rural: alpha = 0.14, delta_m = 270.0.
-        //
-        // f_t = (δ_met/h_met)^α_met × (h_total/δ_site)^α_site
-        //     = (270.0/10.0)^0.14 × (6.5/270.0)^0.14
-        //     = (6.5/10.0)^0.14              [α_met = α_rural, δ_met = δ_rural]
-        // f_w = 0.3 × (1 − 0.75)^(1/3) × f_t
-        // wind_coeff = f_w² / 100
-
+        // Attic: hor_lk_frac = 0.75, 1.5 m above a 5.0 m walls top, exposed
+        // (s_g = 0.9 / 3) in rural terrain (OS-HPXML 0.85, 0.20):
+        // f_t = 0.85 (6.5 m / 32.8 ft)^0.20, f_w = 0.3 (1 - 0.75)^(1/3) f_t,
+        // wind_coeff = f_w^2 / 100.
         let (_, w) =
-            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Exposed, TerrainClass::Rural);
+            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Exposed, TerrainClass::Rural)
+                .unwrap();
 
-        let f_t = (MET_STATION_DELTA_M / MET_STATION_HEIGHT_M).powf(MET_STATION_ALPHA)
-            * (6.5_f64 / RURAL_DELTA_M).powf(RURAL_ALPHA);
+        let f_t = 0.85 * (6.5_f64 / 0.3048 / 32.8).powf(0.20);
         let f_w = (ShieldingClass::Exposed.raw() / 3.0) * (1.0_f64 - 0.75).powf(1.0 / 3.0) * f_t;
         let expected = f_w * f_w / 100.0;
 
@@ -2038,7 +2121,8 @@ mod tests {
 
         // Additionally verify the result differs from the suburban-normal default.
         let (_, w_default) =
-            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban);
+            super::attic_ela_coefficients(1.5, 5.0, ShieldingClass::Normal, TerrainClass::Suburban)
+                .unwrap();
         assert!(
             (w - w_default).abs() > 1e-15,
             "exposed rural attic wind_coeff must differ from suburban-normal"

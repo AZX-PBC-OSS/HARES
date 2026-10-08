@@ -21,12 +21,21 @@ import sys
 from pathlib import Path
 from typing import TypedDict
 
+import pandas as pd
+
+from ochre_units import register_removed_units
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OCHRE_ROOT = REPO_ROOT / "vendors" / "OCHRE"
 EXAMPLES = REPO_ROOT / "data" / "examples"
 sys.path.insert(0, str(OCHRE_ROOT))
 
-from ochre import Dwelling
+from ochre import Dwelling  # noqa: E402
+import ochre.utils.units  # noqa: E402
+
+# OCHRE's infiltration model converts with a unit name pint 0.25 removed from
+# the default registry; re-register it before any dwelling is built.
+register_removed_units(ochre.utils.units.ureg)
 
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures"
 
@@ -161,7 +170,12 @@ def run_scenario(scenario: Scenario, use_ideal_capacity: bool) -> None:
     ]
     print(f"  HVAC equipment retained: {hvac_names}")
 
-    df, _metrics, _hourly = dwelling.simulate()
+    sim_result = dwelling.simulate()
+    assert isinstance(sim_result, tuple) and len(sim_result) == 3, (
+        "OCHRE simulate must return (df, metrics_by_end_use, ...)"
+    )
+    df = sim_result[0]
+    assert isinstance(df, pd.DataFrame), "OCHRE simulate must return a results DataFrame"
 
     columns_of_interest = [
         col

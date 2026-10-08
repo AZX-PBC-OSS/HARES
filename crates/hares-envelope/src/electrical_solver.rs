@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use hares_physics::units::power_w_to_kw;
-use hares_types::{DomainId, DomainSolver, DomainUpdate, ELECTRICAL, EnvironmentState, PortSlots};
+use hares_types::{
+    DomainId, DomainSolver, DomainUpdate, ELECTRICAL, EnvironmentState, HaresError, PortSlots,
+};
 use thiserror::Error;
 
 const ZIP_SUM_TOLERANCE: f64 = 1e-6;
@@ -195,7 +197,7 @@ impl DomainSolver for ElectricalSolver {
         env: &EnvironmentState,
         _dt: Duration,
         out: &mut DomainUpdate,
-    ) {
+    ) -> std::result::Result<(), HaresError> {
         let p_load = power_w_to_kw(ports.electrical.load_power_w);
         let p_gen = power_w_to_kw(ports.electrical.generation_power_w);
         let load_scale = self.effective_load_scale(&env.grid);
@@ -213,6 +215,7 @@ impl DomainSolver for ElectricalSolver {
         payload.clear();
         payload.push(self.net_active_kw);
         payload.push(self.net_reactive_kvar);
+        Ok(())
     }
 }
 
@@ -232,6 +235,7 @@ mod tests {
 
     fn env_with_voltage(v: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: hares_types::ZoneId(1),
                 temperature_c: 21.0,
@@ -267,7 +271,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -304,7 +309,9 @@ mod tests {
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         assert_eq!(update.domain_id, hares_types::ELECTRICAL);
         assert_eq!(solver.net_active_kw(), 6.0);
     }
@@ -456,7 +463,9 @@ mod tests {
         let mut solver = ElectricalSolver::new(ElectricalSolverConfig::default()).unwrap();
         let env = env_with_voltage(1.0);
         let ports = PortSlots::default();
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(60))
+            .unwrap();
         assert_eq!(update.custom_payload, Some(vec![0.0, 0.0]));
         assert_eq!(solver.net_active_kw(), 0.0);
         assert_eq!(solver.net_reactive_kvar(), 0.0);

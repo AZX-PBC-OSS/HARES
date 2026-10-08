@@ -8,14 +8,14 @@ use hares_equipment::{
     ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
-use hares_types::{FuelType, parse_trimmed_f64};
+use hares_types::{FuelType, Warning, parse_trimmed_f64};
 
 use super::building::{Building, XmlNode};
 use super::data_patches::HpxmlDataPatches;
 use super::equipment::EquipmentSpec;
 use super::water_heater_ua::{UaInputs, WhCategory, ua_from_energy_factor};
 use super::xml_helpers::{
-    child_f64, child_temperature_c, child_text, descendants_named, element_id,
+    child_bool, child_f64, child_temperature_c, child_text, descendants_named, element_id,
 };
 use hares_physics::units as conv;
 
@@ -60,15 +60,113 @@ fn zone_id_for_location(building: &Building, location_text: &str) -> Option<u16>
         .map(|idx| (idx as u16) + 1)
 }
 
+/// Share of a heat pump water heater's sensible gain that lands on interior
+/// partition walls instead of the zone air, by HPXML `Location`. OCHRE
+/// splits 0.5 to the "Interior Wall" surface it builds only in the living
+/// zone (WaterHeater.py "HPWH Wall Interaction Factor", hpxml.py
+/// "Interior Wall"); every other zone has no such wall and OS-HPXML adds all
+/// HPWH gains convectively to the zone air (waterheater.rb,
+/// apply_hpwh_zone_heat_gain_program, frac_radiant 0), so the share there is
+/// 0.0, including a conditioned basement or crawlspace.
+fn hpwh_wall_heat_fraction(location: &str) -> f64 {
+    if super::building::is_living_space_label(location) {
+        0.5
+    } else {
+        0.0
+    }
+}
+
+/// HPXML enclosure surface elements, the set OS-HPXML's
+/// `HPXML::Building#surfaces` searches in `has_location` (hpxml.rb:1790-1797).
+const ENCLOSURE_SURFACES: [&str; 7] = [
+    "Roof",
+    "RimJoist",
+    "Wall",
+    "FoundationWall",
+    "Floor",
+    "FrameFloor",
+    "Slab",
+];
+
+/// Whether any enclosure surface is adjacent to `location` (OS-HPXML
+/// `has_location`, hpxml.rb:1790-1797).
+fn has_surface_adjacent_to(building: &Building, location: &str) -> bool {
+    let Some(enclosure) = building.details_xml.child("Enclosure") else {
+        return false;
+    };
+    ENCLOSURE_SURFACES.iter().any(|surface| {
+        descendants_named(enclosure, surface)
+            .into_iter()
+            .any(|node| {
+                ["InteriorAdjacentTo", "ExteriorAdjacentTo"]
+                    .iter()
+                    .any(|side| child_text(node, side).is_some_and(|text| text.trim() == location))
+            })
+    })
+}
+
+/// The location OS-HPXML gives a water heater with no `<Location>`:
+/// defaults.rb:6104-6132 (`get_water_heater_location`, v1.12.0, after
+/// ANSI/RESNET/ICC 301-2022C), called from defaults.rb:3401-3406 with the
+/// building's first IECC climate zone: the HPXML's, else the one OS-HPXML
+/// derives from the weather station (`Building::climate_zone_iecc`). The
+/// first location of the zone's hierarchy the building has surfaces in
+/// wins. Conditioned space, last in every hierarchy, is present in every
+/// HPXML building (the schema requires conditioned floor area; HARES always
+/// builds the conditioned zone), and older files spell it "living space".
+fn default_water_heater_location(
+    building: &Building,
+) -> std::result::Result<&'static str, super::HpxmlError> {
+    let hierarchy: &[&'static str] = match building.climate_zone_iecc.as_deref() {
+        Some("1A" | "1B" | "1C" | "2A" | "2B" | "2C" | "3A" | "3B" | "3C") => {
+            &["garage", "conditioned space"]
+        }
+        Some("4A" | "4B" | "4C" | "5A" | "5B" | "5C" | "6A" | "6B" | "6C" | "7" | "8") => &[
+            "basement - unconditioned",
+            "basement - conditioned",
+            "conditioned space",
+        ],
+        None => &[
+            "basement - conditioned",
+            "basement - unconditioned",
+            "conditioned space",
+        ],
+        Some(other) => {
+            return Err(super::HpxmlError::Parse(
+                format!(
+                    "unexpected IECC climate zone '{other}' for the water heater location default"
+                )
+                .into(),
+            ));
+        }
+    };
+    hierarchy
+        .iter()
+        .copied()
+        .find(|&location| {
+            has_surface_adjacent_to(building, location)
+                || (location == "conditioned space"
+                    && building.conditioned_zone_index().ok().flatten().is_some())
+        })
+        .ok_or_else(|| {
+            super::HpxmlError::Parse(
+                "the building has none of the water heater default locations"
+                    .to_string()
+                    .into(),
+            )
+        })
+}
+
 pub(super) fn resolve_water_heaters(
     building: &Building,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
     data_patches: Option<&HpxmlDataPatches>,
+    warnings: &mut Vec<Warning>,
 ) -> std::result::Result<(), super::HpxmlError> {
     let details = &building.details_xml;
     let (avg_water_draw_l_per_day, n_bedrooms) =
-        parse_avg_water_draw_and_bedrooms(details, data_patches);
+        parse_avg_water_draw_and_bedrooms(details, data_patches)?;
 
     for wh in descendants_named(details, "WaterHeatingSystem") {
         let wh_type = child_text(wh, "WaterHeaterType").unwrap_or_default();
@@ -76,14 +174,28 @@ pub(super) fn resolve_water_heaters(
         let name = canonical_water_heater_name(&wh_type, fuel)?;
         let setpoint_c = child_temperature_c(wh);
         let performance_adjustment = child_f64(wh, "PerformanceAdjustment");
-        let location = child_text(wh, "Location");
-        let zone_name = location.as_deref().map(|location| {
-            let zone_type = super::building::parse_zone_label(location);
-            super::building::zone_key(&zone_type)
-        });
-        let zone_id = location
-            .as_deref()
-            .and_then(|loc| zone_id_for_location(building, loc));
+        let location = match child_text(wh, "Location") {
+            Some(location) => location,
+            None => {
+                let location = default_water_heater_location(building)?;
+                warnings.push(Warning::new(
+                    "hpxml",
+                    format!(
+                        "{name} ({}) has no Location; defaulted to '{location}' as OS-HPXML does",
+                        element_id(wh).unwrap_or_default()
+                    ),
+                ));
+                location.to_string()
+            }
+        };
+        // The raw HPXML-normalized Location text goes into the typed configs'
+        // `zone_type` verbatim, so the placements that name space with no
+        // modeled zone ("other heated space", "other housing unit", ...) stay
+        // distinguishable downstream instead of collapsing into one
+        // "adjacent" bucket. The zone-id lookup keeps using the collapsed
+        // zone key below.
+        let zone_id = zone_id_for_location(building, &location);
+        let zone_name = Some(location.clone());
 
         let energy_factor = child_f64(wh, "EnergyFactor");
         let uniform_energy_factor = child_f64(wh, "UniformEnergyFactor");
@@ -308,7 +420,7 @@ pub(super) fn resolve_water_heaters(
                     backup_efficiency: None,
                     shr: None,
                     lost_heat_fraction: None,
-                    wall_heat_fraction: None,
+                    wall_heat_fraction: Some(hpwh_wall_heat_fraction(&location)),
                     capacity_biquadratic_coeffs: None,
                     cop_biquadratic_coeffs: None,
                     cop_curve_is_normalized: None,
@@ -433,11 +545,12 @@ pub(super) fn resolve_water_heaters(
 /// `<WaterHeating>/<WaterFixture>/<LowFlow>`, the `<WaterFixturesUsageMultiplier>` extension,
 /// and `<HotWaterDistribution>` to compute the OCHRE/ANSI-RESNET 301 draw estimate.
 ///
-/// Returns `(None, None)` when bedroom count is absent (required for both outputs).
+/// A missing bedroom count falls back to [`resolve_bedroom_count`], so both
+/// outputs are always present.
 fn parse_avg_water_draw_and_bedrooms(
     details: &XmlNode,
     data_patches: Option<&HpxmlDataPatches>,
-) -> (Option<f64>, Option<f64>) {
+) -> Result<(Option<f64>, Option<f64>), super::HpxmlError> {
     let n_bedrooms_raw = match details
         .path(&[
             "BuildingSummary",
@@ -450,7 +563,8 @@ fn parse_avg_water_draw_and_bedrooms(
         None => resolve_bedroom_count(None, data_patches),
     };
 
-    // Adjust bedroom count by occupancy and house type (OCHRE hpxml.py:789-797).
+    // Adjust bedroom count by occupancy and house type (OCHRE hpxml.py:789-797),
+    // the shared adjustment the appliance energies also apply.
     let n_occupants = details
         .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
         .and_then(|n| parse_trimmed_f64(&n.text));
@@ -461,24 +575,22 @@ fn parse_avg_water_draw_and_bedrooms(
             "ResidentialFacilityType",
         ])
         .map(|n| n.text.trim().to_ascii_lowercase());
-    let n_bedrooms = match (n_occupants, house_type.as_deref()) {
-        (Some(occ), Some("single-family attached" | "apartment unit")) => {
-            (-0.68 + 1.09 * occ).max(0.0)
-        }
-        (Some(occ), _) => (-1.47 + 1.69 * occ).max(0.0),
-        (None, _) => n_bedrooms_raw,
-    };
+    let n_bedrooms = super::resolve_loads::adjusted_bedroom_count(
+        n_occupants,
+        house_type.as_deref(),
+        n_bedrooms_raw,
+    );
 
     // Fixture efficiency: low-flow if any WaterFixture has <LowFlow>true</LowFlow>.
-    let fixture_efficiency = if details
-        .path(&["WaterHeating"])
-        .map(|wh_section| {
-            descendants_named(wh_section, "WaterFixture")
-                .iter()
-                .any(|f| child_text(f, "LowFlow").is_some_and(|v| v.eq_ignore_ascii_case("true")))
-        })
-        .unwrap_or(false)
-    {
+    let mut any_low_flow = false;
+    if let Some(wh_section) = details.path(&["WaterHeating"]) {
+        for fixture in descendants_named(wh_section, "WaterFixture") {
+            any_low_flow |=
+                child_bool(fixture, "LowFlow", "WaterFixture/LowFlow", "Water Fixture")?
+                    .unwrap_or(false);
+        }
+    }
+    let fixture_efficiency = if any_low_flow {
         FixtureEfficiency::LowFlow
     } else {
         FixtureEfficiency::Standard
@@ -500,7 +612,7 @@ fn parse_avg_water_draw_and_bedrooms(
         &distribution,
     );
 
-    (Some(draw_l_per_day), Some(n_bedrooms))
+    Ok((Some(draw_l_per_day), Some(n_bedrooms)))
 }
 
 /// Public entry point: extract the bedroom count from a parsed [`Building`].
@@ -543,6 +655,7 @@ where
         fuel_type,
         parameters,
         zip_params: defaults.zip_params(&name).cloned(),
+        typed_overrides: serde_json::Map::new(),
         typed_config: Some(typed_config),
         system_id: None,
         related_hvac_idref: None,
@@ -831,7 +944,7 @@ fn try_build_gas_wh_config(name: &str, params: &Map<String, Value>) -> Option<Eq
     let cfg = GasWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
-        loop_id: None,
+        loop_id: param_u16(params, "loop_id"),
         fuel_type: param_fuel(params),
         tank_volume_m3: param_f64(params, "tank_volume_m3"),
         tank_height_m: param_f64(params, "tank_height_m"),
@@ -872,7 +985,7 @@ fn try_build_elec_res_wh_config(
     let cfg = ElectricResistanceWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
-        loop_id: None,
+        loop_id: param_u16(params, "loop_id"),
         tank_volume_m3: param_f64(params, "tank_volume_m3"),
         tank_height_m: param_f64(params, "tank_height_m"),
         energy_factor: param_f64(params, "energy_factor"),
@@ -912,7 +1025,7 @@ fn try_build_hpwh_config(name: &str, params: &Map<String, Value>) -> Option<Equi
     let cfg = HeatPumpWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
-        loop_id: None,
+        loop_id: param_u16(params, "loop_id"),
         tank_volume_m3: param_f64(params, "tank_volume_m3"),
         tank_height_m: param_f64(params, "tank_height_m"),
         cop: param_f64(params, "cop"),
@@ -962,7 +1075,7 @@ fn try_build_tankless_wh_config(
     let cfg = TanklessWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
-        loop_id: None,
+        loop_id: param_u16(params, "loop_id"),
         fuel_type: param_fuel(params),
         energy_factor: param_f64(params, "energy_factor"),
         uniform_energy_factor: param_f64(params, "uniform_energy_factor"),
@@ -1038,7 +1151,6 @@ pub fn rebuild_wh_typed_config(name: &str, params: &Map<String, Value>) -> Optio
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::needless_update)]
     use super::*;
     use crate::hpxml::parse_xml_document;
     use serde_json::Value;
@@ -1069,7 +1181,19 @@ mod tests {
                 longitude_deg: None,
                 utc_offset_h: None,
             },
-            zones: vec![],
+            // Every HPXML building has its conditioned zone.
+            zones: vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: None,
+                volume_m3: None,
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
+            }],
             boundaries: vec![],
             windows: vec![],
             skylights: vec![],
@@ -1078,7 +1202,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -1089,16 +1213,19 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            conditioned_volume_m3: 400.0,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: details,
+            parse_warnings: Vec::new(),
         }
     }
 
@@ -1107,6 +1234,112 @@ mod tests {
         let name = canonical_water_heater_name("storage water heater", FuelType::Propane)
             .expect("propane storage WH should map to gas class");
         assert_eq!(name, "Gas Water Heater");
+    }
+
+    /// The post-autosize typed-config rebuild keeps the loop id each
+    /// water-heater class was wired or allocated: every builder reads it
+    /// from the raw parameters under the key the wiring pass and the loop
+    /// allocator mirror it into (`loop_id` for the water-heater classes,
+    /// `boiler_loop_id` for the indirect tank).
+    #[test]
+    fn rebuild_keeps_the_params_loop_id_for_every_water_heater_class() {
+        for (name, key) in [
+            ("Gas Water Heater", "loop_id"),
+            ("Electric Resistance Water Heater", "loop_id"),
+            ("Tankless Water Heater", "loop_id"),
+            ("Heat Pump Water Heater", "loop_id"),
+            ("Indirect Tank", "boiler_loop_id"),
+        ] {
+            let mut params = serde_json::Map::new();
+            params.insert(
+                key.to_string(),
+                serde_json::Value::Number(serde_json::Number::from(3_u16)),
+            );
+            let cfg = rebuild_wh_typed_config(name, &params)
+                .unwrap_or_else(|| panic!("{name} rebuilds from params"));
+            let loop_id = match name {
+                "Indirect Tank" => {
+                    cfg.typed::<IndirectTankConfig>()
+                        .expect("indirect tank config")
+                        .boiler_loop_id
+                }
+                "Gas Water Heater" => {
+                    cfg.typed::<GasWaterHeaterConfig>()
+                        .expect("gas wh config")
+                        .loop_id
+                }
+                "Electric Resistance Water Heater" => {
+                    cfg.typed::<ElectricResistanceWaterHeaterConfig>()
+                        .expect("electric resistance wh config")
+                        .loop_id
+                }
+                "Tankless Water Heater" => {
+                    cfg.typed::<TanklessWaterHeaterConfig>()
+                        .expect("tankless wh config")
+                        .loop_id
+                }
+                "Heat Pump Water Heater" => {
+                    cfg.typed::<HeatPumpWaterHeaterConfig>()
+                        .expect("heat pump wh config")
+                        .loop_id
+                }
+                other => panic!("unmatched water heater class: {other}"),
+            };
+            assert_eq!(
+                loop_id,
+                Some(3),
+                "{name} rebuild keeps the params {key} it was wired or allocated"
+            );
+        }
+    }
+
+    /// Without a loop id in the parameters the rebuild leaves the field
+    /// unset, exactly as before the id ever travelled there.
+    #[test]
+    fn rebuild_without_a_params_loop_id_leaves_it_none() {
+        for (name, key) in [
+            ("Gas Water Heater", "loop_id"),
+            ("Electric Resistance Water Heater", "loop_id"),
+            ("Tankless Water Heater", "loop_id"),
+            ("Heat Pump Water Heater", "loop_id"),
+            ("Indirect Tank", "boiler_loop_id"),
+        ] {
+            let params = serde_json::Map::new();
+            let cfg = rebuild_wh_typed_config(name, &params)
+                .unwrap_or_else(|| panic!("{name} rebuilds from params"));
+            let loop_id = match name {
+                "Indirect Tank" => {
+                    cfg.typed::<IndirectTankConfig>()
+                        .expect("indirect tank config")
+                        .boiler_loop_id
+                }
+                "Gas Water Heater" => {
+                    cfg.typed::<GasWaterHeaterConfig>()
+                        .expect("gas wh config")
+                        .loop_id
+                }
+                "Electric Resistance Water Heater" => {
+                    cfg.typed::<ElectricResistanceWaterHeaterConfig>()
+                        .expect("electric resistance wh config")
+                        .loop_id
+                }
+                "Tankless Water Heater" => {
+                    cfg.typed::<TanklessWaterHeaterConfig>()
+                        .expect("tankless wh config")
+                        .loop_id
+                }
+                "Heat Pump Water Heater" => {
+                    cfg.typed::<HeatPumpWaterHeaterConfig>()
+                        .expect("heat pump wh config")
+                        .loop_id
+                }
+                other => panic!("unmatched water heater class: {other}"),
+            };
+            assert_eq!(
+                loop_id, None,
+                "{name} rebuild with no {key} param leaves the loop id unset"
+            );
+        }
     }
 
     #[test]
@@ -1238,6 +1471,7 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1270,8 +1504,14 @@ mod tests {
         let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
 
         let spec = specs
             .iter()
@@ -1306,6 +1546,7 @@ mod tests {
                       <NumberofBedrooms>4</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1333,8 +1574,14 @@ mod tests {
         let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
 
         let cfg: TanklessWaterHeaterConfig = specs
             .iter()
@@ -1364,6 +1611,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1392,7 +1640,6 @@ mod tests {
 
         let patches = HpxmlDataPatches {
             number_of_bedrooms: Some(5.0),
-            ..Default::default()
         };
 
         let mut specs = Vec::new();
@@ -1401,6 +1648,7 @@ mod tests {
             &DefaultsStore::empty(),
             &mut specs,
             Some(&patches),
+            &mut Vec::new(),
         )
         .expect("water heaters must resolve");
 
@@ -1432,6 +1680,7 @@ mod tests {
                     <BuildingConstruction>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1459,8 +1708,14 @@ mod tests {
         let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
 
         let cfg: TanklessWaterHeaterConfig = specs
             .iter()
@@ -1491,6 +1746,7 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1518,8 +1774,14 @@ mod tests {
         let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
 
         let cfg: TanklessWaterHeaterConfig = specs
             .iter()
@@ -1548,6 +1810,7 @@ mod tests {
                       <NumberofBedrooms>4</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1576,7 +1839,6 @@ mod tests {
 
         let patches = HpxmlDataPatches {
             number_of_bedrooms: Some(1.0),
-            ..Default::default()
         };
 
         let mut specs = Vec::new();
@@ -1585,6 +1847,7 @@ mod tests {
             &DefaultsStore::empty(),
             &mut specs,
             Some(&patches),
+            &mut Vec::new(),
         )
         .expect("water heaters must resolve");
 
@@ -1617,6 +1880,7 @@ mod tests {
                       <NumberofBedrooms>3.7</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1644,8 +1908,14 @@ mod tests {
         let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
 
         let cfg: TanklessWaterHeaterConfig = specs
             .iter()
@@ -1740,8 +2010,14 @@ mod tests {
         let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
 
         let spec = specs
             .iter()
@@ -1791,8 +2067,14 @@ mod tests {
         let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
 
         let spec = specs
             .iter()
@@ -1846,8 +2128,14 @@ mod tests {
         let root = parse_xml_document(xml).expect("xml must parse");
         let building = building_for_test(&root);
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
         let spec = specs
             .iter()
             .find(|s| s.name == "Gas Water Heater")
@@ -2079,8 +2367,14 @@ mod tests {
         let root = parse_xml_document(xml).expect("xml must parse");
         let building = building_for_test(&root);
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
         let spec = specs
             .iter()
             .find(|s| s.name == "Heat Pump Water Heater")
@@ -2134,8 +2428,14 @@ mod tests {
         let root = parse_xml_document(xml).expect("xml must parse");
         let building = building_for_test(&root);
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
         let spec = specs
             .iter()
             .find(|s| s.name == "Gas Water Heater")
@@ -2198,8 +2498,14 @@ mod tests {
         let root = parse_xml_document(xml).expect("xml must parse");
         let building = building_for_test(&root);
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
         let spec = specs
             .iter()
             .find(|s| s.name.contains("Tankless"))
@@ -2247,8 +2553,14 @@ mod tests {
         let root = parse_xml_document(xml).expect("xml must parse");
         let building = building_for_test(&root);
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
         let spec = specs
             .iter()
             .find(|s| s.name.contains("Tankless"))
@@ -2299,6 +2611,7 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -2318,8 +2631,14 @@ mod tests {
         let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("combi boiler with storage tank must resolve successfully");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("combi boiler with storage tank must resolve successfully");
 
         let spec = specs
             .iter()
@@ -2364,6 +2683,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 },
                 Zone {
                     zone_type: ZoneType::Garage,
@@ -2374,6 +2695,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 },
                 Zone {
                     zone_type: ZoneType::Attic,
@@ -2384,6 +2707,8 @@ mod tests {
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 },
             ],
             boundaries: vec![],
@@ -2394,7 +2719,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -2405,21 +2730,24 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            conditioned_volume_m3: 400.0,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: XmlNode {
                 name: String::new(),
                 attrs: std::collections::HashMap::new(),
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         };
 
         // Conditioned zone is at index 0 → zone_id 1
@@ -2451,10 +2779,18 @@ mod tests {
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <Enclosure>
                     <Walls />
+                    <Slabs>
+                      <Slab>
+                        <SystemIdentifier id="garage-slab"/>
+                        <InteriorAdjacentTo>garage</InteriorAdjacentTo>
+                        <Area units="ft2">400</Area>
+                      </Slab>
+                    </Slabs>
                     <Garages>
                       <Garage>
                         <SystemIdentifier id="g1"/>
@@ -2486,8 +2822,14 @@ mod tests {
         "#;
         let building = crate::hpxml::building::parse_building(xml).expect("building must parse");
         let mut specs = Vec::new();
-        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
 
         let spec = specs
             .iter()
@@ -2507,5 +2849,19 @@ mod tests {
             "water heater in garage must have zone_id=2"
         );
         assert_eq!(cfg.zone_type.as_deref(), Some("garage"));
+    }
+
+    #[test]
+    fn fixture_low_flow_is_an_xs_boolean() {
+        crate::hpxml::xml_helpers::assert_reads_xs_boolean("WaterFixture/LowFlow", |v| {
+            let details = parse_xml_document(&format!(
+                "<BuildingDetails><BuildingSummary><BuildingConstruction>\
+                 <NumberofBedrooms>3</NumberofBedrooms></BuildingConstruction></BuildingSummary>\
+                 <WaterHeating><WaterFixture><WaterFixtureType>shower head</WaterFixtureType>\
+                 <LowFlow>{v}</LowFlow></WaterFixture></WaterHeating></BuildingDetails>"
+            ))
+            .expect("xml");
+            parse_avg_water_draw_and_bedrooms(&details, None).map(|(draw, _)| draw)
+        });
     }
 }

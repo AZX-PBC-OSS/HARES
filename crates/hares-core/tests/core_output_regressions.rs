@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use hares_core::actor::testing::TestEnvBuilder;
-use hares_core::actors::BatteryManagementActor;
+use hares_core::actors::{BatteryManagementActor, BmsParams};
 use hares_core::{Actor, Dwelling, DwellingConfig, StepResult};
 use hares_io::SimulationConfig;
 use hares_types::{
@@ -38,9 +38,15 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
         .and_then(|value| value.as_integer())
         .unwrap_or(1);
 
+    // The fixture configs carry no output settings, so the parsed config
+    // defaults to writing to a working-directory-relative path; these tests
+    // read in-memory state, so the recorder is off.
+    let mut sim_config = sim_config;
+    sim_config.write_output = false;
+
     let config = DwellingConfig {
         hpxml_path: root.join("building.xml"),
-        schedule_path: root.join("schedule.csv"),
+        schedule_path: Some(root.join("schedule.csv")),
         weather_path: root.join("weather.epw"),
         defaults_path: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")),
         sim_config,
@@ -57,7 +63,7 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
 #[test]
 fn energy_balance_residual_has_entry_per_zone_and_becomes_nonzero() {
     let mut dwelling = load_fixture("cz2a_gas_furnace_ac_res_wh");
-    let telemetry = dwelling.telemetry();
+    let telemetry = dwelling.telemetry().unwrap();
     assert_eq!(
         telemetry.energy_balance_residuals.len(),
         telemetry.zone_names.len(),
@@ -67,7 +73,7 @@ fn energy_balance_residual_has_entry_per_zone_and_becomes_nonzero() {
     let mut saw_nonzero = false;
     for _ in 0..12 {
         dwelling.step().expect("fixture step must succeed");
-        let tel = dwelling.telemetry();
+        let tel = dwelling.telemetry().unwrap();
         assert_eq!(
             tel.energy_balance_residuals.len(),
             tel.zone_names.len(),
@@ -120,7 +126,7 @@ fn sum_fuel_consumption_w(dwelling: &Dwelling) -> f64 {
 }
 
 fn assert_snapshot_aligned(dwelling: &Dwelling, step: &StepResult) {
-    let telemetry = dwelling.telemetry();
+    let telemetry = dwelling.telemetry().unwrap();
     let equipment = dwelling.equipment();
 
     assert_eq!(
@@ -275,18 +281,20 @@ fn gas_fuel_core_output_matches_dwelling_aggregation() {
 fn actors_observe_previous_equipment_core_snapshot() {
     let mut actor = BatteryManagementActor::new(
         "Battery1",
-        BmsMode::SelfConsumption {
-            min_soc: 0.1,
-            max_soc: 0.8,
-            solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+        BmsParams {
+            bms_mode: BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.8,
+                solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
+            },
+            grid_export_rule: GridExportRule::Unrestricted,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            price_schedule: None,
+            steps_per_day: 24,
+            min_dwell_steps: 0,
         },
-        GridExportRule::Unrestricted,
-        5.0,
-        5.0,
-        None,
-        24,
-        0,
     );
     let battery_id = EquipmentId(42);
     let mut id_map = std::collections::HashMap::new();

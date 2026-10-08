@@ -6,6 +6,8 @@ use rayon::prelude::*;
 use std::time::Duration;
 
 fn bench_rl_step(c: &mut Criterion) {
+    let temp = tempfile::tempdir().expect("benchmark directory");
+    let dir = temp.path();
     let mut group = c.benchmark_group("rl_step");
     group.sample_size(20);
     group.warm_up_time(Duration::from_secs(1));
@@ -14,9 +16,10 @@ fn bench_rl_step(c: &mut Criterion) {
     group.bench_function("dwelling_step_single", |b| {
         b.iter_batched(
             || {
-                let path = common::unique_temp_path("hares-bench-rl-single", "toml");
+                let path = common::numbered_path(dir, "hares-bench-rl-single", "toml");
                 common::synthetic_toml_case(&path, 86_400);
-                Dwelling::from_toml_config(&path).expect("create dwelling")
+                Dwelling::from_toml_config_with_write_output(&path, Some(false))
+                    .expect("create dwelling")
             },
             |mut dwelling| {
                 let _ = dwelling.step().expect("single dwelling step");
@@ -31,12 +34,14 @@ fn bench_rl_step(c: &mut Criterion) {
                 || {
                     (0..*n)
                         .map(|idx| {
-                            let path = common::unique_temp_path(
+                            let path = common::numbered_path(
+                                dir,
                                 &format!("hares-bench-rl-vec-{idx}"),
                                 "toml",
                             );
                             common::synthetic_toml_case(&path, 86_400);
-                            Dwelling::from_toml_config(&path).expect("create vector dwelling")
+                            Dwelling::from_toml_config_with_write_output(&path, Some(false))
+                                .expect("create vector dwelling")
                         })
                         .collect::<Vec<_>>()
                 },

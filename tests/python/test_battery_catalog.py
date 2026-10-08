@@ -110,14 +110,17 @@ class TestBatteryCatalogFactories:
         bat = Battery.tesla_pw3()
         dw.add_battery(bat)
         dw.apply_control("Tesla Powerwall 3", ControlSignal.soc_target(target=0.95))
-        initial_soc = None
+        initial_soc: float | None = None
+        tel = dw.telemetry().equipment()
+        idx = tel["names"].index("Tesla Powerwall 3")
         for _ in range(5):
             dw.step()
             tel = dw.telemetry().equipment()
             idx = tel["names"].index("Tesla Powerwall 3")
             if initial_soc is None:
-                initial_soc = tel["soc"][idx]
-        final_soc = tel["soc"][idx]
+                initial_soc = float(tel["soc"][idx])
+        assert initial_soc is not None, "initial SOC must be captured on the first step"
+        final_soc = float(tel["soc"][idx])
         assert final_soc > initial_soc, (
             f"Catalog battery should charge: initial={initial_soc}, final={final_soc}"
         )
@@ -210,11 +213,12 @@ class TestBatteryThermalBehavior:
         dw.apply_control("Tesla Powerwall 3", ControlSignal.soc_target(target=0.9))
 
         charged = False
+        soc: float = 0.0
         for _ in range(180):  # 3 hours
             dw.step()
             tel = dw.telemetry().equipment()
             idx = tel["names"].index("Tesla Powerwall 3")
-            soc = tel["soc"][idx]
+            soc = float(tel["soc"][idx])
             if soc > 0.52:  # default initial is ~0.5
                 charged = True
                 break
@@ -245,18 +249,18 @@ class TestBatteryThermalBehavior:
         dw.add_battery(bat)
         dw.apply_control("Enphase IQ 5P", ControlSignal.soc_target(target=0.9))
 
-        initial_soc = None
-        final_soc = None
+        initial_soc: float | None = None
+        final_soc: float | None = None
         for _ in range(60):
             dw.step()
             tel = dw.telemetry().equipment()
             idx = tel["names"].index("Enphase IQ 5P")
-            soc = tel["soc"][idx]
+            soc = float(tel["soc"][idx])
             if initial_soc is None:
                 initial_soc = soc
             final_soc = soc
 
-        assert final_soc > initial_soc, (
+        assert final_soc is not None and initial_soc is not None and final_soc > initial_soc, (
             f"Enphase IQ 5P (min_charge_temp=-20°C) should charge at -19°C "
             f"(with derating). Initial={initial_soc:.4f}, final={final_soc:.4f}"
         )

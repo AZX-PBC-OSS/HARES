@@ -24,21 +24,27 @@
 //! single-speed equipment when multispeed CSV is unavailable) rather than
 //! failing hard on incomplete data.
 //!
-//! Three CSV-based defaults files warn on missing file
-//! (`HVAC Multispeed Parameters.csv`, `water_heating/default_paramters.csv`,
-//! and `ev/vehicle_mapping.csv`). All other optional defaults files
+//! Two CSV-based defaults files warn on missing file
+//! (`HVAC Multispeed Parameters.csv` and
+//! `water_heating/default_paramters.csv`). All other optional defaults files
 //! (TOML directories, generator efficiency curve, PV panel defaults) return an
 //! empty collection or `None` silently.
+//!
+//! `ev/vehicle_mapping.csv` is the exception: a missing, unopenable or
+//! malformed mapping fails the defaults load with a `HaresError` naming the
+//! path, the row number and the field.
 //!
 //! Set the environment variable `HARES_STRICT_DEFAULTS=1` to elevate a missing
 //! `HVAC Multispeed Parameters.csv` from a warning to a hard error
 //! ([`DefaultsError::MissingFile`]) — useful for CI and test environments that
-//! must validate complete data sets. The water heating and EV CSV loaders warn
-//! but are not escalated by `HARES_STRICT_DEFAULTS`. All other optional loaders
-//! are unaffected.
+//! must validate complete data sets. The water heating CSV loader warns but is
+//! not escalated by `HARES_STRICT_DEFAULTS`; the EV vehicle mapping load
+//! errors regardless of the flag. All other optional loaders are unaffected.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use hares_types::HaresError;
 
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::BTU_PER_HR_PER_W;
@@ -433,6 +439,11 @@ pub enum DefaultsError {
     },
     #[error("missing critical row '{row_name}' in {path}")]
     MissingRow { path: PathBuf, row_name: String },
+    /// An EV vehicle-mapping load failure from
+    /// `load_vehicle_mapping_csv`: the message names the path, the row
+    /// number and the field.
+    #[error(transparent)]
+    VehicleMapping(#[from] HaresError),
 }
 
 impl DefaultsStore {
@@ -501,7 +512,7 @@ impl DefaultsStore {
         store.envelope = load_toml_dir(&defaults_dir.join("envelope"))?;
         store.ev = load_toml_dir(&defaults_dir.join("ev"))?;
         store.generator = load_toml_dir(&defaults_dir.join("generator"))?;
-        store.generator_curve = load_generator_curve(&defaults_dir.join("generator"));
+        store.generator_curve = Some(load_generator_curve(&defaults_dir.join("generator"))?);
         store.loads = load_toml_dir(&defaults_dir.join("loads"))?;
         store.pv = load_toml_dir(&defaults_dir.join("pv"))?;
         store.pv_panel = load_pv_panel_defaults(&defaults_dir.join("pv"))?;
@@ -511,20 +522,7 @@ impl DefaultsStore {
                 .join("water_heating")
                 .join("default_paramters.csv"),
         );
-        store.ev_mapping = load_vehicle_mapping_csv(&defaults_dir.join("ev"));
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if let Some(ref wh) = store.water_heating_csv {
-                check_water_heating_invariants(wh);
-            }
-            if store.generator_curve.is_none() {
-                tracing::warn!(
-                    "generator efficiency curve file not loaded; \
-                     falling back to hardcoded 6-point default curve"
-                );
-            }
-            check_csv_header_invariants(defaults_dir);
-        }
+        store.ev_mapping = Some(load_vehicle_mapping_csv(&defaults_dir.join("ev"))?);
 
         Ok(store)
     }
@@ -1375,23 +1373,23 @@ fn load_hvac_multispeed_csv(
         // and AFUE is a percentage, so this check is restricted to SEER and EER
         // entries where COP ≈ efficiency_value / BTU_PER_HR_PER_W.
         // EnergyPlus StandardRatings.hh:71 defines ConvFromSIToIP = 3.412141633.
-        if efficiency_kind == "SEER" || efficiency_kind == "EER" {
-            if let Some(&last_cop) = cops.last() {
-                let expected = efficiency_value / BTU_PER_HR_PER_W;
-                let deviation = (last_cop - expected).abs() / expected;
-                if deviation > 0.30 {
-                    tracing::warn!(
-                        hvac_name = %hvac_name,
-                        %efficiency_kind,
-                        efficiency_value,
-                        last_cop,
-                        expected_cop = expected,
-                        deviation_pct = deviation * 100.0,
-                        "CSV row rated-speed COP deviates from SEER/EER-derived \
+        if (efficiency_kind == "SEER" || efficiency_kind == "EER")
+            && let Some(&last_cop) = cops.last()
+        {
+            let expected = efficiency_value / BTU_PER_HR_PER_W;
+            let deviation = (last_cop - expected).abs() / expected;
+            if deviation > 0.30 {
+                tracing::warn!(
+                    hvac_name = %hvac_name,
+                    %efficiency_kind,
+                    efficiency_value,
+                    last_cop,
+                    expected_cop = expected,
+                    deviation_pct = deviation * 100.0,
+                    "CSV row rated-speed COP deviates from SEER/EER-derived \
                          expectation by {:.1}% (>30%); values may be erroneous",
-                        deviation * 100.0,
-                    );
-                }
+                    deviation * 100.0,
+                );
             }
         }
 
@@ -1412,11 +1410,8 @@ fn load_hvac_multispeed_csv(
     // rating. A reversal indicates a data entry error where COPs from a
     // lower-efficiency unit were copied to a higher-rated row. The check
     // uses a 1% tolerance for floating-point rounding, comparing against the
-    // proportional COP expected from the HSPF ratio.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        check_hspf_cop_monotonicity(&rows);
-    }
+    // proportional COP expected from the HSPF ratio; it runs as a unit test
+    // over the shipped multispeed CSV (`hspf_cop_monotone_in_shipped_csv`).
 
     if rows.is_empty() {
         tracing::warn!(
@@ -1488,14 +1483,15 @@ fn parse_efficiency_cell(raw: &str) -> (f64, String) {
     (value, kind)
 }
 
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn check_hspf_cop_monotonicity(rows: &[HvacMultispeedParameters]) {
+#[cfg(test)]
+fn check_hspf_cop_monotonicity(rows: &[HvacMultispeedParameters]) -> Vec<(String, usize)> {
     // Group rows by (hvac_name, number_of_speeds, efficiency_kind) and
     // validate that COPs at each speed are monotonically increasing with
     // the efficiency rating. A COP that is lower for a higher-rated unit
     // than for a lower-rated unit signals a data entry error.
     use std::collections::HashMap;
 
+    let mut findings = Vec::new();
     let mut groups: HashMap<(String, usize, String), Vec<&HvacMultispeedParameters>> =
         HashMap::new();
     for row in rows {
@@ -1532,25 +1528,12 @@ fn check_hspf_cop_monotonicity(rows: &[HvacMultispeedParameters]) {
                 let expected_cop = cop_prev * (eff_curr / eff_prev);
                 if cop_curr < expected_cop * 0.99 {
                     let stage_num = stage + 1;
-                    tracing::warn!(
-                        hvac_name = %sorted[i].hvac_name,
-                        prev_hvac_name = %sorted[i - 1].hvac_name,
-                        eff_kind = %sorted[i].efficiency_kind,
-                        prev_eff = eff_prev,
-                        curr_eff = eff_curr,
-                        stage = stage_num,
-                        prev_cop = cop_prev,
-                        curr_cop = cop_curr,
-                        expected_cop,
-                        n_speeds = sorted[i].number_of_speeds,
-                        "COP at speed {stage_num} is {cop_curr:.3} but {eff_prev:.2}-rated \
-                         unit has COP {cop_prev:.3} at same speed; expected ~{expected_cop:.3} \
-                         from proportional scaling of the higher rating"
-                    );
+                    findings.push((sorted[i].hvac_name.clone(), stage_num));
                 }
             }
         }
     }
+    findings
 }
 
 fn normalize_equipment_key(raw: &str) -> String {
@@ -1672,49 +1655,40 @@ fn load_water_heating_csv(path: &Path) -> Option<WaterHeatingDefaults> {
 /// The CSV must have columns: `profile_column`, `vehicle_type`, `profile_file`,
 /// `capacity_kwh`, `charger_power_kw`, `efficiency`.
 ///
-/// Returns `None` if the file does not exist (non-fatal — the mapping is a
-/// data-integrity guard, not a required startup resource). However, if the file
-/// exists but has fewer than 50 rows (one per Vehicle 1–50), a `tracing::error!`
-/// is emitted and `None` is returned.
-///
-/// Malformed rows (unparseable numeric fields) are skipped with a warning.
-fn load_vehicle_mapping_csv(ev_dir: &Path) -> Option<VehicleMapping> {
+/// Any defect is a load error naming the path, the row number and the field:
+/// a missing or unopenable file, a malformed CSV row, an empty required
+/// field, a non-positive or unparseable `capacity_kwh` or `charger_power_kw`,
+/// an `efficiency` outside `(0.0, 1.0]` or unparseable. Fewer than 50
+/// entries (one per Vehicle 1-50 in EV Profiles.csv) is the same error
+/// class.
+fn load_vehicle_mapping_csv(ev_dir: &Path) -> Result<VehicleMapping, HaresError> {
     let path = ev_dir.join("vehicle_mapping.csv");
     if !path.exists() {
-        tracing::warn!(
-            path = %path.display(),
-            "EV vehicle mapping CSV not found; \
+        return Err(HaresError::Io(format!(
+            "EV vehicle mapping CSV not found at '{}'; \
              vehicle-to-type mapping unavailable",
-        );
-        return None;
+            path.display()
+        )));
     }
-    let mut rdr = match csv::ReaderBuilder::new()
+    let mut rdr = csv::ReaderBuilder::new()
         .comment(Some(b'#'))
         .from_path(&path)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "failed to open EV vehicle mapping CSV"
-            );
-            return None;
-        }
-    };
+        .map_err(|err| {
+            HaresError::Io(format!(
+                "failed to open EV vehicle mapping CSV '{}': {err}",
+                path.display()
+            ))
+        })?;
     let mut entries: Vec<VehicleMappingEntry> = Vec::new();
     for result in rdr.records() {
-        let record = match result {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "skipping malformed row in EV vehicle mapping CSV"
-                );
-                continue;
-            }
-        };
+        let record = result.map_err(|err| {
+            let row = csv_error_row_label(err.position());
+            HaresError::Io(format!(
+                "EV vehicle mapping CSV '{}': {row} is malformed: {err}",
+                path.display()
+            ))
+        })?;
+        let row = record_row_label(&record);
         let profile_column = record.get(0).unwrap_or("").trim().to_string();
         let vehicle_type = record.get(1).unwrap_or("").trim().to_string();
         let profile_file = record.get(2).unwrap_or("").trim().to_string();
@@ -1723,83 +1697,50 @@ fn load_vehicle_mapping_csv(ev_dir: &Path) -> Option<VehicleMapping> {
         let efficiency_str = record.get(5).unwrap_or("");
 
         if profile_column.is_empty() || vehicle_type.is_empty() || profile_file.is_empty() {
-            tracing::warn!(
-                profile_column = %profile_column,
-                "skipping EV vehicle mapping row with empty required fields"
-            );
-            continue;
+            let mut missing: Vec<&str> = Vec::new();
+            if profile_column.is_empty() {
+                missing.push("'profile_column'");
+            }
+            if vehicle_type.is_empty() {
+                missing.push("'vehicle_type'");
+            }
+            if profile_file.is_empty() {
+                missing.push("'profile_file'");
+            }
+            return Err(HaresError::Io(format!(
+                "EV vehicle mapping CSV '{}': {row} has an empty required \
+                 field: {}",
+                path.display(),
+                missing.join(", ")
+            )));
         }
 
-        let capacity_kwh = match capacity_str.trim().parse::<f64>() {
-            Ok(v) if v.is_finite() && v > 0.0 => v,
-            Ok(_) => {
-                tracing::warn!(
-                    profile_column = %profile_column,
-                    capacity_kwh = %capacity_str.trim(),
-                    "non-positive capacity_kwh in EV vehicle mapping CSV"
-                );
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    profile_column = %profile_column,
-                    capacity_kwh = %capacity_str.trim(),
-                    error = %e,
-                    "unparseable capacity_kwh in EV vehicle mapping CSV"
-                );
-                continue;
-            }
-        };
+        let capacity_kwh = vehicle_mapping_numeric_field(
+            &path,
+            &row,
+            "capacity_kwh",
+            capacity_str,
+            "a positive finite number",
+            |v| v > 0.0,
+        )?;
 
-        let charger_power_kw = match charger_str.trim().parse::<f64>() {
-            Ok(v) if v.is_finite() && v > 0.0 => v,
-            Ok(_) => {
-                tracing::warn!(
-                    profile_column = %profile_column,
-                    charger_power_kw = %charger_str.trim(),
-                    "non-positive charger_power_kw in EV vehicle mapping CSV"
-                );
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    profile_column = %profile_column,
-                    charger_power_kw = %charger_str.trim(),
-                    error = %e,
-                    "unparseable charger_power_kw in EV vehicle mapping CSV"
-                );
-                continue;
-            }
-        };
+        let charger_power_kw = vehicle_mapping_numeric_field(
+            &path,
+            &row,
+            "charger_power_kw",
+            charger_str,
+            "a positive finite number",
+            |v| v > 0.0,
+        )?;
 
-        let efficiency = match efficiency_str.trim().parse::<f64>() {
-            Ok(v) if v.is_finite() && v > 0.0 && v <= 1.0 => v,
-            Ok(v) if v.is_finite() => {
-                tracing::warn!(
-                    profile_column = %profile_column,
-                    efficiency = v,
-                    "EV vehicle mapping efficiency {v} not in range (0.0, 1.0] — check data"
-                );
-                continue;
-            }
-            Ok(_) => {
-                tracing::warn!(
-                    profile_column = %profile_column,
-                    efficiency = %efficiency_str.trim(),
-                    "non-finite efficiency value in EV vehicle mapping CSV"
-                );
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    profile_column = %profile_column,
-                    efficiency = %efficiency_str.trim(),
-                    error = %e,
-                    "unparseable efficiency in EV vehicle mapping CSV"
-                );
-                continue;
-            }
-        };
+        let efficiency = vehicle_mapping_numeric_field(
+            &path,
+            &row,
+            "efficiency",
+            efficiency_str,
+            "a finite number in (0.0, 1.0]",
+            |v| v > 0.0 && v <= 1.0,
+        )?;
 
         entries.push(VehicleMappingEntry {
             profile_column,
@@ -1812,29 +1753,65 @@ fn load_vehicle_mapping_csv(ev_dir: &Path) -> Option<VehicleMapping> {
     }
 
     if entries.len() < 50 {
-        // EV Profiles.csv has exactly 50 vehicle columns (Vehicle 1–50).
+        // EV Profiles.csv has exactly 50 vehicle columns (Vehicle 1-50).
         // Fewer than 50 mapping entries means some columns have no type
         // association and would silently produce None at query time.
         let expected = 50;
         let actual = entries.len();
-        tracing::error!(
-            expected,
-            actual,
-            "EV vehicle mapping CSV has only {actual} of {expected} expected \
-             entries (one per Vehicle 1–50 in EV Profiles.csv). Simulation \
-             results will be incorrect if unmapped vehicle columns are used — \
-             apply the correct vehicle type to every column in \
-             defaults/ev/vehicle_mapping.csv.",
-        );
-        return None;
+        return Err(HaresError::Io(format!(
+            "EV vehicle mapping CSV '{}' has only {actual} of {expected} \
+             expected entries (one per Vehicle 1-50 in EV Profiles.csv): \
+             every vehicle column must have a type association in \
+             vehicle_mapping.csv",
+            path.display()
+        )));
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        check_ev_mapping_invariants(&entries);
-    }
+    Ok(VehicleMapping { entries })
+}
 
-    Some(VehicleMapping { entries })
+/// The 1-based line label for one CSV record read from a reader: the row
+/// number the record starts on.
+fn record_row_label(record: &csv::StringRecord) -> String {
+    match record.position() {
+        Some(position) => format!("row {}", position.line()),
+        None => "unknown row".to_string(),
+    }
+}
+
+/// The 1-based line label for a CSV read error, from the error's own
+/// position when the parser recorded one.
+fn csv_error_row_label(position: Option<&csv::Position>) -> String {
+    match position {
+        Some(position) => format!("row {}", position.line()),
+        None => "unknown row".to_string(),
+    }
+}
+
+/// Parse one required numeric field of a vehicle-mapping row, or fail the
+/// load naming the path, the row number and the field.
+fn vehicle_mapping_numeric_field(
+    path: &Path,
+    row: &str,
+    field: &str,
+    raw: &str,
+    requirement: &str,
+    is_valid: fn(f64) -> bool,
+) -> Result<f64, HaresError> {
+    let trimmed = raw.trim();
+    match trimmed.parse::<f64>() {
+        Ok(value) if value.is_finite() && is_valid(value) => Ok(value),
+        Ok(_) => Err(HaresError::Io(format!(
+            "EV vehicle mapping CSV '{}': {row} field '{field}': value \
+             '{trimmed}' must be {requirement}",
+            path.display()
+        ))),
+        Err(err) => Err(HaresError::Io(format!(
+            "EV vehicle mapping CSV '{}': {row} field '{field}': unparseable \
+             value '{trimmed}' ({err})",
+            path.display()
+        ))),
+    }
 }
 
 /// Invariant checks for EV vehicle mapping loaded at startup.
@@ -1847,10 +1824,11 @@ fn load_vehicle_mapping_csv(ev_dir: &Path) -> Option<VehicleMapping> {
 /// - Every `profile_file` is one of the four known archetypes.
 /// - `capacity_kwh` values match the vehicle type's known capacity.
 /// - `efficiency` is in (0.0, 1.0].
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn check_ev_mapping_invariants(entries: &[VehicleMappingEntry]) {
+#[cfg(test)]
+fn check_ev_mapping_invariants(entries: &[VehicleMappingEntry]) -> Vec<String> {
     use std::collections::HashSet;
 
+    let mut findings = Vec::new();
     let expected_columns: HashSet<String> = (1..=50).map(|i| format!("Vehicle {i}")).collect();
     let actual_columns: HashSet<&str> = entries.iter().map(|e| e.profile_column.as_str()).collect();
 
@@ -1861,23 +1839,22 @@ fn check_ev_mapping_invariants(entries: &[VehicleMappingEntry]) {
         .cloned()
         .collect();
     if !missing.is_empty() {
-        tracing::error!(
-            missing = ?missing,
+        findings.push(format!(
             "EV vehicle mapping CSV is missing entries for {} vehicle \
-             column(s). Every Vehicle 1–50 in EV Profiles.csv must have \
-             a corresponding entry in vehicle_mapping.csv.",
+             column(s): {missing:?}. Every Vehicle 1-50 in EV Profiles.csv \
+             must have a corresponding entry in vehicle_mapping.csv.",
             missing.len()
-        );
+        ));
     }
 
     // Check for duplicate profile_column values.
     let mut seen: HashSet<&str> = HashSet::new();
     for entry in entries {
         if !seen.insert(&entry.profile_column) {
-            tracing::error!(
-                profile_column = %entry.profile_column,
-                "duplicate profile_column in EV vehicle mapping CSV"
-            );
+            findings.push(format!(
+                "duplicate profile_column in EV vehicle mapping CSV: {}",
+                entry.profile_column
+            ));
         }
     }
 
@@ -1885,12 +1862,10 @@ fn check_ev_mapping_invariants(entries: &[VehicleMappingEntry]) {
     const KNOWN_TYPES: &[&str] = &["MY2030_BEV_SUV", "MY2030_PHEV_SUV"];
     for entry in entries {
         if !KNOWN_TYPES.contains(&entry.vehicle_type.as_str()) {
-            tracing::warn!(
-                profile_column = %entry.profile_column,
-                vehicle_type = %entry.vehicle_type,
-                known_types = ?KNOWN_TYPES,
-                "unrecognized vehicle_type in EV vehicle mapping CSV"
-            );
+            findings.push(format!(
+                "unrecognized vehicle_type in EV vehicle mapping CSV: {} ({})",
+                entry.vehicle_type, entry.profile_column
+            ));
         }
     }
 
@@ -1898,12 +1873,10 @@ fn check_ev_mapping_invariants(entries: &[VehicleMappingEntry]) {
     const KNOWN_PROFILES: &[&str] = &["pdf_Veh1", "pdf_Veh2", "pdf_Veh3", "pdf_Veh4"];
     for entry in entries {
         if !KNOWN_PROFILES.contains(&entry.profile_file.as_str()) {
-            tracing::warn!(
-                profile_column = %entry.profile_column,
-                profile_file = %entry.profile_file,
-                known_profiles = ?KNOWN_PROFILES,
-                "unrecognized profile_file in EV vehicle mapping CSV"
-            );
+            findings.push(format!(
+                "unrecognized profile_file in EV vehicle mapping CSV: {} ({})",
+                entry.profile_file, entry.profile_column
+            ));
         }
     }
 
@@ -1917,29 +1890,26 @@ fn check_ev_mapping_invariants(entries: &[VehicleMappingEntry]) {
             _ => continue, // unrecognized types flagged above
         };
         if (entry.capacity_kwh - expected_capacity).abs() > 0.01 {
-            tracing::warn!(
-                profile_column = %entry.profile_column,
-                vehicle_type = %entry.vehicle_type,
-                capacity_kwh = entry.capacity_kwh,
-                expected_capacity_kwh = expected_capacity,
-                "capacity_kwh deviates from expected value for vehicle_type"
-            );
+            findings.push(format!(
+                "capacity_kwh {} deviates from expected {} for vehicle_type {} ({})",
+                entry.capacity_kwh, expected_capacity, entry.vehicle_type, entry.profile_column
+            ));
         }
     }
 
     // Check efficiency range.
     for entry in entries {
         if entry.efficiency <= 0.0 || entry.efficiency > 1.0 {
-            tracing::error!(
-                profile_column = %entry.profile_column,
-                efficiency = entry.efficiency,
-                "efficiency must be in (0.0, 1.0]"
-            );
+            findings.push(format!(
+                "efficiency must be in (0.0, 1.0], got {} ({})",
+                entry.efficiency, entry.profile_column
+            ));
         }
     }
+    findings
 }
 
-/// Invariant checks for water heater defaults loaded at startup.
+/// Invariant checks for water heater defaults.
 ///
 /// Validates:
 /// - UA values are within the physically plausible range (0.5–5.0 W/K) for residential tanks
@@ -1949,28 +1919,25 @@ fn check_ev_mapping_invariants(entries: &[VehicleMappingEntry]) {
 /// - Every required field has a corresponding entry
 /// - Every row has a non-empty Units column
 /// - Every unit string is in the known set; unrecognized units produce a warning
-///
-/// Core invariants that would corrupt simulation results produce `tracing::error!`;
-/// minor anomalies produce `tracing::warn!`.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
+#[cfg(test)]
+fn check_water_heating_invariants(wh: &WaterHeatingDefaults) -> Vec<String> {
+    let mut findings = Vec::new();
     // Unit validation: every row must have a non-empty, recognized unit.
     for row in &wh.rows {
         if row.units.is_empty() {
-            tracing::error!(
-                row_name = %row.name,
-                row_value = row.value,
-                "water heating defaults row has empty Units column; \
-                 use 'dimensionless' for dimensionless parameters"
-            );
+            findings.push(format!(
+                "water heating defaults row '{}' has empty Units column; \
+                 use 'dimensionless' for dimensionless parameters",
+                row.name
+            ));
         } else if !KNOWN_WATER_HEATING_UNITS.contains(&row.units.as_str()) {
-            tracing::warn!(
-                row_name = %row.name,
-                row_unit = %row.units,
-                "unrecognized unit for water heating defaults row; \
+            findings.push(format!(
+                "unrecognized unit '{}' for water heating defaults row '{}'; \
                  known units: {}",
+                row.units,
+                row.name,
                 KNOWN_WATER_HEATING_UNITS.join(", ")
-            );
+            ));
         }
     }
 
@@ -1981,22 +1948,17 @@ fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
         if let Some(ua) = wh.ua_r12_w_per_k(gal) {
             // UA must be within physically plausible range for residential tanks.
             if !(0.5..=5.0).contains(&ua) {
-                tracing::error!(
-                    gal,
-                    ua_w_per_k = ua,
+                findings.push(format!(
                     "UA for {gal}-gal tank ({ua:.2} W/K) outside plausible range [0.5, 5.0] W/K"
-                );
+                ));
             }
-            if let Some(prev) = prev_ua {
-                if ua <= prev {
-                    tracing::error!(
-                        gal,
-                        prev_ua = prev,
-                        ua_w_per_k = ua,
-                        "UA for {gal}-gal tank ({ua:.2} W/K) not greater than \
-                         previous size ({prev:.2} W/K); UA must increase monotonically with tank volume"
-                    );
-                }
+            if let Some(prev) = prev_ua
+                && ua <= prev
+            {
+                findings.push(format!(
+                    "UA for {gal}-gal tank ({ua:.2} W/K) not greater than \
+                     previous size ({prev:.2} W/K); UA must increase monotonically with tank volume"
+                ));
             }
             prev_ua = Some(ua);
         }
@@ -2021,15 +1983,12 @@ fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
         ("UEF_HPWH_65gal", 1.0, 5.0),
         ("UEF_HPWH_80gal", 1.0, 5.0),
     ] {
-        if let Some(uef) = wh.uef(uef_name) {
-            if !(min..=max).contains(&uef) {
-                tracing::error!(
-                    name = %uef_name,
-                    uef_value = uef,
-                    valid_range = format!("[{min}, {max}]"),
-                    "UEF value {uef} for {uef_name} outside valid range [{min}, {max}]"
-                );
-            }
+        if let Some(uef) = wh.uef(uef_name)
+            && !(min..=max).contains(&uef)
+        {
+            findings.push(format!(
+                "UEF value {uef} for {uef_name} outside valid range [{min}, {max}]"
+            ));
         }
     }
 
@@ -2041,14 +2000,10 @@ fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
             let expected_l = m3 * 1000.0;
             let pct_error = ((l - expected_l) / expected_l).abs() * 100.0;
             if pct_error > 1.0 {
-                tracing::error!(
-                    gal,
-                    vol_m3 = m3,
-                    vol_l = l,
-                    expected_l = expected_l,
-                    pct_error,
-                    "{gal}-gal tank: m³→L conversion error {pct_error:.2}% (m³={m3:.4} → {expected_l:.1} L, got {l:.1} L)"
-                );
+                findings.push(format!(
+                    "{gal}-gal tank: m³→L conversion error {pct_error:.2}% \
+                     (m³={m3:.4} → {expected_l:.1} L, got {l:.1} L)"
+                ));
             }
         }
     }
@@ -2133,12 +2088,12 @@ fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
     ];
     for &name in required {
         if wh.get(name).is_none() {
-            tracing::error!(
-                name,
+            findings.push(format!(
                 "required water heating defaults CSV field '{name}' is missing"
-            );
+            ));
         }
     }
+    findings
 }
 
 /// Check equipment defaults directories for CSV files whose parameter names
@@ -2147,16 +2102,16 @@ fn check_water_heating_invariants(wh: &WaterHeatingDefaults) {
 ///
 /// Unrecognised CSV files are not consumed by the loader (which only reads
 /// `.toml` from equipment directories via [`load_toml_dir`]), but they create
-/// confusion and can mislead users. This check emits a warning for each
-/// misplacement detected so the operator can clean it up.
+/// confusion and can mislead users. Returns one finding per misplaced
+/// parameter detected.
 ///
 /// The check inspects CSV files in the generator directory and flags any file
 /// whose "Name" column contains battery-specific parameter names.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn check_csv_header_invariants(defaults_dir: &Path) {
+#[cfg(test)]
+fn check_csv_header_invariants(defaults_dir: &Path) -> Vec<String> {
     // Battery-specific parameters that should never appear in non-battery
-    // equipment parameter files. Derived from defaults/battery/default_parameters.csv
-    // and battery/ directory files.
+    // equipment parameter files. Derived from the battery defaults the
+    // loader reads (the defaults/battery/*.toml tree via load_toml_dir).
     const BATTERY_ONLY_PARAMS: &[&str] = &[
         "capacity_kwh",
         "soc_init",
@@ -2181,15 +2136,7 @@ fn check_csv_header_invariants(defaults_dir: &Path) {
         "thermal_c",
     ];
 
-    let findings =
-        check_dir_for_foreign_csv_params(&defaults_dir.join("generator"), BATTERY_ONLY_PARAMS);
-    for finding in &findings {
-        tracing::warn!(
-            directory = %defaults_dir.join("generator").display(),
-            finding = %finding,
-            "misplaced battery parameter file detected in generator defaults directory"
-        );
-    }
+    check_dir_for_foreign_csv_params(&defaults_dir.join("generator"), BATTERY_ONLY_PARAMS)
 }
 
 /// Scan an equipment defaults directory for CSV files whose "Name" column
@@ -2197,7 +2144,7 @@ fn check_csv_header_invariants(defaults_dir: &Path) {
 ///
 /// Returns human-readable strings describing each violation found.
 /// Callers convert these to warnings, errors, or test assertions.
-#[cfg(any(test, debug_assertions, feature = "check_invariants"))]
+#[cfg(test)]
 fn check_dir_for_foreign_csv_params(dir: &Path, foreign_params: &[&str]) -> Vec<String> {
     let mut findings = Vec::new();
     if !dir.exists() {
@@ -2275,69 +2222,55 @@ fn check_dir_for_foreign_csv_params(dir: &Path, foreign_params: &[&str]) -> Vec<
 /// Load the generator efficiency curve from
 /// `defaults/generator/efficiency_curve.toml`.
 ///
-/// Returns `None` silently when the file is missing — the caller falls back to
-/// the hardcoded 6-point curve at
-/// [`hares_equipment::generator::EfficiencyModel::default_curve_points`].
-fn load_generator_curve(dir: &Path) -> Option<GeneratorEfficiencyCurve> {
+/// The file is shipped with the defaults tree, so a missing, malformed or
+/// invalid curve is a typed error naming the file, not a silent fallback to
+/// a hardcoded curve.
+fn load_generator_curve(dir: &Path) -> Result<GeneratorEfficiencyCurve, DefaultsError> {
     let path = dir.join("efficiency_curve.toml");
     if !path.exists() {
-        return None;
+        return Err(DefaultsError::MissingFile(path));
     }
-    match std::fs::read_to_string(&path) {
-        Ok(content) => match toml::from_str::<GeneratorEfficiencyCurve>(&content) {
-            Ok(curve) => {
-                // Validate the points at load time.
-                if curve.points.len() < 2 {
-                    tracing::warn!(
-                        path = %path.display(),
-                        "generator efficiency curve has fewer than 2 points; ignoring"
-                    );
-                    return None;
-                }
-                for point in &curve.points {
-                    if !point.capacity_ratio.is_finite()
-                        || !(0.0..=1.0).contains(&point.capacity_ratio)
-                        || !point.efficiency_ratio.is_finite()
-                        || point.efficiency_ratio < 0.0
-                    {
-                        tracing::warn!(
-                            path = %path.display(),
-                            capacity_ratio = point.capacity_ratio,
-                            efficiency_ratio = point.efficiency_ratio,
-                            "invalid generator efficiency curve point; ignoring file"
-                        );
-                        return None;
-                    }
-                }
-                for window in curve.points.windows(2) {
-                    if window[1].capacity_ratio <= window[0].capacity_ratio {
-                        tracing::warn!(
-                            path = %path.display(),
-                            "generator efficiency curve points not strictly increasing; ignoring"
-                        );
-                        return None;
-                    }
-                }
-                Some(curve)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "malformed generator efficiency curve TOML; ignoring"
-                );
-                None
-            }
-        },
-        Err(e) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "I/O error reading generator efficiency curve; ignoring"
-            );
-            None
+    let content = std::fs::read_to_string(&path).map_err(|e| DefaultsError::Io {
+        path: path.clone(),
+        source: e,
+    })?;
+    let curve: GeneratorEfficiencyCurve =
+        toml::from_str(&content).map_err(|e| DefaultsError::MalformedToml {
+            path: path.clone(),
+            reason: e.to_string(),
+        })?;
+    // Validate the points at load time.
+    if curve.points.len() < 2 {
+        return Err(DefaultsError::MalformedToml {
+            path: path.clone(),
+            reason: "generator efficiency curve has fewer than 2 points".into(),
+        });
+    }
+    for point in &curve.points {
+        if !point.capacity_ratio.is_finite()
+            || !(0.0..=1.0).contains(&point.capacity_ratio)
+            || !point.efficiency_ratio.is_finite()
+            || point.efficiency_ratio < 0.0
+        {
+            return Err(DefaultsError::MalformedToml {
+                path: path.clone(),
+                reason: format!(
+                    "invalid generator efficiency curve point \
+                     (capacity_ratio={}, efficiency_ratio={})",
+                    point.capacity_ratio, point.efficiency_ratio
+                ),
+            });
         }
     }
+    for window in curve.points.windows(2) {
+        if window[1].capacity_ratio <= window[0].capacity_ratio {
+            return Err(DefaultsError::MalformedToml {
+                path: path.clone(),
+                reason: "generator efficiency curve points not strictly increasing".into(),
+            });
+        }
+    }
+    Ok(curve)
 }
 
 #[cfg(test)]
@@ -2348,6 +2281,12 @@ mod tests {
     fn create_subdirs(root: &Path, names: &[&str]) {
         for name in names {
             std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+        // The generator efficiency curve is mandatory at load (a missing
+        // file is a typed error, there is no hardcoded fallback), so every
+        // fixture loading a full store ships a minimal valid one.
+        if names.contains(&"generator") {
+            write_minimal_generator_curve(&root.join("generator"));
         }
     }
 
@@ -2364,6 +2303,23 @@ iq = 0.0
 pq = 0.0
 pf = 1.0
 "#,
+        )
+        .unwrap();
+        // The generator efficiency curve is mandatory at load (a missing
+        // file is a typed error, there is no hardcoded fallback), so every
+        // fixture loading a store ships a minimal valid one. `create_subdirs`
+        // writes the same file for fixtures that use it; the two are
+        // idempotent.
+        let gen_dir = path.join("generator");
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        write_minimal_generator_curve(&gen_dir);
+    }
+
+    fn write_minimal_generator_curve(gen_dir: &Path) {
+        std::fs::write(
+            gen_dir.join("efficiency_curve.toml"),
+            "[[points]]\ncapacity_ratio = 0.0\nefficiency_ratio = 0.0\n\
+             [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
         )
         .unwrap();
     }
@@ -2472,6 +2428,7 @@ pf = 1.0
     fn loads_hvac_curve_set_from_toml() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
 
         let hvac_dir = dir.path().join("hvac_cooling");
         std::fs::create_dir_all(&hvac_dir).unwrap();
@@ -2522,6 +2479,7 @@ tdb_bounds = [18.33, 51.66]
     fn loads_equipment_defaults_from_toml_subdir() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
 
         let battery_dir = dir.path().join("battery");
         std::fs::create_dir_all(&battery_dir).unwrap();
@@ -2561,6 +2519,7 @@ round_trip_efficiency = 0.9
     fn multispeed_lookup_loads_capacity_cop_and_shr_arrays() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         std::fs::write(
             dir.path().join("HVAC Multispeed Parameters.csv"),
             "HVAC Name,HVAC Efficiency,Number of Speeds,Capacity Ratio 1,Air Flow Ratio 1,COP 1,Capacity Ratio 2,Air Flow Ratio 2,COP 2,SHR 1,SHR 2\n\
@@ -2581,6 +2540,7 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
     fn missing_multispeed_csv_lookup_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         // No "HVAC Multispeed Parameters.csv" file — simulate missing file.
         // Strictness pinned to false so an ambient HARES_STRICT_DEFAULTS
         // (e.g. a CI environment) cannot flip this warning-path test.
@@ -2613,6 +2573,7 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
     fn strict_missing_multispeed_csv_returns_missing_file_error() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         // No CSV file created — with strict defaults, this must error. The
         // strictness is injected via the internal seam, not the process env:
         // `set_var` is process-global state under `cargo test`'s shared-process
@@ -2641,6 +2602,7 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
     fn multispeed_csv_header_only_produces_empty_result() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         // Header row only — no data rows, so all rows are skipped.
         std::fs::write(
             dir.path().join("HVAC Multispeed Parameters.csv"),
@@ -3036,10 +2998,181 @@ max_Tdb,{tdb_max}\n",
         }
     }
 
+    /// Helper: the shipped defaults tree at the repository root.
+    fn shipped_defaults_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults")
+    }
+
+    /// COP at every speed must increase with the efficiency rating across
+    /// the shipped multispeed CSV (the runtime check moved here: the data
+    /// is static, shipped with the repository).
+    ///
+    /// The shipped inverter-driven mini-split part-load curves and the
+    /// fixed-speed AC's top SEER bin are measured curves, not rating-scaled,
+    /// so they legitimately deviate from proportional scaling (the reason
+    /// the runtime check only warned. The deviating (family, speed) set is
+    /// pinned: a data edit that introduces a deviation outside it fails
+    /// here.
+    #[test]
+    fn hspf_cop_monotone_in_shipped_csv() {
+        let defaults_dir = shipped_defaults_dir();
+        let rows =
+            load_hvac_multispeed_csv(&defaults_dir.join("HVAC Multispeed Parameters.csv"), true)
+                .expect("shipped multispeed CSV loads");
+        let findings = check_hspf_cop_monotonicity(&rows);
+
+        let mut by_family: std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> =
+            std::collections::BTreeMap::new();
+        for (name, stage) in findings {
+            by_family.entry(name).or_default().insert(stage);
+        }
+        let expected: std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> = [
+            ("MSHP Heater", [1, 2, 3, 4].into_iter().collect()),
+            ("MSHP Cooler", [1, 2, 3, 4].into_iter().collect()),
+            ("Air Conditioner", [1].into_iter().collect()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert_eq!(
+            by_family, expected,
+            "shipped multispeed CSV COP deviations changed: edit the pin \
+             only when the new curve is a measured part-load curve, not a \
+             data-entry error"
+        );
+    }
+
+    /// The shipped EV vehicle mapping must map every Vehicle column with
+    /// known types, profiles, capacities and efficiencies.
+    #[test]
+    fn shipped_ev_mapping_complete_and_consistent() {
+        let defaults_dir = shipped_defaults_dir();
+        let mapping = load_vehicle_mapping_csv(&defaults_dir.join("ev"))
+            .expect("shipped vehicle mapping loads");
+        let findings = check_ev_mapping_invariants(&mapping.entries);
+        assert!(
+            findings.is_empty(),
+            "shipped EV vehicle mapping violates its invariants: {findings:?}"
+        );
+    }
+
+    /// The shipped `defaults/ev/vehicle_mapping.csv` loads with exactly 50
+    /// entries, one per Vehicle 1-50.
+    #[test]
+    fn vehicle_mapping_loads_the_shipped_csv() {
+        let defaults_dir = shipped_defaults_dir();
+        let mapping = load_vehicle_mapping_csv(&defaults_dir.join("ev"))
+            .expect("the shipped vehicle mapping loads");
+        assert_eq!(mapping.count(), 50);
+    }
+
+    /// The shipped water-heating defaults CSV must satisfy every unit, UA,
+    /// UEF, volume-conversion and field-coverage invariant.
+    #[test]
+    fn shipped_water_heating_defaults_satisfy_invariants() {
+        let defaults_dir = shipped_defaults_dir();
+        let wh = load_water_heating_csv(
+            &defaults_dir
+                .join("water_heating")
+                .join("default_paramters.csv"),
+        )
+        .expect("shipped water-heating defaults load");
+        let findings = check_water_heating_invariants(&wh);
+        assert!(
+            findings.is_empty(),
+            "shipped water-heating defaults violate their invariants: {findings:?}"
+        );
+    }
+
+    /// No shipped generator CSV may carry battery-only parameter names.
+    #[test]
+    fn shipped_generator_dir_has_no_foreign_csv_params() {
+        let defaults_dir = shipped_defaults_dir();
+        let findings = check_csv_header_invariants(&defaults_dir);
+        assert!(
+            findings.is_empty(),
+            "shipped defaults tree has misplaced battery parameters: {findings:?}"
+        );
+    }
+
+    /// Every shipped entry of `defaults/battery/` is a TOML file. The
+    /// battery defaults load from this directory's `.toml` entries only
+    /// ([`load_toml_dir`]); a non-TOML file shipped beside them is an
+    /// unread parallel source a future reader could mistake for
+    /// configuration. The `.gitkeep` placeholder keeps the otherwise
+    /// empty directory in git and carries no data.
+    #[test]
+    fn battery_defaults_directory_holds_only_toml() {
+        let battery_dir = shipped_defaults_dir().join("battery");
+        let offenders: Vec<String> = std::fs::read_dir(&battery_dir)
+            .expect("the shipped battery defaults directory exists")
+            .filter_map(|entry| {
+                let entry = entry.expect("a readable battery defaults entry");
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name == ".gitkeep" {
+                    return None;
+                }
+                let is_toml = entry.path().extension().is_some_and(|ext| ext == "toml");
+                (!is_toml).then_some(name)
+            })
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "defaults/battery/ holds non-TOML entries {offenders:?}: the \
+             battery defaults loader reads only .toml from this directory, \
+             so the file is an unread parallel source; delete it or move its \
+             data into the TOML tree"
+        );
+    }
+
+    /// No shipped cooling row's top-speed COP may fall below half the
+    /// SEER/EER-derived expectation (EnergyPlus StandardRatings.hh:71:
+    /// COP = SEER / 3.412141633). A far-below value signals a data entry
+    /// error; the runtime check moved here over the shipped CSV.
+    #[test]
+    fn top_speed_cop_not_far_below_seer_derivation() {
+        const BTU_PER_HR_PER_W: f64 = 3.412141633;
+        let defaults_dir = shipped_defaults_dir();
+        let rows =
+            load_hvac_multispeed_csv(&defaults_dir.join("HVAC Multispeed Parameters.csv"), true)
+                .expect("shipped multispeed CSV loads");
+        let mut violations = Vec::new();
+        for row in &rows {
+            let kind = row.efficiency_kind.to_ascii_uppercase();
+            if !(kind == "SEER" || kind == "EER") {
+                continue;
+            }
+            let Some(&last_cop) = row.cops.last() else {
+                continue;
+            };
+            let expected_cop = row.efficiency_value / BTU_PER_HR_PER_W;
+            if last_cop < expected_cop * 0.5 {
+                violations.push(format!(
+                    "{} ({} {}: top-speed COP {last_cop:.3}, expected >= {:.3})",
+                    row.hvac_name,
+                    kind,
+                    row.efficiency_value,
+                    expected_cop * 0.5
+                ));
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "shipped multispeed CSV has top-speed COPs far below the \
+             SEER/EER derivation: {violations:?}"
+        );
+    }
+
     #[test]
     fn can_load_one_entry_in_each_equipment_subdir() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
 
         create_subdirs(
             dir.path(),
@@ -3100,6 +3233,7 @@ max_Tdb,{tdb_max}\n",
                 "water_heating",
             ],
         );
+        write_complete_ev_mapping(dir.path());
 
         let store = DefaultsStore::load(dir.path()).expect("load empty defaults");
         assert_eq!(store.zip_count(), 0);
@@ -3109,6 +3243,7 @@ max_Tdb,{tdb_max}\n",
     fn load_pv_panel_defaults_deserializes_complete_toml() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
 
         let pv_dir = dir.path().join("pv");
         std::fs::create_dir_all(&pv_dir).unwrap();
@@ -3157,6 +3292,7 @@ system_losses_fraction = 0.14
     fn load_pv_panel_defaults_falls_back_when_dir_empty() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
 
         create_subdirs(
             dir.path(),
@@ -3304,6 +3440,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     fn water_heating_csv_parses_successfully() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
         write_water_heating_csv(&wh_dir);
@@ -3332,6 +3469,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     fn water_heating_csv_lookup_returns_correct_values() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
         write_water_heating_csv(&wh_dir);
@@ -3395,6 +3533,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     fn ua_increases_monotonically_with_tank_volume() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
         write_water_heating_csv(&wh_dir);
@@ -3428,6 +3567,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     fn uef_values_are_within_valid_ranges() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
         write_water_heating_csv(&wh_dir);
@@ -3473,6 +3613,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     fn water_heating_csv_regression_does_not_panic() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
         write_water_heating_csv(&wh_dir);
@@ -3515,6 +3656,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     fn water_heating_csv_missing_file_is_non_fatal() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         create_subdirs(
             dir.path(),
             &[
@@ -3543,6 +3685,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     fn water_heating_csv_malformed_rows_are_skipped() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
         std::fs::write(
@@ -3597,6 +3740,7 @@ Another_Good,Key2,3.14,m
         // that silently assumes W would produce a 1000× error in power values.
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
         std::fs::write(
@@ -3645,6 +3789,7 @@ Element_Power_Upper_Tank,P_hw2,4.5,kW
         // checker is responsible for flagging empty-units rows at startup.
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
         std::fs::write(
@@ -3726,6 +3871,7 @@ Some_Parameter,P_test,42.0,
         // partial-load path.
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
         std::fs::write(
@@ -4105,10 +4251,20 @@ Setpoint,T_set,60.0,degC
         std::fs::write(dir.join("vehicle_mapping.csv"), csv_content).unwrap();
     }
 
+    /// Fixture helper: a defaults tree whose EV mapping is not the subject
+    /// of the test still needs a complete one, because a missing or
+    /// malformed vehicle mapping CSV fails the defaults load.
+    fn write_complete_ev_mapping(root: &Path) {
+        let ev_dir = root.join("ev");
+        std::fs::create_dir_all(&ev_dir).unwrap();
+        write_vehicle_mapping_csv(&ev_dir);
+    }
+
     #[test]
     fn vehicle_mapping_csv_parses_successfully() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let ev_dir = dir.path().join("ev");
         std::fs::create_dir_all(&ev_dir).unwrap();
         write_vehicle_mapping_csv(&ev_dir);
@@ -4150,6 +4306,7 @@ Setpoint,T_set,60.0,degC
     fn vehicle_mapping_returns_none_for_missing_vehicle() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let ev_dir = dir.path().join("ev");
         std::fs::create_dir_all(&ev_dir).unwrap();
         write_vehicle_mapping_csv(&ev_dir);
@@ -4181,7 +4338,7 @@ Setpoint,T_set,60.0,degC
     }
 
     #[test]
-    fn vehicle_mapping_csv_missing_file_is_non_fatal() {
+    fn vehicle_mapping_missing_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
         create_subdirs(
@@ -4199,16 +4356,21 @@ Setpoint,T_set,60.0,degC
             ],
         );
 
-        // No vehicle_mapping.csv in ev/ — should load fine.
-        let store = DefaultsStore::load(dir.path()).expect("load defaults");
-        assert!(!store.has_ev_mapping(), "no CSV → no EV mapping");
-        assert!(store.ev_mapping().is_none());
+        // No vehicle_mapping.csv in ev/: the load must fail naming the path.
+        let err = DefaultsStore::load(dir.path())
+            .expect_err("a missing EV vehicle mapping CSV must fail the load");
+        let message = err.to_string();
+        assert!(
+            message.contains("vehicle_mapping.csv"),
+            "the error must name the missing file's path, got: {message}"
+        );
     }
 
     #[test]
-    fn vehicle_mapping_with_fewer_than_50_entries_returns_none() {
+    fn vehicle_mapping_with_fewer_than_50_entries_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let ev_dir = dir.path().join("ev");
         std::fs::create_dir_all(&ev_dir).unwrap();
         std::fs::write(
@@ -4232,31 +4394,36 @@ Setpoint,T_set,60.0,degC
             ],
         );
 
-        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        let err = DefaultsStore::load(dir.path())
+            .expect_err("an incomplete EV vehicle mapping must fail the load");
+        let message = err.to_string();
         assert!(
-            !store.has_ev_mapping(),
-            "incomplete mapping (2 entries) should not be exposed"
+            message.contains("vehicle_mapping.csv"),
+            "the error must name the path, got: {message}"
         );
-        assert!(store.ev_mapping().is_none());
+        assert!(
+            message.contains("2 of 50"),
+            "the error must name the entry shortfall, got: {message}"
+        );
     }
 
     #[test]
-    fn vehicle_mapping_csv_malformed_rows_are_skipped() {
+    fn vehicle_mapping_malformed_row_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let ev_dir = dir.path().join("ev");
         std::fs::create_dir_all(&ev_dir).unwrap();
 
-        // Build 50 rows: one for each Vehicle, but Vehicle 25 and Vehicle 26
-        // have unparseable numeric fields.
+        // 50 rows for Vehicle 1-50, but Vehicle 25 carries a non-numeric
+        // capacity_kwh: the whole load fails naming the path, the row and
+        // the field.
         let mut csv_content = String::from(
             "profile_column,vehicle_type,profile_file,capacity_kwh,charger_power_kw,efficiency\n",
         );
         for i in 1..=50 {
             if i == 25 {
                 csv_content.push_str("Vehicle 25,MY2030_BEV_SUV,pdf_Veh1,not_a_number,10.26,0.9\n");
-            } else if i == 26 {
-                csv_content.push_str("Vehicle 26,MY2030_BEV_SUV,pdf_Veh2,117.6,also_bad,0.9\n");
             } else {
                 let vtype = if i >= 36 {
                     "MY2030_PHEV_SUV"
@@ -4286,9 +4453,22 @@ Setpoint,T_set,60.0,degC
             ],
         );
 
-        let store = DefaultsStore::load(dir.path()).expect("load defaults");
-        // 2 malformed rows skipped → 48 valid entries → fewer than 50 → None.
-        assert!(store.ev_mapping().is_none());
+        let err = DefaultsStore::load(dir.path())
+            .expect_err("a malformed EV vehicle mapping row must fail the load");
+        let message = err.to_string();
+        assert!(
+            message.contains("vehicle_mapping.csv"),
+            "the error must name the path, got: {message}"
+        );
+        assert!(
+            message.contains("capacity_kwh"),
+            "the error must name the field, got: {message}"
+        );
+        assert!(
+            message.contains("row 26"),
+            "the error must name the row (header is line 1, Vehicle 25 is \
+             line 26), got: {message}"
+        );
     }
 
     #[test]
@@ -4299,6 +4479,7 @@ Setpoint,T_set,60.0,degC
         // malformed row.
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
         std::fs::write(
@@ -4332,12 +4513,13 @@ Inf_Row,InfKey,inf,units
     }
 
     #[test]
-    fn vehicle_mapping_csv_non_finite_values_are_skipped() {
+    fn vehicle_mapping_non_finite_values_are_an_error() {
         // Same finiteness arm on the EV mapping numeric fields: "nan"
-        // parses as f64, so a corrupt capacity/charger/efficiency must be
-        // rejected explicitly rather than stored.
+        // parses as f64, so a corrupt capacity must fail the load like any
+        // other out-of-range value.
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         let ev_dir = dir.path().join("ev");
         std::fs::create_dir_all(&ev_dir).unwrap();
 
@@ -4347,8 +4529,6 @@ Inf_Row,InfKey,inf,units
         for i in 1..=50 {
             if i == 25 {
                 csv_content.push_str("Vehicle 25,MY2030_BEV_SUV,pdf_Veh1,nan,10.26,0.9\n");
-            } else if i == 26 {
-                csv_content.push_str("Vehicle 26,MY2030_BEV_SUV,pdf_Veh2,117.6,10.26,inf\n");
             } else {
                 let vtype = if i >= 36 {
                     "MY2030_PHEV_SUV"
@@ -4378,9 +4558,17 @@ Inf_Row,InfKey,inf,units
             ],
         );
 
-        let store = DefaultsStore::load(dir.path()).expect("load defaults");
-        // 2 non-finite rows skipped → 48 valid entries → fewer than 50 → None.
-        assert!(store.ev_mapping().is_none());
+        let err = DefaultsStore::load(dir.path())
+            .expect_err("a non-finite EV vehicle mapping value must fail the load");
+        let message = err.to_string();
+        assert!(
+            message.contains("vehicle_mapping.csv"),
+            "the error must name the path, got: {message}"
+        );
+        assert!(
+            message.contains("capacity_kwh"),
+            "the error must name the field, got: {message}"
+        );
     }
 
     #[test]
@@ -4495,6 +4683,7 @@ Inf_Row,InfKey,inf,units
             ],
         );
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
 
         // Write the 6-point efficiency curve TOML.
         let toml_content = r#"
@@ -4543,7 +4732,7 @@ efficiency_ratio = 1.0
     }
 
     #[test]
-    fn missing_generator_efficiency_curve_returns_none() {
+    fn missing_generator_efficiency_curve_is_a_typed_error() {
         let dir = tempfile::tempdir().unwrap();
         create_subdirs(
             dir.path(),
@@ -4560,18 +4749,20 @@ efficiency_ratio = 1.0
             ],
         );
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         // No efficiency_curve.toml in generator/ — simulate missing file.
+        std::fs::remove_file(dir.path().join("generator").join("efficiency_curve.toml"))
+            .expect("remove the curve file create_subdirs wrote");
 
-        let store = DefaultsStore::load(dir.path()).expect("load defaults");
-
+        let err = DefaultsStore::load(dir.path()).expect_err("missing curve must fail the load");
         assert!(
-            store.generator_efficiency_curve_points().is_none(),
-            "missing efficiency_curve.toml should return None"
+            matches!(err, DefaultsError::MissingFile(ref path) if path.file_name().is_some_and(|f| f == "efficiency_curve.toml")),
+            "the error must be MissingFile naming efficiency_curve.toml, got: {err}"
         );
     }
 
     #[test]
-    fn malformed_generator_efficiency_curve_returns_none() {
+    fn malformed_generator_efficiency_curve_is_a_typed_error() {
         let dir = tempfile::tempdir().unwrap();
         create_subdirs(
             dir.path(),
@@ -4588,6 +4779,7 @@ efficiency_ratio = 1.0
             ],
         );
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
 
         // Write a malformed TOML (reversed capacity_ratio order — not strictly increasing).
         let toml_content = r#"
@@ -4605,11 +4797,10 @@ efficiency_ratio = 0.0
         )
         .unwrap();
 
-        let store = DefaultsStore::load(dir.path()).expect("load defaults");
-
+        let err = DefaultsStore::load(dir.path()).expect_err("malformed curve must fail the load");
         assert!(
-            store.generator_efficiency_curve_points().is_none(),
-            "non-strictly-increasing curve points should be rejected"
+            err.to_string().contains("not strictly increasing"),
+            "the error must name the invalid curve, got: {err}"
         );
     }
 
@@ -4624,6 +4815,7 @@ efficiency_ratio = 0.0
         // the generator directory is clean.
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         create_subdirs(
             dir.path(),
             &[
@@ -4661,6 +4853,7 @@ efficiency_ratio = 0.0
         // invariant check must detect the misplaced parameters.
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         create_subdirs(
             dir.path(),
             &[
@@ -4723,6 +4916,7 @@ efficiency_ratio = 0.0
         // header columns in a generator CSV should be detected.
         let dir = tempfile::tempdir().unwrap();
         write_minimal_zip(dir.path());
+        write_complete_ev_mapping(dir.path());
         create_subdirs(
             dir.path(),
             &[

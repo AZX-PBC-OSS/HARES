@@ -12,18 +12,22 @@
 //! 9. normalize_column_name dedup / import from schedule in validation
 
 use chrono::{DateTime, Duration};
-use serde_json::json;
 
 use hares_io::ScheduleTimeSeries;
 use hares_io::defaults::DefaultsStore;
+use hares_io::hpxml::ZoneType;
 use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml::equipment::resolve_equipment;
+use hares_io::hpxml::infiltration_geometry::{
+    exterior_leakage_fraction, foundation_top_m, walls_top_m,
+};
 use hares_io::hpxml::parse_hpxml;
 use hares_io::hpxml::validation::{
     validate_building_ranges, validate_cross_inputs, validate_epw_time_gaps, validate_hpxml_schema,
     validate_schedule_required_columns,
 };
 use hares_io::weather::{WeatherMeta, WeatherTimeSeries};
+use hares_types::AmbientLocation;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -40,6 +44,7 @@ fn minimal_xml_with_systems(systems_xml: &str) -> String {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -62,6 +67,7 @@ fn empty_weather_meta() -> WeatherMeta {
         source_step_secs: 3600,
         midpoint_offset_secs: 0,
         has_embedded_location: false,
+        station_wmo: None,
     }
 }
 
@@ -295,7 +301,7 @@ fn ev_plug_load_emits_ev_equipment_spec_with_correct_parameters() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let ev = specs
@@ -332,7 +338,7 @@ fn ev_plug_load_large_kwh_emits_250_mile_range() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let ev = specs
@@ -367,7 +373,7 @@ fn ev_plug_load_not_emitted_as_scheduled_load() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     // Should NOT produce a ScheduledLoad/MELs entry
@@ -393,7 +399,7 @@ fn whole_building_ventilation_fan_is_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let fan = specs
@@ -429,7 +435,7 @@ fn exhaust_fan_without_whole_building_flag_is_not_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     assert!(
@@ -450,7 +456,7 @@ fn seasonal_cooling_fan_is_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     assert!(
@@ -472,7 +478,7 @@ fn whole_house_fan_type_resolves_to_exhaust_fan_not_hrv() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let fan = specs
@@ -604,6 +610,7 @@ fn missing_enclosure_returns_error() {
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
     </BuildingDetails>
@@ -627,6 +634,7 @@ fn missing_site_returns_error() {
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -663,6 +671,7 @@ fn complete_minimal_xml_passes_schema_check() {
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -689,6 +698,7 @@ fn area_above_1000_without_units_is_converted_as_ft2() {
         <BuildingConstruction>
           <ConditionedFloorArea>2000</ConditionedFloorArea>
           <ConditionedBuildingVolume>16000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -721,6 +731,7 @@ fn area_without_units_is_treated_as_ft2() {
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -840,7 +851,7 @@ fn hvac_capacity_equipment_resolution_stores_kbtu_h() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let furnace = specs
@@ -870,7 +881,7 @@ fn water_heater_setpoint_equipment_resolution_stores_celsius() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment");
 
     let wh = specs
@@ -914,7 +925,7 @@ fn pv_inverter_max_power_output_w_converted_to_kw() {
 
     let building = parse_building(&xml).expect("should parse");
     let defaults = DefaultsStore::default();
-    let specs = resolve_equipment(&building, &defaults, &serde_json::Value::Null, None)
+    let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
         .expect("should resolve equipment");
 
     let pv = specs
@@ -963,6 +974,7 @@ fn wall_xml_with_stud_geometry(spacing_in: f64, width_in: f64) -> String {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -1065,6 +1077,7 @@ fn wall_xml_with_construction_type(construction_type_element: &str) -> String {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -1176,7 +1189,7 @@ fn eer_only_cooling_system_does_not_resolve_via_seer_zero_sentinel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment should succeed for EER-only room AC");
 
     let ac = specs
@@ -1246,7 +1259,7 @@ fn high_eer_central_ac_without_seer_resolves_via_eer_not_zero_sentinel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("EER-only central AC should resolve without error");
 
     let ac = specs
@@ -1282,7 +1295,7 @@ fn cooling_system_missing_both_seer_and_eer_produces_error() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse XML structure");
-    let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None);
+    let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
 
     assert!(
         result.is_err(),
@@ -1307,7 +1320,7 @@ fn seer_present_cooling_system_resolves_normally_regression() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("SEER-present system must resolve without error");
 
     let ac = specs
@@ -1344,6 +1357,7 @@ fn cfm25_duct_leakage_parse_resolve_pipeline_succeeds() {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -1416,7 +1430,7 @@ fn cfm25_duct_leakage_parse_resolve_pipeline_succeeds() {
     // when CFM25 duct leakage is present (the old bug caused silent
     // zeroing, not a crash, but verifying the full pipeline runs is
     // still a valid integration smoke test).
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("equipment resolution must succeed with CFM25 duct leakage");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -1447,6 +1461,7 @@ fn refrigerator_in_conditioned_basement_retains_gain_fractions() {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">150</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">375</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
           <NumberofBedrooms>3</NumberofBedrooms>
         </BuildingConstruction>
       </BuildingSummary>
@@ -1464,7 +1479,7 @@ fn refrigerator_in_conditioned_basement_retains_gain_fractions() {
 </HPXML>
 "#;
     let building = parse_building(xml).expect("HPXML should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment should succeed");
 
     let fridge = specs
@@ -1539,11 +1554,7 @@ fn hpxml_v3_parses_resolves_equipment_with_schema_warning() {
         "floor area should be 200 m²"
     );
     assert!(
-        building.conditioned_volume_m3.is_some(),
-        "conditioned volume should be parsed"
-    );
-    assert!(
-        (building.conditioned_volume_m3.unwrap() - 500.0).abs() < 1.0,
+        (building.conditioned_volume_m3 - 500.0).abs() < 1.0,
         "conditioned volume should be 500 m³"
     );
     assert!(
@@ -1563,7 +1574,7 @@ fn hpxml_v3_parses_resolves_equipment_with_schema_warning() {
     );
 
     // Resolve equipment → heating, cooling, and water heater must all resolve.
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment should succeed for 3.x fixture");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -1609,7 +1620,7 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
     );
 
     let building = parse_building(&xml).expect("fixture should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment should succeed for fixture");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -1757,7 +1768,7 @@ fn hpxml_v4_building_sync_parses_resolves_without_rejection() {
         conditioned.floor_area_m2.unwrap()
     );
     assert!(
-        building.conditioned_volume_m3.is_some(),
+        building.conditioned_volume_m3 > 0.0,
         "conditioned volume should be parsed"
     );
     assert!(
@@ -1791,7 +1802,7 @@ fn hpxml_v4_building_sync_parses_resolves_without_rejection() {
     );
 
     // Resolve equipment — the full pipeline must succeed.
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment should succeed for BuildingSync fixture");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -1832,12 +1843,13 @@ fn resstock_2025_1_failing_buildings_parse_and_resolve() {
                 panic!("{name}: HPXML parse failed: {e}");
             }
         };
-        let specs = match resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None) {
-            Ok(s) => s,
-            Err(e) => {
-                panic!("{name}: equipment resolution failed: {e}");
-            }
-        };
+        let specs =
+            match resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()) {
+                Ok(s) => s,
+                Err(e) => {
+                    panic!("{name}: equipment resolution failed: {e}");
+                }
+            };
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         eprintln!(
             "  {name}: OK — heating_sp={:?}, cooling_sp={:?}, equipment={names:?}",
@@ -1871,6 +1883,7 @@ fn gable_roof_without_pitch_not_classified_as_flat() {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -1976,7 +1989,7 @@ fn unrecognized_fuel_type_on_heating_system_returns_error() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse XML structure");
-    let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None);
+    let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
 
     assert!(
         result.is_err(),
@@ -2006,7 +2019,7 @@ fn unrecognized_fuel_type_on_cooling_system_returns_error() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse XML structure");
-    let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None);
+    let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
 
     assert!(
         result.is_err(),
@@ -2035,7 +2048,7 @@ fn missing_fuel_on_heating_system_returns_error() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse XML structure");
-    let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None);
+    let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
     assert!(
         result.is_err(),
         "resolve_equipment must return Err when HeatingSystemFuel is absent"
@@ -2044,5 +2057,1284 @@ fn missing_fuel_on_heating_system_returns_error() {
     assert!(
         msg.contains("FuelType is required"),
         "error message must name the missing field, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Water heaters in HPXML locations with no modeled zone (parse level)
+// ---------------------------------------------------------------------------
+
+/// Parse a vendored OS-HPXML sample and return the water heater spec's
+/// `zone_type` and `zone_id` parameters.
+fn wh_zone_params_from_vendored_sample(
+    sample: &str,
+) -> (Option<String>, Option<serde_json::Value>) {
+    let spec = wh_spec_from_vendored_sample(sample, |xml| xml);
+    (
+        spec.parameters
+            .get("zone_type")
+            .and_then(|v| v.as_str().map(str::to_string)),
+        spec.parameters.get("zone_id").cloned(),
+    )
+}
+
+/// Parse a vendored OS-HPXML sample, after `edit` rewrites its XML, and
+/// return the resolved water heater spec.
+fn wh_spec_from_vendored_sample(
+    sample: &str,
+    edit: impl FnOnce(String) -> String,
+) -> hares_io::EquipmentSpec {
+    let (spec, _) = resolve_vendored_water_heater(sample, edit)
+        .unwrap_or_else(|e| panic!("{sample} equipment should resolve: {e:?}"));
+    spec
+}
+
+/// Parse a vendored OS-HPXML sample, after `edit` rewrites its XML, and
+/// return its water heater spec and the resolution warnings.
+fn resolve_vendored_water_heater(
+    sample: &str,
+    edit: impl FnOnce(String) -> String,
+) -> Result<(hares_io::EquipmentSpec, Vec<hares_types::Warning>), hares_io::hpxml::HpxmlError> {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("vendors/OCHRE/test/OS-HPXML Sample Files")
+        .join(sample);
+    let xml = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("{sample} fixture should be readable: {e}"));
+    // The sample lacks <Latitude>/<Longitude>, required for duct DSE in the
+    // HVAC resolution path; inject them as the pool test does.
+    let xml = edit(xml.replacen(
+        "</StateCode>",
+        "</StateCode><Latitude>39.7</Latitude><Longitude>-105.0</Longitude>",
+        1,
+    ));
+    let building = parse_building(&xml).unwrap_or_else(|e| panic!("{sample} should parse: {e:?}"));
+    let mut warnings = Vec::new();
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut warnings)?;
+    let spec = specs
+        .into_iter()
+        .find(|s| s.name.contains("Water Heater") || s.name == "Indirect Tank")
+        .unwrap_or_else(|| panic!("{sample} should resolve a water heater"));
+    Ok((spec, warnings))
+}
+
+/// Remove the water heater's own `<Location>` from an HPXML document.
+fn without_water_heater_location(xml: String) -> String {
+    let system = xml
+        .find("<WaterHeatingSystem>")
+        .expect("the sample has a water heater");
+    let start = system
+        + xml[system..]
+            .find("<Location>")
+            .expect("the water heater has a location");
+    let end = start + xml[start..].find("</Location>").unwrap() + "</Location>".len();
+    format!("{}{}", &xml[..start], &xml[end..])
+}
+
+/// A water heater with no `<Location>` takes the OS-HPXML v1.12.0 default
+/// (defaults.rb `get_water_heater_location`): by IECC zone, the first of
+/// its location hierarchy the building has surfaces in. The defaulted
+/// location is recorded as a warning naming the unit.
+#[test]
+fn unlocated_water_heater_takes_the_os_hpxml_default_location() {
+    for (sample, climate_zone, expected) in [
+        // 4-8: unconditioned basement, conditioned basement, conditioned space.
+        (
+            "base-foundation-unconditioned-basement.xml",
+            None,
+            "basement - unconditioned",
+        ),
+        ("base.xml", None, "basement - conditioned"),
+        // 1-3: garage, conditioned space.
+        ("base-enclosure-garage.xml", Some("3A"), "garage"),
+        ("base-location-miami-fl.xml", None, "conditioned space"),
+        // No IECC zone: conditioned basement, unconditioned basement,
+        // conditioned space.
+        ("base.xml", Some(""), "basement - conditioned"),
+    ] {
+        let (spec, warnings) = resolve_vendored_water_heater(sample, |xml| {
+            let xml = without_water_heater_location(xml);
+            match climate_zone {
+                None => xml,
+                Some("") => {
+                    let start = xml.find("<ClimateZone>").unwrap();
+                    let end = start + xml[start..].find("</ClimateZone>").unwrap();
+                    format!("{}{}", &xml[..start], &xml[end + "</ClimateZone>".len()..])
+                }
+                Some(zone) => xml.replacen(
+                    "<ClimateZone>5B</ClimateZone>",
+                    &format!("<ClimateZone>{zone}</ClimateZone>"),
+                    1,
+                ),
+            }
+        })
+        .unwrap_or_else(|e| panic!("{sample}: an unlocated water heater must resolve: {e:?}"));
+        assert_eq!(
+            spec.parameters.get("zone_type").and_then(|v| v.as_str()),
+            Some(expected),
+            "{sample} (IECC {climate_zone:?}): defaulted location"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains(expected) && w.message.contains(&spec.name)),
+            "{sample}: the defaulted location must be a warning naming the unit, got {warnings:?}"
+        );
+    }
+}
+
+/// Where a building has both basement kinds the hierarchy order decides:
+/// IECC 4-8 picks the unconditioned basement first, no IECC zone picks the
+/// conditioned basement first (defaults.rb:6104-6132). `base.xml` has a
+/// conditioned basement; moving its rim joist to an unconditioned basement
+/// gives it both.
+#[test]
+fn unlocated_water_heater_follows_the_hierarchy_order_between_basements() {
+    let with_both_basements = |xml: String| {
+        let xml = without_water_heater_location(xml);
+        let rim = xml.find("<RimJoist>").expect("base.xml has a rim joist");
+        let tag = "<InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>";
+        let at = rim
+            + xml[rim..]
+                .find(tag)
+                .expect("the rim joist is in the basement");
+        format!(
+            "{}<InteriorAdjacentTo>basement - unconditioned</InteriorAdjacentTo>{}",
+            &xml[..at],
+            &xml[at + tag.len()..]
+        )
+    };
+    for (climate_zone, expected) in [
+        ("<ClimateZone>5B</ClimateZone>", "basement - unconditioned"),
+        ("", "basement - conditioned"),
+    ] {
+        let (spec, _) = resolve_vendored_water_heater("base.xml", |xml| {
+            with_both_basements(xml).replacen("<ClimateZone>5B</ClimateZone>", climate_zone, 1)
+        })
+        .unwrap_or_else(|e| panic!("IECC {climate_zone:?}: must resolve: {e:?}"));
+        assert_eq!(
+            spec.parameters.get("zone_type").and_then(|v| v.as_str()),
+            Some(expected),
+            "IECC {climate_zone:?}: defaulted location with both basements"
+        );
+    }
+}
+
+/// OS-HPXML fails on an IECC zone outside its table; so does HARES.
+#[test]
+fn unlocated_water_heater_rejects_an_unknown_iecc_zone() {
+    resolve_vendored_water_heater("base.xml", |xml| {
+        without_water_heater_location(xml).replacen(
+            "<ClimateZone>5B</ClimateZone>",
+            "<ClimateZone>9Z</ClimateZone>",
+            1,
+        )
+    })
+    .expect_err("an unknown IECC zone must fail the default");
+}
+
+/// The HPWH wall share is OCHRE's partition-wall split, which exists only
+/// in the living zone; OS-HPXML puts every HPWH gain convectively into the
+/// zone air. Parsing makes the value explicit per location: 0.5 for the
+/// living zone, 0.0 for a conditioned basement or any other zone.
+#[test]
+fn parse_hpwh_wall_heat_fraction_is_explicit_per_location() {
+    for (location, expected) in [("living space", 0.5), ("basement - conditioned", 0.0)] {
+        let spec = wh_spec_from_vendored_sample("base-dhw-tank-heat-pump.xml", |xml| {
+            xml.replacen(
+                "<WaterHeaterType>heat pump water heater</WaterHeaterType>\n            <Location>living space</Location>",
+                &format!(
+                    "<WaterHeaterType>heat pump water heater</WaterHeaterType>\n            <Location>{location}</Location>"
+                ),
+                1,
+            )
+        });
+        let typed: hares_equipment::HeatPumpWaterHeaterConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("HPWH spec carries a typed config")
+            .typed()
+            .expect("HPWH typed config");
+        assert_eq!(
+            typed.zone_type.as_deref(),
+            Some(location),
+            "the location edit must reach the parsed water heater"
+        );
+        assert_eq!(
+            typed.wall_heat_fraction,
+            Some(expected),
+            "{location}: wall_heat_fraction must be explicit"
+        );
+    }
+}
+
+fn assert_wh_parses_to_ambient_location(sample: &str, expected: AmbientLocation) {
+    let (zone_type, zone_id) = wh_zone_params_from_vendored_sample(sample);
+    // The config serializes an absent zone_id as `null`; the assert accepts
+    // an absent key or a null and rejects any real zone number.
+    assert!(
+        zone_id.is_none() || zone_id == Some(serde_json::Value::Null),
+        "{sample}: the water heater must not carry a zone_id, got {zone_id:?}"
+    );
+    let zone_type = zone_type.unwrap_or_else(|| panic!("{sample}: zone_type must be present"));
+    assert_eq!(
+        AmbientLocation::from_location(&zone_type),
+        Some(expected),
+        "{sample}: location '{zone_type}' must classify as {expected:?}"
+    );
+}
+
+#[test]
+fn parse_other_heated_space_wh_carries_ambient_location() {
+    assert_wh_parses_to_ambient_location(
+        "base-bldgtype-multifamily-adjacent-to-other-heated-space.xml",
+        AmbientLocation::OtherHeatedSpace,
+    );
+}
+
+#[test]
+fn parse_multifamily_buffer_space_wh_carries_ambient_location() {
+    assert_wh_parses_to_ambient_location(
+        "base-bldgtype-multifamily-adjacent-to-multifamily-buffer-space.xml",
+        AmbientLocation::OtherMultifamilyBufferSpace,
+    );
+}
+
+#[test]
+fn parse_non_freezing_space_wh_carries_ambient_location() {
+    assert_wh_parses_to_ambient_location(
+        "base-bldgtype-multifamily-adjacent-to-non-freezing-space.xml",
+        AmbientLocation::OtherNonFreezingSpace,
+    );
+}
+
+#[test]
+fn parse_other_housing_unit_wh_carries_ambient_location() {
+    assert_wh_parses_to_ambient_location(
+        "base-bldgtype-multifamily-adjacent-to-other-housing-unit.xml",
+        AmbientLocation::OtherHousingUnit,
+    );
+}
+
+#[test]
+fn parse_other_exterior_wh_carries_ambient_location() {
+    assert_wh_parses_to_ambient_location(
+        "base-dhw-tank-gas-outside.xml",
+        AmbientLocation::OtherExterior,
+    );
+}
+
+// ===========================================================================
+// xsd:boolean parsing at every boolean element
+// ===========================================================================
+
+/// Every boolean element the parser reads goes through the one xs:boolean
+/// reader: each of the twelve census sites parses `1` as true and `0` as
+/// false through its own parse path, so a site that regresses to the old
+/// case-insensitive `true`-only test fails here instead of only at the
+/// single flue site.
+#[test]
+fn every_xsd_boolean_site_uses_the_xs_boolean_reader() {
+    // (site, value) -> the XML system/enclosure fragment under test.
+    let fragment = |site: usize, v: &str| match site {
+        0 => format!(
+            "<Enclosure><Walls /><extension><HasFlueOrChimneyInConditionedSpace>{v}</HasFlueOrChimneyInConditionedSpace></extension></Enclosure>"
+        ),
+        1 => format!(
+            "<Enclosure><Walls /><Foundations><Foundation><SystemIdentifier id=\"F1\"/><FoundationType><Basement><Conditioned>{v}</Conditioned></Basement></FoundationType><FloorArea units=\"m2\">50</FloorArea></Foundation></Foundations></Enclosure>"
+        ),
+        2 => format!(
+            "<Enclosure><Roofs><Roof><SystemIdentifier id=\"R1\"/><InteriorAdjacentTo>attic</InteriorAdjacentTo><ExteriorAdjacentTo>outside</ExteriorAdjacentTo><Area units=\"m2\">50</Area><RadiantBarrier>{v}</RadiantBarrier></Roof></Roofs></Enclosure>"
+        ),
+        3 => format!(
+            "<Enclosure><Slabs><Slab><SystemIdentifier id=\"S1\"/><InteriorAdjacentTo>basement - unconditioned</InteriorAdjacentTo><ExteriorAdjacentTo>ground</ExteriorAdjacentTo><Area units=\"m2\">50</Area><UnderSlabInsulation><Layer><NominalRValue>10</NominalRValue><InsulationSpansEntireSlab>{v}</InsulationSpansEntireSlab></Layer></UnderSlabInsulation></Slab></Slabs></Enclosure>"
+        ),
+        4 => format!(
+            "<Enclosure><Roofs><Roof><SystemIdentifier id=\"R1\"/><InteriorAdjacentTo>attic</InteriorAdjacentTo><ExteriorAdjacentTo>outside</ExteriorAdjacentTo><Area units=\"m2\">50</Area></Roof></Roofs><Attics><Attic><SystemIdentifier id=\"A1\"/><AttachedToRoof idref=\"R1\"/><AtticType><Attic><Vented>{v}</Vented></Attic></AtticType><FloorArea units=\"m2\">40</FloorArea></Attic></Attics></Enclosure>"
+        ),
+        5 => format!(
+            "<Enclosure><Walls /><Foundations><Foundation><SystemIdentifier id=\"F1\"/><FoundationType><Crawlspace><Vented>{v}</Vented></Crawlspace></FoundationType><FloorArea units=\"m2\">30</FloorArea></Foundation></Foundations></Enclosure>"
+        ),
+        6 => format!(
+            "<Appliances><ClothesDryer><FuelType>electricity</FuelType><Vented>{v}</Vented></ClothesDryer></Appliances>"
+        ),
+        7 => format!(
+            "<Appliances><CookingRange><FuelType>electricity</FuelType><IsInduction>{v}</IsInduction></CookingRange></Appliances>"
+        ),
+        8 => format!(
+            "<Appliances><Refrigerator><PrimaryIndicator>{v}</PrimaryIndicator></Refrigerator></Appliances>"
+        ),
+        9 => format!(
+            "<MechanicalVentilation><VentilationFans><VentilationFan><UsedForWholeBuildingVentilation>{v}</UsedForWholeBuildingVentilation><RatedFlowRate>72</RatedFlowRate><FanPower>30</FanPower></VentilationFan></VentilationFans></MechanicalVentilation>"
+        ),
+        10 => format!(
+            "<MechanicalVentilation><VentilationFans><VentilationFan><UsedForSeasonalCoolingLoadReduction>{v}</UsedForSeasonalCoolingLoadReduction><RatedFlowRate>72</RatedFlowRate><FanPower>30</FanPower></VentilationFan></VentilationFans></MechanicalVentilation>"
+        ),
+        11 => format!(
+            "<WaterHeating><WaterFixture><LowFlow>{v}</LowFlow></WaterFixture><WaterHeatingSystem><WaterHeaterType>storage water heater</WaterHeaterType><FuelType>electricity</FuelType><EnergyFactor>0.95</EnergyFactor></WaterHeatingSystem></WaterHeating>"
+        ),
+        _ => unreachable!(),
+    };
+
+    // Enclosure fragments (sites 0-5) supply their own <Enclosure> content
+    // and replace the minimal document's empty walls; appliance fragments
+    // (sites 6-8) sit directly under BuildingDetails; the mechanical
+    // ventilation fragments (sites 9-10) are wrapped in <Systems>; the
+    // LowFlow fragment (site 11) also sits directly under BuildingDetails,
+    // which is the layout its parse path reads.
+    let doc = |site: usize, v: &str| {
+        let body = fragment(site, v);
+        if body.starts_with("<Enclosure>") {
+            minimal_xml_with_systems("").replace("<Enclosure><Walls /></Enclosure>", &body)
+        } else if (6..=8).contains(&site) || site == 11 {
+            minimal_xml_with_systems(&body)
+        } else {
+            minimal_xml_with_systems(&format!("<Systems>{body}</Systems>"))
+        }
+    };
+
+    let resolve = |xml: &str| -> Vec<hares_io::EquipmentSpec> {
+        let building = parse_building(xml).expect("should parse");
+        resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
+            .expect("resolve_equipment should succeed")
+    };
+
+    let site_names = [
+        "HasFlueOrChimneyInConditionedSpace",
+        "Foundation/Basement/Conditioned",
+        "Roof/RadiantBarrier",
+        "UnderSlabInsulation InsulationSpansEntireSlab",
+        "AtticType/Attic/Vented",
+        "FoundationType/Crawlspace/Vented",
+        "ClothesDryer/Vented",
+        "CookingRange/IsInduction",
+        "Refrigerator/PrimaryIndicator",
+        "VentilationFan/UsedForWholeBuildingVentilation",
+        "VentilationFan/UsedForSeasonalCoolingLoadReduction",
+        "WaterFixture/LowFlow",
+    ];
+
+    for (site, name) in site_names.iter().enumerate() {
+        let specs_true = resolve(&doc(site, "1"));
+        let specs_false = resolve(&doc(site, "0"));
+
+        match *name {
+            "HasFlueOrChimneyInConditionedSpace" => {
+                let building = parse_building(&doc(site, "1")).expect("should parse");
+                assert_eq!(
+                    building.has_flue_or_chimney,
+                    Some(true),
+                    "{name}: 1 must read as true"
+                );
+            }
+            "Foundation/Basement/Conditioned" => {
+                let b_true = parse_building(&doc(site, "1")).expect("should parse");
+                let b_false = parse_building(&doc(site, "0")).expect("should parse");
+                assert_eq!(
+                    b_true.foundation_name.as_deref(),
+                    Some("Finished Basement"),
+                    "{name}: 1 must read as conditioned"
+                );
+                assert_eq!(
+                    b_false.foundation_name.as_deref(),
+                    Some("Unfinished Basement"),
+                    "{name}: 0 must read as unconditioned"
+                );
+            }
+            "Roof/RadiantBarrier" => {
+                let read = |xml: &str| {
+                    parse_building(xml)
+                        .expect("should parse")
+                        .boundaries
+                        .iter()
+                        .find(|b| b.boundary_type == hares_io::hpxml::building::BoundaryType::Roof)
+                        .expect("roof expected")
+                        .has_radiant_barrier
+                };
+                assert!(read(&doc(site, "1")), "{name}: 1 must read as true");
+                assert!(!read(&doc(site, "0")), "{name}: 0 must read as false");
+            }
+            "UnderSlabInsulation InsulationSpansEntireSlab" => {
+                let read = |xml: &str| {
+                    parse_building(xml)
+                        .expect("should parse")
+                        .boundaries
+                        .iter()
+                        .find(|b| b.boundary_type == hares_io::hpxml::building::BoundaryType::Slab)
+                        .expect("slab expected")
+                        .insulation_details
+                        .clone()
+                        .expect("insulation details expected")
+                };
+                assert!(
+                    read(&doc(site, "1")).contains("Whole Slab"),
+                    "{name}: 1 must read as spanning the whole slab"
+                );
+                assert!(
+                    read(&doc(site, "0")).contains("Exterior"),
+                    "{name}: 0 must read as partial"
+                );
+            }
+            "AtticType/Attic/Vented" | "FoundationType/Crawlspace/Vented" => {
+                let read = |xml: &str| {
+                    parse_building(xml)
+                        .expect("should parse")
+                        .zones
+                        .iter()
+                        .find(|z| {
+                            matches!(
+                                z.zone_type,
+                                hares_io::hpxml::building::ZoneType::Attic
+                                    | hares_io::hpxml::building::ZoneType::Foundation
+                            )
+                        })
+                        .expect("zone expected")
+                        .vented
+                };
+                assert!(read(&doc(site, "1")), "{name}: 1 must read as vented");
+                assert!(!read(&doc(site, "0")), "{name}: 0 must read as unvented");
+            }
+            "ClothesDryer/Vented" => {
+                // The venting reaches the model through the dryer's split: a
+                // vented dryer exhausts 0.85 of its input, leaving 0.135
+                // sensible; an unvented one keeps 0.90 sensible.
+                let read = |specs: &[hares_io::EquipmentSpec]| {
+                    let sensible = specs
+                        .iter()
+                        .find(|s| s.name == "Clothes Dryer")
+                        .expect("clothes dryer spec expected")
+                        .parameters
+                        .get("sensible_gain_fraction")
+                        .and_then(serde_json::Value::as_f64)
+                        .expect("sensible_gain_fraction expected");
+                    (sensible - 0.135).abs() < 1e-12
+                };
+                assert!(read(&specs_true), "{name}: 1 must read as vented");
+                assert!(!read(&specs_false), "{name}: 0 must read as unvented");
+            }
+            "CookingRange/IsInduction" => {
+                let read = |specs: &[hares_io::EquipmentSpec]| {
+                    specs
+                        .iter()
+                        .find(|s| s.name == "Cooking Range")
+                        .expect("cooking range spec expected")
+                        .parameters
+                        .get("annual_electric_kwh")
+                        .and_then(serde_json::Value::as_f64)
+                        .expect("annual kwh expected")
+                };
+                // Induction burners carry a 0.91 burner efficiency factor
+                // against 1.0 for a standard range, so the annual kWh differ.
+                assert!(
+                    read(&specs_true) < read(&specs_false),
+                    "{name}: 1 (induction) must use less energy than 0"
+                );
+            }
+            "Refrigerator/PrimaryIndicator" => {
+                let read = |specs: &[hares_io::EquipmentSpec]| {
+                    specs
+                        .iter()
+                        .find(|s| s.name == "Refrigerator")
+                        .expect("refrigerator spec expected")
+                        .instance_name
+                        .clone()
+                };
+                assert_eq!(
+                    read(&specs_true),
+                    None,
+                    "{name}: 1 must read as the primary refrigerator"
+                );
+                assert_eq!(
+                    read(&specs_false).as_deref(),
+                    Some("Refrigerator (Secondary)"),
+                    "{name}: 0 must read as a secondary refrigerator"
+                );
+            }
+            "VentilationFan/UsedForWholeBuildingVentilation"
+            | "VentilationFan/UsedForSeasonalCoolingLoadReduction" => {
+                let emits = |specs: &[hares_io::EquipmentSpec]| {
+                    specs.iter().any(|s| s.name == "Ventilation Fan")
+                };
+                assert!(emits(&specs_true), "{name}: 1 must emit the fan spec");
+                assert!(!emits(&specs_false), "{name}: 0 must skip the fan spec");
+            }
+            "WaterFixture/LowFlow" => {
+                let read = |specs: &[hares_io::EquipmentSpec]| {
+                    specs
+                        .iter()
+                        .find(|s| s.name.contains("Water Heater"))
+                        .expect("water heater spec expected")
+                        .parameters
+                        .get("avg_water_draw_l_per_day")
+                        .and_then(serde_json::Value::as_f64)
+                        .expect("draw expected")
+                };
+                let draw_true = read(&specs_true);
+                let draw_false = read(&specs_false);
+                // Low-flow fixtures use less hot water per day.
+                assert!(
+                    draw_true < draw_false,
+                    "{name}: 1 (low flow) must draw less water than 0, got {draw_true} vs {draw_false}"
+                );
+            }
+            other => unreachable!("uncovered boolean site: {other}"),
+        }
+    }
+}
+
+fn parse_vendored_sample(sample: &str) -> hares_io::Building {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendors/OCHRE/test/OS-HPXML Sample Files")
+        .join(sample);
+    parse_hpxml(&path).unwrap_or_else(|e| panic!("{sample} should parse: {e:?}"))
+}
+
+fn zone_volume_m3(building: &hares_io::Building, zone_type: &ZoneType) -> Option<f64> {
+    building
+        .zones
+        .iter()
+        .find(|zone| zone.zone_type == *zone_type)
+        .unwrap_or_else(|| panic!("no {zone_type:?} zone"))
+        .volume_m3
+}
+
+/// A foundation or garage zone whose HPXML gives no floor area takes
+/// OS-HPXML's volume: the slab area times the tallest foundation wall of
+/// the location, or 8 ft for a garage without foundation walls
+/// (geometry.rb `calculate_zone_volume`).
+#[test]
+fn zone_volume_follows_the_os_hpxml_default() {
+    use hares_physics::units::{area_ft2_to_m2, length_ft_to_m};
+    for (sample, zone_type, slab_ft2, height_ft) in [
+        // Unconditioned basement: 1350 ft2 slab, 8 ft walls.
+        (
+            "base-foundation-unconditioned-basement-assembly-r.xml",
+            ZoneType::Foundation,
+            1350.0,
+            8.0,
+        ),
+        // Unvented crawlspace: 1350 ft2 slab, 4 ft walls.
+        (
+            "base-foundation-unvented-crawlspace.xml",
+            ZoneType::Foundation,
+            1350.0,
+            4.0,
+        ),
+        // Garage: 600 ft2 slab, no foundation walls, 8 ft assumed.
+        ("base-enclosure-garage.xml", ZoneType::Garage, 600.0, 8.0),
+    ] {
+        let building = parse_vendored_sample(sample);
+        let volume = zone_volume_m3(&building, &zone_type)
+            .unwrap_or_else(|| panic!("{sample}: {zone_type:?} must have a volume"));
+        let expected = area_ft2_to_m2(slab_ft2) * length_ft_to_m(height_ft);
+        assert!(
+            (volume - expected).abs() < 1e-9,
+            "{sample}: {zone_type:?} volume {volume} m3, expected {expected} m3"
+        );
+    }
+}
+
+/// A conditioned basement merges into the conditioned space (OS-HPXML
+/// geometry.rb `create_or_get_space`, 1704-1716): no Foundation zone, and
+/// the conditioned zone's floor area is the full ConditionedFloorArea, the
+/// basement's included (OCHRE hpxml.py:253).
+#[test]
+fn conditioned_basement_merges_into_the_conditioned_zone() {
+    for (sample, cfa_ft2) in [
+        ("base.xml", 2700.0),
+        (
+            "base-foundation-conditioned-basement-slab-insulation.xml",
+            2700.0,
+        ),
+        ("base-foundation-conditioned-crawlspace.xml", 1350.0),
+    ] {
+        let building = parse_vendored_sample(sample);
+        assert!(
+            building
+                .zones
+                .iter()
+                .all(|zone| zone.zone_type != ZoneType::Foundation),
+            "{sample}: a conditioned foundation must not build a separate (unheated) \
+             Foundation zone",
+        );
+        assert!(
+            building.conditioned_foundation_merged,
+            "{sample}: the conditioned foundation must be recorded as merged",
+        );
+        let conditioned = building
+            .zones
+            .iter()
+            .find(|z| z.zone_type == ZoneType::Conditioned)
+            .unwrap_or_else(|| panic!("{sample}: no conditioned zone"));
+        assert_eq!(
+            conditioned.floor_area_m2,
+            Some(hares_physics::units::area_ft2_to_m2(cfa_ft2)),
+            "{sample}: the merged conditioned zone's floor area is the full \
+             ConditionedFloorArea"
+        );
+    }
+}
+
+/// A foundation or attic the HPXML declares but no surface touches (a
+/// slab-on-grade foundation, a below-apartment attic) is no zone.
+#[test]
+fn declared_spaces_no_surface_touches_are_no_zones() {
+    for (sample, zone_type) in [
+        ("base-foundation-slab.xml", ZoneType::Foundation),
+        ("base-atticroof-cathedral.xml", ZoneType::Attic),
+    ] {
+        let building = parse_vendored_sample(sample);
+        assert!(
+            building
+                .zones
+                .iter()
+                .all(|zone| zone.zone_type != zone_type),
+            "{sample}: no surface is adjacent to the {zone_type:?}, got {:?}",
+            building.zones
+        );
+    }
+}
+
+/// `xml` with every `<element>...</element>` removed.
+fn without_elements(xml: &str, element: &str) -> String {
+    let (open, close) = (format!("<{element}>"), format!("</{element}>"));
+    let mut out = xml.to_string();
+    while let Some(start) = out.find(&open) {
+        let end = start + out[start..].find(&close).expect("closed") + close.len();
+        out.replace_range(start..end, "");
+    }
+    out
+}
+
+fn parse_edited_sample(sample: &str, edit: impl FnOnce(String) -> String) -> hares_io::Building {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendors/OCHRE/test/OS-HPXML Sample Files")
+        .join(sample);
+    let xml = edit(std::fs::read_to_string(&path).expect("sample readable"));
+    hares_io::hpxml::parse_hpxml_str(&xml).unwrap_or_else(|e| panic!("{sample}: {e:?}"))
+}
+
+/// A crawlspace with no foundation walls is 3 ft high (geometry.rb
+/// `calculate_zone_height`), recorded as a warning naming the location.
+#[test]
+fn crawlspace_without_walls_takes_the_assumed_three_feet() {
+    let building = parse_edited_sample("base-foundation-vented-crawlspace.xml", |xml| {
+        without_elements(&xml, "FoundationWall")
+    });
+    let expected =
+        hares_physics::units::area_ft2_to_m2(1350.0) * hares_physics::units::length_ft_to_m(3.0);
+    let volume = zone_volume_m3(&building, &ZoneType::Foundation).expect("crawlspace volume");
+    assert!(
+        (volume - expected).abs() < 1e-9,
+        "{volume} m3, expected {expected} m3"
+    );
+    assert!(
+        building
+            .parse_warnings
+            .iter()
+            .any(|w| w.message.contains("'crawlspace - vented'") && w.message.contains("3 ft")),
+        "the assumed height must be a warning, got {:?}",
+        building.parse_warnings
+    );
+}
+
+/// The zone air temperature capacitance multiplier OS-HPXML v1.12 applies to
+/// every zone is `AdvancedResearchFeatures/TemperatureCapacitanceMultiplier`,
+/// 7 when absent (hpxml.rb:1051, defaults.rb:219-221).
+#[test]
+fn temperature_capacitance_multiplier_is_read_and_defaults_to_seven() {
+    assert_eq!(
+        parse_vendored_sample("base.xml").temperature_capacitance_multiplier,
+        7.0
+    );
+    let given = parse_edited_sample("base.xml", |xml| {
+        xml.replacen(
+            "</SimulationControl>",
+            "<AdvancedResearchFeatures><TemperatureCapacitanceMultiplier>3.5\
+             </TemperatureCapacitanceMultiplier></AdvancedResearchFeatures></SimulationControl>",
+            1,
+        )
+    });
+    assert_eq!(given.temperature_capacitance_multiplier, 3.5);
+}
+
+/// The pre-v1.11 `SimulationControl/TemperatureCapacitanceMultiplier`, which
+/// OS-HPXML v1.12 no longer reads, is ignored with a warning naming it.
+#[test]
+fn legacy_temperature_capacitance_multiplier_is_ignored_with_a_warning() {
+    let building = parse_edited_sample(
+        "base-simcontrol-temperature-capacitance-multiplier.xml",
+        |xml| {
+            xml.replace(
+                ">7.0</TemperatureCapacitanceMultiplier>",
+                ">2.0</TemperatureCapacitanceMultiplier>",
+            )
+        },
+    );
+    assert_eq!(building.temperature_capacitance_multiplier, 7.0);
+    assert!(
+        building.parse_warnings.iter().any(|w| w
+            .message
+            .contains("SimulationControl/TemperatureCapacitanceMultiplier")),
+        "the ignored element must be a warning, got {:?}",
+        building.parse_warnings
+    );
+}
+
+/// A multiplier that is not a positive number is an error.
+#[test]
+fn non_positive_temperature_capacitance_multiplier_is_an_error() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendors/OCHRE/test/OS-HPXML Sample Files/base.xml");
+    let xml = std::fs::read_to_string(path)
+        .expect("sample readable")
+        .replacen(
+            "</SimulationControl>",
+            "<AdvancedResearchFeatures><TemperatureCapacitanceMultiplier>0\
+             </TemperatureCapacitanceMultiplier></AdvancedResearchFeatures></SimulationControl>",
+            1,
+        );
+    let err = hares_io::hpxml::parse_hpxml_str(&xml).expect_err("zero multiplier");
+    assert!(
+        format!("{err}").contains("TemperatureCapacitanceMultiplier"),
+        "{err}"
+    );
+}
+
+fn attic_volume_and_height_m(building: &hares_io::Building) -> (f64, f64) {
+    let attic = building
+        .zones
+        .iter()
+        .find(|z| z.zone_type == ZoneType::Attic)
+        .expect("attic zone");
+    (
+        attic.volume_m3.expect("attic volume"),
+        attic.height_m.expect("attic height"),
+    )
+}
+
+fn assert_attic(building: &hares_io::Building, volume_ft3: f64, height_ft: f64) {
+    let (volume, height) = attic_volume_and_height_m(building);
+    let expected = hares_physics::units::volume_ft3_to_m3(volume_ft3);
+    assert!(
+        (volume - expected).abs() / expected < 1e-6,
+        "{volume} m3, expected {expected} m3"
+    );
+    let expected_height = hares_physics::units::length_ft_to_m(height_ft);
+    assert!(
+        (height - expected_height).abs() / expected_height < 1e-6,
+        "attic height {height} m, expected {expected_height} m"
+    );
+}
+
+/// base.xml without its gable wall.
+fn base_without_gable() -> hares_io::Building {
+    parse_edited_sample("base.xml", |xml| {
+        let start = xml
+            .find("<Wall>\n            <SystemIdentifier id='Wall2'/>")
+            .expect("Wall2");
+        let end = start + xml[start..].find("</Wall>").expect("closed") + "</Wall>".len();
+        format!("{}{}", &xml[..start], &xml[end..]).replace("<AttachedToWall idref='Wall2'/>", "")
+    })
+}
+
+/// The two sides of the rectangle with area `area` and perimeter
+/// `perimeter`.
+fn rectangle_sides(area: f64, perimeter: f64) -> (f64, f64) {
+    let half = perimeter / 2.0;
+    let root = (half * half - 4.0 * area).sqrt();
+    ((half - root) / 2.0, (half + root) / 2.0)
+}
+
+/// A gable attic, one whose walls to the outside are its two gable ends,
+/// takes its geometric volume: half its footprint times its ridge rise,
+/// rise = (span / 2) tan(pitch). base.xml: the 1509.3 ft2 roof at 6:12
+/// covers a 1350 ft2 footprint, and 1200 ft2 of conditioned walls 8 ft high
+/// give it a 150 ft perimeter, so a 30 x 45 ft rectangle; the 112.5 ft2
+/// gable ends are the 30 ft span's triangles. Rise 7.5 ft, 5062.5 ft3.
+#[test]
+fn a_gable_attic_takes_its_geometric_volume() {
+    let slope: f64 = 6.0 / 12.0;
+    let footprint_ft2 = 1509.3 / (1.0 + slope * slope).sqrt();
+    let (span_ft, _) = rectangle_sides(footprint_ft2, 1200.0 / 8.0);
+    assert!((span_ft - 30.0).abs() < 1e-2, "span {span_ft} ft");
+    let rise_ft = span_ft / 2.0 * slope;
+    let ceiling_from_the_attic_side = parse_edited_sample("base.xml", |xml| {
+        let from = "<ExteriorAdjacentTo>attic - unvented</ExteriorAdjacentTo>\n            <InteriorAdjacentTo>living space</InteriorAdjacentTo>\n            <FloorOrCeiling>";
+        assert!(xml.contains(from), "base.xml's attic floor");
+        xml.replacen(
+            from,
+            "<ExteriorAdjacentTo>living space</ExteriorAdjacentTo>\n            <InteriorAdjacentTo>attic - unvented</InteriorAdjacentTo>\n            <FloorOrCeiling>",
+            1,
+        )
+    });
+    for building in [
+        parse_vendored_sample("base.xml"),
+        ceiling_from_the_attic_side,
+    ] {
+        assert_attic(&building, footprint_ft2 * rise_ft / 2.0, rise_ft);
+    }
+}
+
+/// The gable walls choose the span but do not size the rise: BEopt's
+/// 144.5 ft2 gable ends include the eave overhang, and sqrt(end area x
+/// tan(pitch)) would raise its 30 ft span's 7.5 ft ridge to 8.5 ft. Its
+/// 1200 ft2 footprint and 1120 ft2 of 8 ft walls make a 30 x 40 ft
+/// rectangle; the gable triangles sit on the 30 ft sides: 4500 ft3.
+#[test]
+fn eaves_in_the_gable_walls_do_not_raise_the_attic() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/examples/BEopt_example.xml");
+    let building = parse_hpxml(&path).expect("BEopt example parses");
+    let (span_ft, long_ft) = rectangle_sides(1200.0, 1120.0 / 8.0);
+    assert!((span_ft - 30.0).abs() < 1e-9 && (long_ft - 40.0).abs() < 1e-9);
+    assert_attic(&building, 1200.0 * 7.5 / 2.0, 7.5);
+}
+
+/// An attached unit's single outside gable wall is one gable end, not both:
+/// its party-side twin is the attic wall the HPXML also lists, so the ends
+/// sit on the party wall's side. base-bldgtype-attached.xml: 979.8 ft2 of
+/// conditioned walls 8 ft high (685.9 outside, 293.9 the party wall) and a
+/// 1006.2 ft2 roof at 6:12 make a 24.49 x 36.74 ft rectangle of 900 ft2;
+/// the 168.7 ft2 wall is the 36.74 ft span's triangle (168.8 ft2), not the
+/// 24.49 ft span's 75.0, which the ends of two equal 84.35 ft2 halves would
+/// suggest. Rise 9.18 ft, 4133 ft3 (117 m3); the half-area reading gave
+/// 78.0 m3 at a 6.12 ft rise. The 2stories and
+/// infil-compartmentalization-test variants share the geometry (the same
+/// 900 ft2 footprint and 61.24 ft half perimeter).
+#[test]
+fn an_attached_unit_s_gable_end_is_its_full_outside_wall() {
+    let slope: f64 = 6.0 / 12.0;
+    let footprint_ft2 = 1006.2 / (1.0 + slope * slope).sqrt();
+    let (_, span_ft) = rectangle_sides(footprint_ft2, 979.8 / 8.0);
+    assert!((span_ft - 36.74).abs() < 0.01, "span {span_ft} ft");
+    let rise_ft = span_ft / 2.0 * slope;
+    for sample in [
+        "base-bldgtype-attached.xml",
+        "base-bldgtype-attached-2stories.xml",
+        "base-bldgtype-attached-infil-compartmentalization-test.xml",
+    ] {
+        let building = parse_vendored_sample(sample);
+        assert_attic(&building, footprint_ft2 * rise_ft / 2.0, rise_ft);
+    }
+}
+
+/// A gable attic whose span the HPXML does not determine is OS-HPXML's
+/// square hip, with a warning naming why: an attic that also covers a
+/// garage is not bounded by the conditioned walls, and without the number
+/// of conditioned floors the area per floor is unknown.
+#[test]
+fn a_gable_attic_of_unknown_span_is_a_square_hip_with_a_warning() {
+    let hip_volume_ft3 = |roof_area_ft2: f64| {
+        let slope: f64 = 6.0 / 12.0;
+        let footprint_ft2 = roof_area_ft2 / (1.0 + slope * slope).sqrt();
+        footprint_ft2 * 0.5 * slope.atan().sin() * footprint_ft2.sqrt() / 3.0
+    };
+    let base_with = |from: &str, to: &str| {
+        let (from, to) = (from.to_string(), to.to_string());
+        parse_edited_sample("base.xml", move |xml| {
+            assert!(xml.contains(&from), "base.xml holds '{from}'");
+            xml.replacen(&from, &to, 1)
+        })
+    };
+    let attic_floor = "<FloorType>\n              <WoodFrame/>\n            </FloorType>\n            <Area>1350.0</Area>";
+    let cases = [
+        (
+            parse_vendored_sample("base-enclosure-garage.xml"),
+            2180.2,
+            "also lies over 'garage'",
+        ),
+        (
+            base_with(
+                "<NumberofConditionedFloors>2.0</NumberofConditionedFloors>",
+                "",
+            ),
+            1509.3,
+            "number of conditioned floors is not given",
+        ),
+        (
+            base_with(attic_floor, &attic_floor.replace("1350.0", "1100.0")),
+            1509.3,
+            "do not match its roof footprint",
+        ),
+        // A larger lower floor, as under a smaller upper storey or beside a
+        // one-storey wing: the walls would bound more than the attic.
+        (
+            base_with(
+                "<ConditionedFloorArea>2700.0</ConditionedFloorArea>",
+                "<ConditionedFloorArea>3500.0</ConditionedFloorArea>",
+            ),
+            1509.3,
+            "per floor",
+        ),
+        (
+            base_with(
+                "<Area>1200.0</Area>\n            <Siding>wood siding</Siding>",
+                "<Area>400.0</Area>\n            <Siding>wood siding</Siding>",
+            ),
+            1509.3,
+            "do not enclose",
+        ),
+        // 1176 ft2 of 8 ft walls round a 1350 ft2 footprint: a 36 x 37.5 ft
+        // rectangle, so near a square that 1 % less wall leaves no rectangle
+        // at all. Its gable ends are made the 36 ft span's triangles, so only
+        // the conditioning can reject it.
+        (
+            parse_edited_sample("base.xml", |xml| {
+                let walls = "<Area>1200.0</Area>\n            <Siding>wood siding</Siding>";
+                let gables = "<Area>225.0</Area>";
+                assert!(
+                    xml.contains(walls) && xml.contains(gables),
+                    "base.xml walls"
+                );
+                xml.replacen(
+                    walls,
+                    "<Area>1176.0</Area>\n            <Siding>wood siding</Siding>",
+                    1,
+                )
+                .replacen(gables, "<Area>324.0</Area>", 1)
+            }),
+            1509.3,
+            "near a square",
+        ),
+        // Gable ends 0.89 times the 30 ft span's triangle: smaller than any
+        // gable on that span, so the gable and storey walls disagree on it.
+        (
+            base_with("<Area>225.0</Area>", "<Area>200.0</Area>"),
+            1509.3,
+            "times the",
+        ),
+        // 1264 ft2 of 8 ft walls round the 1350 ft2 footprint: a 25 x 54 ft
+        // rectangle. Gable ends of 160 ft2 are 2.05 times the 25 ft span's
+        // 78.1 ft2 triangle (and nearer it than the 54 ft side's 364.5 ft2),
+        // more than OS-HPXML's deepest 5 ft eaves make on 25 ft, 1.96.
+        (
+            parse_edited_sample("base.xml", |xml| {
+                let walls = "<Area>1200.0</Area>\n            <Siding>wood siding</Siding>";
+                assert!(xml.contains(walls) && xml.contains("<Area>225.0</Area>"));
+                xml.replacen(
+                    walls,
+                    "<Area>1264.0</Area>\n            <Siding>wood siding</Siding>",
+                    1,
+                )
+                .replacen("<Area>225.0</Area>", "<Area>320.0</Area>", 1)
+            }),
+            1509.3,
+            "outside 0.98 to 1.96",
+        ),
+    ];
+    for (building, roof_area_ft2, reason) in cases {
+        let (volume, _) = attic_volume_and_height_m(&building);
+        let expected = hares_physics::units::volume_ft3_to_m3(hip_volume_ft3(roof_area_ft2));
+        assert!(
+            (volume - expected).abs() / expected < 1e-6,
+            "{volume} m3, expected the hip's {expected} m3"
+        );
+        assert!(
+            building
+                .parse_warnings
+                .iter()
+                .any(|w| w.message.contains("span cannot be determined")
+                    && w.message.contains(reason)),
+            "expected a warning naming '{reason}', got {:?}",
+            building.parse_warnings
+        );
+    }
+}
+
+/// An attic whose HPXML does not show it is a gable is OS-HPXML's square
+/// hip under its roofs: footprint = roof area / sqrt(1 + slope^2), height =
+/// 0.5 sin(atan(slope)) sqrt(footprint), volume = footprint x height / 3
+/// (geometry.rb:1325-1329, 1373-1393). base.xml without its gable wall has
+/// no gable ends; with roofs of two pitches over gable walls the roof shape
+/// is unknown, which is a warning.
+#[test]
+fn an_attic_not_shown_to_be_a_gable_is_a_square_hip() {
+    let hip = |building: &hares_io::Building, roof_area_ft2: f64, slope: f64| {
+        let footprint_ft2 = roof_area_ft2 / (1.0 + slope * slope).sqrt();
+        let height_ft = 0.5 * slope.atan().sin() * footprint_ft2.sqrt();
+        assert_attic(building, footprint_ft2 * height_ft / 3.0, height_ft);
+    };
+    hip(&base_without_gable(), 1509.3, 6.0 / 12.0);
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/examples/BEopt_example.xml");
+    let xml = std::fs::read_to_string(path)
+        .expect("BEopt example readable")
+        .replacen("<Pitch>6.0</Pitch>", "<Pitch>8.0</Pitch>", 1);
+    let two_pitches = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
+    let slope = (6.0 + 8.0) / 2.0 / 12.0;
+    hip(&two_pitches, 2.0 * 670.8204, slope);
+    assert!(
+        two_pitches
+            .parse_warnings
+            .iter()
+            .any(|w| w.message.contains("gable") && w.message.contains("hip")),
+        "the unknown roof shape must be a warning, got {:?}",
+        two_pitches.parse_warnings
+    );
+}
+
+/// The foundation top above grade is the highest foundation wall top
+/// (base.xml: 8 ft high, 7 ft below grade, so 1 ft), raised to a given
+/// `UnitHeightAboveGrade` (3 ft), or 2 ft for a unit over open air with no
+/// slab (base-foundation-ambient.xml); the walls top adds the 8 ft average
+/// ceiling per conditioned floor above grade (geometry.rb:835-848,
+/// defaults.rb:933-951).
+#[test]
+fn infiltration_heights_follow_the_foundation_and_the_floors() {
+    let raised = parse_edited_sample("base.xml", |xml| {
+        xml.replace(
+            "<NumberofConditionedFloorsAboveGrade>",
+            "<UnitHeightAboveGrade>3.0</UnitHeightAboveGrade>\n          \
+             <NumberofConditionedFloorsAboveGrade>",
+        )
+    });
+    for (building, foundation_top_ft) in [
+        (parse_vendored_sample("base.xml"), 1.0),
+        (raised, 3.0),
+        (parse_vendored_sample("base-foundation-ambient.xml"), 2.0),
+    ] {
+        let foundation_top = foundation_top_m(&building).expect("foundation top");
+        let expected_m = hares_physics::units::length_ft_to_m(foundation_top_ft);
+        assert!(
+            (foundation_top - expected_m).abs() < 1e-9,
+            "foundation top {foundation_top} m, expected {expected_m} m"
+        );
+        let walls_top = walls_top_m(&building).expect("walls top");
+        let walls_m = hares_physics::units::length_ft_to_m(foundation_top_ft + 8.0);
+        assert!(
+            (walls_top - walls_m).abs() < 1e-9,
+            "walls top {walls_top} m, expected {walls_m} m"
+        );
+    }
+}
+
+/// The walls top derives from the number of conditioned floors above
+/// grade, and the foundation top from each foundation wall's height and
+/// depth: an input lacking one fails rather than taking an assumed value.
+/// The parser requires the floor count, so a file without it fails there;
+/// a foundation wall without its depth fails where the height is needed.
+#[test]
+fn infiltration_heights_without_their_inputs_error() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendors/OCHRE/test/OS-HPXML Sample Files/base.xml");
+    let no_floors = without_elements(
+        &std::fs::read_to_string(&path).expect("sample readable"),
+        "NumberofConditionedFloorsAboveGrade",
+    );
+    let err = hares_io::hpxml::parse_hpxml_str(&no_floors).expect_err("no floor count must fail");
+    assert!(
+        format!("{err:?}").contains("NumberofConditionedFloorsAboveGrade"),
+        "the error must name the element, got {err:?}"
+    );
+    let no_depth = parse_edited_sample("base.xml", |xml| without_elements(&xml, "DepthBelowGrade"));
+    foundation_top_m(&no_depth).expect_err("no wall depth must fail");
+}
+
+/// The exterior share of a unit-total leakage measurement: a given `Aext`;
+/// for an attached unit without one, OS-HPXML's compartmentalization split
+/// (test_defaults.rb `test_infiltration_compartmentalization_test_adjustment`
+/// pins 0.840, and 0.817 with the unvented attic inside the infiltration
+/// volume); 1 for a unit-exterior measurement.
+#[test]
+fn exterior_leakage_share_follows_os_hpxml() {
+    let sample = "base-bldgtype-attached-infil-compartmentalization-test.xml";
+    let with_aext = parse_edited_sample(sample, |xml| {
+        xml.replace(
+            "<InfiltrationVolume>14400.0</InfiltrationVolume>",
+            "<InfiltrationVolume>14400.0</InfiltrationVolume>\n            \
+             <extension><Aext>0.5</Aext></extension>",
+        )
+    });
+    let attic_within = parse_edited_sample(sample, |xml| {
+        xml.replace(
+            "<WithinInfiltrationVolume>false</WithinInfiltrationVolume>",
+            "<WithinInfiltrationVolume>true</WithinInfiltrationVolume>",
+        )
+    });
+    for (building, expected) in [
+        (parse_vendored_sample(sample), 0.84014),
+        (attic_within, 0.81739),
+        (with_aext, 0.5),
+        (parse_vendored_sample("base-bldgtype-attached.xml"), 1.0),
+        (parse_vendored_sample("base.xml"), 1.0),
+    ] {
+        let share = exterior_leakage_fraction(&building).expect("exterior share");
+        assert!(
+            (share - expected).abs() < 1e-12,
+            "exterior leakage share {share}, expected {expected}"
+        );
+    }
+}
+
+/// OS-HPXML's default ConditionedBuildingVolume where its own tests pin it
+/// (test_defaults.rb `test_infiltration_height_and_volume` and
+/// `test_building_construction`): a cathedral ceiling raises the 8 ft
+/// average ceiling under the roof (25300 ft3), a conditioned attic adds its
+/// roof height (30816 ft3), a conditioned crawlspace adds its volume
+/// (16200 ft3).
+#[test]
+fn default_conditioned_volume_matches_the_os_hpxml_tests() {
+    for (sample, drop_average_ceiling, expected_ft3) in [
+        ("base-atticroof-cathedral.xml", true, 25300.0),
+        ("base-atticroof-conditioned.xml", true, 30816.0),
+        ("base-foundation-conditioned-crawlspace.xml", false, 16200.0),
+    ] {
+        let building = parse_edited_sample(sample, |xml| {
+            let xml = without_elements(&xml, "ConditionedBuildingVolume");
+            if drop_average_ceiling {
+                without_elements(&xml, "AverageCeilingHeight")
+            } else {
+                xml
+            }
+        });
+        let volume_ft3 = hares_physics::units::volume_m3_to_ft3(building.conditioned_volume_m3);
+        assert!(
+            (volume_ft3 - expected_ft3).abs() / expected_ft3 < 1e-4,
+            "{sample}: {volume_ft3} ft3, OS-HPXML {expected_ft3} ft3"
+        );
+    }
+}
+
+/// A vented crawlspace or attic with no VentilationRate takes OS-HPXML's
+/// default SLA, 1/150 and 1/300 to six places (defaults.rb
+/// `get_vented_crawl_sla`, `get_vented_attic_sla`), as a warning.
+#[test]
+fn vented_spaces_without_a_rate_take_the_os_hpxml_sla() {
+    for (sample, zone_type, expected) in [
+        (
+            "base-foundation-vented-crawlspace.xml",
+            ZoneType::Foundation,
+            0.006667,
+        ),
+        ("base-atticroof-vented.xml", ZoneType::Attic, 0.003333),
+    ] {
+        let building = parse_edited_sample(sample, |xml| without_elements(&xml, "VentilationRate"));
+        let zone = building
+            .zones
+            .iter()
+            .find(|z| z.zone_type == zone_type)
+            .expect("vented space");
+        assert_eq!(zone.ventilation_sla, Some(expected), "{sample}");
+        assert!(
+            building
+                .parse_warnings
+                .iter()
+                .any(|w| w.message.contains("VentilationRate")),
+            "{sample}: the default must be a warning, got {:?}",
+            building.parse_warnings
+        );
+    }
+}
+
+/// A roof over conditioned space with no Pitch cannot raise the default
+/// ceiling; the volume falls to the flat 8 ft ceiling and the missing Pitch
+/// is a warning naming the roof.
+#[test]
+fn default_ceiling_without_a_roof_pitch_is_a_warning() {
+    let building = parse_edited_sample("base-atticroof-cathedral.xml", |xml| {
+        let xml = without_elements(&xml, "ConditionedBuildingVolume");
+        let xml = without_elements(&xml, "AverageCeilingHeight");
+        without_elements(&xml, "Pitch")
+    });
+    let volume_ft3 = hares_physics::units::volume_m3_to_ft3(building.conditioned_volume_m3);
+    assert!((volume_ft3 - 2700.0 * 8.0).abs() < 1e-3, "{volume_ft3} ft3");
+    assert!(
+        building
+            .parse_warnings
+            .iter()
+            .any(|w| w.message.contains("Roof1") && w.message.contains("no Pitch")),
+        "the missing Pitch must be a warning, got {:?}",
+        building.parse_warnings
+    );
+}
+
+/// A file with no ConditionedBuildingVolume takes OS-HPXML's default, the
+/// conditioned floor area times an 8 ft average ceiling (defaults.rb
+/// `apply_building_construction`), recorded as a warning.
+#[test]
+fn missing_conditioned_volume_takes_the_os_hpxml_default() {
+    let building = parse_vendored_sample("base-misc-defaults.xml");
+    let expected = hares_physics::units::volume_ft3_to_m3(2700.0 * 8.0);
+    let volume = building.conditioned_volume_m3;
+    assert!(
+        (volume - expected).abs() < 1e-6,
+        "conditioned volume {volume} m3, expected {expected} m3"
+    );
+    assert!(
+        building
+            .parse_warnings
+            .iter()
+            .any(|w| w.message.contains("ConditionedBuildingVolume")),
+        "the default must be a warning, got {:?}",
+        building.parse_warnings
+    );
+}
+
+/// A constant setpoint with a daily setback or setup takes it for
+/// `TotalSetbackHoursperWeek / 7` hours from the start hour, every day
+/// (OS-HPXML hvac.rb `get_hvac_setpoints`): 66 °F heating 23:00-06:00 and
+/// 80 °F cooling 09:00-15:00 in base-hvac-setpoints-daily-setbacks.xml.
+#[test]
+fn constant_setpoints_carry_their_daily_setback() {
+    let building = parse_vendored_sample("base-hvac-setpoints-daily-setbacks.xml");
+    let f = hares_physics::units::temperature_f_to_c;
+    let mut heating = [f(68.0); 24];
+    for hour in [23, 0, 1, 2, 3, 4, 5] {
+        heating[hour] = f(66.0);
+    }
+    let mut cooling = [f(78.0); 24];
+    cooling[9..15].fill(f(80.0));
+    for (label, setpoints, expected) in [
+        (
+            "heating weekday",
+            &building.heating_weekday_setpoints_c,
+            heating,
+        ),
+        (
+            "heating weekend",
+            &building.heating_weekend_setpoints_c,
+            heating,
+        ),
+        (
+            "cooling weekday",
+            &building.cooling_weekday_setpoints_c,
+            cooling,
+        ),
+        (
+            "cooling weekend",
+            &building.cooling_weekend_setpoints_c,
+            cooling,
+        ),
+    ] {
+        assert_eq!(
+            setpoints.as_deref(),
+            Some(&expected[..]),
+            "{label} setpoints"
+        );
+    }
+}
+
+/// A setback with no weekly hours is an incomplete control, not a flat
+/// setpoint.
+#[test]
+fn setback_without_hours_is_an_error() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../vendors/OCHRE/test/OS-HPXML Sample Files/base-hvac-setpoints-daily-setbacks.xml",
+    );
+    let xml = std::fs::read_to_string(path)
+        .expect("sample readable")
+        .replace(
+            "<TotalSetbackHoursperWeekHeating>49</TotalSetbackHoursperWeekHeating>",
+            "",
+        );
+    let err = hares_io::hpxml::parse_hpxml_str(&xml).expect_err("missing hours must fail");
+    assert!(
+        err.to_string().contains("TotalSetbackHoursperWeekHeating"),
+        "got: {err}"
     );
 }

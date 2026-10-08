@@ -8,12 +8,9 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
-    telemetry_keys as tk,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)] // warn! used only under debug_assertions or check_invariants
-use tracing::warn;
 
 use hares_physics::constants::{
     CP_LIQUID_WATER_J_KG_K, GALLONS_PER_MINUTE_TO_KG_PER_SECOND, UEF_TO_EF_GAS_INTERCEPT,
@@ -24,9 +21,10 @@ use hares_physics::water_density_kg_m3;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
+use super::siting::Siting;
+use super::tank_thermostat_update;
 use super::wh_config::TanklessWaterHeaterConfig;
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
-use crate::hvac::helpers::zone_id_from_config_or_default;
 
 const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
 const DEFAULT_EF: f64 = 0.9;
@@ -58,6 +56,8 @@ pub struct TanklessWH {
     core_output: CoreOutput,
     fuel_type: FuelType,
     setpoint_c: f64,
+    /// The configured setpoint, which the release form restores.
+    configured_setpoint_c: f64,
     efficiency_factor: f64,
     // si-guard-ignore: `GPM` in doc comment reflects HPXML user-facing config field unit; the
     // value is converted to kg/s (SI) at init and never used imperially in simulation.
@@ -91,8 +91,8 @@ pub struct TanklessWH {
     dr_level: DRLevel,
     // Transient load fraction from LoadFraction control signal; reset each step.
     ctrl_load_fraction: f64,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
+    /// The zone or no-zone location the unit sits in, resolved at init.
+    siting: Siting,
     /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
     draw_tracker: super::DrawVolumeTracker,
 }
@@ -100,20 +100,11 @@ pub struct TanklessWH {
 impl TanklessWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let siting = Siting::from_constructor_config(&config);
         let typed = config
             .require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")
             .expect("Tankless Water Heater requires typed FuelType");
         let fuel_type = typed.fuel_type;
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if typed.zone_id.is_none() && typed.zone_type.is_some() {
-            warn!(
-                water_heater = %config.name,
-                zone_type = ?typed.zone_type,
-                "zone_id not resolved from HPXML Location; falling back to ZoneId(1)"
-            );
-        }
 
         let ports = build_ports(fuel_type);
 
@@ -123,7 +114,7 @@ impl TanklessWH {
                 name: config.name,
                 end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Tankless Water Heater"),
-                zone: Some(zone),
+                zone: siting.zone(),
                 fuel: fuel_type,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -141,6 +132,7 @@ impl TanklessWH {
             core_output: CoreOutput::default(),
             fuel_type,
             setpoint_c: DEFAULT_SETPOINT_C,
+            configured_setpoint_c: DEFAULT_SETPOINT_C,
             efficiency_factor: DEFAULT_EF,
             min_flow_kg_s: 0.0,
             rated_thermal_power_w: DEFAULT_MAX_THERMAL_POWER_W,
@@ -160,7 +152,7 @@ impl TanklessWH {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
-            zone_id_explicit,
+            siting,
             draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
@@ -220,13 +212,17 @@ impl TanklessWH {
         if let Some(id) = equipment_id_from_config(config)? {
             self.descriptor.id = EquipmentId(id);
         }
-        self.descriptor.zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
+        // A tankless unit stores no water, so it has no standing loss and
+        // reads no ambient air; its placement still must resolve.
+        self.siting.resolve(config, c.zone_type.as_deref())?;
+        self.descriptor.zone = self.siting.zone();
         self.fuel_type = c.fuel_type;
         self.descriptor.fuel = self.fuel_type;
         self.descriptor.core_capabilities = core_capabilities_for_fuel(self.fuel_type);
         self.ports = build_ports(self.fuel_type);
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
+        self.configured_setpoint_c = self.setpoint_c;
 
         // Fallback chain for efficiency factor:
         // 1. energy_factor — pre-2015 EF test procedure value (direct use).
@@ -320,10 +316,6 @@ impl Equipment for TanklessWH {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
@@ -379,11 +371,12 @@ impl Equipment for TanklessWH {
         let mains_temp_c_source = self.mains_temp_c_source.as_mut();
         let (inlet_temp_c, schedule_draw_kg_s) = super::resolve_storage_step_inputs(
             env,
+            &self.descriptor.name,
             self.inlet_temp_c,
             self.draw_flow_rate_kg_s,
             draw_flow_rate_kg_s_source,
             mains_temp_c_source,
-        );
+        )?;
         let delta_t_c = (setpoint_c - inlet_temp_c).max(0.0);
         let _ = dt; // dt not used for tankless (on-demand model)
 
@@ -642,16 +635,17 @@ impl Equipment for TanklessWH {
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c,
                 cooling_setpoint_c,
-                ..
+                deadband_c,
             } => {
-                if let Some(sp) = heating_setpoint_c.or(*cooling_setpoint_c) {
-                    if !sp.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "invalid water-heater setpoint: {sp}"
-                        )));
-                    }
-                    self.setpoint_c = sp;
+                let update =
+                    tank_thermostat_update(*heating_setpoint_c, *cooling_setpoint_c, *deadband_c)?;
+                if let Some(band_c) = update.band_c {
+                    return Err(HaresError::Control(format!(
+                        "a tankless water heater has no thermostat switching band, got \
+                         deadband_c {band_c}"
+                    )));
                 }
+                self.setpoint_c = update.setpoint_c(self.setpoint_c, self.configured_setpoint_c);
             }
             ControlSignal::DutyCycle { on_fraction, .. } => {
                 if !on_fraction.is_finite() || !(0.0..=1.0).contains(on_fraction) {
@@ -789,9 +783,11 @@ mod tests {
     use super::TanklessWH;
     use crate::water_heater::DHW_DEMAND_LOOP;
     use crate::{Equipment, EquipmentConfig, TanklessWaterHeaterConfig};
+    use hares_types::AmbientLocation;
 
     fn env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -819,7 +815,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -831,6 +828,31 @@ mod tests {
             price_signal: Default::default(),
             electrical: Default::default(),
         }
+    }
+
+    #[test]
+    fn thermal_setpoint_band_is_rejected_for_a_heater_without_a_tank_thermostat() {
+        use hares_types::ControlSignal;
+        let cfg = config();
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+        let setpoint_before = eq.setpoint_c;
+        for (setpoint, db) in [(None, 1.0), (Some(50.0), 1.0)] {
+            eq.apply_signal(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: setpoint,
+                cooling_setpoint_c: None,
+                deadband_c: Some(db),
+            })
+            .expect_err("a tankless heater has no switching band to set");
+            assert_eq!(eq.setpoint_c, setpoint_before);
+        }
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(50.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        assert_eq!(eq.setpoint_c, 50.0);
     }
 
     /// Reactive-power contract for tankless water heaters: control
@@ -891,7 +913,7 @@ mod tests {
     fn typed_config() -> TanklessWaterHeaterConfig {
         TanklessWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             fuel_type: FuelType::Gas,
             energy_factor: Some(0.8),
@@ -913,6 +935,23 @@ mod tests {
 
     fn config() -> EquipmentConfig {
         config_from_typed(typed_config())
+    }
+
+    #[test]
+    fn the_release_restores_the_configured_setpoint() {
+        use hares_types::ControlSignal;
+        let config = config();
+        let mut eq = TanklessWH::new(config.clone());
+        eq.init(&config, &env()).unwrap();
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(55.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        assert_eq!(eq.setpoint_c, 55.0);
+        eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
+        assert_eq!(eq.setpoint_c, 50.0);
     }
 
     /// Grid outage: an electric tankless heater cannot fire — cold water
@@ -1888,6 +1927,7 @@ mod tests {
     fn tankless_wh_uses_dynamic_mains_temp_from_environment() {
         fn env_with_mains(mains_c: f64) -> EnvironmentState {
             EnvironmentState {
+                ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
                 zones: vec![ZoneState {
                     id: ZoneId(1),
                     temperature_c: 21.0,
@@ -1904,7 +1944,8 @@ mod tests {
                     frequency_hz: 60.0,
                     island_bus_voltage_pu: None,
                 },
-                custom_domains: vec![],
+                schedule_row: None,
+                domains: hares_types::DomainSlots::default(),
                 equipment_telemetry: std::collections::HashMap::new(),
                 equipment_core: std::collections::HashMap::new(),
                 current_time: FixedOffset::east_opt(0)
@@ -2137,6 +2178,69 @@ mod tests {
         assert!(
             eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap() > 0.0,
             "flow 0.02 kg/s must fire when min_flow_kg_s=0.01 takes precedence"
+        );
+    }
+
+    /// A tankless water heater in an HPXML location with no modeled zone
+    /// carries the "other exterior" ambient placement instead of a zone id.
+    /// The unit is on-demand with no tank, so its ambient placement has no
+    /// per-step temperature read; the classification itself is the contract.
+    #[test]
+    fn tankless_ambient_source_for_other_exterior_location() {
+        let mut typed = typed_config();
+        typed.zone_id = None;
+        typed.zone_type = Some("other exterior".to_string());
+        let cfg = config_from_typed(typed);
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+        assert_eq!(
+            eq.siting.ambient_location(),
+            Some(AmbientLocation::OtherExterior),
+            "init must resolve the classified ambient placement"
+        );
+        assert_eq!(eq.descriptor().zone, None);
+        assert_eq!(
+            eq.ambient_location(),
+            None,
+            "a tankless unit reads no ambient air, so it asks for none"
+        );
+    }
+
+    /// The "outside" spelling classifies the same as "other exterior",
+    /// case-insensitively.
+    #[test]
+    fn tankless_ambient_source_for_outside_location_spelling() {
+        let mut typed = typed_config();
+        typed.zone_id = None;
+        typed.zone_type = Some("Outside".to_string());
+        let cfg = config_from_typed(typed);
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+        assert_eq!(
+            eq.siting.ambient_location(),
+            Some(AmbientLocation::OtherExterior)
+        );
+        assert_eq!(eq.descriptor().zone, None);
+    }
+
+    #[test]
+    fn tankless_errors_on_unresolved_zone_and_unclassified_location() {
+        let mut typed = typed_config();
+        typed.zone_id = None;
+        typed.zone_type = Some("in between somewhere".to_string());
+        let cfg = config_from_typed(typed);
+        let mut eq = TanklessWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env())
+            .expect_err("an unclassifiable location with no zone must fail init");
+        let message = err.to_string();
+        assert!(
+            message.contains("Tankless"),
+            "the error must name the water heater, got: {message}"
+        );
+        assert!(
+            message.contains("in between somewhere"),
+            "the error must name the unresolved zone_type, got: {message}"
         );
     }
 }

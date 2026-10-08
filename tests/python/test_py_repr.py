@@ -29,6 +29,7 @@ def dwelling():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         master_seed=0,
+        write_output=False,
     )
     dw.initialize()
     return dw

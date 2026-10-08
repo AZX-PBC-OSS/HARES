@@ -1,43 +1,33 @@
 //! Per-timestep numerical invariant checks for the dwelling simulation loop.
 //!
-//! Checks are compiled and executed when either:
-//! - The `check_invariants` Cargo feature is enabled, or
-//! - The build has `debug_assertions` enabled (i.e., `cargo build` / `cargo test`
-//!   without `--release`).
-//!
-//! In production release builds without the feature flag all public functions
-//! compile to nothing -- the compiler eliminates the bodies entirely.
+//! Checks are compiled and executed in every build profile: a
+//! violation is a typed `HaresError` that quarantines the dwelling, never a
+//! silent no-op, so a production release run enforces the same invariants a
+//! debug build does.
 
-#[cfg(any(debug_assertions, test, feature = "check_invariants"))]
 use std::collections::HashMap;
 
 use hares_types::ports::FuelAccumulator;
-#[cfg(any(debug_assertions, test, feature = "check_invariants"))]
 use hares_types::ports::{ALL_FUEL_TYPES, FUEL_TYPE_COUNT, fuel_index_reverse};
 use hares_types::{ControlCapabilities, HaresError, ZoneId};
 
 /// Entrypoint for per-timestep numerical invariant validation.
 ///
-/// Construct once per dwelling; call the `check_*` methods each timestep
-/// inside a `cfg(any(debug_assertions, feature = "check_invariants"))` block.
-/// All methods return `Ok(())` in unchecked builds.
+/// Construct once per dwelling; call the `check_*` methods each timestep.
+/// All methods return the first violation found, or `Ok(())`.
 pub struct InvariantChecker {
     /// Per-zone accumulated heating energy [Wh]. Used by
     /// [`check_heating_accumulator`] to detect sign errors that produce
     /// persistently negative cumulative totals.
-    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
     total_heating_wh: HashMap<ZoneId, f64>,
     /// Per-zone accumulated cooling energy [Wh]. See [`total_heating_wh`].
-    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
     total_cooling_wh: HashMap<ZoneId, f64>,
 }
 
 impl InvariantChecker {
     pub fn new() -> Self {
         Self {
-            #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
             total_heating_wh: HashMap::new(),
-            #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
             total_cooling_wh: HashMap::new(),
         }
     }
@@ -49,14 +39,13 @@ impl Default for InvariantChecker {
     }
 }
 
-#[cfg(any(test, debug_assertions, feature = "check_invariants"))]
 impl InvariantChecker {
     /// Verifies energy conservation across the thermal domain for one zone.
     ///
     /// The check asserts:
     /// `|Σ(Q_gain) − ΔE_storage − Q_loss_envelope| < max(1.0, 1e-6 · Σ|Q_gain_i|)`
     ///
-    /// All values in watts [W].
+    /// All values in watts (W).
     pub fn check_thermal(
         &self,
         q_gains: &[f64],
@@ -109,7 +98,7 @@ impl InvariantChecker {
     /// Verifies reactive power balance across the bus.
     ///
     /// The check asserts:
-    /// `|Q_solver − Q_ports| < max(0.001, 1e-6 · gross_reactive_flux)` [kvar]
+    /// `|Q_solver − Q_ports| < max(0.001, 1e-6 · gross_reactive_flux)` (kvar)
     ///
     /// Unlike active power, reactive power is accumulated as one signed sum
     /// (no load/gen split).  The gross reactive flux is therefore
@@ -151,7 +140,7 @@ impl InvariantChecker {
     /// Verifies electrical power balance across the bus.
     ///
     /// The check asserts:
-    /// `|P_grid + Σ P_equipment_ports| < max(0.001, 1e-6 · Σ|P_i|)` [kW]
+    /// `|P_grid + Σ P_equipment_ports| < max(0.001, 1e-6 · Σ|P_i|)` (kW)
     pub fn check_electrical(
         &self,
         p_grid: f64,
@@ -301,29 +290,6 @@ impl InvariantChecker {
                 value: sorption_residual,
                 tolerance: sorption_tolerance,
             });
-        }
-        Ok(())
-    }
-
-    /// Validates state-of-charge is within `[0.0, 1.0]` and warns if accumulated
-    /// integration error exceeds threshold.
-    ///
-    /// Returns `Ok(())` always -- SoC out-of-bounds is clamped (not a fatal error).
-    /// Emits `tracing::warn!` when `accumulated_error.abs() > 0.001`.
-    pub fn check_soc(&self, soc: f64, accumulated_error: f64) -> Result<(), HaresError> {
-        let clamped = soc.clamp(0.0, 1.0);
-        if (clamped - soc).abs() > f64::EPSILON {
-            tracing::warn!(
-                soc = soc,
-                clamped = clamped,
-                "SoC out of [0, 1] range; clamped"
-            );
-        }
-        if accumulated_error.abs() > 0.001 {
-            tracing::warn!(
-                accumulated_error = accumulated_error,
-                "SoC accumulated integration error exceeds 0.001"
-            );
         }
         Ok(())
     }
@@ -584,7 +550,8 @@ impl InvariantChecker {
     /// context-rich NaN-screening gate that fires at the earliest possible
     /// phase boundary — before any residual is computed.
     ///
-    /// Called from the dwelling's [`check_invariants`] at the top of the
+    /// Called from the dwelling's `Dwelling::check_step_invariants` at the
+    /// top of the
     /// per-step invariant pass, and from diagnostic / telemetry construction
     /// sites as a backstop.
     ///
@@ -702,91 +669,6 @@ impl InvariantChecker {
     }
 }
 
-#[cfg(not(any(test, debug_assertions, feature = "check_invariants")))]
-impl InvariantChecker {
-    pub fn check_thermal(&self, _: &[f64], _: f64, _: f64) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_reactive(&self, _: f64, _: f64) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_electrical(&self, _: f64, _: &[f64]) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_moisture(&self, _: f64, _: f64, _: f64, _: f64, _: f64) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_soc(&self, _: f64, _: f64) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_ev_capacity_degraded(
-        &self,
-        _: f64,
-        _: f64,
-        _: f64,
-        _: f64,
-    ) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_temperatures(&self, _: &[f64], _: &[f64], _: &[f64]) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_protocol_native_registration(
-        &self,
-        _: &[ControlCapabilities],
-    ) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_fuel_coverage(&self, _: &FuelAccumulator) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_fuel_electric_absent(&self, _: f64) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_equipment_step_order(&self, _: &[u8]) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_nan_screen(
-        &self,
-        _: u64,
-        _: &[(&str, Option<ZoneId>, f64)],
-    ) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_hvac_power_non_negative(
-        &self,
-        _: u64,
-        _: ZoneId,
-        _: f64,
-        _: f64,
-    ) -> Result<(), HaresError> {
-        Ok(())
-    }
-
-    pub fn check_heating_accumulator(
-        &mut self,
-        _: u64,
-        _: ZoneId,
-        _: f64,
-        _: f64,
-        _: f64,
-    ) -> Result<(), HaresError> {
-        Ok(())
-    }
-}
-
 /// Verifies that Basement Lighting is only created when the foundation is
 /// conditioned (i.e. "Finished Basement").
 ///
@@ -799,7 +681,6 @@ impl InvariantChecker {
 /// This invariant catches regressions where unconditioned-basement lighting
 /// is inadvertently created through an alternative code path that bypasses
 /// the HPXML resolution gate.
-#[cfg(any(debug_assertions, test, feature = "check_invariants"))]
 pub fn check_basement_lighting_foundation(
     equipment_names: &[String],
     foundation_name: Option<&str>,
@@ -1458,21 +1339,6 @@ mod tests {
     fn tank_temperature_below_minimum_fails() {
         let result = checker().check_temperatures(&[], &[], &[-0.1]);
         assert!(result.is_err());
-    }
-
-    // ── soc ──────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn soc_within_range_returns_ok() {
-        let result = checker().check_soc(0.5, 0.0);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn soc_out_of_range_returns_ok_with_warning() {
-        // SoC violations warn but do not return Err.
-        let result = checker().check_soc(1.5, 0.002);
-        assert!(result.is_ok());
     }
 
     // ── ev_capacity_degraded ──────────────────────────────────────────────────

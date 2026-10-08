@@ -17,8 +17,13 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+import pandas as pd
+
+from ochre_units import register_removed_units
 
 ROOT = Path(__file__).resolve().parents[2]
 VENDOR_OCHRE = ROOT / "vendors" / "OCHRE"
@@ -78,7 +83,12 @@ def _run_ochre() -> tuple[dict[str, float], float, float]:
     """Run OCHRE with PV + Battery for 120 days."""
     if str(VENDOR_OCHRE) not in sys.path:
         sys.path.insert(0, str(VENDOR_OCHRE))
-    from ochre import Dwelling as OchreDwelling  # type: ignore[import-not-found]
+    # OCHRE's infiltration model converts with a unit name pint 0.25 removed
+    # from the default registry; re-register it before any dwelling is built.
+    import ochre.utils.units
+    from ochre import Dwelling as OchreDwelling
+
+    register_removed_units(ochre.utils.units.ureg)
 
     equipment: dict[str, dict] = {
         "PV": {
@@ -115,7 +125,12 @@ def _run_ochre() -> tuple[dict[str, float], float, float]:
     init_elapsed = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    df, _, _ = dwelling.simulate()
+    sim_result = dwelling.simulate()
+    assert isinstance(sim_result, tuple) and len(sim_result) == 3, (
+        "OCHRE simulate must return (df, metrics_by_end_use, ...)"
+    )
+    df = sim_result[0]
+    assert isinstance(df, pd.DataFrame), "OCHRE simulate must return a results DataFrame"
     sim_elapsed = time.perf_counter() - t1
 
     time_res_h = TIME_RES_MIN / 60.0
@@ -126,9 +141,9 @@ def _run_ochre() -> tuple[dict[str, float], float, float]:
     return kwh, init_elapsed, sim_elapsed
 
 
-def _run_hares() -> tuple[dict[str, float], float, float]:
-    """Run HARES with PV + Battery for 120 days."""
-    from ochre_next import Battery, Dwelling as HaresDwelling, PV  # type: ignore[import-not-found]
+def _run_hares(output_dir: Path) -> tuple[dict[str, float], float, float]:
+    """Run HARES with PV + Battery for 120 days, writing its output into ``output_dir``."""
+    from ochre_next import Battery, Dwelling as HaresDwelling, PV
 
     t0 = time.perf_counter()
     dwelling = HaresDwelling.from_hpxml(
@@ -141,6 +156,8 @@ def _run_hares() -> tuple[dict[str, float], float, float]:
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
+        write_output=True,
+        output_path=str(output_dir / "hares_bench_4month_der.csv"),
     )
     dwelling.initialize()
 
@@ -247,7 +264,8 @@ def main() -> None:
     print(f"  done  (init={ochre_init:.1f}s  sim={ochre_sim:.1f}s)")
 
     print("\nRunning HARES ...", flush=True)
-    hares_kwh, hares_init, hares_sim = _run_hares()
+    with tempfile.TemporaryDirectory() as output_dir:
+        hares_kwh, hares_init, hares_sim = _run_hares(Path(output_dir))
     print(f"  done  (init={hares_init:.1f}s  sim={hares_sim:.1f}s)")
 
     print(f"\n{sep}")

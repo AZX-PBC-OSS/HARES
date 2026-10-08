@@ -4,19 +4,25 @@
 //! types that multiple sibling crates need without introducing circular deps:
 //! port contributions, environment state, control signals, equipment descriptors.
 
+pub mod alloc_count;
 pub mod control_signal;
 pub mod domain_solver;
 pub mod environment;
 pub mod equipment;
 pub mod error;
 pub mod fluid;
+pub mod health;
 pub(crate) mod mode_flow_guard;
 pub mod panic_hook;
 pub mod ports;
+pub mod rng;
 pub mod schedule;
 pub mod telemetry;
 pub mod telemetry_keys;
 pub mod text;
+pub mod thermostat_axis;
+pub mod thermostat_band;
+pub mod warning;
 pub mod zip;
 pub mod zone_map;
 
@@ -26,6 +32,8 @@ pub use environment::*;
 pub use equipment::*;
 pub use error::*;
 pub use fluid::*;
+pub use health::*;
+pub use warning::*;
 
 // `mode_flow_guard` itself stays crate-private: the consistency checks are
 // internal plumbing for `validate_core_contract`. Only the observability
@@ -40,6 +48,12 @@ pub use ports::*;
 pub use schedule::*;
 pub use telemetry::*;
 pub use text::{normalize_ascii, parse_trimmed_f64};
+pub use thermostat_axis::{ThermostatAxes, ThermostatAxis};
+pub use thermostat_band::{
+    MAX_HVAC_THERMOSTAT_BAND_C, MAX_TANK_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C,
+    ThermostatBandClass, thermal_setpoint_band_c, validate_thermal_setpoint_deadband,
+    validate_thermostat_band_c,
+};
 pub use zone_map::{ZoneMap, ZoneRole};
 
 #[cfg(test)]
@@ -63,6 +77,7 @@ pub mod test_utils {
                 humidity_ratio: 0.008,
                 volume_m3: 200.0,
             }],
+            ambient_other_space_c: crate::AmbientOtherSpaceTemps::default(),
             weather: WeatherState {
                 outdoor_temp_c: 10.0,
                 outdoor_humidity_ratio: 0.005,
@@ -98,7 +113,8 @@ pub mod test_utils {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: crate::domain_solver::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)

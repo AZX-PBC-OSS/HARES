@@ -4,8 +4,8 @@
 //! normalized schedule fractions are scaled to kW using
 //! `max_kw = annual_kwh / 8760 / mean(fraction)`.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 
 use chrono::{Datelike, Timelike};
 use hares_equipment::{
@@ -14,7 +14,8 @@ use hares_equipment::{
 };
 use hares_physics::constants::HOURS_PER_YEAR;
 use hares_types::{
-    BoundaryPolicy, FuelType, HaresError, ScheduleSourceConfig, normalize_ascii, parse_trimmed_f64,
+    BoundaryPolicy, FuelType, HaresError, ScheduleSourceConfig, Warning, normalize_ascii,
+    parse_trimmed_f64,
 };
 use serde_json::{Map, Value};
 use tracing::warn;
@@ -23,11 +24,15 @@ use crate::EquipmentSpec;
 use crate::defaults::DefaultsStore;
 use crate::draw_profile::normalize_draw_profile;
 use crate::hpxml::{MICROWAVE_DEFAULT_ANNUAL_KWH, build_spec};
-use crate::schedule::{ColumnAggregation, ScheduleTimeSeries};
+use crate::schedule::{
+    ColumnAggregation, ScheduleFormatFamily, ScheduleTimeSeries, resolve_occupancy_column,
+    schedule_format_family,
+};
 
-// HERS Reference Home default thermostat setpoints (ASHRAE 90.2).
-pub(super) const HERS_HEATING_SETPOINT_C: f64 = 20.0;
-pub(super) const HERS_COOLING_SETPOINT_C: f64 = 24.0;
+// OS-HPXML's manual-thermostat default setpoints
+// (defaults.rb:2827-2848, 6746-6785).
+const OS_HPXML_DEFAULT_HEATING_SETPOINT_F: f64 = 68.0;
+const OS_HPXML_DEFAULT_COOLING_SETPOINT_F: f64 = 78.0;
 
 /// Maps HPXML/ResStock schedule CSV column names (lowercase, normalized) to
 /// OCHRE equipment names.  The category determines how to convert:
@@ -41,13 +46,56 @@ enum ScheduleCategory {
     EventWindow,
     Setpoint,
     Occupancy,
-    Ignore,
+    /// Read by `inject_water_heater_schedule_columns` (the DHW draw and the
+    /// mains temperature), never through `mapping_by_equipment`.
+    WaterHeater,
+    /// A column no code reads; the reason states why the engine does not
+    /// consume it, so a column the mapping table should know about is never
+    /// silently ignored.
+    NotUsed {
+        reason: &'static str,
+    },
+}
+
+/// Which schedule-file families a column mapping applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MappingFamilies {
+    /// The columns the OS-HPXML and BEopt/OCHRE conventions share.
+    Both,
+    /// The one mapping whose energy accounting differs between the
+    /// conventions: OS-HPXML v1.12.0 models no microwave appliance (its
+    /// bundled HPXML v3 schema has no `Microwave` element, and `defaults.rb`
+    /// `get_residual_mels_values` sizes the residual "other" plug loads from
+    /// RECS 2020 with the microwave energy inside), and its schedule files
+    /// carry no microwave column. A `microwave` column on an OS-HPXML-derived
+    /// building therefore shapes nothing additional: the energy is already in
+    /// the residual MELs, and a separate Microwave load would count it twice.
+    /// A BEopt/OCHRE-format input (the `Occupancy (Persons)` event files)
+    /// models the microwave separately, so the column stays mapped there.
+    BeoptOchreOnly,
 }
 
 struct ColumnMapping {
     csv_column: &'static str,
     equipment_name: &'static str,
     category: ScheduleCategory,
+}
+
+impl ColumnMapping {
+    fn families(&self) -> MappingFamilies {
+        match self.csv_column {
+            "microwave" => MappingFamilies::BeoptOchreOnly,
+            _ => MappingFamilies::Both,
+        }
+    }
+
+    /// Whether the mapping applies to a schedule file of the given family.
+    fn applies_to(&self, family: ScheduleFormatFamily) -> bool {
+        match self.families() {
+            MappingFamilies::Both => true,
+            MappingFamilies::BeoptOchreOnly => family == ScheduleFormatFamily::BeoptOchre,
+        }
+    }
 }
 
 const COLUMN_MAPPINGS: &[ColumnMapping] = &[
@@ -192,52 +240,128 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
     ColumnMapping {
         csv_column: "extra_refrigerator",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "HARES models one refrigerator, the `refrigerator` column; \
+                     a second unit's load is not modelled separately",
+        },
     },
     ColumnMapping {
         csv_column: "clothes_dryer_exhaust",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "the clothes dryer's exhaust air heat is not modelled",
+        },
     },
     ColumnMapping {
         csv_column: "lighting_exterior_holiday",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "holiday lighting is not modelled",
+        },
     },
     ColumnMapping {
         csv_column: "plug_loads_vehicle",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "vehicle charging is modelled by the EV equipment, whose \
+                     schedule comes from the ev_driver actor's trip model",
+        },
     },
     ColumnMapping {
         csv_column: "battery",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "the battery follows its own control strategy, not a schedule",
+        },
     },
     ColumnMapping {
         csv_column: "vacancy",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "unavailable periods are not modelled",
+        },
     },
     ColumnMapping {
         csv_column: "water_heater_operating_mode",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "the water heater's operating mode follows its own controller",
+        },
     },
     ColumnMapping {
         csv_column: "power_outage",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "unavailable periods are not modelled",
+        },
     },
     ColumnMapping {
         csv_column: "no_space_heating",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "unavailable periods are not modelled",
+        },
     },
     ColumnMapping {
         csv_column: "no_space_cooling",
         equipment_name: "",
-        category: ScheduleCategory::Ignore,
+        category: ScheduleCategory::NotUsed {
+            reason: "unavailable periods are not modelled",
+        },
+    },
+    // Water heater: read by inject_water_heater_schedule_columns, which no
+    // table entry declared before.
+    ColumnMapping {
+        csv_column: "hot_water_fixtures",
+        equipment_name: "Water Heating",
+        category: ScheduleCategory::WaterHeater,
+    },
+    ColumnMapping {
+        csv_column: "hot_water_mains_temperature",
+        equipment_name: "Water Heating",
+        category: ScheduleCategory::WaterHeater,
+    },
+    // Wet appliances draw their own hot water on the DHW demand loop during
+    // the water-draw phases of the cycles the dishwasher and clothes_washer
+    // event-window columns schedule; consuming the hot-water column as well
+    // would count the draw twice.
+    ColumnMapping {
+        csv_column: "hot_water_dishwasher",
+        equipment_name: "",
+        category: ScheduleCategory::NotUsed {
+            reason: "the dishwasher draws its own hot water on the DHW demand \
+                     loop during the draw phases of the `dishwasher` column's \
+                     cycles; consuming this column as well would count the \
+                     draw twice",
+        },
+    },
+    ColumnMapping {
+        csv_column: "hot_water_clothes_washer",
+        equipment_name: "",
+        category: ScheduleCategory::NotUsed {
+            reason: "the clothes washer draws its own hot water on the DHW \
+                     demand loop during the draw phases of the \
+                     `clothes_washer` column's cycles; consuming this column \
+                     as well would count the draw twice",
+        },
+    },
+    // Charging and driving times come from the ev_driver actor's trip model,
+    // not an OpenStudio-HPXML schedule.
+    ColumnMapping {
+        csv_column: "electric_vehicle_charging",
+        equipment_name: "",
+        category: ScheduleCategory::NotUsed {
+            reason: "EV charging times come from the ev_driver actor's trip \
+                     model, not an OpenStudio-HPXML schedule",
+        },
+    },
+    ColumnMapping {
+        csv_column: "electric_vehicle_discharging",
+        equipment_name: "",
+        category: ScheduleCategory::NotUsed {
+            reason: "EV discharging (driving) times come from the ev_driver \
+                     actor's trip model, not an OpenStudio-HPXML schedule",
+        },
     },
 ];
 
@@ -245,87 +369,215 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
 // Default schedule profiles (weekday/weekend fractions + monthly multipliers)
 // ---------------------------------------------------------------------------
 
+/// The file inside the defaults directory that holds the default schedule
+/// profiles.
+pub const DEFAULT_SCHEDULES_CSV: &str = "Default Schedule Parameters.csv";
+
 #[derive(Debug, Clone)]
-pub(crate) struct DefaultScheduleProfile {
-    pub(crate) weekday_fractions: [f64; 24],
-    pub(crate) weekend_fractions: [f64; 24],
-    pub(crate) month_multipliers: [f64; 12],
+pub struct DefaultScheduleProfile {
+    /// The 24 hourly fractions for weekdays.
+    pub weekday_fractions: [f64; 24],
+    /// The 24 hourly fractions for weekends.
+    pub weekend_fractions: [f64; 24],
+    /// The 12 monthly multipliers applied on top of the hourly fractions.
+    pub month_multipliers: [f64; 12],
 }
 
-/// Load default schedule profiles from `Default Schedule Parameters.csv`.
-/// Returns a map keyed by "OCHRE Name" (e.g. "Indoor Lighting", "MELs").
-pub(crate) fn load_default_profiles(
-    defaults_dir: &Path,
-) -> HashMap<String, DefaultScheduleProfile> {
-    let csv_path = defaults_dir.join("Default Schedule Parameters.csv");
-    let content = match std::fs::read_to_string(&csv_path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                path = %csv_path.display(),
-                error = %e,
-                "cannot read defaults CSV; default schedule profiles will be empty"
-            );
-            return HashMap::new();
+/// The default schedule profiles parsed from `Default Schedule Parameters.csv`
+/// in the configured defaults directory. The `Default` value is the empty
+/// set a config with no defaults directory resolves against: it has no
+/// file, and every lookup names the `defaults_path` setting.
+#[derive(Debug, Clone, Default)]
+pub struct DefaultProfiles {
+    profiles: HashMap<String, DefaultScheduleProfile>,
+    csv_path: Option<PathBuf>,
+}
+
+impl DefaultProfiles {
+    /// The profile named `name`, or an error naming the missing profile and
+    /// the file it was expected in.
+    pub fn get(&self, name: &str) -> Result<&DefaultScheduleProfile, HaresError> {
+        self.profiles
+            .get(name)
+            .ok_or_else(|| HaresError::Io(self.missing_profile(name)))
+    }
+
+    /// The profile named `name`, if present: the probe for fallback chains
+    /// that have another source to try.
+    pub(crate) fn find(&self, name: &str) -> Option<&DefaultScheduleProfile> {
+        self.profiles.get(name)
+    }
+
+    /// Why no profile named `name` is available, for error messages: the
+    /// file it is missing from, or the unset defaults directory.
+    pub(crate) fn missing_profile(&self, name: &str) -> String {
+        match &self.csv_path {
+            Some(path) => format!("no '{name}' profile in '{}'", path.display()),
+            None => format!(
+                "no '{name}' profile, because no defaults directory is configured to \
+                 load '{DEFAULT_SCHEDULES_CSV}' from; set defaults_path"
+            ),
         }
-    };
+    }
+}
 
-    // Intermediate: collect raw vectors per (ochre_name, element_kind)
-    let mut weekday_map: HashMap<String, [f64; 24]> = HashMap::new();
-    let mut weekend_map: HashMap<String, [f64; 24]> = HashMap::new();
-    let mut month_map: HashMap<String, [f64; 12]> = HashMap::new();
+/// One parsed row of the default schedule profiles file, for the error a
+/// second row of the same profile and element raises.
+struct ProfileRow<'a> {
+    csv_path: &'a Path,
+    profile: &'a str,
+    element: &'a str,
+    line_no: usize,
+}
 
-    for line in content.lines().skip(1) {
+impl ProfileRow<'_> {
+    fn insert_into<const N: usize>(
+        &self,
+        map: &mut HashMap<String, (usize, [f64; N])>,
+        values: [f64; N],
+    ) -> Result<(), HaresError> {
+        match map.entry(self.profile.to_string()) {
+            std::collections::hash_map::Entry::Occupied(first) => Err(HaresError::Io(format!(
+                "'{}' line {}: profile '{}' element '{}' repeats the row at line {}",
+                self.csv_path.display(),
+                self.line_no,
+                self.profile,
+                self.element,
+                first.get().0,
+            ))),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert((self.line_no, values));
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Load the default schedule profiles from
+/// `Default Schedule Parameters.csv` in `defaults_dir`, keyed by "OCHRE Name"
+/// (e.g. "Indoor Lighting", "MELs").
+///
+/// Strict: an unreadable file, a row with fewer than five fields, a value
+/// that does not parse, a value count other than 24 (fractions) or 12
+/// (monthly multipliers), a second row for the same profile and element,
+/// and a profile missing any of its
+/// `weekday_fractions` / `weekend_fractions` / `month_multipliers` rows are
+/// all errors naming the file, the line, the profile and the element.
+pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, HaresError> {
+    let csv_path = defaults_dir.join(DEFAULT_SCHEDULES_CSV);
+    let content = std::fs::read_to_string(&csv_path).map_err(|e| {
+        HaresError::Io(format!(
+            "default schedule profiles file '{}' could not be read: {e}",
+            csv_path.display()
+        ))
+    })?;
+
+    // Intermediate: the values and source line per (ochre_name, element_kind)
+    let mut weekday_map: HashMap<String, (usize, [f64; 24])> = HashMap::new();
+    let mut weekend_map: HashMap<String, (usize, [f64; 24])> = HashMap::new();
+    let mut month_map: HashMap<String, (usize, [f64; 12])> = HashMap::new();
+
+    for (idx, line) in content.lines().enumerate().skip(1) {
+        let line_no = idx + 1;
+
         // Parse CSV line handling quoted "Values" field
         let fields = parse_csv_line(line);
         if fields.len() < 5 {
-            continue;
+            return Err(HaresError::Io(format!(
+                "'{}' line {line_no}: row has {} fields, expected at least 5 \
+                 (Schedule Name, Element, OCHRE Name, OCHRE Element, Values, Data Source): '{line}'",
+                csv_path.display(),
+                fields.len(),
+            )));
         }
 
-        let ochre_name = fields[2].trim();
-        let ochre_element = fields[3].trim();
+        let profile_name = fields[2].trim();
+        if profile_name.is_empty() || profile_name == "N/A" {
+            continue;
+        }
+        let element = fields[3].trim();
         let values_str = fields[4].trim();
 
-        if ochre_name.is_empty() || ochre_name == "N/A" {
-            continue;
+        let mut values: Vec<f64> = Vec::new();
+        for token in values_str.split(',') {
+            let Some(value) = parse_trimmed_f64(token) else {
+                return Err(HaresError::Io(format!(
+                    "'{}' line {line_no}: profile '{profile_name}' element '{element}': \
+                     value '{token}' does not parse as a finite number",
+                    csv_path.display(),
+                )));
+            };
+            values.push(value);
         }
 
-        let values: Vec<f64> = values_str
-            .split(',')
-            .filter_map(parse_trimmed_f64)
-            .collect();
-
-        match ochre_element {
-            "weekday_fractions" if values.len() == 24 => {
-                let mut arr = [0.0; 24];
-                arr.copy_from_slice(&values);
-                weekday_map.insert(ochre_name.to_string(), arr);
+        let value_count = values.len();
+        let wrong_count = |expected: usize| {
+            HaresError::Io(format!(
+                "'{}' line {line_no}: profile '{profile_name}' element '{element}': \
+                 {value_count} values, expected {expected}",
+                csv_path.display(),
+            ))
+        };
+        let row = ProfileRow {
+            csv_path: &csv_path,
+            profile: profile_name,
+            element,
+            line_no,
+        };
+        match element {
+            "weekday_fractions" => {
+                let arr: [f64; 24] = values.try_into().map_err(|_| wrong_count(24))?;
+                row.insert_into(&mut weekday_map, arr)?;
             }
-            "weekend_fractions" if values.len() == 24 => {
-                let mut arr = [0.0; 24];
-                arr.copy_from_slice(&values);
-                weekend_map.insert(ochre_name.to_string(), arr);
+            "weekend_fractions" => {
+                let arr: [f64; 24] = values.try_into().map_err(|_| wrong_count(24))?;
+                row.insert_into(&mut weekend_map, arr)?;
             }
-            "month_multipliers" if values.len() == 12 => {
-                let mut arr = [0.0; 12];
-                arr.copy_from_slice(&values);
-                month_map.insert(ochre_name.to_string(), arr);
+            "month_multipliers" => {
+                let arr: [f64; 12] = values.try_into().map_err(|_| wrong_count(12))?;
+                row.insert_into(&mut month_map, arr)?;
             }
-            _ => {}
+            other => {
+                return Err(HaresError::Io(format!(
+                    "'{}' line {line_no}: profile '{profile_name}' has unknown \
+                     element '{other}': expected weekday_fractions, weekend_fractions \
+                     or month_multipliers",
+                    csv_path.display(),
+                )));
+            }
         }
     }
 
-    // Assemble profiles for each equipment name that has at least weekday fractions
+    // Assemble profiles for every name that has any of the three rows; every
+    // profile needs all three, and a missing one is an error naming the
+    // profile. Sorted for a deterministic error when several are incomplete.
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    names.extend(weekday_map.keys().cloned());
+    names.extend(weekend_map.keys().cloned());
+    names.extend(month_map.keys().cloned());
     let mut profiles = HashMap::new();
-    for (name, weekday) in &weekday_map {
-        let weekend = weekend_map.get(name).copied().unwrap_or(*weekday);
-        let months = month_map.get(name).copied().unwrap_or([1.0; 12]);
+    for name in &names {
+        let missing = |element: &str| {
+            HaresError::Io(format!(
+                "'{}': profile '{name}' has no {element} row",
+                csv_path.display(),
+            ))
+        };
+        let (_, weekday) = weekday_map
+            .get(name)
+            .ok_or_else(|| missing("weekday_fractions"))?;
+        let (_, weekend) = weekend_map
+            .get(name)
+            .ok_or_else(|| missing("weekend_fractions"))?;
+        let (_, months) = month_map
+            .get(name)
+            .ok_or_else(|| missing("month_multipliers"))?;
         profiles.insert(
             name.clone(),
             DefaultScheduleProfile {
                 weekday_fractions: *weekday,
-                weekend_fractions: weekend,
-                month_multipliers: months,
+                weekend_fractions: *weekend,
+                month_multipliers: *months,
             },
         );
     }
@@ -345,21 +597,13 @@ pub(crate) fn load_default_profiles(
 
     // Invariant: at least the 'Occupancy' schedule must have non-identical
     // weekday and weekend fraction arrays. Identical arrays mean the data
-    // was imported verbatim from the ANSI 301 source without weekend derivation.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        if let Some(occ) = profiles.get("Occupancy") {
-            if occ.weekday_fractions == occ.weekend_fractions {
-                tracing::error!(
-                    "Occupancy weekday and weekend schedule fractions are identical; \
-                     the default CSV has not been updated with distinct weekend patterns. \
-                     ASHRAE 90.2/HERS Reference Home requires distinct weekday/weekend occupancy."
-                );
-            }
-        }
-    }
-
-    profiles
+    // was imported verbatim from the ANSI 301 source without weekend
+    // derivation; the shipped default schedule CSV is pinned by the unit
+    // test `shipped_default_occupancy_has_distinct_weekend`.
+    Ok(DefaultProfiles {
+        profiles,
+        csv_path: Some(csv_path),
+    })
 }
 
 /// Parse a single CSV line, respecting double-quoted fields.
@@ -414,7 +658,7 @@ pub fn inject_schedule_into_specs(
     schedule: &mut ScheduleTimeSeries,
     defaults_path: Option<&Path>,
     defaults: &DefaultsStore,
-    foundation_name: Option<&str>,
+    warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
     let mut csv_col_map: HashMap<String, usize> = schedule
         .column_names
@@ -426,64 +670,67 @@ pub fn inject_schedule_into_specs(
     // OCHRE schedule.py:390-391: copy zone-specific schedules when the
     // schedule file lacks them — Basement Lighting follows the interior
     // lighting column when `lighting_basement` is absent but
-    // `lighting_interior` is present. A Basement Lighting spec can only
-    // exist for a Finished Basement foundation (gated in resolve_loads and
-    // ensure_specs_for_csv_columns), so no extra foundation check is needed.
+    // `lighting_interior` is present. A Basement Lighting spec exists only
+    // for a Finished Basement foundation (gated in resolve_loads), so no
+    // extra foundation check is needed.
     if specs.iter().any(|s| s.name == "Basement Lighting")
         && !csv_col_map.contains_key("lighting_basement")
+        && let Some(&interior_idx) = csv_col_map.get("lighting_interior")
     {
-        if let Some(&interior_idx) = csv_col_map.get("lighting_interior") {
-            let values = schedule.columns[interior_idx].clone();
-            let aggregation = schedule
-                .column_aggregations
-                .get(interior_idx)
-                .copied()
-                .unwrap_or(ColumnAggregation::Mean);
-            match schedule.add_column("lighting_basement", values, aggregation) {
-                Ok(()) => {
-                    if let Some(&idx) = schedule.column_index.get("lighting_basement") {
-                        csv_col_map.insert("lighting_basement".to_string(), idx);
-                    }
-                }
-                Err(error) => {
-                    warn!(
-                        %error,
-                        "failed to copy lighting_interior column to lighting_basement; \
-                         Basement Lighting will fall back to other schedule sources"
-                    );
-                }
-            }
+        let values = schedule.columns[interior_idx].clone();
+        let aggregation = schedule
+            .column_aggregations
+            .get(interior_idx)
+            .copied()
+            .unwrap_or(ColumnAggregation::Mean);
+        schedule
+            .add_column("lighting_basement", values, aggregation)
+            .map_err(|error| {
+                HaresError::Io(format!(
+                    "copying lighting_interior to lighting_basement for Basement Lighting \
+                     failed: {error}"
+                ))
+            })?;
+        if let Some(&idx) = schedule.column_index.get("lighting_basement") {
+            csv_col_map.insert("lighting_basement".to_string(), idx);
         }
     }
 
-    // Invariant: check for unmapped CSV columns before any processing.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    // Invariant: check for unknown CSV columns before any processing. A
+    // column neither the mapping table nor the environment reads is reported
+    // once per column as a `Warning`, so a column the mapping table should
+    // know about is never silently ignored.
     {
-        let unmapped = find_unmapped_csv_columns(&csv_col_map);
-        for col_name in &unmapped {
-            warn!(
-                csv_column = %col_name,
-                "schedule CSV column has no entry in COLUMN_MAPPINGS; \
-                 this column will be silently ignored during schedule resolution"
-            );
+        let unknown = find_unknown_schedule_columns(&csv_col_map);
+        for col_name in &unknown {
+            warnings.push(Warning::new(
+                "schedule",
+                format!(
+                    "schedule CSV column '{col_name}' has no entry in COLUMN_MAPPINGS \
+                     and the environment does not read it; HARES does not read it"
+                ),
+            ));
         }
     }
 
-    // Ensure specs exist for CSV columns that have column mappings but
-    // no corresponding spec from HPXML parsing (e.g. microwave).
-    ensure_specs_for_csv_columns(specs, &csv_col_map, defaults, foundation_name);
+    ensure_specs_for_csv_columns(specs, &csv_col_map, defaults, warnings);
 
-    let profiles = defaults_path.map(load_default_profiles).unwrap_or_default();
+    let profiles = match defaults_path {
+        Some(dir) => load_default_profiles(dir)?,
+        None => DefaultProfiles::default(),
+    };
 
+    let schedule_family = schedule_format_family(&csv_col_map);
     let mapping_by_equipment: HashMap<&str, &ColumnMapping> = COLUMN_MAPPINGS
         .iter()
         .filter(|m| {
-            matches!(
-                m.category,
-                ScheduleCategory::Power
-                    | ScheduleCategory::EventWindow
-                    | ScheduleCategory::Occupancy
-            )
+            m.applies_to(schedule_family)
+                && matches!(
+                    m.category,
+                    ScheduleCategory::Power
+                        | ScheduleCategory::EventWindow
+                        | ScheduleCategory::Occupancy
+                )
         })
         .map(|m| (m.equipment_name, m))
         .collect();
@@ -491,46 +738,13 @@ pub fn inject_schedule_into_specs(
     // Invariant: if HPXML-derived pool/spa specs have annual energy but the
     // schedule CSV also has pool/spa columns, the CSV fractions will override
     // the HPXML extension fractions (while HPXML annual energy is used for
-    // max_kW scaling). This is an intentional precedence, but the combination
-    // may produce unexpected results. Warn when both sources are present.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let pool_source = ["Pool Pump", "Pool Heater", "Spa Pump", "Spa Heater"];
-        let csv_to_eq: [(&str, &str); 4] = [
-            ("pool_pump", "Pool Pump"),
-            ("pool_heater", "Pool Heater"),
-            ("permanent_spa_pump", "Spa Pump"),
-            ("permanent_spa_heater", "Spa Heater"),
-        ];
-        for spec in specs.iter() {
-            if !pool_source.contains(&spec.name.as_str()) {
-                continue;
-            }
-            for (csv_col, eq_name) in &csv_to_eq {
-                if eq_name != &spec.name.as_str() {
-                    continue;
-                }
-                let csv_key = normalize_schedule_col_name(csv_col);
-                if csv_col_map.contains_key(&csv_key) {
-                    tracing::warn!(
-                        equipment = %spec.name,
-                        csv_column = csv_col,
-                        "HPXML provides '{eq_name}' equipment AND schedule CSV defines \
-                         column '{csv_col}': CSV schedule fractions will override \
-                         HPXML <extension> fractions while HPXML annual energy drives \
-                         max kW. Verify this combination is intentional to avoid \
-                         unexpected load profiles."
-                    );
-                }
-            }
-        }
-    }
+    // max_kW scaling). This is the documented precedence; no warning.
 
     for spec in specs.iter_mut() {
         // Ventilation Fan: constant power from equipment properties, not schedule CSV.
         // Mirrors OCHRE: schedule["Ventilation Fan (kW)"] = equipment["Power (W)"] / 1000
         if spec.name == "Ventilation Fan" {
-            inject_constant_power_schedule(spec, schedule.len());
+            inject_constant_power_schedule(spec, schedule.len())?;
             continue;
         }
 
@@ -540,7 +754,7 @@ pub fn inject_schedule_into_specs(
 
         match mapping.category {
             ScheduleCategory::Power => {
-                inject_power_schedule(spec, mapping, &csv_col_map, schedule, &profiles);
+                inject_power_schedule(spec, mapping, &csv_col_map, schedule, &profiles)?;
             }
             ScheduleCategory::EventWindow => {
                 inject_event_schedule(spec, mapping, &csv_col_map, schedule);
@@ -548,7 +762,8 @@ pub fn inject_schedule_into_specs(
             ScheduleCategory::Occupancy => {
                 inject_occupancy_schedule(spec, schedule, &profiles);
             }
-            ScheduleCategory::Setpoint | ScheduleCategory::Ignore => {}
+            ScheduleCategory::Setpoint | ScheduleCategory::WaterHeater => {}
+            ScheduleCategory::NotUsed { .. } => {}
         }
     }
 
@@ -556,9 +771,9 @@ pub fn inject_schedule_into_specs(
     // any heating/cooling HVAC equipment. The CSV column `heating_setpoint`
     // maps to all heating equipment, `cooling_setpoint` to all cooling.
     // When neither a schedule CSV column nor HPXML-derived setpoints are
-    // present, falls back to the HERS reference-home default profiles
-    // loaded from Default Schedule Parameters.csv.
-    inject_setpoint_schedules(specs, &csv_col_map, schedule, &profiles)?;
+    // present, the unit takes OS-HPXML's manual-thermostat default
+    // (68 °F heating, 78 °F cooling), recorded as a warning naming it.
+    inject_setpoint_schedules(specs, &csv_col_map, schedule, warnings)?;
     Ok(())
 }
 
@@ -602,53 +817,69 @@ fn spec_has_setpoint_source(spec: &EquipmentSpec, prefix: &str) -> bool {
 /// Walk a JSON object tree looking for a setpoint key at any nesting level.
 fn find_setpoint_source<'a>(data: &'a Value, key: &str) -> Option<&'a Value> {
     let obj = data.as_object()?;
-    if let Some(sp) = obj.get("setpoint") {
-        if let Some(v) = sp.get(key) {
-            return Some(v);
-        }
+    if let Some(sp) = obj.get("setpoint")
+        && let Some(v) = sp.get(key)
+    {
+        return Some(v);
     }
     None
 }
 
-fn inject_default_setpoint_profile(
+/// Give `spec` OS-HPXML's default `prefix` ("heating" or "cooling")
+/// setpoint and record the substitution as a warning naming the unit.
+fn inject_default_setpoint(
     spec: &mut EquipmentSpec,
-    ochre_name: &str,
     prefix: &str,
-    profiles: &HashMap<String, DefaultScheduleProfile>,
-) {
-    let Some(profile) = profiles.get(ochre_name) else {
-        return;
-    };
-    let temp = match prefix {
-        "heating" => HERS_HEATING_SETPOINT_C,
-        "cooling" => HERS_COOLING_SETPOINT_C,
-        _ => return,
-    };
-    let source = ScheduleSourceConfig::DailyProfile {
-        weekday: profile.weekday_fractions.map(|f| f * temp),
-        weekend: profile.weekend_fractions.map(|f| f * temp),
-        month_multipliers: profile.month_multipliers,
+    default_f: f64,
+    warnings: &mut Vec<Warning>,
+) -> Result<(), HaresError> {
+    let setpoint_c = hares_physics::units::temperature_f_to_c(default_f);
+    // The config enum is internally tagged, so a constant travels as a flat
+    // daily profile.
+    let source = serde_json::to_value(ScheduleSourceConfig::DailyProfile {
+        weekday: [setpoint_c; 24],
+        weekend: [setpoint_c; 24],
+        month_multipliers: [1.0; 12],
         max_value: 1.0,
-    };
-    let Some(typed) = spec.typed_config.as_mut() else {
-        return;
-    };
-    let ConfigPayload::Typed { data, .. } = &mut typed.payload else {
-        return;
-    };
-    let Some(obj) = data.as_object_mut() else {
-        return;
-    };
-    if let Ok(json) = serde_json::to_value(source) {
-        insert_setpoint_into_obj(obj, &format!("{prefix}_setpoint_source"), json);
+    })
+    .map_err(|e| HaresError::Equipment(format!("{}: setpoint source: {e}", spec.name)))?;
+    let inserted = spec
+        .typed_config
+        .as_mut()
+        .and_then(|typed| match &mut typed.payload {
+            ConfigPayload::Typed { data, .. } => data.as_object_mut(),
+            ConfigPayload::Raw { .. } => None,
+        })
+        .is_some_and(|obj| {
+            insert_setpoint_into_obj(obj, &format!("{prefix}_setpoint_source"), source)
+        });
+    if !inserted {
+        return Err(HaresError::Equipment(format!(
+            "{}: no {prefix} setpoint in the HPXML or the schedule, and the unit's \
+             config has no setpoint block to take the default",
+            spec.name
+        )));
     }
+    warnings.push(Warning::new(
+        "schedule",
+        format!(
+            "{}: no {prefix} setpoint in the HPXML or the schedule; defaulted to \
+             {default_f} °F ({setpoint_c:.2} °C) as OS-HPXML does",
+            spec.name
+        ),
+    ));
+    Ok(())
 }
 
-fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Value) {
-    if let Some(sp) = obj.get_mut("setpoint") {
-        if let Some(sp_obj) = sp.as_object_mut() {
+/// Insert `value` under `key` in the config's `setpoint` block; false when
+/// the config has no such block.
+fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Value) -> bool {
+    match obj.get_mut("setpoint").and_then(Value::as_object_mut) {
+        Some(sp_obj) => {
             sp_obj.insert(key.to_string(), value);
+            true
         }
+        None => false,
     }
 }
 
@@ -656,7 +887,7 @@ fn inject_setpoint_schedules(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
-    profiles: &HashMap<String, DefaultScheduleProfile>,
+    warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
     // Store only the column index -- the equipment resolves the value each
     // timestep from the environment's schedule domain payload. No materialization.
@@ -665,27 +896,30 @@ fn inject_setpoint_schedules(
 
     inject_water_heater_schedule_columns(specs, csv_col_map, schedule)?;
 
-    // Skip the entire loop only when there is no work to do at all.
-    if heating_col.is_none() && cooling_col.is_none() && profiles.is_empty() {
-        return Ok(());
-    }
-
     for spec in specs.iter_mut() {
         if HEATING_EQUIPMENT.contains(&spec.name.as_str()) {
             if let Some(col_idx) = heating_col {
                 // Schedule CSV provides a per-timestep heating column.
                 set_typed_setpoint_source(spec, "heating", col_idx);
             } else if !spec_has_setpoint_source(spec, "heating") {
-                // No HPXML-derived setpoint schedule and no CSV column:
-                // fall back to the HERS reference-home default profile.
-                inject_default_setpoint_profile(spec, "HVAC Heating", "heating", profiles);
+                inject_default_setpoint(
+                    spec,
+                    "heating",
+                    OS_HPXML_DEFAULT_HEATING_SETPOINT_F,
+                    warnings,
+                )?;
             }
         }
         if COOLING_EQUIPMENT.contains(&spec.name.as_str()) {
             if let Some(col_idx) = cooling_col {
                 set_typed_setpoint_source(spec, "cooling", col_idx);
             } else if !spec_has_setpoint_source(spec, "cooling") {
-                inject_default_setpoint_profile(spec, "HVAC Cooling", "cooling", profiles);
+                inject_default_setpoint(
+                    spec,
+                    "cooling",
+                    OS_HPXML_DEFAULT_COOLING_SETPOINT_F,
+                    warnings,
+                )?;
             }
         }
     }
@@ -782,10 +1016,10 @@ fn inject_water_heater_schedule_columns(
                 set_typed_schedule_source(spec, "draw_flow_rate_source", derived_col_idx);
             }
         }
-        if let Some(col_idx) = mains_col {
-            if has_typed_sources {
-                set_typed_schedule_source(spec, "mains_temp_c_source", col_idx);
-            }
+        if let Some(col_idx) = mains_col
+            && has_typed_sources
+        {
+            set_typed_schedule_source(spec, "mains_temp_c_source", col_idx);
         }
     }
     Ok(())
@@ -917,15 +1151,15 @@ fn inject_power_schedule(
     mapping: &ColumnMapping,
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
-    profiles: &HashMap<String, DefaultScheduleProfile>,
-) {
+    profiles: &DefaultProfiles,
+) -> Result<(), HaresError> {
     // Skip if equipment already has power schedule source keys.
     if spec.parameters.keys().any(|k| {
         k.starts_with("power_schedule_")
             || k.starts_with("power_profile_")
             || k == "power_constant_kw"
     }) {
-        return;
+        return Ok(());
     }
 
     let col_name = normalize_schedule_col_name(mapping.csv_column);
@@ -935,34 +1169,37 @@ fn inject_power_schedule(
         // CSV column exists -- use it directly and add a derived kW column.
         let fraction_series = schedule.columns[col_idx].clone();
         if fraction_series.is_empty() {
-            return;
+            return Ok(());
         }
 
         let mean_fraction: f64 =
             fraction_series.iter().copied().sum::<f64>() / fraction_series.len() as f64;
 
-        let Some(max_kw) = determine_max_kw(spec, mean_fraction) else {
-            inject_compact_constant_power(spec, 0.0);
-            return;
-        };
+        let max_kw = resolve_max_kw(
+            spec,
+            mean_fraction,
+            &format!("the schedule column '{col_name}'"),
+        )?;
 
         let kw_series: Vec<f64> = fraction_series.iter().map(|f| f * max_kw).collect();
-        if let Ok(derived_col_idx) = schedule.append_derived_column(
-            &format!(
-                "power_schedule_kw_{}",
-                normalize_schedule_col_name(spec.name.as_str())
-            ),
-            kw_series,
-            ColumnAggregation::Mean,
-        ) {
-            inject_compact_column_power(spec, derived_col_idx);
-        } else {
-            tracing::warn!(
-                equipment = %spec.name,
-                "failed to append derived kW column; falling back to constant 0.0 kW"
-            );
-            inject_compact_constant_power(spec, 0.0);
-        }
+        let derived_col_idx = schedule
+            .append_derived_column(
+                &format!(
+                    "power_schedule_kw_{}",
+                    normalize_schedule_col_name(spec.name.as_str())
+                ),
+                kw_series,
+                ColumnAggregation::Mean,
+            )
+            .map_err(|err| {
+                let msg = format!(
+                    "failed to append derived kW column for {}: {err}",
+                    spec.name
+                );
+                tracing::error!(equipment = %spec.name, error = %err, "{msg}");
+                HaresError::Io(msg)
+            })?;
+        inject_compact_column_power(spec, derived_col_idx);
     } else if schedule_len > 0 {
         // No CSV column -- prefer building-specific HPXML profile, then generic defaults.
         if let Some(profile) = resolve_hpxml_profile(spec) {
@@ -970,24 +1207,37 @@ fn inject_power_schedule(
                 "schedule_resolve: no CSV column '{}' for '{}'; using HPXML profile fractions",
                 col_name, mapping.equipment_name
             );
-            let max_kw = determine_max_kw(spec, annual_mean_fraction(&profile)).unwrap_or(0.0);
+            let max_kw = resolve_max_kw(
+                spec,
+                annual_mean_fraction(&profile),
+                "the HPXML schedule fractions on the spec",
+            )?;
             inject_compact_profile_power(spec, &profile, max_kw);
-        } else if let Some(profile) = profiles.get(mapping.equipment_name) {
+        } else if let Some(profile) = profiles.find(mapping.equipment_name) {
             warn!(
                 "schedule_resolve: no CSV column '{}' for '{}'; using default profile",
                 col_name, mapping.equipment_name
             );
-            let max_kw = determine_max_kw(spec, annual_mean_fraction(profile)).unwrap_or(0.0);
+            let max_kw = resolve_max_kw(
+                spec,
+                annual_mean_fraction(profile),
+                &format!(
+                    "the default schedule profile for '{}'",
+                    mapping.equipment_name
+                ),
+            )?;
             inject_compact_profile_power(spec, profile, max_kw);
         } else {
-            let constant_kw = determine_constant_kw(spec).unwrap_or(0.0);
-            warn!(
-                "schedule_resolve: no CSV column '{}' and no default profile for '{}'; falling back to constant power {:.3} kW -- THIS MAY BE INCORRECT",
-                col_name, mapping.equipment_name, constant_kw
-            );
-            inject_compact_constant_power(spec, constant_kw);
+            return Err(HaresError::Io(format!(
+                "equipment '{}' has no schedule source: no '{}' column in the \
+                 schedule file, no HPXML schedule fractions on the spec, and {}",
+                spec.name,
+                col_name,
+                profiles.missing_profile(mapping.equipment_name),
+            )));
         }
     }
+    Ok(())
 }
 
 /// Inject occupancy schedule data into the schedule timeseries using a three-tier
@@ -1005,7 +1255,7 @@ fn inject_power_schedule(
 fn inject_occupancy_schedule(
     spec: &mut EquipmentSpec,
     schedule: &mut ScheduleTimeSeries,
-    profiles: &HashMap<String, DefaultScheduleProfile>,
+    profiles: &DefaultProfiles,
 ) {
     // If an "occupants" column already exists in the schedule — from any source
     // (CSV, previously generated by another spec, or HPXML schedule generation) —
@@ -1058,7 +1308,7 @@ fn inject_occupancy_schedule(
     }
 
     // Tier 3: Default "Occupancy" schedule profile.
-    if let Some(profile) = profiles.get("Occupancy") {
+    if let Some(profile) = profiles.find("Occupancy") {
         let values = generate_occupancy_timeseries(schedule, profile);
         match schedule.add_column(
             "occupants",
@@ -1133,43 +1383,43 @@ fn resolve_hpxml_profile(spec: &EquipmentSpec) -> Option<DefaultScheduleProfile>
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>());
 
-    if let Some(ref wd) = hpxml_weekday {
-        if !wd.is_empty() {
-            let we = spec
-                .parameters
-                .get("weekend_schedule_fractions")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>());
+    if let Some(ref wd) = hpxml_weekday
+        && !wd.is_empty()
+    {
+        let we = spec
+            .parameters
+            .get("weekend_schedule_fractions")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>());
 
-            let month = spec
-                .parameters
-                .get("month_multipliers")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>());
+        let month = spec
+            .parameters
+            .get("month_multipliers")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>());
 
-            let mut profile = DefaultScheduleProfile {
-                weekday_fractions: [0.0; 24],
-                weekend_fractions: [0.0; 24],
-                month_multipliers: [1.0; 12],
-            };
+        let mut profile = DefaultScheduleProfile {
+            weekday_fractions: [0.0; 24],
+            weekend_fractions: [0.0; 24],
+            month_multipliers: [1.0; 12],
+        };
 
-            let n = wd.len().min(24);
-            profile.weekday_fractions[..n].copy_from_slice(&wd[..n]);
+        let n = wd.len().min(24);
+        profile.weekday_fractions[..n].copy_from_slice(&wd[..n]);
 
-            if let Some(ref we_vals) = we {
-                let n = we_vals.len().min(24);
-                profile.weekend_fractions[..n].copy_from_slice(&we_vals[..n]);
-            } else {
-                profile.weekend_fractions = profile.weekday_fractions;
-            }
-
-            if let Some(ref m_vals) = month {
-                let n = m_vals.len().min(12);
-                profile.month_multipliers[..n].copy_from_slice(&m_vals[..n]);
-            }
-
-            return Some(profile);
+        if let Some(ref we_vals) = we {
+            let n = we_vals.len().min(24);
+            profile.weekend_fractions[..n].copy_from_slice(&we_vals[..n]);
+        } else {
+            profile.weekend_fractions = profile.weekday_fractions;
         }
+
+        if let Some(ref m_vals) = month {
+            let n = m_vals.len().min(12);
+            profile.month_multipliers[..n].copy_from_slice(&m_vals[..n]);
+        }
+
+        return Some(profile);
     }
 
     None
@@ -1209,18 +1459,50 @@ fn determine_max_kw(spec: &EquipmentSpec, mean_fraction: f64) -> Option<f64> {
     Some((annual_kwh / HOURS_PER_YEAR) / mean_fraction)
 }
 
-fn determine_constant_kw(spec: &EquipmentSpec) -> Option<f64> {
-    spec.parameters
-        .get("max_electric_power_w")
-        .and_then(|v| v.as_f64())
-        .map(|w| w / 1000.0)
-        .or_else(|| {
-            spec.parameters
-                .get("annual_electric_kwh")
-                .and_then(|v| v.as_f64())
-                .filter(|kwh| *kwh > 0.0)
-                .map(|kwh| kwh / HOURS_PER_YEAR)
-        })
+/// Determine an equipment's peak power from its schedule source, or fail
+/// when the power is undeterminable.
+///
+/// Two zeros are determined, not undeterminable: an all-zero fraction
+/// series (the schedule never runs the equipment, so the spec's annual
+/// energy is never drawn), and a spec that declares its annual energy as
+/// zero (there is no energy to scale). An equipment whose schedule does
+/// run it and which declares neither a rated power (`max_electric_power_w`)
+/// nor annual energy (`annual_electric_kwh`, `annual_gas_therms`) has no
+/// determinable power: the returned error names the equipment and the
+/// missing field.
+fn resolve_max_kw(
+    spec: &EquipmentSpec,
+    mean_fraction: f64,
+    source: &str,
+) -> Result<f64, HaresError> {
+    match determine_max_kw(spec, mean_fraction) {
+        Some(max_kw) => Ok(max_kw),
+        None if mean_fraction <= 0.0 || spec_declares_a_power_field(spec) => Ok(0.0),
+        None => Err(undeterminable_schedule_power_error(spec, source)),
+    }
+}
+
+/// Whether the spec declares any power field at all (even at zero): a
+/// declared zero is a determined power, an absent one is not.
+fn spec_declares_a_power_field(spec: &EquipmentSpec) -> bool {
+    spec.parameters.contains_key("max_electric_power_w")
+        || spec.parameters.contains_key("annual_electric_kwh")
+        || spec.parameters.contains_key("annual_gas_therms")
+}
+
+/// Build the resolve error for an equipment whose schedule power cannot be
+/// determined: the spec carries neither a rated power (`max_electric_power_w`)
+/// nor annual energy (`annual_electric_kwh`, `annual_gas_therms`). Names the
+/// equipment and the missing field.
+fn undeterminable_schedule_power_error(spec: &EquipmentSpec, source: &str) -> HaresError {
+    let msg = format!(
+        "equipment '{}' has a schedule source ({source}) but no \
+         determinable power: the spec carries no 'max_electric_power_w', \
+         no 'annual_electric_kwh' and no 'annual_gas_therms'",
+        spec.name
+    );
+    tracing::error!(equipment = %spec.name, "{msg}");
+    HaresError::Equipment(msg)
 }
 
 fn inject_event_schedule(
@@ -1271,27 +1553,58 @@ fn inject_event_schedule(
 }
 
 /// Inject a constant power schedule for equipment that runs at rated power
-/// (e.g., Ventilation Fan).  Reads `power_w` from the spec parameters.
-fn inject_constant_power_schedule(spec: &mut EquipmentSpec, schedule_len: usize) {
+/// (e.g., Ventilation Fan).
+///
+/// The power is the spec's declared `power_w`; a Ventilation Fan's rated
+/// power is its declared fan power (`fan_power_w`, or the supply/exhaust
+/// pair); a spec that declares neither resolves through [`resolve_max_kw`],
+/// so a spec with no determinable power is a resolve error naming the
+/// equipment and the missing field, never a silent 0 kW constant.
+fn inject_constant_power_schedule(
+    spec: &mut EquipmentSpec,
+    schedule_len: usize,
+) -> Result<(), HaresError> {
     if schedule_len == 0 {
-        return;
+        return Ok(());
     }
     if spec.parameters.keys().any(|k| {
         k.starts_with("power_schedule_")
             || k.starts_with("power_profile_")
             || k == "power_constant_kw"
     }) {
-        return;
+        return Ok(());
     }
 
-    let power_kw = spec
+    let power_w = spec
         .parameters
         .get("power_w")
         .and_then(|v| v.as_f64())
-        .unwrap_or(0.0)
-        / 1000.0;
+        .or_else(|| fan_rated_power_w(spec));
+    let power_kw = match power_w {
+        Some(power_w) => power_w / 1000.0,
+        None => resolve_max_kw(spec, 1.0, "the constant-power schedule source")?,
+    };
 
     inject_compact_constant_power(spec, power_kw);
+    Ok(())
+}
+
+/// A Ventilation Fan spec's total rated fan power [W]: the declared
+/// `fan_power_w`, else the supply/exhaust pair's sum.
+fn fan_rated_power_w(spec: &EquipmentSpec) -> Option<f64> {
+    let total = |a: Option<f64>, b: Option<f64>| match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    };
+    let supply = spec
+        .parameters
+        .get("supply_fan_power_w")
+        .and_then(|v| v.as_f64());
+    let exhaust = spec
+        .parameters
+        .get("exhaust_fan_power_w")
+        .and_then(|v| v.as_f64());
+    total(supply, exhaust).or_else(|| spec.parameters.get("fan_power_w").and_then(|v| v.as_f64()))
 }
 
 fn inject_compact_column_power(spec: &mut EquipmentSpec, col_idx: usize) {
@@ -1357,51 +1670,61 @@ fn normalize_schedule_col_name(name: &str) -> String {
     normalize_ascii(name).replace([' ', '-'], "_")
 }
 
-/// Auto-create EquipmentSpecs for CSV columns that have COLUMN_MAPPINGS entries
-/// but no corresponding spec from HPXML parsing (e.g. microwave, which is a
-/// separate schedule CSV column not produced by the HPXML appliance parser).
+/// Create an EquipmentSpec for a CSV column whose equipment the HPXML does
+/// not describe, when that equipment has a default annual energy to scale
+/// the column by (a microwave, which no HPXML element carries, in a
+/// BEopt/OCHRE-format schedule). A column for
+/// any other equipment the HPXML leaves out (garage or basement lighting in
+/// a building without that space, an appliance the home does not have)
+/// creates nothing: the column is a profile, and with no equipment energy
+/// it would drive a zero-power load. Such a column is reported as a
+/// construction warning, so a declared schedule input does not vanish
+/// from the run unrecorded. On an OS-HPXML-derived schedule the microwave
+/// column creates nothing for the same reason and its energy stays in the
+/// residual plug loads (OS-HPXML v1.12.0 `defaults.rb`
+/// `get_residual_mels_values`, from RECS 2020), so the column is reported
+/// unread instead of a second Microwave load.
 ///
-/// Basement Lighting is gated on `foundation_name == "Finished Basement"` to
-/// match the HPXML-resolution gate in `resolve_loads.rs` and OCHRE's behaviour
-/// (hpxml.py:1695-1698). Without this check, a schedule CSV with a
-/// `lighting_basement` column would silently create basement lighting equipment
-/// for unconditioned foundations, reintroducing the exact regression class the
-/// `check_basement_lighting_foundation` invariant was written to catch.
-///
-/// Specs are constructed through `build_spec` — the same path every HPXML-derived
-/// spec takes — so default gain fractions, fuel-type labels, and ZIP parameters
-/// are injected consistently.  This prevents the class of bug where an
-/// auto-created spec is missing a required parameter that `build_spec` would
-/// have supplied.
+/// Specs are constructed through `build_spec`, the path every HPXML-derived
+/// spec takes, so default gain fractions, fuel-type labels and ZIP
+/// parameters are injected consistently.
 fn ensure_specs_for_csv_columns(
     specs: &mut Vec<EquipmentSpec>,
     csv_col_map: &HashMap<String, usize>,
     defaults: &DefaultsStore,
-    foundation_name: Option<&str>,
+    warnings: &mut Vec<Warning>,
 ) {
+    let family = schedule_format_family(csv_col_map);
     for mapping in COLUMN_MAPPINGS {
-        if matches!(
-            mapping.category,
-            ScheduleCategory::Ignore | ScheduleCategory::Occupancy | ScheduleCategory::Setpoint
-        ) {
-            continue;
-        }
-        if mapping.equipment_name == "Basement Lighting"
-            && foundation_name != Some("Finished Basement")
+        if !mapping.applies_to(family)
+            || matches!(
+                mapping.category,
+                ScheduleCategory::NotUsed { .. }
+                    | ScheduleCategory::Occupancy
+                    | ScheduleCategory::Setpoint
+                    | ScheduleCategory::WaterHeater
+            )
         {
             continue;
         }
         let col_name = normalize_schedule_col_name(mapping.csv_column);
-        if !csv_col_map.contains_key(&col_name) {
+        if !csv_col_map.contains_key(&col_name)
+            || specs.iter().any(|s| s.name == mapping.equipment_name)
+        {
             continue;
         }
-        if specs.iter().any(|s| s.name == mapping.equipment_name) {
+        let Some(annual_kwh) = default_annual_kwh_for_equipment(mapping.equipment_name) else {
+            let message = format!(
+                "schedule CSV column '{col_name}' is not read: the building declares no {0} \
+                 and there is no default annual energy to create one with, so no {0} is created",
+                mapping.equipment_name
+            );
+            warn!(equipment = %mapping.equipment_name, "{message}");
+            warnings.push(Warning::new("schedule", message));
             continue;
-        }
+        };
         let mut params = Map::new();
-        if let Some(annual_kwh) = default_annual_kwh_for_equipment(mapping.equipment_name) {
-            params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
-        }
+        params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
         specs.push(build_spec(
             mapping.equipment_name.to_string(),
             FuelType::Electric,
@@ -1413,38 +1736,34 @@ fn ensure_specs_for_csv_columns(
 
 fn default_annual_kwh_for_equipment(equipment_name: &str) -> Option<f64> {
     match equipment_name {
-        "Microwave" => {
-            // ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default.
-            Some(MICROWAVE_DEFAULT_ANNUAL_KWH)
-        }
-        _ => {
-            warn!(
-                equipment = %equipment_name,
-                "auto-created spec for unmapped CSV column but no default annual energy; \
-                 schedule will have zero power"
-            );
-            None
-        }
+        // ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default.
+        "Microwave" => Some(MICROWAVE_DEFAULT_ANNUAL_KWH),
+        _ => None,
     }
 }
 
-/// Return the set of CSV column names that have no entry in COLUMN_MAPPINGS.
+/// Return the set of CSV column names that are neither in `COLUMN_MAPPINGS`
+/// (any category, so `NotUsed` entries keep their columns known, within the
+/// mapping's schedule families) nor the occupancy column the environment
+/// resolves.
 ///
-/// Only active under `#[cfg(any(debug_assertions, feature = "check_invariants"))]`.
-/// The caller is responsible for logging a warning for each unmapped column.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub(crate) fn find_unmapped_csv_columns(csv_col_map: &HashMap<String, usize>) -> Vec<String> {
-    let mut unmapped = Vec::new();
-    for col_name in csv_col_map.keys() {
-        let normalized = normalize_schedule_col_name(col_name);
-        let is_mapped = COLUMN_MAPPINGS
-            .iter()
-            .any(|m| normalize_schedule_col_name(m.csv_column) == normalized);
-        if !is_mapped {
-            unmapped.push(col_name.clone());
-        }
-    }
-    unmapped
+/// The caller reports one `Warning` per returned column.
+pub(crate) fn find_unknown_schedule_columns(csv_col_map: &HashMap<String, usize>) -> Vec<String> {
+    let occupancy_column = resolve_occupancy_column(csv_col_map).map(|(name, _)| name);
+    let family = schedule_format_family(csv_col_map);
+    let mut unknown: Vec<String> = csv_col_map
+        .keys()
+        .filter(|col_name| {
+            let normalized = normalize_schedule_col_name(col_name);
+            let is_mapped = COLUMN_MAPPINGS.iter().any(|m| {
+                m.applies_to(family) && normalize_schedule_col_name(m.csv_column) == normalized
+            });
+            !is_mapped && occupancy_column.as_deref() != Some(col_name.as_str())
+        })
+        .cloned()
+        .collect();
+    unknown.sort();
+    unknown
 }
 
 /// Gated invariant: every HVAC equipment spec must have a setpoint source.
@@ -1452,8 +1771,7 @@ pub(crate) fn find_unmapped_csv_columns(csv_col_map: &HashMap<String, usize>) ->
 /// If heating/cooling equipment is present and no setpoint schedule is
 /// configured (schedule CSV column, HPXML-derived, or default profile),
 /// the diagnostic names the missing schedule and the affected equipment.
-/// This guard only runs in debug or when `feature = "check_invariants"`.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+/// Runs in every build profile as a warning diagnostic.
 pub fn check_hvac_setpoint_invariants(specs: &[EquipmentSpec]) {
     for spec in specs {
         if HEATING_EQUIPMENT.contains(&spec.name.as_str()) {
@@ -1497,25 +1815,26 @@ mod tests {
         ConfigPayload, ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
         HeatPumpWaterHeaterConfig, HvacSetpointConfig, TanklessWaterHeaterConfig,
     };
-    use hares_types::{BoundaryPolicy, FuelType, ScheduleSourceConfig};
+    use hares_types::{BoundaryPolicy, FuelType, ScheduleSourceConfig, Warning};
     use serde_json::{Map, Value};
     use tempfile::tempdir;
+
+    use super::find_unknown_schedule_columns;
 
     fn find_setpoint_in_json<'a>(
         data: &'a serde_json::Map<String, Value>,
         key: &str,
     ) -> Option<&'a Value> {
-        if let Some(common) = data.get("common") {
-            if let Some(sp) = common.get("setpoint") {
-                if let Some(v) = sp.get(key) {
-                    return Some(v);
-                }
-            }
+        if let Some(common) = data.get("common")
+            && let Some(sp) = common.get("setpoint")
+            && let Some(v) = sp.get(key)
+        {
+            return Some(v);
         }
-        if let Some(sp) = data.get("setpoint") {
-            if let Some(v) = sp.get(key) {
-                return Some(v);
-            }
+        if let Some(sp) = data.get("setpoint")
+            && let Some(v) = sp.get(key)
+        {
+            return Some(v);
         }
         data.get(key)
     }
@@ -1655,6 +1974,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1680,6 +2000,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1727,7 +2048,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1741,27 +2062,48 @@ mod tests {
     }
 
     #[test]
-    fn missing_csv_and_missing_default_profile_falls_back_to_constant() {
+    fn missing_csv_and_missing_default_profile_is_an_error() {
+        // A defaults CSV that loads (Occupancy only) but has no
+        // Indoor Lighting profile.
         let dir = tempdir().expect("create temp dir");
+        let mut csv = String::from("Category,Name,OCHRE Name,OCHRE Element,Values\n");
+        csv.push_str(
+            "Schedules,Occupants,Occupancy,weekday_fractions,\"0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1\"\n",
+        );
+        csv.push_str(
+            "Schedules,Occupants,Occupancy,weekend_fractions,\"0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2\"\n",
+        );
+        csv.push_str(
+            "Schedules,Occupants,Occupancy,month_multipliers,\"1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0\"\n",
+        );
+        std::fs::write(dir.path().join("Default Schedule Parameters.csv"), csv)
+            .expect("write the occupancy-only defaults CSV");
 
         let mut schedule = make_schedule(24);
         let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
-        inject_schedule_into_specs(
+        let err = inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
-        .expect("inject_schedule_into_specs should succeed with valid config");
+        .expect_err("an equipment with no schedule source must fail the injection");
 
-        let expected = 876.0 / 8760.0;
-        let constant_kw = specs[0]
-            .parameters
-            .get("power_constant_kw")
-            .and_then(Value::as_f64)
-            .expect("power_constant_kw must be set");
-        assert!((constant_kw - expected).abs() < 1e-12);
+        let message = err.to_string();
+        assert!(
+            message.contains("Indoor Lighting"),
+            "the error must name the equipment, got: {message}"
+        );
+        assert!(
+            message.contains("lighting_interior"),
+            "the error must name the schedule column looked for, got: {message}"
+        );
+        assert!(
+            message.contains("Default Schedule Parameters.csv"),
+            "the error must name the defaults file the profile was looked for \
+             in, got: {message}"
+        );
     }
 
     #[test]
@@ -1779,7 +2121,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1805,7 +2147,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1847,13 +2189,67 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!((peak - 0.5).abs() < 1e-9, "max power should win precedence");
+    }
+
+    /// A Ventilation Fan spec with no power input fails the resolve with the
+    /// resolve error naming the equipment and the missing fields. The pre-fix
+    /// code injected a constant-power schedule at 0 kW instead.
+    #[test]
+    fn constant_power_schedule_without_a_power_is_a_resolve_error() {
+        let mut schedule = make_schedule(24);
+        let mut spec = make_spec("Ventilation Fan", 0.0);
+        spec.parameters.remove("annual_electric_kwh");
+        let mut specs = vec![spec];
+        let err = inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+        )
+        .expect_err("a constant-power schedule without a power must fail the resolve");
+        let message = err.to_string();
+        assert!(
+            message.contains("Ventilation Fan"),
+            "the error must name the equipment: {message}"
+        );
+        assert!(
+            message.contains("max_electric_power_w"),
+            "the error must name the missing field: {message}"
+        );
+    }
+
+    /// A Ventilation Fan spec's rated fan power is a determinable constant
+    /// power: `fan_power_w` (or the supply/exhaust pair) sets
+    /// `power_constant_kw` without `power_w` being present.
+    #[test]
+    fn constant_power_schedule_reads_the_fan_rated_power() {
+        let mut schedule = make_schedule(24);
+        let mut spec = make_spec("Ventilation Fan", 0.0);
+        spec.parameters
+            .insert("fan_power_w".to_string(), Value::from(876.0));
+        let mut specs = vec![spec];
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+        )
+        .expect("the fan's rated fan power is a determinable power");
+        let kw = specs[0]
+            .parameters
+            .get("power_constant_kw")
+            .and_then(Value::as_f64)
+            .expect("power_constant_kw injected");
+        assert!((kw - 0.876).abs() < 1e-9, "expected 0.876 kW, got {kw}");
     }
 
     #[test]
@@ -1865,7 +2261,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
@@ -1891,7 +2287,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1926,33 +2322,186 @@ mod tests {
     }
 
     #[test]
-    fn constant_injects_compact_constant_keys() {
-        let dir = tempdir().expect("create temp dir");
-        let mut schedule = make_schedule(24);
-        let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
+    fn schedule_resolve_equipment_with_no_determinable_power_is_an_error() {
+        // A spec with no rated power and no annual energy routed through
+        // each of the three schedule-source branches must fail the resolve
+        // naming the equipment and the missing field, never silently run at
+        // 0 kW.
 
-        inject_schedule_into_specs(
+        // Branch 1: the schedule CSV carries the equipment's fraction
+        // column, so the column is the source and the max kW determination
+        // fails.
+        let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
+        let mut specs = vec![make_spec_with_power("Indoor Lighting", None, None)];
+        let err = inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+        )
+        .expect_err("a CSV-column source with no determinable power must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("Indoor Lighting"),
+            "the error must name the equipment, got: {message}"
+        );
+        assert!(
+            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            "the error must name the missing fields, got: {message}"
+        );
+        assert!(
+            message.contains("lighting_interior"),
+            "the error must name the schedule source, got: {message}"
+        );
+
+        // Branch 2: no CSV column, but the spec carries HPXML schedule
+        // fractions, so the fractions are the source.
+        let mut hpxml_spec = make_spec_with_power("Indoor Lighting", None, None);
+        hpxml_spec.parameters.insert(
+            "weekday_schedule_fractions".to_string(),
+            Value::Array(
+                (0..24)
+                    .map(|h| Value::from(0.5 + f64::from(h % 12) * 0.01))
+                    .collect(),
+            ),
+        );
+        hpxml_spec.parameters.insert(
+            "weekend_schedule_fractions".to_string(),
+            Value::Array((0..24).map(|_| Value::from(0.4)).collect()),
+        );
+        let mut schedule = make_schedule(24);
+        let mut specs = vec![hpxml_spec];
+        let err = inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+        )
+        .expect_err("an HPXML-fraction source with no determinable power must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("Indoor Lighting"),
+            "the error must name the equipment, got: {message}"
+        );
+        assert!(
+            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            "the error must name the missing fields, got: {message}"
+        );
+        assert!(
+            message.contains("HPXML schedule fractions"),
+            "the error must name the schedule source, got: {message}"
+        );
+
+        // Branch 3: no CSV column and no HPXML fractions, but a default
+        // profile exists for the equipment.
+        let dir = tempdir().expect("create temp dir");
+        write_default_profile_csv(dir.path());
+        let mut schedule = make_schedule(24);
+        let mut specs = vec![make_spec_with_power("Indoor Lighting", None, None)];
+        let err = inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
-        .expect("inject_schedule_into_specs should succeed with valid config");
-
-        assert_eq!(
-            specs[0]
-                .parameters
-                .get("power_schedule_source")
-                .and_then(Value::as_str),
-            Some("constant")
+        .expect_err("a default-profile source with no determinable power must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("Indoor Lighting"),
+            "the error must name the equipment, got: {message}"
         );
-        let constant_kw = specs[0]
+        assert!(
+            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            "the error must name the missing fields, got: {message}"
+        );
+        assert!(
+            message.contains("default schedule profile"),
+            "the error must name the schedule source, got: {message}"
+        );
+    }
+
+    #[test]
+    fn all_zero_schedule_fractions_are_a_determined_zero_not_an_error() {
+        // A spec WITH annual energy whose schedule fractions are all zero
+        // runs never: its determined power is exactly 0 kW, the schedule's
+        // own claim, not the silent zero-fill of an undeterminable one.
+        let mut schedule = make_schedule_with_lighting_column(&[0.0, 0.0, 0.0]);
+        let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+        )
+        .expect("an all-zero fraction column resolves to a determined 0 kW");
+
+        let derived_idx = specs[0]
             .parameters
-            .get("power_constant_kw")
+            .get("power_schedule_col")
+            .and_then(Value::as_u64)
+            .expect("power_schedule_col must be present") as usize;
+        assert!(
+            schedule.columns[derived_idx].iter().all(|kw| *kw == 0.0),
+            "the derived kW column must be all zero"
+        );
+
+        // Same through the HPXML-fraction branch: no CSV column, zero
+        // fractions on the spec, annual energy present.
+        let mut spec = make_spec_with_power("Indoor Lighting", Some(876.0), None);
+        spec.parameters.insert(
+            "weekday_schedule_fractions".to_string(),
+            Value::Array((0..24).map(|_| Value::from(0.0)).collect()),
+        );
+        let mut schedule = make_schedule(24);
+        let mut specs = vec![spec];
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+        )
+        .expect("an all-zero HPXML profile resolves to a determined 0 kW");
+        let max_kw = specs[0]
+            .parameters
+            .get("power_profile_max_kw")
             .and_then(Value::as_f64)
-            .expect("power_constant_kw should be present");
-        assert!((constant_kw - (876.0 / 8760.0)).abs() < 1e-12);
+            .expect("power_profile_max_kw must be present");
+        assert_eq!(max_kw, 0.0);
+    }
+
+    #[test]
+    fn declared_zero_annual_energy_is_a_determined_zero_not_an_error() {
+        // A spec whose annual energy is DECLARED as zero has a determined
+        // power: exactly 0 kW. Only a spec that declares no power field at
+        // all is undeterminable.
+        let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
+        let mut spec = make_spec_with_power("Indoor Lighting", None, None);
+        spec.parameters
+            .insert("annual_electric_kwh".to_string(), Value::from(0.0));
+        let mut specs = vec![spec];
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+        )
+        .expect("a declared zero annual energy resolves to a determined 0 kW");
+
+        let derived_idx = specs[0]
+            .parameters
+            .get("power_schedule_col")
+            .and_then(Value::as_u64)
+            .expect("power_schedule_col must be present") as usize;
+        assert!(
+            schedule.columns[derived_idx].iter().all(|kw| *kw == 0.0),
+            "the derived kW column must be all zero"
+        );
     }
 
     #[test]
@@ -1965,7 +2514,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -1989,7 +2538,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2014,6 +2563,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 hares_equipment::EquipmentConfig::from_typed(
                     name.to_string(),
@@ -2051,6 +2601,7 @@ mod tests {
                 "ASHP Cooler",
                 "ASHP Cooler",
                 HeatPumpCoolerConfig {
+                    reject_unknown_keys: hares_equipment::RejectUnknownKeys,
                     common: HeatPumpCommonConfig {
                         equipment_id: None,
                         zone_id: Some(1),
@@ -2103,7 +2654,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2285,6 +2836,7 @@ mod tests {
             },
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(typed_config),
             system_id: None,
             related_hvac_idref: None,
@@ -2324,6 +2876,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(typed_config),
             system_id: None,
             related_hvac_idref: None,
@@ -2350,7 +2903,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2440,7 +2993,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2489,7 +3042,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         );
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.unwrap_err();
@@ -2549,6 +3102,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(typed_config),
             system_id: None,
             related_hvac_idref: None,
@@ -2567,7 +3121,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         );
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.unwrap_err();
@@ -2589,6 +3143,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -2622,7 +3177,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -2675,6 +3230,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -2728,6 +3284,31 @@ mod tests {
             .expect("write defaults csv with setpoints");
     }
 
+    /// A second row for the same profile and element is an error naming
+    /// both lines, never a silent override by the later row.
+    #[test]
+    fn load_default_profiles_rejects_a_duplicate_profile_row() {
+        let dir = tempdir().expect("create temp dir");
+        write_defaults_csv_with_setpoints(dir.path());
+        let path = dir.path().join("Default Schedule Parameters.csv");
+        let mut csv = std::fs::read_to_string(&path).expect("read the written csv");
+        csv.push_str(
+            "Schedules,Lighting,Indoor Lighting,month_multipliers,\"1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0\"\n",
+        );
+        std::fs::write(&path, csv).expect("rewrite the csv");
+
+        let err = super::load_default_profiles(dir.path())
+            .expect_err("a duplicate profile row must not override the first");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Indoor Lighting")
+                && msg.contains("month_multipliers")
+                && msg.contains("line 4")
+                && msg.contains("line 11"),
+            "the error names the profile, the element and both lines, got: {msg}"
+        );
+    }
+
     // ── Setpoint default profile tests ──
 
     #[test]
@@ -2735,7 +3316,8 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         write_defaults_csv_with_setpoints(dir.path());
 
-        let profiles = super::load_default_profiles(dir.path());
+        let profiles =
+            super::load_default_profiles(dir.path()).expect("the setpoints defaults CSV must load");
 
         let heat = profiles
             .get("HVAC Heating")
@@ -2752,8 +3334,11 @@ mod tests {
         assert_eq!(cool.month_multipliers, [1.0; 12]);
     }
 
+    /// A unit whose HPXML and schedule carry no setpoint takes OS-HPXML's
+    /// manual-thermostat default (68 °F heating, 78 °F cooling), recorded
+    /// as a warning naming the unit.
     #[test]
-    fn hvac_spec_without_hpxml_setpoints_gets_default_daily_profile() {
+    fn hvac_spec_without_setpoints_takes_the_os_hpxml_default_with_a_warning() {
         use hares_equipment::hvac::heat_pump_config::{
             HeatPumpCommonConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
         };
@@ -2762,6 +3347,7 @@ mod tests {
         write_defaults_csv_with_setpoints(dir.path());
 
         let mut schedule = make_schedule(24);
+        let mut warnings = Vec::new();
         let mut specs = vec![
             make_typed_spec(
                 "ASHP Heater",
@@ -2779,6 +3365,7 @@ mod tests {
                 "ASHP Cooler",
                 "ASHP Cooler",
                 HeatPumpCoolerConfig {
+                    reject_unknown_keys: hares_equipment::RejectUnknownKeys,
                     common: HeatPumpCommonConfig {
                         equipment_id: None,
                         zone_id: Some(1),
@@ -2831,52 +3418,54 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut warnings,
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
-        // Heater: should receive a heating DailyProfile with max_value = 20 °C.
-        let heater_data = typed_data_of_spec(&specs[0]);
-        let heater_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
-            find_setpoint_in_json(heater_data, "heating_setpoint_source")
-                .cloned()
-                .expect("heater heating_setpoint_source must be injected"),
-        )
-        .expect("heater source must deserialize");
-        assert!(
-            matches!(&heater_source,
-                hares_types::ScheduleSourceConfig::DailyProfile { weekday, max_value, .. }
-                if (weekday[0] - super::HERS_HEATING_SETPOINT_C).abs() < 1e-12
-                && (max_value - 1.0).abs() < 1e-12),
-            "expected DailyProfile with weekday[0]={}°C and max_value=1.0, got {heater_source:?}",
-            super::HERS_HEATING_SETPOINT_C,
-        );
-
-        // Cooler: should receive a cooling DailyProfile with max_value = 24 °C.
-        let cooler_data = typed_data_of_spec(&specs[1]);
-        let cooler_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
-            find_setpoint_in_json(cooler_data, "cooling_setpoint_source")
-                .cloned()
-                .expect("cooler cooling_setpoint_source must be injected"),
-        )
-        .expect("cooler source must deserialize");
-        assert!(
-            matches!(&cooler_source,
-                hares_types::ScheduleSourceConfig::DailyProfile { weekday, max_value, .. }
-                if (weekday[0] - super::HERS_COOLING_SETPOINT_C).abs() < 1e-12
-                && (max_value - 1.0).abs() < 1e-12),
-            "expected DailyProfile with weekday[0]={}°C and max_value=1.0, got {cooler_source:?}",
-            super::HERS_COOLING_SETPOINT_C,
-        );
+        // 68 °F and 78 °F, as constants: a flat DailyProfile.
+        for (spec, key, expected_c) in [
+            (&specs[0], "heating_setpoint_source", 20.0),
+            (
+                &specs[1],
+                "cooling_setpoint_source",
+                (78.0 - 32.0) * 5.0 / 9.0,
+            ),
+        ] {
+            let source: hares_types::ScheduleSourceConfig = serde_json::from_value(
+                find_setpoint_in_json(typed_data_of_spec(spec), key)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{}: {key} must be injected", spec.name)),
+            )
+            .expect("source must deserialize");
+            assert!(
+                matches!(&source, hares_types::ScheduleSourceConfig::DailyProfile {
+                    weekday, weekend, month_multipliers, max_value }
+                    if weekday.iter().chain(weekend).all(|c| (c - expected_c).abs() < 1e-9)
+                        && month_multipliers.iter().all(|m| *m == 1.0)
+                        && *max_value == 1.0),
+                "{}: expected a constant {expected_c} °C, got {source:?}",
+                spec.name
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.message.contains(spec.name.as_str())
+                        && w.message.contains("OS-HPXML")),
+                "{}: the default must be a warning naming the unit, got {warnings:?}",
+                spec.name
+            );
+        }
 
         // Heater should NOT get a cooling source, and cooler should NOT get a
         // heating source.
         assert!(
-            find_setpoint_in_json(heater_data, "cooling_setpoint_source").is_none(),
+            find_setpoint_in_json(typed_data_of_spec(&specs[0]), "cooling_setpoint_source")
+                .is_none(),
             "heater should not have a cooling setpoint source"
         );
         assert!(
-            find_setpoint_in_json(cooler_data, "heating_setpoint_source").is_none(),
+            find_setpoint_in_json(typed_data_of_spec(&specs[1]), "heating_setpoint_source")
+                .is_none(),
             "cooler should not have a heating setpoint source"
         );
     }
@@ -2938,6 +3527,7 @@ mod tests {
                 "ASHP Cooler",
                 "ASHP Cooler",
                 HeatPumpCoolerConfig {
+                    reject_unknown_keys: hares_equipment::RejectUnknownKeys,
                     common: HeatPumpCommonConfig {
                         equipment_id: None,
                         zone_id: Some(1),
@@ -2994,7 +3584,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3024,7 +3614,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn invariant_detects_missing_heating_setpoint_source() {
         use hares_equipment::hvac::heat_pump_config::{HeatPumpCommonConfig, HeatPumpHeaterConfig};
 
@@ -3054,7 +3643,8 @@ mod tests {
     fn load_default_profiles_occupants_has_distinct_weekend_fractions() {
         use std::path::Path;
         let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
-        let profiles = super::load_default_profiles(&defaults_dir);
+        let profiles = super::load_default_profiles(&defaults_dir)
+            .expect("the shipped defaults CSV must load");
 
         let occ = profiles
             .get("Occupancy")
@@ -3070,7 +3660,8 @@ mod tests {
     fn load_default_profiles_all_priority_schedules_have_distinct_weekend_fractions() {
         use std::path::Path;
         let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
-        let profiles = super::load_default_profiles(&defaults_dir);
+        let profiles = super::load_default_profiles(&defaults_dir)
+            .expect("the shipped defaults CSV must load");
 
         let priority_schedules = [
             "Occupancy",
@@ -3089,8 +3680,8 @@ mod tests {
 
         for name in &priority_schedules {
             let profile = profiles
-                .get(*name)
-                .unwrap_or_else(|| panic!("schedule '{name}' must exist in defaults"));
+                .get(name)
+                .unwrap_or_else(|err| panic!("schedule '{name}' must exist in defaults: {err}"));
             assert!(
                 profile.weekday_fractions != profile.weekend_fractions,
                 "schedule '{name}' must have distinct weekday and weekend fraction arrays"
@@ -3102,7 +3693,8 @@ mod tests {
     fn fixed_operation_schedules_keep_identical_fractions() {
         use std::path::Path;
         let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
-        let profiles = super::load_default_profiles(&defaults_dir);
+        let profiles = super::load_default_profiles(&defaults_dir)
+            .expect("the shipped defaults CSV must load");
 
         let fixed_schedules = [
             "Refrigerator",
@@ -3118,7 +3710,7 @@ mod tests {
         ];
 
         for name in &fixed_schedules {
-            if let Some(profile) = profiles.get(*name) {
+            if let Some(profile) = profiles.find(name) {
                 assert_eq!(
                     profile.weekday_fractions, profile.weekend_fractions,
                     "fixed-operation schedule '{name}' should keep identical fractions"
@@ -3131,7 +3723,8 @@ mod tests {
     fn spa_heater_month_multipliers_match_spa_pump() {
         use std::path::Path;
         let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
-        let profiles = super::load_default_profiles(&defaults_dir);
+        let profiles = super::load_default_profiles(&defaults_dir)
+            .expect("the shipped defaults CSV must load");
 
         let spa_pump = profiles
             .get("Spa Pump")
@@ -3175,6 +3768,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3217,7 +3811,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3279,7 +3873,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3338,7 +3932,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3370,6 +3964,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3382,7 +3977,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3416,7 +4011,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3464,6 +4059,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3476,7 +4072,7 @@ mod tests {
             &mut schedule,
             Some(dir.path()),
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3514,7 +4110,9 @@ mod tests {
 
     // ── Microwave column mapping tests ──
 
-    fn make_schedule_with_microwave_column(values: &[f64]) -> ScheduleTimeSeries {
+    /// A BEopt/OCHRE-format schedule (`Occupancy (Persons)`, the event-file
+    /// family) carrying a `microwave` column.
+    fn make_beopt_schedule_with_microwave_column(values: &[f64]) -> ScheduleTimeSeries {
         let start =
             DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
         let timestamps = (0..values.len())
@@ -3522,20 +4120,74 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut column_index = HashMap::new();
+        column_index.insert("Occupancy (Persons)".to_string(), 1);
         column_index.insert("microwave".to_string(), 0);
         ScheduleTimeSeries {
             timestamps,
-            column_names: vec!["microwave".to_string()],
-            columns: vec![values.to_vec()],
+            column_names: vec!["microwave".to_string(), "Occupancy (Persons)".to_string()],
+            columns: vec![values.to_vec(), vec![1.0; values.len()]],
             column_index,
             source_step_secs: 3600,
-            column_aggregations: vec![crate::ColumnAggregation::Mean],
+            column_aggregations: vec![crate::ColumnAggregation::Mean; 2],
+        }
+    }
+
+    /// An OS-HPXML-derived schedule (`occupants`, the residual
+    /// `plug_loads_other` column) carrying a `microwave` column.
+    fn make_os_hpxml_schedule_with_microwave_column(values: &[f64]) -> ScheduleTimeSeries {
+        let start =
+            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+        let timestamps = (0..values.len())
+            .map(|i| start + Duration::hours(i as i64))
+            .collect::<Vec<_>>();
+
+        let mut column_index = HashMap::new();
+        column_index.insert("occupants".to_string(), 2);
+        column_index.insert("plug_loads_other".to_string(), 1);
+        column_index.insert("microwave".to_string(), 0);
+        ScheduleTimeSeries {
+            timestamps,
+            column_names: vec![
+                "microwave".to_string(),
+                "plug_loads_other".to_string(),
+                "occupants".to_string(),
+            ],
+            columns: vec![
+                values.to_vec(),
+                vec![0.04; values.len()],
+                vec![1.0; values.len()],
+            ],
+            column_index,
+            source_step_secs: 3600,
+            column_aggregations: vec![crate::ColumnAggregation::Mean; 3],
+        }
+    }
+
+    /// The residual MELs spec an OS-HPXML building resolves from its
+    /// declared "other" plug load, with the annual energy the ResStock
+    /// fixtures carry.
+    fn melts_spec_with_residual_energy(annual_kwh: f64) -> EquipmentSpec {
+        let mut params = Map::new();
+        params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+        params.insert("sensible_gain_fraction".to_string(), Value::from(0.855));
+        params.insert("latent_gain_fraction".to_string(), Value::from(0.045));
+        EquipmentSpec {
+            instance_name: None,
+            name: "MELs".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: params,
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
         }
     }
 
     #[test]
     fn microwave_csv_column_creates_spec_with_event_schedule_and_nonzero_energy() {
-        let mut schedule = make_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
+        let mut schedule = make_beopt_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
         let mut specs: Vec<EquipmentSpec> = Vec::new();
 
         inject_schedule_into_specs(
@@ -3543,7 +4195,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -3610,6 +4262,90 @@ mod tests {
             (latent - 0.08).abs() < 1e-12,
             "microwave latent gain fraction should match default_gain_fractions"
         );
+
+        // OS-HPXML v1.12.0 misc_loads.rb:89: the plug-load radiant split,
+        // 0.6 of the sensible heat radiant.
+        let radiant = specs[0]
+            .parameters
+            .get("radiant_share_of_sensible")
+            .and_then(Value::as_f64)
+            .expect("radiant_share_of_sensible must be injected by build_spec");
+        assert!(
+            (radiant - 0.6).abs() < 1e-12,
+            "a declared microwave takes OS-HPXML's plug-load radiant split"
+        );
+    }
+
+    /// The acceptance rule, OS-HPXML half: a `microwave` column on an
+    /// OS-HPXML-derived schedule shapes nothing additional. OS-HPXML
+    /// v1.12.0 models no microwave appliance and its residual "other" plug
+    /// loads already carry the microwave energy (`defaults.rb`
+    /// `get_residual_mels_values`, from RECS 2020), so the total
+    /// plug-load plus microwave energy stays the residual MELs alone, and
+    /// the column is reported unread.
+    #[test]
+    fn an_os_hpxml_schedules_microwave_column_counts_only_the_residual_mels() {
+        let mut schedule = make_os_hpxml_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
+        let mut specs: Vec<EquipmentSpec> = vec![melts_spec_with_residual_energy(1119.0 * 2.42)];
+        let mut warnings = Vec::new();
+
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut warnings,
+        )
+        .expect("inject_schedule_into_specs should succeed");
+
+        assert!(
+            !specs.iter().any(|s| s.name == "Microwave"),
+            "no Microwave load may ride on top of the residual plug loads, got {:?}",
+            specs.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+        );
+        let mels = specs
+            .iter()
+            .find(|s| s.name == "MELs")
+            .expect("the residual MELs spec stays");
+        let annual_kwh = mels
+            .parameters
+            .get("annual_electric_kwh")
+            .and_then(Value::as_f64)
+            .expect("annual_electric_kwh must be set");
+        assert!(
+            (annual_kwh - 1119.0 * 2.42).abs() < 1e-9,
+            "the residual's declared energy is untouched: {annual_kwh}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.source.as_ref() == "schedule"
+                && w.message
+                    .contains("'microwave' has no entry in COLUMN_MAPPINGS")),
+            "the column is reported unread, got {warnings:?}"
+        );
+    }
+
+    /// The unknown-column check reports a `microwave` column on an
+    /// OS-HPXML-derived schedule (the mapping applies only to the
+    /// BEopt/OCHRE event family) and keeps it mapped on a BEopt/OCHRE
+    /// schedule.
+    #[test]
+    fn the_microwave_column_is_unknown_only_outside_the_beopt_family() {
+        let os_hpxml = HashMap::from([("occupants".to_string(), 0), ("microwave".to_string(), 1)]);
+        let unknown = super::find_unknown_schedule_columns(&os_hpxml);
+        assert!(
+            unknown.contains(&"microwave".to_string()),
+            "an OS-HPXML schedule's microwave column is unread: {unknown:?}"
+        );
+
+        let beopt = HashMap::from([
+            ("Occupancy (Persons)".to_string(), 0),
+            ("microwave".to_string(), 1),
+        ]);
+        let unknown = super::find_unknown_schedule_columns(&beopt);
+        assert!(
+            !unknown.contains(&"microwave".to_string()),
+            "a BEopt/OCHRE schedule's microwave column is mapped: {unknown:?}"
+        );
     }
 
     /// Regression: an auto-created Microwave spec (from a schedule CSV column
@@ -3624,11 +4360,9 @@ mod tests {
         use hares_equipment::Equipment;
         use hares_equipment::config::ConfigValue;
         use hares_equipment::event_load::EventBasedLoad;
-        use hares_types::{
-            DomainUpdate, GridState, SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
-        };
+        use hares_types::{GridState, WeatherState, ZoneId, ZoneState};
 
-        let mut schedule = make_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
+        let mut schedule = make_beopt_schedule_with_microwave_column(&[0.0, 1.0, 0.5, 0.0]);
         let mut specs: Vec<EquipmentSpec> = Vec::new();
 
         inject_schedule_into_specs(
@@ -3636,7 +4370,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject should succeed");
 
@@ -3665,9 +4399,18 @@ mod tests {
             })
             .collect();
 
-        let cfg = EquipmentConfig::raw(spec.name.clone(), spec.name.clone(), raw_config);
+        let stream = hares_types::rng::RngStream::event_load(
+            hares_types::rng::dwelling_seed(0, 0),
+            &spec.name,
+        );
+        let mut cfg = EquipmentConfig::raw(spec.name.clone(), spec.name.clone(), raw_config)
+            .with_rng_stream(stream);
+        let mut zone_map = hares_types::ZoneMap::new();
+        zone_map.insert(hares_types::ZoneRole::Indoor, ZoneId(1));
+        cfg.zone_map = Some(zone_map);
 
-        let env = hares_types::EnvironmentState {
+        let mut env = hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -3680,11 +4423,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![DomainUpdate {
-                domain_id: SCHEDULE_DOMAIN_ID,
-                zone_temperatures_c: Vec::new(),
-                custom_payload: Some(vec![0.0, 0.0]),
-            }],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: HashMap::new(),
             equipment_core: HashMap::new(),
             current_time: chrono::FixedOffset::east_opt(0)
@@ -3696,6 +4436,11 @@ mod tests {
             price_signal: Default::default(),
             electrical: Default::default(),
         };
+        env.domains.schedule.set_from(&hares_types::DomainUpdate {
+            domain_id: hares_types::SCHEDULE_DOMAIN_ID,
+            zone_temperatures_c: Vec::new(),
+            custom_payload: Some(vec![0.0, 0.0]),
+        });
 
         let mut eq = EventBasedLoad::new(cfg.clone());
         eq.init(&cfg, &env).expect(
@@ -3705,13 +4450,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn find_unmapped_csv_columns_detects_unknown_column() {
         let mut column_index = HashMap::new();
         column_index.insert("unknown_column".to_string(), 0);
         column_index.insert("microwave".to_string(), 1);
+        column_index.insert("Occupancy (Persons)".to_string(), 2);
 
-        let unmapped = super::find_unmapped_csv_columns(&column_index);
+        let unmapped = super::find_unknown_schedule_columns(&column_index);
         assert!(
             unmapped.contains(&"unknown_column".to_string()),
             "unknown_column should be flagged as unmapped; got {unmapped:?}"
@@ -3723,13 +4468,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn find_unmapped_csv_columns_returns_empty_when_all_mapped() {
         let mut column_index = HashMap::new();
         column_index.insert("cooking_range".to_string(), 0);
         column_index.insert("refrigerator".to_string(), 1);
 
-        let unmapped = super::find_unmapped_csv_columns(&column_index);
+        let unmapped = super::find_unknown_schedule_columns(&column_index);
         assert!(unmapped.is_empty(), "all columns mapped; got {unmapped:?}");
     }
 
@@ -3747,14 +4491,23 @@ mod tests {
         let mut column_index = HashMap::new();
         column_index.insert("cooking_range".to_string(), 0);
         column_index.insert("microwave".to_string(), 1);
+        column_index.insert("Occupancy (Persons)".to_string(), 2);
 
         let mut schedule = ScheduleTimeSeries {
             timestamps,
-            column_names: vec!["cooking_range".to_string(), "microwave".to_string()],
-            columns: vec![vec![0.1, 0.5, 0.3, 0.1], vec![0.0, 1.0, 0.5, 0.0]],
+            column_names: vec![
+                "cooking_range".to_string(),
+                "microwave".to_string(),
+                "Occupancy (Persons)".to_string(),
+            ],
+            columns: vec![
+                vec![0.1, 0.5, 0.3, 0.1],
+                vec![0.0, 1.0, 0.5, 0.0],
+                vec![1.0, 1.0, 1.0, 1.0],
+            ],
             column_index,
             source_step_secs: 3600,
-            column_aggregations: vec![ColumnAggregation::Mean, ColumnAggregation::Mean],
+            column_aggregations: vec![ColumnAggregation::Mean; 3],
         };
 
         let mut params = Map::new();
@@ -3765,6 +4518,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3776,7 +4530,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            None,
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -3818,6 +4572,10 @@ mod tests {
     }
 
     fn make_schedule_with_basement_lighting_column(values: &[f64]) -> ScheduleTimeSeries {
+        make_schedule_with_column("lighting_basement", values)
+    }
+
+    fn make_schedule_with_column(name: &str, values: &[f64]) -> ScheduleTimeSeries {
         let start =
             DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
         let timestamps = (0..values.len())
@@ -3825,10 +4583,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut column_index = HashMap::new();
-        column_index.insert("lighting_basement".to_string(), 0);
+        column_index.insert(name.to_string(), 0);
         ScheduleTimeSeries {
             timestamps,
-            column_names: vec!["lighting_basement".to_string()],
+            column_names: vec![name.to_string()],
             columns: vec![values.to_vec()],
             column_index,
             source_step_secs: 3600,
@@ -3836,87 +4594,36 @@ mod tests {
         }
     }
 
+    /// A schedule column for equipment the HPXML leaves out creates no
+    /// equipment unless that equipment has a default energy: basement and
+    /// garage lighting columns in a building without those lights, and a
+    /// clothes dryer column in a home without a dryer, would otherwise
+    /// become zero-power loads, the garage lights with no zone for their
+    /// heat and the dryer with no gain split.
     #[test]
-    fn basement_lighting_not_auto_created_from_csv_for_unfinished_foundation() {
-        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
-        let mut specs: Vec<EquipmentSpec> = Vec::new();
-
-        inject_schedule_into_specs(
-            &mut specs,
-            &mut schedule,
-            None,
-            &DefaultsStore::empty(),
-            None,
-        )
-        .expect("inject_schedule_into_specs should succeed");
-
-        assert!(
-            !specs.iter().any(|s| s.name == "Basement Lighting"),
-            "Basement Lighting must not be auto-created from CSV column when foundation is not Finished Basement"
-        );
-    }
-
-    #[test]
-    fn basement_lighting_not_auto_created_from_csv_for_unfinished_basement() {
-        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
-        let mut specs: Vec<EquipmentSpec> = Vec::new();
-
-        inject_schedule_into_specs(
-            &mut specs,
-            &mut schedule,
-            None,
-            &DefaultsStore::empty(),
-            Some("Unfinished Basement"),
-        )
-        .expect("inject_schedule_into_specs should succeed");
-
-        assert!(
-            !specs.iter().any(|s| s.name == "Basement Lighting"),
-            "Basement Lighting must not be auto-created from CSV column when foundation is Unfinished Basement"
-        );
-    }
-
-    #[test]
-    fn basement_lighting_auto_created_from_csv_for_finished_basement() {
-        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
-        let mut specs: Vec<EquipmentSpec> = Vec::new();
-
-        inject_schedule_into_specs(
-            &mut specs,
-            &mut schedule,
-            None,
-            &DefaultsStore::empty(),
-            Some("Finished Basement"),
-        )
-        .expect("inject_schedule_into_specs should succeed");
-
-        let basement = specs.iter().find(|s| s.name == "Basement Lighting");
-        assert!(
-            basement.is_some(),
-            "Basement Lighting must be auto-created from CSV column when foundation is Finished Basement"
-        );
-        let spec = basement.unwrap();
-        assert_eq!(spec.fuel_type, FuelType::Electric);
-    }
-
-    #[test]
-    fn basement_lighting_not_auto_created_from_csv_for_crawlspace() {
-        let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
-        let mut specs: Vec<EquipmentSpec> = Vec::new();
-
-        inject_schedule_into_specs(
-            &mut specs,
-            &mut schedule,
-            None,
-            &DefaultsStore::empty(),
-            Some("Crawlspace"),
-        )
-        .expect("inject_schedule_into_specs should succeed");
-
-        assert!(
-            !specs.iter().any(|s| s.name == "Basement Lighting"),
-            "Basement Lighting must not be auto-created from CSV column when foundation is Crawlspace"
-        );
+    fn columns_for_equipment_without_energy_create_no_equipment() {
+        for column in ["lighting_basement", "lighting_garage", "clothes_dryer"] {
+            let mut schedule = make_schedule_with_basement_lighting_column(&[0.02, 0.01, 0.005]);
+            schedule.column_names[0] = column.to_string();
+            schedule.column_index = HashMap::from([(column.to_string(), 0)]);
+            let mut specs: Vec<EquipmentSpec> = Vec::new();
+            let mut warnings = Vec::new();
+            inject_schedule_into_specs(
+                &mut specs,
+                &mut schedule,
+                None,
+                &DefaultsStore::empty(),
+                &mut warnings,
+            )
+            .expect("inject_schedule_into_specs should succeed");
+            assert!(specs.is_empty(), "{column} created {specs:?}");
+            let reported: Vec<&Warning> = warnings
+                .iter()
+                .filter(|w| w.message.contains(&format!("'{column}' is not read")))
+                .collect();
+            assert_eq!(reported.len(), 1, "{column}: {warnings:?}");
+            assert_eq!(&*reported[0].source, "schedule");
+        }
     }
 
     /// OCHRE schedule.py:390-391: when Basement Lighting equipment exists and
@@ -3926,14 +4633,20 @@ mod tests {
     #[test]
     fn basement_lighting_uses_interior_csv_column_when_basement_column_absent() {
         let mut schedule = make_schedule_with_lighting_column(&[0.02, 0.01, 0.005]);
-        let mut specs = vec![make_spec("Basement Lighting", 100.0)];
+        // Powered specs: the subject here is the column copy, not the
+        // power determination, and an auto-created Indoor Lighting spec
+        // would carry no annual energy and fail the resolve.
+        let mut specs = vec![
+            make_spec("Indoor Lighting", 100.0),
+            make_spec("Basement Lighting", 100.0),
+        ];
 
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            Some("Finished Basement"),
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -3972,7 +4685,7 @@ mod tests {
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            Some("Finished Basement"),
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -4009,14 +4722,19 @@ mod tests {
             ],
         };
         let basement_original = schedule.columns[1].clone();
-        let mut specs = vec![make_spec("Basement Lighting", 100.0)];
+        // Powered specs: the subject here is column preservation, not the
+        // power determination.
+        let mut specs = vec![
+            make_spec("Indoor Lighting", 100.0),
+            make_spec("Basement Lighting", 100.0),
+        ];
 
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
             None,
             &DefaultsStore::empty(),
-            Some("Finished Basement"),
+            &mut Vec::new(),
         )
         .expect("inject_schedule_into_specs should succeed");
 
@@ -4032,6 +4750,271 @@ mod tests {
                 .count(),
             1,
             "lighting_basement must not be duplicated by the interior copy"
+        );
+    }
+
+    /// Builds the CSV column map from a schedule file's header line.
+    fn header_map(path: &std::path::Path) -> HashMap<String, usize> {
+        let header = std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        let line = header
+            .lines()
+            .next()
+            .unwrap_or_else(|| panic!("{} has a header line", path.display()));
+        line.split(',')
+            .enumerate()
+            .map(|(i, name)| (name.trim().trim_matches('"').to_string(), i))
+            .collect()
+    }
+
+    /// Every schedule column in the fixture tree (ResStock, parity and the
+    /// BEopt example) is read by the engine or stated as not used: the
+    /// unknown-column check returns nothing for all of them.
+    #[test]
+    fn fixture_schedule_columns_are_all_known() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let mut schedule_files: Vec<std::path::PathBuf> = Vec::new();
+        let resstock = root.join("tests/fixtures/resstock");
+        if resstock.is_dir() {
+            for year in std::fs::read_dir(&resstock).expect("resstock years") {
+                let year = year.expect("year entry").path();
+                if !year.is_dir() {
+                    continue;
+                }
+                for bldg in std::fs::read_dir(&year).expect("resstock buildings") {
+                    let bldg = bldg.expect("bldg entry").path();
+                    let schedules = bldg.join("in.schedules.csv");
+                    if schedules.is_file() {
+                        schedule_files.push(schedules);
+                    }
+                }
+            }
+        }
+        let parity = root.join("tests/fixtures/parity");
+        if parity.is_dir() {
+            for case in std::fs::read_dir(&parity).expect("parity cases") {
+                let case = case.expect("case entry").path();
+                let schedule = case.join("schedule.csv");
+                if schedule.is_file() {
+                    schedule_files.push(schedule);
+                }
+            }
+        }
+        let beopt = root.join("data/examples/BEopt_example_schedule.csv");
+        if beopt.is_file() {
+            schedule_files.push(beopt);
+        }
+        assert!(
+            schedule_files.len() >= 40,
+            "the fixture census must find the schedule files, found {}",
+            schedule_files.len()
+        );
+
+        for file in &schedule_files {
+            let map = header_map(file);
+            let unknown = find_unknown_schedule_columns(&map);
+            assert!(
+                unknown.is_empty(),
+                "{} carries unknown schedule columns {unknown:?}",
+                file.display()
+            );
+        }
+    }
+
+    /// An unknown column warns through the collector, naming the column, and
+    /// does not fail the injection.
+    #[test]
+    fn unknown_schedule_column_warns_naming_it() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = root.join("tests/fixtures/parity/cz4a_ashp_hpwh/schedule.csv");
+        let csv = std::fs::read_to_string(&fixture).expect("read the parity schedule");
+        let rows: Vec<String> = csv
+            .lines()
+            .enumerate()
+            .map(|(i, line)| {
+                if i == 0 {
+                    format!("{line},lighting_interor")
+                } else {
+                    format!("{line},0.0")
+                }
+            })
+            .collect();
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("schedule.csv");
+        std::fs::write(&path, rows.join("\n")).expect("write modified schedule");
+
+        let mut schedule = crate::parse_schedule_csv(&path, &[], None, None)
+            .expect("the modified parity schedule parses");
+        let mut specs: Vec<EquipmentSpec> = Vec::new();
+        let mut warnings: Vec<Warning> = Vec::new();
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut warnings,
+        )
+        .expect("an unknown column is a warning, not an error");
+
+        let schedule_warnings: Vec<&Warning> = warnings
+            .iter()
+            .filter(|w| {
+                w.source.as_ref() == "schedule" && w.message.contains("no entry in COLUMN_MAPPINGS")
+            })
+            .collect();
+        assert_eq!(
+            schedule_warnings.len(),
+            1,
+            "one unknown-column warning for the one unknown column, got {warnings:?}"
+        );
+        assert!(
+            schedule_warnings[0].message.contains("lighting_interor"),
+            "the warning names the column: {}",
+            schedule_warnings[0].message
+        );
+    }
+
+    /// Census over every checked-in HPXML: the equipment specs whose power
+    /// schedule has no source (no schedule CSV column, no HPXML fractions, no
+    /// default profile) are exactly the pinned list. Each entry ran at a
+    /// constant power under a "THIS MAY BE INCORRECT" log line before that
+    /// fallback became the three-source error; the list is the record of
+    /// which specs the error can surface when the run's schedule file lacks
+    /// their column. Files that do not parse as HPXML have no specs and are
+    /// counted, not silently skipped.
+    #[test]
+    fn census_specs_without_any_schedule_source_across_checked_in_hpxmls() {
+        use std::path::{Path, PathBuf};
+
+        fn collect_xmls(dir: &Path, out: &mut Vec<PathBuf>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .expect("read fixture directory")
+                .map(|entry| entry.expect("fixture directory entry").path())
+                .collect();
+            entries.sort();
+            for entry in entries {
+                if entry.is_dir() {
+                    collect_xmls(&entry, out);
+                } else if entry.extension().is_some_and(|ext| ext == "xml") {
+                    out.push(entry);
+                }
+            }
+        }
+
+        let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+        let mut xml_paths = Vec::new();
+        collect_xmls(&fixtures_root, &mut xml_paths);
+        assert!(
+            xml_paths.len() > 40,
+            "the census must walk the checked-in HPXML corpus, found {}",
+            xml_paths.len()
+        );
+
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let profiles = super::load_default_profiles(&defaults_dir)
+            .expect("the shipped defaults CSV must load");
+        let defaults = DefaultsStore::load(&defaults_dir).expect("the shipped defaults load");
+
+        let mut unreachable: Vec<String> = Vec::new();
+        let mut unparsed: Vec<String> = Vec::new();
+        let mut unresolved: Vec<String> = Vec::new();
+        let mut power_specs_considered = 0usize;
+        for path in &xml_paths {
+            let Ok(building) = crate::parse_hpxml(path) else {
+                unparsed.push(
+                    path.strip_prefix(&fixtures_root)
+                        .expect("the walked paths live under the fixtures root")
+                        .display()
+                        .to_string(),
+                );
+                continue;
+            };
+            let mut warnings: Vec<Warning> = Vec::new();
+            // A fixture whose equipment cannot resolve standalone (it needs
+            // the weather site or patches its own test supplies) has no
+            // census here: it is counted in `unresolved`, pinned below, so a
+            // resolve failure is never silently eaten.
+            let specs = match crate::resolve_equipment(&building, &defaults, None, &mut warnings) {
+                Ok(specs) => specs,
+                Err(_) => {
+                    unresolved.push(
+                        path.strip_prefix(&fixtures_root)
+                            .expect("the walked paths live under the fixtures root")
+                            .display()
+                            .to_string(),
+                    );
+                    continue;
+                }
+            };
+            for spec in &specs {
+                let Some(mapping) = super::COLUMN_MAPPINGS.iter().find(|m| {
+                    matches!(m.category, super::ScheduleCategory::Power)
+                        && m.equipment_name == spec.name
+                }) else {
+                    continue;
+                };
+                power_specs_considered += 1;
+                if super::resolve_hpxml_profile(spec).is_none()
+                    && profiles.find(mapping.equipment_name).is_none()
+                {
+                    let relative = path
+                        .strip_prefix(&fixtures_root)
+                        .expect("the walked paths live under the fixtures root")
+                        .display()
+                        .to_string();
+                    unreachable.push(format!("{relative}: {}", spec.name));
+                }
+            }
+        }
+        unreachable.sort();
+        unreachable.dedup();
+        assert!(
+            power_specs_considered > 100,
+            "the census must examine the corpus's power specs, saw {power_specs_considered}"
+        );
+        println!(
+            "census: {power_specs_considered} power specs across {} checked-in \
+             HPXMLs, {} with no schedule source of any kind",
+            xml_paths.len() - unparsed.len() - unresolved.len(),
+            unreachable.len()
+        );
+
+        let pinned: Vec<String> = Vec::new();
+        assert_eq!(
+            unreachable, pinned,
+            "the no-source census moved: every new entry is a spec the \
+             three-source error can now fail construction on"
+        );
+        // The full dwelling entrance (schema and domain validation) rejects
+        // this fixture; it is exercised only through the raw string parser
+        // in the defaults regressions, so it has no census here.
+        assert_eq!(
+            unparsed,
+            vec!["hpxml/ochre_samples/base-enclosure-windows-physical-properties.xml".to_string()],
+            "the set of fixture XMLs the dwelling entrance cannot parse moved"
+        );
+        // These ResStock homes resolve only with the data patches their
+        // runs supply (site location and equipment metadata), never
+        // standalone; their census is their own run's business.
+        assert_eq!(
+            unresolved,
+            [
+                "resstock/2024.2/bldg0000002/home.xml",
+                "resstock/2024.2/bldg0000004/home.xml",
+                "resstock/2024.2/bldg0000005/home.xml",
+                "resstock/2024.2/bldg0000006/home.xml",
+                "resstock/2024.2/bldg0000007/home.xml",
+                "resstock/2024.2/bldg0000008/home.xml",
+                "resstock/2024.2/bldg0000010/home.xml",
+                "resstock/2024.2/bldg0174177/home.xml",
+                "resstock/2024.2/bldg0449186/home.xml",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<String>>(),
+            "the set of fixture HPXMLs that cannot resolve without their \
+             run's data patches moved"
         );
     }
 }

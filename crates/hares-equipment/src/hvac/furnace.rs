@@ -22,10 +22,10 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
-        apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
-        register_ebm_telemetry_keys, update_heating_control, zone_id_from_config_or_default,
+        apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
+        apply_simple_mode_override_in_control, outage_forces_off, register_ebm_telemetry_keys,
+        served_zone_ports, step_equivalent_battery, update_heating_control, write_ebm_telemetry,
+        zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -47,8 +47,6 @@ pub struct ElectricFurnace {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// External ModeOverride control (sticky).
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
@@ -77,8 +75,6 @@ pub struct GasFurnace {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// External ModeOverride control (sticky).
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
@@ -88,12 +84,17 @@ pub struct GasFurnace {
     zip: hares_types::zip::ResolvedZip,
 }
 
+/// Version 2: the thermostat hysteresis is persisted.
+const FURNACE_CHECKPOINT_VERSION: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FurnaceState {
     mode: ThermostatMode,
     duty_cycle: f64,
     last_mode_switch_at: Option<DateTime<FixedOffset>>,
     runtime_setpoints: Option<RuntimeSetpointOverride>,
+    /// The hysteresis in force, which a named `ThermalSetpoint` may have set.
+    thermostat_hysteresis_c: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
     electric_kw: f64,
@@ -110,20 +111,21 @@ struct FurnaceState {
 impl ElectricFurnace {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone = zone_id_from_config(&config);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Electric Furnace"),
-            zone: Some(zone),
+            zone,
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY
                 | ControlCapabilities::MODE_OVERRIDE
-                | ControlCapabilities::DEMAND_RESPONSE,
+                | ControlCapabilities::DEMAND_RESPONSE
+                | ControlCapabilities::NON_HVAC_ZONE_INPUT,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_MODE
@@ -135,10 +137,7 @@ impl ElectricFurnace {
 
         Self {
             descriptor,
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-            ],
+            ports: served_zone_ports(&[PortDeclaration::electrical()], zone, false),
             telemetry: electric_furnace_default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::ElectricFurnace, zone),
@@ -148,7 +147,6 @@ impl ElectricFurnace {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
-            zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ResolvedZip::reactive_only(
@@ -160,6 +158,10 @@ impl ElectricFurnace {
 }
 
 impl Equipment for ElectricFurnace {
+    fn checkpoint_version() -> u32 {
+        FURNACE_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -172,20 +174,16 @@ impl Equipment for ElectricFurnace {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed = config.require_typed::<ElectricFurnaceConfig>("Electric Furnace")?;
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         self.fan_zip =
             super::reactive::secondary_motor_zip(&self.zip, super::reactive::FAN_MOTOR_ZIP);
-        let typed = config.require_typed::<ElectricFurnaceConfig>("Electric Furnace")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
         let airflow_m3_s = self.hvac.config.airflow_m3_s_per_w * self.rated_capacity_w;
@@ -200,8 +198,9 @@ impl Equipment for ElectricFurnace {
                 self.eir
             )));
         }
-        self.hvac.update_zone_heat_fractions();
+        self.hvac.update_zone_heat_fractions()?;
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
+        self.descriptor.zone = self.hvac.config.zone_id;
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
         self.hvac.config.eir_by_stage = vec![self.eir];
         self.hvac.runtime.startup.c_d = 0.0;
@@ -234,7 +233,14 @@ impl Equipment for ElectricFurnace {
             self.operating_mode = mode;
             return mode;
         }
-        self.operating_mode = update_heating_control(&mut self.hvac, env);
+        self.operating_mode =
+            match update_heating_control(&mut self.hvac, env, &self.descriptor.name) {
+                Ok(mode) => mode,
+                Err(err) => {
+                    self.hvac.record_control_error(err);
+                    OperatingMode::Off
+                }
+            };
         self.operating_mode
     }
 
@@ -244,6 +250,9 @@ impl Equipment for ElectricFurnace {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        if let Some(err) = self.hvac.take_control_error() {
+            return Err(err);
+        }
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let gross_capacity_w = self.rated_capacity_w * duty * sf;
@@ -261,17 +270,18 @@ impl Equipment for ElectricFurnace {
             + self
                 .fan_zip
                 .reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
+        // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
+        let fan_heat_w = power_kw_to_w(fan_kw);
+        let total_sensible_w = gross_capacity_w + fan_heat_w;
+        let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
+
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
                 reactive_power_kvar,
             })?;
         }
-
-        // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
-        let fan_heat_w = power_kw_to_w(fan_kw);
-        let total_sensible_w = gross_capacity_w + fan_heat_w;
-
         if total_sensible_w > 0.0 {
             self.hvac.write_zone_thermal_contributions(
                 ports,
@@ -285,7 +295,6 @@ impl Equipment for ElectricFurnace {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
         // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
         let duct_loss_w = gross_capacity_w * (1.0 - self.hvac.config.duct_dse.clamp(0.0, 1.0));
         // OCHRE HVAC.py:575: main_power = total_input - fan.
@@ -361,15 +370,7 @@ impl Equipment for ElectricFurnace {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            thermal_output_w,
-            &mut self.telemetry,
-        );
+        write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -402,6 +403,16 @@ impl Equipment for ElectricFurnace {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(self.hvac.thermostat_fsm.thermostat.band_class)
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Heating,
+        ))
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
@@ -413,6 +424,7 @@ impl Equipment for ElectricFurnace {
                 duty_cycle: self.hvac.runtime.duty_cycle,
                 last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
                 runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -441,6 +453,9 @@ impl Equipment for ElectricFurnace {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac
+            .thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -502,7 +517,7 @@ impl Equipment for ElectricFurnace {
         )? {
             return Ok(());
         }
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Furnace")?;
+        self.hvac.apply_control_signal(signal)?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
     }
@@ -512,27 +527,28 @@ impl Equipment for ElectricFurnace {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 }
 
 impl GasFurnace {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone = zone_id_from_config(&config);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Gas Furnace"),
-            zone: Some(zone),
+            zone,
             fuel: FuelType::Gas,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY
                 | ControlCapabilities::MODE_OVERRIDE
-                | ControlCapabilities::DEMAND_RESPONSE,
+                | ControlCapabilities::DEMAND_RESPONSE
+                | ControlCapabilities::NON_HVAC_ZONE_INPUT,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::FUEL
                 | CoreCapabilities::REACTIVE
@@ -546,11 +562,11 @@ impl GasFurnace {
 
         Self {
             descriptor,
-            ports: vec![
-                PortDeclaration::fuel(),
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-            ],
+            ports: served_zone_ports(
+                &[PortDeclaration::fuel(), PortDeclaration::electrical()],
+                zone,
+                false,
+            ),
             telemetry: gas_furnace_default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::GasFurnace, zone),
@@ -561,7 +577,6 @@ impl GasFurnace {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
-            zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ResolvedZip::reactive_only(
@@ -572,6 +587,10 @@ impl GasFurnace {
 }
 
 impl Equipment for GasFurnace {
+    fn checkpoint_version() -> u32 {
+        FURNACE_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -584,18 +603,14 @@ impl Equipment for GasFurnace {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed = config.require_typed::<GasFurnaceConfig>("Gas Furnace")?;
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
-        let typed = config.require_typed::<GasFurnaceConfig>("Gas Furnace")?;
         typed.validate()?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.fuel_efficiency = typed.afue;
@@ -605,8 +620,9 @@ impl Equipment for GasFurnace {
             .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
         self.hvac.config.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
         self.hvac.config.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
-        self.hvac.update_zone_heat_fractions();
+        self.hvac.update_zone_heat_fractions()?;
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
+        self.descriptor.zone = self.hvac.config.zone_id;
         self.hvac.config.heating_capacities_w =
             if let Some(stages) = &typed.stage_heating_capacities_w {
                 stages.clone()
@@ -655,7 +671,14 @@ impl Equipment for GasFurnace {
             self.operating_mode = mode;
             return mode;
         }
-        self.operating_mode = update_heating_control(&mut self.hvac, env);
+        self.operating_mode =
+            match update_heating_control(&mut self.hvac, env, &self.descriptor.name) {
+                Ok(mode) => mode,
+                Err(err) => {
+                    self.hvac.record_control_error(err);
+                    OperatingMode::Off
+                }
+            };
         self.operating_mode
     }
 
@@ -665,6 +688,9 @@ impl Equipment for GasFurnace {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        if let Some(err) = self.hvac.take_control_error() {
+            return Err(err);
+        }
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         // Fuel is computed from gross capacity: the furnace burns fuel regardless
@@ -676,6 +702,13 @@ impl Equipment for GasFurnace {
         } else {
             0.0
         };
+        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
+        // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
+        let fan_heat_w = power_kw_to_w(fan_kw);
+        let total_sensible_w = gross_capacity_w + fan_heat_w;
+        // Telemetry reports delivered capacity (post-DSE) for the conditioned zone.
+        let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
 
         if fuel_input_w > 0.0 {
             ports.accumulate(&PortContribution::Fuel {
@@ -683,19 +716,12 @@ impl Equipment for GasFurnace {
                 consumption_w: fuel_input_w,
             })?;
         }
-
-        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
         if fan_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(fan_kw),
                 reactive_power_kvar,
             })?;
         }
-
-        // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
-        let fan_heat_w = power_kw_to_w(fan_kw);
-        let total_sensible_w = gross_capacity_w + fan_heat_w;
-
         if total_sensible_w > 0.0 {
             self.hvac.write_zone_thermal_contributions(
                 ports,
@@ -709,8 +735,6 @@ impl Equipment for GasFurnace {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        // Telemetry reports delivered capacity (post-DSE) for the conditioned zone.
-        let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
         // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
         let duct_loss_w = gross_capacity_w * (1.0 - self.hvac.config.duct_dse.clamp(0.0, 1.0));
         // OCHRE HVAC.py:575: main_power = total_input_kw - fan_kw.
@@ -786,15 +810,7 @@ impl Equipment for GasFurnace {
             / 1000.0;
         self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            thermal_output_w,
-            &mut self.telemetry,
-        );
+        write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
@@ -830,6 +846,16 @@ impl Equipment for GasFurnace {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(self.hvac.thermostat_fsm.thermostat.band_class)
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Heating,
+        ))
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
@@ -841,6 +867,7 @@ impl Equipment for GasFurnace {
                 duty_cycle: self.hvac.runtime.duty_cycle,
                 last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
                 runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -869,6 +896,9 @@ impl Equipment for GasFurnace {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac
+            .thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -934,7 +964,7 @@ impl Equipment for GasFurnace {
         )? {
             return Ok(());
         }
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Gas Furnace")?;
+        self.hvac.apply_control_signal(signal)?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
     }
@@ -944,7 +974,7 @@ impl Equipment for GasFurnace {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 }
 
@@ -1324,6 +1354,7 @@ mod tests {
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -1350,7 +1381,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1392,6 +1424,25 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_checkpoint_carrying_an_invalid_band_is_rejected_on_restore() {
+        let cfg = ef_config(10_000.0, 1.0);
+        let mut saved = ElectricFurnace::new(cfg.clone());
+        saved.init(&cfg, &env(20.0)).unwrap();
+        saved.hvac.thermostat_fsm.thermostat.hysteresis_c = 0.0;
+        let state = saved.save_state().unwrap();
+
+        let mut restored = ElectricFurnace::new(cfg.clone());
+        restored.init(&cfg, &env(20.0)).unwrap();
+        let err = restored
+            .load_state(&state)
+            .expect_err("a zero cycling band is not a valid checkpointed band");
+        assert!(
+            matches!(err, hares_types::HaresError::ThermostatBand { .. }),
+            "{err}"
+        );
     }
 
     #[test]

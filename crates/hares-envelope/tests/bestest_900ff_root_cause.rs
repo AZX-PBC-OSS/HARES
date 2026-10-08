@@ -93,7 +93,7 @@ fn derive_zone_capacitances_uses_altitude_corrected_density() {
     let zones = vec![ZoneInput {
         floor_area_m2: Some(48.0),
         volume_m3: Some(129.6),
-        mass_multiplier: 1.0,
+        temperature_capacitance_multiplier: 1.0,
     }];
 
     let p_sea_level = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
@@ -146,7 +146,7 @@ fn heavyweight_concrete_wall_produces_two_rc_sub_layers() {
     let zones = vec![ZoneInput {
         floor_area_m2: Some(48.0),
         volume_m3: Some(129.6),
-        mass_multiplier: 1.0,
+        temperature_capacitance_multiplier: 1.0,
     }];
     let zone_caps = derive_zone_capacitances(&zones, standard_pressure_pa(1609.0)).unwrap();
 

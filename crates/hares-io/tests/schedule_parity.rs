@@ -58,6 +58,7 @@ fn make_spec_annual_kwh(name: &str, annual_kwh: f64) -> EquipmentSpec {
         fuel_type: FuelType::Electric,
         parameters,
         zip_params: None,
+        typed_overrides: serde_json::Map::new(),
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,
@@ -75,6 +76,7 @@ fn make_spec_with_duty_cycle(name: &str, annual_kwh: f64, duty_cycle: f64) -> Eq
         fuel_type: FuelType::Electric,
         parameters,
         zip_params: None,
+        typed_overrides: serde_json::Map::new(),
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,
@@ -136,7 +138,7 @@ fn time_varying_lighting_schedule_is_not_constant() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -191,7 +193,7 @@ fn annual_energy_round_trip_matches_configured_kwh() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -237,7 +239,7 @@ fn duty_cycle_fraction_parameter_is_preserved_after_injection() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -275,16 +277,11 @@ fn missing_required_column_returns_typed_error_not_silent_fallback() {
                        2007-01-01T00:00:00+00:00,0.1\n\
                        2007-01-01T01:00:00+00:00,0.2\n";
 
-    let mut path = std::env::temp_dir();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before UNIX_EPOCH")
-        .as_nanos();
-    path.push(format!("hares-schedule-parity-missing-{nanos}.csv"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("schedule.csv");
     std::fs::write(&path, csv_content).expect("write temp csv");
 
     let result = parse_schedule_csv(&path, &["lighting_interior"], None, None);
-    let _ = std::fs::remove_file(path);
 
     match result {
         Err(ScheduleError::MissingRequiredColumns { missing }) => {
@@ -343,7 +340,7 @@ fn ochre_parity_24h_lighting_schedule_reference_values() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 

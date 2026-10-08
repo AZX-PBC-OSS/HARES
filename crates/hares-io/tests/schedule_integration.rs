@@ -8,15 +8,16 @@ use hares_equipment::hvac::heat_pump_config::{
     HeatPumpCommonConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
 };
 use hares_equipment::{Equipment, EquipmentConfig, config::ConfigValue};
-use hares_equipment::{event_load::EventBasedLoad, scheduled_load::ScheduledLoad};
+use hares_equipment::{event_load::WetAppliance, scheduled_load::ScheduledLoad};
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
 use hares_io::{EquipmentSpec, ScheduleTimeSeries, inject_schedule_into_specs, resolve_equipment};
+use hares_types::rng::{RngStream, dwelling_seed};
 use hares_types::{
     DomainUpdate, EndUse, EnvironmentState, FuelType, GridState, PortSlots, SCHEDULE_DOMAIN_ID,
     ScheduleSourceConfig, WeatherState, ZoneId, ZoneState,
 };
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use tempfile::tempdir;
 
 fn make_schedule(columns: &[(&str, &[f64])]) -> ScheduleTimeSeries {
@@ -60,6 +61,7 @@ fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
         fuel_type: FuelType::Electric,
         parameters,
         zip_params: None,
+        typed_overrides: serde_json::Map::new(),
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,
@@ -110,7 +112,8 @@ fn equipment_config_from_spec_with_extras(
 }
 
 fn base_env(payload: Vec<f64>) -> EnvironmentState {
-    EnvironmentState {
+    let mut env = EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: 21.0,
@@ -133,11 +136,8 @@ fn base_env(payload: Vec<f64>) -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![DomainUpdate {
-            domain_id: SCHEDULE_DOMAIN_ID,
-            zone_temperatures_c: Vec::new(),
-            custom_payload: Some(payload),
-        }],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
@@ -148,7 +148,13 @@ fn base_env(payload: Vec<f64>) -> EnvironmentState {
         time_res: ChronoDuration::minutes(1),
         price_signal: Default::default(),
         electrical: Default::default(),
-    }
+    };
+    env.domains.schedule.set_from(&DomainUpdate {
+        domain_id: SCHEDULE_DOMAIN_ID,
+        zone_temperatures_c: Vec::new(),
+        custom_payload: Some(payload),
+    });
+    env
 }
 
 fn payload_for_row(schedule: &ScheduleTimeSeries, row: usize) -> Vec<f64> {
@@ -170,6 +176,48 @@ fn write_default_profile_csv(path: &std::path::Path) {
         .expect("write default profile csv");
 }
 
+/// A spec whose power schedule has none of its three sources (no schedule
+/// CSV column, no HPXML fractions on the spec, no default profile in the
+/// defaults file) fails the injection naming the equipment and the sources.
+#[test]
+fn equipment_without_any_schedule_source_is_an_error() {
+    let dir = tempdir().expect("create temp dir");
+    write_default_profile_csv(dir.path());
+
+    let mut schedule = make_schedule(&[
+        ("occupants", &[1.0, 1.0]),
+        // The schedule file has no `freezer` column.
+        ("lighting_interior", &[0.2, 1.0]),
+    ]);
+    let mut specs = vec![make_spec("Freezer", 500.0)];
+    let err = inject_schedule_into_specs(
+        &mut specs,
+        &mut schedule,
+        Some(dir.path()),
+        &DefaultsStore::empty(),
+        &mut Vec::new(),
+    )
+    .expect_err("a Freezer with no schedule source must fail the injection");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("Freezer"),
+        "the error must name the equipment, got: {message}"
+    );
+    assert!(
+        message.contains("freezer"),
+        "the error must name the schedule column looked for, got: {message}"
+    );
+    assert!(
+        message.contains("no HPXML schedule fractions"),
+        "the error must name the HPXML profile looked for, got: {message}"
+    );
+    assert!(
+        message.contains("no 'Freezer' profile"),
+        "the error must name the default profile looked for, got: {message}"
+    );
+}
+
 #[test]
 fn io_injection_to_scheduled_load_step_column_source() {
     let mut schedule = make_schedule(&[("lighting_interior", &[0.2, 1.0, 0.4])]);
@@ -179,7 +227,7 @@ fn io_injection_to_scheduled_load_step_column_source() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -224,7 +272,7 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
         &mut schedule,
         Some(defaults_dir.path()),
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -274,14 +322,19 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
 
 #[test]
 fn io_injection_to_scheduled_load_step_constant_source() {
+    // The Ventilation Fan is the constant-power schedule source: its rated
+    // power_w becomes a constant kW the load steps at.
+    let mut spec = make_spec("Ventilation Fan", 876.0);
+    spec.parameters
+        .insert("power_w".to_string(), Value::from(876.0));
     let mut schedule = make_schedule(&[("occupants", &[1.0, 1.0])]);
-    let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
+    let mut specs = vec![spec];
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -300,7 +353,7 @@ fn io_injection_to_scheduled_load_step_constant_source() {
         .expect("power_constant_kw should be injected");
 
     let config = equipment_config_from_spec(&specs[0]);
-    let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
+    let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Ventilation Fan");
 
     let env = base_env(payload_for_row(&schedule, 0));
     eq.init(&config, &env)
@@ -326,7 +379,7 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -342,12 +395,12 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
         &[
             ("active_power_kw", 1.5.into()),
             ("active_duration_s", 60.0.into()),
-            ("cooldown_duration_s", 0.0.into()),
         ],
         &[],
-    );
+    )
+    .with_rng_stream(RngStream::event_load(dwelling_seed(0, 0), &specs[0].name));
 
-    let mut eq = EventBasedLoad::new(config.clone());
+    let mut eq = WetAppliance::new(config.clone(), "Dishwasher");
     // payload len=2 while injected column index is 2. BoundaryPolicy::Wrap should map idx 2 -> 0.
     let env = base_env(vec![1.0, 1.0]);
     eq.init(&config, &env).expect("event load init should pass");
@@ -368,7 +421,7 @@ fn missing_column_index_errors_at_init_not_step() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -404,6 +457,7 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">150</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">375</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
           <NumberofBedrooms>3</NumberofBedrooms>
         </BuildingConstruction>
       </BuildingSummary>
@@ -419,7 +473,7 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
 "#;
 
     let building = parse_building(xml).expect("HPXML should parse");
-    let mut specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    let mut specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
         .expect("resolve_equipment should succeed");
 
     let ref_spec = specs.iter().find(|s| s.name == "Refrigerator").expect(
@@ -443,7 +497,7 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         &mut schedule,
         None,
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
@@ -453,7 +507,12 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         "inject_schedule_into_specs must wire Refrigerator to a power schedule source"
     );
 
-    let config = equipment_config_from_spec(ref_spec);
+    let mut config = equipment_config_from_spec(ref_spec);
+    // The dwelling's zone map, as assembly injects it: the refrigerator
+    // heats the conditioned zone.
+    let mut zone_map = hares_types::ZoneMap::new();
+    zone_map.insert(hares_types::ZoneRole::Indoor, hares_types::ZoneId(1));
+    config.zone_map = Some(zone_map);
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::REFRIGERATION, "Refrigerator");
     let env = base_env(payload_for_row(&schedule, 0));
     eq.init(&config, &env)
@@ -493,11 +552,11 @@ fn repo_defaults_dir() -> std::path::PathBuf {
         .join("defaults")
 }
 
-/// Verify that the simulation starts without panicking when the only source of
-/// HVAC thermostat setpoints is the real defaults CSV (no HPXML-derived setpoints).
-/// This is the integration-test acceptance criterion from the ticket.
+/// HVAC with no HPXML-derived setpoints and no schedule setpoint column, run
+/// against the repository's defaults directory, takes OS-HPXML's default
+/// setpoints (68 °F heating, 78 °F cooling).
 #[test]
-fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
+fn hvac_without_setpoints_takes_the_os_hpxml_defaults() {
     let defaults_dir = repo_defaults_dir();
 
     let mut specs = vec![
@@ -507,6 +566,7 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 EquipmentConfig::from_typed(
                     "ASHP Heater".to_string(),
@@ -531,6 +591,7 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: Some(
                 EquipmentConfig::from_typed(
                     "ASHP Cooler".to_string(),
@@ -557,11 +618,11 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
         &mut schedule,
         Some(&defaults_dir),
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
-    // Heater: must receive a heating DailyProfile with max_value = 20°C from HERS defaults.
+    // Heater: 68 °F.
     let heater_typed = specs[0]
         .typed_config
         .as_ref()
@@ -581,7 +642,7 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
             .get("setpoint")
             .and_then(|sp| sp.get("heating_setpoint_source"))
             .cloned()
-            .expect("heater must have heating_setpoint_source injected from defaults CSV"),
+            .expect("heater must have the default heating_setpoint_source"),
     )
     .expect("heater source must deserialize");
     assert!(
@@ -601,7 +662,7 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
         "heater must not get a cooling setpoint source"
     );
 
-    // Cooler: must receive a cooling DailyProfile with weekday[0] = 24°C, max_value = 1.0.
+    // Cooler: 78 °F.
     let cooler_typed = specs[1]
         .typed_config
         .as_ref()
@@ -621,17 +682,19 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
             .get("setpoint")
             .and_then(|sp| sp.get("cooling_setpoint_source"))
             .cloned()
-            .expect("cooler must have cooling_setpoint_source injected from defaults CSV"),
+            .expect("cooler must have the default cooling_setpoint_source"),
     )
     .expect("cooler source must deserialize");
+    let expected_cooling_c = (78.0 - 32.0) * 5.0 / 9.0;
     assert!(
         matches!(
             &cooler_source,
             ScheduleSourceConfig::DailyProfile { weekday, max_value, .. }
-            if (weekday[0] - 24.0).abs() < 1e-12
+            if (weekday[0] - expected_cooling_c).abs() < 1e-12
             && (max_value - 1.0).abs() < 1e-12
         ),
-        "expected DailyProfile with weekday[0]=24°C and max_value=1.0, got {cooler_source:?}"
+        "expected DailyProfile with weekday[0]={expected_cooling_c} °C and max_value=1.0, \
+         got {cooler_source:?}"
     );
     assert!(
         cooler_obj
@@ -658,7 +721,7 @@ fn daily_profile_produces_different_weekday_vs_weekend_power_at_noon() {
         &mut schedule,
         Some(dir.path()),
         &DefaultsStore::empty(),
-        None,
+        &mut Vec::new(),
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 

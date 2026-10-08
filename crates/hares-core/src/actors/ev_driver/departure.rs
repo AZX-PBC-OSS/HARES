@@ -32,7 +32,7 @@ impl DepartureDeadline {
     /// shared estimate ([`super::preference::needed_charge_hours_to_target`])
     /// so every preference that votes a target SOC reports time-to-charge
     /// through the same physics.
-    fn needed_charge_hours(&self, ctx: &DecisionContext) -> f64 {
+    fn needed_charge_hours(&self, ctx: &DecisionContext) -> Result<f64, hares_types::HaresError> {
         needed_charge_hours_to_target(self.target_soc, self.efficiency, ctx)
     }
 
@@ -64,7 +64,12 @@ impl ChargingPreference for DepartureDeadline {
 
         let minutes_left = self.minutes_until_departure(ctx, departure_minute);
         let hours_left = minutes_left / 60.0;
-        let needed = self.needed_charge_hours(ctx);
+        // The estimate's typed error (a NaN or negative result) surfaces
+        // from the composer's fold, which fails the step; the decision here
+        // degrades to inactive for that step.
+        let Ok(needed) = self.needed_charge_hours(ctx) else {
+            return Constraint::Inactive;
+        };
 
         // Buffer window: if within buffer_hours of departure and still need
         // charge, force max-rate charging regardless of price optimality.
@@ -105,7 +110,11 @@ impl ChargingPreference for DepartureDeadline {
         };
 
         let minutes_left = self.minutes_until_departure(ctx, departure_minute);
-        let needed = self.needed_charge_hours(ctx);
+        // The estimate's typed error surfaces from the composer's fold; the
+        // score degrades to idle for that step.
+        let Ok(needed) = self.needed_charge_hours(ctx) else {
+            return PreferenceVote::idle("departure:estimate_error");
+        };
         let total_available = minutes_left / 60.0;
 
         let urgency = if total_available > 0.0 {
@@ -125,7 +134,7 @@ impl ChargingPreference for DepartureDeadline {
         }
     }
 
-    fn needed_charge_hours(&self, ctx: &DecisionContext) -> f64 {
+    fn needed_charge_hours(&self, ctx: &DecisionContext) -> Result<f64, hares_types::HaresError> {
         DepartureDeadline::needed_charge_hours(self, ctx)
     }
 
@@ -491,8 +500,8 @@ mod tests {
         let ctx_warm = make_ctx(&env_warm, 0.4, 300);
         let ctx_cold = make_ctx(&env_cold, 0.4, 300);
 
-        let hours_warm = pref.needed_charge_hours(&ctx_warm);
-        let hours_cold = pref.needed_charge_hours(&ctx_cold);
+        let hours_warm = pref.needed_charge_hours(&ctx_warm).unwrap();
+        let hours_cold = pref.needed_charge_hours(&ctx_cold).unwrap();
 
         assert!(
             hours_cold > hours_warm * 1.30,
@@ -510,7 +519,7 @@ mod tests {
         let env = TestEnvBuilder::new().hour(5).outdoor_temp(22.0).build();
         let ctx = make_ctx(&env, 0.4, 300);
 
-        let hours = pref.needed_charge_hours(&ctx);
+        let hours = pref.needed_charge_hours(&ctx).unwrap();
 
         // At 22°C: temp_mult = 1.0, effective_efficiency = 0.9.
         // soc_gap = 0.5, energy_kwh = 0.5 * 60 = 30 kWh.

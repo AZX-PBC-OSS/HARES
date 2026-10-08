@@ -1,11 +1,10 @@
 """Tests for solar override API in PyDwelling."""
 
-import os
-import tempfile
 import numpy as np
 import polars as pl
 import pytest
 from pathlib import Path
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
@@ -38,6 +37,7 @@ class TestSurfaceIds:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -62,6 +62,7 @@ class TestSolarOverrideNumpy:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -105,6 +106,7 @@ class TestSolarOverrideNumpy:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
             dw.initialize()
             return dw
@@ -168,6 +170,7 @@ class TestSolarOverrideDataFrame:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -183,7 +186,7 @@ class TestSolarOverrideDataFrame:
 
 
 class TestSolarOverrideParquet:
-    def test_set_solar_override_from_parquet_file(self):
+    def test_set_solar_override_from_parquet_file(self, tmp_path: Path):
         from ochre_next import Dwelling
 
         dw = Dwelling.from_hpxml(
@@ -196,26 +199,22 @@ class TestSolarOverrideParquet:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
         df = pl.read_csv(PVLIB_SOLAR_CSV)
         df = df.head(10)
 
-        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
-            temp_path = f.name
+        override_path = tmp_path / "solar_override.parquet"
+        df.write_parquet(override_path)
 
-        try:
-            df.write_parquet(temp_path)
+        dw.set_solar_override(str(override_path))
 
-            dw.set_solar_override(temp_path)
+        assert dw.has_solar_override(), "has_solar_override() should be True"
 
-            assert dw.has_solar_override(), "has_solar_override() should be True"
-
-            dw.step()
-            dw.step()
-        finally:
-            os.unlink(temp_path)
+        dw.step()
+        dw.step()
 
 
 class TestSolarOverrideClear:
@@ -232,6 +231,7 @@ class TestSolarOverrideClear:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -299,6 +299,7 @@ class TestSolarOverrideListOfDicts:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -341,11 +342,12 @@ class TestSolarOverrideValidation:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
         with pytest.raises(ValueError):
-            dw.set_solar_override(12345)
+            dw.set_solar_override(cast("str", 12345))
 
     def test_invalid_dict_raises_value_error(self):
         from ochre_next import Dwelling
@@ -360,11 +362,12 @@ class TestSolarOverrideValidation:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
         with pytest.raises(ValueError):
-            dw.set_solar_override({"not": "valid"})
+            dw.set_solar_override(cast("dict[int, dict[str, Any]]", {"not": "valid"}))
 
 
 class TestSolarOverridePVProduction:
@@ -382,6 +385,7 @@ class TestSolarOverridePVProduction:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -433,7 +437,8 @@ class TestSolarOverridePVProduction:
             f"power_zero={power_zero:.6f}, power_high={power_high:.6f}"
         )
 
-    def test_pv_produces_zero_at_night_with_summer_override(self):
+    @staticmethod
+    def _summer_night_pv_dwelling():
         from ochre_next import Dwelling
 
         dw = Dwelling.from_hpxml(
@@ -446,19 +451,51 @@ class TestSolarOverridePVProduction:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
+        return dw
 
-        df = pl.read_csv(PVLIB_SOLAR_SUMMER_CSV)
-        df = df.head(24)
+    def test_override_without_the_pv_surfaces_is_rejected_at_the_call(self):
+        """The pvlib CSV carries only the envelope surfaces; the PV cannot
+        step without its own, so the override is refused when set."""
+        from ochre_next._hares import HaresConfigError
+
+        dw = self._summer_night_pv_dwelling()
+        df = pl.read_csv(PVLIB_SOLAR_SUMMER_CSV).head(24)
+        with pytest.raises(HaresConfigError, match="PV surface"):
+            dw.set_solar_override(df)
+        assert not dw.has_solar_override()
+
+    def test_pv_produces_zero_at_night_with_summer_override(self):
+        dw = self._summer_night_pv_dwelling()
+        # The CSV starts at 12:00 at one-minute resolution: hourly rows from
+        # 22:00 to 04:00 are the summer night.
+        df = pl.read_csv(PVLIB_SOLAR_SUMMER_CSV).slice(600, 361).gather_every(60)
+        irradiance = [c for c in df.columns if not c.endswith("_aoi") and c != "step"]
+        assert df.select(irradiance).to_numpy().max() == 0.0, "the rows are night"
+        missing = [
+            sid for sid in dw.surface_ids() if f"s{sid}_direct" not in df.columns
+        ]
+        assert missing, "the PV surfaces are absent from the pvlib CSV"
+        # At night the PV arrays' surfaces are as dark as the envelope's.
+        df = df.with_columns(
+            pl.lit(0.0).alias(f"s{sid}_{field}")
+            for sid in missing
+            for field in ("direct", "diffuse", "reflected", "aoi")
+        )
         dw.set_solar_override(df)
 
-        for _ in range(6):
+        pv_names = [eq.name for eq in dw.equipment() if eq.name.startswith("PV")]
+        assert pv_names, "the base-pv fixture assembles PV"
+        for step in range(5):
             result = dw.step()
-            net_power = result["net_electric_power_kw"]
-            assert net_power >= 0, (
-                f"Expected non-negative net power at night, got {net_power} kW"
-            )
+            assert result["net_electric_power_kw"] >= 0, f"step {step}"
+            for eq in dw.equipment():
+                if eq.name in pv_names:
+                    assert eq.core_output.electric_kw == 0.0, (
+                        f"step {step}: {eq.name} produced at night"
+                    )
 
     def test_summer_daytime_with_pv_produces_negative_power(self):
         from ochre_next import Dwelling, PV
@@ -473,6 +510,7 @@ class TestSolarOverridePVProduction:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         pv = PV(name="roof_pv", capacity_kw=10.0, tilt=30.0, azimuth=180.0)
         dw.add_pv(pv)

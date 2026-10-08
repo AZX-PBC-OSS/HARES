@@ -7,6 +7,8 @@
 //! two dwellings with the same master seed and building ID produce
 //! identical simulation outputs, including all internal stochastic draws.
 
+use hares_types::HaresError;
+use hares_types::rng::EVENT_LOAD_STREAM_TAG;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -14,25 +16,45 @@ use rand_chacha::ChaCha8Rng;
 /// Stream 0 is reserved for the dwelling's own RNG (thermal noise,
 /// per-timestep advancement, etc.).
 pub const RNG_STREAM_DWELLING: u64 = 0;
-/// Stream range for EV driver actors.  The per-actor stream is
-/// `RNG_STREAM_EV_DRIVER_BASE + actor_index`.
+/// First stream of the range reserved for built-in EV driver actors (see
+/// `ev_driver_stream`).
 pub const RNG_STREAM_EV_DRIVER_BASE: u64 = 1;
-/// Stream range for event-based load equipment (EventBasedLoad,
-/// WetAppliance).  The per-equipment stream is
-/// `RNG_STREAM_EVENT_LOAD_BASE + equipment_index`.
-pub const RNG_STREAM_EVENT_LOAD_BASE: u64 = 1000;
+// Event-based load equipment (EventBasedLoad, WetAppliance) draws from
+// `hares_types::rng::RngStream::event_load`: a stream keyed by the load's
+// stable identity with the top bit set, disjoint from the indexed streams
+// above.
+/// Number of streams reserved for built-in EV drivers: the drivers' streams
+/// are `RNG_STREAM_EV_DRIVER_BASE + offset` for `offset` below this count,
+/// so they end below the tagged event-load streams and never alias an
+/// event load or the dwelling's own stream.
+pub(crate) const EV_DRIVER_STREAM_COUNT: u64 = EVENT_LOAD_STREAM_TAG - RNG_STREAM_EV_DRIVER_BASE;
+const _: () = assert!(RNG_STREAM_DWELLING < RNG_STREAM_EV_DRIVER_BASE);
+
+/// The RNG stream of the built-in EV driver at `offset` into the reserved
+/// range.
+///
+/// # Errors
+///
+/// `HaresError::Dwelling` once `offset` passes the reserved range: a
+/// dwelling that has built that many drivers cannot give the next one a
+/// stream of its own.
+pub(crate) fn ev_driver_stream(offset: u64) -> Result<u64, HaresError> {
+    if offset < EV_DRIVER_STREAM_COUNT {
+        Ok(RNG_STREAM_EV_DRIVER_BASE + offset)
+    } else {
+        Err(HaresError::Dwelling(format!(
+            "no EV driver RNG stream is left: the dwelling has used all \
+             {EV_DRIVER_STREAM_COUNT} streams reserved for built-in EV drivers"
+        )))
+    }
+}
 
 /// Derives a deterministic per-dwelling RNG from a master seed and building ID.
 ///
-/// Seed construction: bytes 0..8 are `master_seed` (little-endian), bytes 8..16
-/// are `bldg_id` (little-endian, two's-complement for negative IDs), and
-/// remaining bytes are zero. This guarantees isolation: adding or removing
+/// The key is [`hares_types::rng::dwelling_seed`], so adding or removing
 /// buildings does not affect any other building's RNG stream.
 pub fn derive_dwelling_rng(master_seed: u64, bldg_id: i64) -> ChaCha8Rng {
-    let mut seed = [0u8; 32];
-    seed[..8].copy_from_slice(&master_seed.to_le_bytes());
-    seed[8..16].copy_from_slice(&bldg_id.to_le_bytes());
-    ChaCha8Rng::from_seed(seed)
+    ChaCha8Rng::from_seed(hares_types::rng::dwelling_seed(master_seed, bldg_id))
 }
 
 /// Derives an independent sub-RNG from a parent RNG by partitioning
@@ -92,6 +114,16 @@ mod tests {
 
         assert_eq!(a1.get_seed(), b1.get_seed());
         assert_eq!(a2.get_seed(), b2.get_seed());
+    }
+
+    #[test]
+    fn ev_driver_streams_stay_between_the_dwelling_and_event_load_streams() {
+        assert_eq!(ev_driver_stream(0).unwrap(), RNG_STREAM_EV_DRIVER_BASE);
+        assert_eq!(
+            ev_driver_stream(EV_DRIVER_STREAM_COUNT - 1).unwrap(),
+            EVENT_LOAD_STREAM_TAG - 1
+        );
+        assert!(ev_driver_stream(EV_DRIVER_STREAM_COUNT).is_err());
     }
 
     #[test]

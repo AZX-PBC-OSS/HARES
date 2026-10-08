@@ -18,10 +18,6 @@ macro_rules! delegate_equipment {
                 self.$inner.descriptor()
             }
 
-            fn zone_id_explicit(&self) -> bool {
-                self.$inner.zone_id_explicit()
-            }
-
             fn ports(&self) -> &[hares_types::PortDeclaration] {
                 self.$inner.ports()
             }
@@ -70,6 +66,10 @@ macro_rules! delegate_equipment {
                 self.$inner.apply_signal(signal)
             }
 
+            fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
+                self.$inner.take_health_counts()
+            }
+
             fn rename(&mut self, name: String) {
                 self.$inner.rename(name)
             }
@@ -100,6 +100,14 @@ macro_rules! delegate_equipment {
 
             fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
                 self.$inner.resolved_zip()
+            }
+
+            fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+                self.$inner.thermostat_band_class()
+            }
+
+            fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+                self.$inner.thermostat_axes()
             }
         }
     };

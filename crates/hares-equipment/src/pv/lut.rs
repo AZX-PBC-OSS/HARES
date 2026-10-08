@@ -22,10 +22,9 @@
 //! ## Cross-location usage
 //!
 //! The LUT embeds its generating site's latitude and longitude as Parquet
-//! file-level metadata. On load the invariant check (gated behind
-//! `debug_assertions` or `feature = "check_invariants"`) logs the embedded
-//! location for informational purposes and warns if the metadata is absent
-//! (lat/lon ≈ 0.0, indicating a pre-T-0085 LUT). A true cross-location
+//! file-level metadata. On load the location check warns if the metadata is
+//! absent (lat/lon ≈ 0.0, indicating a LUT generated before location
+//! metadata was added). A true cross-location
 //! comparison against the simulation site is not possible because
 //! `EnvironmentState` carries no `site_latitude_deg`/`site_longitude_deg`
 //! fields (see Known Limitations below).
@@ -453,20 +452,12 @@ impl PvLut {
     }
 
     /// LUT geographic location latitude in degrees.
-    ///
-    /// Only compiled when debug_assertions, check_invariants, or tests are
-    /// active (used by `check_lut_location` and test assertions).
-    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
     #[inline]
     pub(crate) fn latitude_deg(&self) -> f64 {
         self.latitude_deg
     }
 
     /// LUT geographic location longitude in degrees.
-    ///
-    /// Only compiled when debug_assertions, check_invariants, or tests are
-    /// active (used by `check_lut_location` and test assertions).
-    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
     #[inline]
     pub(crate) fn longitude_deg(&self) -> f64 {
         self.longitude_deg
@@ -480,17 +471,6 @@ impl PvLut {
     #[inline]
     pub(crate) fn sam_losses(&self) -> f64 {
         self.sam_losses
-    }
-
-    /// Raw SAM `array_type` index stored in LUT metadata. Callers that need
-    /// the NOCT value should use `sam_noct_c()` instead.
-    // Why: sam_noct_c() reads self.sam_array_type directly; this accessor is
-    // dormant until an external caller (e.g. a diagnostics layer) needs the
-    // raw index. Suppression retained to keep the public(crate) surface stable.
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn sam_array_type(&self) -> Option<u8> {
-        self.sam_array_type
     }
 
     /// SAM's internal NOCT (°C) derived from this LUT's `array_type` metadata.
@@ -663,9 +643,6 @@ fn parse_csv_f64(raw: Option<&str>) -> Option<f64> {
 
 #[cfg(test)]
 impl PvLut {
-    // Why: from_raw is only compiled in test builds; the dead_code lint fires
-    // in non-test builds where cfg(test) modules are excluded from analysis.
-    #[allow(dead_code)]
     pub(crate) fn from_raw(
         solar_zenith_values: Vec<f64>,
         solar_azimuth_values: Vec<f64>,

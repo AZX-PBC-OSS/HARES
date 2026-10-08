@@ -16,14 +16,14 @@ use hares_io::{
     ResampleMethod, ResampleOverrides, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries,
 };
 
+#[path = "../../../tests/support/denver_offset.rs"]
+mod denver_offset;
+
+use denver_offset::denver_offset;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Denver-ish fixed offset: UTC-7.
-fn denver_offset() -> FixedOffset {
-    FixedOffset::west_opt(7 * 3600).expect("offset")
-}
 
 /// Timestamp for a given hour on 2024-07-15 in Denver local time.
 fn ts(hour: u32) -> DateTime<FixedOffset> {
@@ -109,6 +109,7 @@ fn synthetic_weather() -> WeatherTimeSeries {
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
             has_embedded_location: true,
+            station_wmo: None,
         },
         design_conditions: None,
         dry_bulb_c,
@@ -171,12 +172,14 @@ fn minimal_building() -> hares_io::Building {
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(244.0),
             attached_wall_ids: vec![],
             duct_systems: vec![],
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         boundaries: vec![
             Boundary {
@@ -235,7 +238,7 @@ fn minimal_building() -> hares_io::Building {
         infiltration_ach_natural: None,
         infiltration_cfm_natural: None,
         infiltration_ela_cm2: None,
-        infiltration_constant_ach: None,
+        infiltration_constant_ach: Some(0.0),
         hvac_capacity_w: None,
         seer2: None,
         hspf2: None,
@@ -246,16 +249,19 @@ fn minimal_building() -> hares_io::Building {
         cooling_weekend_setpoints_c: None,
         battery_round_trip_efficiency: None,
         pv_tilt_deg: None,
-        conditioned_volume_m3: None,
-        ceiling_height_m: None,
+        conditioned_volume_m3: 400.0,
+        ceiling_height_m: 2.5,
         infiltration_height_m: None,
-        floors_above_grade: None,
+        floors_above_grade: 1.0,
         has_flue_or_chimney: None,
         foundation_name: None,
+        conditioned_foundation_merged: false,
         residential_facility_type: None,
-        mass_multiplier_override: None,
+        temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
+        climate_zone_iecc: None,
         details_xml,
+        parse_warnings: Vec::new(),
     }
 }
 
@@ -431,16 +437,16 @@ fn full_pipeline_synthetic_weather() {
         assert_finite(w.solar_altitude_deg, "solar_altitude_deg", step);
 
         // F-5: Enthalpy increases with temperature
-        if let (Some(pt), Some(pe)) = (prev_temp, prev_enthalpy) {
-            if w.outdoor_temp_c > pt + 0.5 {
-                assert!(
-                    w.outdoor_enthalpy_j_kg > pe,
-                    "step {step}: temp increased by {:.2}°C but enthalpy did not increase \
+        if let (Some(pt), Some(pe)) = (prev_temp, prev_enthalpy)
+            && w.outdoor_temp_c > pt + 0.5
+        {
+            assert!(
+                w.outdoor_enthalpy_j_kg > pe,
+                "step {step}: temp increased by {:.2}°C but enthalpy did not increase \
                      (prev_enthalpy={pe}, cur_enthalpy={})",
-                    w.outdoor_temp_c - pt,
-                    w.outdoor_enthalpy_j_kg
-                );
-            }
+                w.outdoor_temp_c - pt,
+                w.outdoor_enthalpy_j_kg
+            );
         }
         prev_temp = Some(w.outdoor_temp_c);
         prev_enthalpy = Some(w.outdoor_enthalpy_j_kg);
@@ -568,6 +574,7 @@ fn leap_year_dec31_reads_correct_weather_row() {
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
             has_embedded_location: true,
+            station_wmo: None,
         },
         design_conditions: None,
         dry_bulb_c: seq.clone(),
@@ -632,12 +639,14 @@ fn leap_year_dec31_reads_correct_weather_row() {
             zones: vec![Zone {
                 zone_type: ZoneType::Conditioned,
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
+                volume_m3: Some(244.0),
                 attached_wall_ids: vec![],
                 duct_systems: vec![],
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             }],
             boundaries: vec![Boundary {
                 id: "wall".to_string(),
@@ -670,7 +679,7 @@ fn leap_year_dec31_reads_correct_weather_row() {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -681,16 +690,19 @@ fn leap_year_dec31_reads_correct_weather_row() {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            conditioned_volume_m3: 400.0,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml,
+            parse_warnings: Vec::new(),
         }
     };
 
@@ -843,12 +855,14 @@ fn wall_missing_azimuth_constructs_with_warning() {
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(244.0),
             attached_wall_ids: vec![],
             duct_systems: vec![],
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         // azimuth_deg is None — exterior wall with unknown orientation.
         // Valid HPXML: wall azimuth is optional.
@@ -883,7 +897,7 @@ fn wall_missing_azimuth_constructs_with_warning() {
         infiltration_ach_natural: None,
         infiltration_cfm_natural: None,
         infiltration_ela_cm2: None,
-        infiltration_constant_ach: None,
+        infiltration_constant_ach: Some(0.0),
         hvac_capacity_w: None,
         seer2: None,
         hspf2: None,
@@ -894,16 +908,19 @@ fn wall_missing_azimuth_constructs_with_warning() {
         cooling_weekend_setpoints_c: None,
         battery_round_trip_efficiency: None,
         pv_tilt_deg: None,
-        conditioned_volume_m3: None,
-        ceiling_height_m: None,
+        conditioned_volume_m3: 400.0,
+        ceiling_height_m: 2.5,
         infiltration_height_m: None,
-        floors_above_grade: None,
+        floors_above_grade: 1.0,
         has_flue_or_chimney: None,
         foundation_name: None,
+        conditioned_foundation_merged: false,
         residential_facility_type: None,
-        mass_multiplier_override: None,
+        temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
+        climate_zone_iecc: None,
         details_xml,
+        parse_warnings: Vec::new(),
     };
 
     let start = ts(0);
@@ -950,12 +967,14 @@ fn roof_missing_azimuth_constructs_successfully() {
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(244.0),
             attached_wall_ids: vec![],
             duct_systems: vec![],
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         // Roof with no azimuth: valid HPXML for hip/flat roofs.
         boundaries: vec![Boundary {
@@ -989,7 +1008,7 @@ fn roof_missing_azimuth_constructs_successfully() {
         infiltration_ach_natural: None,
         infiltration_cfm_natural: None,
         infiltration_ela_cm2: None,
-        infiltration_constant_ach: None,
+        infiltration_constant_ach: Some(0.0),
         hvac_capacity_w: None,
         seer2: None,
         hspf2: None,
@@ -1000,16 +1019,19 @@ fn roof_missing_azimuth_constructs_successfully() {
         cooling_weekend_setpoints_c: None,
         battery_round_trip_efficiency: None,
         pv_tilt_deg: None,
-        conditioned_volume_m3: None,
-        ceiling_height_m: None,
+        conditioned_volume_m3: 400.0,
+        ceiling_height_m: 2.5,
         infiltration_height_m: None,
-        floors_above_grade: None,
+        floors_above_grade: 1.0,
         has_flue_or_chimney: None,
         foundation_name: None,
+        conditioned_foundation_merged: false,
         residential_facility_type: None,
-        mass_multiplier_override: None,
+        temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
+        climate_zone_iecc: None,
         details_xml,
+        parse_warnings: Vec::new(),
     };
 
     let start = ts(0);
@@ -1053,12 +1075,14 @@ fn window_missing_azimuth_returns_error() {
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(244.0),
             attached_wall_ids: vec![],
             duct_systems: vec![],
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         boundaries: vec![Boundary {
             id: "window-no-azimuth".to_string(),
@@ -1091,7 +1115,7 @@ fn window_missing_azimuth_returns_error() {
         infiltration_ach_natural: None,
         infiltration_cfm_natural: None,
         infiltration_ela_cm2: None,
-        infiltration_constant_ach: None,
+        infiltration_constant_ach: Some(0.0),
         hvac_capacity_w: None,
         seer2: None,
         hspf2: None,
@@ -1102,16 +1126,19 @@ fn window_missing_azimuth_returns_error() {
         cooling_weekend_setpoints_c: None,
         battery_round_trip_efficiency: None,
         pv_tilt_deg: None,
-        conditioned_volume_m3: None,
-        ceiling_height_m: None,
+        conditioned_volume_m3: 400.0,
+        ceiling_height_m: 2.5,
         infiltration_height_m: None,
-        floors_above_grade: None,
+        floors_above_grade: 1.0,
         has_flue_or_chimney: None,
         foundation_name: None,
+        conditioned_foundation_merged: false,
         residential_facility_type: None,
-        mass_multiplier_override: None,
+        temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
+        climate_zone_iecc: None,
         details_xml,
+        parse_warnings: Vec::new(),
     };
 
     let start = ts(0);

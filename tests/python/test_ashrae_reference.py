@@ -15,25 +15,22 @@ from pathlib import Path
 import pytest
 
 # The generator script imports xmltodict, which ships only in the ochre
-# dependency group. The ochre marker scopes the module to the runs whose
-# env has that group; the importorskip guard keeps collection clean in
-# the plain helics env (marker filtering alone cannot, since it applies
-# after collection). The dedicated check-ashrae-reference CI job covers
-# the same fixture independently.
-pytest.importorskip("xmltodict")
+# dependency group: tests/python/conftest.py collects this module only in
+# runs that select the ochre marker, where a missing xmltodict is a
+# collection error, not a skip. The dedicated check-ashrae-reference CI job
+# covers the same fixture independently.
 pytestmark = pytest.mark.ochre
 
 # Import the reference script as a module.
 _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
-from gen_ashrae_reference import (  # noqa: E402  (path insert above)  # type: ignore[import-not-found]
+from gen_ashrae_reference import (
     MIN_DELTA_T_TARP_NATURAL_K,
     FilmInputs,
     ashrae_simple_interior_h_conv,
     film_resistances,
     tarp_h_natural,
 )
-
 
 # ---------------------------------------------------------------------------
 # Orientation boundary angles derived from:
@@ -253,15 +250,22 @@ def test_min_delta_t_tarp_floor_is_applied() -> None:
     # Choosing avg_ambient = 15.0 → t_ext = 20.0 → raw_dt = 0.0 K.
     # Choosing avg_ambient = 15.05 → t_ext = 20.05 → raw_dt = 0.05 K.
     # Both are < MIN_DELTA_T_TARP_NATURAL_K (0.1 K).
-    common_kwargs = dict(
+    inputs_raw_zero = FilmInputs(
+        avg_ambient_temp_c=15.0,
         tilt_deg=90.0,
         interior_zone="LIV",
         exterior_zone="EXT",
         avg_wind_speed_m_s=2.0,
         avg_ground_temp_c=10.0,
     )
-    inputs_raw_zero = FilmInputs(avg_ambient_temp_c=15.0, **common_kwargs)
-    inputs_raw_half = FilmInputs(avg_ambient_temp_c=15.05, **common_kwargs)
+    inputs_raw_half = FilmInputs(
+        avg_ambient_temp_c=15.05,
+        tilt_deg=90.0,
+        interior_zone="LIV",
+        exterior_zone="EXT",
+        avg_wind_speed_m_s=2.0,
+        avg_ground_temp_c=10.0,
+    )
 
     _, r_ext_zero = film_resistances(inputs_raw_zero)
     _, r_ext_half = film_resistances(inputs_raw_half)

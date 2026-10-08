@@ -22,7 +22,7 @@ tests. Tests that depend on it will fail if the submodule is not initialised.
 
 | Tool   | Version | Install |
 |--------|---------|---------|
-| Rust   | 1.87+   | [rustup.rs](https://rustup.rs/) |
+| Rust   | 1.89+   | [rustup.rs](https://rustup.rs/) |
 | uv     | 0.11+   | `brew install uv` or [docs.astral.sh/uv](https://docs.astral.sh/uv/) |
 | Python | 3.12–3.13 | Managed by uv |
 
@@ -42,11 +42,10 @@ cargo check                        # type-check without codegen (fastest feedbac
 ```
 
 Debug builds enable runtime invariant checks (energy balance, temperature
-bounds) automatically. Release builds compile these out for zero overhead
-but can opt back in:
+bounds) automatically, and so do release builds: every physics,
+conservation, non-finite and wiring check runs in every build profile.
 
 ```bash
-cargo build --release -F check_invariants   # release + conservation checks
 cargo build --release -F observe            # release + step-level observer
 ```
 
@@ -118,10 +117,11 @@ print(bldg.hpxml_path, bldg.weather_path)
 bldg = fetch_resstock_building(bldg_id=1, version="2025.1")
 ```
 
-For fleet-scale fetches, `fetch_resstock_fleet` downloads buildings
-concurrently via `httpx` when available. The fetcher tries
-`httpx` -> `boto3` -> `urllib` in order; `httpx` is recommended for async
-fleet downloads.
+For fleet-scale fetches, `fetch_resstock_fleet` downloads up to 16 buildings
+at once on a thread pool, whichever transport is installed. Each download
+tries `httpx` -> `boto3` -> `urllib` in order. With `httpx`, Ctrl-C ends a
+fleet at once, cutting the downloads in flight; on the other transports a
+download already in flight finishes or times out first.
 
 ## Crate layout
 

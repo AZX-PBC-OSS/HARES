@@ -7,8 +7,10 @@ use std::path::Path;
 use thiserror::Error;
 
 pub mod building;
+pub mod climate_zone;
 pub mod data_patches;
 pub mod equipment;
+pub mod infiltration_geometry;
 mod resolve_der;
 pub mod resolve_hvac;
 mod resolve_loads;
@@ -17,17 +19,22 @@ mod resolve_water_heater;
 pub mod validation;
 pub mod water_heater_ua;
 pub(crate) mod xml_helpers;
+mod zone_geometry;
 
 use building::{parse_building_from_node, parse_xml_document};
+use hares_types::Warning;
 use validation::{ValidationError, validate_building_ranges, validate_hpxml_schema_node};
 
 pub use building::{
-    Boundary, BoundaryType, Building, DuctLocation, DuctSystem, DuctType, MaterialLayer, Site,
-    SiteType, Window, Zone, ZoneType,
+    Boundary, BoundaryType, Building, DuctLocation, DuctSystem, DuctType, MaterialLayer,
+    MultipleConditionedZones, ShieldingOfHome, Site, SiteType, Window, Zone, ZoneType,
 };
 pub use data_patches::HpxmlDataPatches;
 pub(crate) use equipment::build_spec;
-pub use equipment::{EquipmentSpec, build_typed_spec, nested_update, resolve_equipment};
+pub use equipment::{
+    EquipmentSpec, OverrideLayers, WILDCARD_OVERRIDE_KEYS, build_typed_spec, nested_insert,
+    nested_update, override_layers, resolve_equipment, wildcard_override,
+};
 pub(crate) use resolve_loads::MICROWAVE_DEFAULT_ANNUAL_KWH;
 pub use resolve_water_heater::{extract_bedroom_count, rebuild_wh_typed_config};
 pub use validation::{ValidationReport, ValidationWarning};
@@ -154,6 +161,15 @@ pub enum HpxmlError {
         /// The measurement context (e.g. "area", "volume", "length").
         context: String,
     },
+    /// A unit that always lives in the conditioned zone (a dehumidifier) was
+    /// parsed from a building that defines no conditioned zone to host it.
+    #[error("{equipment} requires a conditioned zone, but the building defines none")]
+    NoConditionedZone {
+        /// Name of the equipment that needs the conditioned zone.
+        equipment: String,
+    },
+    #[error(transparent)]
+    MultipleConditionedZones(#[from] MultipleConditionedZones),
     /// Equipment configuration error propagated from hares-equipment.
     #[error(transparent)]
     Equipment(#[from] hares_types::HaresError),
@@ -186,7 +202,13 @@ pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
         tracing::warn!(field = %w.field, message = %w.message, "HPXML schema warning");
     }
 
-    let building = parse_building_from_node(&root)?;
+    let mut building = parse_building_from_node(&root)?;
+    building.parse_warnings.splice(
+        0..0,
+        schema_warnings
+            .iter()
+            .map(|w| Warning::new("hpxml", format!("{}: {}", w.field, w.message))),
+    );
 
     let report = validate_building_ranges(&building);
     if report.has_errors() {
@@ -232,8 +254,8 @@ mod tests {
   <Building>
     <BuildingDetails>
       <BuildingSummary>
-        <Site><Elevation>100</Elevation><SiteType>suburban</SiteType><ShieldingOfHome>0.5</ShieldingOfHome></Site>
-        <BuildingConstruction><ConditionedFloorArea units="m2">5</ConditionedFloorArea><ConditionedBuildingVolume units="m3">12.5</ConditionedBuildingVolume></BuildingConstruction>
+        <Site><Elevation>100</Elevation><SiteType>suburban</SiteType><ShieldingofHome>normal</ShieldingofHome></Site>
+        <BuildingConstruction><ConditionedFloorArea units="m2">5</ConditionedFloorArea><ConditionedBuildingVolume units="m3">12.5</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
     </BuildingDetails>

@@ -8,11 +8,11 @@ reject non-finite floats at. The actor-param copy has no non-finite
 guard: a NaN parameter is stored, arms the actor at seed time
 (`actor_registry.rs` reads `heating_c`/`cooling_c`/`deadband_c`/
 `hysteresis_c` with no finite check), and the failure surfaces only
-mid-simulation — a telemetry panic in debug builds (`Telemetry::set
-called with non-finite value NaN for key 'heating_setpoint_c'`), and,
-with that panic cfg-gated to debug/check_invariants builds, a silent
-never-heating actor behind a `tracing::error!` log line in release
-builds. The loud rejection must happen at the boundary that received
+mid-simulation: a telemetry write rejection (`Telemetry::set
+called with non-finite value NaN for key 'heating_setpoint_c'`,
+surfaced as a step failure), and, behind that unconditional
+step-failure screen, an actor armed with a NaN parameter that never
+heats. The loud rejection must happen at the boundary that received
 the value, with the config field named — the same contract the two
 fixed boundaries already meet.
 """
@@ -20,6 +20,9 @@ fixed boundaries already meet.
 import pytest
 
 from conftest import make_dwelling
+
+# The fixture dwelling's heating equipment, the thermostat's target.
+HEATING = "Gas Furnace"
 
 
 @pytest.mark.parametrize(
@@ -32,7 +35,7 @@ def test_nan_thermostat_param_fails_loudly_at_the_boundary(param: str) -> None:
         dwelling.add_actor_by_name(
             "IdealThermostat",
             "Thermostat",
-            {"target": "HVAC", param: float("nan")},
+            {"target": HEATING, param: float("nan")},
         )
 
 
@@ -46,29 +49,30 @@ def test_inf_thermostat_param_fails_loudly_at_the_boundary(param: str) -> None:
         dwelling.add_actor_by_name(
             "IdealThermostat",
             "Thermostat",
-            {"target": "HVAC", param: float("inf")},
+            {"target": HEATING, param: float("inf")},
         )
 
 
-def test_finite_thermostat_param_still_attaches_and_simulates() -> None:
+def test_finite_thermostat_param_still_attaches_and_simulates(tmp_path) -> None:
     # Control: the rejection must be value-triggered, not blanket — a
     # finite setpoint attaches, simulates without panic, and the
-    # thermostat heats the dwelling (the observed behavior the NaN
-    # variant silently loses).
-    dwelling = make_dwelling(output_verbosity=5)
-    dwelling.add_actor_by_name(
-        "IdealThermostat",
-        "Thermostat",
-        {"target": "HVAC", "heating_c": 21.0},
-    )
-    df = dwelling.simulate()
-    heat_cols = [
-        c for c in df.columns if "HVAC" in c and "Heating" in c and "kW" in c
-    ]
-    assert heat_cols, "the fixture dwelling exposes an HVAC heating column"
-    assert df[heat_cols[0]].sum() > 0.0, (
-        "a finite 21 °C heating setpoint must produce heating energy — "
-        "the observable the NaN variant silently loses"
+    # thermostat's override heats the dwelling beyond its own schedule (the
+    # observed behavior the NaN variant silently loses). The fixture's
+    # scheduled heating setpoint is 20 °C, below the 21 °C override.
+    def heating_delivered_w_sum(tag: str, params: dict[str, object] | None) -> float:
+        dwelling = make_dwelling(
+            output_verbosity=5, output_path=str(tmp_path / f"{tag}.csv"), write_output=True
+        )
+        if params is not None:
+            dwelling.add_actor_by_name("IdealThermostat", "Thermostat", params)
+        return float(dwelling.simulate()["HVAC Heating Delivered (W)"].sum())
+
+    scheduled = heating_delivered_w_sum("scheduled", None)
+    overridden = heating_delivered_w_sum("overridden", {"target": HEATING, "heating_c": 21.0})
+    assert overridden > scheduled, (
+        f"a finite 21 °C override must heat beyond the schedule alone "
+        f"(override {overridden:.0f}, schedule {scheduled:.0f}), the observable "
+        "the NaN variant silently loses"
     )
 
 
@@ -97,13 +101,13 @@ def test_non_finite_list_element_param_fails_loudly_at_the_boundary(bad: float) 
         )
 
 
-def test_finite_list_element_param_still_attaches_and_simulates() -> None:
+def test_finite_list_element_param_still_attaches_and_simulates(tmp_path) -> None:
     """Control: the list-element rejection must be value-triggered, not
     blanket — a finite occupancy column attaches and the dwelling
     simulates (the channel the non-finite variant must be rejected from,
     not silently stored into).
     """
-    dwelling = make_dwelling(output_verbosity=5)
+    dwelling = make_dwelling(output_verbosity=5, output_path=str(tmp_path / "dwelling_42.csv"))
     dwelling.add_actor_by_name(
         "Occupant",
         "Occupant",
@@ -114,3 +118,61 @@ def test_finite_list_element_param_still_attaches_and_simulates() -> None:
     )
     df = dwelling.simulate()
     assert df is not None and len(df) > 0, "the finite occupancy column must simulate"
+
+
+def test_add_actor_by_name_without_params_uses_the_default() -> None:
+    """The stub claims `params: dict[str, Any] | None = None`; the binding
+    must carry that default. Under PyO3 0.29 a parameter without a
+    `#[pyo3(signature)]` default is required, so the two-argument call the
+    stub invites failed at call time with the stub's own default in place.
+    The Occupant's parameters are all optional, so the two-argument call
+    reaches its factory and attaches: the pin's vehicle. The
+    IdealThermostat's factory requires its target and rejects the same
+    call with the error that names it.
+    """
+    dwelling = make_dwelling()
+    before = dwelling.actor_count()
+    dwelling.add_actor_by_name("Occupant", "occupant")
+    assert dwelling.actor_count() == before + 1, (
+        "the two-argument call must attach the actor, not raise"
+    )
+
+
+def test_ideal_thermostat_without_params_is_rejected_naming_target() -> None:
+    """A thermostat bound without its target is the misconfiguration the
+    registry rejects at the boundary: the error names the parameter, it
+    does not route the override to a default equipment name.
+    """
+    dwelling = make_dwelling()
+    with pytest.raises(ValueError, match="target"):
+        dwelling.add_actor_by_name("IdealThermostat", "t1")
+
+
+def test_a_preconditioning_event_its_unit_cannot_serve_is_a_config_error() -> None:
+    """A pre-cool event naming a heating-only unit is refused at
+    registration as a `HaresConfigError` that names both setpoints in
+    plain words, and the dwelling keeps no actor for it.
+    """
+    from ochre_next._hares import HaresConfigError
+
+    dwelling = make_dwelling()
+    heater = next(
+        name
+        for name in dwelling.equipment_names()
+        if dwelling.thermostat_axes(name) == ["Heating"]
+    )
+    before = dwelling.actor_count()
+    with pytest.raises(
+        HaresConfigError,
+        match="serves only the Heating setpoint, not the Cooling setpoint",
+    ):
+        dwelling.add_actor_by_name(
+            "DrCompliance",
+            "DR",
+            {
+                "always_comply": True,
+                "hvac_target": f"name:{heater}",
+                "hvac_action": "SetpointAdjust:2.0:PreCool",
+            },
+        )
+    assert dwelling.actor_count() == before

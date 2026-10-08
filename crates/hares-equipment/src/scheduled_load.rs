@@ -11,21 +11,19 @@ use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory,
-    ZoneRole, telemetry_keys as tk,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::config::constructor_equipment_id;
+use crate::gain_fractions::{GainFractions, accumulate_zone_gain};
+use crate::load_zone::resolve_load_zone;
+use crate::raw_params::{ParamKind, RawParam};
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_usize,
     parse_zone_id, restore_schedule_source_state,
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
-const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
-const KEY_CONVECTIVE_GAIN_FRACTION: &str = "convective_gain_fraction";
-const KEY_RADIATIVE_GAIN_FRACTION: &str = "radiative_gain_fraction";
-const KEY_LATENT_GAIN_FRACTION: &str = "latent_gain_fraction";
 const KEY_GAS_SCHEDULE_IS_W: &str = "gas_schedule_is_w";
 const KEY_POWER_SCHEDULE_SOURCE: &str = "power_schedule_source";
 const KEY_POWER_SCHEDULE_COL: &str = "power_schedule_col";
@@ -41,6 +39,54 @@ const KEY_GAS_PROFILE_WEEKDAY: &str = "gas_profile_weekday";
 const KEY_GAS_PROFILE_WEEKEND: &str = "gas_profile_weekend";
 const KEY_GAS_PROFILE_MONTH: &str = "gas_profile_month";
 const KEY_GAS_CONSTANT: &str = "gas_constant";
+
+/// The schedule parameters a scheduled load reads, beside the ones every
+/// raw-parameter load reads ([`crate::raw_params::SCHEDULED_LOAD`]).
+pub(crate) const SCHEDULE_PARAMS: &[RawParam] = &[
+    RawParam::key(KEY_GAS_SCHEDULE_IS_W, ParamKind::Bool),
+    RawParam::key(KEY_POWER_SCHEDULE_SOURCE, ParamKind::Text),
+    RawParam::key(KEY_POWER_SCHEDULE_COL, ParamKind::Number),
+    RawParam::key(KEY_POWER_PROFILE_MAX_KW, ParamKind::Number),
+    RawParam::key(KEY_POWER_PROFILE_WEEKDAY, ParamKind::NumberList),
+    RawParam::key(KEY_POWER_PROFILE_WEEKEND, ParamKind::NumberList),
+    RawParam::key(KEY_POWER_PROFILE_MONTH, ParamKind::NumberList),
+    RawParam::key(KEY_POWER_CONSTANT_KW, ParamKind::Number),
+    RawParam::key(KEY_GAS_SCHEDULE_SOURCE, ParamKind::Text),
+    RawParam::key(KEY_GAS_SCHEDULE_COL, ParamKind::Number),
+    RawParam::key(KEY_GAS_PROFILE_MAX, ParamKind::Number),
+    RawParam::key(KEY_GAS_PROFILE_WEEKDAY, ParamKind::NumberList),
+    RawParam::key(KEY_GAS_PROFILE_WEEKEND, ParamKind::NumberList),
+    RawParam::key(KEY_GAS_PROFILE_MONTH, ParamKind::NumberList),
+    RawParam::key(KEY_GAS_CONSTANT, ParamKind::Number),
+];
+
+/// The classes registered as scheduled loads, each with its end use.
+pub(crate) const CLASSES: &[(&str, EndUse)] = &[
+    ("Lighting", EndUse::LIGHTING),
+    ("Plug Loads", EndUse::PLUG_LOADS),
+    ("Other", EndUse::OTHER),
+    ("Refrigerator", EndUse::REFRIGERATION),
+    ("Freezer", EndUse::REFRIGERATION),
+    ("MELs", EndUse::PLUG_LOADS),
+    ("TV", EndUse::PLUG_LOADS),
+    ("Well Pump", EndUse::OTHER),
+    ("Pool Pump", EndUse::POOL_PUMP),
+    ("Pool Heater", EndUse::POOL_HEATER),
+    ("Spa Pump", EndUse::SPA_PUMP),
+    ("Spa Heater", EndUse::SPA_HEATER),
+    ("Gas Grill", EndUse::COOKING),
+    // Gas Fireplace has no direct HPXML EndUse equivalent: it is neither
+    // cooking, heating (it is decorative) nor an HPXML 4.2 §3 appliance
+    // category, so it stays OTHER until the data dictionary gains a
+    // fireplace end use.
+    ("Gas Fireplace", EndUse::OTHER),
+    ("Gas Lighting", EndUse::LIGHTING),
+    ("Ceiling Fan", EndUse::CEILING_FAN),
+    ("Indoor Lighting", EndUse::LIGHTING),
+    ("Exterior Lighting", EndUse::LIGHTING),
+    ("Basement Lighting", EndUse::LIGHTING),
+    ("Garage Lighting", EndUse::LIGHTING),
+];
 
 #[derive(Clone, Copy, Debug)]
 enum GasScheduleUnit {
@@ -90,17 +136,14 @@ pub struct ScheduledLoad {
     core_output: CoreOutput,
     gas_source: Option<ScheduleSource>,
     gas_schedule_unit: GasScheduleUnit,
-    sensible_gain_fraction: f64,
-    radiant_gain_fraction: f64,
-    latent_gain_fraction: f64,
+    gains: GainFractions,
     /// Full ZIP model (real + reactive) resolved via
     /// [`crate::config::resolve_zip`]; scheduled loads keep the full
     /// voltage-dependent real-power polynomial (OCHRE parity), so the
     /// resolved regime is governing.
     zip: hares_types::zip::ResolvedZip,
-    /// Per-month scale factors [0..11] applied after load_fraction.
-    // OCHRE ScheduledLoad.py:38-41: month_multipliers zeros schedule in specified months.
-    // Used for seasonal equipment like ceiling fans (zero in winter months).
+    /// Per-month scale factors [0..11] applied after load_fraction, e.g. a
+    /// ceiling fan off in winter (divergence D-013).
     month_multipliers: Option<[f64; 12]>,
     last_non_zero_power_kw: f64,
     last_non_zero_gas_w: f64,
@@ -111,67 +154,15 @@ pub struct ScheduledLoad {
     power_source: ScheduleSource,
 }
 
-/// Warns if a scheduled load template uses `EndUse::OTHER` when a more
-/// specific standard end-use constant exists. This is a construction-time
-/// invariant check gated behind `debug_assertions` or `check_invariants`.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn check_other_end_use_for_known_template(equipment_type: &str) {
-    // Template names that now have dedicated `EndUse` constants per HPXML 4.2.
-    // This is a best-effort guard — a false positive (template renamed) is a
-    // compile-time cue to update the check; a missing entry here means
-    // the invariant is silently not checked for that template.
-    let known = matches!(
-        equipment_type,
-        "Pool Pump"
-            | "Pool Heater"
-            | "Spa Pump"
-            | "Spa Heater"
-            | "Gas Grill"
-            | "Ceiling Fan"
-            | "Refrigerator"
-            | "Freezer"
-            | "MELs"
-            | "TV"
-            | "Well Pump"
-    );
-    if known {
-        tracing::warn!(
-            equipment_type = %equipment_type,
-            "ScheduledLoad template '{equipment_type}' uses EndUse::OTHER but a more \
-             specific standard end-use constant exists (POOL_PUMP, POOL_HEATER, \
-             SPA_PUMP, SPA_HEATER, COOKING, CEILING_FAN, REFRIGERATION, PLUG_LOADS, \
-             or LIGHTING). Update the registry entry to use the correct EndUse \
-             constant so energy can be disaggregated by HPXML-aligned end-use."
-        );
-    }
-}
-
 impl ScheduledLoad {
     #[must_use]
     pub fn new(config: EquipmentConfig, end_use: EndUse, equipment_type: &'static str) -> Self {
-        // EV charging occurs outside the building envelope.
-        // "Exterior"/"Outdoor" equipment has no zone assignment — its heat gain
-        // goes to the outdoor environment. Everything else either uses an
-        // explicit zone_id from the config or is resolved by the ZoneMap at
-        // init time via name-based auto-routing.
-        let name_lower = config.name.to_ascii_lowercase();
+        // `init` resolves the zone; until then only an explicit one is known.
         let zone = if end_use == EndUse::EV {
             None
-        } else if let Some(explicit) = parse_zone_id(&config) {
-            Some(explicit)
-        } else if name_lower.contains("exterior") || name_lower.contains("outdoor") {
-            None
         } else {
-            // Defer zone resolution to init_from_config(), which has access to
-            // the ZoneMap for name-based auto-routing (garage, basement, etc.).
-            None
+            parse_zone_id(&config)
         };
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if end_use == EndUse::OTHER {
-                check_other_end_use_for_known_template(equipment_type);
-            }
-        }
 
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
@@ -195,9 +186,7 @@ impl ScheduledLoad {
             core_output: CoreOutput::default(),
             gas_source: None,
             gas_schedule_unit: GasScheduleUnit::ThermsPerHour,
-            sensible_gain_fraction: 0.0,
-            radiant_gain_fraction: 0.0,
-            latent_gain_fraction: 0.0,
+            gains: GainFractions::default(),
             zip: hares_types::zip::ResolvedZip::governing(
                 hares_types::zip::zip_defaults_for_class(equipment_type)
                     .unwrap_or_else(hares_types::zip::ZipLoad::constant_power),
@@ -223,147 +212,20 @@ impl ScheduledLoad {
         }
     }
 
-    /// Resolve zone by name from the [`ZoneMap`] when no explicit `zone_id`
-    /// was configured and the equipment name implies a specific zone role.
-    ///
-    /// Called once during `init()` after the [`ZoneMap`] has been injected
-    /// into the config by the dwelling. If a matching role has no zone in
-    /// the building (e.g. the building has no garage), the zone stays `None`
-    /// and a diagnostic is emitted.
-    fn resolve_zone_from_map(&mut self, config: &EquipmentConfig) {
-        // Zone already set explicitly — nothing to resolve.
-        if self.descriptor.zone.is_some() {
-            return;
-        }
-        let Some(zone_map) = &config.zone_map else {
-            return;
-        };
-        let name_lower = config.name.to_ascii_lowercase();
-        // EV charging occurs outside the building envelope — no zone assignment.
-        // This mirrors the exclusion in new().
-        if self.descriptor.end_use == EndUse::EV {
-            return;
-        }
-        // Outdoor/exterior equipment has no zone assignment — its heat gain
-        // goes to the outdoor environment. This matches the exclusion in new().
-        if name_lower.contains("exterior") || name_lower.contains("outdoor") {
-            return;
-        }
-        #[cfg_attr(not(feature = "observe"), allow(unused_variables))]
-        let (resolved, role) = if name_lower.contains("garage") {
-            (zone_map.get(ZoneRole::Garage), ZoneRole::Garage)
-        } else if name_lower.contains("basement") {
-            (zone_map.get(ZoneRole::Basement), ZoneRole::Basement)
-        } else if name_lower.contains("crawlspace") {
-            (zone_map.get(ZoneRole::Crawlspace), ZoneRole::Crawlspace)
-        } else if name_lower.contains("attic") {
-            (zone_map.get(ZoneRole::Attic), ZoneRole::Attic)
-        } else {
-            // Indoor equipment defaults to the primary conditioned zone.
-            (zone_map.get(ZoneRole::Indoor), ZoneRole::Indoor)
-        };
-        // Why: clippy `single_match` fires when `observe` feature is off because
-        // the None arm has only cfg-gated tracing calls. The match arms remain
-        // semantically distinct regardless of feature gates.
-        #[allow(clippy::single_match)]
-        match resolved {
-            Some(id) => {
-                self.descriptor.zone = Some(id);
-                #[cfg(feature = "observe")]
-                tracing::debug!(
-                    equipment = %config.name,
-                    zone_role = %role,
-                    zone_id = %id,
-                    "zone resolved via ZoneMap",
-                );
-            }
-            None => {
-                #[cfg(feature = "observe")]
-                tracing::warn!(
-                    equipment = %config.name,
-                    zone_role = %role,
-                    "no zone mapping found for role; equipment will not contribute thermal gains",
-                );
-            }
-        }
-    }
-
     fn init_from_config(
         &mut self,
         config: &EquipmentConfig,
-        _env: &EnvironmentState,
+        env: &EnvironmentState,
     ) -> crate::Result<()> {
         self.power_source = parse_power_schedule_source(config)?;
         let (gas_source, gas_unit) = parse_optional_gas_schedule_source(config)?;
         self.gas_source = gas_source;
-        self.gas_schedule_unit = if parse_bool(config, KEY_GAS_SCHEDULE_IS_W)?.unwrap_or(false) {
+        self.gas_schedule_unit = if config.get_bool(KEY_GAS_SCHEDULE_IS_W).unwrap_or(false) {
             GasScheduleUnit::Watts
         } else {
             gas_unit
         };
-        // OCHRE Equipment.py:83-86: sensible gain = convective + radiative fractions.
-        // "frac_sensible" is the HPXML-parsed alias for sensible_gain_fraction.
-        let radiative_frac = config.get_f64(KEY_RADIATIVE_GAIN_FRACTION).unwrap_or(0.0);
-        self.sensible_gain_fraction = config
-            .get_f64(KEY_SENSIBLE_GAIN_FRACTION)
-            .or_else(|| config.get_f64("frac_sensible"))
-            .or_else(|| {
-                let conv = config.get_f64(KEY_CONVECTIVE_GAIN_FRACTION).unwrap_or(0.0);
-                let rad = config.get_f64(KEY_RADIATIVE_GAIN_FRACTION).unwrap_or(0.0);
-                if conv > 0.0 || rad > 0.0 {
-                    Some(conv + rad)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| {
-                HaresError::Equipment(format!(
-                    "sensible_gain_fraction missing for '{}'; must be specified explicitly",
-                    self.descriptor.name
-                ))
-            })?;
-        self.radiant_gain_fraction = radiative_frac;
-        // "frac_latent" is the HPXML-parsed alias for latent_gain_fraction.
-        self.latent_gain_fraction = config
-            .get_f64(KEY_LATENT_GAIN_FRACTION)
-            .or_else(|| config.get_f64("frac_latent"))
-            .unwrap_or(0.0);
-        if self.sensible_gain_fraction < 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) must not be negative",
-                self.sensible_gain_fraction
-            )));
-        }
-        if self.sensible_gain_fraction > 1.0 + 1e-9 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) must not exceed 1.0",
-                self.sensible_gain_fraction
-            )));
-        }
-        if self.latent_gain_fraction < 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "latent_gain_fraction ({}) must not be negative",
-                self.latent_gain_fraction
-            )));
-        }
-        if self.radiant_gain_fraction < 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "radiant_gain_fraction ({}) must not be negative",
-                self.radiant_gain_fraction
-            )));
-        }
-        if self.sensible_gain_fraction + self.latent_gain_fraction > 1.0 + 1e-9 {
-            return Err(HaresError::Equipment(format!(
-                "sensible_gain_fraction ({}) + latent_gain_fraction ({}) must not exceed 1.0",
-                self.sensible_gain_fraction, self.latent_gain_fraction
-            )));
-        }
-        if self.radiant_gain_fraction > self.sensible_gain_fraction + 1e-9 {
-            return Err(HaresError::Equipment(format!(
-                "radiant_gain_fraction ({}) must not exceed sensible_gain_fraction ({}) (convective gain would be negative)",
-                self.radiant_gain_fraction, self.sensible_gain_fraction
-            )));
-        }
+        self.gains = GainFractions::from_config(config, &self.descriptor.name)?;
         self.zip = crate::config::resolve_zip(config);
         crate::config::validate_zip_sums(&self.zip, &self.descriptor.name)?;
         #[cfg(feature = "observe")]
@@ -379,13 +241,14 @@ impl ScheduledLoad {
             pf = self.zip.pf,
             "resolved ZIP coefficients",
         );
+        // A daily profile's own month factors are its shape; the load's month
+        // multipliers scale whatever schedule it has on top, the profile
+        // included. OCHRE only zeroes a month whose multiplier is 0
+        // (divergence D-013).
         self.month_multipliers = parse_month_multipliers(config)?;
-        if matches!(self.power_source, ScheduleSource::DailyProfile { .. }) {
-            // Month multipliers are already baked into the DailyProfile evaluation,
-            // so clear runtime month multipliers to avoid double-scaling.
-            self.month_multipliers = None;
-        }
-        let usage_multiplier = config.get_f64("usage_multiplier").unwrap_or(1.0);
+        let usage_multiplier = config
+            .get_f64(crate::config::KEY_USAGE_MULTIPLIER)
+            .unwrap_or(1.0);
         if usage_multiplier != 1.0 {
             scale_schedule_source(&mut self.power_source, usage_multiplier);
             if let Some(gas_source) = &mut self.gas_source {
@@ -418,11 +281,12 @@ impl ScheduledLoad {
             } else {
                 CoreCapabilities::empty()
             };
-        // Resolve zone from ZoneMap when zone was deferred at construction time.
-        // The ZoneMap is populated by the dwelling from HPXML zone configuration
-        // and provides stable ZoneRole → ZoneId mappings that do not assume
-        // a fixed zone sort order.
-        self.resolve_zone_from_map(config);
+        self.descriptor.zone = resolve_load_zone(
+            config,
+            &self.descriptor.end_use,
+            self.gains.gives_zone_heat(),
+            env,
+        )?;
         self.telemetry = default_telemetry();
         self.core_output = CoreOutput::default();
         self.update_ports();
@@ -465,21 +329,6 @@ impl Equipment for ScheduledLoad {
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            crate::config::debug_assert_zip_sums(&self.zip, "ScheduledLoad", &self.descriptor.name);
-            // Verify that the assigned zone (if any) exists in the current
-            // environment state. A missing zone indicates a stale ZoneId from
-            // a misconfigured ZoneMap.
-            if let Some(zone) = self.descriptor.zone {
-                assert!(
-                    env.zones.iter().any(|z| z.id == zone),
-                    "ScheduledLoad '{}': assigned zone {zone} not found in environment state",
-                    self.descriptor.name,
-                );
-            }
-        }
-
         // Grid outage (de-energized bus): all outputs are zero. Gas scheduled
         // loads are also zeroed — modern gas appliances (ranges, dryers,
         // fireplaces with electronic ignition) need electricity to operate.
@@ -570,7 +419,7 @@ impl Equipment for ScheduledLoad {
             if let Some(override_kw) = self.power_setpoint_override.take() {
                 (override_kw, 0.0, 0.0)
             } else {
-                // Apply month multiplier (OCHRE ScheduledLoad.py:38-41). Negative schedule
+                // Apply the month multiplier (D-013). Negative schedule
                 // values are silently clamped to zero -- OCHRE treats them as "no load" rather
                 // than generation; this is intentional for e.g. CSV schedules with placeholder
                 // fill values.
@@ -639,21 +488,10 @@ impl Equipment for ScheduledLoad {
         }
 
         let total_gain_source_w = power_kw_to_w(electric_power_kw) + gas_consumption_w;
-        let total_sensible_w = total_gain_source_w * self.sensible_gain_fraction;
-        let radiant_gain_w = total_gain_source_w * self.radiant_gain_fraction;
-        let sensible_gain_w = total_sensible_w - radiant_gain_w;
-        let latent_gain_w = total_gain_source_w * self.latent_gain_fraction;
-        if let Some(zone) = self.descriptor.zone {
-            if sensible_gain_w != 0.0 || radiant_gain_w != 0.0 || latent_gain_w != 0.0 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w,
-                    radiant_gain_w,
-                    latent_gain_w,
-                    category: ThermalCategory::InternalGain,
-                })?;
-            }
-        }
+        let gain = self.gains.of(total_gain_source_w);
+        let total_sensible_w = total_gain_source_w * self.gains.sensible;
+        let latent_gain_w = gain.latent_w;
+        accumulate_zone_gain(ports, self.descriptor.zone, gain)?;
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_power_kw);
         self.telemetry
@@ -745,19 +583,35 @@ impl Equipment for ScheduledLoad {
                 }
             }
             source => {
-                let mean = source.mean();
                 // `step()` scales every draw by the runtime month
                 // multipliers (`raw * load_fraction * month_scale`), so the
                 // published expectation must describe the same load: the
                 // unscaled source mean would overstate a seasonal load's
                 // premise weight by the inverse of the mean multiplier.
                 // Equal-weight month averaging is the same convention
-                // `ScheduleSource::mean()` uses for DailyProfile months.
-                let month_scale_mean = self
-                    .month_multipliers
-                    .map(|m| m.iter().sum::<f64>() / 12.0)
-                    .unwrap_or(1.0);
-                let mean = mean * month_scale_mean;
+                // `ScheduleSource::mean()` uses for DailyProfile months; a
+                // daily profile's own month factors take the multipliers
+                // month by month, so the mean is that of their product.
+                let mean = match (source, self.month_multipliers) {
+                    (
+                        ScheduleSource::DailyProfile {
+                            weekday,
+                            weekend,
+                            month_multipliers,
+                            max_value,
+                        },
+                        Some(scale),
+                    ) => ScheduleSource::DailyProfile {
+                        weekday: *weekday,
+                        weekend: *weekend,
+                        month_multipliers: std::array::from_fn(|m| month_multipliers[m] * scale[m]),
+                        max_value: *max_value,
+                    }
+                    .mean(),
+                    (source, scale) => {
+                        source.mean() * scale.map_or(1.0, |m| m.iter().sum::<f64>() / 12.0)
+                    }
+                };
                 // `ScheduleSource::mean()` has no finiteness guard (it is
                 // used for planning hints, not stepping); a non-finite mean
                 // must not be published as a weight-looking `Some` value.
@@ -835,12 +689,10 @@ impl Equipment for ScheduledLoad {
             power_kw_to_w(self.last_non_zero_power_kw) + self.last_non_zero_gas_w;
         self.telemetry.insert(
             tk::TOTAL_SENSIBLE_GAIN_W,
-            total_gain_source_w * self.sensible_gain_fraction,
+            total_gain_source_w * self.gains.sensible,
         );
-        self.telemetry.insert(
-            tk::LATENT_GAIN_W,
-            total_gain_source_w * self.latent_gain_fraction,
-        );
+        self.telemetry
+            .insert(tk::LATENT_GAIN_W, total_gain_source_w * self.gains.latent);
         self.telemetry
             .insert(tk::FUEL_INPUT_W, self.last_non_zero_gas_w);
         self.core_output = CoreOutput {
@@ -905,140 +757,12 @@ impl Equipment for ScheduledLoad {
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
-    registry.register(
-        "Lighting",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::LIGHTING, "Lighting"))),
-    );
-    registry.register(
-        "Plug Loads",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PLUG_LOADS, "Plug Loads"))),
-    );
-    registry.register(
-        "Other",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Other"))),
-    );
-
-    // Appliance loads
-    registry.register(
-        "Refrigerator",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::REFRIGERATION,
-                "Refrigerator",
-            ))
-        }),
-    );
-    registry.register(
-        "Freezer",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::REFRIGERATION, "Freezer"))),
-    );
-    registry.register(
-        "MELs",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PLUG_LOADS, "MELs"))),
-    );
-    registry.register(
-        "TV",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PLUG_LOADS, "TV"))),
-    );
-
-    // Pumps
-    registry.register(
-        "Well Pump",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Well Pump"))),
-    );
-    registry.register(
-        "Pool Pump",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::POOL_PUMP, "Pool Pump"))),
-    );
-    registry.register(
-        "Pool Heater",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::POOL_HEATER,
-                "Pool Heater",
-            ))
-        }),
-    );
-    registry.register(
-        "Spa Pump",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::SPA_PUMP, "Spa Pump"))),
-    );
-    registry.register(
-        "Spa Heater",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::SPA_HEATER, "Spa Heater"))),
-    );
-
-    // Gas appliances
-    registry.register(
-        "Gas Grill",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::COOKING, "Gas Grill"))),
-    );
-    // Gas Fireplace has no direct HPXML EndUse equivalent — it is neither Cooking,
-    // Heating (it's decorative/ambient), nor an appliance category in HPXML 4.2 §3.
-    // Keep as OTHER until the HPXML data dictionary gains a Fireplace end-use.
-    registry.register(
-        "Gas Fireplace",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Gas Fireplace"))),
-    );
-    registry.register(
-        "Gas Lighting",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::LIGHTING, "Gas Lighting"))),
-    );
-
-    // Fans
-    registry.register(
-        "Ceiling Fan",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::CEILING_FAN,
-                "Ceiling Fan",
-            ))
-        }),
-    );
-    // Lighting variants
-    registry.register(
-        "Indoor Lighting",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::LIGHTING,
-                "Indoor Lighting",
-            ))
-        }),
-    );
-    registry.register(
-        "Exterior Lighting",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::LIGHTING,
-                "Exterior Lighting",
-            ))
-        }),
-    );
-    registry.register(
-        "Basement Lighting",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::LIGHTING,
-                "Basement Lighting",
-            ))
-        }),
-    );
-    registry.register(
-        "Garage Lighting",
-        Box::new(|config| {
-            Box::new(ScheduledLoad::new(
-                config,
-                EndUse::LIGHTING,
-                "Garage Lighting",
-            ))
-        }),
-    );
+    for (class, end_use) in CLASSES {
+        registry.register(
+            *class,
+            Box::new(move |config| Box::new(ScheduledLoad::new(config, end_use.clone(), class))),
+        );
+    }
 }
 
 fn default_telemetry() -> Telemetry {
@@ -1278,10 +1002,10 @@ fn scale_schedule_source(source: &mut ScheduleSource, scale: f64) {
                     *max *= scale;
                 }
                 // Ensure min ≤ max after scaling (negative scale inverts).
-                if let (Some(lo), Some(hi)) = (&mut w.min_value, &mut w.max_value) {
-                    if *lo > *hi {
-                        std::mem::swap(lo, hi);
-                    }
+                if let (Some(lo), Some(hi)) = (&mut w.min_value, &mut w.max_value)
+                    && *lo > *hi
+                {
+                    std::mem::swap(lo, hi);
                 }
             }
         }
@@ -1306,25 +1030,6 @@ fn is_schedule_source_zero(source: &ScheduleSource) -> bool {
     }
 }
 
-fn parse_bool(config: &EquipmentConfig, key: &str) -> crate::Result<Option<bool>> {
-    if let Some(b) = config.get_bool(key) {
-        return Ok(Some(b));
-    }
-    let value = match config.get_f64(key) {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-    if value == 0.0 {
-        return Ok(Some(false));
-    }
-    if value == 1.0 {
-        return Ok(Some(true));
-    }
-    Err(HaresError::Equipment(format!(
-        "invalid boolean for key {key}: expected 0.0 or 1.0, got {value}"
-    )))
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -1343,10 +1048,12 @@ mod tests {
     use hares_types::zip::{ResolvedZip, ZipLoad};
 
     use super::{
-        GAS_THERMS_PER_HOUR_TO_W, KEY_CONVECTIVE_GAIN_FRACTION, KEY_GAS_CONSTANT,
-        KEY_GAS_SCHEDULE_IS_W, KEY_GAS_SCHEDULE_SOURCE, KEY_LATENT_GAIN_FRACTION,
-        KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE,
-        KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION, ScheduledLoad,
+        GAS_THERMS_PER_HOUR_TO_W, KEY_GAS_CONSTANT, KEY_GAS_SCHEDULE_IS_W, KEY_GAS_SCHEDULE_SOURCE,
+        KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE, ScheduledLoad,
+    };
+    use crate::gain_fractions::{
+        KEY_LATENT as KEY_LATENT_GAIN_FRACTION, KEY_RADIANT as KEY_RADIATIVE_GAIN_FRACTION,
+        KEY_SENSIBLE as KEY_SENSIBLE_GAIN_FRACTION,
     };
 
     use crate::schedule_helpers::KEY_MONTH_MULTIPLIER_PREFIX;
@@ -1354,6 +1061,7 @@ mod tests {
 
     fn base_env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -1379,7 +1087,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1805,7 +1514,7 @@ mod tests {
                 (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (KEY_GAS_SCHEDULE_SOURCE, "constant".into()),
                 (KEY_GAS_CONSTANT, 1000.0.into()),
-                (KEY_GAS_SCHEDULE_IS_W, 1.0.into()),
+                (KEY_GAS_SCHEDULE_IS_W, true.into()),
             ],
         );
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
@@ -1898,7 +1607,7 @@ mod tests {
 
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
-        env.custom_domains.push(DomainUpdate {
+        env.domains.schedule.set_from(&DomainUpdate {
             domain_id: SCHEDULE_DOMAIN_ID,
             zone_temperatures_c: vec![],
             custom_payload: Some(vec![2.5, 7.25]),
@@ -2026,6 +1735,51 @@ mod tests {
         assert!(registry.get("Lighting").is_some());
         assert!(registry.get("Plug Loads").is_some());
         assert!(registry.get("Other").is_some());
+    }
+
+    /// Over the static registry: every template with a dedicated standard
+    /// end-use constant must not register as `EndUse::OTHER`, so energy
+    /// disaggregates by HPXML-aligned end use. This replaced the gated
+    /// construction warn (`check_other_end_use_for_known_template`): the
+    /// registry is static, so the property is a unit test. The documented
+    /// OTHER users are pinned: the generic "Other" template, "Well Pump"
+    /// (no dedicated constant) and "Gas Fireplace" (no HPXML end use).
+    #[test]
+    fn registry_templates_with_dedicated_end_use_do_not_use_other() {
+        use crate::config::ConfigValue;
+        use hares_types::EndUse as Eu;
+
+        let registry = EquipmentRegistry::new();
+        let config = |name: &str| {
+            let mut raw: HashMap<String, ConfigValue> = HashMap::new();
+            raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+            raw.insert(KEY_POWER_CONSTANT_KW.to_string(), 1.0.into());
+            raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 1.0.into());
+            EquipmentConfig::raw(name.to_string(), name.to_string(), raw)
+        };
+        let end_use_of = |name: &str| {
+            let factory = registry.get(name).expect(name);
+            let eq = factory(config(name));
+            eq.descriptor().end_use.clone()
+        };
+
+        assert_ne!(end_use_of("Refrigerator"), Eu::OTHER);
+        assert_ne!(end_use_of("Freezer"), Eu::OTHER);
+        assert_ne!(end_use_of("MELs"), Eu::OTHER);
+        assert_ne!(end_use_of("TV"), Eu::OTHER);
+        assert_ne!(end_use_of("Pool Pump"), Eu::OTHER);
+        assert_ne!(end_use_of("Pool Heater"), Eu::OTHER);
+        assert_ne!(end_use_of("Spa Pump"), Eu::OTHER);
+        assert_ne!(end_use_of("Spa Heater"), Eu::OTHER);
+        assert_ne!(end_use_of("Gas Grill"), Eu::OTHER);
+        assert_ne!(end_use_of("Ceiling Fan"), Eu::OTHER);
+        assert_ne!(end_use_of("Gas Lighting"), Eu::OTHER);
+        assert_ne!(end_use_of("Lighting"), Eu::OTHER);
+        assert_ne!(end_use_of("Plug Loads"), Eu::OTHER);
+
+        assert_eq!(end_use_of("Other"), Eu::OTHER);
+        assert_eq!(end_use_of("Well Pump"), Eu::OTHER);
+        assert_eq!(end_use_of("Gas Fireplace"), Eu::OTHER);
     }
 
     #[test]
@@ -2161,13 +1915,13 @@ mod tests {
     }
 
     #[test]
-    fn convective_and_radiative_fractions_sum_to_sensible() {
+    fn an_absolute_radiative_fraction_leaves_the_rest_of_sensible_convective() {
         let config = config_with_extras(
             "s",
             "Lighting",
             &[1.0],
             &[
-                (KEY_CONVECTIVE_GAIN_FRACTION, 0.3.into()),
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.5.into()),
                 (KEY_RADIATIVE_GAIN_FRACTION, 0.2.into()),
             ],
         );
@@ -2180,9 +1934,6 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        // 1 kW = 1000 W; sensible = conv(0.3) + rad(0.2) = 0.5 → total sensible = 500W
-        // convective = total_sensible - radiant = 500 - 200 = 300W
-        // radiant = 1000 * 0.2 = 200W
         assert!((ports.thermal[0].sensible_gain_w - 300.0).abs() < 1e-9);
         assert!((ports.thermal[0].radiant_gain_w - 200.0).abs() < 1e-9);
     }
@@ -2540,6 +2291,69 @@ mod tests {
         }
     }
 
+    /// A load that gives heat to a zone must have that zone: garage
+    /// lighting in a building with no garage zone fails init naming the
+    /// load and the missing role, instead of dropping its heat.
+    #[test]
+    fn heat_giving_load_errors_when_its_zone_role_is_missing() {
+        let mut config = base_config_for_zone_test("Garage Lighting", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.5.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(1));
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::LIGHTING,
+            "Garage Lighting",
+        );
+        let err = eq
+            .init(&config, &base_env())
+            .expect_err("garage lighting with gains and no garage zone must fail init");
+        let message = err.to_string();
+        assert!(
+            message.contains("Garage Lighting") && message.contains("Garage"),
+            "the error must name the load and its zone role, got: {message}"
+        );
+    }
+
+    /// With no zone_id and no dwelling zone map a heat-giving load has no
+    /// zone to heat.
+    #[test]
+    fn heat_giving_load_errors_without_a_zone_or_zone_map() {
+        let mut config = base_config_for_zone_test("Refrigerator", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.5.into());
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::REFRIGERATION,
+            "Refrigerator",
+        );
+        eq.init(&config, &base_env())
+            .expect_err("a heat-giving load with no zone must fail init");
+    }
+
+    /// A load that gives no heat to any zone needs none.
+    #[test]
+    fn load_without_zone_gains_needs_no_zone() {
+        let mut config = base_config_for_zone_test("Garage Lighting", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(1));
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::LIGHTING,
+            "Garage Lighting",
+        );
+        eq.init(&config, &base_env()).unwrap();
+        assert_eq!(eq.descriptor().zone, None);
+    }
+
     #[test]
     fn garage_name_auto_routes_to_garage_zone() {
         let mut config = base_config_for_zone_test("Garage Lighting", &[1.0]);
@@ -2555,7 +2369,7 @@ mod tests {
             hares_types::EndUse::LIGHTING,
             "Garage Lighting",
         );
-        eq.init(&config, &base_env()).unwrap();
+        eq.init(&config, &env_with_zone(ZoneId(3))).unwrap();
         assert_eq!(
             eq.descriptor().zone,
             Some(ZoneId(3)),
@@ -2579,7 +2393,7 @@ mod tests {
             hares_types::EndUse::LIGHTING,
             "Basement Lighting",
         );
-        eq.init(&config, &base_env()).unwrap();
+        eq.init(&config, &env_with_zone(ZoneId(4))).unwrap();
         assert_eq!(
             eq.descriptor().zone,
             Some(ZoneId(4)),
@@ -2601,12 +2415,42 @@ mod tests {
             hares_types::EndUse::REFRIGERATION,
             "Refrigerator",
         );
-        eq.init(&config, &base_env()).unwrap();
+        eq.init(&config, &env_with_zone(ZoneId(5))).unwrap();
         assert_eq!(
             eq.descriptor().zone,
             Some(ZoneId(5)),
             "Indoor equipment should resolve to ZoneMap Indoor role (ZoneId(5))"
         );
+    }
+
+    /// A zone map entry the environment does not hold would drop the load's
+    /// heat every step: init fails naming the load.
+    #[test]
+    fn zone_map_zone_missing_from_the_environment_fails_init() {
+        let mut config = base_config_for_zone_test("Refrigerator", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 1.0.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(5));
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::REFRIGERATION,
+            "Refrigerator",
+        );
+        let err = eq
+            .init(&config, &base_env())
+            .expect_err("a zone the environment lacks must fail init");
+        assert!(err.to_string().contains("Refrigerator"), "got: {err}");
+    }
+
+    fn env_with_zone(zone: ZoneId) -> EnvironmentState {
+        let mut env = base_env();
+        let mut extra = env.zones[0].clone();
+        extra.id = zone;
+        env.zones.push(extra);
+        env
     }
 
     #[test]
@@ -2632,7 +2476,7 @@ mod tests {
     }
 
     /// Regression test for Outdoor/Exterior equipment routed via ZoneMap.
-    /// Without the outdoor/exclusion guard in resolve_zone_from_map(), outdoor-named
+    /// Without the outdoor/exclusion guard in resolve_load_zone(), outdoor-named
     /// equipment would be routed to the indoor zone because it doesn't match any
     /// specific role keyword.
     #[test]
@@ -2886,7 +2730,7 @@ mod tests {
         let mut eq =
             ScheduledLoad::new(config.clone(), hares_types::EndUse::OTHER, "Seasonal Pump");
         let mut env = base_env();
-        env.custom_domains.push(DomainUpdate {
+        env.domains.schedule.set_from(&DomainUpdate {
             domain_id: SCHEDULE_DOMAIN_ID,
             zone_temperatures_c: vec![],
             custom_payload: Some(vec![2.5, 7.25]),
@@ -3005,12 +2849,6 @@ mod tests {
 
     #[test]
     fn non_finite_month_multiplier_fails_loudly_at_init() {
-        // `parse_month_multipliers` previously clamped with `val.max(0.0)`,
-        // which drops a NaN operand: a `nan` month multiplier silently
-        // zeroed that month's draw — the load quietly off for a month with
-        // no signal, the same silent-absorption class every other
-        // schedule-data channel rejects at its boundary. The shared parse
-        // site (scheduled + event loads) must error at init, naming the key.
         let mut extras: Vec<(String, crate::config::ConfigValue)> =
             vec![(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into())];
         extras.push((
@@ -3028,14 +2866,13 @@ mod tests {
         let err = eq
             .init(&config, &env)
             .expect_err("a non-finite month multiplier must fail at init");
-        let message = err.to_string();
         assert!(
-            message.contains("non-finite"),
-            "the rejection must name the defect, got: {message}"
-        );
-        assert!(
-            message.contains("month_multiplier_3"),
-            "the rejection must name the offending key, got: {message}"
+            matches!(
+                &err,
+                hares_types::HaresError::InvalidEquipmentParameter { key, .. }
+                    if key == "month_multiplier_3"
+            ),
+            "the rejection must name the offending key, got: {err}"
         );
     }
 
@@ -3103,6 +2940,60 @@ mod tests {
                 "a month-scaled constant load has a computable expected draw, \
                  got {other:?}"
             ),
+        }
+    }
+
+    /// A daily profile's month factors are its shape; the load's month
+    /// multipliers scale it on top, in its draws and its expected mean.
+    #[test]
+    fn month_multipliers_scale_a_daily_profile() {
+        use super::{
+            KEY_POWER_PROFILE_MAX_KW, KEY_POWER_PROFILE_MONTH, KEY_POWER_PROFILE_WEEKDAY,
+            KEY_POWER_PROFILE_WEEKEND,
+        };
+        use hares_types::EndUse;
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
+        raw.insert(
+            KEY_POWER_SCHEDULE_SOURCE.to_string(),
+            "daily_profile".into(),
+        );
+        raw.insert(KEY_POWER_PROFILE_MAX_KW.to_string(), 2.0.into());
+        for key in [KEY_POWER_PROFILE_WEEKDAY, KEY_POWER_PROFILE_WEEKEND] {
+            raw.insert(
+                key.to_string(),
+                crate::config::ConfigValue::FloatArray(vec![1.0; 24]),
+            );
+        }
+        let mut profile_months = vec![1.0; 12];
+        profile_months[2] = 0.5;
+        raw.insert(
+            KEY_POWER_PROFILE_MONTH.to_string(),
+            crate::config::ConfigValue::FloatArray(profile_months),
+        );
+        raw.insert("month_multiplier_2".to_string(), 0.5.into());
+        let config = EquipmentConfig::raw("Profile".to_string(), "Lighting".to_string(), raw);
+        let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(
+            ports.electrical.net_active_w(),
+            500.0,
+            "March: 2 kW, times the profile's 0.5, times the multiplier's 0.5"
+        );
+        match eq.expected_mean_power_kw() {
+            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
+                (kw - 2.0 * 11.25 / 12.0).abs() < 1e-12,
+                "eleven months at 2 kW and March at 0.5 kW, got {kw}"
+            ),
+            other => panic!("a daily profile has a computable mean, got {other:?}"),
         }
     }
 

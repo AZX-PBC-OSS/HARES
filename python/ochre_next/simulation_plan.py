@@ -6,6 +6,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 import polars as pl
 
@@ -46,12 +47,12 @@ class SimulationPlan:
         output_verbosity: int = 0,
         master_seed: int = 42,
         initialization_duration: int = 604800,  # 7 days
-        **extra_kwargs,
+        **extra_kwargs: Any,
     ):
         self.hpxml = hpxml
         self.schedule = schedule
         self.weather = weather
-        self.base_kwargs = {
+        self.base_kwargs: dict[str, Any] = {
             "defaults_path": defaults_path,
             "bldg_id": bldg_id,
             "time_res_s": time_res_s,
@@ -129,7 +130,7 @@ class SimulationPlan:
                 raise
 
             df: pl.DataFrame = dw.results()
-            if df is not None and not df.is_empty():
+            if not df.is_empty():
                 df = df.with_columns(pl.lit(i).alias("segment"))
                 all_frames.append(df)
             else:

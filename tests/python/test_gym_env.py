@@ -5,14 +5,19 @@ from __future__ import annotations
 from datetime import timedelta
 import math
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-np = pytest.importorskip("numpy")
+# gymnasium ships only in the optional rl extra.
 pytest.importorskip("gymnasium")
 
+import numpy as np
+from conftest import output_in_test_dir
+from gymnasium import spaces
+
 from ochre_next._hares import Dwelling as PyDwelling
-from ochre_next.rl.gym_env import DwellingGymEnv, _observation_field_bounds, _sorted_action_layout, telemetry_to_observation
+from ochre_next.rl.gym_env import DwellingGymEnv, observation_field_bounds, sorted_action_layout, telemetry_to_observation
 from ochre_next.rl.vec_env import VecDwellingGymEnv
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +35,15 @@ _DWELLING_CONFIG = {
     "duration_s": 600,
     "time_res_s": 60,
 }
+# The gym env's dict path cannot disable write_output.
+_output_in_test_dir = output_in_test_dir(_DWELLING_CONFIG, "dwelling_0.csv")
+
+
+def _obs_box(env: DwellingGymEnv | VecDwellingGymEnv) -> spaces.Box:
+    """The observation space as a Box (gymnasium is an importorskip here)."""
+    space = env.observation_space
+    assert isinstance(space, spaces.Box), "observation_space must be a Box"
+    return space
 
 # Gas Furnace is present in the base HPXML; heat_c resolves to ThermalSetpoint.
 _ACTION_CONFIG: dict[str, list[str]] = {"Gas Furnace": ["heat_c"]}
@@ -56,6 +70,7 @@ def _make_dwelling(seed: int = 0) -> PyDwelling:
         duration_s=600,
         time_res_s=60,
         master_seed=seed,
+        write_output=False,
     )
 
 
@@ -89,8 +104,143 @@ def test_dwelling_gym_spaces_and_mapping():
     assert isinstance(truncated, bool)
 
 
+def _water_heater_name(dwelling: PyDwelling) -> str:
+    (name,) = [n for n in dwelling.equipment_names() if "Water Heater" in n]
+    return name
+
+
+def test_deadband_action_bounds_follow_the_target_thermostat_class():
+    from ochre_next._hares import (
+        MAX_HVAC_THERMOSTAT_BAND_C,
+        MAX_TANK_THERMOSTAT_BAND_C,
+        MIN_THERMOSTAT_BAND_C,
+    )
+
+    water_heater = _water_heater_name(_make_dwelling())
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=_OBS_FIELDS,
+        action_space_config={
+            "Gas Furnace": ["heat_c", "deadband_c"],
+            water_heater: ["setpoint_c", "deadband_c"],
+        },
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    space = env.action_space
+    assert isinstance(space, spaces.Box)
+    bounds = {
+        (equipment, field): (low, high)
+        for (equipment, field), low, high in zip(env._action_layout, space.low, space.high)
+    }
+    assert bounds[("Gas Furnace", "deadband_c")] == (
+        MIN_THERMOSTAT_BAND_C,
+        MAX_HVAC_THERMOSTAT_BAND_C,
+    )
+    assert bounds[(water_heater, "deadband_c")] == (
+        MIN_THERMOSTAT_BAND_C,
+        MAX_TANK_THERMOSTAT_BAND_C,
+    )
+
+
+def test_thermostat_band_range_is_the_target_class():
+    from ochre_next._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+
+    dwelling = _make_dwelling()
+    assert dwelling.thermostat_band_range("Gas Furnace") == (
+        MIN_THERMOSTAT_BAND_C,
+        MAX_HVAC_THERMOSTAT_BAND_C,
+    )
+    non_thermostats = [
+        n for n in dwelling.equipment_names() if n != "Gas Furnace" and "Water" not in n
+        and dwelling.thermostat_band_range(n) is None
+    ]
+    assert non_thermostats, "some equipment takes no band"
+
+
+def test_a_deadband_action_on_equipment_without_a_band_is_rejected():
+    dwelling = _make_dwelling()
+    no_band = next(n for n in dwelling.equipment_names() if dwelling.thermostat_band_range(n) is None)
+    with pytest.raises(ValueError, match="no thermostat band"):
+        DwellingGymEnv(
+            config=_DWELLING_CONFIG,
+            observation_fields=_OBS_FIELDS,
+            action_space_config={"Gas Furnace": ["heat_c"], no_band: ["setpoint_c", "deadband_c"]},
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_band_range_and_zip_each_carry_their_own_doc():
+    band_doc = PyDwelling.thermostat_band_range.__doc__
+    zip_doc = PyDwelling.equipment_zip.__doc__
+    assert band_doc is not None and zip_doc is not None
+    assert "deadband" in band_doc
+    assert "ZIP" in zip_doc
+    assert "deadband" not in zip_doc
+
+
+def test_vec_env_bounds_a_deadband_by_each_dwelling_s_target_class():
+    from ochre_next._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+
+    dwellings = [_make_dwelling(seed=i) for i in range(2)]
+    # The fixture's construction notices (base.xml gives no ShieldingofHome,
+    # which takes OS-HPXML's default) are not a step's warnings.
+    for dwelling in dwellings:
+        dwelling.take_warnings()
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config={"Gas Furnace": ["heat_c", "deadband_c"]},
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    column = env._action_layout.index(("Gas Furnace", "deadband_c"))
+    assert env._action_bounds[column] == (MIN_THERMOSTAT_BAND_C, MAX_HVAC_THERMOSTAT_BAND_C)
+    assert [field for _, field in env._action_layout] == ["deadband_c", "heat_c"]
+    _, _, _, _, infos = env.step(np.asarray([[30.0, 21.0], [30.0, 21.0]]))
+    assert [info["warning_count"] for info in infos] == [0.0, 0.0], "the band is clipped"
+
+
+class _DwellingWithBand:
+    """A dwelling whose furnace reports another thermostat class's range."""
+
+    def __init__(self, dwelling: PyDwelling, band: tuple[float, float]) -> None:
+        self._dwelling = dwelling
+        self._band = band
+
+    def thermostat_band_range(self, name: str) -> tuple[float, float]:
+        return self._band
+
+    def __getattr__(self, attr: str):
+        return getattr(self._dwelling, attr)
+
+
+def test_vec_env_refuses_a_fleet_whose_deadband_bounds_differ():
+    from ochre_next._hares import MAX_TANK_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+
+    other_class = _DwellingWithBand(
+        _make_dwelling(seed=1), (MIN_THERMOSTAT_BAND_C, MAX_TANK_THERMOSTAT_BAND_C)
+    )
+    with pytest.raises(ValueError, match="different bounds across the dwellings"):
+        VecDwellingGymEnv(
+            dwellings=[_make_dwelling(seed=0), cast(PyDwelling, other_class)],
+            observation_fields=_OBS_FIELDS,
+            action_space_config={"Gas Furnace": ["heat_c", "deadband_c"]},
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_deadband_action_without_a_setpoint_field_is_rejected():
+    with pytest.raises(ValueError, match="no setpoint field"):
+        sorted_action_layout({"HVAC": ["deadband_c"]})
+    layout, _ = sorted_action_layout({"HVAC": ["deadband_c", "heat_c"]})
+    assert [f for _, f in layout] == ["deadband_c", "heat_c"]
+
+
 def test_sorted_action_layout_preserves_equipment_sort_order():
-    layout, type_by_equip = _sorted_action_layout(
+    layout, type_by_equip = sorted_action_layout(
         {"B": ["reactive_power_kvar", "active_power_kw"], "A": ["active_power_kw"]}
     )
 
@@ -187,6 +337,7 @@ def test_vec_gym_random_policy_100_steps():
             duration_s=6000,
             time_res_s=60,
             master_seed=i,
+            write_output=False,
         )
         for i in range(n_dwel)
     ]
@@ -227,18 +378,20 @@ def test_apply_action_clips_at_bounds():
     before passing them to _build_control_signal."""
     env = _make_env()
     env.reset(seed=42)
-    low = env.action_space.low[0]
-    high = env.action_space.high[0]
+    action_space = env.action_space
+    assert isinstance(action_space, spaces.Box)
+    low = action_space.low[0]
+    high = action_space.high[0]
 
     from ochre_next.rl import gym_env
-    original = gym_env._build_control_signal
+    original = gym_env.build_control_signal
     captured = []
 
     def _spy(signal_type, values):
         captured.append(dict(values))
         return original(signal_type, values)
 
-    gym_env._build_control_signal = _spy
+    gym_env.build_control_signal = _spy
     try:
         # Above upper bound is clipped to high.
         env._apply_action(np.array([high + 100.0], dtype=np.float64))
@@ -259,18 +412,21 @@ def test_apply_action_clips_at_bounds():
             val = captured[0]["heat_c"]
             assert low <= val <= high, f"heat_c {val} should be in [{low}, {high}]"
     finally:
-        gym_env._build_control_signal = original
+        gym_env.build_control_signal = original
 
 
 def test_vec_gym_out_of_bounds_actions_no_nan():
     """100-step random-policy test with actions 10x the declared range.
 
-    Forces the Python fallback path (rust_batch_step = None) so that
-    _apply_controls — the method this ticket patches — is actually exercised.
-    Also spies on _build_control_signal to verify _apply_controls clips
-    action values to the declared action space bounds before forwarding them.
+    Runs on the extension's batch_step, which clips every action value to
+    the declared action-space bounds before applying it, so the
+    observations and rewards stay finite.
     """
     import ochre_next.rl.vec_env as ve
+
+    assert ve.rust_batch_step is not None, (
+        "the extension registers batch_step; without it the vec env does not import"
+    )
 
     n_dwel = 2
     obs_fields = ["total_power_kw", "outdoor_temp"]
@@ -284,6 +440,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
             duration_s=6000,
             time_res_s=60,
             master_seed=i,
+            write_output=False,
         )
         for i in range(n_dwel)
     ]
@@ -304,57 +461,23 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
         episode_length=timedelta(seconds=6000),
     )
 
-    low = env.action_space.low
-    high = env.action_space.high
+    low = env._action_low
+    high = env._action_high
     scale = 10.0
     rng = np.random.default_rng(42)
 
-    # Resolve action layout indices once — _sorted_action_layout sorts
-    # equipment names and fields alphabetically, so for the config above
-    # the layout is [("Batt", "active_power_kw"), ("Gas Furnace", "heat_c")].
-    heat_idx = next(i for i, (_, f) in enumerate(env._action_layout) if f == "heat_c")
-    power_idx = next(i for i, (_, f) in enumerate(env._action_layout) if f == "active_power_kw")
-
-    captured_signals = []
-    original_build = ve._build_control_signal
-
-    def _spy(signal_type, values):
-        captured_signals.append((signal_type, dict(values)))
-        return original_build(signal_type, values)
-
-    ve._build_control_signal = _spy
-    old_batch_step = ve.rust_batch_step
-    ve.rust_batch_step = None
-    try:
-        for step_idx in range(100):
-            actions = rng.uniform(low * scale, high * scale, size=(n_dwel, len(env._action_layout))).astype(np.float64)
-            step_obs, rewards, _dones, _truncs, _infos = env.step(actions)
-            assert step_obs.shape == (n_dwel, len(obs_fields)), (
-                f"obs shape mismatch at step {step_idx}"
-            )
-            assert np.all(np.isfinite(step_obs)), (
-                f"Non-finite observation at step {step_idx}: {step_obs}"
-            )
-            assert np.all(np.isfinite(rewards)), (
-                f"Non-finite reward at step {step_idx}: {rewards}"
-            )
-    finally:
-        ve.rust_batch_step = old_batch_step
-        ve._build_control_signal = original_build
-
-    # Verify all captured action values are within action space bounds.
-    assert captured_signals, "spy should have captured at least one signal"
-    for _signal_type, values in captured_signals:
-        if "heat_c" in values:
-            val = float(values["heat_c"])
-            assert low[heat_idx] <= val <= high[heat_idx], (
-                f"heat_c {val} should be in [{low[heat_idx]}, {high[heat_idx]}]"
-            )
-        if "active_power_kw" in values:
-            val = float(values["active_power_kw"])
-            assert low[power_idx] <= val <= high[power_idx], (
-                f"active_power_kw {val} should be in [{low[power_idx]}, {high[power_idx]}]"
-            )
+    for step_idx in range(100):
+        actions = rng.uniform(low * scale, high * scale, size=(n_dwel, len(env._action_layout))).astype(np.float64)
+        step_obs, rewards, _dones, _truncs, _infos = env.step(actions)
+        assert step_obs.shape == (n_dwel, len(obs_fields)), (
+            f"obs shape mismatch at step {step_idx}"
+        )
+        assert np.all(np.isfinite(step_obs)), (
+            f"Non-finite observation at step {step_idx}: {step_obs}"
+        )
+        assert np.all(np.isfinite(rewards)), (
+            f"Non-finite reward at step {step_idx}: {rewards}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +487,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
 
 def test_observation_field_bounds_all_finite():
     """Every known observation key (and the fallback) returns finite bounds."""
-    from ochre_next.rl.gym_env import _observation_field_bounds
+    from ochre_next.rl.gym_env import observation_field_bounds
 
     fields = [
         "outdoor_temp",
@@ -386,7 +509,7 @@ def test_observation_field_bounds_all_finite():
         "unknown_field",
     ]
     for field in fields:
-        low, high = _observation_field_bounds(field)
+        low, high = observation_field_bounds(field)
         assert np.isfinite(low), f"low bound {low} is not finite for field {field!r}"
         assert np.isfinite(high), f"high bound {high} is not finite for field {field!r}"
         assert not np.isnan(low), f"low bound is NaN for field {field!r}"
@@ -397,8 +520,8 @@ def test_observation_field_bounds_all_finite():
 def test_observation_space_bounds_all_finite():
     """Observation space arrays must contain no -inf or +inf values."""
     env = _make_env()
-    low = np.asarray(env.observation_space.low, dtype=np.float64)
-    high = np.asarray(env.observation_space.high, dtype=np.float64)
+    low = np.asarray(_obs_box(env).low, dtype=np.float64)
+    high = np.asarray(_obs_box(env).high, dtype=np.float64)
     assert np.all(np.isfinite(low)), f"non-finite low bounds: {low}"
     assert np.all(np.isfinite(high)), f"non-finite high bounds: {high}"
 
@@ -456,8 +579,8 @@ def test_field_bounds_overrides_apply():
         episode_length=timedelta(minutes=5),
         field_bounds_overrides={"total_power_kw": (-200.0, 200.0)},
     )
-    low = env.observation_space.low
-    high = env.observation_space.high
+    low = _obs_box(env).low
+    high = _obs_box(env).high
     total_power_idx = _OBS_FIELDS.index("total_power_kw")
     assert np.isclose(float(low[total_power_idx]), -200.0), f"override low not applied: {low}"
     assert np.isclose(float(high[total_power_idx]), 200.0), f"override high not applied: {high}"
@@ -477,7 +600,7 @@ def test_observation_field_bounds_case_insensitive():
         (" equipment_power[Gas Furnace]", (0.0, 100.0)),
     ]
     for field, expected in tests:
-        low, high = _observation_field_bounds(field)
+        low, high = observation_field_bounds(field)
         assert low == expected[0] and high == expected[1], (
             f"{field!r}: expected {expected}, got ({low}, {high})"
         )
@@ -486,7 +609,7 @@ def test_observation_field_bounds_case_insensitive():
 def test_observation_field_bounds_broad_fallback_is_finite():
     """Unrecognised fields return the broad but finite fallback, not ±inf."""
     for field in ("giraffe_temp_c", "  fluffy_rh  "):
-        low, high = _observation_field_bounds(field)
+        low, high = observation_field_bounds(field)
         assert np.isfinite(low), f"fallback low {low} not finite for {field!r}"
         assert np.isfinite(high), f"fallback high {high} not finite for {field!r}"
         assert low < high, f"fallback bounds inverted for {field!r}"
@@ -502,8 +625,8 @@ def test_vec_gym_observation_space_bounds_finite():
         reward_fn=lambda ctx: -ctx["total_power_kw"],
         episode_length=timedelta(minutes=5),
     )
-    low = np.asarray(env.observation_space.low, dtype=np.float64)
-    high = np.asarray(env.observation_space.high, dtype=np.float64)
+    low = np.asarray(_obs_box(env).low, dtype=np.float64)
+    high = np.asarray(_obs_box(env).high, dtype=np.float64)
     assert np.all(np.isfinite(low)), f"non-finite low bounds in VecDwellingGymEnv: {low}"
     assert np.all(np.isfinite(high)), f"non-finite high bounds in VecDwellingGymEnv: {high}"
 
@@ -539,9 +662,9 @@ def test_vec_gym_field_bounds_overrides_in_info():
 
 def test_observation_field_bounds_time_sin_cos():
     """time_sin and time_cos have bounds [-1, 1]."""
-    low, high = _observation_field_bounds("time_sin")
+    low, high = observation_field_bounds("time_sin")
     assert low == -1.0 and high == 1.0, f"time_sin: ({low}, {high})"
-    low, high = _observation_field_bounds("time_cos")
+    low, high = observation_field_bounds("time_cos")
     assert low == -1.0 and high == 1.0, f"time_cos: ({low}, {high})"
 
 
@@ -571,8 +694,8 @@ def test_time_sin_cos_observation_space_finite():
         reward_fn=lambda ctx: -ctx["total_power_kw"],
         episode_length=timedelta(minutes=5),
     )
-    low = np.asarray(env.observation_space.low, dtype=np.float64)
-    high = np.asarray(env.observation_space.high, dtype=np.float64)
+    low = np.asarray(_obs_box(env).low, dtype=np.float64)
+    high = np.asarray(_obs_box(env).high, dtype=np.float64)
     assert np.all(np.isfinite(low)), f"non-finite low: {low}"
     assert np.all(np.isfinite(high)), f"non-finite high: {high}"
     assert np.isclose(float(low[0]), -1.0)
@@ -851,7 +974,7 @@ def test_vec_gym_reset_observation_nan_and_mask():
         assert len(infos) == 4
         for info in infos:
             mask = info.get("initial_observation_mask")
-            assert mask is not None, "reset info must include initial_observation_mask"
+            assert isinstance(mask, np.ndarray), "reset info must include initial_observation_mask"
             assert mask.shape == (len(_OBS_FIELDS),)
             assert np.all(mask), "all fields should be masked (NaN) on initial observation"
 

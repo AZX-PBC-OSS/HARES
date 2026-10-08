@@ -2,7 +2,14 @@ use chrono::{DateTime, Datelike, Duration, Timelike};
 use chrono_tz::Tz;
 use hares_types::{HaresError, season_contains_month};
 
-use crate::billing::{BillingPeriodSummary, BillingState, compute_tiered_energy_cost};
+use crate::billing::{
+    BillingPeriodCharges, BillingPeriodSummary, BillingState, BillingStep,
+    compute_tiered_energy_cost, containing_period_start,
+};
+use crate::snapshot::{
+    TARIFF_SNAPSHOT_SCHEMA_VERSION, TariffSnapshot, datetime_from_string, datetime_to_string,
+    parse_zone,
+};
 use crate::types::{ElectricTariff, ExportMode};
 
 pub struct TariffEvaluator {
@@ -75,6 +82,18 @@ pub struct TariffEvaluator {
     pub shoulder_months: Vec<u32>,
 }
 
+/// The largest ratchet lookback any demand rate declares, for
+/// `BillingState`'s prior-peak history bound.
+fn max_ratchet_lookback(tariff: &ElectricTariff) -> u32 {
+    tariff
+        .demand_rates
+        .iter()
+        .filter_map(|dr| dr.ratchet.as_ref())
+        .map(|r| u32::from(r.lookback_months))
+        .max()
+        .unwrap_or(0)
+}
+
 impl TariffEvaluator {
     pub fn new(
         tariff: ElectricTariff,
@@ -125,10 +144,10 @@ impl TariffEvaluator {
             }
         }
         for dr in &tariff.demand_rates {
-            if let Some(name) = &dr.period_name {
-                if !period_name_table.contains(name) {
-                    period_name_table.push(name.clone());
-                }
+            if let Some(name) = &dr.period_name
+                && !period_name_table.contains(name)
+            {
+                period_name_table.push(name.clone());
             }
         }
 
@@ -153,44 +172,6 @@ impl TariffEvaluator {
         let shoulder_months: Vec<u32> = seasonal_split
             .map(|ss| (1..=12u32).filter(|&m| ss.is_shoulder(m as u8)).collect())
             .unwrap_or_default();
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if let Some(split) = seasonal_split {
-            if split.has_seasonal() {
-                for m in 1..=12u8 {
-                    let split_summer = split.is_summer(m);
-                    let default_summer = (6..=9).contains(&m);
-                    if split_summer != default_summer {
-                        tracing::debug!(
-                            month = m,
-                            split_summer,
-                            default_summer,
-                            summer_start = split.summer_start_month,
-                            summer_end = split.summer_end_month,
-                            "SeasonalSplit reclassifies month relative to June–September default"
-                        );
-                    }
-                }
-            }
-            if split.has_shoulder() {
-                for m in 1..=12u8 {
-                    if split.is_summer(m) && split.is_shoulder(m) {
-                        debug_assert!(
-                            false,
-                            "SeasonalSplit shoulder range overlaps with summer range at month {m}"
-                        );
-                        tracing::error!(
-                            month = m,
-                            summer_start = split.summer_start_month,
-                            summer_end = split.summer_end_month,
-                            shoulder_start = split.shoulder_start,
-                            shoulder_end = split.shoulder_end,
-                            "SeasonalSplit shoulder range overlaps with summer range; shoulder takes precedence"
-                        );
-                    }
-                }
-            }
-        }
 
         for i in 0..num_steps {
             let ts = simulation_start + Duration::seconds(i as i64 * interval_seconds as i64);
@@ -317,13 +298,7 @@ impl TariffEvaluator {
 
         // Compute max lookback across all demand rates' ratchets so BillingState
         // retains enough history for any per-rate ratchet to work.
-        let max_lookback_months = tariff
-            .demand_rates
-            .iter()
-            .filter_map(|dr| dr.ratchet.as_ref())
-            .map(|r| r.lookback_months)
-            .max()
-            .unwrap_or(0);
+        let max_lookback_months = max_ratchet_lookback(&tariff);
 
         let demand_window_minutes = tariff.demand_window_minutes;
         // When the demand window is shorter than the simulation interval,
@@ -332,12 +307,8 @@ impl TariffEvaluator {
         // warn when the window is longer than the interval but not evenly
         // divisible -- that silently truncates the averaging window.
         let window_seconds = demand_window_minutes as u64 * 60;
-        // Why: clippy::manual_is_multiple_of fires on `a % b != 0` even when the
-        // semantics are "is not evenly divisible" — the guard checks
-        // non-divisibility, not divisibility, and `is_multiple_of()` reads
-        // awkwardly when negated.
-        #[allow(clippy::manual_is_multiple_of)]
-        if window_seconds > interval_seconds as u64 && window_seconds % interval_seconds as u64 != 0
+        if window_seconds > interval_seconds as u64
+            && !window_seconds.is_multiple_of(interval_seconds as u64)
         {
             return Err(HaresError::Tariff(format!(
                 "demand_window_minutes ({demand_window_minutes}) must be evenly \
@@ -350,7 +321,7 @@ impl TariffEvaluator {
             tariff.billing_cycle,
             demand_window_minutes,
             interval_seconds,
-            max_lookback_months.into(),
+            max_lookback_months,
             period_name_table.len(),
         );
 
@@ -491,15 +462,10 @@ impl TariffEvaluator {
         let export_price = self.current_export_price();
 
         // Resolve effective import price: CPP event override.
+        // The event schedule's length is validated to exactly 8760 entries by
+        // `CppConfig::validate` at construction, so an out-of-range hour
+        // cannot exist and no per-step scan is needed here.
         let ci = self.clamped_index();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if let Some(ref cpp) = self.tariff.cpp_config {
-                for (i, &val) in cpp.event_schedule.iter().enumerate() {
-                    debug_assert!(val == 0 || i < 8760, "cpp event_schedule index {i} >= 8760");
-                }
-            }
-        }
         let _cpp_active = if let Some(ref cpp) = self.tariff.cpp_config {
             let hoy = self.hour_of_year_array[ci];
             let is_event = cpp.event_schedule.get(hoy).copied().unwrap_or(0) != 0;
@@ -572,7 +538,11 @@ impl TariffEvaluator {
             }
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Debug-build wiring tripwires only: `Tariff::validate` enforces
+        // schedule lengths and value finiteness at construction, so these
+        // cannot fire on a constructed tariff; release builds compile the
+        // block out.
+        #[cfg(debug_assertions)]
         {
             if let Some(ref cpp) = self.tariff.cpp_config {
                 debug_assert!(
@@ -617,51 +587,18 @@ impl TariffEvaluator {
 
         let period_idx = self.period_indices[self.step_index];
         let demand_period_idx = self.demand_period_indices[self.step_index];
-        self.billing_state.update(
+        self.billing_state.update(BillingStep {
             net_power_kw,
             dt_seconds,
-            effective_import_price,
+            import_price: effective_import_price,
             export_price,
             period_idx,
             demand_period_idx,
             ev_import_kwh,
-        );
+        });
 
         let result = if current_time >= self.billing_state.period_end {
-            let month = self.billing_state.period_start.month() as u8;
-
-            let demand_charge = self.compute_demand_charge(month);
-
-            let days_in_period =
-                (self.billing_state.period_end - self.billing_state.period_start).num_days() as f64;
-            let fixed_charge = self.tariff.fixed_charges.monthly_usd
-                + self.tariff.fixed_charges.daily_usd * days_in_period;
-
-            let energy_charge = compute_tiered_energy_cost(
-                self.billing_state.cumulative_import_kwh,
-                &self.tariff.tiered_rates,
-                month,
-                self.tariff.seasonal_split.as_ref(),
-                self.billing_state.cumulative_energy_cost_usd,
-            );
-            let export_credit = self.billing_state.cumulative_export_credit_usd;
-
-            let summary = BillingPeriodSummary::new(
-                self.billing_state.period_start,
-                self.billing_state.period_end,
-                energy_charge,
-                demand_charge,
-                fixed_charge,
-                export_credit,
-                self.tariff.minimum_charge,
-                self.tariff.minimum_charge_excludes_export,
-                self.billing_state.peak_demand_kw,
-                self.billing_state.cumulative_import_kwh,
-                self.billing_state.cumulative_export_kwh,
-            );
-
-            self.billing_state.reset(self.billing_state.period_end);
-            Some(summary)
+            Some(self.close_period(self.billing_state.period_end))
         } else {
             None
         };
@@ -670,6 +607,133 @@ impl TariffEvaluator {
             self.finished = true;
         }
         result
+    }
+
+    /// Closes the open billing period at `close_time` and reopens the next
+    /// one at its boundary, returning the closing period's summary.
+    ///
+    /// A period the tariff joined mid-way (the attach or switch instant is
+    /// the open period's `active_since`) keeps the cycle's boundary
+    /// structure but bills its fixed and demand charges prorated to the
+    /// active span: the active span over the period's full length, applied
+    /// to both the monthly-plus-daily fixed charge and the demand charge.
+    /// A period opened at its own boundary multiplies nothing, so runs that
+    /// never attach or replace a tariff close periods exactly as this
+    /// proration never touches them.
+    fn close_period(&mut self, close_time: DateTime<Tz>) -> BillingPeriodSummary {
+        let period_start = self.billing_state.period_start;
+        let period_end = self.billing_state.period_end;
+        let month = period_start.month() as u8;
+
+        let demand_charge = self.compute_demand_charge(month);
+
+        let days_in_period = (period_end - period_start).num_days() as f64;
+        let fixed_charge = self.tariff.fixed_charges.monthly_usd
+            + self.tariff.fixed_charges.daily_usd * days_in_period;
+
+        let energy_charge = compute_tiered_energy_cost(
+            self.billing_state.cumulative_import_kwh,
+            &self.tariff.tiered_rates,
+            month,
+            self.tariff.seasonal_split.as_ref(),
+            self.billing_state.cumulative_energy_cost_usd,
+        );
+        let export_credit = self.billing_state.cumulative_export_credit_usd;
+
+        let active_since = self.billing_state.active_since;
+        let (fixed_charge, demand_charge) =
+            if active_since > period_start || close_time < period_end {
+                let fraction = self.active_span_fraction(close_time);
+                (fixed_charge * fraction, demand_charge * fraction)
+            } else {
+                // The boundary close of a period the tariff served from its
+                // own start: multiply nothing.
+                (fixed_charge, demand_charge)
+            };
+
+        let summary = BillingPeriodSummary::new(
+            period_start,
+            period_end.min(close_time),
+            BillingPeriodCharges {
+                energy_charge_usd: energy_charge,
+                demand_charge_usd: demand_charge,
+                fixed_charge_usd: fixed_charge,
+                export_credit_usd: export_credit,
+                minimum_charge: self.tariff.minimum_charge,
+                minimum_charge_excludes_export: self.tariff.minimum_charge_excludes_export,
+                peak_demand_kw: self.billing_state.peak_demand_kw,
+                total_import_kwh: self.billing_state.cumulative_import_kwh,
+                total_export_kwh: self.billing_state.cumulative_export_kwh,
+            },
+        );
+
+        self.billing_state.reset(period_end);
+        summary
+    }
+
+    /// Re-anchors the open billing period to the one containing
+    /// `attach_time` and marks the tariff active from that instant.
+    ///
+    /// A tariff attached after step 0 bills from the period containing the
+    /// attach step: the period keeps the billing cycle's boundary structure
+    /// (the walk follows the same boundary chain the stepping evaluator
+    /// closes on), and its fixed and demand charges prorate to the span
+    /// from the attach instant to the period end. Nothing bills for the
+    /// time before the attach: no summary exists for it, and the containing
+    /// period's charges cover only the active span.
+    ///
+    /// The convention at an exact period boundary: the attach opens the new
+    /// period, and the boundary step's energy books to it; a from-start run
+    /// folds that step into the old period (its close fires on the fold
+    /// whose time reaches the boundary, after the fold books). One step's
+    /// attribution differs by design; every kWh is billed exactly once.
+    pub fn activate_at(&mut self, attach_time: DateTime<Tz>) {
+        let cycle = self.tariff.billing_cycle;
+        let period_start = containing_period_start(self.simulation_start, attach_time, cycle);
+        self.billing_state = BillingState::new(
+            period_start,
+            cycle,
+            self.tariff.demand_window_minutes,
+            self.interval_seconds,
+            self.max_ratchet_lookback(),
+            self.period_name_table.len(),
+        );
+        self.billing_state.active_since = attach_time;
+    }
+
+    /// Closes the open billing period ahead of a tariff replacement at
+    /// `at`, returning the outgoing period's summary: the bill exists, with
+    /// the outgoing tariff's accruals and its fixed and demand charges
+    /// prorated to the span it served.
+    ///
+    /// Returns `None` when the evaluator has already finalized (its open
+    /// period closed then, and a second close would double-bill) or when no
+    /// step has been folded into the open period (a period holding nothing
+    /// billable closes nothing; the boundary close that opened it already
+    /// billed through the boundary).
+    pub fn close_open_period(&mut self, at: DateTime<Tz>) -> Option<BillingPeriodSummary> {
+        if self.finalized || self.billing_state.steps_in_period == 0 {
+            return None;
+        }
+        Some(self.close_period(at))
+    }
+
+    /// The largest ratchet lookback any demand rate declares, for
+    /// `BillingState`'s prior-peak history bound.
+    fn max_ratchet_lookback(&self) -> u32 {
+        max_ratchet_lookback(&self.tariff)
+    }
+
+    /// The share of the open period's span the tariff has served by
+    /// `close_time`: the elapsed-fraction rule a period the tariff joined
+    /// mid-way bills its fixed and demand charges by.
+    fn active_span_fraction(&self, close_time: DateTime<Tz>) -> f64 {
+        let span_seconds =
+            (self.billing_state.period_end - self.billing_state.period_start).num_seconds() as f64;
+        let active_seconds = (close_time - self.billing_state.active_since)
+            .num_seconds()
+            .max(0) as f64;
+        active_seconds / span_seconds
     }
 
     fn compute_demand_charge(&self, month: u8) -> f64 {
@@ -696,7 +760,13 @@ impl TariffEvaluator {
                 };
                 peak * dr.rate_per_kw
             })
-            .sum()
+            .sum::<f64>()
+            // An empty (or all-filtered) rate list's sum carries the sign of
+            // the reduction's initialization, which is compiler latitude for
+            // floats (rustc 1.94 emits -0.0 here): adding the positive zero
+            // pins the sign (+0.0 + -0.0 = +0.0) without touching any other
+            // value, so the summary's bits do not depend on the toolchain.
+            + 0.0
     }
 
     /// Snapshot of the current billing period without closing it.
@@ -712,7 +782,10 @@ impl TariffEvaluator {
         let current_time = self.simulation_start
             + Duration::seconds(self.step_index as i64 * self.interval_seconds as i64);
         let actual_end = current_time.min(self.billing_state.period_end());
-        let elapsed_days = (actual_end - self.billing_state.period_start())
+        // The fixed charges count the days the tariff was active in the open
+        // period: the period start for a period opened at its boundary, the
+        // attach or switch instant for one the tariff joined mid-way.
+        let elapsed_days = (actual_end - self.billing_state.active_since)
             .num_days()
             .max(0) as f64;
         let fixed_charge = self.tariff.fixed_charges.monthly_usd
@@ -730,15 +803,17 @@ impl TariffEvaluator {
         BillingPeriodSummary::new(
             self.billing_state.period_start(),
             actual_end,
-            energy_charge,
-            demand_charge,
-            fixed_charge,
-            export_credit,
-            self.tariff.minimum_charge,
-            self.tariff.minimum_charge_excludes_export,
-            self.billing_state.peak_demand_kw(),
-            self.billing_state.cumulative_import_kwh(),
-            self.billing_state.cumulative_export_kwh(),
+            BillingPeriodCharges {
+                energy_charge_usd: energy_charge,
+                demand_charge_usd: demand_charge,
+                fixed_charge_usd: fixed_charge,
+                export_credit_usd: export_credit,
+                minimum_charge: self.tariff.minimum_charge,
+                minimum_charge_excludes_export: self.tariff.minimum_charge_excludes_export,
+                peak_demand_kw: self.billing_state.peak_demand_kw(),
+                total_import_kwh: self.billing_state.cumulative_import_kwh(),
+                total_export_kwh: self.billing_state.cumulative_export_kwh(),
+            },
         )
     }
 
@@ -764,9 +839,13 @@ impl TariffEvaluator {
 
     /// Emit the final partial billing period. Call after the last `step()`.
     ///
-    /// `sim_end` is the actual simulation end time, used to prorate fixed
-    /// charges for partial periods. If the simulation ends mid-month, only
-    /// the elapsed days are charged.
+    /// `sim_end` is the actual simulation end time, used to prorate charges
+    /// for partial periods. A period the tariff joined mid-way bills its
+    /// fixed and demand charges prorated to the active span, exactly what a
+    /// replacement close at `sim_end` would bill; a period the tariff served
+    /// from its start bills the full monthly charge plus the daily charge
+    /// for the days elapsed. If the simulation ends mid-month, only the
+    /// active span's share is charged.
     ///
     /// Returns `None` on second call (idempotent -- `finalized` flag prevents double-billing).
     /// Returns `Some` even with zero metered load, as fixed charges may apply.
@@ -780,15 +859,35 @@ impl TariffEvaluator {
         let month = self.billing_state.period_start().month() as u8;
         let demand_charge = self.compute_demand_charge(month);
 
-        // Prorate fixed charges: use actual elapsed days, not the full
-        // scheduled period length. Clamp to period end in case sim_end
-        // exceeds the billing period boundary.
+        // Clamp to period end in case sim_end exceeds the billing period
+        // boundary.
         let actual_end = sim_end.min(self.billing_state.period_end());
-        let elapsed_days = (actual_end - self.billing_state.period_start())
-            .num_days()
-            .max(0) as f64;
-        let fixed_charge = self.tariff.fixed_charges.monthly_usd
-            + self.tariff.fixed_charges.daily_usd * elapsed_days;
+
+        // The joined case follows close_period's arithmetic term for term, so
+        // the finalize's bill is bitwise the replacement close of the same
+        // instant: the period's full fixed charge (the monthly plus the
+        // period's day count) and its demand charge, each multiplied by the
+        // active-span fraction. The from-start case is unchanged: the full
+        // monthly charge plus the daily charge for the days elapsed.
+        let (fixed_charge, demand_charge) = if self.billing_state.active_since
+            > self.billing_state.period_start
+        {
+            let days_in_period =
+                (self.billing_state.period_end - self.billing_state.period_start).num_days() as f64;
+            let full_fixed = self.tariff.fixed_charges.monthly_usd
+                + self.tariff.fixed_charges.daily_usd * days_in_period;
+            let fraction = self.active_span_fraction(actual_end);
+            (full_fixed * fraction, demand_charge * fraction)
+        } else {
+            // The days count from the period start, clamped to the
+            // period end.
+            let elapsed_days = (actual_end - self.billing_state.period_start)
+                .num_days()
+                .max(0) as f64;
+            let fixed_charge = self.tariff.fixed_charges.monthly_usd
+                + self.tariff.fixed_charges.daily_usd * elapsed_days;
+            (fixed_charge, demand_charge)
+        };
 
         let energy_charge = compute_tiered_energy_cost(
             self.billing_state.cumulative_import_kwh(),
@@ -807,16 +906,86 @@ impl TariffEvaluator {
         Some(BillingPeriodSummary::new(
             start,
             end,
-            energy_charge,
-            demand_charge,
-            fixed_charge,
-            export_credit,
-            self.tariff.minimum_charge,
-            self.tariff.minimum_charge_excludes_export,
-            peak,
-            import,
-            export,
+            BillingPeriodCharges {
+                energy_charge_usd: energy_charge,
+                demand_charge_usd: demand_charge,
+                fixed_charge_usd: fixed_charge,
+                export_credit_usd: export_credit,
+                minimum_charge: self.tariff.minimum_charge,
+                minimum_charge_excludes_export: self.tariff.minimum_charge_excludes_export,
+                peak_demand_kw: peak,
+                total_import_kwh: import,
+                total_export_kwh: export,
+            },
         ))
+    }
+
+    /// The evaluator's full mutable state as a serializable snapshot; the
+    /// counterpart of [`TariffEvaluator::from_snapshot`].
+    #[must_use]
+    pub fn snapshot_state(&self) -> TariffSnapshot {
+        TariffSnapshot {
+            schema_version: TARIFF_SNAPSHOT_SCHEMA_VERSION,
+            tariff: self.tariff.clone(),
+            timezone: self.simulation_start.timezone().name().to_string(),
+            simulation_start: datetime_to_string(self.simulation_start),
+            interval_seconds: self.interval_seconds,
+            total_steps: self.price_array.len(),
+            step_index: self.step_index,
+            finished: self.finished,
+            finalized: self.finalized,
+            billing: self.billing_state.snapshot(),
+        }
+    }
+
+    /// Rebuilds an evaluator from its snapshot.
+    ///
+    /// The price arrays are recomputed from the tariff and the horizon,
+    /// which determine them exactly; every piece of mutable state (the
+    /// price-index position, the open period, the accruals, the demand
+    /// window's contents and the flags) is restored from the snapshot, so
+    /// the rebuilt evaluator's later steps and billing summaries are bitwise
+    /// those of the run the snapshot came from.
+    ///
+    /// # Errors
+    ///
+    /// A snapshot schema version mismatch, an unparseable zone or timestamp,
+    /// a tariff that fails validation, or peak vectors whose length does not
+    /// match the tariff's TOU period count.
+    pub fn from_snapshot(snapshot: &TariffSnapshot) -> Result<Self, HaresError> {
+        if snapshot.schema_version != TARIFF_SNAPSHOT_SCHEMA_VERSION {
+            return Err(HaresError::Tariff(format!(
+                "tariff snapshot version mismatch: snapshot={}, expected={}",
+                snapshot.schema_version, TARIFF_SNAPSHOT_SCHEMA_VERSION
+            )));
+        }
+        let tz = parse_zone(&snapshot.timezone)?;
+        let simulation_start =
+            datetime_from_string(tz, "simulation_start", &snapshot.simulation_start)?;
+        let simulation_end = simulation_start
+            + Duration::seconds(snapshot.total_steps as i64 * snapshot.interval_seconds as i64);
+        let mut evaluator = TariffEvaluator::new(
+            snapshot.tariff.clone(),
+            simulation_start,
+            simulation_end,
+            snapshot.interval_seconds,
+        )?;
+        if !snapshot.finished && snapshot.step_index >= evaluator.price_array.len() {
+            return Err(HaresError::Tariff(format!(
+                "tariff snapshot step_index {} out of bounds for {} steps",
+                snapshot.step_index,
+                evaluator.price_array.len()
+            )));
+        }
+        evaluator.step_index = snapshot.step_index;
+        evaluator.finished = snapshot.finished;
+        evaluator.finalized = snapshot.finalized;
+        evaluator.billing_state = BillingState::from_snapshot(
+            snapshot.billing.clone(),
+            tz,
+            evaluator.period_name_table.len(),
+        )?;
+        Ok(evaluator)
     }
 }
 
@@ -2030,6 +2199,287 @@ mod tests {
             (s.net_bill_usd - 50.0).abs() < 1e-6,
             "excludes_export=false: net should be floored to $50.00, got ${:.2}",
             s.net_bill_usd
+        );
+    }
+
+    // The attach-period rule: a tariff activated mid-period keeps the
+    // cycle's boundary structure (the January period still ends Feb 1) and
+    // its fixed and demand charges prorate to the span from the attach
+    // instant to the period end.
+    #[test]
+    fn activate_at_mid_period_prorates_fixed_and_demand_charges() {
+        use crate::types::DemandRate;
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 3, 1);
+        let interval = 3600u32;
+        let mut tariff = flat_tariff(0.12);
+        tariff.fixed_charges = FixedCharges {
+            monthly_usd: 10.0,
+            daily_usd: 1.0,
+        };
+        tariff.demand_rates = vec![DemandRate {
+            period_name: None,
+            season: SeasonFilter::All,
+            rate_per_kw: 5.0,
+            ratchet: None,
+        }];
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        // Activate at Jan 17 00:00: the containing period is [Jan 1, Feb 1).
+        let attach = make_start(2025, 1, 17);
+        ev.activate_at(attach);
+
+        let total = ev.total_steps();
+        let mut summaries = Vec::new();
+        for i in 0..total {
+            let step_end = start + Duration::seconds((i as i64 + 1) * interval as i64);
+            if let Some(s) = ev.step(1.0, 0.0, interval as f64, step_end) {
+                summaries.push(s);
+            }
+        }
+
+        assert_eq!(summaries.len(), 2, "one close per period boundary");
+        let january = &summaries[0];
+        assert_eq!(january.period_start, make_start(2025, 1, 1));
+        assert_eq!(january.period_end, make_start(2025, 2, 1));
+
+        // The proration: 15 of January's 31 days active.
+        let fraction = (make_start(2025, 2, 1) - attach).num_seconds() as f64
+            / (make_start(2025, 2, 1) - start).num_seconds() as f64;
+        let expected_fixed = (10.0 + 1.0 * 31.0) * fraction;
+        let expected_demand = 1.0 * 5.0 * fraction;
+        assert_eq!(
+            january.fixed_charge_usd.to_bits(),
+            expected_fixed.to_bits(),
+            "the first period's fixed charge is the full charge by the active fraction"
+        );
+        assert_eq!(
+            january.demand_charge_usd.to_bits(),
+            expected_demand.to_bits(),
+            "the first period's demand charge is the full charge by the active fraction"
+        );
+
+        // February, a period opened at its own boundary, bills in full: its
+        // summary is bitwise the one a from-start run's February would give
+        // (28 days, full charges).
+        let february = &summaries[1];
+        assert_eq!(february.period_start, make_start(2025, 2, 1));
+        assert_eq!(february.period_end, make_start(2025, 3, 1));
+        assert_eq!(
+            february.fixed_charge_usd.to_bits(),
+            (10.0_f64 + 1.0_f64 * 28.0).to_bits()
+        );
+    }
+
+    // A tariff activated exactly at a period boundary opens that period in
+    // full: no proration, bitwise the from-start close.
+    #[test]
+    fn activate_at_a_period_boundary_bills_in_full() {
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 3, 1);
+        let interval = 3600u32;
+        let mut tariff = flat_tariff(0.12);
+        tariff.fixed_charges = FixedCharges {
+            monthly_usd: 10.0,
+            daily_usd: 0.0,
+        };
+        let mut from_start = make_evaluator(tariff.clone(), start, end, interval);
+        let mut attached = make_evaluator(tariff, start, end, interval);
+
+        // The from-start run steps January; the attached run activates at
+        // the February boundary and steps February only.
+        let total = from_start.total_steps();
+        let january_hours = 31 * 24;
+        for i in 0..total {
+            let step_end = start + Duration::seconds((i as i64 + 1) * interval as i64);
+            let (a, b) = (from_start.step(2.0, 0.0, interval as f64, step_end), {
+                if i >= january_hours {
+                    attached.step(2.0, 0.0, interval as f64, step_end)
+                } else {
+                    None
+                }
+            });
+            if i + 1 < january_hours {
+                assert!(a.is_none() && b.is_none());
+            } else if i + 1 == january_hours {
+                // The from-start run closes January with full charges; the
+                // attached run has stepped nothing yet.
+                assert!(a.is_some() && b.is_none());
+                attached.activate_at(step_end);
+            } else {
+                assert_eq!(a.is_some(), b.is_some());
+                if let (Some(a), Some(b)) = (a, b) {
+                    assert_eq!(a.period_start, b.period_start);
+                    assert_eq!(a.period_end, b.period_end);
+                    assert_eq!(a.fixed_charge_usd.to_bits(), b.fixed_charge_usd.to_bits());
+                    assert_eq!(a.energy_charge_usd.to_bits(), b.energy_charge_usd.to_bits());
+                    assert_eq!(a.total_import_kwh.to_bits(), b.total_import_kwh.to_bits());
+                }
+            }
+        }
+    }
+
+    // Replacing a tariff: the outgoing open period closes with its
+    // accruals, its fixed and demand charges prorated to the served span.
+    #[test]
+    fn close_open_period_returns_the_accrued_bill() {
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 3, 1);
+        let interval = 3600u32;
+        let mut tariff = flat_tariff(0.12);
+        tariff.fixed_charges = FixedCharges {
+            monthly_usd: 10.0,
+            daily_usd: 1.0,
+        };
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        // Ten days of load, then the switch mid-period.
+        for i in 0..240 {
+            let step_end = start + Duration::seconds((i as i64 + 1) * interval as i64);
+            ev.step(2.0, 0.0, interval as f64, step_end);
+        }
+        let switch = start + Duration::seconds(240 * 3600);
+        let bill = ev.close_open_period(switch).expect("the bill exists");
+
+        assert_eq!(bill.period_start, make_start(2025, 1, 1));
+        assert_eq!(bill.period_end, switch);
+        // The accruals: 240 hours at 2 kW = 480 kWh at $0.12.
+        assert_eq!(bill.total_import_kwh.to_bits(), 480.0_f64.to_bits());
+        let fraction = (switch - start).num_seconds() as f64
+            / (make_start(2025, 2, 1) - start).num_seconds() as f64;
+        let expected_fixed = (10.0 + 1.0 * 31.0) * fraction;
+        assert_eq!(bill.fixed_charge_usd.to_bits(), expected_fixed.to_bits());
+
+        // The second close returns nothing: the period closed.
+        assert!(ev.close_open_period(switch).is_none());
+    }
+
+    // A period that folded no step holds nothing billable: closing it
+    // returns None.
+    #[test]
+    fn close_open_period_skips_a_period_that_folded_no_step() {
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 3, 1);
+        let interval = 3600u32;
+        let mut ev = make_evaluator(flat_tariff(0.12), start, end, interval);
+        let switch = start + Duration::seconds(48 * 3600);
+        assert!(ev.close_open_period(switch).is_none());
+    }
+
+    // A finalize of a period the tariff joined mid-way bills the same fixed
+    // and demand charges a replacement close at the same instant bills: the
+    // active-span fraction applied to both. The unprorated finalize would
+    // bill the full monthly charge and the full demand charge.
+    #[test]
+    fn finalize_of_a_joined_period_bills_the_replacement_close_of_the_same_instant() {
+        use crate::types::DemandRate;
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 3, 1);
+        let interval = 3600u32;
+        let mut tariff = flat_tariff(0.12);
+        tariff.fixed_charges = FixedCharges {
+            monthly_usd: 10.0,
+            daily_usd: 1.0,
+        };
+        tariff.demand_rates = vec![DemandRate {
+            period_name: None,
+            season: SeasonFilter::All,
+            rate_per_kw: 5.0,
+            ratchet: None,
+        }];
+
+        let attach = make_start(2025, 1, 17);
+        let sim_end = make_start(2025, 1, 24);
+        let hours = (sim_end - attach).num_hours() as usize;
+
+        // The finalizing run: the tariff attached mid-period, folded to
+        // sim_end, finalized there.
+        let mut finalizing = make_evaluator(tariff.clone(), start, end, interval);
+        finalizing.activate_at(attach);
+        for i in 0..hours {
+            let t = attach + Duration::seconds((i as i64 + 1) * interval as i64);
+            finalizing.step(2.0, 0.0, interval as f64, t);
+        }
+        let finalized = finalizing.finalize(sim_end).expect("the finalize bills");
+
+        // The replacing run: the same attached state, closed by a
+        // replacement at sim_end instead of finalized.
+        let mut replacing = make_evaluator(tariff, start, end, interval);
+        replacing.activate_at(attach);
+        for i in 0..hours {
+            let t = attach + Duration::seconds((i as i64 + 1) * interval as i64);
+            replacing.step(2.0, 0.0, interval as f64, t);
+        }
+        let closed = replacing
+            .close_open_period(sim_end)
+            .expect("the replacement close bills");
+
+        assert_eq!(finalized.period_end, closed.period_end);
+        assert_eq!(
+            finalized.fixed_charge_usd.to_bits(),
+            closed.fixed_charge_usd.to_bits(),
+            "the finalize's fixed charge is bitwise the replacement close's"
+        );
+        assert_eq!(
+            finalized.demand_charge_usd.to_bits(),
+            closed.demand_charge_usd.to_bits(),
+            "the finalize's demand charge is bitwise the replacement close's"
+        );
+
+        // Both are the active span's share of the period's full charges,
+        // not the full month's: 7 of January's 31 days active.
+        let fraction = (sim_end - attach).num_seconds() as f64
+            / (make_start(2025, 2, 1) - start).num_seconds() as f64;
+        assert!(fraction < 1.0);
+        assert_eq!(
+            finalized.fixed_charge_usd.to_bits(),
+            ((10.0 + 1.0 * 31.0) * fraction).to_bits()
+        );
+        assert!(finalized.total_import_kwh > 0.0);
+    }
+
+    // A from-start finalize is unchanged: the full monthly charge plus the
+    // daily charge for the days elapsed, no active-span fraction.
+    #[test]
+    fn finalize_of_a_from_start_period_keeps_the_full_monthly_charge() {
+        use crate::types::DemandRate;
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 3, 1);
+        let interval = 3600u32;
+        let mut tariff = flat_tariff(0.12);
+        tariff.fixed_charges = FixedCharges {
+            monthly_usd: 10.0,
+            daily_usd: 1.0,
+        };
+        tariff.demand_rates = vec![DemandRate {
+            period_name: None,
+            season: SeasonFilter::All,
+            rate_per_kw: 5.0,
+            ratchet: None,
+        }];
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        let sim_end = make_start(2025, 1, 24);
+        let hours = (sim_end - start).num_hours() as usize;
+        for i in 0..hours {
+            let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
+            ev.step(2.0, 0.0, interval as f64, t);
+        }
+        let finalized = ev.finalize(sim_end).expect("the finalize bills");
+
+        assert_eq!(
+            finalized.fixed_charge_usd.to_bits(),
+            (10.0_f64 + 1.0_f64 * 23.0).to_bits(),
+            "the monthly charge applies in full; the daily charge counts elapsed days"
+        );
+        // The demand charge is unprorated for a from-start period: the peak
+        // (2 kW through the default one-sample window) times the rate.
+        assert_eq!(
+            finalized.demand_charge_usd.to_bits(),
+            (2.0_f64 * 5.0).to_bits()
         );
     }
 

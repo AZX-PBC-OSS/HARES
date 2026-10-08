@@ -5,28 +5,32 @@ that can be injected into HARES via the solar_override API.
 
 Usage:
     cd /home/rich/src/HARES
-    PYTHONPATH=vendors/OCHRE vendors/OCHRE/.venv/bin/python tests/python/generate_pvlib_solar_override.py
+    uv run --group ochre python tests/python/generate_pvlib_solar_override.py --out <dir>
+
+Writes only into the --out directory. Replacing a committed fixture under
+tests/fixtures/freefloat/ is a deliberate copy of the generated files, in a
+commit that states the pvlib version and the reason.
 """
+
 from __future__ import annotations
 
+import argparse
 import datetime as dt
-import json
-import sys
+import importlib.metadata
+import math
+import zoneinfo
+from collections.abc import Mapping
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
-import numpy as np
-import pandas as pd
-import pvlib
+if TYPE_CHECKING:
+    import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-OCHRE_ROOT = REPO_ROOT / "vendors" / "OCHRE"
 EXAMPLES = REPO_ROOT / "data" / "examples"
-sys.path.insert(0, str(OCHRE_ROOT))
 
 EPW_PATH = EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"
 HPXML_PATH = EXAMPLES / "BEopt_example.xml"
-OUTPUT_DIR = REPO_ROOT / "tests" / "fixtures" / "freefloat"
 
 # BEopt building surface geometry (from HARES surface_geometry output).
 # Order must match building.boundaries in HARES.
@@ -66,6 +70,7 @@ SURFACES = [
 # Denver location
 LAT, LON = 39.76, -104.86
 TZ = "Etc/GMT+7"  # MST (no DST in TMY)
+MST = zoneinfo.ZoneInfo(TZ)
 ALBEDO = 0.2
 
 
@@ -76,29 +81,66 @@ class Scenario(TypedDict):
 
 
 SCENARIOS: list[Scenario] = [
-    {"name": "beopt_spring_72h", "start_time": dt.datetime(2019, 5, 5, 12, 0, 0), "duration": dt.timedelta(hours=72)},
-    {"name": "beopt_summer_48h", "start_time": dt.datetime(2019, 7, 15, 12, 0, 0), "duration": dt.timedelta(hours=48)},
-    {"name": "beopt_winter_48h", "start_time": dt.datetime(2019, 1, 15, 12, 0, 0), "duration": dt.timedelta(hours=48)},
+    {
+        "name": "beopt_spring_72h",
+        "start_time": dt.datetime(2019, 5, 5, 12, 0, 0, tzinfo=MST),
+        "duration": dt.timedelta(hours=72),
+    },
+    {
+        "name": "beopt_summer_48h",
+        "start_time": dt.datetime(2019, 7, 15, 12, 0, 0, tzinfo=MST),
+        "duration": dt.timedelta(hours=48),
+    },
+    {
+        "name": "beopt_winter_48h",
+        "start_time": dt.datetime(2019, 1, 15, 12, 0, 0, tzinfo=MST),
+        "duration": dt.timedelta(hours=48),
+    },
 ]
 
 
-def generate_solar_override(scenario: Scenario) -> None:
+def _component(irradiance: Mapping[str, float] | pd.DataFrame, key: str) -> float:
+    """Extract one POA component from pvlib's get_total_irradiance result.
+
+    pvlib documents the scalar-input return as "dict or DataFrame": recent
+    releases return a mapping of numpy scalars (verified identical in shape
+    from 0.14 through 0.16), while the DataFrame form is what pvlib's own
+    source suggests to a type checker. float() unwraps numpy scalars, 0-d
+    arrays and single-row frames alike, and anything else fails right here
+    instead of silently degrading. perez evaluates its sky-clearness term
+    as 0/0 when dhi is 0 while the sun is up, so non-finite components are
+    rejected explicitly and can never reach the CSV.
+    """
+    raw = (
+        irradiance[key] if isinstance(irradiance, Mapping) else irradiance[key].iloc[0]
+    )
+    component = float(raw)
+    if not math.isfinite(component):
+        raise ValueError(f"pvlib returned non-finite {key}: {raw!r}")
+    return component
+
+
+def generate_solar_override(scenario: Scenario, out_dir: Path) -> None:
+    # Imported here, not at module level: main() parses its arguments first,
+    # so a missing --out is reported whatever the environment can import.
+    import numpy as np
+    import pandas as pd
+    import pvlib
+
     name = scenario["name"]
-    start = pd.Timestamp(scenario["start_time"], tz=TZ)
+    start = pd.Timestamp(scenario["start_time"])
     n_steps = int(scenario["duration"].total_seconds() / 60)  # 1-min resolution
     times = pd.date_range(start, periods=n_steps, freq="1min")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Scenario: {name} ({n_steps} steps)")
 
     # Read EPW
-    epw_df, location = pvlib.iotools.read_epw(str(EPW_PATH))
+    epw_df, _location = pvlib.iotools.read_epw(str(EPW_PATH))
 
     # Resample EPW to 1-min with forward fill (matching OCHRE)
     epw_annual = epw_df.copy()
-    epw_annual.index = pd.date_range(
-        start=f"2019-01-01", periods=8760, freq="1h", tz=TZ
-    )
+    epw_annual.index = pd.date_range(start="2019-01-01", periods=8760, freq="1h", tz=TZ)
     # Shift EPW timestamps +30min for midpoint convention
     epw_annual.index = epw_annual.index + pd.Timedelta(minutes=30)
     epw_1min = epw_annual.resample("1min").ffill()
@@ -120,7 +162,7 @@ def generate_solar_override(scenario: Scenario) -> None:
         dhi = float(weather["dhi"].iloc[i])
         de = float(dni_extra.iloc[i])
 
-        step_data = {"step": i}
+        step_data: dict[str, float] = {"step": i}
         for surf in SURFACES:
             sid = surf["id"]
             tilt = surf["tilt"]
@@ -142,23 +184,38 @@ def generate_solar_override(scenario: Scenario) -> None:
                 step_data[f"s{sid}_aoi"] = 3.14159
                 continue
 
-            try:
-                aoi_val = float(pvlib.irradiance.aoi(tilt, azimuth, z, a))
-                irr = pvlib.irradiance.get_total_irradiance(
-                    tilt, azimuth, z, a, dni, ghi, dhi,
-                    dni_extra=de, model="perez", albedo=ALBEDO,
-                )
-                direct = max(0.0, float(irr["poa_direct"]))
-                diffuse = max(0.0, float(irr["poa_diffuse"]))
-                # Split ground diffuse from sky diffuse isn't straightforward,
-                # so use poa_ground_diffuse for reflected
-                reflected = max(0.0, float(irr["poa_ground_diffuse"]))
-                sky_diff = max(0.0, diffuse - reflected)
-            except Exception:
+            # The aoi stays physical whenever the sun is up, including the
+            # no-input case below.
+            aoi_val = float(pvlib.irradiance.aoi(tilt, azimuth, z, a))
+
+            if dni == 0.0 and ghi == 0.0 and dhi == 0.0:
+                # No irradiance input: every POA term is a product with one
+                # of these three, so all components are exactly zero. perez
+                # instead evaluates its epsilon as 0/0 and yields NaN there.
+                # The sun may still be just above the horizon, so nothing is
+                # assumed about the aoi.
                 direct = 0.0
                 sky_diff = 0.0
                 reflected = 0.0
-                aoi_val = 3.14159
+            else:
+                irr = pvlib.irradiance.get_total_irradiance(
+                    tilt,
+                    azimuth,
+                    z,
+                    a,
+                    dni,
+                    ghi,
+                    dhi,
+                    dni_extra=de,
+                    model="perez",
+                    albedo=ALBEDO,
+                )
+                direct = max(0.0, _component(irr, "poa_direct"))
+                diffuse = max(0.0, _component(irr, "poa_diffuse"))
+                # Split ground diffuse from sky diffuse isn't straightforward,
+                # so use poa_ground_diffuse for reflected
+                reflected = max(0.0, _component(irr, "poa_ground_diffuse"))
+                sky_diff = max(0.0, diffuse - reflected)
 
             step_data[f"s{sid}_direct"] = direct
             step_data[f"s{sid}_diffuse"] = sky_diff
@@ -171,21 +228,39 @@ def generate_solar_override(scenario: Scenario) -> None:
             print(f"  step {i}/{n_steps}")
 
     df = pd.DataFrame(rows)
-    out_path = OUTPUT_DIR / name / "pvlib_solar_override.csv"
+    out_path = out_dir / name / "pvlib_solar_override.csv"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False, float_format="%.6f")
     print(f"  Wrote {len(df)} steps × {len(df.columns)} cols to {out_path}")
 
     # Print step-0 summary
-    print(f"  Step 0 sample (south wall, surface 0):")
+    print("  Step 0 sample (south wall, surface 0):")
     print(f"    direct={df['s0_direct'].iloc[0]:.1f} W/m²")
     print(f"    diffuse={df['s0_diffuse'].iloc[0]:.1f} W/m²")
     print(f"    reflected={df['s0_reflected'].iloc[0]:.1f} W/m²")
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate per-surface POA irradiance CSVs with pvlib (matching OCHRE exactly).",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        metavar="DIR",
+        help="Directory to write the scenario CSVs into; the generator writes only there.",
+    )
+    args = parser.parse_args()
+    out_dir: Path = args.out
+
+    # Standard library only up to here: the numpy/pandas/pvlib imports live
+    # below the argument parse (see generate_solar_override), so a missing
+    # --out is reported whatever the environment can import.
+    print(f"pvlib version: {importlib.metadata.version('pvlib')}")
     for scenario in SCENARIOS:
-        generate_solar_override(scenario)
-    print(f"\n{'='*60}")
+        generate_solar_override(scenario, out_dir)
+    print(f"\n{'=' * 60}")
     print("All scenarios complete.")
 
 

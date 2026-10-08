@@ -113,6 +113,5 @@ conducts comparably to the film (wood siding, stucco, metal — the ASHRAE
   assembled RC network, conducting and insulated regimes, ratio sweep.
 - `skin_rad_coupling_uses_parallel_resistance` — formula + identity
   `rad_res == rad_frac·R_half/A` + routing edge cases.
-- Skin-closure invariant under `debug_assertions`/`check_invariants` in
-  the iterative solve: converged skins must sit on their fixed
-  point within 0.05 K.
+- Skin-closure invariant in the iterative solve: converged skins must sit
+  on their fixed point within 0.05 K (a typed error in every build).

@@ -13,6 +13,7 @@ message.
 from __future__ import annotations
 
 import logging
+from importlib import import_module
 from pathlib import Path
 
 from .pybamm_battery import (
@@ -65,15 +66,18 @@ def resolve_battery_params(
     -------
     CellParams
     """
+    # import-inside-try on purpose: a findable-but-non-importable PySAM
+    # install (or an ImportError raised while extracting from it) must fall
+    # through to the built-in defaults, exactly as the import statement did.
     try:
-        import pybamm  # noqa: F401
+        import_module("pybamm")
 
         LOGGER.info("PyBaMM available; SAM still preferred for cell params")
     except ImportError:
         pass
 
     try:
-        import PySAM  # noqa: F401
+        import_module("PySAM")
 
         LOGGER.info("Using PySAM for battery cell params (%s, %.1f kWh)", chemistry, capacity_kwh)
         return extract_cell_params(

@@ -28,6 +28,7 @@ def dwelling_summer_24h():
         start_time="2019-07-15T00:00:00Z",
         duration_s=86400,
         time_res_s=900,
+        write_output=False,
     )
 
 
@@ -43,6 +44,7 @@ def dwelling_winter_24h():
         start_time="2019-01-15T00:00:00Z",
         duration_s=86400,
         time_res_s=900,
+        write_output=False,
     )
 
 
@@ -58,6 +60,7 @@ def dwelling_all_north():
         start_time="2019-07-15T00:00:00Z",
         duration_s=86400,
         time_res_s=900,
+        write_output=False,
     )
 
 
@@ -219,6 +222,7 @@ class TestPvPowerProduction:
             duration_s=duration_s,
             time_res_s=time_res_s,
             defaults_path=str(HARES_DEFAULTS),
+            write_output=False,
         )
 
     @pytest.mark.slow
@@ -301,6 +305,7 @@ class TestPvPowerProduction:
             start_time="2019-07-15T00:00:00Z",
             duration_s=86400,
             time_res_s=900,
+            write_output=False,
         )
         dw.initialize()
 

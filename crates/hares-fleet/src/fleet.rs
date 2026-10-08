@@ -67,8 +67,12 @@ pub enum FleetError {
     ResStock(String),
     #[error("from_configs requires at least one dwelling config")]
     EmptySteppableFleetConfig,
-    #[error("all dwellings failed to initialize ({count} failure(s))")]
-    AllSteppableDwellingsFailed { count: usize },
+    #[error(
+        "all dwellings failed to initialize ({} failure(s)): {}",
+        count,
+        causes.join("; ")
+    )]
+    AllSteppableDwellingsFailed { count: usize, causes: Vec<String> },
     #[error("failed to build local rayon thread pool: {0}")]
     ThreadPoolBuild(String),
     #[error("fleet has no dwelling with positive sample_weight")]
@@ -138,6 +142,10 @@ impl Fleet {
     /// `resstock_version` defaults to the latest known schema when `None`.
     /// `duration` overrides the default 24-hour simulation duration;
     /// when `None`, the default of 24 hours is used for backward compatibility.
+    /// `defaults_path` becomes every dwelling's
+    /// [`DwellingConfig::defaults_path`], with the same meaning: `None` means
+    /// no default schedule profiles, so a building whose schedule lacks a
+    /// column an equipment maps to fails construction naming the setting.
     pub fn from_resstock(
         metadata_path: &Path,
         hpxml_dir: &Path,
@@ -145,6 +153,7 @@ impl Fleet {
         resstock_version: Option<ResStockVersion>,
         filter: Option<HashMap<String, String>>,
         duration: Option<chrono::Duration>,
+        defaults_path: Option<&Path>,
     ) -> Result<Self> {
         let version = resstock_version.unwrap_or(DEFAULT_RESSTOCK_VERSION);
         let buildings = parse_resstock_metadata(metadata_path, version, hpxml_dir)
@@ -195,9 +204,9 @@ impl Fleet {
                 FleetEntry {
                     config: DwellingConfig {
                         hpxml_path: building.hpxml_path,
-                        schedule_path: building.schedule_path,
+                        schedule_path: Some(building.schedule_path),
                         weather_path,
-                        defaults_path: None,
+                        defaults_path: defaults_path.map(Path::to_path_buf),
                         sim_config: sim_config.clone(),
                         overrides: None,
                         bldg_id: building.bldg_id,
@@ -334,7 +343,7 @@ impl Fleet {
         // but this one covers the gap before worker guards are constructed and
         // serves as defense-in-depth in case a worker path skips the guard.
         let _guard = PanicHookGuard::new();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -373,14 +382,11 @@ impl Fleet {
                             Ok(result) => result,
                             Err(_) => {
                                 record_double_panic_prevented();
-                                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                                {
-                                    tracing::error!(
-                                        bldg_id = entry.config.bldg_id,
-                                        "CRITICAL: error handling panicked \
-                                         (double-panic prevented) in fleet::simulate_parallel"
-                                    );
-                                }
+                                tracing::error!(
+                                    bldg_id = entry.config.bldg_id,
+                                    "CRITICAL: error handling panicked \
+                                     (double-panic prevented) in fleet::simulate_parallel"
+                                );
                                 Err(SimError::Panic {
                                     bldg_id: entry.config.bldg_id,
                                     message: "panic handling failed (double-panic prevented)"
@@ -459,7 +465,7 @@ impl SteppableFleet {
         let mut build_errors = Vec::new();
 
         let _guard = PanicHookGuard::new();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -487,14 +493,11 @@ impl SteppableFleet {
                         Ok(err) => build_errors.push(err),
                         Err(_) => {
                             record_double_panic_prevented();
-                            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                            {
-                                tracing::error!(
-                                    bldg_id,
-                                    "CRITICAL: error handling panicked \
-                                     (double-panic prevented) in fleet::SteppableFleet::from_configs"
-                                );
-                            }
+                            tracing::error!(
+                                bldg_id,
+                                "CRITICAL: error handling panicked \
+                                 (double-panic prevented) in fleet::SteppableFleet::from_configs"
+                            );
                             build_errors.push(DwellingBuildError {
                                 bldg_id,
                                 message: "panic handling failed (double-panic prevented)".into(),
@@ -508,6 +511,10 @@ impl SteppableFleet {
         if dwellings.is_empty() {
             return Err(FleetError::AllSteppableDwellingsFailed {
                 count: build_errors.len(),
+                causes: build_errors
+                    .iter()
+                    .map(|e| format!("dwelling {}: {}", e.bldg_id, e.message))
+                    .collect(),
             });
         }
 
@@ -547,6 +554,10 @@ impl SteppableFleet {
         if dwellings.is_empty() {
             return Err(FleetError::AllSteppableDwellingsFailed {
                 count: build_errors.len(),
+                causes: build_errors
+                    .iter()
+                    .map(|e| format!("dwelling {}: {}", e.bldg_id, e.message))
+                    .collect(),
             });
         }
 
@@ -583,7 +594,7 @@ impl SteppableFleet {
         // that become failed during this step (via a panic caught in
         // step_dwellings_parallel) are not asserted — they were not failed when
         // step() was called, and a Panic result is valid for them.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         let was_already_failed: Vec<bool> = self.dwellings.iter().map(|d| d.failed).collect();
 
         let results = if let Some(pool) = &self.step_pool {
@@ -592,7 +603,7 @@ impl SteppableFleet {
             step_dwellings_parallel(&mut self.dwellings)
         };
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             for (i, (dwelling, result)) in self.dwellings.iter().zip(results.iter()).enumerate() {
                 if was_already_failed[i] {
@@ -636,9 +647,26 @@ impl SteppableFleet {
     }
 
     /// Returns telemetry for one dwelling, or `None` if the index is out of bounds.
+    ///
+    /// A telemetry snapshot that cannot be constructed (non-finite or
+    /// out-of-range state) is reported as `None`, the same signal as an
+    /// out-of-bounds index, with the underlying error logged. Some
+    /// snapshot-construction conditions are not step failures, so this is
+    /// the only place the error would surface.
     #[must_use]
     pub fn telemetry(&self, dwelling_index: usize) -> Option<DwellingTelemetry> {
-        self.dwellings.get(dwelling_index).map(|d| d.telemetry())
+        self.dwellings.get(dwelling_index).and_then(|d| {
+            d.telemetry()
+                .map_err(|err| {
+                    tracing::warn!(
+                        dwelling_index,
+                        error = %err,
+                        "dwelling telemetry snapshot failed; reporting None"
+                    );
+                    err
+                })
+                .ok()
+        })
     }
 
     /// Returns building id for one dwelling index.
@@ -713,7 +741,7 @@ fn step_dwellings_parallel(
     dwellings: &mut [Dwelling],
 ) -> Vec<std::result::Result<StepResult, SimError>> {
     let _guard = PanicHookGuard::new();
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(debug_assertions)]
     {
         assert!(
             panic_hook::is_installed(),
@@ -748,14 +776,11 @@ fn step_dwellings_parallel(
                         Ok(result) => result,
                         Err(_) => {
                             record_double_panic_prevented();
-                            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                            {
-                                tracing::error!(
-                                    bldg_id = dwelling.bldg_id,
-                                    "CRITICAL: error handling panicked \
-                                     (double-panic prevented) in fleet::step_dwellings_parallel"
-                                );
-                            }
+                            tracing::error!(
+                                bldg_id = dwelling.bldg_id,
+                                "CRITICAL: error handling panicked \
+                                 (double-panic prevented) in fleet::step_dwellings_parallel"
+                            );
                             Err(SimError::Panic {
                                 bldg_id: dwelling.bldg_id,
                                 message: "panic handling failed (double-panic prevented)".into(),
@@ -796,6 +821,7 @@ fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: true,
         rotation: hares_io::RotationPolicy::None,
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
 
@@ -950,7 +976,16 @@ fn validate_fleet_building_zone(
     weather_path: &Path,
     bldg_id: i64,
 ) -> ZoneMatchStatus {
-    let Some(building_zone) = hares_io::parse_iecc_climate_zone(hpxml_path) else {
+    // One IECC resolution path for the dwelling and the fleet: the HPXML's
+    // declared zone, else the weather station's zone (the OS-HPXML default
+    // the dwelling build derives in `apply_climate_zone_default`).
+    let station_wmo = hares_io::parse_epw_station_wmo(weather_path);
+    let declared_zone = hares_io::parse_iecc_climate_zone(hpxml_path);
+    let building_zone = hares_io::hpxml::climate_zone::resolve_iecc_climate_zone(
+        declared_zone.as_deref(),
+        station_wmo.as_deref(),
+    );
+    let Some(building_zone) = building_zone else {
         return ZoneMatchStatus::Skipped;
     };
 
@@ -1020,6 +1055,10 @@ fn validate_fleet_building_zone(
 }
 
 #[cfg(test)]
+#[path = "../../../tests/support/fixture_start.rs"]
+mod fixture_start;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
@@ -1027,7 +1066,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -1036,23 +1074,9 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    fn unique_temp_path(suffix: &str) -> PathBuf {
-        // See hares-core/tests/engine.rs: pid + monotonic counter + nanos for
-        // uniqueness by construction across processes, threads, and runs.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let mut path = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        path.push(format!(
-            "hares-fleet-{}-{nanos}-{seq}.{suffix}",
-            std::process::id()
-        ));
-        path
-    }
+    /// A root no test creates and a non-root user cannot: every path under it
+    /// is missing, and nothing can be written there.
+    const MISSING_ROOT: &str = "/nonexistent-hares-fleet-test";
 
     fn write_temp_file(path: &Path, contents: &str) {
         fs::write(path, contents).expect("failed to write temp file");
@@ -1140,9 +1164,16 @@ mod tests {
             .join("../../tests/fixtures/hpxml/ochre_samples/base.xml")
     }
 
+    /// The repo's defaults directory: equipment whose schedule source is
+    /// missing (no schedule column, no HPXML fractions) resolves its default
+    /// profile there instead of erroring.
+    fn repo_defaults_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+    }
+
     fn simulation_config(output_path: PathBuf) -> SimulationConfig {
         SimulationConfig {
-            start_time: chrono::Utc::now().fixed_offset(),
+            start_time: fixture_start::fixture_start(),
             duration: Duration::hours(1),
             time_res: Duration::minutes(1),
             output_verbosity: 0,
@@ -1156,22 +1187,24 @@ mod tests {
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: false,
             rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         }
     }
 
-    fn build_valid_configs(count: usize) -> Vec<DwellingConfig> {
-        let schedule_path = unique_temp_path("csv");
-        let weather_path = unique_temp_path("epw");
+    /// Configs whose inputs and outputs all live in `dir`.
+    fn build_valid_configs(dir: &Path, count: usize) -> Vec<DwellingConfig> {
+        let schedule_path = dir.join("schedule.csv");
+        let weather_path = dir.join("weather.epw");
         write_temp_file(&schedule_path, &build_schedule_csv());
         write_temp_file(&weather_path, &build_epw_8760());
 
         (0..count)
             .map(|idx| DwellingConfig {
                 hpxml_path: fixture_hpxml_path(),
-                schedule_path: schedule_path.clone(),
+                schedule_path: Some(schedule_path.clone()),
                 weather_path: weather_path.clone(),
-                sim_config: simulation_config(unique_temp_path("csv")),
-                defaults_path: None,
+                sim_config: simulation_config(dir.join(format!("output-{idx}.csv"))),
+                defaults_path: Some(repo_defaults_path()),
                 overrides: None,
                 bldg_id: idx as i64 + 1,
                 initialization_duration: None,
@@ -1184,10 +1217,10 @@ mod tests {
     fn build_missing_configs(count: usize) -> Vec<DwellingConfig> {
         (0..count)
             .map(|idx| DwellingConfig {
-                hpxml_path: PathBuf::from("/tmp/missing-hpxml.xml"),
-                schedule_path: PathBuf::from("/tmp/missing-schedule.csv"),
-                weather_path: PathBuf::from("/tmp/missing-weather.epw"),
-                sim_config: simulation_config(unique_temp_path("csv")),
+                hpxml_path: Path::new(MISSING_ROOT).join("hpxml.xml"),
+                schedule_path: Some(Path::new(MISSING_ROOT).join("schedule.csv")),
+                weather_path: Path::new(MISSING_ROOT).join("weather.epw"),
+                sim_config: simulation_config(Path::new(MISSING_ROOT).join("output.csv")),
                 defaults_path: None,
                 overrides: None,
                 bldg_id: idx as i64 + 1,
@@ -1200,7 +1233,8 @@ mod tests {
 
     #[test]
     fn simulate_runs_three_dwellings() {
-        let fleet = Fleet::from_buildings(build_valid_configs(3));
+        let dir = tempdir().expect("temp dir");
+        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3));
         let results = fleet.simulate(1);
 
         assert_eq!(results.len(), 3);
@@ -1290,13 +1324,15 @@ mod tests {
 
     #[test]
     fn panic_in_callback_is_isolated_to_one_result() {
+        let dir = tempdir().expect("temp dir");
         let panic_on = 2usize;
-        let fleet =
-            Fleet::from_buildings(build_valid_configs(3)).with_progress(move |done, _total| {
+        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3)).with_progress(
+            move |done, _total| {
                 if done == panic_on {
                     panic!("injected callback panic");
                 }
-            });
+            },
+        );
 
         let results = fleet.simulate(3);
         assert_eq!(results.len(), 3);
@@ -1313,13 +1349,15 @@ mod tests {
 
     #[test]
     fn panic_error_message_includes_file_and_line() {
+        let dir = tempdir().expect("temp dir");
         let panic_on = 2usize;
-        let fleet =
-            Fleet::from_buildings(build_valid_configs(3)).with_progress(move |done, _total| {
+        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3)).with_progress(
+            move |done, _total| {
                 if done == panic_on {
                     panic!("injected callback panic");
                 }
-            });
+            },
+        );
 
         let results = fleet.simulate(3);
         assert_eq!(results.len(), 3);
@@ -1578,8 +1616,10 @@ mod tests {
 
     #[test]
     fn steppable_fleet_steps_and_finishes() {
+        let dir = tempdir().expect("temp dir");
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
         assert!(!fleet.is_finished());
@@ -1616,7 +1656,8 @@ mod tests {
 
     #[test]
     fn steppable_fleet_from_configs_returns_partial_success() {
-        let mut configs = build_valid_configs(2);
+        let dir = tempdir().expect("temp dir");
+        let mut configs = build_valid_configs(dir.path(), 2);
         let mut bad = build_missing_configs(1);
         bad[0].bldg_id = 999;
         configs.extend(bad);
@@ -1657,8 +1698,10 @@ mod tests {
 
     #[test]
     fn steppable_fleet_skips_failed_dwelling() {
+        let dir = tempdir().expect("temp dir");
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
 
@@ -1700,10 +1743,12 @@ mod tests {
 
     #[test]
     fn steppable_fleet_ipc_isolation_after_failure() {
+        let dir = tempdir().expect("temp dir");
         // Integration test: verify that a failed dwelling does not prevent
         // other dwellings from producing valid results over a full simulation.
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
 
@@ -1755,12 +1800,13 @@ mod tests {
 
     #[test]
     fn construction_panic_is_not_a_runtime_failure() {
+        let dir = tempdir().expect("temp dir");
         // Regression test: a dwelling that fails during from_config is
         // never added to the fleet, so it cannot be marked as a runtime
         // failure.  The AssertUnwindSafe wrapping at from_configs line 343
         // is sound because construction failure (whether error or panic)
         // prevents fleet inclusion.
-        let mut configs = build_valid_configs(2);
+        let mut configs = build_valid_configs(dir.path(), 2);
         let mut bad = build_missing_configs(1);
         bad[0].bldg_id = 999;
         configs.extend(bad);
@@ -1793,6 +1839,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn dwelling_panic_during_step_is_caught_and_marks_dwelling_failed() {
+        let dir = tempdir().expect("temp dir");
         // End-to-end test of the panic→failed→skipped path in
         // step_dwellings_parallel.  A dwelling configured to panic during
         // step() must:
@@ -1802,7 +1849,8 @@ mod tests {
         // The invariant check in SteppableFleet::step() must NOT misfire
         // when the dwelling becomes failed during this step.
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
 
@@ -1866,13 +1914,15 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn assert_panic_from_dwelling_step_includes_file_and_line() {
+        let dir = tempdir().expect("temp dir");
         // Verifies the end-to-end chain when equipment/dwelling code panics
         // via assert! (as opposed to panic!()). The hook must capture
         // PanicHookInfo::location() from the assert's expansion site
         // (the dwelling source file), not from the catch_unwind call site
         // in fleet code.
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
 
@@ -1914,13 +1964,15 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn single_panic_does_not_abort_fleet_and_other_dwellings_intact() {
+        let dir = tempdir().expect("temp dir");
         // Integration test: verify that when one dwelling panics in a
         // steppable fleet, the process does not abort and the other
         // dwellings produce valid results for every remaining step.
         // This validates that the outer catch_unwind in step_dwellings_parallel
         // correctly isolates per-dwelling panics at fleet scale.
         let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
         assert!(build_errors.is_empty());
         assert_eq!(fleet.len(), 3);
 
@@ -2043,12 +2095,11 @@ mod tests {
 
     #[test]
     fn test_remap_weather_path_zone_validation() {
-        let hpxml_dir = unique_temp_path("hpxml_dir");
-        fs::create_dir_all(&hpxml_dir).expect("create temp hpxml dir");
-        let hpxml_path = hpxml_dir.join("home.xml");
+        let dir = tempdir().expect("temp dir");
+        let hpxml_path = dir.path().join("home.xml");
         write_temp_file(&hpxml_path, &build_hpxml_with_zone("5B"));
 
-        let epw_path = unique_temp_path("epw");
+        let epw_path = dir.path().join("weather.epw");
         write_temp_file(
             &epw_path,
             "LOCATION,USA_CO_Denver.Intl.AP.725650_TMY3,CO,USA,TMY3,725650,39.83,-104.65,-7.0,1609.0",
@@ -2097,7 +2148,9 @@ mod tests {
             }
         );
 
-        // Missing zone -> skipped
+        // Missing zone: the weather station's zone is derived (one IECC
+        // resolution path for the dwelling and the fleet), so the derived
+        // 5B matches CO and the validation proceeds.
         let no_zone_xml = r#"<?xml version='1.0'?>
 <HPXML xmlns='http://hpxmlonline.com/2023/09' schemaVersion='4.0'>
   <Building/>
@@ -2105,11 +2158,25 @@ mod tests {
         write_temp_file(&hpxml_path, no_zone_xml);
         assert_eq!(
             validate_fleet_building_zone(&hpxml_path, &epw_path, 3),
+            ZoneMatchStatus::Match {
+                building_zone: "5B".to_string(),
+                weather_state: "CO".to_string()
+            }
+        );
+
+        // A station the OS-HPXML table does not carry derives no zone: skipped.
+        let no_wmo_epw = dir.path().join("no-wmo.epw");
+        write_temp_file(
+            &no_wmo_epw,
+            "LOCATION,USA_CO_Unknown,XZ,USA,TMY3,,39.83,-104.65,-7.0,1609.0",
+        );
+        assert_eq!(
+            validate_fleet_building_zone(&hpxml_path, &no_wmo_epw, 5),
             ZoneMatchStatus::Skipped
         );
 
         // Non-EPW extension -> skipped (state parse returns None)
-        let csv_path = unique_temp_path("csv");
+        let csv_path = dir.path().join("weather.csv");
         write_temp_file(&csv_path, "not,an,epw");
         assert_eq!(
             validate_fleet_building_zone(&hpxml_path, &csv_path, 4),
@@ -2153,6 +2220,7 @@ mod tests {
             Some(ResStockVersion::V2025_1),
             None,
             None,
+            None,
         )
         .expect("fleet construction");
 
@@ -2165,6 +2233,66 @@ mod tests {
                 entry.config.sim_config.duration,
                 Duration::hours(24),
                 "default duration should be 24 hours"
+            );
+        }
+    }
+
+    /// The ResStock constructor's `defaults_path` reaches every dwelling it
+    /// configures. The BEopt example schedule has no lighting or plug-load
+    /// columns, so its dwelling builds with the defaults directory and fails
+    /// naming `defaults_path` without one. The constructor points each
+    /// building at its dataset zip archive, which construction does not
+    /// unpack, so the test points the entries at unpacked files.
+    #[test]
+    fn from_resstock_passes_the_defaults_directory_to_each_dwelling() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("test.parquet");
+        write_resstock_parquet_v2025(&pq);
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let configs_with = |defaults_path: Option<&Path>| -> Vec<DwellingConfig> {
+            Fleet::from_resstock(
+                &pq,
+                tmp.path(),
+                tmp.path(),
+                Some(ResStockVersion::V2025_1),
+                None,
+                None,
+                defaults_path,
+            )
+            .expect("fleet construction")
+            .entries
+            .into_iter()
+            .map(|entry| DwellingConfig {
+                hpxml_path: fixture_hpxml_path(),
+                schedule_path: Some(root.join("data/examples/BEopt_example_schedule.csv")),
+                weather_path: root.join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+                initialization_duration: None,
+                ..entry.config
+            })
+            .collect()
+        };
+
+        let defaults = repo_defaults_path();
+        let with_defaults = configs_with(Some(&defaults));
+        assert!(!with_defaults.is_empty(), "the fleet must have an entry");
+        for config in with_defaults {
+            assert_eq!(config.defaults_path.as_deref(), Some(defaults.as_path()));
+            if let Err(err) = Dwelling::from_config(config) {
+                panic!("a dwelling given the defaults directory must build, got: {err}");
+            }
+        }
+
+        let without_defaults = configs_with(None);
+        assert!(!without_defaults.is_empty(), "the fleet must have an entry");
+        for config in without_defaults {
+            let message = match Dwelling::from_config(config) {
+                Err(err) => err.to_string(),
+                Ok(_) => panic!("a config with no defaults directory must fail at the store load"),
+            };
+            assert!(
+                message.contains("defaults load failed"),
+                "the error must name the defaults load failure, got: {message}"
             );
         }
     }
@@ -2182,6 +2310,7 @@ mod tests {
             Some(ResStockVersion::V2025_1),
             None,
             Some(Duration::days(365)),
+            None,
         )
         .expect("fleet construction");
 

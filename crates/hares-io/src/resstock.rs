@@ -756,10 +756,11 @@ mod tests {
 
     #[test]
     fn io_error_variant_for_missing_file() {
+        let tmp = tempdir().expect("tmp");
         let err = parse_resstock_metadata(
-            Path::new("/nonexistent/file.parquet"),
+            &tmp.path().join("file.parquet"),
             ResStockVersion::V2024_1,
-            Path::new("/tmp"),
+            tmp.path(),
         )
         .unwrap_err();
         assert!(matches!(err, ResStockError::IoError(_)));

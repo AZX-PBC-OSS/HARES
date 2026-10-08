@@ -1022,7 +1022,7 @@ ac = AirConditioner("New AC", capacity_w=10000, seer=16.0)
 ac_auto = AirConditioner("Auto AC", autosize=True, seer=18.0)
 
 # HPWH with autosize (omits tank_volume and capacity)
-hpwh_auto = HeatPumpWH("HPWH Auto", autosize=True, cop=3.5,
+hpwh_auto = HeatPumpWH("HPWH Auto", autosize=True, cop=3.5, zone_id=1,
                        avg_water_draw_l_per_day=200.0)
 ```
 
@@ -1054,7 +1054,7 @@ def test_autosize_water_heater():
     bp = _make_blueprint()
     bp.remove_equipment_by_end_use(EndUse.WATER_HEATING)
 
-    wh = GasWaterHeater("AutoWH", autosize=True, uniform_energy_factor=0.65,
+    wh = GasWaterHeater("AutoWH", autosize=True, uniform_energy_factor=0.65, zone_id=1,
                         avg_water_draw_l_per_day=200.0)
     bp.add_equipment(wh)
 

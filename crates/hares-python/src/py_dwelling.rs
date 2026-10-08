@@ -117,10 +117,11 @@ fn parse_solar_override_from_dataframe(
 
     let mut surface_ids: Vec<u32> = Vec::new();
     for col in &columns {
-        if col.starts_with("s") && col.ends_with("_direct") {
-            if let Ok(sid) = col[1..col.len() - 7].parse::<u32>() {
-                surface_ids.push(sid);
-            }
+        if col.starts_with("s")
+            && col.ends_with("_direct")
+            && let Ok(sid) = col[1..col.len() - 7].parse::<u32>()
+        {
+            surface_ids.push(sid);
         }
     }
     surface_ids.sort();
@@ -383,16 +384,13 @@ fn get_array_len(arr: &Bound<'_, PyAny>) -> PyResult<usize> {
     if let Ok(list) = arr.extract::<Bound<'_, PyList>>() {
         return Ok(list.len());
     }
-    if arr.hasattr("shape")? {
-        if let Ok(shape) = arr.getattr("shape") {
-            if let Ok(tuple) = shape.extract::<Bound<'_, pyo3::types::PyTuple>>() {
-                if tuple.len() > 0 {
-                    if let Ok(Ok(dim)) = tuple.get_item(0).map(|v| v.extract::<usize>()) {
-                        return Ok(dim);
-                    }
-                }
-            }
-        }
+    if arr.hasattr("shape")?
+        && let Ok(shape) = arr.getattr("shape")
+        && let Ok(tuple) = shape.extract::<Bound<'_, pyo3::types::PyTuple>>()
+        && tuple.len() > 0
+        && let Ok(Ok(dim)) = tuple.get_item(0).map(|v| v.extract::<usize>())
+    {
+        return Ok(dim);
     }
     Err(PyValueError::new_err("Expected a list or numpy array"))
 }
@@ -636,7 +634,7 @@ impl PyDwelling {
     pub fn from_hpxml(
         _cls: &Bound<'_, PyType>,
         hpxml: String,
-        schedule: String,
+        schedule: Option<String>,
         weather: String,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
@@ -691,9 +689,66 @@ impl PyDwelling {
         })
     }
 
+    /// Per-phase wall-clock split of the work done so far, behind the `profiling`
+    /// feature (`maturin develop --release --features profiling`). A flat dict of
+    /// seconds plus the memory high-water mark, the hot-path allocation
+    /// counters (each `None` when no measurement is available: the extension
+    /// does not install the counting allocator), and `per_actor`: the run's
+    /// per-actor totals as `{"name", "total_s", "calls"}` dicts, one per
+    /// registered actor in registration order. Goes through the crate's own
+    /// acquire discipline: a fatal-error dwelling refuses, and lock poison surfaces as
+    /// the same error type every other method raises. Without the feature the
+    /// method raises `NotImplementedError` instead of returning zeros that
+    /// would read as a measurement.
+    pub fn profiling_summary(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        #[cfg(not(feature = "profiling"))]
+        {
+            let _ = py;
+            Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "PyDwelling.profiling_summary() requires building the extension with the 'profiling' feature: maturin develop --release --features profiling",
+            ))
+        }
+        #[cfg(feature = "profiling")]
+        {
+            let d = pyo3::types::PyDict::new(py);
+            // acquire discipline: a fatal-error dwelling refuses, and lock poison
+            // surfaces as the same error type every other method raises.
+            let p = self.acquire()?.profiling_summary();
+            d.set_item("environment_s", p.environment.as_secs_f64())?;
+            d.set_item("control_s", p.control.as_secs_f64())?;
+            d.set_item("ideal_capacity_s", p.ideal_capacity.as_secs_f64())?;
+            d.set_item("actors_s", p.actors.as_secs_f64())?;
+            d.set_item("dispatch_s", p.dispatch.as_secs_f64())?;
+            d.set_item("equipment_s", p.equipment.as_secs_f64())?;
+            d.set_item("envelope_s", p.envelope.as_secs_f64())?;
+            d.set_item("invariants_s", p.invariants.as_secs_f64())?;
+            d.set_item("state_snapshot_s", p.state_snapshot.as_secs_f64())?;
+            d.set_item("output_s", p.output.as_secs_f64())?;
+            d.set_item("accounting_s", p.accounting.as_secs_f64())?;
+            d.set_item("step_total_s", p.step_total.as_secs_f64())?;
+            d.set_item("memory_high_water_kb", p.memory_high_water_kb)?;
+            d.set_item("hot_path_allocations", p.hot_path_allocations)?;
+            d.set_item("hot_path_alloc_violations", p.hot_path_alloc_violations)?;
+            let per_actor_entries: Vec<pyo3::Bound<'_, pyo3::types::PyDict>> = p
+                .per_actor
+                .iter()
+                .map(|timing| {
+                    let entry = pyo3::types::PyDict::new(py);
+                    entry.set_item("name", timing.name.as_ref())?;
+                    entry.set_item("total_s", timing.total.as_secs_f64())?;
+                    entry.set_item("calls", timing.calls)?;
+                    Ok(entry)
+                })
+                .collect::<PyResult<_>>()?;
+            let per_actor = pyo3::types::PyList::new(py, per_actor_entries)?;
+            d.set_item("per_actor", per_actor)?;
+            Ok(d.into())
+        }
+    }
+
     pub fn simulate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let _guard = PanicHookGuard::new();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -731,7 +786,7 @@ impl PyDwelling {
             }
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 !self.poisoned.load(Ordering::Acquire) || self.dwelling.is_poisoned(),
@@ -748,7 +803,7 @@ impl PyDwelling {
 
     pub fn step(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let _guard = PanicHookGuard::new();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -781,7 +836,7 @@ impl PyDwelling {
             }
         };
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 !self.poisoned.load(Ordering::Acquire) || self.dwelling.is_poisoned(),
@@ -849,6 +904,7 @@ impl PyDwelling {
     /// * `actor_type` - Registered actor type name (e.g., "IdealThermostat", "Occupant", "DrCompliance")
     /// * `name` - Actor instance name
     /// * `params` - Configuration parameters as a dictionary
+    #[pyo3(signature = (actor_type, name, params=None))]
     pub fn add_actor_by_name(
         &self,
         actor_type: String,
@@ -865,10 +921,13 @@ impl PyDwelling {
             }
         }
 
+        // Every refusal here is of the caller's input: an unknown type, a
+        // bad parameter, a duplicate name, or an event the dwelling's
+        // equipment cannot serve.
         let mut dwelling = self.acquire()?;
         dwelling
             .add_actor_by_name(&self.registry, config)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            .map_err(|e| HaresConfigError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -938,7 +997,7 @@ impl PyDwelling {
                 e
             ))
         })?;
-        Ok(PyTelemetry::new(dwelling.telemetry()))
+        Ok(PyTelemetry::new(dwelling.telemetry().map_err(to_py_err)?))
     }
 
     #[getter]
@@ -955,20 +1014,59 @@ impl PyDwelling {
             .collect())
     }
 
+    /// Each equipment with its core output for the latest step. After a
+    /// tolerated step failure that equipment's flows read zero (it delivered
+    /// nothing) and its state is the committed one.
     pub fn equipment(&self) -> PyResult<Vec<PyEquipment>> {
         let dwelling = self.acquire()?;
         Ok(dwelling
             .equipment()
             .iter()
-            .map(|eq| {
+            .enumerate()
+            .map(|(idx, eq)| {
                 PyEquipment::new(
                     eq.descriptor().clone(),
-                    eq.core_output().clone(),
+                    dwelling.reported_core_output(idx),
                     eq.telemetry().clone(),
                     eq.resolved_zip(),
                 )
             })
             .collect())
+    }
+
+    /// The ``(low, high)`` range in °C a ``ThermalSetpoint`` deadband sent
+    /// to the named equipment is held to (its thermostat class), or
+    /// ``None`` when it takes no band. Raises ``ValueError`` for an unknown
+    /// equipment name.
+    pub fn thermostat_band_range(&self, name: &str) -> PyResult<Option<(f64, f64)>> {
+        self.band_range_of(name).map_err(PyValueError::new_err)
+    }
+
+    /// The setpoints the named equipment's thermostat serves, as
+    /// ``["Heating"]``, ``["Cooling"]`` or ``["Heating", "Cooling"]``, or
+    /// ``None`` when it has no setpoint a pre-conditioning event can move.
+    /// A pre-conditioning event on a unit serving both must name its
+    /// direction (``SetpointAdjust:<delta>:PreHeat`` or ``:PreCool``).
+    /// Raises ``ValueError`` for an unknown equipment name.
+    pub fn thermostat_axes(&self, name: &str) -> PyResult<Option<Vec<&'static str>>> {
+        use hares_types::{ThermostatAxes, ThermostatAxis};
+        let axis_name = |axis: ThermostatAxis| match axis {
+            ThermostatAxis::Heating => "Heating",
+            ThermostatAxis::Cooling => "Cooling",
+        };
+        let dwelling = self.acquire()?;
+        let eq = dwelling
+            .equipment()
+            .iter()
+            .find(|e| e.descriptor().name == name)
+            .ok_or_else(|| PyValueError::new_err(format!("equipment '{name}' not found")))?;
+        Ok(eq.thermostat_axes().map(|axes| match axes {
+            ThermostatAxes::One(axis) => vec![axis_name(axis)],
+            ThermostatAxes::Both => vec![
+                axis_name(ThermostatAxis::Heating),
+                axis_name(ThermostatAxis::Cooling),
+            ],
+        }))
     }
 
     /// The primary resolved ZIP/power-factor model for the named equipment,
@@ -1120,43 +1218,58 @@ impl PyDwelling {
             .create("PV", config.clone())
             .map_err(to_py_err)?;
         let mut dwelling = self.acquire()?;
-
-        // Register the PV surface orientation with the environment so that
-        // Perez irradiance is computed for this panel during simulation.
-        let surface_id = hares_equipment::pv::surface_id_for_orientation(pv.tilt, pv.azimuth, 5.0)
+        let orientations = config
+            .require_typed::<hares_equipment::PvConfig>("PV")
+            .and_then(|typed| typed.array_orientations(&pv.name))
             .map_err(to_py_err)?;
-        dwelling.environment.register_surface(SurfaceGeometry {
-            surface_id,
-            azimuth_deg: pv.azimuth,
-            tilt_deg: pv.tilt,
-            area_m2: 1.0,
-            omni_directional: false,
-        });
 
         // PV init() validates that a SurfaceIrradiance entry exists for each
         // array. The environment computes real irradiance during simulation;
         // inject a placeholder so init() succeeds.
         let mut init_env = dwelling.latest_env().clone();
-        if !init_env
-            .weather
-            .solar_irradiance
-            .iter()
-            .any(|s| s.surface_id == surface_id)
-        {
-            init_env.weather.solar_irradiance.push(SurfaceIrradiance {
-                surface_id,
-                direct_w_m2: 0.0,
-                diffuse_w_m2: 0.0,
-                reflected_w_m2: 0.0,
-                angle_of_incidence_rad: 0.0,
-            });
+        for orientation in &orientations {
+            dwelling
+                .environment
+                .check_pv_surface(orientation.surface_id)
+                .map_err(to_py_err)?;
+            if !init_env
+                .weather
+                .solar_irradiance
+                .iter()
+                .any(|s| s.surface_id == orientation.surface_id)
+            {
+                init_env.weather.solar_irradiance.push(SurfaceIrradiance {
+                    surface_id: orientation.surface_id,
+                    direct_w_m2: 0.0,
+                    diffuse_w_m2: 0.0,
+                    reflected_w_m2: 0.0,
+                    angle_of_incidence_rad: 0.0,
+                });
+            }
         }
         eq.init(&config, &init_env).map_err(to_py_err)?;
 
         dwelling.add_equipment(eq).map_err(to_py_err)?;
+        // Only an accepted panel registers its orientations, so that Perez
+        // irradiance is computed for them during simulation.
+        for orientation in orientations {
+            dwelling
+                .environment
+                .register_pv_surface(SurfaceGeometry {
+                    surface_id: orientation.surface_id,
+                    azimuth_deg: orientation.azimuth_deg,
+                    tilt_deg: orientation.tilt_deg,
+                    area_m2: 1.0,
+                    omni_directional: false,
+                })
+                .map_err(to_py_err)?;
+        }
         Ok(())
     }
 
+    /// Add an EV with the driver actor that simulates its use. The driver
+    /// joins with the EV; drivers and battery managers already attached to
+    /// other equipment keep their state.
     pub fn add_ev(&mut self, ev: &PyEv) -> PyResult<()> {
         let config = ev_config_from_py(ev)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -1175,16 +1288,8 @@ impl PyDwelling {
                 .map_err(to_py_err)?;
         }
 
+        // Joins with the driver actor its seed builds.
         dwelling.add_equipment(eq).map_err(to_py_err)?;
-        // Equipment added after construction never sees the construction-time
-        // actor registration, and registration otherwise only re-runs on
-        // set_tariff — without this call the EV would sit inert unless a
-        // tariff happened to be set later. Battery needs no equivalent: its
-        // python surface always constructs BmsMode::Manual (the deliberate
-        // no-actor mode). add_ev_with_driver must NOT do this: it attaches
-        // its own driver under the canonical EvDriver:<name> the
-        // re-registration dedups against.
-        dwelling.auto_register_actors();
         Ok(())
     }
 
@@ -1195,7 +1300,7 @@ impl PyDwelling {
         seed: u64,
     ) -> PyResult<()> {
         use hares_core::actors::ev_driver::EvDriverActor;
-        use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId};
+        use hares_equipment::ev::catalog::{EvArchetypeId, L1_CAP_KW, VehicleId};
 
         let rust_vid: VehicleId = vehicle_id.into();
         let rust_aid: EvArchetypeId = archetype_id.into();
@@ -1203,7 +1308,7 @@ impl PyDwelling {
         let preset = rust_aid.preset();
 
         let max_power = match preset.charging_level {
-            hares_types::ChargingLevel::L1 => spec.max_l2_power_kw.min(1.8),
+            hares_types::ChargingLevel::L1 => spec.max_l2_power_kw.min(L1_CAP_KW),
             hares_types::ChargingLevel::L2 => spec.max_l2_power_kw,
         };
 
@@ -1262,40 +1367,26 @@ impl PyDwelling {
 
         let mut dwelling = self.acquire()?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
-        dwelling.add_equipment(eq).map_err(to_py_err)?;
 
-        let fuel_economy = spec.capacity_kwh / spec.range_miles;
         let seed_bytes = {
             let mut bytes = [0u8; 32];
             bytes[..8].copy_from_slice(&seed.to_le_bytes());
             bytes
         };
 
-        // Canonical built-in actor name ("EvDriver:<equipment>") so that a
-        // later auto_register_actors re-run (set_tariff) recognizes this
-        // driver as already attached and does not build a second, competing
-        // one from the equipment's actor seed.
+        // The canonical built-in actor name ("EvDriver:<equipment>") takes
+        // the place of the driver the EV's actor seed would build, now and
+        // on every later rebuild of the built-in actors (set_tariff).
         let actor = EvDriverActor::new(
             &format!("EvDriver:{}", spec.label),
             spec.label,
-            preset.strategy.clone(),
-            preset.plug_in_policy.clone(),
-            preset.build_miles_schedule(seed_bytes),
-            preset.build_departure_schedule(seed_bytes),
-            preset.build_duration_schedule(seed_bytes),
-            preset.build_arrival_schedule(seed_bytes),
-            preset.event_day_ratio,
-            fuel_economy,
-            spec.capacity_kwh,
-            max_power,
-            30.0, // average_speed_mph
-            20.0, // range_anxiety_miles
-            0.0,  // away_charge_fraction
-            0.0,  // away_charge_power_kw
+            ev_driver_params(spec, preset, seed_bytes, max_power),
             hares_core::ChaCha8Rng::from_seed(seed_bytes),
         );
 
-        dwelling.add_actor(Box::new(actor)).map_err(to_py_err)?;
+        dwelling
+            .add_equipment_with_actors(eq, vec![Box::new(actor)])
+            .map_err(to_py_err)?;
         Ok(())
     }
 
@@ -1319,6 +1410,17 @@ impl PyDwelling {
     }
 
     /// Replace equipment by name with a new equipment config object (Battery, PV, or EV).
+    ///
+    /// Actors bound to the replaced name stay and drive the replacement
+    /// when it keeps that name and accepts their signals; they are removed
+    /// when the replacement takes another name or cannot accept their
+    /// signals. A built-in EV driver or battery manager also stays only
+    /// when the replacement is configured for it identically (an EV's
+    /// capacity and charging, a battery's mode and power limits);
+    /// otherwise a fresh one is built for the replacement. The
+    /// replacement's own driver or battery manager is attached unless an
+    /// actor already holds its name. A rejected replacement leaves the
+    /// dwelling unchanged.
     pub fn replace_equipment(
         &mut self,
         name: String,
@@ -1506,10 +1608,14 @@ impl PyDwelling {
             )?;
 
         for batch in &batches {
-            calculator.accumulate(batch);
+            calculator
+                .accumulate(batch)
+                .map_err(|e| PyValueError::new_err(format!("metrics accumulation failed: {e}")))?;
         }
 
-        let full_metrics = calculator.finish();
+        let full_metrics = calculator
+            .finish()
+            .map_err(|e| PyValueError::new_err(format!("metrics finalization failed: {e}")))?;
         Ok(PySimulationMetrics {
             inner: full_metrics,
         })
@@ -1573,12 +1679,8 @@ impl PyDwelling {
     pub fn set_solar_override(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let solar_data = parse_solar_override(py, data)?;
         // Loud on non-finite irradiance, at the boundary that received
-        // the value — never relying on the downstream screens: the
-        // dwelling's finiteness screens are cfg-gated to
-        // debug/`check_invariants` builds, so in release builds a
-        // non-finite value that crosses here silently poisons the solar
-        // gains (NaN propagates into the zone/surface energy balance).
-        // This is the documented external-pipeline channel (pvlib/PySAM
+        // the value: never relying on the downstream screens. This is
+        // the documented external-pipeline channel (pvlib/PySAM
         // injection — see
         // tests/python/generate_pvlib_solar_override.py), where a NaN
         // riding in from missing satellite data is the normal failure
@@ -1606,8 +1708,10 @@ impl PyDwelling {
             }
         }
         let mut dwelling = self.acquire()?;
-        dwelling.environment.set_solar_override(solar_data);
-        Ok(())
+        dwelling
+            .environment
+            .set_solar_override(solar_data)
+            .map_err(to_py_err)
     }
 
     pub fn clear_solar_override(&self) -> PyResult<()> {
@@ -1686,13 +1790,15 @@ impl PyDwelling {
         crate::py_pv_sizing::pv_candidates_from_dwelling(
             &dwelling.roof_info,
             roof_shape,
-            &dwelling.wall_azimuths,
-            dwelling.latitude_deg,
-            diffuse_fraction,
-            panel_watts,
-            panel_area_m2,
+            hares_physics::pv_sizing::PvRoofTuning {
+                wall_azimuths: &dwelling.wall_azimuths,
+                latitude: dwelling.latitude_deg,
+                panel_watts,
+                panel_area_m2,
+                diffuse_fraction,
+                roof_shape_user_override: user_override,
+            },
             dwelling.pv_panel_defaults(),
-            user_override,
         )
     }
 
@@ -1738,8 +1844,7 @@ impl PyDwelling {
         panel_watts=None, panel_area_m2=None, system_losses=None,
         inverter_kw_ac=None, max_dc_ac_ratio=None, main_panel_ampacity=None,
         main_breaker_ampacity=None, roof_shape=None))]
-    // Why: PyO3 signature mirrors the full Rust API surface;
-    // a builder type adds indirection at the binding layer.
+    // PyO3 maps this keyword signature 1:1 to the Python API.
     #[allow(clippy::too_many_arguments)]
     pub fn estimate_pv_capacity(
         &self,
@@ -1778,21 +1883,27 @@ impl PyDwelling {
         crate::py_pv_sizing::size_pv_from_dwelling(
             &dwelling.roof_info,
             roof_shape,
-            &dwelling.wall_azimuths,
-            dwelling.latitude_deg,
-            target_kw,
-            min_kw,
-            max_kw,
-            diffuse_fraction,
-            panel_watts,
-            panel_area_m2,
-            system_losses,
-            inverter_kw_ac,
-            max_dc_ac_ratio,
-            main_panel_ampacity,
-            main_breaker_ampacity,
+            crate::py_pv_sizing::PvSizingTargets {
+                target_kw,
+                min_kw,
+                max_kw,
+            },
+            crate::py_pv_sizing::PvRoofSiting {
+                wall_azimuths: &dwelling.wall_azimuths,
+                latitude: dwelling.latitude_deg,
+                diffuse_fraction,
+                roof_shape_user_override: user_override,
+            },
+            hares_physics::pv_sizing::PvSystemTuning {
+                system_losses,
+                panel_watts,
+                panel_area_m2,
+                inverter_kw_ac,
+                max_dc_ac_ratio,
+                main_panel_ampacity,
+                main_breaker_ampacity,
+            },
             dwelling.pv_panel_defaults(),
-            user_override,
         )
         .map_err(pyo3::exceptions::PyValueError::new_err)
     }
@@ -1881,7 +1992,7 @@ impl PyDwelling {
     /// Removes all equipment from the dwelling.
     pub fn clear_equipment(&self) -> PyResult<()> {
         let mut dwelling = self.acquire()?;
-        dwelling.clear_equipment();
+        dwelling.clear_equipment().map_err(to_py_err)?;
         Ok(())
     }
 
@@ -1895,7 +2006,9 @@ impl PyDwelling {
         let rust_end_uses: Vec<hares_types::EndUse> =
             end_uses.into_iter().map(From::from).collect();
         let mut dwelling = self.acquire()?;
-        Ok(dwelling.remove_equipment_by_end_use(&rust_end_uses))
+        dwelling
+            .remove_equipment_by_end_use(&rust_end_uses)
+            .map_err(to_py_err)
     }
 
     /// Returns a snapshot of the current environment state.
@@ -1939,6 +2052,35 @@ impl PyDwelling {
             .collect::<PyResult<_>>()?;
         dict.set_item("zones", zones)?;
         Ok(dict.into())
+    }
+}
+
+/// The driver params an EV added through `add_ev_with_driver` is built
+/// with: every behavioural field comes from the archetype preset or the
+/// vehicle spec, never a local re-derivation. Free-standing so the
+/// agreement tests below can pin the construction to the catalogue's fuel
+/// economy and the seed path's away-charge power.
+fn ev_driver_params(
+    spec: &hares_equipment::ev::catalog::VehicleSpec,
+    preset: &hares_equipment::ev::catalog::ArchetypePreset,
+    seed_bytes: [u8; 32],
+    max_power: f64,
+) -> hares_core::actors::EvDriverParams {
+    hares_core::actors::EvDriverParams {
+        strategy: preset.strategy.clone(),
+        plug_in_policy: preset.plug_in_policy.clone(),
+        daily_drive_miles: preset.build_miles_schedule(seed_bytes),
+        departure_time: preset.build_departure_schedule(seed_bytes),
+        trip_duration: preset.build_duration_schedule(seed_bytes),
+        arrival_time: preset.build_arrival_schedule(seed_bytes),
+        event_day_ratio: preset.event_day_ratio,
+        fuel_economy_kwh_per_mi: spec.fuel_economy_kwh_per_mi,
+        capacity_kwh: spec.capacity_kwh,
+        max_charge_kw: max_power,
+        average_speed_mph: 30.0,
+        range_anxiety_miles: 20.0,
+        away_charge_fraction: 0.0,
+        away_charge_power_kw: preset.away_charge_power_kw,
     }
 }
 
@@ -2042,9 +2184,23 @@ impl PyDwelling {
         dwelling.step().map_err(|e| e.to_string())
     }
 
+    /// The deadband range of the named equipment's thermostat class, or
+    /// `None` when it takes no band.
+    pub(crate) fn band_range_of(&self, name: &str) -> Result<Option<(f64, f64)>, String> {
+        let dwelling = self.acquire_string()?;
+        let eq = dwelling
+            .equipment()
+            .iter()
+            .find(|e| e.descriptor().name == name)
+            .ok_or_else(|| format!("equipment '{name}' not found"))?;
+        Ok(eq
+            .thermostat_band_class()
+            .map(hares_types::ThermostatBandClass::range_c))
+    }
+
     pub(crate) fn observation(&self) -> Result<Vec<f64>, String> {
         let dwelling = self.acquire_string()?;
-        let telemetry = dwelling.telemetry();
+        let telemetry = dwelling.telemetry().map_err(|e| e.to_string())?;
         telemetry
             .to_observation_vec(&["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio"])
             .map_err(|err| err.to_string())
@@ -2162,6 +2318,7 @@ const KNOWN_KWARGS: &[&str] = &[
     "elevation_m",
     "utc_offset_h",
     "rotation",
+    "max_consecutive_step_failures",
 ];
 
 /// Extract an explicit [`SiteLocationOverride`] from the `latitude`,
@@ -2182,39 +2339,39 @@ fn extract_site_location_override(
     };
 
     let latitude_deg = get("latitude")?;
-    if let Some(lat) = latitude_deg {
-        if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
-            return Err(PyValueError::new_err(format!(
-                "latitude must be finite and within [-90, 90] degrees, got {lat}"
-            )));
-        }
+    if let Some(lat) = latitude_deg
+        && (!lat.is_finite() || !(-90.0..=90.0).contains(&lat))
+    {
+        return Err(PyValueError::new_err(format!(
+            "latitude must be finite and within [-90, 90] degrees, got {lat}"
+        )));
     }
 
     let longitude_deg = get("longitude")?;
-    if let Some(lon) = longitude_deg {
-        if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
-            return Err(PyValueError::new_err(format!(
-                "longitude must be finite and within [-180, 180] degrees, got {lon}"
-            )));
-        }
+    if let Some(lon) = longitude_deg
+        && (!lon.is_finite() || !(-180.0..=180.0).contains(&lon))
+    {
+        return Err(PyValueError::new_err(format!(
+            "longitude must be finite and within [-180, 180] degrees, got {lon}"
+        )));
     }
 
     let elevation_m = get("elevation_m")?;
-    if let Some(elev) = elevation_m {
-        if !elev.is_finite() || !(-500.0..=9000.0).contains(&elev) {
-            return Err(PyValueError::new_err(format!(
-                "elevation_m must be finite and within [-500, 9000] m, got {elev}"
-            )));
-        }
+    if let Some(elev) = elevation_m
+        && (!elev.is_finite() || !(-500.0..=9000.0).contains(&elev))
+    {
+        return Err(PyValueError::new_err(format!(
+            "elevation_m must be finite and within [-500, 9000] m, got {elev}"
+        )));
     }
 
     let utc_offset_h = get("utc_offset_h")?;
-    if let Some(off) = utc_offset_h {
-        if !off.is_finite() || !(-14.0..=14.0).contains(&off) {
-            return Err(PyValueError::new_err(format!(
-                "utc_offset_h must be finite and within [-14, 14] hours, got {off}"
-            )));
-        }
+    if let Some(off) = utc_offset_h
+        && (!off.is_finite() || !(-14.0..=14.0).contains(&off))
+    {
+        return Err(PyValueError::new_err(format!(
+            "utc_offset_h must be finite and within [-14, 14] hours, got {off}"
+        )));
     }
 
     Ok(SiteLocationOverride {
@@ -2227,7 +2384,7 @@ fn extract_site_location_override(
 
 pub(crate) fn build_config(
     hpxml: String,
-    schedule: String,
+    schedule: Option<String>,
     weather: String,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<DwellingConfig> {
@@ -2356,12 +2513,12 @@ pub(crate) fn build_config(
             .map(|obj| obj.extract::<f64>())
             .transpose()?;
 
-        if let Some(db) = setpoint_deadband_c {
-            if !db.is_finite() || db < 0.0 {
-                return Err(PyValueError::new_err(format!(
-                    "setpoint_deadband_c must be finite and non-negative, got {db}"
-                )));
-            }
+        if let Some(db) = setpoint_deadband_c
+            && (!db.is_finite() || db < 0.0)
+        {
+            return Err(PyValueError::new_err(format!(
+                "setpoint_deadband_c must be finite and non-negative, got {db}"
+            )));
         }
 
         let site_location = extract_site_location_override(kwargs.as_ref())?;
@@ -2379,6 +2536,13 @@ pub(crate) fn build_config(
             .map(parse_rotation_policy)
             .transpose()?
             .unwrap_or(hares_io::RotationPolicy::None);
+
+        let max_consecutive_step_failures = kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("max_consecutive_step_failures").ok().flatten())
+            .map(|obj| obj.extract::<u32>())
+            .transpose()?
+            .unwrap_or(hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES);
 
         if duration.num_milliseconds() % time_res.num_milliseconds() != 0 {
             return Err(PyValueError::new_err(format!(
@@ -2407,6 +2571,7 @@ pub(crate) fn build_config(
             site_location,
             retain_batches: true,
             rotation: rotation_policy,
+            max_consecutive_step_failures,
         }
     };
 
@@ -2518,11 +2683,13 @@ pub(crate) fn build_config(
         // rejects as a misconfigured non-object payload. A JSON `null`
         // nested INSIDE a provided dict keeps its meaning (a null override
         // field, rejected per-key downstream).
-        .and_then(|v| if v.is_null() { None } else { Some(v) });
+        .filter(|v| !v.is_null());
 
     Ok(DwellingConfig {
         hpxml_path: PathBuf::from(hpxml),
-        schedule_path: PathBuf::from(schedule),
+        // `None` requests a schedule generated from the HPXML; a set path
+        // must be readable at construction.
+        schedule_path: schedule.map(PathBuf::from),
         weather_path: PathBuf::from(weather),
         defaults_path,
         sim_config,
@@ -2545,15 +2712,27 @@ fn default_start() -> PyResult<DateTime<FixedOffset>> {
 
 pub(crate) fn to_py_err(err: HaresError) -> PyErr {
     let msg = err.to_string();
-    match err {
+    // A rejected equipment's error carries the warnings it raised; the
+    // exception class follows the reason it was rejected for.
+    let classified = match &err {
+        HaresError::RejectedEquipment { reason, .. } => reason.as_ref(),
+        other => other,
+    };
+    match classified {
         // Io errors are mapped to ConfigError because they predominantly arise during
         // config/file loading (HPXML, weather, schedules). This is a conscious trade-off:
         // a rare runtime Io error will surface as ConfigError rather than adding a
         // separate Python exception type for a case that effectively never occurs.
-        HaresError::Io(_) | HaresError::Dwelling(_) | HaresError::Envelope(_) => {
-            HaresConfigError::new_err(msg)
+        HaresError::Io(_)
+        | HaresError::Dwelling(_)
+        | HaresError::Envelope(_)
+        | HaresError::ThermostatBand { .. }
+        | HaresError::SolarOverrideMissingSurface { .. }
+        | HaresError::MissingInput { .. }
+        | HaresError::PreconditioningAxis { .. } => HaresConfigError::new_err(msg),
+        HaresError::Equipment(_) | HaresError::InvalidEquipmentParameter { .. } => {
+            HaresEquipmentError::new_err(msg)
         }
-        HaresError::Equipment(_) => HaresEquipmentError::new_err(msg),
         // Physics variant is DEPRECATED: zero production constructors remain in
         // the codebase (T-0144). Kept for serialization compatibility and future
         // hares-physics crate retrofitting (T-0145).
@@ -2564,7 +2743,8 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         | HaresError::InvalidState(_)
         | HaresError::InvariantViolation { .. }
         | HaresError::NanDetected { .. }
-        | HaresError::NegativeDeliveredEnergy { .. } => HaresSimulationError::new_err(msg),
+        | HaresError::NegativeDeliveredEnergy { .. }
+        | HaresError::RejectedEquipment { .. } => HaresSimulationError::new_err(msg),
     }
 }
 
@@ -2641,7 +2821,15 @@ fn snapshot_to_py(
                 ports
                     .thermal
                     .iter()
-                    .map(|(z, s, l)| (z.0, *s, *l))
+                    .map(|(z, heat)| {
+                        (
+                            z.0,
+                            heat.convective_w,
+                            heat.radiant_w,
+                            heat.shortwave_w,
+                            heat.latent_w,
+                        )
+                    })
                     .collect::<Vec<_>>(),
             )?;
             pd.set_item("electrical_load_kw", ports.electrical_load_kw)?;
@@ -2664,6 +2852,7 @@ fn snapshot_to_py(
         let d = PyDict::new(py);
         let gains = &solvers.envelope_gains;
         d.set_item("window_solar_w", gains.window_solar_w)?;
+        d.set_item("window_through_glass_w", gains.window_through_glass_w)?;
         d.set_item("opaque_solar_lwr_w", gains.opaque_solar_lwr_w)?;
         d.set_item("interior_lwr_w", gains.interior_lwr_w)?;
         d.set_item("infiltration_w", gains.infiltration_w)?;
@@ -2691,6 +2880,7 @@ fn snapshot_to_py(
         }
         d.set_item("port_convective_w", gains.port_convective_w)?;
         d.set_item("port_radiant_w", gains.port_radiant_w)?;
+        d.set_item("port_shortwave_w", gains.port_shortwave_w)?;
         d.set_item("internal_gain_w", gains.internal_gain_w)?;
         dict.set_item("post_solvers", d)?;
     }
@@ -2796,6 +2986,29 @@ mod tests {
     use crate::py_equipment::PyPv;
     use crate::utils::extract_seconds;
     use crate::utils::{extract_datetime, parse_datetime_str};
+
+    /// A rejected add or replace raises the exception class of the reason
+    /// it was rejected for, and its message carries the rejected
+    /// equipment's warnings.
+    #[test]
+    fn rejected_equipment_raises_the_exception_of_its_reason() {
+        use hares_types::HaresError;
+        let rejected = |reason: HaresError| HaresError::RejectedEquipment {
+            reason: Box::new(reason),
+            warnings: vec!["EV1: init warning".to_string()],
+        };
+        Python::attach(|py| {
+            let equipment = super::to_py_err(rejected(HaresError::Equipment("dup".to_string())));
+            assert!(equipment.is_instance_of::<super::HaresEquipmentError>(py));
+            assert!(equipment.to_string().contains("EV1: init warning"));
+
+            let config = super::to_py_err(rejected(HaresError::Io("no file".to_string())));
+            assert!(config.is_instance_of::<super::HaresConfigError>(py));
+
+            let simulation = super::to_py_err(rejected(HaresError::Control("taken".to_string())));
+            assert!(simulation.is_instance_of::<super::HaresSimulationError>(py));
+        });
+    }
 
     #[derive(Debug)]
     struct TestDwelling {
@@ -3033,6 +3246,7 @@ mod tests {
         let surface_id =
             surface_id_for_orientation(tilt_deg, azimuth_deg, 5.0).expect("surface id");
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 24.0,
@@ -3060,7 +3274,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: HashMap::new(),
             equipment_core: HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -3112,14 +3327,15 @@ mod tests {
 
     #[test]
     fn pypv_invalid_sam_lut_path_fails_init() {
-        let bad_lut_path = "/tmp/hares_bad_pv_lut.txt";
-        fs::write(bad_lut_path, "not,a,valid,lut\n1,2,3,4").expect("write test file");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bad_lut_path = dir.path().join("bad_pv_lut.txt");
+        fs::write(&bad_lut_path, "not,a,valid,lut\n1,2,3,4").expect("write test file");
         let pv = PyPv {
             name: "PV Bad LUT".to_string(),
             capacity_kw: 5.0,
             tilt: 30.0,
             azimuth: 180.0,
-            sam_lut_path: Some(bad_lut_path.to_string()),
+            sam_lut_path: Some(bad_lut_path.to_string_lossy().into_owned()),
             soiling: None,
         };
         let config = pv_config_from_py(&pv).expect("PV config");
@@ -3570,6 +3786,243 @@ mod tests {
                 assert_eq!(
                     result, expected,
                     "extract_seconds({input}) = {result}, expected {expected}"
+                );
+            }
+        });
+    }
+
+    /// The seed path's away-charge default: `actor_registry` builds an
+    /// EvDriver whose `away_charge_power_kw` falls back to this when the
+    /// config carries no override.
+    const SEED_PATH_AWAY_CHARGE_POWER_KW: f64 = 6.6;
+
+    #[test]
+    fn add_ev_with_driver_away_charge_power_matches_the_seed_path() {
+        use hares_control::DispatchRequest;
+        use hares_core::Actor;
+        use hares_core::actors::ev_driver::EvDriverActor;
+        use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId};
+        use hares_types::{ControlSignal, ScheduleSource};
+        use rand::SeedableRng;
+
+        let spec = VehicleId::ChevyBoltEv.spec();
+        for aid in EvArchetypeId::ALL {
+            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7.2);
+            assert_eq!(
+                params.away_charge_power_kw, SEED_PATH_AWAY_CHARGE_POWER_KW,
+                "{aid}: the Python-built driver's away-charge power must be the seed path's default"
+            );
+        }
+
+        // Behavioral half: with `away_charge_fraction` set above 0.0 (the
+        // condition the two paths disagree under), the driver built from
+        // `add_ev_with_driver`'s params dispatches its away session at the
+        // preset's power, which the equipment mirrors as
+        // `away_charge_power_kw` telemetry. Constant schedules pin the
+        // trip to departure minute 0, 600 driven minutes, arrival at 600.
+        let mut params = super::ev_driver_params(
+            spec,
+            EvArchetypeId::DailyCommuterL2.preset(),
+            [7u8; 32],
+            7.2,
+        );
+        params.away_charge_fraction = 0.3;
+        params.event_day_ratio = 1.0;
+        params.daily_drive_miles = ScheduleSource::Constant(30.0);
+        params.departure_time = ScheduleSource::Constant(0.0);
+        params.trip_duration = ScheduleSource::Constant(600.0);
+        params.arrival_time = None;
+        let mut actor = EvDriverActor::new(
+            "EvDriver:EV1",
+            "EV1",
+            params,
+            hares_core::ChaCha8Rng::from_seed([7u8; 32]),
+        );
+
+        let start = FixedOffset::east_opt(0)
+            .expect("UTC offset")
+            .with_ymd_and_hms(2026, 6, 21, 0, 0, 0)
+            .single()
+            .expect("valid start");
+        let mut away_powers: Vec<f64> = Vec::new();
+        for minute in 0..=1440i64 {
+            let mut env = pv_env(30.0, 180.0);
+            env.current_time = start + ChronoDuration::minutes(minute);
+            let mut out: Vec<DispatchRequest> = Vec::new();
+            actor.decide(&env, &mut out);
+            for req in out {
+                if let ControlSignal::EvAwayCharge { power_kw } = req.signal {
+                    away_powers.push(power_kw);
+                }
+            }
+        }
+        assert!(
+            !away_powers.is_empty(),
+            "the pinned trip must produce an away-charging session"
+        );
+        assert!(
+            away_powers
+                .iter()
+                .all(|p| (*p - SEED_PATH_AWAY_CHARGE_POWER_KW).abs() < 1e-9),
+            "every away-charge dispatch must carry the seed path's 6.6 kW, got {away_powers:?}"
+        );
+    }
+
+    #[test]
+    fn add_ev_with_driver_fuel_economy_matches_the_catalogue() {
+        use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId};
+
+        let spec = VehicleId::ChevyBoltEv.spec();
+        let quotient = spec.capacity_kwh / spec.range_miles;
+        for aid in EvArchetypeId::ALL {
+            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7.2);
+            assert_eq!(
+                params.fuel_economy_kwh_per_mi, spec.fuel_economy_kwh_per_mi,
+                "{aid}: the Python-built driver's fuel economy must be the catalogue's"
+            );
+            assert_ne!(
+                params.fuel_economy_kwh_per_mi, quotient,
+                "{aid}: the catalogue figure must not be the capacity/range quotient"
+            );
+        }
+    }
+}
+
+/// `profiling_summary_lists_actors`: the per-actor
+/// totals reach the Python `profiling_summary()` dict in registration
+/// order, accumulated over the run. The probes are defined here because
+/// hares-core's test actors are test items another crate cannot import;
+/// the whole module compiles only under `test-profiling`, which enables
+/// the crate's `profiling` feature.
+#[cfg(all(test, feature = "profiling"))]
+mod profiling_summary_tests {
+    use std::path::PathBuf;
+
+    use hares_control::DispatchRequest;
+    use hares_core::Actor;
+    use hares_types::EnvironmentState;
+    use pyo3::Python;
+    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods};
+
+    use super::{PyDwelling, to_py_err};
+
+    /// No interests (the filter calls `decide()` every step) and dispatches
+    /// nothing.
+    struct ProbeActor {
+        name: &'static str,
+    }
+
+    impl Actor for ProbeActor {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {}
+    }
+
+    #[test]
+    fn profiling_summary_lists_actors() {
+        Python::attach(|py| {
+            let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            root.push("../..");
+            let fixture = root.join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
+            let defaults = root.join("defaults");
+
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("start_time", "2023-01-01T00:00:00-07:00")
+                .unwrap();
+            kwargs.set_item("duration_s", 96 * 3600_i64).unwrap();
+            kwargs.set_item("time_res_s", 3600_i64).unwrap();
+            kwargs
+                .set_item("defaults_path", defaults.to_string_lossy().into_owned())
+                .unwrap();
+            kwargs.set_item("bldg_id", 1_i64).unwrap();
+            kwargs.set_item("master_seed", 0_u64).unwrap();
+            kwargs.set_item("write_output", false).unwrap();
+
+            let mut dwelling = PyDwelling::from_hpxml(
+                &py.get_type::<PyDwelling>(),
+                fixture.join("building.xml").to_string_lossy().into_owned(),
+                Some(fixture.join("schedule.csv").to_string_lossy().into_owned()),
+                fixture.join("weather.epw").to_string_lossy().into_owned(),
+                Some(&kwargs),
+            )
+            .expect("cz2a fixture must load");
+
+            // Add the probes through the inner Dwelling, in that order.
+            {
+                let mut d = dwelling
+                    .acquire()
+                    .expect("fresh dwelling must not be poisoned");
+                d.add_actor(Box::new(ProbeActor { name: "probe_a" }))
+                    .map_err(to_py_err)
+                    .expect("probe_a must register");
+                d.add_actor(Box::new(ProbeActor { name: "probe_b" }))
+                    .map_err(to_py_err)
+                    .expect("probe_b must register");
+            }
+
+            dwelling.initialize().expect("initialize must succeed");
+            for _ in 0..96 {
+                dwelling.step(py).expect("cz2a fixture step must succeed");
+            }
+
+            let summary = dwelling
+                .profiling_summary(py)
+                .expect("a profiling build reports a summary");
+            let dict = summary
+                .bind(py)
+                .cast::<PyDict>()
+                .expect("profiling_summary returns a dict");
+            let per_actor = dict
+                .get_item("per_actor")
+                .expect("get_item must not raise")
+                .expect("the summary must carry a per_actor key")
+                .cast::<PyList>()
+                .expect("per_actor must be a list")
+                .clone();
+            // (name, calls) per entry, in the dict's registration order.
+            let listed: Vec<(String, u64)> = per_actor
+                .iter()
+                .map(|entry| {
+                    let entry = entry
+                        .cast::<PyDict>()
+                        .expect("per_actor entry must be a dict");
+                    let name: String = entry
+                        .get_item("name")
+                        .expect("get_item must not raise")
+                        .expect("entry must carry a name")
+                        .extract()
+                        .expect("name must be a str");
+                    let calls: u64 = entry
+                        .get_item("calls")
+                        .expect("get_item must not raise")
+                        .expect("entry must carry calls")
+                        .extract()
+                        .expect("calls must be an int");
+                    (name, calls)
+                })
+                .collect();
+            let position =
+                |name: &str| listed.iter().position(|(entry_name, _)| entry_name == name);
+            let probe_a = position("probe_a");
+            let probe_b = position("probe_b");
+            assert!(
+                probe_a.is_some() && probe_b.is_some(),
+                "per_actor must hold both probes: {listed:?}"
+            );
+            assert!(
+                probe_a.unwrap() < probe_b.unwrap(),
+                "probe_a must be listed before probe_b (registration order): {listed:?}"
+            );
+            for (name, calls) in listed
+                .iter()
+                .filter(|(n, _)| n == "probe_a" || n == "probe_b")
+            {
+                assert_eq!(
+                    calls, &96,
+                    "'{name}' declares no interests, so the filter must call decide() every step"
                 );
             }
         });

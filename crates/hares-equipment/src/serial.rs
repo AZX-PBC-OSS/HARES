@@ -5,7 +5,7 @@
 //! `from_bytes_crc32` validates the suffix and returns
 //! `Err(PostcardError::CrcMismatch)` on bit-rot corruption.
 //!
-//! Versioned (`save_versioned` / `load_versioned`) helpers additionally
+//! Versioned (`try_save_versioned` / `load_versioned`) helpers additionally
 //! prepend a little-endian `u32` version token so that field-type or
 //! enum-variant changes in checkpoint structs are caught with a descriptive
 //! error rather than a generic postcard failure.
@@ -48,21 +48,9 @@ const VERSION_PREAMBLE_LEN: usize = std::mem::size_of::<u32>();
 /// On load, `load_versioned` validates the version before attempting
 /// deserialization so that a field-type or enum-variant change in the
 /// checkpoint struct is caught with a descriptive error rather than silent
-/// corruption or a generic postcard failure.
-///
-/// # Panics
-///
-/// Panics on postcard serialization failure. Prefer `try_save_versioned` in
-/// production code where panicking would crash a long-running simulation.
-#[deprecated(note = "use try_save_versioned instead to avoid panics during checkpointing")]
-pub fn save_versioned<T: Serialize>(state: &T, version: u32, equipment_type: &str) -> Vec<u8> {
-    try_save_versioned(state, version, equipment_type)
-        .expect("postcard serialization failed in save_versioned — use try_save_versioned for production paths")
-}
-
-/// Non-panicking variant of `save_versioned` for production checkpoint paths
-/// where a serialization failure must be propagated rather than terminating
-/// the process.
+/// corruption or a generic postcard failure. A serialization failure is
+/// returned, not panicked, so a checkpoint cannot terminate a long-running
+/// simulation.
 ///
 /// Format: `[version: u32 LE][postcard payload with CRC32 suffix]`
 #[must_use = "serialization errors should be handled, not silently discarded"]

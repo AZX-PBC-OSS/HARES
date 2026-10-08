@@ -115,26 +115,26 @@ impl BatteryConfig {
                 "battery max_discharge_kw must be finite and > 0".to_string(),
             ));
         }
-        if let (Some(min), Some(max)) = (self.min_soc, self.max_soc) {
-            if min >= max {
-                return Err(HaresError::Equipment(
-                    "battery min_soc must be less than max_soc".to_string(),
-                ));
-            }
+        if let (Some(min), Some(max)) = (self.min_soc, self.max_soc)
+            && min >= max
+        {
+            return Err(HaresError::Equipment(
+                "battery min_soc must be less than max_soc".to_string(),
+            ));
         }
-        if let Some(n) = self.n_series {
-            if n == 0 {
-                return Err(HaresError::Equipment(
-                    "battery n_series must be > 0".to_string(),
-                ));
-            }
+        if let Some(n) = self.n_series
+            && n == 0
+        {
+            return Err(HaresError::Equipment(
+                "battery n_series must be > 0".to_string(),
+            ));
         }
-        if let Some(n) = self.n_parallel {
-            if n == 0 {
-                return Err(HaresError::Equipment(
-                    "battery n_parallel must be > 0".to_string(),
-                ));
-            }
+        if let Some(n) = self.n_parallel
+            && n == 0
+        {
+            return Err(HaresError::Equipment(
+                "battery n_parallel must be > 0".to_string(),
+            ));
         }
         for (name, val) in [
             ("import_limit_w", self.import_limit_w),
@@ -142,12 +142,12 @@ impl BatteryConfig {
             ("heater_power_w", self.heater_power_w),
             ("standby_power_w", self.standby_power_w),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() || v < 0.0 {
-                    return Err(HaresError::Equipment(format!(
-                        "battery {name} must be finite and >= 0"
-                    )));
-                }
+            if let Some(v) = val
+                && (!v.is_finite() || v < 0.0)
+            {
+                return Err(HaresError::Equipment(format!(
+                    "battery {name} must be finite and >= 0"
+                )));
             }
         }
         // Temperature fields must be finite: a NaN cell temperature falls
@@ -207,27 +207,27 @@ impl BatteryConfig {
             ("charge_efficiency", self.charge_efficiency),
             ("discharge_efficiency", self.discharge_efficiency),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() || v <= 0.0 || v > 1.0 {
-                    return Err(HaresError::Equipment(format!(
-                        "battery {name} must be finite and within (0, 1]"
-                    )));
-                }
+            if let Some(v) = val
+                && (!v.is_finite() || v <= 0.0 || v > 1.0)
+            {
+                return Err(HaresError::Equipment(format!(
+                    "battery {name} must be finite and within (0, 1]"
+                )));
             }
         }
-        if let Some(pf) = self.power_factor {
-            if !pf.is_finite() || pf <= 0.0 || pf > 1.0 {
-                return Err(HaresError::Equipment(
-                    "battery power_factor must be finite and within (0, 1]".to_string(),
-                ));
-            }
+        if let Some(pf) = self.power_factor
+            && (!pf.is_finite() || pf <= 0.0 || pf > 1.0)
+        {
+            return Err(HaresError::Equipment(
+                "battery power_factor must be finite and within (0, 1]".to_string(),
+            ));
         }
-        if let Some(kva) = self.inverter_capacity_kva {
-            if !kva.is_finite() || kva <= 0.0 {
-                return Err(HaresError::Equipment(
-                    "battery inverter_capacity_kva must be finite and > 0".to_string(),
-                ));
-            }
+        if let Some(kva) = self.inverter_capacity_kva
+            && (!kva.is_finite() || kva <= 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "battery inverter_capacity_kva must be finite and > 0".to_string(),
+            ));
         }
         Ok(())
     }

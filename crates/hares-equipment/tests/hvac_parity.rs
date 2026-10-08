@@ -14,6 +14,7 @@ use hares_equipment::{
     CentralAirConditionerConfig, DefrostConfig, DuctConfig, ElectricBaseboardConfig,
     EquipmentConfig, EquipmentRegistry, GasFurnaceConfig, HeatPumpCommonConfig,
     HeatPumpCoolerConfig, HeatPumpHeaterConfig, HvacSetpointConfig, IdealHvacConfig,
+    RejectUnknownKeys,
 };
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, HumidityAccumulator, OperatingMode,
@@ -26,6 +27,7 @@ use hares_types::{
 
 fn make_env(zone_temp_c: f64, outdoor_temp_c: f64, _zone_wb_c: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: zone_temp_c,
@@ -61,7 +63,8 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64, _zone_wb_c: f64) -> Environme
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
@@ -161,6 +164,7 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
             name.to_string(),
             class.to_string(),
             HeatPumpHeaterConfig {
+                reject_unknown_keys: RejectUnknownKeys,
                 common: HeatPumpCommonConfig {
                     equipment_id: None,
                     zone_id: get("zone_id").map(|v| v as u16),
@@ -262,6 +266,7 @@ fn hp_cooler_cfg(
             "ASHP Cooler".to_string()
         },
         HeatPumpCoolerConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),
@@ -289,7 +294,7 @@ fn hp_cooler_cfg(
                     cooling_setpoint_c: Some(24.0),
                     ..Default::default()
                 },
-                hysteresis_c: Some(0.0),
+                hysteresis_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
                 duct: DuctConfig::default(),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
@@ -1841,13 +1846,16 @@ fn two_speed_ac_setpoint_matrix_transitions_from_high_to_low_stage() {
         "high-load two-speed call should run full runtime fraction; got {}",
         high.runtime_fraction
     );
-    let expected_low_plr = 0.4_f64 / 0.72_f64;
+    // The band-relative load fraction: the zero edge is the setpoint 24.0
+    // and the turn-on 24.8, so the zone 24.4 sits at (24.4-24.0)/0.8 = 0.5
+    // of the band.
+    let expected_low_plr = 0.5_f64 / 0.72_f64;
     // Two-speed PLF Cd = 0.11; RTF = PLR / PLF where PLF = 1 - Cd * (1 - PLR).
     let cd = 0.11;
     let expected_rtf = expected_low_plr / (1.0 - cd * (1.0 - expected_low_plr));
     assert!(
         (low.runtime_fraction - expected_rtf).abs() < 1e-9,
-        "load_fraction 0.4 with default low stage fraction 0.72 should cycle stage 0 at \
+        "load_fraction 0.6 with default low stage fraction 0.72 should cycle stage 0 at \
          RTF=PLR/PLF≈{expected_rtf:.4}; got {}",
         low.runtime_fraction
     );
@@ -1935,6 +1943,7 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
         "ashp".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
             common: HeatPumpCommonConfig {
                 equipment_id: None,
                 zone_id: Some(1),

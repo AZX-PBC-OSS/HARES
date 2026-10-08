@@ -16,11 +16,12 @@ use hares_equipment::hvac::heating_config::{
     GasBoilerConfig, GasFurnaceConfig, HvacSetpointConfig, IdealHvacConfig,
 };
 use hares_equipment::{EquipmentConfig, SetpointReconciliation};
-use hares_types::{FuelType, ScheduleSourceConfig};
+use hares_types::{FuelType, HaresError, ScheduleSourceConfig, Warning};
 
 use super::HpxmlError;
 use super::building::{Boundary, BoundaryType, Building, DuctLocation, XmlNode, Zone, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec};
+use super::validation::ValidationError;
 use super::xml_helpers::{child_f64, child_text, descendants_named, element_id};
 use hares_physics::constants::{
     BOILER_AUXILIARY_HOURS_PER_YEAR, BTU_PER_HR_PER_W, CFM_TO_M3_S, HOURS_PER_YEAR, KW_TO_W,
@@ -63,6 +64,17 @@ fn zone_id_from_params(params: &Map<String, Value>) -> Option<u16> {
         .get("zone_id")
         .and_then(Value::as_u64)
         .map(|v| v as u16)
+}
+
+/// The boiler spec's assigned fluid loop id, written into its raw parameters
+/// by the loop wiring pass and the loop allocator. The post-autosize
+/// typed-config rebuild reads the parameters, so the id a boiler was wired
+/// or allocated survives the rebuild.
+fn loop_id_from_params(params: &Map<String, Value>) -> Option<u16> {
+    params
+        .get("loop_id")
+        .and_then(Value::as_u64)
+        .and_then(|v| u16::try_from(v).ok())
 }
 
 fn airflow_defect_multiplier(params: &Map<String, Value>) -> f64 {
@@ -244,15 +256,7 @@ pub fn compute_duct_dse_params(
         return Ok(DuctDseParams::default());
     }
 
-    let house_volume_m3 = building.conditioned_volume_m3.ok_or_else(|| {
-        HpxmlError::MissingField {
-            path: "BuildingSummary/BuildingConstruction/ConditionedBuildingVolume",
-            system_kind: "Building",
-            system_id: "conditioned".to_string(),
-            reason:
-                "conditioned volume (m³) is required for ASHRAE 152 duct DSE when ducts are outside conditioned space; no silent default permitted",
-        }
-    })?;
+    let house_volume_m3 = building.conditioned_volume_m3;
     let latitude_deg = building.site.latitude_deg.ok_or_else(|| {
         HpxmlError::MissingField {
             path: "Site/Latitude",
@@ -305,61 +309,78 @@ pub fn compute_duct_dse_params(
 ///
 /// Called after autosizing to replace placeholder capacities with computed
 /// values. Matches on the canonical equipment name to select the correct
-/// config builder.
+/// config builder. A builder failure is an error naming the equipment and
+/// the failure: a rebuild that silently left the raw spec (placeholder
+/// capacities) in place would run autosized numbers through un-autosized
+/// equipment.
+///
+/// # Errors
+///
+/// The matched builder's own error, or the unrecognized-name error.
 pub fn rebuild_hvac_typed_config(
     name: &str,
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
-) -> Option<EquipmentConfig> {
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
     match name {
-        "Gas Furnace" => try_build_gas_furnace_config(name, params, duct_params)
-            .ok()
-            .flatten(),
-        "Electric Furnace" => try_build_electric_furnace_config(name, params, duct_params)
-            .ok()
-            .flatten(),
-        "Gas Boiler" => try_build_gas_boiler_config(name, params).ok().flatten(),
-        "Electric Boiler" => try_build_electric_boiler_config(name, params)
-            .ok()
-            .flatten(),
-        "Electric Baseboard" => try_build_electric_baseboard_config(name, params)
-            .ok()
-            .flatten(),
-        "Ideal HVAC" => try_build_ideal_hvac_config(name, params),
-        "Air Conditioner" => try_build_central_ac_config(name, params, duct_params),
-        "Room AC" => try_build_room_ac_config(name, params),
+        "Gas Furnace" => try_build_gas_furnace_config(name, params, duct_params)?
+            .ok_or_else(|| rebuild_failed(name)),
+        "Electric Furnace" => try_build_electric_furnace_config(name, params, duct_params)?
+            .ok_or_else(|| rebuild_failed(name)),
+        "Gas Boiler" => {
+            try_build_gas_boiler_config(name, params)?.ok_or_else(|| rebuild_failed(name))
+        }
+        "Electric Boiler" => {
+            try_build_electric_boiler_config(name, params)?.ok_or_else(|| rebuild_failed(name))
+        }
+        "Electric Baseboard" => {
+            try_build_electric_baseboard_config(name, params)?.ok_or_else(|| rebuild_failed(name))
+        }
+        "Ideal HVAC" => {
+            try_build_ideal_hvac_config(name, params).ok_or_else(|| rebuild_failed(name))
+        }
+        "Air Conditioner" => try_build_central_ac_config(name, params, duct_params)?
+            .ok_or_else(|| rebuild_failed(name)),
+        "Room AC" => try_build_room_ac_config(name, params).ok_or_else(|| rebuild_failed(name)),
         "ASHP Heater" | "MSHP Heater" => {
             let is_mini_split = name.starts_with("MSHP");
-            try_build_heat_pump_heater_config(name, params, duct_params, is_mini_split)
-                .ok()
-                .flatten()
+            try_build_heat_pump_heater_config(name, params, duct_params, is_mini_split)?
+                .ok_or_else(|| rebuild_failed(name))
         }
         "ASHP Cooler" | "MSHP Cooler" => {
             let is_mini_split = name.starts_with("MSHP");
-            try_build_heat_pump_cooler_config(name, params, duct_params, is_mini_split)
-                .ok()
-                .flatten()
+            try_build_heat_pump_cooler_config(name, params, duct_params, is_mini_split)?
+                .ok_or_else(|| rebuild_failed(name))
         }
         "GSHP Heater" | "WSHP Heater" => {
-            try_build_heat_pump_heater_config(name, params, duct_params, false)
-                .ok()
-                .flatten()
+            try_build_heat_pump_heater_config(name, params, duct_params, false)?
+                .ok_or_else(|| rebuild_failed(name))
         }
         "GSHP Cooler" | "WSHP Cooler" => {
-            try_build_heat_pump_cooler_config(name, params, duct_params, false)
-                .ok()
-                .flatten()
+            try_build_heat_pump_cooler_config(name, params, duct_params, false)?
+                .ok_or_else(|| rebuild_failed(name))
         }
-        "Dehumidifier" => try_build_dehumidifier_config(name, params),
-        other => {
-            tracing::warn!(
-                canonical_name = other,
-                "rebuild_hvac_typed_config called with unrecognized equipment name; \
-                 returning None"
-            );
-            None
+        "Dehumidifier" => {
+            try_build_dehumidifier_config(name, params).ok_or_else(|| rebuild_failed(name))
         }
+        other => Err(HpxmlError::Parse(
+            format!("rebuild_hvac_typed_config called with unrecognized equipment name '{other}'")
+                .into(),
+        )),
     }
+}
+
+/// The rebuild failure for `name`: the typed config did not build from the
+/// spec's parameters, so autosizing could not replace its placeholder
+/// capacities.
+fn rebuild_failed(name: &str) -> HpxmlError {
+    HpxmlError::Parse(
+        format!(
+            "autosized typed config for '{name}' did not build from the spec's \
+             parameters; the raw spec with placeholder capacities is not a valid fallback"
+        )
+        .into(),
+    )
 }
 
 /// Compute a `DuctConfig` from the duct parameter bundle produced by
@@ -379,12 +400,12 @@ fn compute_duct_config(
     n_speeds: u8,
     is_heat_pump: bool,
     explicit_airflow_m3_s_per_w: Option<f64>,
-) -> DuctConfig {
+) -> std::result::Result<DuctConfig, HpxmlError> {
     use hares_physics::ashrae152::{Ashrae152ZoneType, DuctDseInput, calculate_dse};
     use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
 
     let Some(zone_type_str) = duct_params.zone_type.as_deref() else {
-        return DuctConfig::default();
+        return Ok(DuctConfig::default());
     };
 
     let zone_type = match zone_type_str {
@@ -405,11 +426,14 @@ fn compute_duct_config(
         "under_slab" => Ashrae152ZoneType::UnderSlab,
         "ext_walls" => Ashrae152ZoneType::ExteriorWalls,
         other => {
-            tracing::warn!(
-                duct_zone_type = other,
-                "Unrecognized duct zone type; skipping DSE calculation"
-            );
-            return DuctConfig::default();
+            return Err(HpxmlError::InvalidField {
+                path: "Ducts/zone type",
+                system_kind: "Ducts",
+                system_id: duct_params.zone_type.clone().unwrap_or_default(),
+                value_received: other.to_string(),
+                reason: "unrecognized duct zone type for the ASHRAE 152 duct DSE \
+                         calculation; no default zone model may be substituted",
+            });
         }
     };
 
@@ -426,7 +450,7 @@ fn compute_duct_config(
     let return_r = duct_params.return_r_m2_k_w;
 
     if capacity_w <= 0.0 {
-        return DuctConfig::default();
+        return Ok(DuctConfig::default());
     }
 
     let cfm_per_ton = if is_heating { 350.0_f64 } else { 400.0_f64 };
@@ -441,14 +465,16 @@ fn compute_duct_config(
     if duct_params.supply_leakage_cfm25 > 0.0 && fan_flow_m3_s > 0.0 {
         let fan_flow_cfm = fan_flow_m3_s / CFM_TO_M3_S;
         let supply_frac_from_cfm25 = duct_params.supply_leakage_cfm25 / fan_flow_cfm;
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        debug_assert!(
-            (0.0..=1.0).contains(&supply_frac_from_cfm25),
-            "supply CFM25 fraction {supply_frac_from_cfm25} outside [0,1] — \
-             CFM25 leakage ({}) exceeds fan flow ({fan_flow_cfm} CFM)",
-            duct_params.supply_leakage_cfm25
-        );
-        supply_leak = supply_frac_from_cfm25.clamp(0.0, 1.0);
+        // Leakage above fan flow is invalid input, so out-of-range is a
+        // typed error in every build profile (no silent clamp).
+        if !(0.0..=1.0).contains(&supply_frac_from_cfm25) {
+            return Err(HpxmlError::from(HaresError::Physics(format!(
+                "supply CFM25 fraction {supply_frac_from_cfm25} outside [0,1]: \
+                 CFM25 leakage ({}) exceeds fan flow ({fan_flow_cfm} CFM)",
+                duct_params.supply_leakage_cfm25
+            ))));
+        }
+        supply_leak = supply_frac_from_cfm25;
         #[cfg(feature = "observe")]
         tracing::info!(
             target: "observe",
@@ -463,14 +489,16 @@ fn compute_duct_config(
     if duct_params.return_leakage_cfm25 > 0.0 && fan_flow_m3_s > 0.0 {
         let fan_flow_cfm = fan_flow_m3_s / CFM_TO_M3_S;
         let return_frac_from_cfm25 = duct_params.return_leakage_cfm25 / fan_flow_cfm;
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        debug_assert!(
-            (0.0..=1.0).contains(&return_frac_from_cfm25),
-            "return CFM25 fraction {return_frac_from_cfm25} outside [0,1] — \
-             CFM25 leakage ({}) exceeds fan flow ({fan_flow_cfm} CFM)",
-            duct_params.return_leakage_cfm25
-        );
-        return_leak = return_frac_from_cfm25.clamp(0.0, 1.0);
+        // Leakage above fan flow is invalid input, so out-of-range is a
+        // typed error in every build profile (no silent clamp).
+        if !(0.0..=1.0).contains(&return_frac_from_cfm25) {
+            return Err(HpxmlError::from(HaresError::Physics(format!(
+                "return CFM25 fraction {return_frac_from_cfm25} outside [0,1]: \
+                 CFM25 leakage ({}) exceeds fan flow ({fan_flow_cfm} CFM)",
+                duct_params.return_leakage_cfm25
+            ))));
+        }
+        return_leak = return_frac_from_cfm25;
         #[cfg(feature = "observe")]
         tracing::info!(
             target: "observe",
@@ -519,26 +547,20 @@ fn compute_duct_config(
         soil_conductivity_w_m_k: None,
     };
 
-    let raw_dse = calculate_dse(&input);
-    // Invariant: DSE must be in [0, 1] — a value outside this range
-    // indicates invalid input or an arithmetic error in ASHRAE 152.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    debug_assert!(
-        (0.0..=1.0).contains(&raw_dse),
-        "DSE {raw_dse} outside [0,1] — ASHRAE 152 produced an invalid result; check input parameters"
-    );
-    let dse = raw_dse.clamp(0.0, 1.0);
+    // `calculate_dse` clamps its result to (0, 1] and reports out-of-range
+    // resolved leakage fractions as a typed error in every build profile.
+    let dse = calculate_dse(&input)?.clamp(0.0, 1.0);
 
     if is_heating {
-        DuctConfig {
+        Ok(DuctConfig {
             dse_heat: Some(dse),
             ..DuctConfig::default()
-        }
+        })
     } else {
-        DuctConfig {
+        Ok(DuctConfig {
             dse_cool: Some(dse),
             ..DuctConfig::default()
-        }
+        })
     }
 }
 
@@ -811,7 +833,7 @@ fn try_build_gas_furnace_config(
         n_speeds,
         false,
         Some(airflow_m3_s_per_w),
-    );
+    )?;
     ducts.airflow_m3_s_per_w = Some(airflow_m3_s_per_w);
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
@@ -865,7 +887,7 @@ fn try_build_electric_furnace_config(
         n_speeds,
         false,
         Some(airflow_m3_s_per_w),
-    );
+    )?;
     ducts.airflow_m3_s_per_w = Some(airflow_m3_s_per_w);
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
@@ -954,7 +976,7 @@ fn try_build_gas_boiler_config(
     let mut cfg = GasBoilerConfig {
         equipment_id: None,
         zone_id,
-        loop_id: None,
+        loop_id: loop_id_from_params(params),
         afue,
         capacity_w,
         number_of_speeds: n_speeds,
@@ -1037,7 +1059,7 @@ fn try_build_electric_boiler_config(
     let cfg = ElectricBoilerConfig {
         equipment_id: None,
         zone_id,
-        loop_id: None,
+        loop_id: loop_id_from_params(params),
         eir: heating_efficiency,
         capacity_w,
         number_of_speeds: n_speeds,
@@ -1146,13 +1168,41 @@ fn try_build_central_ac_config(
     name: &str,
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
-) -> Option<EquipmentConfig> {
-    let Some(seer) = seer_from_params(params) else {
-        tracing::warn!("Skipping AC: AnnualCoolingEfficiency (SEER) not found in HPXML");
-        return None;
+) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
+    // SEER first, then EER as the stated metric (the speed-inference
+    // fallback below accepts EER-only systems for the same reason).
+    let stated_efficiency = seer_from_params(params).or_else(|| eer_from_params(params));
+    let Some(efficiency) = stated_efficiency else {
+        return Err(HpxmlError::MissingField {
+            path: "CoolingSystem/AnnualCoolingEfficiency",
+            system_kind: "Central AC",
+            system_id: params
+                .get("equipment_id")
+                .and_then(Value::as_u64)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            reason: "no SEER or EER (AnnualCoolingEfficiency) on the cooling system; \
+                     OS-HPXML v1.12.0 has no defaulting rule for a missing cooling \
+                     efficiency (defaults.rb converts SEER to SEER2 only), so the \
+                     system is rejected",
+        });
     };
-    let eir = BTU_PER_HR_PER_W / seer.max(1e-6);
-    let capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64)?;
+    // EIR = 1/(Btu/Wh efficiency) in W/W for either metric: SEER and EER
+    // share the Btu/Wh denominator form (EIR = 3.413/efficiency).
+    let eir = BTU_PER_HR_PER_W / efficiency.max(1e-6);
+    let Some(capacity_w) = params.get("cooling_capacity_w").and_then(Value::as_f64) else {
+        return Err(HpxmlError::MissingField {
+            path: "CoolingSystem/CoolingCapacity",
+            system_kind: "Central AC",
+            system_id: params
+                .get("equipment_id")
+                .and_then(Value::as_u64)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            reason: "no cooling capacity on the cooling system and autosizing did not \
+                     supply one; a central AC without a determinable capacity is rejected",
+        });
+    };
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
     let shr = params.get("shr").and_then(Value::as_f64);
@@ -1175,7 +1225,7 @@ fn try_build_central_ac_config(
         n_speeds,
         false,
         Some(airflow_m3_s_per_w),
-    );
+    )?;
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
@@ -1228,10 +1278,10 @@ fn try_build_central_ac_config(
         charge_defect_ratio: params.get("charge_defect_ratio").and_then(Value::as_f64),
         min_oat_compressor_cooling_c: None,
     };
-    Some(
+    Ok(
         EquipmentConfig::from_typed(name.to_string(), "Air Conditioner".to_string(), cfg)
-            .ok()?
-            .with_setpoints_reconciled(setpoints),
+            .ok()
+            .map(|c| c.with_setpoints_reconciled(setpoints)),
     )
 }
 
@@ -1381,7 +1431,7 @@ fn try_build_heat_pump_heater_config(
             n_speeds,
             true,
             Some(airflow_m3_s_per_w),
-        )
+        )?
     };
 
     let ochre_class = if is_mini_split {
@@ -1392,6 +1442,7 @@ fn try_build_heat_pump_heater_config(
 
     let zone_id = zone_id_from_params(params);
     let cfg = HeatPumpHeaterConfig {
+        reject_unknown_keys: hares_equipment::RejectUnknownKeys,
         common: HeatPumpCommonConfig {
             equipment_id: None,
             zone_id,
@@ -1489,19 +1540,17 @@ fn try_build_heat_pump_heater_config(
         capacity_ratio_at_17f: params.get("capacity_ratio_at_17f").and_then(Value::as_f64),
         defrost: {
             let mut d = DefrostConfig::default();
-            if let Some(s) = params.get("defrost_control").and_then(Value::as_str) {
-                if let Ok(c) =
+            if let Some(s) = params.get("defrost_control").and_then(Value::as_str)
+                && let Ok(c) =
                     serde_json::from_value::<DefrostControl>(Value::String(s.to_string()))
-                {
-                    d.control = c;
-                }
+            {
+                d.control = c;
             }
-            if let Some(s) = params.get("defrost_strategy").and_then(Value::as_str) {
-                if let Ok(st) =
+            if let Some(s) = params.get("defrost_strategy").and_then(Value::as_str)
+                && let Ok(st) =
                     serde_json::from_value::<DefrostStrategy>(Value::String(s.to_string()))
-                {
-                    d.strategy = st;
-                }
+            {
+                d.strategy = st;
             }
             if let Some(v) = params.get("defrost_time_fraction").and_then(Value::as_f64) {
                 d.defrost_time_fraction = v;
@@ -1590,7 +1639,7 @@ fn try_build_heat_pump_cooler_config(
             n_speeds,
             true,
             Some(airflow_m3_s_per_w),
-        )
+        )?
     };
 
     let ochre_class = if is_mini_split {
@@ -1601,6 +1650,7 @@ fn try_build_heat_pump_cooler_config(
 
     let zone_id = zone_id_from_params(params);
     let cfg = HeatPumpCoolerConfig {
+        reject_unknown_keys: hares_equipment::RejectUnknownKeys,
         common: HeatPumpCommonConfig {
             equipment_id: None,
             zone_id,
@@ -1840,35 +1890,19 @@ fn zone_type_to_ashrae152_str(zone: &Zone, building: &Building) -> super::Result
     }
 }
 
-/// Compute basement heat distribution params for heating equipment.
-///
-/// OCHRE HVAC.py lines 181-184: for finished basements, 20% of DSE-adjusted
-/// capacity is routed to the Foundation zone. Returns empty map when the
-/// building does not have a finished basement.
-fn compute_basement_params(building: &Building) -> Map<String, Value> {
-    let mut params = Map::new();
-    if building.foundation_name.as_deref() != Some("Finished Basement") {
-        return params;
-    }
-    let Some(zone_idx) = building
-        .zones
-        .iter()
-        .position(|z| matches!(z.zone_type, ZoneType::Foundation))
-    else {
-        return params;
-    };
-    let zone_id = (zone_idx as u16) + 1;
-    params.insert("basement_zone_id".to_string(), json!(zone_id));
-    params.insert("basement_airflow_ratio".to_string(), json!(0.2_f64));
-    params
-}
-
-fn conditioned_zone_id(building: &Building) -> Option<u16> {
+/// Id (1-indexed) of the building's one conditioned zone, for `equipment`
+/// that conditions it (HVAC here, the dehumidifier in `resolve_loads`). A
+/// building with none cannot host the equipment: a typed error naming it.
+pub(super) fn conditioned_zone_id(
+    building: &Building,
+    equipment: &str,
+) -> std::result::Result<u16, HpxmlError> {
     let idx = building
-        .zones
-        .iter()
-        .position(|z| matches!(z.zone_type, ZoneType::Conditioned))?;
-    Some((idx as u16) + 1)
+        .conditioned_zone_index()?
+        .ok_or_else(|| HpxmlError::NoConditionedZone {
+            equipment: equipment.to_string(),
+        })?;
+    Ok((idx as u16) + 1)
 }
 
 /// Check that the primary designation for heating/cooling is valid.
@@ -1878,9 +1912,8 @@ fn conditioned_zone_id(building: &Building) -> Option<u16> {
 /// designate which system is primary. This function validates the designation
 /// and marks the matching `EquipmentSpec` with `primary_role`.
 ///
-/// Errors in `check_invariants` or `debug_assertions` mode when:
+/// Returns a typed error when:
 /// - Zero primary designations found but multiple systems are present
-/// - Multiple primary designations are found (not possible per HPXML schema but guarded)
 /// - The designated `idref` does not match any parsed `SystemIdentifier/@id`
 fn check_primary_designation_invariant(
     mode: &str,
@@ -1888,9 +1921,8 @@ fn check_primary_designation_invariant(
     primary_idref: Option<&str>,
     specs: &mut [EquipmentSpec],
     start_idx: usize,
-) {
+) -> std::result::Result<(), HpxmlError> {
     let count = parsed_ids.len();
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     let system_label = if mode == "heating" {
         "Heating"
     } else {
@@ -1898,18 +1930,18 @@ fn check_primary_designation_invariant(
     };
 
     if count <= 1 {
-        return;
+        return Ok(());
     }
 
     let Some(idref) = primary_idref else {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        tracing::error!(
-            mode,
-            system_count = count,
-            "HPXML has {count} systems providing {mode} but no Primary{system_label}System \
-             designation; exactly one system must be designated as primary",
-        );
-        return;
+        return Err(HpxmlError::SchemaValidation(ValidationError::new(
+            format!("Primary{system_label}System"),
+            format!(
+                "HPXML has {count} systems providing {mode} but no \
+                 Primary{system_label}System designation; exactly one system \
+                 must be designated as primary"
+            ),
+        )));
     };
 
     let primary_roles: Vec<(usize, &mut EquipmentSpec)> = specs[start_idx..]
@@ -1919,14 +1951,13 @@ fn check_primary_designation_invariant(
         .collect();
 
     if primary_roles.is_empty() {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        tracing::error!(
-            mode,
-            designated_id = %idref,
-            parsed_ids = ?parsed_ids,
-            "Primary{system_label}System designated '{idref}' but no parsed system matches that ID",
-        );
-        return;
+        return Err(HpxmlError::SchemaValidation(ValidationError::new(
+            format!("Primary{system_label}System"),
+            format!(
+                "designated '{idref}' but no parsed system matches that ID \
+                 (parsed: {parsed_ids:?})"
+            ),
+        )));
     }
 
     for (_, spec) in primary_roles {
@@ -1958,12 +1989,14 @@ fn check_primary_designation_invariant(
             _ => {}
         }
     }
+    Ok(())
 }
 
 pub(super) fn resolve_hvac(
     building: &Building,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
+    warnings: &mut Vec<Warning>,
 ) -> std::result::Result<(), HpxmlError> {
     let details = &building.details_xml;
     let Some(hvac) = details.path(&["Systems", "HVAC"]) else {
@@ -1981,9 +2014,8 @@ pub(super) fn resolve_hvac(
         .path(&["HVACPlant", "PrimarySystems", "PrimaryCoolingSystem"])
         .and_then(|n| n.attrs.get("idref").cloned());
 
-    let setpoint_params = parse_hvac_setpoint_params(details);
+    let setpoint_params = parse_hvac_setpoint_params(details)?;
     let duct_params = compute_duct_dse_params(building)?;
-    let basement_params = compute_basement_params(building);
 
     // Track parsed system IDs for primary-system invariant checks.
     let mut heating_sys_ids: Vec<String> = Vec::new();
@@ -1998,8 +2030,13 @@ pub(super) fn resolve_hvac(
                 .or(child_text(heating, "FuelType").as_deref()),
         )?;
         let Some(system_type) = parse_named_type(heating, "HeatingSystemType") else {
-            tracing::warn!("HeatingSystem has empty or self-closing HeatingSystemType; skipping");
-            continue;
+            return Err(HpxmlError::MissingField {
+                path: "HeatingSystem/HeatingSystemType",
+                system_kind: "HeatingSystem",
+                system_id: element_id(heating).unwrap_or_else(|| "unknown".to_string()),
+                reason: "the HeatingSystemType element is empty or self-closing; a \
+                         heating system whose type the input does not state is rejected",
+            });
         };
         let name = canonical_hvac_heating_name(&system_type, fuel)?;
         let mut params = Map::new();
@@ -2069,23 +2106,21 @@ pub(super) fn resolve_hvac(
             params.insert(k.clone(), v.clone());
         }
         apply_building_setpoint_profiles(building, &mut params, true, name == "Ideal HVAC");
-        if name == "Ideal HVAC" {
-            if let Some(deadband) = building.hvac_deadband_c {
-                params.insert("deadband_c".to_string(), json!(deadband));
-            }
+        if name == "Ideal HVAC"
+            && let Some(deadband) = building.hvac_deadband_c
+        {
+            params.insert("deadband_c".to_string(), json!(deadband));
         }
         duct_params.insert_into_map(&mut params);
-        for (k, v) in &basement_params {
-            params.insert(k.clone(), v.clone());
-        }
         // OCHRE only applies startup_cd for heat pump heaters (ASHP/MSHP),
         // not for furnaces, boilers, or baseboard.
         if matches!(name.as_str(), "ASHP Heater" | "MSHP Heater") {
             insert_startup_degradation(&mut params, &name, true);
         }
-        if let Some(zone_id) = conditioned_zone_id(building) {
-            params.insert("zone_id".to_string(), json!(zone_id));
-        }
+        params.insert(
+            "zone_id".to_string(),
+            json!(conditioned_zone_id(building, &name)?),
+        );
         if name == "Gas Furnace" {
             apply_multispeed_furnace_parameters(&mut params, defaults, &name);
         }
@@ -2134,7 +2169,7 @@ pub(super) fn resolve_hvac(
         specs.push(spec);
     }
 
-    #[cfg_attr(not(feature = "observe"), allow(unused_variables))]
+    #[cfg(feature = "observe")]
     let heating_loop_end = specs.len();
 
     for cooling in descendants_named(hvac, "CoolingSystem") {
@@ -2144,14 +2179,26 @@ pub(super) fn resolve_hvac(
                 .or(Some("electricity")),
         )?;
         let Some(system_type) = child_text(cooling, "CoolingSystemType") else {
-            tracing::warn!("CoolingSystem has empty or missing CoolingSystemType; skipping");
-            continue;
+            return Err(HpxmlError::MissingField {
+                path: "CoolingSystem/CoolingSystemType",
+                system_kind: "CoolingSystem",
+                system_id: element_id(cooling).unwrap_or_else(|| "unknown".to_string()),
+                reason: "the CoolingSystemType element is empty or missing; a cooling \
+                         system whose type the input does not state is rejected",
+            });
         };
         let name = match canonical_hvac_cooling_name(&system_type, fuel) {
             Ok(name) => name,
-            Err(e) => {
-                tracing::warn!("Skipping unsupported cooling system: {e}");
-                continue;
+            Err(_e) => {
+                return Err(HpxmlError::InvalidField {
+                    path: "CoolingSystem/CoolingSystemType",
+                    system_kind: "CoolingSystem",
+                    system_id: element_id(cooling).unwrap_or_else(|| "unknown".to_string()),
+                    value_received: system_type.clone(),
+                    reason: "unsupported cooling system type; no equipment class \
+                             exists for it and a skipped system would silently leave \
+                             the home without its cooling equipment",
+                });
             }
         };
         let mut params = Map::new();
@@ -2176,7 +2223,7 @@ pub(super) fn resolve_hvac(
             "CoolingSystem",
             &name,
         )?;
-        apply_multispeed_cooling_parameters(&mut params, defaults, &name);
+        apply_multispeed_cooling_parameters(&mut params, defaults, &name, warnings);
         insert_startup_degradation(&mut params, &name, false);
 
         if let Some(shr) = child_f64(cooling, "SensibleHeatFraction") {
@@ -2224,15 +2271,25 @@ pub(super) fn resolve_hvac(
         if name != "Room AC" && name != "MSHP Cooler" {
             duct_params.insert_into_map(&mut params);
         }
-        if let Some(zone_id) = conditioned_zone_id(building) {
-            params.insert("zone_id".to_string(), json!(zone_id));
-        }
+        params.insert(
+            "zone_id".to_string(),
+            json!(conditioned_zone_id(building, &name)?),
+        );
         let typed_config = match name.as_str() {
-            "Air Conditioner" => try_build_central_ac_config(&name, &params, &duct_params),
+            "Air Conditioner" => match try_build_central_ac_config(&name, &params, &duct_params) {
+                Ok(config) => config,
+                Err(HpxmlError::MissingField { .. })
+                    if params
+                        .get("autosize_cooling")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false) =>
+                {
+                    None
+                }
+                Err(e) => return Err(e),
+            },
             "Room AC" => try_build_room_ac_config(&name, &params),
-            "MSHP Cooler" => try_build_heat_pump_cooler_config(&name, &params, &duct_params, true)
-                .ok()
-                .flatten(),
+            "MSHP Cooler" => try_build_heat_pump_cooler_config(&name, &params, &duct_params, true)?,
             // Unreachable: canonical_hvac_cooling_name validates all names.
             _ => unreachable!(
                 "canonical_hvac_cooling_name validated '{}' but typed_config match did not cover it",
@@ -2293,25 +2350,23 @@ pub(super) fn resolve_hvac(
         );
         // HPXML MinimumCapacity → min_compressor_fraction when HeatingCapacity is available.
         // MinimumCapacity is the lowest compressor output; min_compressor_fraction = MinimumCapacity / HeatingCapacity.
-        if let Some(min_btu_h) = child_f64(heat_pump, "MinimumCapacity") {
-            if let Some(Value::Number(cap_n)) = params.get("heating_capacity_w") {
-                if let Some(heat_w) = cap_n.as_f64() {
-                    if heat_w > 0.0 {
-                        let min_w = conv::power_btu_h_to_w(min_btu_h);
-                        let raw_frac = min_w / heat_w;
-                        let frac = raw_frac.clamp(0.1, 0.5);
-                        if (frac - raw_frac).abs() > f64::EPSILON {
-                            tracing::warn!(
-                                raw = raw_frac,
-                                clamped = frac,
-                                "HPXML MinimumCapacity / HeatingCapacity = {raw_frac:.3} \
+        if let Some(min_btu_h) = child_f64(heat_pump, "MinimumCapacity")
+            && let Some(Value::Number(cap_n)) = params.get("heating_capacity_w")
+            && let Some(heat_w) = cap_n.as_f64()
+            && heat_w > 0.0
+        {
+            let min_w = conv::power_btu_h_to_w(min_btu_h);
+            let raw_frac = min_w / heat_w;
+            let frac = raw_frac.clamp(0.1, 0.5);
+            if (frac - raw_frac).abs() > f64::EPSILON {
+                tracing::warn!(
+                    raw = raw_frac,
+                    clamped = frac,
+                    "HPXML MinimumCapacity / HeatingCapacity = {raw_frac:.3} \
                                  is outside [0.1, 0.5]; clamped to {frac:.3}"
-                            );
-                        }
-                        params.insert("min_compressor_fraction".to_string(), json!(frac));
-                    }
-                }
+                );
             }
+            params.insert("min_compressor_fraction".to_string(), json!(frac));
         }
         let is_mini_split = heat_pump_type == "mini-split";
         insert_annual_efficiency(&mut params, heat_pump, true, is_mini_split);
@@ -2324,16 +2379,15 @@ pub(super) fn resolve_hvac(
         // HeatingCapacity17F: AHRI 210/240 H3 low-ambient rating point at 17°F (-8.33°C).
         // Stores capacity_ratio_at_17f = HeatingCapacity17F / HeatingCapacity (both in W)
         // so the biquadratic curve can be validated against the manufacturer spec.
-        if let Some(cap_17f_btu) = child_f64(heat_pump, "HeatingCapacity17F") {
-            if let Some(cap_w) = params.get("heating_capacity_w").and_then(Value::as_f64) {
-                if cap_w > 0.0 {
-                    let cap_17f_w = conv::power_btu_h_to_w(cap_17f_btu);
-                    params.insert(
-                        "capacity_ratio_at_17f".to_string(),
-                        json!(cap_17f_w / cap_w),
-                    );
-                }
-            }
+        if let Some(cap_17f_btu) = child_f64(heat_pump, "HeatingCapacity17F")
+            && let Some(cap_w) = params.get("heating_capacity_w").and_then(Value::as_f64)
+            && cap_w > 0.0
+        {
+            let cap_17f_w = conv::power_btu_h_to_w(cap_17f_btu);
+            params.insert(
+                "capacity_ratio_at_17f".to_string(),
+                json!(cap_17f_w / cap_w),
+            );
         }
 
         // Backup heating parameters.
@@ -2359,47 +2413,50 @@ pub(super) fn resolve_hvac(
         // backup). For ASHP, init_from_typed will return Err if a required
         // backup capacity is missing, guarding against a genuinely incomplete
         // HPXML rather than silently inferring an absent backup system.
-        if let Some(eff_node) = heat_pump.child("BackupAnnualHeatingEfficiency") {
-            if let Some(val) = child_f64(eff_node, "Value") {
-                let units_raw = child_text(eff_node, "Units").unwrap_or_default();
-                let units = units_raw.to_ascii_uppercase();
-                let eir =
-                    match units.as_str() {
-                        "PERCENT" if val > 1.0 => {
-                            // Value expressed as percent-out-of-100 (e.g. 95 → 95%).
-                            // Divide by 100 before inverting so 100% efficiency yields EIR = 1.0.
-                            // OpenStudio-HPXML (NREL reference implementation) treats Percent
-                            // values as fractions 0–1, but HARES guards against the
-                            // percent-out-of-100 form to be robust to all valid HPXML inputs.
-                            100.0 / val.max(0.01)
-                        }
-                        "PERCENT" => {
-                            // Value is already a fraction (0–1) — the conventional HPXML form.
-                            1.0 / val.max(0.01)
-                        }
-                        // AFUE is always a fraction (0–1). Absent units default to fraction
-                        // form per HPXML convention.
-                        "AFUE" | "" => 1.0 / val.max(0.01),
-                        // COP is already a COP; EIR = 1/COP.
-                        "COP" => 1.0 / val.max(0.01),
-                        // HSPF and HSPF2 are seasonal metrics valid per the HPXML XSD
-                        // HeatingEfficiencyUnits_simple type, but they do not apply to a
-                        // backup resistance or gas strip. Reject loudly.
-                        "HSPF" | "HSPF2" => {
-                            return Err(HpxmlError::Parse(format!(
+        if let Some(eff_node) = heat_pump.child("BackupAnnualHeatingEfficiency")
+            && let Some(val) = child_f64(eff_node, "Value")
+        {
+            let units_raw = child_text(eff_node, "Units").unwrap_or_default();
+            let units = units_raw.to_ascii_uppercase();
+            let eir =
+                match units.as_str() {
+                    "PERCENT" if val > 1.0 => {
+                        // Value expressed as percent-out-of-100 (e.g. 95 → 95%).
+                        // Divide by 100 before inverting so 100% efficiency yields EIR = 1.0.
+                        // OpenStudio-HPXML (NREL reference implementation) treats Percent
+                        // values as fractions 0–1, but HARES guards against the
+                        // percent-out-of-100 form to be robust to all valid HPXML inputs.
+                        100.0 / val.max(0.01)
+                    }
+                    "PERCENT" => {
+                        // Value is already a fraction (0-1): the conventional HPXML form.
+                        1.0 / val.max(0.01)
+                    }
+                    // AFUE is always a fraction (0–1). Absent units default to fraction
+                    // form per HPXML convention.
+                    "AFUE" | "" => 1.0 / val.max(0.01),
+                    // COP is already a COP; EIR = 1/COP.
+                    "COP" => 1.0 / val.max(0.01),
+                    // HSPF and HSPF2 are seasonal metrics valid per the HPXML XSD
+                    // HeatingEfficiencyUnits_simple type, but they do not apply to a
+                    // backup resistance or gas strip. Reject loudly.
+                    "HSPF" | "HSPF2" => {
+                        return Err(HpxmlError::Parse(format!(
                             "BackupAnnualHeatingEfficiency: '{units_raw}' is a seasonal metric, \
                              not supported for backup heating"
                         ).into()));
-                        }
-                        _ => {
-                            return Err(HpxmlError::Parse(format!(
-                            "BackupAnnualHeatingEfficiency: unrecognized or unsupported units \
+                    }
+                    _ => {
+                        return Err(HpxmlError::Parse(
+                            format!(
+                                "BackupAnnualHeatingEfficiency: unrecognized or unsupported units \
                              '{units_raw}'"
-                        ).into()));
-                        }
-                    };
-                params.insert("backup_eir".to_string(), json!(eir));
-            }
+                            )
+                            .into(),
+                        ));
+                    }
+                };
+            params.insert("backup_eir".to_string(), json!(eir));
         }
         if let Some(fuel) = child_text(heat_pump, "BackupSystemFuel") {
             params.insert("backup_fuel".to_string(), Value::String(fuel));
@@ -2508,18 +2565,16 @@ pub(super) fn resolve_hvac(
         if heat_pump_type != "mini-split" {
             duct_params.insert_into_map(&mut params);
         }
-        if let Some(zone_id) = conditioned_zone_id(building) {
-            params.insert("zone_id".to_string(), json!(zone_id));
-        }
+        params.insert(
+            "zone_id".to_string(),
+            json!(conditioned_zone_id(building, cooler_name)?),
+        );
 
         let is_mini_split = heat_pump_type == "mini-split";
         let mut heater_params = params.clone();
         let mut cooler_params = params;
-        for (k, v) in &basement_params {
-            heater_params.insert(k.clone(), v.clone());
-        }
-        apply_multispeed_heating_parameters(&mut heater_params, defaults, heater_name);
-        apply_multispeed_cooling_parameters(&mut cooler_params, defaults, cooler_name);
+        apply_multispeed_heating_parameters(&mut heater_params, defaults, heater_name, warnings);
+        apply_multispeed_cooling_parameters(&mut cooler_params, defaults, cooler_name, warnings);
         insert_startup_degradation(&mut heater_params, heater_name, true);
         insert_startup_degradation(&mut cooler_params, cooler_name, false);
 
@@ -2581,7 +2636,7 @@ pub(super) fn resolve_hvac(
         primary_heating_idref.as_deref(),
         specs,
         starting_spec_count,
-    );
+    )?;
 
     // --- Invariant: primary cooling system designation -----------------------
     check_primary_designation_invariant(
@@ -2590,7 +2645,7 @@ pub(super) fn resolve_hvac(
         primary_cooling_idref.as_deref(),
         specs,
         cooling_start,
-    );
+    )?;
 
     #[cfg(feature = "observe")]
     {
@@ -2809,10 +2864,10 @@ fn insert_autosizing_params(
             params.insert(key.to_string(), json!(factor));
             return;
         }
-        if let Some(ext) = node.child("extension") {
-            if let Some(factor) = child_f64(ext, tag) {
-                params.insert(key.to_string(), json!(factor));
-            }
+        if let Some(ext) = node.child("extension")
+            && let Some(factor) = child_f64(ext, tag)
+        {
+            params.insert(key.to_string(), json!(factor));
         }
     };
 
@@ -3182,16 +3237,18 @@ fn apply_multispeed_cooling_parameters(
     params: &mut Map<String, Value>,
     defaults: &DefaultsStore,
     equipment_name: &str,
+    warnings: &mut Vec<Warning>,
 ) {
-    apply_multispeed_parameters(params, defaults, equipment_name, false);
+    apply_multispeed_parameters(params, defaults, equipment_name, false, warnings);
 }
 
 fn apply_multispeed_heating_parameters(
     params: &mut Map<String, Value>,
     defaults: &DefaultsStore,
     equipment_name: &str,
+    warnings: &mut Vec<Warning>,
 ) {
-    apply_multispeed_parameters(params, defaults, equipment_name, true);
+    apply_multispeed_parameters(params, defaults, equipment_name, true, warnings);
 }
 
 fn apply_multispeed_furnace_parameters(
@@ -3342,44 +3399,12 @@ fn remap_minisplit_stages(
     }
 }
 
-/// Invariant check: when equipment has multiple speeds but no per-stage
-/// capacity data was populated, the equipment will silently behave as
-/// single-speed despite its `number_of_speeds > 1` configuration.
-///
-/// Only fires under `debug_assertions` or `check_invariants` feature.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn check_multispeed_invariant(params: &Map<String, Value>, n_speeds: usize) {
-    let (_cap_prefix, _eir_prefix) = if params.contains_key("heating_capacity_w") {
-        ("heating_capacity_w_stage", "heating_eir_stage")
-    } else {
-        ("cooling_capacity_w_stage", "cooling_eir_stage")
-    };
-    let has_any_stage = (0..n_speeds).any(|i| {
-        params
-            .get(&format!("{_cap_prefix}_{i}"))
-            .and_then(Value::as_f64)
-            .map(|v| v > 0.0)
-            .unwrap_or(false)
-    });
-    if !has_any_stage {
-        let name = params
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        tracing::warn!(
-            equipment = name,
-            n_speeds,
-            "equipment has {n_speeds} speeds but no per-stage capacity data applied; \
-             system will behave as single-speed"
-        );
-    }
-}
-
 fn apply_multispeed_parameters(
     params: &mut Map<String, Value>,
     defaults: &DefaultsStore,
     equipment_name: &str,
     is_heating: bool,
+    warnings: &mut Vec<Warning>,
 ) {
     let n_speeds = params
         .get("number_of_speeds")
@@ -3448,14 +3473,13 @@ fn apply_multispeed_parameters(
 
     let Some((_eff_key_used, eff_kind_used, efficiency_value)) = efficiency_key_and_kind else {
         let eff_label = if is_heating { "heating" } else { "cooling" };
-        tracing::warn!(
-            equipment = equipment_name,
-            n_speeds,
-            "equipment has {n_speeds} speeds but no {eff_label} efficiency found; \
-             cannot apply per-stage data"
-        );
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        check_multispeed_invariant(params, n_speeds);
+        warnings.push(Warning::new(
+            "hpxml",
+            format!(
+                "equipment '{equipment_name}' has {n_speeds} speeds but no {eff_label} \
+                 efficiency found; cannot apply per-stage data"
+            ),
+        ));
         return;
     };
 
@@ -3482,15 +3506,13 @@ fn apply_multispeed_parameters(
     }
 
     let Some(multispeed) = multispeed else {
-        tracing::warn!(
-            equipment = equipment_name,
-            n_speeds,
-            eff_kind = %eff_kind_used,
-            "equipment has {n_speeds} speeds but no multi-speed CSV entry found \
-             for efficiency kind '{eff_kind_used}'; per-stage data will be absent"
-        );
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        check_multispeed_invariant(params, n_speeds);
+        warnings.push(Warning::new(
+            "hpxml",
+            format!(
+                "equipment '{equipment_name}' has {n_speeds} speeds but no multi-speed CSV \
+                 entry found for efficiency kind '{eff_kind_used}'; per-stage data will be absent"
+            ),
+        ));
         return;
     };
 
@@ -3545,28 +3567,8 @@ fn apply_multispeed_parameters(
     // the equipment's rated efficiency.  A COP less than 50% of the
     // SEER/EER-derived expectation indicates a physically implausible data
     // entry.  EnergyPlus StandardRatings.hh:71 defines ConvFromSIToIP = 3.412141633
-    // as the conversion factor for SEER/EER to COP.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let eff_kind_upper = eff_kind_used.to_ascii_uppercase();
-        if !is_heating && (eff_kind_upper == "SEER" || eff_kind_upper == "EER") {
-            if let Some(&last_cop) = cops.last() {
-                let expected_cop = efficiency_value / BTU_PER_HR_PER_W;
-                if last_cop < expected_cop * 0.5 {
-                    tracing::warn!(
-                        equipment = %equipment_name,
-                        %eff_kind_used,
-                        efficiency_value,
-                        last_cop,
-                        expected_cop,
-                        "speed-{max_speed} COP {last_cop} is far below SEER-derived \
-                         expectation {expected_cop:.3} for {equipment_name}",
-                        max_speed = cops.len(),
-                    );
-                }
-            }
-        }
-    }
+    // as the conversion factor for SEER/EER to COP. Checked as a unit test
+    // over the shipped multispeed CSV (`top_speed_cop_not_far_below_seer_derivation`).
 
     if let Some(curve_set) = curves {
         if let Some(coeff_text) = serialize_stage_plr_coefficients(curve_set, n_speeds) {
@@ -3718,18 +3720,20 @@ fn select_variants_for_speed_count(
 ///
 /// Delegates to the shared `xml_helpers::parse_setpoint_from_control` for
 /// the actual XML parsing logic.
-fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
+fn parse_hvac_setpoint_params(
+    details: &XmlNode,
+) -> std::result::Result<Vec<(String, Value)>, HpxmlError> {
     let mut out = Vec::new();
 
     let Some(control) = super::xml_helpers::find_hvac_control(details) else {
-        return out;
+        return Ok(out);
     };
 
     let mut heating: Option<([f64; 24], [f64; 24])> = None;
     let mut cooling: Option<([f64; 24], [f64; 24])> = None;
     for (hvac_type, slot) in [("Heating", &mut heating), ("Cooling", &mut cooling)] {
-        let weekday = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, true);
-        let weekend = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, false);
+        let weekday = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, true)?;
+        let weekend = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, false)?;
         if let Some(wd) = weekday {
             let mut weekday_arr = [0.0; 24];
             weekday_arr.copy_from_slice(&wd[..24]);
@@ -3768,7 +3772,7 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
         ));
     }
 
-    out
+    Ok(out)
 }
 
 /// Clip inverted or too-close heating/cooling setpoint pairs to the daily
@@ -3874,78 +3878,60 @@ fn apply_building_setpoint_profiles(
         }
     }
 
-    if include_heating {
-        if let Some((weekday, weekend)) = heating {
-            params.insert(
-                "heating_setpoint_source".to_string(),
-                daily_profile_source(weekday, weekend),
-            );
-        }
+    if include_heating && let Some((weekday, weekend)) = heating {
+        params.insert(
+            "heating_setpoint_source".to_string(),
+            daily_profile_source(weekday, weekend),
+        );
     }
-    if include_cooling {
-        if let Some((weekday, weekend)) = cooling {
-            params.insert(
-                "cooling_setpoint_source".to_string(),
-                daily_profile_source(weekday, weekend),
-            );
-        }
+    if include_cooling && let Some((weekday, weekend)) = cooling {
+        params.insert(
+            "cooling_setpoint_source".to_string(),
+            daily_profile_source(weekday, weekend),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// A multi-speed system whose efficiency is absent warns through the
+    /// collector, naming the equipment: a multi-speed system run single-speed
+    /// is never silent.
+    #[test]
+    fn multispeed_without_csv_entry_warns() {
+        let mut params = Map::new();
+        params.insert("number_of_speeds".to_string(), json!(2));
+        // The capacity is present; the efficiency is absent, which is the
+        // site the warning covers.
+        params.insert("heating_capacity_w".to_string(), json!(10_000.0));
+
+        let mut warnings: Vec<Warning> = Vec::new();
+        apply_multispeed_parameters(
+            &mut params,
+            &DefaultsStore::empty(),
+            "MSHP Heater",
+            true,
+            &mut warnings,
+        );
+
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one warning for the missing efficiency, got {warnings:?}"
+        );
+        assert!(
+            warnings[0].message.contains("MSHP Heater"),
+            "the warning names the equipment: {}",
+            warnings[0].message
+        );
+    }
+
     use super::super::building::{DuctSystem, DuctType, Site, XmlNode, Zone};
     use super::*;
     use crate::hpxml::parse_xml_document;
     use hares_physics::units as conv;
     use hares_types::{BoundaryPolicy, HumidityAccumulator, ScheduleSourceConfig};
     use std::collections::HashMap;
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-    use tracing_subscriber::fmt::MakeWriter;
-
-    #[derive(Clone, Default)]
-    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl<'a> MakeWriter<'a> for SharedWriter {
-        type Writer = SharedWriterGuard;
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedWriterGuard(self.0.clone())
-        }
-    }
-
-    struct SharedWriterGuard(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for SharedWriterGuard {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("writer lock poisoned")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn capture_warnings<F>(f: F) -> String
-    where
-        F: FnOnce(),
-    {
-        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let writer = SharedWriter(buffer.clone());
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .without_time()
-            .with_ansi(false)
-            .with_target(false)
-            .with_writer(writer)
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
-        String::from_utf8(buffer.lock().expect("log lock poisoned").clone())
-            .expect("logs must be valid utf8")
-    }
 
     fn empty_building(zones: Vec<Zone>) -> Building {
         Building {
@@ -3966,7 +3952,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             // Reserved for Phase 2 autosizing: will hold the building-level design
             // heating/cooling load once Manual J/S autosizing is implemented.
             // Currently always None — autosizing computes per-equipment capacity
@@ -3981,21 +3967,24 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            conditioned_volume_m3: 400.0,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: XmlNode {
                 name: String::new(),
                 attrs: HashMap::new(),
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         }
     }
 
@@ -4035,6 +4024,8 @@ mod tests {
             vented: true,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }
     }
 
@@ -4049,13 +4040,30 @@ mod tests {
         ])]);
         building.site.latitude_deg = Some(40.0);
         building.site.longitude_deg = Some(-105.0);
-        building.conditioned_volume_m3 = Some(400.0);
+        building.conditioned_volume_m3 = 400.0;
         let params = compute_duct_dse_params(&building)
             .expect("duct DSE params must resolve when lat/lon/volume are set");
         let supply_r = params.supply_r_m2_k_w;
         assert!(
             (supply_r - 6.0).abs() < 1e-9,
             "expected area-weighted average R-6, got {supply_r}"
+        );
+    }
+
+    /// Ducts in a zone with no ASHRAE 152 zone type have no derating, and the
+    /// duct parameters are an error naming the zone type, never a default.
+    #[test]
+    fn ducts_in_a_zone_without_an_ashrae_152_type_are_an_error() {
+        let mut zone = unconditioned_zone(vec![duct(DuctType::Supply, 10.0, 6.0)]);
+        zone.zone_type = ZoneType::Other("other housing unit".to_string());
+        let mut building = empty_building(vec![zone]);
+        building.site.latitude_deg = Some(40.0);
+        building.site.longitude_deg = Some(-105.0);
+        building.conditioned_volume_m3 = 400.0;
+        let err = compute_duct_dse_params(&building).unwrap_err();
+        assert!(
+            err.to_string().contains("other housing unit"),
+            "the error names the zone type, got: {err}"
         );
     }
 
@@ -4069,7 +4077,7 @@ mod tests {
         ])]);
         building.site.latitude_deg = Some(40.0);
         building.site.longitude_deg = Some(-105.0);
-        building.conditioned_volume_m3 = Some(400.0);
+        building.conditioned_volume_m3 = 400.0;
         let params = compute_duct_dse_params(&building)
             .expect("duct DSE params must resolve when lat/lon/volume are set");
         let return_r = params.return_r_m2_k_w;
@@ -4250,6 +4258,21 @@ mod tests {
     // zone_type_to_ashrae152_str -- foundation type granularity
     // -----------------------------------------------------------------------
 
+    fn conditioned_zone() -> Zone {
+        Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: None,
+            volume_m3: None,
+            attached_wall_ids: vec![],
+            duct_systems: vec![],
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
+        }
+    }
+
     fn foundation_zone(vented: bool) -> Zone {
         Zone {
             zone_type: ZoneType::Foundation,
@@ -4260,6 +4283,8 @@ mod tests {
             vented,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }
     }
 
@@ -4273,6 +4298,8 @@ mod tests {
             vented,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }
     }
 
@@ -4572,6 +4599,8 @@ mod tests {
                 vented: false,
                 ventilation_ach: None,
                 ventilation_sla: None,
+                height_m: None,
+                hpxml_location: None,
             };
             let result = zone_type_to_ashrae152_str(&zone, &building);
             assert!(
@@ -4580,45 +4609,6 @@ mod tests {
                 zone.zone_type
             );
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // compute_basement_params
-    // -----------------------------------------------------------------------
-
-    fn conditioned_zone() -> Zone {
-        Zone {
-            zone_type: ZoneType::Conditioned,
-            floor_area_m2: None,
-            volume_m3: None,
-            attached_wall_ids: vec![],
-            duct_systems: vec![],
-            vented: false,
-            ventilation_ach: None,
-            ventilation_sla: None,
-        }
-    }
-
-    #[test]
-    fn basement_params_empty_when_no_finished_basement() {
-        let mut b = empty_building(vec![conditioned_zone(), foundation_zone(false)]);
-        b.foundation_name = Some("Unfinished Basement".into());
-        let params = compute_basement_params(&b);
-        assert!(
-            params.is_empty(),
-            "unfinished basement must not produce basement params"
-        );
-    }
-
-    #[test]
-    fn basement_params_empty_when_no_foundation_zone() {
-        let mut b = empty_building(vec![conditioned_zone()]);
-        b.foundation_name = Some("Finished Basement".into());
-        let params = compute_basement_params(&b);
-        assert!(
-            params.is_empty(),
-            "finished basement name without Foundation zone must not produce params"
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -4750,7 +4740,8 @@ mod tests {
             1,    // single speed
             false,
             Some(airflow_m3_s_per_w),
-        );
+        )
+        .unwrap();
         let dse_from_direct = compute_duct_config(
             &params_direct,
             capacity_w,
@@ -4758,7 +4749,8 @@ mod tests {
             1,
             false,
             Some(airflow_m3_s_per_w),
-        );
+        )
+        .unwrap();
 
         assert!(
             dse_from_cfm25.dse_heat.is_some(),
@@ -4808,7 +4800,8 @@ mod tests {
             true,     // heating
             1,        // single speed
             false, None, // nominal airflow
-        );
+        )
+        .unwrap();
         assert!(
             config.dse_heat.is_some(),
             "DSE must be computed when Percent/Fraction leakage is present"
@@ -4844,8 +4837,10 @@ mod tests {
         let params_attic = make_params("attic_unvented");
         let params_basement = make_params("unins_basement");
 
-        let cfg_attic = compute_duct_config(&params_attic, capacity_w, true, 1, false, None);
-        let cfg_basement = compute_duct_config(&params_basement, capacity_w, true, 1, false, None);
+        let cfg_attic =
+            compute_duct_config(&params_attic, capacity_w, true, 1, false, None).unwrap();
+        let cfg_basement =
+            compute_duct_config(&params_basement, capacity_w, true, 1, false, None).unwrap();
 
         let attic_dse = cfg_attic
             .dse_heat
@@ -4873,7 +4868,8 @@ mod tests {
         let params = minimal_central_ac_params(16.0, 12_000.0);
         let duct_params = DuctDseParams::default();
         let ec = try_build_central_ac_config("Air Conditioner", &params, &duct_params)
-            .expect("central AC builder must succeed with valid params");
+            .expect("central AC builder must succeed with valid params")
+            .unwrap();
         assert!(ec.is_typed(), "EquipmentConfig must be typed");
         assert_eq!(
             ec.ochre_class, "Air Conditioner",
@@ -4904,7 +4900,8 @@ mod tests {
         params.insert("plf_min".to_string(), json!(0.6));
         params.insert("plf_max".to_string(), json!(1.0));
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("central AC builder must succeed");
+            .expect("central AC builder must succeed")
+            .unwrap();
         use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
         let cfg: CentralAirConditionerConfig = ec
             .typed()
@@ -4924,7 +4921,8 @@ mod tests {
         let mut params = minimal_central_ac_params(16.0, 12_000.0);
         params.insert("airflow_defect_ratio".to_string(), json!(0.0));
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("central AC builder must succeed");
+            .expect("central AC builder must succeed")
+            .unwrap();
         use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
         let cfg: CentralAirConditionerConfig = ec
             .typed()
@@ -4934,7 +4932,8 @@ mod tests {
 
         params.insert("airflow_defect_ratio".to_string(), json!(-0.25));
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("central AC builder must succeed");
+            .expect("central AC builder must succeed")
+            .unwrap();
         let cfg: CentralAirConditionerConfig = ec
             .typed()
             .expect("must deserialize to CentralAirConditionerConfig");
@@ -4948,7 +4947,8 @@ mod tests {
         params.insert("airflow_defect_ratio".to_string(), json!(-0.25));
         params.insert("cooling_airflow_cfm".to_string(), json!(1_500.0));
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("central AC builder must succeed");
+            .expect("central AC builder must succeed")
+            .unwrap();
         use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
         let cfg: CentralAirConditionerConfig = ec
             .typed()
@@ -4990,7 +4990,7 @@ mod tests {
             .path(&["Building", "BuildingDetails"])
             .expect("details node must exist");
 
-        let params = parse_hvac_setpoint_params(details);
+        let params = parse_hvac_setpoint_params(details).expect("setpoints parse");
         let mut map = Map::new();
         for (key, value) in params {
             map.insert(key, value);
@@ -5056,7 +5056,7 @@ mod tests {
             .path(&["Building", "BuildingDetails"])
             .expect("details node must exist");
 
-        let params = parse_hvac_setpoint_params(details);
+        let params = parse_hvac_setpoint_params(details).expect("setpoints parse");
         let mut map = Map::new();
         for (key, value) in params {
             map.insert(key, value);
@@ -5510,7 +5510,8 @@ mod tests {
             }),
         );
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("AC typed config should be built");
+            .expect("AC typed config should be built")
+            .unwrap();
 
         use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
         let cfg: CentralAirConditionerConfig = ec.typed().expect("typed AC config");
@@ -5546,27 +5547,6 @@ mod tests {
         assert_eq!(cfg.integrated_energy_factor, Some(2.0));
         assert_eq!(cfg.fraction_served, Some(0.8));
         assert_eq!(cfg.target_rh, Some(0.5));
-    }
-
-    #[test]
-    fn basement_params_returns_zone_id_and_ratio_for_finished_basement() {
-        // Zones sorted: Conditioned(idx=0) → ZoneId(1), Foundation(idx=1) → ZoneId(2).
-        let mut b = empty_building(vec![conditioned_zone(), foundation_zone(false)]);
-        b.foundation_name = Some("Finished Basement".into());
-        let params = compute_basement_params(&b);
-        assert_eq!(
-            params.get("basement_zone_id").and_then(|v| v.as_f64()),
-            Some(2.0),
-            "Foundation zone at index 1 → ZoneId 2"
-        );
-        let ratio = params
-            .get("basement_airflow_ratio")
-            .and_then(|v| v.as_f64())
-            .expect("basement_airflow_ratio must be present");
-        assert!(
-            (ratio - 0.2).abs() < 1e-12,
-            "OCHRE default basement airflow ratio is 0.2, got {ratio}"
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -5619,24 +5599,38 @@ mod tests {
     fn conditioned_zone_id_returns_correct_zone_id() {
         let b = empty_building(vec![conditioned_zone(), foundation_zone(false)]);
         assert_eq!(
-            conditioned_zone_id(&b),
-            Some(1),
+            conditioned_zone_id(&b, "Unit").unwrap(),
+            1,
             "Conditioned zone at index 0 → ZoneId 1"
         );
     }
 
     #[test]
-    fn conditioned_zone_id_returns_none_when_no_conditioned_zone() {
+    fn conditioned_zone_id_errors_when_no_conditioned_zone() {
         let b = empty_building(vec![foundation_zone(false)]);
-        assert_eq!(conditioned_zone_id(&b), None);
+        assert!(matches!(
+            conditioned_zone_id(&b, "Unit"),
+            Err(HpxmlError::NoConditionedZone { ref equipment }) if equipment == "Unit"
+        ));
+    }
+
+    /// One conditioned zone per dwelling unit: a second is rejected, not
+    /// resolved to whichever comes first.
+    #[test]
+    fn conditioned_zone_id_errors_when_two_conditioned_zones_exist() {
+        let b = empty_building(vec![conditioned_zone(), conditioned_zone()]);
+        assert!(matches!(
+            conditioned_zone_id(&b, "Unit"),
+            Err(HpxmlError::MultipleConditionedZones(ref err)) if err.count == 2
+        ));
     }
 
     #[test]
     fn conditioned_zone_id_returns_correct_id_when_not_first_zone() {
         let b = empty_building(vec![foundation_zone(false), conditioned_zone()]);
         assert_eq!(
-            conditioned_zone_id(&b),
-            Some(2),
+            conditioned_zone_id(&b, "Unit").unwrap(),
+            2,
             "Conditioned zone at index 1 → ZoneId 2"
         );
     }
@@ -5663,7 +5657,8 @@ mod tests {
         params.insert("zone_id".to_string(), json!(2u16));
         let duct_params = DuctDseParams::default();
         let ec = try_build_central_ac_config("Air Conditioner", &params, &duct_params)
-            .expect("typed config must be present");
+            .expect("typed config must be present")
+            .unwrap();
         let cfg: CentralAirConditionerConfig = ec
             .typed()
             .expect("must deserialize to CentralAirConditionerConfig");
@@ -5830,7 +5825,8 @@ mod tests {
 
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs).expect("resolve_hvac must succeed");
+        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+            .expect("resolve_hvac must succeed");
 
         let gas_furnace = specs
             .iter()
@@ -5846,6 +5842,41 @@ mod tests {
             cfg.zone_id,
             Some(2),
             "resolve_hvac must propagate conditioned_zone_id when conditione zone is at index 1"
+        );
+    }
+
+    /// HVAC conditions the conditioned zone: a heating system in a building
+    /// that has none is a typed error naming the equipment, not a spec
+    /// with no zone that the equipment would later place on its own.
+    #[test]
+    fn resolve_hvac_errors_when_no_conditioned_zone_exists() {
+        let mut building = empty_building(vec![foundation_zone(false)]);
+        building.details_xml = XmlNode {
+            name: String::new(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![XmlNode {
+                name: "Systems".into(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![XmlNode {
+                    name: "HVAC".into(),
+                    attrs: HashMap::new(),
+                    text: String::new(),
+                    children: vec![furnace_xml("36000", "0.80")],
+                }],
+            }],
+        };
+        let err = resolve_hvac(
+            &building,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .expect_err("a furnace with no conditioned zone must fail resolution");
+        assert!(
+            matches!(err, HpxmlError::NoConditionedZone { ref equipment } if equipment == "Gas Furnace"),
+            "expected NoConditionedZone naming the furnace, got: {err:?}"
         );
     }
 
@@ -5993,7 +6024,7 @@ mod tests {
             .path(&["Building", "BuildingDetails"])
             .expect("details node must exist");
 
-        let params = parse_hvac_setpoint_params(details);
+        let params = parse_hvac_setpoint_params(details).expect("setpoints parse");
 
         // Find the setpoints_reconciled entry.
         let key_found = params.iter().any(|(k, _)| k == "setpoints_reconciled");
@@ -6093,6 +6124,7 @@ mod tests {
         use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
         use hares_types::{GridState, WeatherState, ZoneId, ZoneState};
         hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 18.0,
@@ -6110,7 +6142,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -6136,6 +6169,7 @@ mod tests {
         let mut params = Map::new();
         params.insert("efficiency_afue".to_string(), json!(0.96));
         params.insert("heating_capacity_w".to_string(), json!(12_000.0));
+        params.insert("zone_id".to_string(), json!(1));
         // Zero fan power so the fuel/thermal ratio equals exactly 1/AFUE.
         params.insert("fan_power_w".to_string(), json!(0.0));
 
@@ -6193,9 +6227,11 @@ mod tests {
         let mut params = Map::new();
         params.insert("efficiency_seer".to_string(), json!(16.0));
         params.insert("cooling_capacity_w".to_string(), json!(10_000.0));
+        params.insert("zone_id".to_string(), json!(1));
 
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("try_build_central_ac_config must succeed with SEER and capacity");
+            .expect("try_build_central_ac_config must succeed with SEER and capacity")
+            .unwrap();
 
         let typed_cfg: CentralAirConditionerConfig = ec
             .typed()
@@ -6214,6 +6250,7 @@ mod tests {
         use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
         use hares_types::{GridState, WeatherState, ZoneState};
         let env = hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 26.67,
@@ -6231,7 +6268,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -6316,18 +6354,21 @@ mod tests {
         let mut params = Map::new();
         params.insert("cooling_capacity_w".to_string(), json!(12_000.0));
 
-        let log = capture_warnings(|| {
-            let result =
-                try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default());
-            assert!(
-                result.is_none(),
-                "builder must return None when SEER is absent"
-            );
-        });
-
+        // No SEER and no EER: the efficiency the EIR needs is not stated, and
+        // OS-HPXML v1.12.0 has no defaulting rule for it. The pre-fix code
+        // skipped the AC with a warning, leaving the home without its
+        // cooling equipment.
+        let err =
+            try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
+                .expect_err("a central AC with no stated efficiency must be rejected");
+        let message = err.to_string();
         assert!(
-            log.contains("AnnualCoolingEfficiency (SEER) not found"),
-            "expected SEER-missing warning in log output; got: {log:?}"
+            message.contains("AnnualCoolingEfficiency"),
+            "expected the missing-efficiency error, got: {message}"
+        );
+        assert!(
+            message.contains("Central AC") || message.contains("cooling system"),
+            "the error must name the system, got: {message}"
         );
     }
 
@@ -6428,7 +6469,8 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs).expect("resolve_hvac must succeed");
+        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+            .expect("resolve_hvac must succeed");
         assert_eq!(specs.len(), 1, "expected one heating spec");
         let aux_w = specs[0]
             .parameters
@@ -6480,7 +6522,8 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs).expect("resolve_hvac must succeed");
+        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+            .expect("resolve_hvac must succeed");
         assert_eq!(specs.len(), 1, "expected one heating spec");
         let aux_w = specs[0]
             .parameters
@@ -6640,7 +6683,8 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs).expect("resolve_hvac must succeed");
+        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+            .expect("resolve_hvac must succeed");
 
         // The split produces two specs: ASHP Heater and ASHP Cooler.
         assert_eq!(specs.len(), 2, "expected heater + cooler specs");
@@ -6731,7 +6775,8 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs).expect("resolve_hvac must succeed");
+        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+            .expect("resolve_hvac must succeed");
 
         assert_eq!(specs.len(), 2, "expected heater + cooler specs");
 
@@ -6824,7 +6869,7 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs).ok()?;
+        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new()).ok()?;
         let heater = specs.iter().find(|s| s.name.contains("Heater"))?;
         heater.parameters.get("backup_eir").and_then(Value::as_f64)
     }
@@ -6929,7 +6974,7 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs)?;
+        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())?;
         let heater = specs
             .iter()
             .find(|s| s.name.contains("Heater"))

@@ -74,7 +74,7 @@ pub struct SplitterBranch {
     /// Zero when the branch node has no accumulator contributions.
     #[serde(skip, default)]
     pub requested_flow_kg_s: f64,
-    /// Resistance coefficient [dimensionless].
+    /// Resistance coefficient (dimensionless).
     ///
     /// Default 1.0 = equal resistance across all branches. Used for
     /// proportional allocation; future pump-curve-based allocation will use
@@ -267,12 +267,12 @@ pub struct FluidLoopState {
     pub loop_id: LoopId,
     pub fluid_type: FluidType,
     /// Total heat injected by heat sources (boilers, heat pumps in heating
-    /// mode) [W]. Always non-negative.
+    /// mode) (W). Always non-negative.
     pub heating_power_w: f64,
     /// Total heat extracted by heat sinks (distribution coils, radiators,
-    /// cooling coils) [W]. Always non-negative.
+    /// cooling coils) (W). Always non-negative.
     pub cooling_power_w: f64,
-    /// Algebraic sum `heating_power_w - cooling_power_w` [W]. Should be near
+    /// Algebraic sum `heating_power_w - cooling_power_w` (W). Should be near
     /// zero for a balanced loop and reflect the net imbalance otherwise.
     pub net_power_w: f64,
     pub mean_supply_temp_c: f64,
@@ -313,7 +313,7 @@ impl FluidDomainPayload {
             )));
         }
         let mut states = Vec::with_capacity(payload.len() / 7);
-        for chunk in payload.chunks_exact(7) {
+        for chunk in payload.as_chunks::<7>().0 {
             let loop_id = f64_to_loop_id(chunk[0])?;
             let fluid_type = f64_to_fluid_type(chunk[1])?;
             states.push(FluidLoopState {
@@ -339,7 +339,6 @@ fn fluid_type_to_f64(fluid_type: FluidType) -> f64 {
 }
 
 fn f64_to_fluid_type(value: f64) -> Result<FluidType, HaresError> {
-    #[allow(clippy::cast_possible_truncation)]
     match value.round() as i64 {
         0 => Ok(FluidType::Water),
         1 => Ok(FluidType::Glycol),

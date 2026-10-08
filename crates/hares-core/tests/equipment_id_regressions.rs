@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
 use chrono::{Duration, FixedOffset, TimeZone};
-use hares_core::actors::BatteryManagementActor;
+use hares_core::actors::{BatteryManagementActor, BmsParams};
 use hares_core::{Dwelling, DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
 use hares_equipment::config::ConfigValue;
 use hares_equipment::{Equipment, EquipmentConfig, EquipmentRegistry};
@@ -55,6 +55,12 @@ fn project_root() -> PathBuf {
 /// ResStock bldg0000007 fixture directory.
 fn fixture_dir() -> PathBuf {
     project_root().join("tests/fixtures/resstock/2025.1/bldg0000007")
+}
+
+/// A home with a garage and a foundation besides the conditioned zone:
+/// environment zones no equipment declares a thermal port on.
+fn fixture_dir_with_unserved_zones() -> PathBuf {
+    project_root().join("tests/fixtures/resstock/2025.1/bldg0176227")
 }
 
 /// Injects a 75 kWh / 11.5 kW Level-2 EV into the fixture's `<Systems>`
@@ -102,6 +108,7 @@ fn sim_config(duration: Duration, output_path: Option<PathBuf>, verbosity: u8) -
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: false,
         rotation: hares_io::RotationPolicy::None,
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
 
@@ -112,7 +119,7 @@ fn dwelling_config(
 ) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: hpxml.to_path_buf(),
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: project_root()
             .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         defaults_path: Some(project_root().join("defaults")),
@@ -297,7 +304,7 @@ fn fixture_dwelling_config(
     (
         DwellingConfig {
             hpxml_path,
-            schedule_path: bldg_dir.join("in.schedules.csv"),
+            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
             weather_path: weather_for(bldg_dir),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: sim_config(Duration::hours(1), None, 0),
@@ -445,12 +452,16 @@ impl Equipment for IdentityProbeEquipment {
         ports: &mut PortSlots,
     ) -> Result<(), HaresError> {
         if let Some(zone) = self.thermal_port_zone {
+            // InternalGain, not HvacHeating: the probe is not HVAC equipment
+            // and reports no thermal_output_w, so an HVAC-category deposit
+            // would trip the (now unconditional) per-zone thermal
+            // consistency check (a non-HVAC deposit is what it is).
             ports.accumulate(&hares_types::PortContribution::Thermal {
                 zone,
                 sensible_gain_w: 100.0,
                 radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
-                category: hares_types::ThermalCategory::HvacHeating,
+                category: hares_types::ThermalCategory::InternalGain,
             })?;
         }
         if self.electric_load_kw > 0.0 {
@@ -519,8 +530,8 @@ fn assembly_equipment_ids_are_distinct_and_nonzero() {
 }
 
 /// Determinism: the same config built twice yields an identical name→id
-/// mapping. The mapping is asserted — never contiguity, which the design
-/// does not promise (dropped non-critical equipment leaves gaps).
+/// mapping. The mapping is asserted, never contiguity: an explicit id above
+/// the counter leaves gaps.
 #[test]
 fn same_config_builds_identical_name_to_id_mapping() {
     let first = id_map(&build_fixture_dwelling(&fixture_dir(), true, None));
@@ -655,11 +666,11 @@ fn add_equipment_rejects_equipment_whose_identity_write_does_not_land() {
     );
 }
 
-/// A hand-built Dehumidifier spec (all-optional typed config, so it inits
-/// cleanly) carrying an explicit id through the blueprint entrance.
+/// A hand-built Dehumidifier spec (minimal typed config carrying the zone
+/// init requires plus an explicit id) going through the blueprint entrance.
 fn dehumidifier_spec(instance: &str, equipment_id: u32) -> hares_io::EquipmentSpec {
     let config: hares_equipment::DehumidifierConfig =
-        serde_json::from_value(serde_json::json!({ "equipment_id": equipment_id }))
+        serde_json::from_value(serde_json::json!({ "equipment_id": equipment_id, "zone_id": 1 }))
             .expect("minimal DehumidifierConfig");
     let typed =
         EquipmentConfig::from_typed(instance.to_string(), "Dehumidifier".to_string(), config)
@@ -670,6 +681,7 @@ fn dehumidifier_spec(instance: &str, equipment_id: u32) -> hares_io::EquipmentSp
         fuel_type: FuelType::Electric,
         parameters: serde_json::Map::new(),
         zip_params: None,
+        typed_overrides: serde_json::Map::new(),
         typed_config: Some(typed),
         system_id: None,
         related_hvac_idref: None,
@@ -849,7 +861,7 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
     });
     let config = DwellingConfig {
         hpxml_path: hpxml,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
@@ -979,7 +991,7 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
     });
     let config = DwellingConfig {
         hpxml_path: hpxml,
-        schedule_path: second_fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(second_fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&second_fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(Duration::days(45), Some(output_path.clone()), 5),
@@ -1061,7 +1073,7 @@ fn checkpoint_restore_rejects_spec_reorder_with_named_error() {
 /// accumulator exists.
 #[test]
 fn added_equipment_gains_port_slot_coverage_before_first_step() {
-    let mut dwelling = build_fixture_dwelling(&fixture_dir(), true, None);
+    let mut dwelling = build_fixture_dwelling(&fixture_dir_with_unserved_zones(), true, None);
     let zone = dwelling
         .latest_env()
         .zones
@@ -1530,7 +1542,7 @@ fn midrun_added_equipment_contributes_to_its_end_use_aggregate() {
 /// silently miswired or dropped.
 #[test]
 fn add_equipment_after_stepping_rejects_undeclared_port() {
-    let mut dwelling = build_fixture_dwelling(&fixture_dir(), true, None);
+    let mut dwelling = build_fixture_dwelling(&fixture_dir_with_unserved_zones(), true, None);
     dwelling.step().expect("first step succeeds");
     // A real env zone the frozen table never allocated (no declarant at
     // assembly): valid for the environment, unsatisfiable for the frozen
@@ -1807,7 +1819,7 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
     });
     let config = DwellingConfig {
         hpxml_path: hpxml,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
@@ -2010,7 +2022,7 @@ fn replace_equipment_rejects_unknown_zone_declaration() {
 /// at the replacement entrance.
 #[test]
 fn replace_equipment_after_stepping_rejects_undeclared_port() {
-    let mut dwelling = build_fixture_dwelling(&fixture_dir(), true, None);
+    let mut dwelling = build_fixture_dwelling(&fixture_dir_with_unserved_zones(), true, None);
     dwelling.step().expect("first step succeeds");
     // A real env zone the frozen table never allocated (no declarant at
     // assembly): valid for the environment, unsatisfiable for the frozen
@@ -2063,7 +2075,9 @@ fn clear_equipment_never_reissues_prior_ids() {
         .max()
         .expect("fixture has equipment");
 
-    dwelling.clear_equipment();
+    dwelling
+        .clear_equipment()
+        .expect("clear must refresh caches");
     assert!(
         dwelling.equipment().is_empty(),
         "clear must empty the equipment vector"
@@ -2147,8 +2161,8 @@ fn replace_equipment_assigns_fresh_identity_and_validates_collisions() {
 }
 
 /// An actor's equipment binding must follow a replacement: eviction is
-/// name-based and only fires on removal, so the actor targeting "Battery"
-/// survives a `replace_equipment` — and the replacement receives a new
+/// name-based, so the actor targeting "Battery" survives a
+/// `replace_equipment` that keeps the name, and the replacement receives a new
 /// never-reused id. Without re-resolving the binding on the identity
 /// refresh, the BMS kept reading the evictee's (now absent) id and its
 /// `soc` channel pinned at the 0.0 no-observation sentinel — the exact
@@ -2174,7 +2188,7 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
     });
     let config = DwellingConfig {
         hpxml_path: hpxml,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
@@ -2191,12 +2205,28 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
         dwelling.step().expect("day-1 step");
     }
 
-    // Replace the battery mid-run with a fresh, unassigned instance — the
-    // replacement is auto-assigned a new never-reused id.
+    // Replace the battery mid-run with a fresh, unassigned instance: the
+    // replacement is auto-assigned a new never-reused id. It is configured
+    // like the original for its manager (same mode and power limits), so
+    // the manager stays bound to the name rather than being rebuilt.
+    let Some(hares_equipment::ActorSeed::Battery {
+        max_charge_kw,
+        max_discharge_kw,
+        ..
+    }) = dwelling
+        .equipment()
+        .iter()
+        .find(|e| e.descriptor().name == "Battery")
+        .expect("the battery is installed")
+        .actor_seed()
+    else {
+        panic!("the original battery seeds a battery manager");
+    };
     let battery_cfg: hares_equipment::BatteryConfig = serde_json::from_value(serde_json::json!({
         "capacity_kwh": 13.5,
-        "max_charge_kw": 5.0,
-        "max_discharge_kw": 5.0,
+        "max_charge_kw": max_charge_kw,
+        "max_discharge_kw": max_discharge_kw,
+        "bms_mode": bms_mode.to_string(),
     }))
     .expect("minimal BatteryConfig");
     let eq_config =
@@ -2237,11 +2267,11 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
     let mut post_replace_soc_last = 0.0_f64;
     for line in contents.lines().skip(1 + 96) {
         // day 2 only
-        if let Some(v) = line.split(',').nth(soc_col) {
-            if let Ok(soc) = v.trim().parse::<f64>() {
-                post_replace_soc_max = post_replace_soc_max.max(soc);
-                post_replace_soc_last = soc;
-            }
+        if let Some(v) = line.split(',').nth(soc_col)
+            && let Ok(soc) = v.trim().parse::<f64>()
+        {
+            post_replace_soc_max = post_replace_soc_max.max(soc);
+            post_replace_soc_last = soc;
         }
     }
     assert!(
@@ -2266,8 +2296,8 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
 // Identity-refresh observability: seeding and actor-binding resolution
 // ===========================================================================
 //
-// The identity refresh (`refresh_equipment_caches`) is the shared mechanism
-// behind two contracts the rebind test above does not pin:
+// Installing a roster change is the shared mechanism behind two contracts
+// the rebind test above does not pin:
 //
 // - **Seeding**: equipment entering mid-run (add, replace) must be
 //   observable in `equipment_core` *immediately* — before its first step
@@ -2324,18 +2354,20 @@ fn midrun_added_equipment_is_observable_before_its_first_step() {
 fn user_bms_actor() -> Box<dyn hares_core::actor::Actor> {
     Box::new(BatteryManagementActor::new(
         "Battery",
-        BmsMode::SelfConsumption {
-            min_soc: 0.1,
-            max_soc: 1.0,
-            solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+        BmsParams {
+            bms_mode: BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 1.0,
+                solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
+            },
+            grid_export_rule: GridExportRule::Unrestricted,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            price_schedule: None,
+            steps_per_day: 96,
+            min_dwell_steps: 0,
         },
-        GridExportRule::Unrestricted,
-        5.0,
-        5.0,
-        None,
-        96,
-        0,
     ))
 }
 
@@ -2346,6 +2378,7 @@ fn user_bms_actor() -> Box<dyn hares_core::actor::Actor> {
 fn bms_observed_soc(dwelling: &Dwelling) -> f64 {
     dwelling
         .telemetry()
+        .unwrap()
         .actor_telemetry
         .get("BatteryManagementActor:Battery")
         .and_then(|channels| channels.get("soc"))
@@ -2367,7 +2400,7 @@ fn user_added_actor_resolves_its_equipment_binding_on_add() {
 
     let config = DwellingConfig {
         hpxml_path: hpxml,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(Duration::hours(6), None, 0),
@@ -2495,23 +2528,17 @@ fn ev_capacity_check_fails_loudly_when_ev_telemetry_keys_are_absent() {
 }
 
 /// The same monitor-blindness class, one gate up in the same invariant
-/// loop: `check_soc` silently skipped when an EV-end-use equipment's
-/// core-output SOC was absent — reachable only through a wiring defect
-/// (every real EV and Battery publishes SOC at every step, and
-/// `Soc::try_from(..).ok()` additionally nulls it on a non-finite
-/// internal SOC), so the SOC-bounds monitor was blind exactly on the
-/// observation failure it existed to catch — the anti-pattern the
-/// adjacent `ev_capacity_degraded` gate was made loud against. The four
-/// static capacity keys are present and consistent so that adjacent gate
-/// passes, isolating the `soc_bounds` behavior under test.
+/// loop: an EV-end-use equipment whose internal SOC is outside `[0, 1]`
+/// reaches the dwelling as an absent core-output SOC (the `Soc`
+/// conversion nulls the out-of-range value instead of surfacing it), and
+/// the always-on `soc_bounds` check fails the step on the absent SOC
+/// instead of skipping it silently. The four static capacity keys are
+/// present and consistent so that the adjacent `ev_capacity_degraded`
+/// gate passes, isolating the `soc_bounds` behavior under test.
 ///
-/// The gate is now loud (the fix landed: the `let-else` at the top of the
-/// loop fails the step naming the check and the equipment); this gate
-/// was the round-9 routed finding's must_fail form and flipped green
-/// with the fix, per the constitution's self-destructing-annotation
-/// discipline. It asserts the full loud-error contract — the failure
-/// names the check (`soc_bounds`) and the offending equipment, mirroring
-/// the sibling `ev_capacity_degraded` gate's message assertion — so a
+/// The gate asserts the full loud-error contract: the failure names the
+/// check (`soc_bounds`) and the offending equipment, mirroring the
+/// sibling `ev_capacity_degraded` gate's message assertion, so a
 /// regression to a generic error message goes red here too.
 #[test]
 fn ev_soc_check_fails_loudly_when_core_output_soc_is_absent() {

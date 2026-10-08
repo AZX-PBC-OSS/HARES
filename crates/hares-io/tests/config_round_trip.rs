@@ -264,6 +264,7 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
         heating_shr: None,
         capacity_ratio_at_17f: None,
         defrost: DefrostConfig::default(),
+        reject_unknown_keys: hares_equipment::RejectUnknownKeys,
     }
 }
 
@@ -555,7 +556,18 @@ fn sample_generator_config() -> GeneratorConfig {
         eta_jacket_water: None,
         eta_lube_oil: None,
         eta_exhaust: None,
-        efficiency_curve_points: None,
+        // A curve config without points is a typed error (the hardcoded
+        // fallback curve is gone), so the sample carries explicit points.
+        efficiency_curve_points: Some(vec![
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.0,
+                efficiency_ratio: 0.0,
+            },
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 1.0,
+                efficiency_ratio: 1.0,
+            },
+        ]),
         efficiency_type: None,
         delta_kw_per_s: Some(1.0),
         capacity_min_kw: Some(2.0),
@@ -603,6 +615,7 @@ fn sample_ventilation_config() -> VentilationConfig {
 
 fn sample_env() -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: 21.0,
@@ -644,7 +657,8 @@ fn sample_env() -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: HashMap::new(),
         equipment_core: HashMap::new(),
         current_time: FixedOffset::east_opt(0)
@@ -802,13 +816,14 @@ fn round_trip_heat_pump_config() {
 }
 
 #[test]
-fn heat_pump_config_ignores_unknown_fields() {
+fn heat_pump_config_rejects_unknown_fields() {
     let mut value = serde_json::to_value(sample_heat_pump_config()).unwrap();
     value["unknown_key"] = serde_json::json!(42.0);
     let result: Result<HeatPumpConfig, _> = serde_json::from_value(value);
+    let err = result.expect_err("the flattened catcher must reject the key no field consumed");
     assert!(
-        result.is_ok(),
-        "serde flatten + no deny_unknown_fields: unknown keys are silently ignored"
+        err.to_string().contains("unknown_key"),
+        "the error must name the unknown key, got: {err}"
     );
 }
 
@@ -818,7 +833,7 @@ fn toml_round_trip_heat_pump_config() {
 }
 
 #[test]
-fn toml_heat_pump_config_ignores_unknown_fields() {
+fn toml_heat_pump_config_rejects_unknown_fields() {
     let serialized = toml::to_string(&sample_heat_pump_config()).unwrap();
     let mut value: toml::Value = toml::from_str(&serialized).unwrap();
     if let toml::Value::Table(ref mut table) = value {
@@ -826,9 +841,11 @@ fn toml_heat_pump_config_ignores_unknown_fields() {
     }
     let modified = toml::to_string(&value).unwrap();
     let result: Result<HeatPumpConfig, _> = toml::from_str(&modified);
+    let err = result
+        .expect_err("the flattened catcher must reject the key no field consumed, in TOML too");
     assert!(
-        result.is_ok(),
-        "serde flatten + no deny_unknown_fields: unknown keys are silently ignored in TOML"
+        err.to_string().contains("unknown_key"),
+        "the error must name the unknown key, got: {err}"
     );
 }
 

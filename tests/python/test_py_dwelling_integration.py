@@ -9,11 +9,16 @@ import math
 import threading
 from datetime import datetime
 
+import polars as pl
 import pytest
 
 from conftest import make_dwelling
 
-pl = pytest.importorskip("polars")
+
+def _num(value: object) -> float:
+    """Narrow a polars reduction result (``PythonLiteral | None``) to float."""
+    assert isinstance(value, (int, float)), f"expected numeric, got {value!r}"
+    return float(value)
 
 
 def _init_dwelling(**kw):
@@ -116,8 +121,8 @@ class TestFullSimulation:
             "January Denver heating case should have positive total electric power"
         )
 
-    def test_simulate_expected_columns(self):
-        dw = _init_dwelling(output_verbosity=3)
+    def test_simulate_expected_columns(self, tmp_path):
+        dw = _init_dwelling(output_verbosity=3, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
         df = dw.simulate()
         cols = df.columns
         assert "Total Electric Power (kW)" in cols
@@ -129,25 +134,25 @@ class TestFullSimulation:
         for tc in temp_cols:
             col = df[tc].drop_nulls()
             if col.len() > 0:
-                assert col.min() >= 10.0, f"{tc} has unrealistically low temp: {col.min()}"
-                assert col.max() <= 30.0, f"{tc} has unrealistically high temp: {col.max()}"
+                assert _num(col.min()) >= 10.0, f"{tc} has unrealistically low temp: {col.min()}"
+                assert _num(col.max()) <= 30.0, f"{tc} has unrealistically high temp: {col.max()}"
                 break
         # verbosity >= 3: equipment mode columns
         mode_cols = [c for c in cols if c.endswith("Mode (-)")]
         assert len(mode_cols) > 0
 
-    def test_verbosity_2_includes_outdoor_temp(self):
-        dw = _init_dwelling(output_verbosity=2)
+    def test_verbosity_2_includes_outdoor_temp(self, tmp_path):
+        dw = _init_dwelling(output_verbosity=2, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
         df = dw.simulate()
         assert "Outdoor Dry Bulb (C)" in df.columns
         col = df["Outdoor Dry Bulb (C)"]
         assert col.null_count() == 0
-        assert col.min() > -50.0
-        assert col.max() < 60.0
+        assert _num(col.min()) > -50.0
+        assert _num(col.max()) < 60.0
 
-    def test_verbosity_1_includes_outdoor_temp(self):
+    def test_verbosity_1_includes_outdoor_temp(self, tmp_path):
         # Outdoor Dry Bulb (C) is a context column present at every verbosity level.
-        dw = _init_dwelling(output_verbosity=1)
+        dw = _init_dwelling(output_verbosity=1, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
         df = dw.simulate()
         assert "Outdoor Dry Bulb (C)" in df.columns
 
@@ -192,7 +197,8 @@ class TestControlInjection:
         # Run baseline (default setpoints) and capture final zone temperature
         dw_base = _init_dwelling(duration_s=600, time_res_s=60)
         name_base = _find_thermal_equipment(dw_base)
-        for _ in range(6):
+        baseline_result = dw_base.step()
+        for _ in range(5):
             baseline_result = dw_base.step()
         temp_keys = [k for k in baseline_result if "Temperature" in k]
         assert len(temp_keys) > 0
@@ -205,7 +211,8 @@ class TestControlInjection:
         name_heat = _find_thermal_equipment(dw_heat)
         signal = ControlSignal.thermal_setpoint(heat_c=25.0, cool_c=30.0)
         dw_heat.apply_control(name_heat, signal)
-        for _ in range(6):
+        heated_result = dw_heat.step()
+        for _ in range(5):
             heated_result = dw_heat.step()
         heated_final_temp = heated_result[temp_keys[0]]
 
@@ -393,7 +400,7 @@ class TestEquipmentDescriptors:
 
 
 class TestMetrics:
-    def test_metrics_after_simulate(self):
+    def test_metrics_after_simulate(self, tmp_path):
         # Use a 2-hour evening simulation in January -- zone will cool below
         # the thermostat turn-on threshold (19.2°C) forcing the gas furnace
         # to run. Midnight start was too warm from prior internal gains.
@@ -402,6 +409,8 @@ class TestMetrics:
             time_res_s=60,
             output_verbosity=1,
             start_time="2019-01-01T05:00:00",
+            write_output=True,
+            output_path=str(tmp_path / "dwelling_42.csv"),
         )
         dw.simulate()
         m = dw.metrics()
@@ -494,7 +503,7 @@ class TestBatchStep:
         from ochre_next import batch_step
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        results = batch_step([dw], [[]], ["total_power_kw"], [], {})
+        results = batch_step([dw], [[]], ["total_power_kw"], [], {}, [])
         assert isinstance(results, list)
         assert len(results) == 1
         r = results[0]
@@ -525,6 +534,7 @@ class TestBatchStep:
                         ["total_power_kw"],
                         [],
                         {},
+                        [],
                     )
                     for r in results:
                         assert isinstance(r, dict)
@@ -549,7 +559,7 @@ class TestBatchStep:
         """batch_step with empty dwellings list returns empty results."""
         from ochre_next import batch_step
 
-        results = batch_step([], [], ["total_power_kw"], [], {})
+        results = batch_step([], [], ["total_power_kw"], [], {}, [])
         assert isinstance(results, list)
         assert len(results) == 0
 
@@ -573,6 +583,7 @@ class TestBatchStep:
                         ["total_power_kw"],
                         [],
                         {},
+                        [],
                     )
                     assert len(results) == len(dw_list)
                     for r in results:
@@ -888,7 +899,7 @@ class TestActorSystem:
 
     def test_builtin_actor_by_name(self):
         dw = _init_dwelling(duration_s=300, time_res_s=60)
-        dw.add_actor_by_name("IdealThermostat", "thermo1", {})
+        dw.add_actor_by_name("IdealThermostat", "thermo1", {"target": "Gas Furnace"})
 
         for _ in range(3):
             result = dw.step()
@@ -902,7 +913,7 @@ class TestActorSystem:
 
 class TestDerSimulationExplorer:
     @pytest.mark.slow
-    def test_pv_battery_ev_end_to_end(self):
+    def test_pv_battery_ev_end_to_end(self, tmp_path):
         """End-to-end DER simulation matching the simulation_explorer.py workflow."""
         from ochre_next import ControlSignal
         from ochre_next import EV, PV, Battery
@@ -914,6 +925,8 @@ class TestDerSimulationExplorer:
             time_res_s=900,  # 15 minutes
             seed=0,
             output_verbosity=3,
+            write_output=True,
+            output_path=str(tmp_path / "dwelling_42.csv"),
         )
         dw.initialize()
 
@@ -950,22 +963,22 @@ class TestDerSimulationExplorer:
         # PV generation is negative in the telemetry convention (matching
         # OCHRE: negative = generating power, same as battery discharge)
         pv_col = df["PV Electric Power (kW)"]
-        assert pv_col.min() < 0, "PV should produce power during daylight"
+        assert _num(pv_col.min()) < 0, "PV should produce power during daylight"
 
         # Battery SOC should be in [0, 1]
         bat_soc = df["Battery SOC (-)"]
-        assert bat_soc.min() >= 0.0
-        assert bat_soc.max() <= 1.0
+        assert _num(bat_soc.min()) >= 0.0
+        assert _num(bat_soc.max()) <= 1.0
 
         # Total electric power should have negative values (export from PV)
         total = df["Total Electric Power (kW)"]
-        assert total.min() < 0, "Should have export (negative) power from PV"
-        assert total.max() > 0, "Should have import (positive) power"
+        assert _num(total.min()) < 0, "Should have export (negative) power from PV"
+        assert _num(total.max()) > 0, "Should have import (positive) power"
         assert total.is_not_nan().all(), "Net import must be finite (no NaN)"
 
         # Battery SOC should have variance -- it charged/discharged at least once
         bat_soc_std = bat_soc.std()
-        assert bat_soc_std > 0, (
+        assert _num(bat_soc_std) > 0, (
             "Battery SOC should vary over 2-week simulation (charged/discharged)"
         )
 
@@ -1022,14 +1035,14 @@ class TestApplyControlPriority:
         # only correct tier arbitration (not same-tier FIFO) can make it win
         dw.apply_control(
             name,
-            ControlSignal.thermal_setpoint(heat_c=50.0, cool_c=25.0),
+            ControlSignal.thermal_setpoint(heat_c=50.0),
             priority=Priority.safety(),
         )
         # UserOverride suppress signal — queued second; must be rejected
         # by the dispatcher's cross-tier priority-inversion protection
         dw.apply_control(
             name,
-            ControlSignal.thermal_setpoint(heat_c=-50.0, cool_c=25.0),
+            ControlSignal.thermal_setpoint(heat_c=-50.0),
         )
 
         step = dw.step()

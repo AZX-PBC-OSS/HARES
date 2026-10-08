@@ -355,10 +355,9 @@ fn sky_temp_matches_clark_allen_for_low_ir_rows() {
 
 use hares_io::weather::{WeatherMeta, WeatherTimeSeries, pchip_resample};
 
-/// Build a `WeatherTimeSeries` with explicit per-field overrides for bound-testing.
-#[allow(clippy::too_many_arguments)]
-fn make_series_full(
-    n: usize,
+/// Per-field series values for [`make_series`]; build one with
+/// [`series_fields`] and override the fields under test.
+struct SeriesFields {
     rel_humidity_pct: Vec<f64>,
     opaque_sky_cover: Vec<f64>,
     pressure_kpa: Vec<f64>,
@@ -367,7 +366,35 @@ fn make_series_full(
     dhi_w_m2: Vec<f64>,
     wind_speed_m_s: Vec<f64>,
     wind_dir_deg: Vec<f64>,
-) -> WeatherTimeSeries {
+}
+
+/// Constant per-field defaults (RH 50%, sky cover 5%, 101.325 kPa, GHI 300,
+/// DNI 500, DHI 100, wind 3 m/s from 180°) for a series of `n` steps.
+fn series_fields(n: usize) -> SeriesFields {
+    SeriesFields {
+        rel_humidity_pct: vec![50.0; n],
+        opaque_sky_cover: vec![5.0; n],
+        pressure_kpa: vec![101.325; n],
+        ghi_w_m2: vec![300.0; n],
+        dni_w_m2: vec![500.0; n],
+        dhi_w_m2: vec![100.0; n],
+        wind_speed_m_s: vec![3.0; n],
+        wind_dir_deg: vec![180.0; n],
+    }
+}
+
+/// Build a `WeatherTimeSeries` with explicit per-field values for bound-testing.
+fn make_series(n: usize, fields: SeriesFields) -> WeatherTimeSeries {
+    let SeriesFields {
+        rel_humidity_pct,
+        opaque_sky_cover,
+        pressure_kpa,
+        ghi_w_m2,
+        dni_w_m2,
+        dhi_w_m2,
+        wind_speed_m_s,
+        wind_dir_deg,
+    } = fields;
     WeatherTimeSeries {
         meta: WeatherMeta {
             location: "Test".to_string(),
@@ -379,6 +406,7 @@ fn make_series_full(
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
             has_embedded_location: false,
+            station_wmo: None,
         },
         dry_bulb_c: vec![20.0; n],
         dew_point_c: vec![10.0; n],
@@ -524,16 +552,12 @@ fn pchip_handles_steep_gradient() {
 fn rh_stays_bounded_after_interpolation() {
     let rh = vec![98.0, 2.0, 98.0, 5.0, 95.0];
     let n = rh.len();
-    let series = make_series_full(
+    let series = make_series(
         n,
-        rh,
-        vec![5.0; n],
-        vec![101.325; n],
-        vec![300.0; n],
-        vec![500.0; n],
-        vec![100.0; n],
-        vec![3.0; n],
-        vec![180.0; n],
+        SeriesFields {
+            rel_humidity_pct: rh,
+            ..series_fields(n)
+        },
     );
     let resampled = series.resample(600).expect("resample should succeed");
 
@@ -549,16 +573,12 @@ fn rh_stays_bounded_after_interpolation() {
 fn rh_non_monotonic_extrema_clamped() {
     let rh = vec![0.0, 100.0, 0.0, 100.0, 0.0];
     let n = rh.len();
-    let series = make_series_full(
+    let series = make_series(
         n,
-        rh,
-        vec![5.0; n],
-        vec![101.325; n],
-        vec![300.0; n],
-        vec![500.0; n],
-        vec![100.0; n],
-        vec![3.0; n],
-        vec![180.0; n],
+        SeriesFields {
+            rel_humidity_pct: rh,
+            ..series_fields(n)
+        },
     );
     let resampled = series.resample(600).expect("resample should succeed");
 
@@ -574,16 +594,12 @@ fn rh_non_monotonic_extrema_clamped() {
 fn sky_cover_stays_bounded_after_interpolation() {
     let sky = vec![0.0, 10.0, 0.0, 10.0, 0.0];
     let n = sky.len();
-    let series = make_series_full(
+    let series = make_series(
         n,
-        vec![50.0; n],
-        sky,
-        vec![101.325; n],
-        vec![300.0; n],
-        vec![500.0; n],
-        vec![100.0; n],
-        vec![3.0; n],
-        vec![180.0; n],
+        SeriesFields {
+            opaque_sky_cover: sky,
+            ..series_fields(n)
+        },
     );
     let resampled = series.resample(600).expect("resample should succeed");
 
@@ -600,16 +616,12 @@ fn pressure_stays_positive_after_interpolation() {
     // Oscillating pressure to try to provoke negative undershoots.
     let p = vec![101.0, 95.0, 105.0, 90.0, 100.0];
     let n = p.len();
-    let series = make_series_full(
+    let series = make_series(
         n,
-        vec![50.0; n],
-        vec![5.0; n],
-        p,
-        vec![300.0; n],
-        vec![500.0; n],
-        vec![100.0; n],
-        vec![3.0; n],
-        vec![180.0; n],
+        SeriesFields {
+            pressure_kpa: p,
+            ..series_fields(n)
+        },
     );
     let resampled = series.resample(600).expect("resample should succeed");
 
@@ -681,16 +693,14 @@ fn solar_fields_use_zoh_by_default() {
     let ghi = vec![0.0, 200.0, 500.0, 300.0, 0.0];
     let dni = vec![0.0, 400.0, 800.0, 600.0, 0.0];
     let dhi = vec![0.0, 50.0, 120.0, 80.0, 0.0];
-    let series = make_series_full(
+    let series = make_series(
         n,
-        vec![50.0; n],
-        vec![5.0; n],
-        vec![101.325; n],
-        ghi.clone(),
-        dni.clone(),
-        dhi.clone(),
-        vec![3.0; n],
-        vec![180.0; n],
+        SeriesFields {
+            ghi_w_m2: ghi.clone(),
+            dni_w_m2: dni.clone(),
+            dhi_w_m2: dhi.clone(),
+            ..series_fields(n)
+        },
     );
     let factor = 6; // 600s timestep
     let resampled = series
@@ -724,16 +734,14 @@ fn solar_fields_use_zoh_by_default() {
 fn zoh_default_preserves_hourly_energy_integral_at_sunset_boundary() {
     let values = vec![400.0_f64, 0.0, 0.0];
     let n = values.len();
-    let series = make_series_full(
+    let series = make_series(
         n,
-        vec![50.0; n],
-        vec![5.0; n],
-        vec![101.325; n],
-        values.clone(), // ghi
-        values.clone(), // dni
-        values.clone(), // dhi
-        vec![3.0; n],
-        vec![180.0; n],
+        SeriesFields {
+            ghi_w_m2: values.clone(), // ghi
+            dni_w_m2: values.clone(), // dni
+            dhi_w_m2: values.clone(), // dhi
+            ..series_fields(n)
+        },
     );
     let factor: usize = 4; // 15-minute sub-steps
     let resampled = series
@@ -763,16 +771,13 @@ fn wind_speed_uses_zoh_wind_dir_uses_circular_linear() {
     let n = 5;
     let ws = vec![1.0, 5.0, 3.0, 8.0, 2.0];
     let wd = vec![90.0, 180.0, 270.0, 0.0, 45.0];
-    let series = make_series_full(
+    let series = make_series(
         n,
-        vec![50.0; n],
-        vec![5.0; n],
-        vec![101.325; n],
-        vec![300.0; n],
-        vec![500.0; n],
-        vec![100.0; n],
-        ws.clone(),
-        wd.clone(),
+        SeriesFields {
+            wind_speed_m_s: ws.clone(),
+            wind_dir_deg: wd.clone(),
+            ..series_fields(n)
+        },
     );
     let factor = 4; // 900s timestep
     let resampled = series
@@ -829,16 +834,14 @@ fn wind_speed_uses_zoh_wind_dir_uses_circular_linear() {
 fn triangular_sunset_boundary_bleeds_into_nighttime_hour() {
     let values = vec![400.0_f64, 0.0, 0.0];
     let n = values.len();
-    let series = make_series_full(
+    let series = make_series(
         n,
-        vec![50.0; n],
-        vec![5.0; n],
-        vec![101.325; n],
-        values.clone(), // ghi
-        values.clone(), // dni
-        values.clone(), // dhi
-        vec![3.0; n],
-        vec![180.0; n],
+        SeriesFields {
+            ghi_w_m2: values.clone(), // ghi
+            dni_w_m2: values.clone(), // dni
+            dhi_w_m2: values.clone(), // dhi
+            ..series_fields(n)
+        },
     );
     let factor: usize = 4; // 15-minute sub-steps
     // Explicit Triangular override — ZOH is now the default for solar fields.
@@ -898,16 +901,14 @@ fn triangular_sunset_boundary_bleeds_into_nighttime_hour() {
 fn zoh_preserves_hourly_energy_integral_at_sunset_boundary() {
     let values = vec![400.0_f64, 0.0, 0.0];
     let n = values.len();
-    let series = make_series_full(
+    let series = make_series(
         n,
-        vec![50.0; n],
-        vec![5.0; n],
-        vec![101.325; n],
-        values.clone(), // ghi
-        values.clone(), // dni
-        values.clone(), // dhi
-        vec![3.0; n],
-        vec![180.0; n],
+        SeriesFields {
+            ghi_w_m2: values.clone(), // ghi
+            dni_w_m2: values.clone(), // dni
+            dhi_w_m2: values.clone(), // dhi
+            ..series_fields(n)
+        },
     );
 
     use hares_io::{ResampleMethod, ResampleOverrides};

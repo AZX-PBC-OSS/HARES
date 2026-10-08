@@ -9,6 +9,7 @@ use hares_types::{
 
 fn sample_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![
             ZoneState {
                 id: ZoneId(1),
@@ -52,7 +53,8 @@ fn sample_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)

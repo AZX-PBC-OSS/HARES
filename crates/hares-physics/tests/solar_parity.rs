@@ -11,8 +11,8 @@
 
 use chrono::{Datelike, FixedOffset, TimeZone};
 use hares_physics::solar::{
-    angle_of_incidence, extraterrestrial_irradiance, perez_sky_diffuse, perez_tilted_irradiance,
-    solar_position,
+    SkyIrradiance, SunPosition, SurfaceOrientation, angle_of_incidence,
+    extraterrestrial_irradiance, perez_sky_diffuse, perez_tilted_irradiance, solar_position,
 };
 
 // ---------------------------------------------------------------------------
@@ -184,7 +184,7 @@ fn perez_diffuse_returns_zero_when_dhi_below_threshold() {
 //   Total POA ≈ 800–1200 W/m² for this geometry.
 //
 // Tolerance: physical plausibility check only (model comparison would need
-//            pvlib reference run; full reference values are #[ignore]).
+//            a pvlib reference run).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -202,14 +202,16 @@ fn poa_total_irradiance_is_physically_plausible_south_facing_30_tilt() {
 
     let result = perez_tilted_irradiance(
         0,
-        ghi,
-        dni,
-        dhi,
-        zenith_deg,
-        solar_azimuth_deg,
-        surface_tilt_deg,
-        surface_azimuth_deg,
-        day_of_year,
+        SkyIrradiance { ghi, dni, dhi },
+        SunPosition {
+            zenith_deg,
+            azimuth_deg: solar_azimuth_deg,
+            day_of_year,
+        },
+        SurfaceOrientation {
+            tilt_deg: surface_tilt_deg,
+            azimuth_deg: surface_azimuth_deg,
+        },
         0.2,
         0.0,
     );
@@ -245,7 +247,25 @@ fn poa_total_irradiance_is_physically_plausible_south_facing_30_tilt() {
 #[test]
 fn poa_total_zero_at_night() {
     // Nighttime: all irradiance inputs zero. All POA components must be zero.
-    let result = perez_tilted_irradiance(0, 0.0, 0.0, 0.0, 90.0, 180.0, 30.0, 180.0, 172, 0.2, 0.0);
+    let result = perez_tilted_irradiance(
+        0,
+        SkyIrradiance {
+            ghi: 0.0,
+            dni: 0.0,
+            dhi: 0.0,
+        },
+        SunPosition {
+            zenith_deg: 90.0,
+            azimuth_deg: 180.0,
+            day_of_year: 172,
+        },
+        SurfaceOrientation {
+            tilt_deg: 30.0,
+            azimuth_deg: 180.0,
+        },
+        0.2,
+        0.0,
+    );
     assert_eq!(result.direct_w_m2, 0.0, "nighttime beam must be 0");
     assert_eq!(result.diffuse_w_m2, 0.0, "nighttime diffuse must be 0");
     assert_eq!(result.reflected_w_m2, 0.0, "nighttime reflected must be 0");
@@ -261,7 +281,6 @@ fn poa_total_zero_at_night() {
 //   solar = loc.get_solarposition(times)
 //   total = pvlib.irradiance.get_total_irradiance(30, 180, solar.apparent_zenith,
 //           solar.azimuth, 800, 900, 100)
-// Marked #[ignore] until pvlib output is captured and hardcoded.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -273,17 +292,23 @@ fn poa_total_matches_pvlib_reference() {
     //       dni_extra=pvlib.irradiance.get_extra_radiation(80))
     //   → poa_global=925.4807, poa_direct=800.0, poa_sky_diffuse=113.4230, poa_ground_diffuse=12.0577
     let result = perez_tilted_irradiance(
-        0,     // surface_id
-        900.0, // ghi
-        800.0, // dni
-        100.0, // dhi
-        30.0,  // solar_zenith_deg
-        180.0, // solar_azimuth_deg
-        30.0,  // surface_tilt_deg
-        180.0, // surface_azimuth_deg
-        80,    // day_of_year (March equinox)
-        0.2,   // ground_albedo
-        0.0,   // elevation_m
+        0, // surface_id
+        SkyIrradiance {
+            ghi: 900.0, // ghi
+            dni: 800.0, // dni
+            dhi: 100.0, // dhi
+        },
+        SunPosition {
+            zenith_deg: 30.0,   // solar_zenith_deg
+            azimuth_deg: 180.0, // solar_azimuth_deg
+            day_of_year: 80,    // day_of_year (March equinox)
+        },
+        SurfaceOrientation {
+            tilt_deg: 30.0,     // surface_tilt_deg
+            azimuth_deg: 180.0, // surface_azimuth_deg
+        },
+        0.2, // ground_albedo
+        0.0, // elevation_m
     );
     let hares_poa = result.direct_w_m2 + result.diffuse_w_m2 + result.reflected_w_m2;
     let pvlib_poa = 925.4807_f64;

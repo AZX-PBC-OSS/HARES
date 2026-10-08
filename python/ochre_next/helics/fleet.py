@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 
 try:
@@ -66,13 +67,12 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
 from ochre_next import ControlSignal
 from ochre_next._hares import SteppableFleet as PySteppableFleet
 
-from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike
-from .broker import allocate_ephemeral_port
-from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, _handle_time_grant, _set_publication_info, _validate_control_signal, STALE_SUBSCRIPTION_THRESHOLD, VOLTAGE_PU_MAX, VOLTAGE_PU_MIN
+from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike, is_json_object
+from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, STALE_SUBSCRIPTION_THRESHOLD, VOLTAGE_PU_MAX, VOLTAGE_PU_MIN, handle_time_grant, set_publication_info, validate_control_signal
 from .federate import (
     DEFAULT_CONNECT_TIMEOUT_S,
     DEFAULT_GRANT_TIMEOUT_S,
-    core_init_timeout_option,
+    create_value_federate,
     enter_executing_mode_with_timeout,
     request_time_with_timeout,
     validate_timeout,
@@ -92,7 +92,8 @@ class HELICSFleet:
     Args:
         fleet: Initialized ``PySteppableFleet`` instance.
         fed_name: Unique name for this federate in the HELICS federation.
-        broker_address: Broker address (host or host:port or tcp://host:port).
+        broker_address: Broker address (host or host:port or tcp://host:port);
+            the broker's name for an in-process core (``"inproc"``).
         core_type: HELICS core transport (e.g. ``"zmq"``).
         time_offset_s: HELICS time offset in seconds.  Use a positive offset
             so this federate steps after an aggregator at the same granted time.
@@ -133,9 +134,9 @@ class HELICSFleet:
             self._n_dwellings,
         )
 
-        fedinfo = self._create_federate_info()
-        self._configure_federate_info(fedinfo)
-        self._fed = helics.helicsCreateValueFederate(fed_name, fedinfo)
+        self._fed = create_value_federate(
+            fed_name, core_type, broker_address, self._connect_timeout_s, self._federate_info
+        )
 
         self._set_flag(helics.HELICS_FLAG_TERMINATE_ON_ERROR, True)
 
@@ -195,8 +196,8 @@ class HELICSFleet:
         self._pub_aggregate_power = self._fed.register_publication(aggregate_power_name, "double")
         self._pub_aggregate_reactive = self._fed.register_publication(aggregate_reactive_name, "double")
 
-        _set_publication_info(self._pub_aggregate_power, "units=kW")
-        _set_publication_info(self._pub_aggregate_reactive, "units=kvar")
+        set_publication_info(self._pub_aggregate_power, "units=kW")
+        set_publication_info(self._pub_aggregate_reactive, "units=kvar")
 
         self._pub_dwelling_power = []
         self._pub_dwelling_reactive = []
@@ -213,21 +214,21 @@ class HELICSFleet:
             pub_reactive = self._fed.register_publication(reactive_name, "double")
             self._pub_dwelling_power.append(pub_power)
             self._pub_dwelling_reactive.append(pub_reactive)
-            _set_publication_info(pub_power, "units=kW")
-            _set_publication_info(pub_reactive, "units=kvar")
+            set_publication_info(pub_power, "units=kW")
+            set_publication_info(pub_reactive, "units=kvar")
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_name}"))
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{reactive_name}"))
 
         # Aggregate zone temperature publication (mean across fleet)
         agg_zone_temp_name = "aggregate_zone_temp_c"
         self._pub_aggregate_zone_temp = self._fed.register_publication(agg_zone_temp_name, "double")
-        _set_publication_info(self._pub_aggregate_zone_temp, "units=degC")
+        set_publication_info(self._pub_aggregate_zone_temp, "units=degC")
         configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{agg_zone_temp_name}"))
 
         # Aggregate SOC publication (mean across fleet)
         agg_soc_name = "aggregate_soc_pct"
         self._pub_aggregate_soc = self._fed.register_publication(agg_soc_name, "double")
-        _set_publication_info(self._pub_aggregate_soc, "units=pct")
+        set_publication_info(self._pub_aggregate_soc, "units=pct")
         configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{agg_soc_name}"))
 
         # Per-dwelling zone and equipment publications — each dwelling's
@@ -249,7 +250,7 @@ class HELICSFleet:
             for zi in range(zone_count):
                 key = f"dwelling_{dwelling_index}/zone_{zi}/temp_air_c"
                 pub = self._fed.register_publication(key, "double")
-                _set_publication_info(pub, "units=degC")
+                set_publication_info(pub, "units=degC")
                 dwelling_zone_pubs.append(pub)
                 configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{key}"))
             self._pub_dwelling_zone_temp.append(dwelling_zone_pubs)
@@ -263,17 +264,17 @@ class HELICSFleet:
                 m_key = f"dwelling_{dwelling_index}/equipment_{ei}/operating_mode"
 
                 pub_p = self._fed.register_publication(p_key, "double")
-                _set_publication_info(pub_p, "units=kW")
+                set_publication_info(pub_p, "units=kW")
                 dw_power_pubs.append(pub_p)
                 configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{p_key}"))
 
                 pub_s = self._fed.register_publication(s_key, "double")
-                _set_publication_info(pub_s, "units=pct")
+                set_publication_info(pub_s, "units=pct")
                 dw_soc_pubs.append(pub_s)
                 configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{s_key}"))
 
                 pub_m = self._fed.register_publication(m_key, "double")
-                _set_publication_info(pub_m, "units=enum")
+                set_publication_info(pub_m, "units=enum")
                 dw_mode_pubs.append(pub_m)
                 configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{m_key}"))
             self._pub_dwelling_equipment_power.append(dw_power_pubs)
@@ -378,7 +379,7 @@ class HELICSFleet:
 
                 exit_time_s = sim_time_s + self._time_res_s
                 granted = self._request_time(exit_time_s)
-                while not _handle_time_grant(exit_time_s, granted):
+                while not handle_time_grant(exit_time_s, granted):
                     self._publish_results()
                     granted = self._request_time(exit_time_s)
 
@@ -539,7 +540,7 @@ class HELICSFleet:
                 if dwelling_index < 0 or dwelling_index >= self._n_dwellings:
                     _LOG.warning("Control payload references invalid dwelling index %d", dwelling_index)
                     continue
-                clamped = _validate_control_signal(signal_dict, equipment_name, _LOG)
+                clamped = validate_control_signal(signal_dict, equipment_name, _LOG)
                 self._control_clamped += clamped
                 try:
                     signal = ControlSignal.from_dict(signal_dict)
@@ -683,8 +684,10 @@ class HELICSFleet:
                     if ei < len(modes):
                         pub.publish(float(modes[ei]))
 
-        self._pub_aggregate_power.publish(aggregate_power_kw)  # type: ignore[union-attr]
-        self._pub_aggregate_reactive.publish(aggregate_reactive_kvar)  # type: ignore[union-attr]
+        if self._pub_aggregate_power is None or self._pub_aggregate_reactive is None:
+            raise RuntimeError("Publications are not registered; call register_publications() first")
+        self._pub_aggregate_power.publish(aggregate_power_kw)
+        self._pub_aggregate_reactive.publish(aggregate_reactive_kvar)
 
         _published_count = (
             2  # aggregate power + reactive
@@ -717,39 +720,42 @@ class HELICSFleet:
 
     @staticmethod
     def _create_federate_info() -> HelicsFederateInfoLike:
-        if hasattr(helics, "HelicsFederateInfo"):
-            try:
-                return helics.HelicsFederateInfo()
-            except TypeError:
-                # Some HELICS builds expose HelicsFederateInfo but require an internal handle.
-                pass
+        # The 3.6.1 wheel builds the info object through
+        # helicsCreateFederateInfo(): HelicsFederateInfo's constructor
+        # requires the raw C handle that only the factory produces.
         if hasattr(helics, "helicsCreateFederateInfo"):
             return helics.helicsCreateFederateInfo()
-        raise RuntimeError("HELICS Python module does not expose federate info creation API")
 
-    def _configure_federate_info(self, fedinfo: HelicsFederateInfoLike) -> None:
+        # Fallback for HELICS builds that expose a no-arg HelicsFederateInfo
+        # constructor instead.
+        info_ctor: Callable[[], HelicsFederateInfoLike] | None = getattr(
+            helics, "HelicsFederateInfo", None
+        )
+        if info_ctor is None:
+            raise RuntimeError("HELICS Python module does not expose federate info creation API")
+        try:
+            return info_ctor()
+        except TypeError as exc:
+            raise RuntimeError(
+                "HELICS Python module does not expose federate info creation API"
+            ) from exc
+
+    def _federate_info(self, core_name: str, core_init_value: str) -> HelicsFederateInfoLike:
+        fedinfo = self._create_federate_info()
+        self._configure_federate_info(fedinfo, core_name, core_init_value)
+        return fedinfo
+
+    def _configure_federate_info(
+        self, fedinfo: HelicsFederateInfoLike, core_name: str, core_init_value: str
+    ) -> None:
         if hasattr(helics, "helicsFederateInfoSetCoreTypeFromString"):
             helics.helicsFederateInfoSetCoreTypeFromString(fedinfo, self._core_type)
         else:
             fedinfo.core_type = self._core_type
 
         if hasattr(helics, "helicsFederateInfoSetCoreName"):
-            helics.helicsFederateInfoSetCoreName(fedinfo, f"core_{self._fed_name}")
+            helics.helicsFederateInfoSetCoreName(fedinfo, core_name)
 
-        broker_address = self._normalize_broker_address(self._broker_address)
-        # Each federate's core needs its own local ZMQ listen port. Without an
-        # explicit --port, multiple auto-named cores in the same process can
-        # collide on the auto-assigned local port and silently deadlock at
-        # enterExecutingMode instead of raising a bind error (reproduced on
-        # macOS/arm64 with HELICS 3.6.1).
-        local_port = allocate_ephemeral_port()
-        # --timeout bounds broker registration: helicsCreateValueFederate
-        # against an unreachable or unresponsive broker raises within the
-        # timeout instead of stalling for the library default (~30s).
-        core_init_value = (
-            f"--broker_address={broker_address} --port={local_port} "
-            f"{core_init_timeout_option(self._connect_timeout_s)}"
-        )
         if hasattr(helics, "helicsFederateInfoSetCoreInitString"):
             helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init_value)
         else:
@@ -789,12 +795,6 @@ class HELICSFleet:
             self._fed.set_flag_option(flag, enabled)
             return
         helics.helicsFederateSetFlagOption(self._fed, flag, int(enabled))
-
-    @staticmethod
-    def _normalize_broker_address(address: str) -> str:
-        if "://" in address:
-            return address
-        return f"tcp://{address}"
 
     @property
     def helics_voltage_all_valid(self) -> bool:
@@ -836,7 +836,7 @@ class HELICSFleet:
         }
 
     def _iter_control_entries(self, payload: Any) -> list[tuple[int, str, dict[str, Any]]]:
-        if not isinstance(payload, dict):
+        if not is_json_object(payload):
             raise ValueError("Control payload must decode to a JSON object")
 
         if not payload:
@@ -887,19 +887,19 @@ class HELICSFleet:
 
     @staticmethod
     def _iter_equipment_entries(body: Any) -> list[tuple[str, dict[str, Any]]]:
-        if not isinstance(body, dict):
+        if not is_json_object(body):
             raise ValueError("Each control entry must be a JSON object")
 
         if "equipment" in body and "signal" in body:
             equipment = body["equipment"]
             signal = body["signal"]
-            if not isinstance(equipment, str) or not isinstance(signal, dict):
+            if not isinstance(equipment, str) or not is_json_object(signal):
                 raise ValueError("Single-control payload requires string equipment + dict signal")
             return [(equipment, signal)]
 
         entries: list[tuple[str, dict[str, Any]]] = []
-        for equipment, signal in body.items():
-            if not isinstance(equipment, str) or not isinstance(signal, dict):
+        for item_key, item_value in body.items():
+            if not is_json_object(item_value):
                 raise ValueError("Multi-control payload must be {str: dict}")
-            entries.append((equipment, signal))
+            entries.append((item_key, item_value))
         return entries

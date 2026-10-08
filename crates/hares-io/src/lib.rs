@@ -18,8 +18,12 @@ pub mod schedule_resolve;
 pub mod site_location;
 pub mod tmy3;
 pub mod weather;
+pub mod wsf;
 
-pub use config::{ConfigError, OutputFormat, RotationPolicy, SimulationConfig};
+pub use config::{
+    ConfigError, DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES, OutputFormat, RotationPolicy,
+    SimulationConfig,
+};
 pub use defaults::{
     BiquadraticCoefficients, DefaultsCategory, DefaultsError, DefaultsStore, EquipmentDefaults,
     HvacCurveSet, HvacCurveVariant, PvPanelDefaults, ZipLoad,
@@ -35,19 +39,16 @@ pub use envelope_lut::{
 pub use epw::{
     DesignConditions, SkyTempModel, berdahl_martin_sky_emissivity, clark_allen_sky_emissivity,
     compute_sky_temp_c, monthly_day_counts, parse_epw, parse_epw_location_state,
-    sky_temp_from_emissivity,
+    parse_epw_station_wmo, sky_temp_from_emissivity,
 };
 // Re-export canonical physical constants from hares-physics (preserving public API names).
 pub use hares_physics::constants::CELSIUS_TO_KELVIN as KELVIN_OFFSET_C;
 pub use hares_physics::constants::STEFAN_BOLTZMANN;
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 pub use hpxml::building::check_foundation_zone_invariant;
 pub use hpxml::{
     Building, EquipmentSpec, HpxmlDataPatches, ValidationReport, parse_hpxml,
     parse_iecc_climate_zone, resolve_equipment,
 };
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub use output::check_mode_ordinals_invariant;
 pub use output::{
     CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
     DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
@@ -74,10 +75,11 @@ pub use resstock::{
 };
 pub use resstock_csv::parse_resstock_csv;
 pub use sample_weight::{SampleWeightClass, classify_sample_weight};
+pub use schedule::resolve_occupancy_column;
 pub use schedule::{ColumnAggregation, ScheduleTimeSeries, parse_schedule_csv};
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 pub use schedule_resolve::check_hvac_setpoint_invariants;
 pub use schedule_resolve::inject_schedule_into_specs;
+pub use schedule_resolve::{DefaultProfiles, DefaultScheduleProfile, load_default_profiles};
 pub use site_location::{FieldSource, SiteLocation, SiteLocationOverride, resolve_site_location};
 pub use tmy3::parse_tmy3;
 pub use weather::{

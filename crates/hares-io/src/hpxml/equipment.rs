@@ -5,6 +5,7 @@ use serde_json::{Map, Value, json};
 use hares_equipment::ConfigPayload;
 use hares_equipment::{EquipmentConfig, EquipmentTypedConfig};
 use hares_types::FuelType;
+use hares_types::Warning;
 
 use super::HpxmlError;
 use super::data_patches::HpxmlDataPatches;
@@ -15,7 +16,10 @@ use crate::defaults::{DefaultsStore, ZipLoad};
 
 use super::resolve_der::{resolve_batteries, resolve_ev, resolve_generators, resolve_pv};
 use super::resolve_hvac::resolve_hvac;
-use super::resolve_loads::{default_gain_fractions, resolve_scheduled_loads, resolve_ventilation};
+use super::resolve_loads::{
+    default_gain_fractions, default_radiant_share, default_visible_share, resolve_scheduled_loads,
+    resolve_ventilation,
+};
 use super::resolve_water_heater::resolve_water_heaters;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +31,16 @@ pub struct EquipmentSpec {
     pub instance_name: Option<String>,
     pub fuel_type: FuelType,
     pub parameters: Map<String, Value>,
+    /// The caller's config overrides for a typed payload, apart from the
+    /// bag: the bag mixes the resolver's machinery keys (autosize flags,
+    /// duct inputs, schedule column indexes) with the serialized payload,
+    /// and a key either channel may write cannot be diagnosed as a typo.
+    /// Every key here must be a field the payload's schema reads (the
+    /// reserved `equipment_id` aside); an unknown key is an error naming
+    /// the equipment and the field when the spec is added to a blueprint
+    /// or built. A raw spec (no typed config) keeps its config in
+    /// `parameters` and carries no overrides.
+    pub typed_overrides: Map<String, Value>,
     pub zip_params: Option<ZipLoad>,
     /// Typed config, populated for equipment types that have been migrated.
     /// When present, consumers should prefer this over raw `parameters`.
@@ -43,25 +57,27 @@ pub struct EquipmentSpec {
     pub primary_role: Option<String>,
 }
 
+/// The equipment the HPXML building describes, before any override: the
+/// dwelling applies overrides, checked against what each equipment reads,
+/// when it builds the equipment configs.
 pub fn resolve_equipment(
     building: &Building,
     defaults: &DefaultsStore,
-    overrides: &Value,
     data_patches: Option<&HpxmlDataPatches>,
+    warnings: &mut Vec<Warning>,
 ) -> std::result::Result<Vec<EquipmentSpec>, HpxmlError> {
     let mut specs = Vec::new();
     let details = &building.details_xml;
 
-    resolve_hvac(building, defaults, &mut specs)?;
-    resolve_water_heaters(building, defaults, &mut specs, data_patches)?;
-    resolve_pv(details, defaults, &mut specs)?;
+    resolve_hvac(building, defaults, &mut specs, warnings)?;
+    resolve_water_heaters(building, defaults, &mut specs, data_patches, warnings)?;
+    resolve_pv(details, defaults, &mut specs, warnings)?;
     resolve_batteries(details, defaults, &mut specs)?;
     resolve_ev(details, defaults, &mut specs)?;
     resolve_generators(details, defaults, &mut specs)?;
     resolve_scheduled_loads(building, defaults, &mut specs)?;
     resolve_ventilation(details, defaults, &mut specs)?;
 
-    apply_overrides(&mut specs, overrides);
     resolve_loop_wiring(&mut specs)?;
     assign_instance_names(&mut specs);
     Ok(specs)
@@ -69,36 +85,90 @@ pub fn resolve_equipment(
 
 pub fn nested_update(base: &mut Map<String, Value>, overrides: &Map<String, Value>) {
     for (key, override_value) in overrides {
-        match (base.get_mut(key), override_value) {
-            (Some(Value::Object(base_obj)), Value::Object(override_obj)) => {
-                nested_update(base_obj, override_obj);
-            }
-            _ => {
-                base.insert(key.clone(), override_value.clone());
-            }
+        nested_insert(base, key, override_value);
+    }
+}
+
+/// Sets `key` to `value` in `base`, merging an object into an object
+/// already there key by key.
+pub fn nested_insert(base: &mut Map<String, Value>, key: &str, value: &Value) {
+    match (base.get_mut(key), value) {
+        (Some(Value::Object(base_obj)), Value::Object(override_obj)) => {
+            nested_update(base_obj, override_obj);
+        }
+        _ => {
+            base.insert(key.to_string(), value.clone());
         }
     }
 }
 
-fn apply_overrides(specs: &mut [EquipmentSpec], overrides: &Value) {
-    let Value::Object(root) = overrides else {
-        return;
-    };
+/// The two spellings of the override that reaches every equipment.
+pub const WILDCARD_OVERRIDE_KEYS: [&str; 2] = ["all", "*"];
 
-    let global = root
-        .get("all")
-        .or_else(|| root.get("*"))
-        .and_then(Value::as_object);
+/// The wildcard override: its spelling and its parameters.
+pub type WildcardOverride<'a> = (&'static str, &'a Map<String, Value>);
 
-    for spec in specs {
-        if let Some(global_obj) = global {
-            nested_update(&mut spec.parameters, global_obj);
+/// The override layers that reach one equipment, lowest first: the
+/// wildcard that reaches every equipment, then the equipment's own entry.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OverrideLayers<'a> {
+    pub wildcard: Option<WildcardOverride<'a>>,
+    pub own: Option<&'a Map<String, Value>>,
+}
+
+/// The wildcard of an override map: `all` or `*`, its one spelling.
+///
+/// # Errors
+///
+/// Both spellings, or a wildcard that is not an object of parameters.
+pub fn wildcard_override(
+    root: &Map<String, Value>,
+) -> Result<Option<WildcardOverride<'_>>, hares_types::HaresError> {
+    let mut found = None;
+    for spelling in WILDCARD_OVERRIDE_KEYS {
+        let Some(value) = root.get(spelling) else {
+            continue;
+        };
+        if found.is_some() {
+            return Err(hares_types::HaresError::Equipment(
+                "equipment overrides give both 'all' and '*', two spellings of the \
+                 override every equipment takes; give one"
+                    .to_string(),
+            ));
         }
-
-        if let Some(Value::Object(eq_obj)) = root.get(&spec.name) {
-            nested_update(&mut spec.parameters, eq_obj);
-        }
+        found = Some((spelling, override_object(spelling, value)?));
     }
+    Ok(found)
+}
+
+/// The override layers of `root` that reach the equipment named `name`.
+///
+/// # Errors
+///
+/// As [`wildcard_override`], or an equipment entry that is not an object of
+/// parameters.
+pub fn override_layers<'a>(
+    root: &'a Map<String, Value>,
+    name: &str,
+) -> Result<OverrideLayers<'a>, hares_types::HaresError> {
+    Ok(OverrideLayers {
+        wildcard: wildcard_override(root)?,
+        own: root
+            .get(name)
+            .map(|value| override_object(name, value))
+            .transpose()?,
+    })
+}
+
+fn override_object<'a>(
+    source: &str,
+    value: &'a Value,
+) -> Result<&'a Map<String, Value>, hares_types::HaresError> {
+    value.as_object().ok_or_else(|| {
+        hares_types::HaresError::Equipment(format!(
+            "the '{source}' equipment override must be an object of parameters, got: {value}"
+        ))
+    })
 }
 
 pub(crate) fn build_spec(
@@ -113,16 +183,25 @@ pub(crate) fn build_spec(
     );
 
     // Inject OCHRE-compatible default gain fractions when HPXML did not provide them.
-    if !parameters.contains_key("frac_sensible")
-        && !parameters.contains_key("sensible_gain_fraction")
+    if !parameters.contains_key("sensible_gain_fraction")
+        && let Some((sensible, latent)) = default_gain_fractions(&name, fuel_type)
     {
-        if let Some((sensible, latent)) = default_gain_fractions(&name, fuel_type) {
-            parameters.insert("sensible_gain_fraction".to_string(), json!(sensible));
-            if !parameters.contains_key("frac_latent")
-                && !parameters.contains_key("latent_gain_fraction")
-            {
-                parameters.insert("latent_gain_fraction".to_string(), json!(latent));
-            }
+        parameters.insert("sensible_gain_fraction".to_string(), json!(sensible));
+        if !parameters.contains_key("latent_gain_fraction") {
+            parameters.insert("latent_gain_fraction".to_string(), json!(latent));
+        }
+    }
+    // The radiant and visible parts are shares of the sensible fraction; the
+    // load resolves them against its final sensible fraction, after every
+    // override, so an overridden sensible fraction keeps the split.
+    for (key, share) in [
+        ("radiant_share_of_sensible", default_radiant_share(&name)),
+        ("visible_share_of_sensible", default_visible_share(&name)),
+    ] {
+        if let Some(share) = share
+            && !parameters.contains_key(key)
+        {
+            parameters.insert(key.to_string(), json!(share));
         }
     }
 
@@ -133,6 +212,7 @@ pub(crate) fn build_spec(
         instance_name: None,
         fuel_type,
         parameters,
+        typed_overrides: Map::new(),
         zip_params,
         typed_config: None,
         system_id: None,
@@ -167,6 +247,7 @@ where
         fuel_type,
         parameters,
         zip_params: defaults.zip_params(&name).cloned(),
+        typed_overrides: serde_json::Map::new(),
         typed_config: Some(typed_config),
         system_id: None,
         related_hvac_idref: None,
@@ -194,14 +275,23 @@ fn fuel_type_label(fuel_type: FuelType) -> String {
 ///
 /// Without this pass, both boiler and indirect tank default to `LoopId(1)`
 /// independently — the cross-reference is parsed but never applied.
+///
+/// A tank's wiring target that is not a resolved boiler spec is a resolve
+/// error naming the tank and the idref it named: an idref that matches no
+/// resolved system id, or one that resolves to an equipment class that
+/// cannot host the tank's fluid loop (a water heater, a furnace), would
+/// otherwise leave the tank silently unwired. The not-a-boiler arm in
+/// `set_boiler_loop_id` stays reachable for direct callers and as defense
+/// in depth; this path validates before dispatch.
 fn resolve_loop_wiring(specs: &mut [EquipmentSpec]) -> Result<(), HpxmlError> {
     let mut next_loop_id: u16 = 1;
 
-    // Build a lookup: HPXML SystemIdentifier/id → index for boiler specs.
-    let boiler_indices: Vec<(String, usize)> = specs
+    // Build a lookup: HPXML SystemIdentifier/id → index for every resolved
+    // spec, so a tank's wiring target that is missing or not a boiler is
+    // diagnosed instead of skipped.
+    let system_indices: Vec<(String, usize)> = specs
         .iter()
         .enumerate()
-        .filter(|(_, s)| matches!(s.name.as_str(), "Gas Boiler" | "Electric Boiler"))
         .filter_map(|(i, s)| s.system_id.clone().map(|id| (id, i)))
         .collect();
 
@@ -214,16 +304,40 @@ fn resolve_loop_wiring(specs: &mut [EquipmentSpec]) -> Result<(), HpxmlError> {
         let Some(ref related_hvac_idref) = tank_spec.related_hvac_idref else {
             continue;
         };
-        let Some(&(_, boiler_idx)) = boiler_indices
+        let tank_display = tank_spec
+            .instance_name
+            .clone()
+            .unwrap_or_else(|| tank_spec.name.clone());
+        let Some(&(_, boiler_idx)) = system_indices
             .iter()
             .find(|(id, _)| id == related_hvac_idref)
         else {
-            tracing::warn!(
-                related_hvac_idref = %related_hvac_idref,
-                "IndirectTank references HVAC system but no matching boiler found in resolved specs"
-            );
-            continue;
+            return Err(HpxmlError::Equipment(hares_types::HaresError::Equipment(
+                format!(
+                    "loop wiring for indirect tank '{tank_display}': its \
+                     RelatedHVACSystem idref '{related_hvac_idref}' matches no \
+                     resolved equipment system id, so the tank's fluid loop \
+                     cannot be wired"
+                ),
+            )));
         };
+        if !matches!(
+            specs[boiler_idx].name.as_str(),
+            "Gas Boiler" | "Electric Boiler"
+        ) {
+            let target_display = specs[boiler_idx]
+                .instance_name
+                .clone()
+                .unwrap_or_else(|| specs[boiler_idx].name.clone());
+            return Err(HpxmlError::Equipment(hares_types::HaresError::Equipment(
+                format!(
+                    "loop wiring for indirect tank '{tank_display}': its \
+                     RelatedHVACSystem idref '{related_hvac_idref}' resolves to \
+                     '{target_display}', which is not a boiler, so the tank's \
+                     fluid loop cannot be wired to it"
+                ),
+            )));
+        }
         let loop_id = next_loop_id;
         next_loop_id += 1;
         wiring_jobs.push((tank_idx, boiler_idx, loop_id));
@@ -244,38 +358,66 @@ fn set_boiler_loop_id(
 ) -> Result<(), HpxmlError> {
     use hares_equipment::{ElectricBoilerConfig, GasBoilerConfig};
 
-    let Some(ref mut cfg) = specs[idx].typed_config else {
-        return Ok(());
-    };
+    let display = specs[idx]
+        .instance_name
+        .clone()
+        .unwrap_or_else(|| specs[idx].name.clone());
     match specs[idx].name.as_str() {
         "Gas Boiler" => {
-            if let Ok(mut typed) = cfg.typed::<GasBoilerConfig>() {
-                typed.loop_id = Some(loop_id);
-                *cfg =
-                    EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
-            } else {
-                tracing::warn!(
-                    name = %specs[idx].name,
-                    loop_id,
-                    "set_boiler_loop_id: failed to deserialize GasBoilerConfig"
-                );
-            }
+            set_spec_loop_id::<GasBoilerConfig>(&mut specs[idx], loop_id, &display, |typed, id| {
+                typed.loop_id = Some(id)
+            })
         }
-        "Electric Boiler" => {
-            if let Ok(mut typed) = cfg.typed::<ElectricBoilerConfig>() {
-                typed.loop_id = Some(loop_id);
-                *cfg =
-                    EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
-            } else {
-                tracing::warn!(
-                    name = %specs[idx].name,
-                    loop_id,
-                    "set_boiler_loop_id: failed to deserialize ElectricBoilerConfig"
-                );
-            }
-        }
-        _ => {}
+        "Electric Boiler" => set_spec_loop_id::<ElectricBoilerConfig>(
+            &mut specs[idx],
+            loop_id,
+            &display,
+            |typed, id| typed.loop_id = Some(id),
+        ),
+        other => Err(HpxmlError::Equipment(hares_types::HaresError::Equipment(
+            format!(
+                "loop wiring for '{display}': the wiring target is a '{other}', \
+                 which is not a boiler, so it cannot take the fluid loop id \
+                 {loop_id} of the indirect tank wired to it"
+            ),
+        ))),
     }
+}
+
+/// Write the wired fluid loop id onto one boiler spec: into its raw
+/// `parameters` (the channel the post-autosize typed-config rebuild reads)
+/// and into its typed config when one is present. A boiler whose typed
+/// config is `None` is pending autosizing by design; its id lives in the
+/// parameters alone until the rebuild materializes it.
+fn set_spec_loop_id<T: hares_equipment::EquipmentTypedConfig>(
+    spec: &mut EquipmentSpec,
+    loop_id: u16,
+    display: &str,
+    set: impl FnOnce(&mut T, u16),
+) -> Result<(), HpxmlError> {
+    let expected_type = T::equipment_type_name();
+    let mut typed = match spec.typed_config.as_ref() {
+        None => {
+            spec.parameters
+                .insert("loop_id".to_string(), serde_json::json!(loop_id));
+            return Ok(());
+        }
+        Some(cfg) => cfg.typed::<T>().map_err(|err| {
+            hares_types::HaresError::Equipment(format!(
+                "loop wiring for '{display}': its typed config does not \
+                 deserialize as {expected_type}, so the fluid loop id \
+                 {loop_id} cannot be applied ({err})"
+            ))
+        })?,
+    };
+    set(&mut typed, loop_id);
+    spec.parameters
+        .insert("loop_id".to_string(), serde_json::json!(loop_id));
+    let cfg = spec
+        .typed_config
+        .as_mut()
+        .expect("typed config checked present above");
+    *cfg = EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
     Ok(())
 }
 
@@ -286,18 +428,35 @@ fn set_indirect_tank_boiler_loop_id(
 ) -> Result<(), HpxmlError> {
     use hares_equipment::IndirectTankConfig;
 
-    if let Some(ref mut cfg) = specs[idx].typed_config {
-        if let Ok(mut typed) = cfg.typed::<IndirectTankConfig>() {
-            typed.boiler_loop_id = Some(loop_id);
-            *cfg = EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
-        } else {
-            tracing::warn!(
-                name = %specs[idx].name,
-                loop_id,
-                "set_indirect_tank_boiler_loop_id: failed to deserialize IndirectTankConfig"
-            );
+    let display = specs[idx]
+        .instance_name
+        .clone()
+        .unwrap_or_else(|| specs[idx].name.clone());
+    let expected_type = IndirectTankConfig::equipment_type_name();
+    let mut typed = match specs[idx].typed_config.as_ref() {
+        None => {
+            specs[idx]
+                .parameters
+                .insert("boiler_loop_id".to_string(), serde_json::json!(loop_id));
+            return Ok(());
         }
-    }
+        Some(cfg) => cfg.typed::<IndirectTankConfig>().map_err(|err| {
+            hares_types::HaresError::Equipment(format!(
+                "loop wiring for '{display}': its typed config does not \
+                 deserialize as {expected_type}, so the shared fluid loop id \
+                 {loop_id} cannot be applied ({err})"
+            ))
+        })?,
+    };
+    typed.boiler_loop_id = Some(loop_id);
+    specs[idx]
+        .parameters
+        .insert("boiler_loop_id".to_string(), serde_json::json!(loop_id));
+    let cfg = specs[idx]
+        .typed_config
+        .as_mut()
+        .expect("typed config checked present above");
+    *cfg = EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed)?;
     Ok(())
 }
 
@@ -398,8 +557,8 @@ fn set_spec_equipment_id(spec: &mut EquipmentSpec, id: u32) {
 /// can never collide with one. A *malformed* present id (negative,
 /// fractional, non-numeric) is left untouched — the constructor's reader
 /// maps it to the unassigned sentinel and assembly validation rejects the
-/// build loudly, never a silent substitution. Ids are therefore sparse by
-/// design (dropped non-critical equipment leaves gaps); the invariants are
+/// build loudly, never a silent substitution. Ids are sparse wherever a
+/// spec carries an explicit id above the counter; the invariants are
 /// uniqueness, non-zero, and determinism from spec order — never
 /// contiguity.
 pub fn assign_equipment_ids(specs: &mut [EquipmentSpec]) {
@@ -453,9 +612,46 @@ mod tests {
     use hares_physics::units as conv;
     use hares_types::{FuelType, ScheduleSourceConfig};
 
-    use super::{HpxmlError, nested_update, resolve_equipment};
+    use super::{EquipmentSpec, HpxmlError, nested_update, override_layers, resolve_equipment};
     use crate::defaults::DefaultsStore;
     use crate::hpxml::building::parse_building;
+    use hares_types::Warning;
+
+    /// The layers reaching one equipment are the wildcard, under either
+    /// spelling, and its own entry; both spellings, or a layer that is not
+    /// an object, are errors.
+    #[test]
+    fn override_layers_resolve_one_wildcard() {
+        let root = |value: Value| value.as_object().cloned().expect("object");
+        for spelling in ["all", "*"] {
+            let overrides = root(json!({ spelling: { "a": 1 }, "Range": { "b": 2 } }));
+            let layers = override_layers(&overrides, "Range").expect("valid");
+            let (source, wildcard) = layers.wildcard.expect("a wildcard");
+            assert_eq!(source, spelling);
+            assert_eq!(wildcard.get("a"), Some(&json!(1)));
+            assert_eq!(layers.own.and_then(|own| own.get("b")), Some(&json!(2)));
+            assert!(
+                override_layers(&overrides, "Dryer")
+                    .expect("valid")
+                    .own
+                    .is_none()
+            );
+        }
+        for (overrides, needle) in [
+            (json!({ "all": {}, "*": {} }), "both 'all' and '*'"),
+            (
+                json!({ "all": 3 }),
+                "'all' equipment override must be an object",
+            ),
+            (
+                json!({ "Range": [1] }),
+                "'Range' equipment override must be an object",
+            ),
+        ] {
+            let err = override_layers(&root(overrides), "Range").expect_err(needle);
+            assert!(err.to_string().contains(needle), "{err}");
+        }
+    }
 
     #[test]
     fn nested_update_merges_objects_without_clobbering_siblings() {
@@ -498,12 +694,12 @@ mod tests {
     #[test]
     fn heat_pump_air_to_air_splits_to_ashp_heater_and_cooler() {
         let xml = r#"
-<HPXML xmlns=\"http://hpxmlonline.com/2019/10\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://hpxmlonline.com/2019/10\" schemaVersion=\"4.0\">
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
   <Building>
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>
@@ -521,7 +717,7 @@ mod tests {
 "#;
 
         let building = parse_building(xml).expect("building should parse");
-        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         assert!(resolved.iter().any(|s| s.name == "ASHP Heater"));
@@ -531,12 +727,12 @@ mod tests {
     #[test]
     fn heat_pump_mini_split_splits_to_mshp_heater_and_cooler() {
         let xml = r#"
-<HPXML xmlns=\"http://hpxmlonline.com/2019/10\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://hpxmlonline.com/2019/10\" schemaVersion=\"4.0\">
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
   <Building>
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>
@@ -554,7 +750,7 @@ mod tests {
 "#;
 
         let building = parse_building(xml).expect("building should parse");
-        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         assert!(resolved.iter().any(|s| s.name == "MSHP Heater"));
@@ -578,7 +774,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems><HVAC>{hvac_inner}</HVAC></Systems>
@@ -601,7 +797,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let cooler = specs
             .iter()
@@ -623,7 +819,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let cooler = specs
             .iter()
@@ -645,7 +841,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let cooler = specs
             .iter()
@@ -669,7 +865,7 @@ mod tests {
         </CoolingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let ac = specs
             .iter()
@@ -688,7 +884,7 @@ mod tests {
         </CoolingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let ac = specs
             .iter()
@@ -707,7 +903,7 @@ mod tests {
         </CoolingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let ac = specs
             .iter()
@@ -729,7 +925,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let cooler = specs
             .iter()
@@ -759,7 +955,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>{systems_inner}</Systems>
@@ -783,7 +979,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let wh = specs
             .iter()
@@ -819,7 +1015,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let wh = specs
             .iter()
@@ -854,7 +1050,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let wh = specs
             .iter()
@@ -887,7 +1083,7 @@ mod tests {
         </Batteries>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let battery = specs
             .iter()
@@ -932,7 +1128,7 @@ mod tests {
         </Batteries>"#
         ));
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let battery = specs
             .iter()
@@ -970,7 +1166,7 @@ mod tests {
         </ElectricVehicles>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let ev = specs
             .iter()
@@ -1027,7 +1223,7 @@ mod tests {
         </Photovoltaics>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let pv = specs
             .iter()
@@ -1048,6 +1244,86 @@ mod tests {
         assert_eq!(typed.system_losses_fraction, Some(0.14));
     }
 
+    fn resolve_pv_xml(orientation: &str) -> (Result<Vec<EquipmentSpec>, HpxmlError>, Vec<Warning>) {
+        let xml = minimal_wh_xml(&format!(
+            r#"<Photovoltaics>
+          <PVSystem>
+            <SystemIdentifier id="PVSystem1"/>
+            <MaxPowerOutput>5000</MaxPowerOutput>
+            {orientation}
+          </PVSystem>
+        </Photovoltaics>"#
+        ));
+        let building = parse_building(&xml).expect("should parse");
+        let mut warnings = Vec::new();
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut warnings);
+        (specs, warnings)
+    }
+
+    fn pv_orientation(specs: &[EquipmentSpec]) -> (Option<f64>, Option<f64>) {
+        let typed: hares_equipment::PvConfig = specs
+            .iter()
+            .find(|s| s.name == "PV")
+            .and_then(|s| s.typed_config.as_ref())
+            .expect("PV spec with typed config")
+            .typed()
+            .expect("PV typed config");
+        (typed.tilt_deg, typed.azimuth_deg)
+    }
+
+    #[test]
+    fn hpxml_pv_without_array_tilt_is_a_missing_field() {
+        let (specs, _) = resolve_pv_xml("<ArrayAzimuth>180</ArrayAzimuth>");
+        assert!(matches!(
+            specs.expect_err("ArrayTilt has no OS-HPXML default"),
+            HpxmlError::MissingField { path: "PVSystem/ArrayTilt", ref system_id, .. }
+                if system_id == "PVSystem1"
+        ));
+    }
+
+    #[test]
+    fn hpxml_pv_without_azimuth_or_orientation_is_a_missing_field() {
+        let (specs, _) = resolve_pv_xml("<ArrayTilt>30</ArrayTilt>");
+        assert!(matches!(
+            specs.expect_err("an azimuth needs ArrayAzimuth or ArrayOrientation"),
+            HpxmlError::MissingField {
+                path: "PVSystem/ArrayAzimuth",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn hpxml_pv_azimuth_comes_from_its_orientation_with_a_warning() {
+        let (specs, warnings) = resolve_pv_xml(
+            "<ArrayOrientation>southwest</ArrayOrientation><ArrayTilt>30</ArrayTilt>",
+        );
+        assert_eq!(
+            pv_orientation(&specs.expect("resolves")),
+            (Some(30.0), Some(225.0))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("PVSystem1") && w.message.contains("225")),
+            "{warnings:?}"
+        );
+        let (specs, warnings) =
+            resolve_pv_xml("<ArrayAzimuth>200</ArrayAzimuth><ArrayTilt>30</ArrayTilt>");
+        assert_eq!(
+            pv_orientation(&specs.expect("resolves")),
+            (Some(30.0), Some(200.0))
+        );
+        assert!(warnings.iter().all(|w| !w.message.contains("PVSystem1")));
+    }
+
+    #[test]
+    fn hpxml_pv_unknown_orientation_is_rejected() {
+        let (specs, _) =
+            resolve_pv_xml("<ArrayOrientation>up</ArrayOrientation><ArrayTilt>30</ArrayTilt>");
+        assert!(specs.is_err());
+    }
+
     #[test]
     fn hpxml_pv_non_fixed_tracking_is_rejected() {
         let xml = minimal_wh_xml(
@@ -1063,7 +1339,7 @@ mod tests {
         </Photovoltaics>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let err = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let err = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect_err("non-fixed tracking should be rejected");
 
         let msg = match err {
@@ -1089,7 +1365,7 @@ mod tests {
         </Generators></extension>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let generator = specs
             .iter()
@@ -1126,7 +1402,7 @@ mod tests {
         </VentilationFans></MechanicalVentilation>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let fan = specs
             .iter()
@@ -1170,7 +1446,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let wh = specs
             .iter()
@@ -1202,6 +1478,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea>1500</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">12000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -1251,7 +1528,7 @@ mod tests {
             </HeatingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let furnace = specs
             .iter()
@@ -1282,7 +1559,7 @@ mod tests {
             </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         let heater = specs
@@ -1314,7 +1591,7 @@ mod tests {
             </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         let heater = specs
@@ -1334,7 +1611,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Appliances>{appliance_inner}</Appliances>
@@ -1352,11 +1629,50 @@ mod tests {
     }
 
     #[test]
+    fn appliance_specs_carry_their_hpxml_system_identifier() {
+        let xml = minimal_appliance_xml(
+            "<ClothesWasher><SystemIdentifier id='Washer-Laundry'/></ClothesWasher>\
+             <ClothesWasher><SystemIdentifier id='Washer-Garage'/></ClothesWasher>\
+             <CookingRange />",
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs =
+            resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()).unwrap();
+        let washer_ids: Vec<Option<&str>> = specs
+            .iter()
+            .filter(|s| s.name == "Clothes Washer")
+            .map(|s| s.system_id.as_deref())
+            .collect();
+        assert_eq!(washer_ids, [Some("Washer-Laundry"), Some("Washer-Garage")]);
+        assert_eq!(find_spec(&specs, "Cooking Range").system_id, None);
+    }
+
+    #[test]
+    fn same_type_appliances_without_unique_ids_are_rejected() {
+        for (inner, expected) in [
+            (
+                "<Microwave><SystemIdentifier id='M1'/></Microwave><Microwave />",
+                "need a SystemIdentifier id each",
+            ),
+            (
+                "<Microwave><SystemIdentifier id='M1'/></Microwave>\
+                 <Microwave><SystemIdentifier id='M1'/></Microwave>",
+                "duplicate SystemIdentifier id 'M1'",
+            ),
+        ] {
+            let building = parse_building(&minimal_appliance_xml(inner)).expect("should parse");
+            let err = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
+                .expect_err("same-type appliances need unique ids");
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
+    #[test]
     fn clothes_washer_gain_fractions_match_ochre() {
         let xml = minimal_appliance_xml("<ClothesWasher />");
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+            resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()).unwrap();
         let cw = find_spec(&specs, "Clothes Washer");
         let sens = cw.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = cw.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1369,7 +1685,7 @@ mod tests {
         let xml = minimal_appliance_xml("<Dishwasher />");
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+            resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()).unwrap();
         let dw = find_spec(&specs, "Dishwasher");
         let sens = dw.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dw.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1384,7 +1700,7 @@ mod tests {
         );
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+            resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1394,10 +1710,6 @@ mod tests {
             "sensible={sens}, expected 0.135"
         );
         assert!((lat - 0.015).abs() < 1e-9, "latent={lat}, expected 0.015");
-        assert_eq!(
-            dryer.parameters["dryer_type"].as_str().unwrap(),
-            "vented_electric"
-        );
     }
 
     #[test]
@@ -1407,17 +1719,13 @@ mod tests {
         );
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+            resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
         // frac_lost=0.0, gain_factor=0.90 → sens=0.90, lat=0.10
         assert!((sens - 0.90).abs() < 1e-9, "sensible={sens}, expected 0.90");
         assert!((lat - 0.10).abs() < 1e-9, "latent={lat}, expected 0.10");
-        assert_eq!(
-            dryer.parameters["dryer_type"].as_str().unwrap(),
-            "unvented_condenser"
-        );
     }
 
     #[test]
@@ -1427,40 +1735,17 @@ mod tests {
         );
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+            resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
-        // frac_lost=0.85, gain_factor=0.89 → sens=0.1335, lat=0.0165
+        // OpenStudio-HPXML gives every fuel the electric split:
+        // frac_lost 0.85, 0.90 of the rest sensible.
         assert!(
-            (sens - 0.1335).abs() < 1e-9,
-            "sensible={sens}, expected 0.1335"
+            (sens - 0.135).abs() < 1e-9,
+            "sensible={sens}, expected 0.135"
         );
-        assert!((lat - 0.0165).abs() < 1e-9, "latent={lat}, expected 0.0165");
-        assert_eq!(
-            dryer.parameters["dryer_type"].as_str().unwrap(),
-            "vented_gas"
-        );
-    }
-
-    #[test]
-    fn unvented_gas_dryer_gain_fractions() {
-        let xml = minimal_appliance_xml(
-            "<ClothesDryer><FuelType>natural gas</FuelType><Vented>false</Vented></ClothesDryer>",
-        );
-        let building = parse_building(&xml).expect("should parse");
-        let specs =
-            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
-        let dryer = find_spec(&specs, "Clothes Dryer");
-        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
-        let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
-        // frac_lost=0.0, gain_factor=0.89 → sens=0.89, lat=0.11
-        assert!((sens - 0.89).abs() < 1e-9, "sensible={sens}, expected 0.89");
-        assert!((lat - 0.11).abs() < 1e-9, "latent={lat}, expected 0.11");
-        assert_eq!(
-            dryer.parameters["dryer_type"].as_str().unwrap(),
-            "vented_gas"
-        );
+        assert!((lat - 0.015).abs() < 1e-9, "latent={lat}, expected 0.015");
     }
 
     #[test]
@@ -1469,17 +1754,13 @@ mod tests {
             minimal_appliance_xml("<ClothesDryer><FuelType>electricity</FuelType></ClothesDryer>");
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+            resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         // Defaults to vented (frac_lost=0.85) → sens=0.135
         assert!(
             (sens - 0.135).abs() < 1e-9,
             "should default to vented: sensible={sens}"
-        );
-        assert_eq!(
-            dryer.parameters["dryer_type"].as_str().unwrap(),
-            "vented_electric"
         );
     }
 
@@ -1494,7 +1775,7 @@ mod tests {
             </HeatingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let furnace = specs
             .iter()
@@ -1519,7 +1800,7 @@ mod tests {
             </HVACControl>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         let rac = specs
@@ -1590,7 +1871,7 @@ mod tests {
             .expect("building cooling weekday setpoints");
 
         // Path 2: setpoints parsed by resolve_equipment → resolve_hvac → parse_hvac_setpoint_params
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let furnace = specs
             .iter()
@@ -1651,7 +1932,7 @@ mod tests {
             </HeatingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let spec = specs
             .iter()
@@ -1698,7 +1979,7 @@ mod tests {
             </CoolingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let spec = specs
             .iter()
@@ -1744,7 +2025,7 @@ mod tests {
             </Dehumidifier>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let spec = specs
             .iter()
@@ -1798,7 +2079,7 @@ mod tests {
         </extension>"#
         ));
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
         let generator = specs
             .iter()
@@ -1841,6 +2122,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea>1500</ConditionedFloorArea>
           <ConditionedBuildingVolume>12000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -1859,7 +2141,7 @@ mod tests {
 </HPXML>
 "#;
         let building = parse_building(xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         let heater = specs
@@ -1907,6 +2189,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea>1500</ConditionedFloorArea>
           <ConditionedBuildingVolume>12000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -1924,7 +2207,7 @@ mod tests {
 </HPXML>
 "#;
         let building = parse_building(xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment must not error when HeatingCapacity17F is absent");
 
         let heater = specs
@@ -1956,7 +2239,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("xml parses");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("ground-to-air must succeed with GSHP model");
         let heater = specs
             .iter()
@@ -1980,7 +2263,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("xml parses");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("water-loop-to-air must resolve to WSHP equipment");
         let heater = specs
             .iter()
@@ -2004,7 +2287,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("xml parses");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("water-to-air must resolve to WSHP equipment");
         let heater = specs
             .iter()
@@ -2028,7 +2311,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("xml parses");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("air-to-air must succeed");
         let heater = specs
             .iter()
@@ -2051,7 +2334,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>{systems_inner}</Systems>
@@ -2086,7 +2369,7 @@ mod tests {
             </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         let boiler = specs
@@ -2150,7 +2433,7 @@ mod tests {
             </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         let tank_cfg: hares_equipment::IndirectTankConfig = specs
@@ -2169,6 +2452,89 @@ mod tests {
         );
     }
 
+    /// An indirect tank whose RelatedHVACSystem idref names a system that
+    /// is not among the resolved specs is a resolve error naming the tank
+    /// and the idref it named, never a silently unwired tank.
+    #[test]
+    fn indirect_tank_idref_to_missing_system_is_a_resolve_error() {
+        let xml = minimal_combi_xml(
+            r#"<HVAC>
+              <HeatingSystem>
+                <SystemIdentifier id="boiler1"/>
+                <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+                <HeatingSystemType><Boiler/></HeatingSystemType>
+                <HeatingCapacity>60000</HeatingCapacity>
+                <AnnualHeatingEfficiency>
+                  <Units>AFUE</Units><Value>0.95</Value>
+                </AnnualHeatingEfficiency>
+              </HeatingSystem>
+            </HVAC>
+            <WaterHeating>
+              <WaterHeatingSystem>
+                <SystemIdentifier id="wh1"/>
+                <WaterHeaterType>space-heating boiler with storage tank</WaterHeaterType>
+                <RelatedHVACSystem idref="ghost-boiler"/>
+                <TankVolume>40</TankVolume>
+              </WaterHeatingSystem>
+            </WaterHeating>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let err = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
+            .expect_err("a dangling wiring target is a resolve error");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("Indirect Tank") && message.contains("ghost-boiler"),
+            "the error names the tank and the idref it named: {message}"
+        );
+    }
+
+    /// An indirect tank whose RelatedHVACSystem idref names a resolved
+    /// system that is not a boiler (here a storage water heater) is a
+    /// resolve error naming the tank, the idref and the target, never a
+    /// silently unwired tank.
+    #[test]
+    fn indirect_tank_idref_to_non_boiler_is_a_resolve_error() {
+        let xml = minimal_combi_xml(
+            r#"<HVAC>
+              <HeatingSystem>
+                <SystemIdentifier id="boiler1"/>
+                <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+                <HeatingSystemType><Boiler/></HeatingSystemType>
+                <HeatingCapacity>60000</HeatingCapacity>
+                <AnnualHeatingEfficiency>
+                  <Units>AFUE</Units><Value>0.95</Value>
+                </AnnualHeatingEfficiency>
+              </HeatingSystem>
+            </HVAC>
+            <WaterHeating>
+              <WaterHeatingSystem>
+                <SystemIdentifier id="wh1"/>
+                <WaterHeaterType>space-heating boiler with storage tank</WaterHeaterType>
+                <RelatedHVACSystem idref="wh2"/>
+                <TankVolume>40</TankVolume>
+              </WaterHeatingSystem>
+              <WaterHeatingSystem>
+                <SystemIdentifier id="wh2"/>
+                <FuelType>natural gas</FuelType>
+                <WaterHeaterType>storage water heater</WaterHeaterType>
+                <TankVolume>50</TankVolume>
+              </WaterHeatingSystem>
+            </WaterHeating>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let err = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
+            .expect_err("a non-boiler wiring target is a resolve error");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("Indirect Tank")
+                && message.contains("wh2")
+                && message.contains("Gas Water Heater"),
+            "the error names the tank, the idref and the non-boiler target: {message}"
+        );
+    }
+
     #[test]
     fn standalone_boiler_without_indirect_tank_keeps_none_loop_id() {
         let xml = minimal_hvac_xml(
@@ -2183,7 +2549,7 @@ mod tests {
             </HeatingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         let boiler_cfg: hares_equipment::GasBoilerConfig = specs
@@ -2227,7 +2593,7 @@ mod tests {
             </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         let boiler_cfg: hares_equipment::ElectricBoilerConfig = specs
@@ -2251,6 +2617,111 @@ mod tests {
 
         assert_eq!(boiler_cfg.loop_id, Some(1));
         assert_eq!(tank_cfg.boiler_loop_id, Some(1));
+    }
+
+    fn typed_spec_with<T: hares_equipment::EquipmentTypedConfig>(
+        name: &str,
+        config: T,
+    ) -> super::EquipmentSpec {
+        let mut spec = make_spec(name);
+        spec.typed_config = Some(
+            hares_equipment::EquipmentConfig::from_typed(
+                name.to_string(),
+                name.to_string(),
+                config,
+            )
+            .expect("the test config builds"),
+        );
+        spec
+    }
+
+    fn gas_boiler_config() -> hares_equipment::GasBoilerConfig {
+        hares_equipment::GasBoilerConfig {
+            loop_id: None,
+            capacity_w: 10_000.0,
+            afue: 0.85,
+            ..Default::default()
+        }
+    }
+
+    /// The wiring pass's silent paths are errors: a boiler spec whose typed
+    /// payload is a different config type, a wiring target that is not a
+    /// boiler, and a tank spec whose payload is not an `IndirectTankConfig`
+    /// each fail naming the equipment, the expected config type and the
+    /// loop id. A boiler pending autosizing (typed config `None`) is not an
+    /// error: its id goes into its raw parameters, which the post-autosize
+    /// rebuild reads.
+    #[test]
+    fn indirect_tank_wiring_errors() {
+        use super::{set_boiler_loop_id, set_indirect_tank_boiler_loop_id};
+
+        // A boiler spec whose typed payload is a different config type: the
+        // spec is named "Electric Boiler" but its payload's type name is the
+        // GasBoilerConfig's, so the ElectricBoilerConfig read fails.
+        let mut specs = vec![typed_spec_with("Electric Boiler", gas_boiler_config())];
+        let err = set_boiler_loop_id(&mut specs, 0, 1).expect_err("the type mismatch fails");
+        let message = err.to_string();
+        assert!(
+            message.contains("Electric Boiler")
+                && message.contains("Gas Boiler")
+                && message.contains('1'),
+            "the error names the equipment, the expected config type and the loop id: {message}"
+        );
+
+        // A wiring target that is not a boiler.
+        let mut specs = vec![make_spec("Gas Water Heater")];
+        let err = set_boiler_loop_id(&mut specs, 0, 1).expect_err("a non-boiler target fails");
+        let message = err.to_string();
+        assert!(
+            message.contains("Gas Water Heater") && message.contains('1'),
+            "the error names the equipment and the loop id: {message}"
+        );
+
+        // A tank spec whose payload is not an IndirectTankConfig.
+        let mut specs = vec![typed_spec_with("Indirect Tank", gas_boiler_config())];
+        let err = set_indirect_tank_boiler_loop_id(&mut specs, 0, 1)
+            .expect_err("the type mismatch fails");
+        let message = err.to_string();
+        assert!(
+            message.contains("Indirect Tank")
+                && message.contains("config type mismatch")
+                && message.contains('1'),
+            "the error names the equipment, the expected config type and the loop id: {message}"
+        );
+
+        // A boiler pending autosizing takes its id into its raw parameters.
+        let mut specs = vec![make_spec("Gas Boiler")];
+        assert!(specs[0].typed_config.is_none());
+        set_boiler_loop_id(&mut specs, 0, 1)
+            .expect("a pending boiler is wired through its parameters");
+        assert_eq!(
+            specs[0].parameters.get("loop_id"),
+            Some(&serde_json::json!(1)),
+            "the wired loop id lives in the parameters the post-autosize rebuild reads"
+        );
+    }
+
+    /// The wiring pass writes the wired id into the boiler's raw parameters
+    /// alongside its typed config, so the post-autosize rebuild (which reads
+    /// the parameters) carries the id the boiler was wired with.
+    #[test]
+    fn wiring_writes_the_loop_id_into_the_boilers_parameters() {
+        use super::set_boiler_loop_id;
+
+        let mut specs = vec![typed_spec_with("Gas Boiler", gas_boiler_config())];
+        set_boiler_loop_id(&mut specs, 0, 1).expect("the wired boiler takes its id");
+        assert_eq!(
+            specs[0].parameters.get("loop_id"),
+            Some(&serde_json::json!(1)),
+            "the wired loop id lives in the parameters the post-autosize rebuild reads"
+        );
+        let boiler_cfg: hares_equipment::GasBoilerConfig = specs[0]
+            .typed_config
+            .as_ref()
+            .expect("boiler typed config")
+            .typed()
+            .expect("GasBoilerConfig");
+        assert_eq!(boiler_cfg.loop_id, Some(1));
     }
 
     fn make_spec(name: &str) -> super::EquipmentSpec {
@@ -2319,7 +2790,7 @@ mod tests {
         </Photovoltaics>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         let pv_specs: Vec<_> = specs.iter().filter(|s| s.name == "PV").collect();
@@ -2351,7 +2822,7 @@ mod tests {
         </Batteries>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("resolve_equipment");
 
         let bat_specs: Vec<_> = specs.iter().filter(|s| s.name == "Battery").collect();

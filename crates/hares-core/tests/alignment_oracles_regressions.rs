@@ -6,7 +6,7 @@ mod bestest_reference_bands;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
+use std::time::Duration as StdDuration;
 
 use arrow::array::{Array, Float64Array, StringArray, TimestampMicrosecondArray};
 use arrow::record_batch::RecordBatch;
@@ -376,8 +376,10 @@ fn ochre_ashp_fixture_total_shape_and_timing_aligns() {
         activity_center_index(&actual_heat).expect("actual heating series must not be empty");
     // Regression anchor: timing center shifts as physics corrections accumulate.
     // Updated after: eta_c fix, HPWH capacity, ER threshold, boiler space_fraction,
-    // combined interior R_film (h_conv + h_rad), surface_node radiation topology.
-    let expected_center: usize = 31;
+    // combined interior R_film (h_conv + h_rad), surface_node radiation topology,
+    // OS-HPXML's temperature capacitance multiplier of 7 on every zone (OCHRE's
+    // own reference centre is step 37.3).
+    let expected_center: usize = 35;
     assert!(
         actual_center.abs_diff(expected_center) <= 2,
         "ASHP HVAC electric power timing center must stay near step {expected_center}: actual={actual_center}"
@@ -398,11 +400,10 @@ fn ochre_minisplit_fixture_total_shape_and_timing_aligns() {
     // Regression anchor: timing center shifts as physics corrections accumulate.
     // Updated after: eta_c fix, HPWH capacity, ER threshold, ideal-mode ER residual,
     // two-phase resolve (current-step inputs for ideal capacity),
-    // B7/D6 fix: mass_multiplier=1.0 when furniture boundaries present (was 7.0,
-    // double-counting with explicit furniture RC nodes; E+ ZoneCapacitanceMultiplier
-    // and InternalMass are mutually exclusive),
     // ER binary on/off fix: resistive elements cannot draw fractional power;
-    // thermostat cycling handles time-averaging.
+    // thermostat cycling handles time-averaging; OS-HPXML's temperature
+    // capacitance multiplier of 7 on every zone (step 28 then; OCHRE's own
+    // reference centre is step 23.9).
     let expected_center: usize = 29;
     assert!(
         actual_center.abs_diff(expected_center) <= 2,
@@ -512,392 +513,6 @@ fn ochre_ashp_fixture_same_step_dr_event_is_observed() {
 }
 
 #[test]
-#[ignore = "debug helper"]
-fn debug_ashp_channel_delta_report() {
-    let fixture = ParityFixture::new("cz4a_ashp_hpwh");
-    let actual = run_fixture_to_columns(&fixture);
-    let reference = read_parquet_columns(&fixture.reference_output_parquet())
-        .expect("reference parquet must be readable");
-
-    fn aggregate(columns: &BTreeMap<String, Vec<f64>>, candidates: &[&str]) -> Option<Vec<f64>> {
-        let mut matched = candidates
-            .iter()
-            .filter_map(|name| columns.get(*name))
-            .peekable();
-        let first = matched.peek()?;
-        let n = first.len();
-        let mut out = vec![0.0; n];
-        for series in matched {
-            let m = n.min(series.len());
-            for i in 0..m {
-                out[i] += series[i];
-            }
-        }
-        Some(out)
-    }
-
-    fn paired_aggregate(
-        actual: &BTreeMap<String, Vec<f64>>,
-        reference: &BTreeMap<String, Vec<f64>>,
-        actual_names: &[&str],
-        reference_names: &[&str],
-    ) -> Option<(Vec<f64>, Vec<f64>)> {
-        let a = aggregate(actual, actual_names)?;
-        let r = aggregate(reference, reference_names)?;
-        let n = a.len().min(r.len());
-        if n == 0 {
-            return None;
-        }
-        Some((a[..n].to_vec(), r[..n].to_vec()))
-    }
-
-    fn series_stats(actual: &[f64], reference: &[f64]) -> (f64, f64, f64, usize, f64, f64) {
-        let mut mae = 0.0;
-        let mut rmse_accum = 0.0;
-        let mut max_abs = 0.0;
-        let mut max_abs_idx = 0usize;
-        let mut a_peak = f64::NEG_INFINITY;
-        let mut r_peak = f64::NEG_INFINITY;
-
-        for (idx, (&a, &r)) in actual.iter().zip(reference.iter()).enumerate() {
-            let d = a - r;
-            let abs = d.abs();
-            mae += abs;
-            rmse_accum += d * d;
-            if abs > max_abs {
-                max_abs = abs;
-                max_abs_idx = idx;
-            }
-            a_peak = a_peak.max(a);
-            r_peak = r_peak.max(r);
-        }
-
-        let n = actual.len() as f64;
-        let rmse = (rmse_accum / n).sqrt();
-        (mae / n, rmse, max_abs, max_abs_idx, a_peak, r_peak)
-    }
-
-    let channels: [(&str, &[&str], &[&str]); 8] = [
-        (
-            "Total Electric Power (kW)",
-            &["Total Electric Power (kW)"],
-            &["Total Electric Power (kW)"],
-        ),
-        (
-            "HVAC Heating End Use Electric Power (kW)",
-            &[
-                "HVAC Heating End Use Electric Power (kW)",
-                "ASHP Heater Electric Power (kW)",
-                "MSHP Heater Electric Power (kW)",
-                "Gas Furnace Electric Power (kW)",
-                "Electric Furnace Electric Power (kW)",
-            ],
-            &["HVAC Heating End Use Electric Power (kW)"],
-        ),
-        (
-            "HVAC Cooling End Use Electric Power (kW)",
-            &[
-                "HVAC Cooling End Use Electric Power (kW)",
-                "ASHP Cooler Electric Power (kW)",
-                "MSHP Cooler Electric Power (kW)",
-                "Air Conditioner Electric Power (kW)",
-                "Room AC Electric Power (kW)",
-            ],
-            &["HVAC Cooling End Use Electric Power (kW)"],
-        ),
-        (
-            "Other End Use Electric Power (kW)",
-            &[
-                "Other End Use Electric Power (kW)",
-                "MELs Electric Power (kW)",
-                "TV Electric Power (kW)",
-                "Refrigerator Electric Power (kW)",
-                "Ventilation Fan Electric Power (kW)",
-            ],
-            &["Other End Use Electric Power (kW)"],
-        ),
-        (
-            "Lighting End Use Electric Power (kW)",
-            &[
-                "Lighting End Use Electric Power (kW)",
-                "Indoor Lighting Electric Power (kW)",
-                "Exterior Lighting Electric Power (kW)",
-            ],
-            &["Lighting End Use Electric Power (kW)"],
-        ),
-        (
-            "Water Heating End Use Electric Power (kW)",
-            &[
-                "Water Heating End Use Electric Power (kW)",
-                "Heat Pump Water Heater Electric Power (kW)",
-                "Resistance Water Heater Electric Power (kW)",
-                "Gas Water Heater Electric Power (kW)",
-            ],
-            &["Water Heating End Use Electric Power (kW)"],
-        ),
-        (
-            "Temperature - Indoor (C)",
-            &["Temperature - Indoor (C)"],
-            &["Temperature - Indoor (C)"],
-        ),
-        (
-            "Unmet HVAC Load (C)",
-            &["Unmet HVAC Load (C)"],
-            &["Unmet HVAC Load (C)"],
-        ),
-    ];
-
-    eprintln!("ASHP parity channel deltas (HARES vs reference):");
-    for (name, actual_names, reference_names) in channels {
-        if let Some((a, r)) = paired_aggregate(&actual, &reference, actual_names, reference_names) {
-            let (mae, rmse, max_abs, idx, a_peak, r_peak) = series_stats(&a, &r);
-            let peak_rel_pct = if r_peak.abs() > 1e-9 {
-                ((a_peak - r_peak) / r_peak) * 100.0
-            } else {
-                f64::NAN
-            };
-            eprintln!(
-                "  {name}: mae={mae:.6}, rmse={rmse:.6}, max_abs={max_abs:.6} @step={idx}, peak_rel={peak_rel_pct:+.3}% (a_peak={a_peak:.6}, r_peak={r_peak:.6})"
-            );
-        } else {
-            eprintln!("  {name}: missing in actual or reference");
-        }
-    }
-
-    if let (Some((a_heat, r_heat)), Some((a_temp, r_temp))) = (
-        paired_aggregate(
-            &actual,
-            &reference,
-            &[
-                "HVAC Heating End Use Electric Power (kW)",
-                "ASHP Heater Electric Power (kW)",
-                "MSHP Heater Electric Power (kW)",
-                "Gas Furnace Electric Power (kW)",
-                "Electric Furnace Electric Power (kW)",
-            ],
-            &["HVAC Heating End Use Electric Power (kW)"],
-        ),
-        paired_aggregate(
-            &actual,
-            &reference,
-            &["Temperature - Indoor (C)"],
-            &["Temperature - Indoor (C)"],
-        ),
-    ) {
-        let n = a_heat
-            .len()
-            .min(a_temp.len())
-            .min(r_heat.len())
-            .min(r_temp.len());
-        let mut rows: Vec<(usize, f64, f64)> = (0..n)
-            .map(|i| (i, (a_heat[i] - r_heat[i]).abs(), a_temp[i] - r_temp[i]))
-            .collect();
-        rows.sort_by(|lhs, rhs| {
-            rhs.1
-                .partial_cmp(&lhs.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        eprintln!("Top |HVAC heating kW delta| timesteps (with indoor temp delta C):");
-        for (i, abs_kw, dtemp) in rows.into_iter().take(12) {
-            eprintln!("  step={i:>4} abs_kw={abs_kw:.6} dT={dtemp:+.6}");
-        }
-    }
-}
-
-#[test]
-#[ignore = "debug helper"]
-fn debug_ashp_peak_step_details() {
-    let fixture = ParityFixture::new("cz4a_ashp_hpwh");
-    let actual = run_fixture_to_columns_with_verbosity(&fixture, Some(8));
-    let reference = read_parquet_columns(&fixture.reference_output_parquet())
-        .expect("reference parquet must be readable");
-
-    let (actual_heat, reference_heat) = paired_aggregate_series(
-        &actual,
-        &reference,
-        &[
-            "HVAC Heating End Use Electric Power (kW)",
-            "ASHP Heater Electric Power (kW)",
-        ],
-        &["HVAC Heating End Use Electric Power (kW)"],
-    )
-    .expect("heating series");
-
-    let n = actual_heat.len().min(reference_heat.len());
-    let mut rows: Vec<(usize, f64)> = (0..n)
-        .map(|i| (i, (actual_heat[i] - reference_heat[i]).abs()))
-        .collect();
-    rows.sort_by(|lhs, rhs| {
-        rhs.1
-            .partial_cmp(&lhs.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mode = actual.get("ASHP Heater Mode (-)");
-    let setpoint = actual.get("ASHP Heater Setpoint (C)");
-    let capacity = actual.get("ASHP Heater Capacity (W)");
-    let cop = actual.get("ASHP Heater COP (-)");
-    let compressor_kw = actual.get("ASHP Heater Compressor Power (kW)");
-    let indoor = actual.get("Temperature - Indoor (C)");
-
-    eprintln!("Top ASHP parity deltas (detail):");
-    for (idx, abs_kw) in rows.into_iter().take(12) {
-        let a = actual_heat[idx];
-        let r = reference_heat[idx];
-        let m = mode.and_then(|v| v.get(idx)).copied().unwrap_or(f64::NAN);
-        let sp = setpoint
-            .and_then(|v| v.get(idx))
-            .copied()
-            .unwrap_or(f64::NAN);
-        let cap = capacity
-            .and_then(|v| v.get(idx))
-            .copied()
-            .unwrap_or(f64::NAN);
-        let c = cop.and_then(|v| v.get(idx)).copied().unwrap_or(f64::NAN);
-        let comp = compressor_kw
-            .and_then(|v| v.get(idx))
-            .copied()
-            .unwrap_or(f64::NAN);
-        let tin = indoor.and_then(|v| v.get(idx)).copied().unwrap_or(f64::NAN);
-        eprintln!(
-            "  step={idx:>4} abs_kw={abs_kw:.6} actual={a:.6} ref={r:.6} mode={m:.3} setpoint={sp:.3}C cap={cap:.1}W cop={c:.3} comp={comp:.3}kW tin={tin:.3}C"
-        );
-    }
-}
-
-#[test]
-#[ignore = "debug helper"]
-fn debug_minisplit_channel_delta_report() {
-    let fixture = ParityFixture::new("cz5a_minisplit_gas_wh");
-    let actual = run_fixture_to_columns_with_verbosity(&fixture, Some(8));
-    let reference = read_parquet_columns(&fixture.reference_output_parquet())
-        .expect("reference parquet must be readable");
-
-    fn aggregate(columns: &BTreeMap<String, Vec<f64>>, candidates: &[&str]) -> Option<Vec<f64>> {
-        let mut matched = candidates
-            .iter()
-            .filter_map(|name| columns.get(*name))
-            .peekable();
-        let first = matched.peek()?;
-        let n = first.len();
-        let mut out = vec![0.0; n];
-        for series in matched {
-            let m = n.min(series.len());
-            for i in 0..m {
-                out[i] += series[i];
-            }
-        }
-        Some(out)
-    }
-
-    fn paired_aggregate(
-        actual: &BTreeMap<String, Vec<f64>>,
-        reference: &BTreeMap<String, Vec<f64>>,
-        actual_names: &[&str],
-        reference_names: &[&str],
-    ) -> Option<(Vec<f64>, Vec<f64>)> {
-        let a = aggregate(actual, actual_names)?;
-        let r = aggregate(reference, reference_names)?;
-        let n = a.len().min(r.len());
-        if n == 0 {
-            return None;
-        }
-        Some((a[..n].to_vec(), r[..n].to_vec()))
-    }
-
-    let (actual_heat, reference_heat) = paired_aggregate(
-        &actual,
-        &reference,
-        &["MSHP Heater Electric Power (kW)"],
-        &["HVAC Heating End Use Electric Power (kW)"],
-    )
-    .expect("series");
-    let actual_center =
-        activity_center_index(&actual_heat).expect("actual heating series must not be empty");
-    let reference_center =
-        activity_center_index(&reference_heat).expect("reference heating series must not be empty");
-    println!(
-        "minisplit centers: actual={actual_center} reference={reference_center} peak_actual={:.6} peak_reference={:.6}",
-        actual_heat
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max),
-        reference_heat
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max),
-    );
-    println!(
-        "minisplit actual first 12: {:?}",
-        &actual_heat[..12.min(actual_heat.len())]
-    );
-    println!(
-        "minisplit reference first 12: {:?}",
-        &reference_heat[..12.min(reference_heat.len())]
-    );
-    println!(
-        "minisplit actual center window: {:?}",
-        peak_window_signature(&actual_heat, actual_center, 5)
-    );
-    println!(
-        "minisplit reference center window: {:?}",
-        peak_window_signature(&reference_heat, reference_center, 5)
-    );
-    println!(
-        "minisplit heater-related columns: {:?}",
-        actual
-            .keys()
-            .filter(|k| k.contains("Heater"))
-            .collect::<Vec<_>>()
-    );
-    if let (Some(mode), Some(setpoint)) = (
-        actual.get("MSHP Heater Mode (-)"),
-        actual.get("MSHP Heater Setpoint (C)"),
-    ) {
-        println!(
-            "minisplit actual mode first 40: {:?}",
-            &mode[..40.min(mode.len())]
-        );
-        println!(
-            "minisplit actual setpoint first 40: {:?}",
-            &setpoint[..40.min(setpoint.len())]
-        );
-        if let Some(capacity) = actual.get("MSHP Heater Capacity (W)") {
-            println!(
-                "minisplit actual capacity first 40: {:?}",
-                &capacity[..40.min(capacity.len())]
-            );
-        }
-        if let Some(cop) = actual.get("MSHP Heater COP (-)") {
-            println!(
-                "minisplit actual cop first 40: {:?}",
-                &cop[..40.min(cop.len())]
-            );
-        }
-    }
-    if let (Some(a_temp), Some(r_temp)) = (
-        actual.get("Temperature - Indoor (C)"),
-        reference.get("Temperature - Indoor (C)"),
-    ) {
-        println!(
-            "minisplit actual indoor first 12: {:?}",
-            &a_temp[..12.min(a_temp.len())]
-        );
-        if let Some(outdoor) = actual.get("Temperature - Outdoor (C)") {
-            println!(
-                "minisplit actual outdoor first 20: {:?}",
-                &outdoor[..20.min(outdoor.len())]
-            );
-        }
-        println!(
-            "minisplit reference indoor first 12: {:?}",
-            &r_temp[..12.min(r_temp.len())]
-        );
-    }
-}
-
-#[test]
 fn energyplus_bestest_core_cases_keep_fixture_and_reference_band_coverage() {
     for case in bestest_cases::core_cases() {
         let fixture_path = case.fixture_path();
@@ -945,9 +560,15 @@ fn run_fixture_to_columns_with_verbosity(
     if let Some(v) = output_verbosity_override {
         sim_config.output_verbosity = v;
     }
-    let output_path = unique_temp_path(fixture.id, "parquet");
+    let output_dir = tempfile::tempdir().expect("temp dir");
+    let output_path = output_dir.path().join(format!("{}.parquet", fixture.id));
     sim_config.output_format = OutputFormat::Parquet;
     sim_config.output_path = Some(output_path.clone());
+    // The helper reads the run back from the Parquet file, so the recorder
+    // must be on: build_dwelling_config leaves the fixture config's default
+    // (writing disabled) in place, and the output goes to the temporary
+    // directory above, not into the tree.
+    sim_config.write_output = true;
     dwelling_config.sim_config = sim_config;
 
     let engine = SimulationEngine::new();
@@ -965,17 +586,21 @@ fn run_fixture_to_columns_with_verbosity(
         .timeseries_path
         .as_deref()
         .unwrap_or(output_path.as_path());
-    let columns = read_parquet_columns(path).expect("actual parquet output must be readable");
-
-    let _ = fs::remove_file(output_path);
-    columns
+    read_parquet_columns(path).expect("actual parquet output must be readable")
 }
 
 fn simulate_fixture_steps(
     fixture: &ParityFixture,
     actor: Option<Box<dyn Actor>>,
 ) -> Vec<StepResult> {
-    let mut dwelling = build_dwelling(fixture);
+    // Recording is off, but the diagnostics CSV still lands beside the
+    // output path, so that path is in a directory removed afterwards.
+    let output_dir = tempfile::tempdir().expect("temp dir");
+    let mut dwelling_config = build_dwelling_config(fixture);
+    dwelling_config.sim_config.write_output = false;
+    dwelling_config.sim_config.output_path =
+        Some(output_dir.path().join(format!("{}.csv", fixture.id)));
+    let mut dwelling = Dwelling::from_config(dwelling_config).expect("fixture dwelling must load");
     if let Some(actor) = actor {
         dwelling.add_actor(actor).unwrap();
     }
@@ -984,13 +609,6 @@ fn simulate_fixture_steps(
         .simulate()
         .expect("fixture simulation must succeed")
         .steps
-}
-
-fn build_dwelling(fixture: &ParityFixture) -> Dwelling {
-    let mut dwelling_config = build_dwelling_config(fixture);
-    dwelling_config.sim_config.write_output = false;
-    dwelling_config.sim_config.output_path = Some(unique_temp_path(fixture.id, "csv"));
-    Dwelling::from_config(dwelling_config).expect("fixture dwelling must load")
 }
 
 fn simulate_fixture_timestamps(config: DwellingConfig) -> Vec<DateTime<FixedOffset>> {
@@ -1050,9 +668,16 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
         parse_simulation_config(&config_contents, &config).expect("simulation config must parse");
     let defaults_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
 
+    // The fixture configs carry no output settings, so the parsed config
+    // defaults to writing to a working-directory-relative path; these tests
+    // compare in-memory series against the reference parquet, so the
+    // recorder is off.
+    let mut sim_config = sim_config;
+    sim_config.write_output = false;
+
     DwellingConfig {
         hpxml_path: fixture.building_xml(),
-        schedule_path: fixture.schedule_csv(),
+        schedule_path: Some(fixture.schedule_csv()),
         weather_path: fixture.weather_epw(),
         sim_config,
         defaults_path: Some(defaults_path),
@@ -1318,23 +943,6 @@ fn activity_center_index(series: &[f64]) -> Option<usize> {
     }
 }
 
-fn peak_window_signature(series: &[f64], center: usize, radius: usize) -> Vec<f64> {
-    let peak = series.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if !peak.is_finite() || peak <= 0.0 {
-        return vec![0.0; radius * 2 + 1];
-    }
-    let mut out = Vec::with_capacity(radius * 2 + 1);
-    let start = center.saturating_sub(radius);
-    let end = (center + radius + 1).min(series.len());
-    for value in series.iter().take(end).skip(start) {
-        out.push(*value / peak);
-    }
-    while out.len() < radius * 2 + 1 {
-        out.push(0.0);
-    }
-    out
-}
-
 fn mean_abs_diff(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len().min(b.len());
     if n == 0 {
@@ -1345,23 +953,4 @@ fn mean_abs_diff(a: &[f64], b: &[f64]) -> f64 {
         accum += (a[i] - b[i]).abs();
     }
     accum / n as f64
-}
-
-fn unique_temp_path(fixture_id: &str, extension: &str) -> PathBuf {
-    // See engine.rs: pid + monotonic counter (thread ids repeat across
-    // processes) make uniqueness constructive.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let mut path = std::env::temp_dir();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before unix epoch")
-        .as_nanos();
-    let thread_id = format!("{:?}", std::thread::current().id());
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    path.push(format!(
-        "hares-alignment-{fixture_id}-{}-{nanos}-{thread_id}-{seq}.{extension}",
-        std::process::id()
-    ));
-    path
 }

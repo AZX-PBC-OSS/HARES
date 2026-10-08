@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use hares_types::rng::RngStream;
 use serde::{Deserialize, Serialize};
 
 mod finite_walk;
@@ -24,6 +25,14 @@ pub struct SetpointReconciliation {
 /// Common config key for equipment ID in `ConfigPayload::Raw` payloads.
 /// Typed configs carry this as a struct field instead.
 pub const KEY_EQUIPMENT_ID: &str = "equipment_id";
+
+#[cfg(test)]
+thread_local! {
+    /// Every key a raw read on this thread asked for, so a test can show
+    /// that each parameter on a load's list has a reader.
+    pub(crate) static RAW_READS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
 
 /// Tri-state `equipment_id` resolution from either payload kind — the single
 /// home for equipment-identity config reads.
@@ -94,6 +103,50 @@ pub fn constructor_equipment_id(config: &EquipmentConfig) -> u32 {
 /// Common config key for zone ID in `ConfigPayload::Raw` payloads.
 /// Typed configs carry this as a struct field instead.
 pub const KEY_ZONE_ID: &str = "zone_id";
+
+/// Raw config key scaling a scheduled load's power and fuel schedules.
+pub const KEY_USAGE_MULTIPLIER: &str = "usage_multiplier";
+
+/// Catches the config keys no other field of a `#[serde(flatten)]`-ed struct
+/// consumed, failing deserialization and naming them.
+///
+/// `deny_unknown_fields` cannot sit on a flattened struct (serde's flatten
+/// machinery hands every flattened member the full remaining map, so a
+/// member cannot tell its own keys from its siblings'), which is why the
+/// heat-pump heater and cooler configs, whose `common` and `defrost` parts
+/// are flattened, were permissive about unknown keys. This field closes
+/// that hole: as the LAST flattened member it receives exactly the keys
+/// every other field left over, and any leftover is a deserialization error
+/// listing the key. It serializes as an empty map, so a payload built from
+/// the struct never carries it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RejectUnknownKeys;
+
+impl Serialize for RejectUnknownKeys {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        serializer.serialize_map(Some(0))?.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RejectUnknownKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let leftover = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        if leftover.is_empty() {
+            return Ok(Self);
+        }
+        let mut keys: Vec<&str> = leftover.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        Err(serde::de::Error::custom(format!(
+            "unknown field{} {}",
+            if keys.len() == 1 { "" } else { "s" },
+            keys.iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
+    }
+}
 
 /// Flexible config value supporting numeric, string, and boolean parameters.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -273,13 +326,11 @@ pub struct EquipmentConfig {
     /// `None` for synthetic or test configs that do not have a building envelope.
     #[serde(skip, default)]
     pub zone_map: Option<hares_types::ZoneMap>,
-    /// Pre-derived RNG seed injected by the dwelling's hierarchical RNG
-    /// system at construction time.  When `Some`, stochastic equipment
-    /// uses this seed directly instead of hashing `master_seed` /
-    /// `building_id` / `name`.  Stream partitioning guarantees that sibling
-    /// equipment streams are non-overlapping and deterministic.
+    /// Random stream injected by the dwelling before `init()`. When `Some`,
+    /// stochastic equipment draws from it instead of deriving a stream from
+    /// `master_seed` / `building_id` / `name`.
     #[serde(skip, default)]
-    pub rng_seed: Option<[u8; 32]>,
+    pub rng_stream: Option<RngStream>,
     /// Zone thermal capacitance [kWh/K] for the equivalent battery model.
     /// Populated by the dwelling from envelope solver zone capacitances at
     /// construction time; 0.0 means EBM is disabled for this equipment.
@@ -299,7 +350,7 @@ impl EquipmentConfig {
             setpoints_reconciled: None,
             zip: None,
             zone_map: None,
-            rng_seed: None,
+            rng_stream: None,
             zone_capacitance_kwh_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
@@ -315,11 +366,9 @@ impl EquipmentConfig {
         self
     }
 
-    /// Attach a pre-derived RNG seed for stochastic equipment that should
-    /// use the dwelling's hierarchical RNG stream partitioning instead of
-    /// the legacy name-based hash.
-    pub fn with_rng_seed(mut self, seed: [u8; 32]) -> Self {
-        self.rng_seed = Some(seed);
+    /// Attach the random stream stochastic equipment draws from.
+    pub fn with_rng_stream(mut self, stream: RngStream) -> Self {
+        self.rng_stream = Some(stream);
         self
     }
 
@@ -340,28 +389,59 @@ impl EquipmentConfig {
         })
     }
 
+    /// The `Raw` payload's value at `key`, read as `kind`. A raw-parameter
+    /// load reads only the parameters on its class's list
+    /// ([`crate::raw_params`]), each as the kind listed; in debug and test
+    /// builds a read of any other key, or as another kind, panics, so the
+    /// list cannot fall behind its readers. The dwelling checks the values
+    /// against the same list when it builds the config.
+    pub fn raw_value(&self, key: &str, kind: crate::raw_params::ParamKind) -> Option<&ConfigValue> {
+        #[cfg(debug_assertions)]
+        if let ConfigPayload::Raw { .. } = &self.payload
+            && let Some(params) = crate::raw_params::raw_params_for_class(&self.ochre_class)
+        {
+            let listed = params.named(key).map(|param| param.kind);
+            assert!(
+                listed == Some(kind),
+                "{} '{}' reads '{key}' as {}, which the {} parameter list does not \
+                 name as that kind (listed: {listed:?})",
+                self.ochre_class,
+                self.name,
+                kind.describe(),
+                params.kind
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = kind;
+        #[cfg(test)]
+        RAW_READS.with_borrow_mut(|reads| {
+            reads.insert(key.to_owned());
+        });
+        self.raw_data().and_then(|data| data.get(key))
+    }
+
     /// Extract a numeric value from the `Raw` payload.
     pub fn get_f64(&self, key: &str) -> Option<f64> {
-        self.raw_data()
-            .and_then(|data| data.get(key).and_then(ConfigValue::as_f64))
+        self.raw_value(key, crate::raw_params::ParamKind::Number)
+            .and_then(ConfigValue::as_f64)
     }
 
     /// Extract a string value from the `Raw` payload.
     pub fn get_str(&self, key: &str) -> Option<&str> {
-        self.raw_data()
-            .and_then(|data| data.get(key).and_then(ConfigValue::as_str))
+        self.raw_value(key, crate::raw_params::ParamKind::Text)
+            .and_then(ConfigValue::as_str)
     }
 
     /// Extract a boolean value from the `Raw` payload.
     pub fn get_bool(&self, key: &str) -> Option<bool> {
-        self.raw_data()
-            .and_then(|data| data.get(key).and_then(ConfigValue::as_bool))
+        self.raw_value(key, crate::raw_params::ParamKind::Bool)
+            .and_then(ConfigValue::as_bool)
     }
 
     /// Extract a float array value from the `Raw` payload.
     pub fn get_f64_array(&self, key: &str) -> Option<&[f64]> {
-        self.raw_data()
-            .and_then(|data| data.get(key).and_then(ConfigValue::as_f64_array))
+        self.raw_value(key, crate::raw_params::ParamKind::NumberList)
+            .and_then(ConfigValue::as_f64_array)
     }
 
     /// Extract the zone ID from either `Raw` or `Typed` payloads.
@@ -391,8 +471,9 @@ impl EquipmentConfig {
         }
     }
 
-    /// Get the raw config data, or None if typed.
-    pub fn raw_data(&self) -> Option<&HashMap<String, ConfigValue>> {
+    /// Get the raw config data, or None if typed. Readers go through
+    /// [`Self::raw_value`], which checks a listed class's reads.
+    pub(crate) fn raw_data(&self) -> Option<&HashMap<String, ConfigValue>> {
         #[cfg(test)]
         if let ConfigPayload::Typed { .. } = &self.payload
             && !self.test_extras.is_empty()
@@ -402,20 +483,6 @@ impl EquipmentConfig {
         match &self.payload {
             ConfigPayload::Raw { data } => Some(data),
             ConfigPayload::Typed { .. } => None,
-        }
-    }
-
-    /// Get the raw config data. Panics if called on a `Typed` payload.
-    pub fn raw_data_or_empty(&self) -> &HashMap<String, ConfigValue> {
-        #[cfg(test)]
-        if let ConfigPayload::Typed { .. } = &self.payload {
-            return &self.test_extras;
-        }
-        match &self.payload {
-            ConfigPayload::Raw { data } => data,
-            ConfigPayload::Typed { .. } => {
-                unreachable!("raw_data_or_empty called on typed config")
-            }
         }
     }
 
@@ -503,7 +570,7 @@ impl EquipmentConfig {
             setpoints_reconciled: None,
             zip: None,
             zone_map: None,
-            rng_seed: None,
+            rng_stream: None,
             zone_capacitance_kwh_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
@@ -520,12 +587,210 @@ impl EquipmentConfig {
             setpoints_reconciled: None,
             zip: None,
             zone_map: None,
-            rng_seed: None,
+            rng_stream: None,
             zone_capacitance_kwh_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
     }
+}
+
+/// Validate a typed payload's data against the concrete config struct its
+/// `type_name` names.
+///
+/// This is the type-directed check the spec→config conversion paths run
+/// before a (possibly override-merged) payload reaches equipment
+/// construction or init: an unknown field is a deserialization error naming
+/// it (the flattened heat-pump configs reject theirs through the trailing
+/// [`RejectUnknownKeys`] catcher, every other config through
+/// `deny_unknown_fields`), and a value the struct's schema cannot read
+/// errors naming the field path and the type problem, at the merge that
+/// applied the override rather than later at `init`.
+///
+/// The error's field path is present only when serde's path tracking can
+/// see the failing field: the flattened heat-pump configs' members are
+/// invisible to it (flattening hands each member the whole remaining map),
+/// so their failures report the bare deserialization message and a caller
+/// with merge context names the field itself. See
+/// [`validate_typed_payload_detailed`].
+///
+/// Every production `EquipmentTypedConfig` implementor has an arm here; a
+/// `type_name` with no arm is itself an error, so a newly registered config
+/// struct missing from this match fails loudly the first time its payload
+/// crosses an override merge.
+pub fn validate_typed_payload(type_name: &str, data: &serde_json::Value) -> Result<(), String> {
+    validate_typed_payload_detailed(type_name, data).map_err(|err| err.to_string())
+}
+
+/// Whether the typed config registered as `type_name` has a field `key`:
+/// the payload `data` carries it, or the schema takes `data` with `key` set
+/// to `value` without naming `key` an unknown field. Every typed config
+/// rejects unknown fields, so a field the schema takes is one it reads.
+///
+/// # Errors
+///
+/// No typed config is registered as `type_name`.
+pub fn typed_payload_reads(
+    type_name: &str,
+    data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<bool, TypedPayloadError> {
+    let check = typed_schema(type_name)?;
+    if data.contains_key(key) {
+        return Ok(true);
+    }
+    let mut probe = data.clone();
+    probe.insert(key.to_string(), value.clone());
+    Ok(match check(&serde_json::Value::Object(probe)) {
+        Ok(()) => true,
+        Err(err) => !err.message.starts_with(&format!("unknown field `{key}`")),
+    })
+}
+
+/// A typed payload's schema failure: the serde field path when serde's path
+/// tracking can see the failing field, and the deserialization problem
+/// itself.
+///
+/// The flattened heat-pump configs' members are invisible to serde's path
+/// tracking (flattening hands each member the whole remaining map), so
+/// their failures carry no path and `message` is the bare deserialization
+/// error; a caller with merge context (the bag key just landed) names the
+/// field itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypedPayloadError {
+    pub path: Option<String>,
+    pub message: String,
+}
+
+impl std::fmt::Display for TypedPayloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.path {
+            Some(path) => write!(f, "'{}': {}", path.trim_start_matches('.'), self.message),
+            None => write!(f, "{}", self.message),
+        }
+    }
+}
+
+/// [`validate_typed_payload`] with the failure kept structured: the serde
+/// field path apart from the deserialization message, so a caller with
+/// merge context can name the field itself when the path is absent (the
+/// flattened heat-pump configs, whose members serde's path tracking cannot
+/// see through).
+pub fn validate_typed_payload_detailed(
+    type_name: &str,
+    data: &serde_json::Value,
+) -> Result<(), TypedPayloadError> {
+    typed_schema(type_name)?(data)
+}
+
+/// A typed payload's schema check.
+type SchemaCheck = fn(&serde_json::Value) -> Result<(), TypedPayloadError>;
+
+/// The schema check of the typed config registered as `type_name`.
+///
+/// # Errors
+///
+/// No typed config is registered as `type_name`.
+fn typed_schema(type_name: &str) -> Result<SchemaCheck, TypedPayloadError> {
+    use crate::hvac::cooling_config::{
+        CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig,
+    };
+    use crate::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+    use crate::hvac::heating_config::{
+        ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig, GasBoilerConfig,
+        GasFurnaceConfig, IdealHvacConfig,
+    };
+    use crate::water_heater::wh_config::{
+        ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
+        IndirectTankConfig, TanklessWaterHeaterConfig,
+    };
+
+    /// Deserialize the payload through the path-carrying error wrapper so a
+    /// malformed value's field path reaches the caller. The JSON value
+    /// itself is the deserializer.
+    fn check<T: serde::de::DeserializeOwned>(
+        data: &serde_json::Value,
+    ) -> Result<(), TypedPayloadError> {
+        serde_path_to_error::deserialize::<serde_json::Value, T>(data.clone())
+            .map(|_: T| ())
+            .map_err(|err| {
+                // A flattened member's failure reports the bare root path
+                // (empty, or the lone dot the root renders as): no field
+                // for the caller to be told.
+                let trimmed = err.path().to_string();
+                let trimmed = trimmed.trim_start_matches('.');
+                let message = err.inner().to_string();
+                if trimmed.is_empty() {
+                    TypedPayloadError {
+                        path: None,
+                        message,
+                    }
+                } else {
+                    TypedPayloadError {
+                        path: Some(trimmed.to_string()),
+                        message,
+                    }
+                }
+            })
+    }
+
+    match type_name {
+        "Gas Furnace" => Ok(check::<GasFurnaceConfig>),
+        "Electric Furnace" => Ok(check::<ElectricFurnaceConfig>),
+        "Gas Boiler" => Ok(check::<GasBoilerConfig>),
+        "Electric Boiler" => Ok(check::<ElectricBoilerConfig>),
+        "Electric Baseboard" => Ok(check::<ElectricBaseboardConfig>),
+        "Ideal HVAC" => Ok(check::<IdealHvacConfig>),
+        "Central AC" => Ok(check::<CentralAirConditionerConfig>),
+        "Room AC" => Ok(check::<RoomAcConfig>),
+        "Dehumidifier" => Ok(check::<DehumidifierConfig>),
+        "ASHP Heater" | "MSHP Heater" | "GSHP Heater" | "WSHP Heater" => {
+            Ok(check::<HeatPumpHeaterConfig>)
+        }
+        "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler" | "WSHP Cooler" => {
+            Ok(check::<HeatPumpCoolerConfig>)
+        }
+        "Gas Water Heater" => Ok(check::<GasWaterHeaterConfig>),
+        "Electric Resistance Water Heater" => Ok(check::<ElectricResistanceWaterHeaterConfig>),
+        "Tankless Water Heater" | "Gas Tankless Water Heater" => {
+            Ok(check::<TanklessWaterHeaterConfig>)
+        }
+        "Indirect Tank" => Ok(check::<IndirectTankConfig>),
+        "Heat Pump Water Heater" | "HPWH" => Ok(check::<HeatPumpWaterHeaterConfig>),
+        "Battery" => Ok(check::<crate::BatteryConfig>),
+        "PV" => Ok(check::<crate::PvConfig>),
+        "EV" | "Electric Vehicle" | "Scheduled EV" => Ok(check::<crate::EvConfig>),
+        "Generator" | "Gas Generator" | "Gas Fuel Cell" => Ok(check::<crate::GeneratorConfig>),
+        "Ventilation" | "HRV" | "ERV" | "Ventilation Fan" => Ok(check::<crate::VentilationConfig>),
+        "Protocol Bridge" | "ProtocolBridge" => {
+            Ok(check::<crate::protocol_bridge::ProtocolBridgeConfig>)
+        }
+        unknown => Err(TypedPayloadError {
+            path: None,
+            message: format!(
+                "no typed config struct is registered under the type name '{unknown}', \
+                 so its payload cannot be validated against a schema"
+            ),
+        }),
+    }
+}
+
+/// Parse a spec bag's raw-text enum value into the canonical JSON form the
+/// typed payload field's serde deserializer accepts.
+///
+/// The spec bags write the human/HPXML fuel vocabulary ("natural gas",
+/// "Gas", "electricity"): the same text the raw-channel resolvers parse and
+/// the Python builders accept. The typed payloads carry the canonical serde
+/// spellings ("Gas", "Electric"). This is the builders' parse expressed
+/// against the shared fuel parser, kept beside [`validate_typed_payload`]
+/// because the deserializer is the parser: the canonical target is exactly
+/// what it accepts. The landing site's revalidation against the payload's
+/// own schema gates every use, so a normalization is only ever kept when
+/// the field's type accepts its result.
+pub fn normalize_enum_text(raw: &str) -> Option<serde_json::Value> {
+    let fuel = crate::hvac::helpers::parse_fuel_type(Some(raw))?;
+    serde_json::to_value(fuel).ok()
 }
 
 /// Resolve the effective ZIP load model for one equipment instance.
@@ -541,10 +806,10 @@ impl EquipmentConfig {
 /// 3. [`hares_types::zip::ZipLoad::constant_power`] (no reactive power,
 ///    real power untouched).
 ///
-/// The returned [`ResolvedZip`] is governing — the equipment (a scheduled or
+/// The returned [`hares_types::zip::ResolvedZip`] is governing -- the equipment (a scheduled or
 /// event load) scales its real power through the real-power polynomial at
 /// the bus voltage each step. Rule R1 callers use
-/// [`resolve_reactive_zip`] instead.
+/// `resolve_reactive_zip` instead.
 #[must_use]
 pub fn resolve_zip(config: &EquipmentConfig) -> hares_types::zip::ResolvedZip {
     hares_types::zip::ResolvedZip::governing(resolve_zip_load(config))
@@ -666,22 +931,6 @@ pub(crate) fn validate_zip_sums(
         }
     }
     Ok(())
-}
-
-/// Debug-build twin of [`validate_zip_sums`]: panics with the validation
-/// error message when the coefficient-sum invariant is violated at step
-/// time. Shared by the full-ZIP consumers (ScheduledLoad, EventBasedLoad,
-/// WetAppliance) so the per-step invariant lives in exactly one place;
-/// typed equipment validates once at init via [`resolve_reactive_zip`].
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub(crate) fn debug_assert_zip_sums(
-    zip: &hares_types::zip::ZipLoad,
-    kind: &str,
-    equipment_name: &str,
-) {
-    if let Err(err) = validate_zip_sums(zip, &format!("{kind} '{equipment_name}'")) {
-        panic!("{err}");
-    }
 }
 
 #[cfg(test)]
@@ -958,6 +1207,30 @@ mod tests {
         assert_eq!(ec.get_f64_array("arr"), Some(&[1.0, 2.0, 3.0][..]));
         assert_eq!(ec.get_f64("missing"), None);
         assert!(!ec.is_typed());
+    }
+
+    /// The schema probe tells a field the typed config has from one it does
+    /// not, through the flattened heat-pump config too, and an unregistered
+    /// type name is an error rather than a config that reads everything.
+    #[test]
+    fn typed_payload_reads_probes_the_schema() {
+        let furnace = serde_json::Map::new();
+        let value = serde_json::json!(0.9);
+        assert_eq!(
+            typed_payload_reads("Gas Furnace", &furnace, "afue", &value),
+            Ok(true)
+        );
+        assert_eq!(
+            typed_payload_reads("Gas Furnace", &furnace, "afuee", &value),
+            Ok(false)
+        );
+        assert_eq!(
+            typed_payload_reads("ASHP Heater", &furnace, "backup_fuell", &value),
+            Ok(false)
+        );
+        let err = typed_payload_reads("No Such Config", &furnace, "afue", &value)
+            .expect_err("an unregistered type name");
+        assert!(err.message.contains("No Such Config"), "{err}");
     }
 
     #[test]

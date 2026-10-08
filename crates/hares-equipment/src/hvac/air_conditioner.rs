@@ -9,9 +9,9 @@ use hares_physics::ground::SourceTemperature;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
-    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, ThermalCategory,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +28,8 @@ use super::ac_config::{
     CentralAirConditionerConfig, RoomAcConfig, default_telemetry, load_curve_pair, telemetry_fields,
 };
 use super::coil_physics::{
-    CoilResult, LatentDegradationParams, calculate_shr, effective_shr_with_latent_degradation,
+    CoilOperatingState, CoilResult, LatentDegradationParams, calculate_shr,
+    effective_shr_with_latent_degradation,
 };
 use super::latent_degradation::compute_coil_ao_by_stage;
 use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_speed_stages};
@@ -36,15 +37,15 @@ use super::staging::{DEFAULT_PLF_DEGRADATION_COEFF, DEFAULT_STARTUP_CD};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{
-        compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
-        register_ebm_telemetry_keys, zone_id_from_config_or_default,
+        cycling_load_fraction, lookup_zone, netted_cycling_duty, outage_forces_off,
+        register_ebm_telemetry_keys, served_zone_ports, step_equivalent_battery,
+        write_ebm_telemetry, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
 
 const CRANKCASE_HEATER_KW: f64 = 0.05;
 const CRANKCASE_HEATER_THRESHOLD_C: f64 = 12.8;
-const MIN_LOAD_FRACTION_DEADBAND_C: f64 = 0.5;
 
 pub struct AirConditioner {
     pub(super) core: CoolingCore,
@@ -123,8 +124,6 @@ pub(super) struct CoolingCore {
     dr_duty_cycle: f64,
     dr_duration_remaining_s: Option<f64>,
     dr_level: DRLevel,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// applies to the compressor component only (class default pf 0.96, or a
     /// user `"zip"` override). Real power stays bit-identical; Q comes from
@@ -297,10 +296,6 @@ impl Equipment for AirConditioner {
         crate::apply_identity_write(self.is_initialized(), &mut self.core.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.core.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.core.ports
     }
@@ -330,6 +325,16 @@ impl Equipment for AirConditioner {
         &self.core.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(self.core.hvac.thermostat_fsm.thermostat.band_class)
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Cooling,
+        ))
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor (class default pf 0.96, or a user
         // "zip" override). The fan component ZIP is secondary.
@@ -350,6 +355,12 @@ impl Equipment for AirConditioner {
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.core.ideal_target()
+    }
+
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
+        }
     }
 }
 
@@ -370,10 +381,6 @@ impl Equipment for RoomAC {
         crate::apply_identity_write(self.is_initialized(), &mut self.core.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.core.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.core.ports
     }
@@ -403,6 +410,16 @@ impl Equipment for RoomAC {
         &self.core.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(self.core.hvac.thermostat_fsm.thermostat.band_class)
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Cooling,
+        ))
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor (class default pf 0.96, or a user
         // "zip" override). The fan component ZIP is secondary.
@@ -423,6 +440,12 @@ impl Equipment for RoomAC {
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.core.ideal_target()
+    }
+
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
+        }
     }
 }
 
@@ -501,7 +524,7 @@ impl CoolingCore {
     }
 
     fn new(config: EquipmentConfig, is_room_ac: bool) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone = zone_id_from_config(&config);
         let equipment_type = if is_room_ac {
             "Room AC"
         } else {
@@ -514,7 +537,7 @@ impl CoolingCore {
                 name: config.name,
                 end_use: EndUse::HVAC_COOLING,
                 equipment_type: Cow::Borrowed(equipment_type),
-                zone: Some(zone),
+                zone,
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -525,7 +548,8 @@ impl CoolingCore {
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
                     | ControlCapabilities::IDEAL_CAPACITY
-                    | ControlCapabilities::MAX_CAPACITY_FRACTION,
+                    | ControlCapabilities::MAX_CAPACITY_FRACTION
+                    | ControlCapabilities::NON_HVAC_ZONE_INPUT,
                 core_capabilities: CoreCapabilities::ELECTRIC
                     | CoreCapabilities::HAS_MODE
                     | CoreCapabilities::THERMAL
@@ -536,11 +560,7 @@ impl CoolingCore {
                 telemetry_fields: telemetry_fields(),
                 zone_type: None,
             },
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-                PortDeclaration::humidity(zone),
-            ],
+            ports: served_zone_ports(&[PortDeclaration::electrical()], zone, true),
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::AcCooler, zone),
@@ -577,7 +597,6 @@ impl CoolingCore {
             dr_duty_cycle: 1.0,
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
-            zone_id_explicit,
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -604,15 +623,12 @@ impl CoolingCore {
 
         self.init_from_typed(config, env)?;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if self.is_room_ac && !self.latent_degradation.is_active() {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "room_ac_latent_degradation_inactive".to_string(),
-                    value: 0.0,
-                    tolerance: 0.0,
-                });
-            }
+        if self.is_room_ac && !self.latent_degradation.is_active() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "room_ac_latent_degradation_inactive".to_string(),
+                value: 0.0,
+                tolerance: 0.0,
+            });
         }
 
         Ok(())
@@ -754,7 +770,7 @@ impl CoolingCore {
                         fan_flow_low_m3_s: flow_low,
                         is_heat_pump: false,
                     },
-                )
+                )?
             };
 
             let speed_mode = cfg.cooling_speed_control_mode();
@@ -816,8 +832,9 @@ impl CoolingCore {
             };
         }
 
-        self.hvac.update_zone_heat_fractions();
+        self.hvac.update_zone_heat_fractions()?;
         self.hvac.rebuild_thermal_ports(&mut self.ports, true);
+        self.descriptor.zone = self.hvac.config.zone_id;
         self.hvac.config.biquadratic_coeffs = load_curve_pair(config, self.is_room_ac)?;
         self.compute_coil_ao(self.rated_shr)?;
 
@@ -874,8 +891,8 @@ impl CoolingCore {
         // instance, enabling verification that distinct SHR profiles are in
         // use across SEER tiers. Registered here, after the telemetry reset
         // above, via insert() so the keys exist before any Telemetry::set
-        // call (Telemetry::set panics on unregistered keys under
-        // debug_assertions/check_invariants). The descriptor's declared
+        // call (an unknown key latches a typed error surfaced at the end of
+        // the step). The descriptor's declared
         // telemetry fields are rebuilt to include the per-stage channels so
         // the descriptor contract (telemetry key count == declared field
         // count) holds; rebuilding from the base list keeps re-init
@@ -1014,16 +1031,30 @@ impl CoolingCore {
             return OperatingMode::Off;
         }
 
-        let mode = self
-            .hvac
-            .update_mode(env)
-            .unwrap_or(ThermostatMode::Deadband);
-        if mode == ThermostatMode::Cooling {
+        // A Cooling mode means the thermostat read the served zone, so the
+        // zone temperature is available whenever cooling is called for. A
+        // thermostat control error is recorded for the following step to
+        // fail with, the same contract the heating classes follow.
+        let cooling_zone_temp_c = match self.hvac.update_mode(env) {
+            Ok(ThermostatMode::Cooling) => self
+                .hvac
+                .config
+                .zone_id
+                .and_then(|zone| lookup_zone(env, zone).ok())
+                .map(|zone| zone.temperature_c),
+            Ok(_) => None,
+            Err(err) => {
+                self.hvac
+                    .record_control_error(HaresError::Equipment(format!(
+                        "{}: {err}",
+                        self.descriptor.name
+                    )));
+                None
+            }
+        };
+        if let Some(zone_temp) = cooling_zone_temp_c {
             let base_setpoint = self.hvac.effective_setpoints().cooling_c;
             let setpoint = base_setpoint + self.dr_setpoint_offset_c;
-            let zone_temp = lookup_zone(env, self.hvac.config.zone_id)
-                .map(|z| z.temperature_c)
-                .unwrap_or(setpoint);
 
             // When DR raises the effective setpoint above the zone temperature, suppress cooling
             // even though the base thermostat is calling for it. This only applies when the DR
@@ -1034,36 +1065,47 @@ impl CoolingCore {
                 self.operating_mode = OperatingMode::Off;
                 self.hvac.update_prev_zone_temp(None);
             } else {
-                let deadband = self
-                    .hvac
-                    .thermostat_fsm
-                    .thermostat
-                    .hysteresis_c
-                    .max(MIN_LOAD_FRACTION_DEADBAND_C);
-                let load_fraction =
-                    if self.hvac.config.speed_control_mode == SpeedControlMode::SingleSpeed {
-                        1.0
-                    } else {
-                        ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0)
-                    };
+                // One runtime-fraction path for every cycling unit: the
+                // single-speed unit delivers the fraction of capacity the
+                // zone needs, like the multi-speed arms below; its electric
+                // draw follows the runtime fraction with the part-load
+                // degradation (EnergyPlus DXCoils.cc:9859). The ideal arms
+                // keep the raw band estimate: their delivery is the solver's
+                // netted capacity, so the share must not be netted twice.
+                let ((_, _), (cool_on, cool_off)) = self.hvac.thermostat_fsm.band_edges();
+                let ideal_band_fraction = cycling_load_fraction(zone_temp, cool_off, cool_on);
                 self.hvac.update_prev_zone_temp(Some(zone_temp));
                 self.hvac.runtime.duty_cycle = match self.hvac.config.speed_control_mode {
                     SpeedControlMode::VariableSpeedIdeal => {
-                        self.select_variable_speed_cooling(load_fraction)
+                        self.select_variable_speed_cooling(ideal_band_fraction)
                             .part_load_ratio
                     }
                     _ if self.use_ideal => 1.0,
                     _ => {
+                        // The cycling arm nets the zone's non-HVAC share out
+                        // of its band estimate, the same netting the ideal
+                        // solve applies to its capacity, and anchors the
+                        // fraction's zero edge at the cooling setpoint.
+                        let ((_, _), (cool_zero, cool_full)) =
+                            self.hvac.thermostat_fsm.duty_bands();
+                        let band_fraction = cycling_load_fraction(zone_temp, cool_zero, cool_full);
+                        let netted_fraction = netted_cycling_duty(
+                            band_fraction,
+                            self.hvac.runtime.non_hvac_input_w,
+                            self.hvac.rated_capacity_w(ThermostatMode::Cooling),
+                        );
                         self.hvac
-                            .select_speed_with_zone_temp(load_fraction, Some(zone_temp), false)
+                            .select_speed_with_zone_temp(netted_fraction, Some(zone_temp), false)
                             .part_load_ratio
                     }
                 };
-                self.operating_mode = if self.hvac.runtime.duty_cycle > 0.0 {
-                    OperatingMode::Cooling
-                } else {
-                    OperatingMode::Off
-                };
+                // The thermostat's latch owns the mode, like the heating
+                // arms: a latched hold step whose netted band estimate is
+                // zero (the zone below the setpoint) delivers nothing but
+                // keeps the latch's mode until the FSM releases at its own
+                // edge. The step's zero duty zeroes the delivery and the
+                // mode resolves idle downstream.
+                self.operating_mode = OperatingMode::Cooling;
             }
         } else {
             self.hvac.runtime.duty_cycle = 0.0;
@@ -1071,7 +1113,7 @@ impl CoolingCore {
             self.hvac.update_prev_zone_temp(None);
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 self.operating_mode != OperatingMode::Cooling
@@ -1097,6 +1139,10 @@ impl CoolingCore {
         ports: &mut PortSlots,
         companion_heating_rtf: Option<f64>,
     ) -> std::result::Result<(), HaresError> {
+        if let Some(err) = self.hvac.take_control_error() {
+            return Err(err);
+        }
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
         self.crankcase_heater_on = false;
         self.crankcase_heater_kw = 0.0;
 
@@ -1262,13 +1308,19 @@ impl CoolingCore {
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         self.telemetry.set(tk::SHR, self.hvac.config.shr);
         let original_mode = self.operating_mode;
-        let has_nonzero_flow = electric_kw > 0.0;
         let post_dse_sensible_w = sensible_cooling_w * dse;
         let post_dse_latent_w = latent_cooling_w * dse;
-        self.operating_mode = original_mode.resolve_idle(
-            has_nonzero_flow,
-            Some(-(post_dse_sensible_w + post_dse_latent_w) + fan_heat_w * dse),
-        );
+        let delivered_thermal_w = -(post_dse_sensible_w + post_dse_latent_w) + fan_heat_w * dse;
+        // The delivered thermal flow counts as activity, the same term the
+        // mode-flow guard's active-mode rule and the ASHP heater's
+        // mode resolution count: a unit whose space-fraction-scaled electric
+        // draw is zero (fraction_load_served = 0, a heating-only heat pump's
+        // cooling side) still delivers real zone cooling and must keep its
+        // active mode rather than resolve to Standby, which the thermal-sign
+        // contract rejects against a cooling flow.
+        let has_nonzero_flow = electric_kw > 0.0 || delivered_thermal_w != 0.0;
+        self.operating_mode =
+            original_mode.resolve_idle(has_nonzero_flow, Some(delivered_thermal_w));
         self.telemetry
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         self.telemetry.set(
@@ -1290,17 +1342,16 @@ impl CoolingCore {
             0.0
         }
         // AHRI 210/240-2023: AC cooling COP ~2.3–4.1 W/W; clamp to [0.0, 8.0]
-        // to exclude physically impossible values from telemetry.
+        // to exclude physically impossible values from telemetry. Non-finite
+        // input survives the clamp: a NaN COP reaching telemetry is a typed
+        // error in every build.
         .clamp(0.0, 8.0);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !(cop.is_finite() && (0.0..=8.0).contains(&cop)) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "ac_cooling_cop_range".to_string(),
-                    value: cop,
-                    tolerance: 0.0,
-                });
-            }
+        if !cop.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "ac_cooling_cop_finite".to_string(),
+                value: cop,
+                tolerance: 0.0,
+            });
         }
         self.telemetry.set(tk::COP, cop);
         self.telemetry
@@ -1373,16 +1424,11 @@ impl CoolingCore {
             .set(tk::MIN_ON_TIME_S, self.hvac.thermostat_fsm.min_on_time_s);
         self.telemetry
             .set(tk::MIN_OFF_TIME_S, self.hvac.thermostat_fsm.min_off_time_s);
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
-        let capacity_ideal_w = post_dse_sensible_w + post_dse_latent_w;
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            capacity_ideal_w,
+        write_ebm_telemetry(
+            ebm_window,
+            post_dse_sensible_w + post_dse_latent_w,
             &mut self.telemetry,
-        );
+        )?;
         let active_setpoint_c = match original_mode {
             OperatingMode::Cooling => sp.cooling_c,
             OperatingMode::Heating => sp.heating_c,
@@ -1393,9 +1439,7 @@ impl CoolingCore {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
                 reactive_power_kvar: Some(reactive_power_kvar),
                 fuel_w: None,
-                thermal_output_w: Some(
-                    -(post_dse_sensible_w + post_dse_latent_w) + fan_heat_w * dse,
-                ),
+                thermal_output_w: Some(delivered_thermal_w),
                 sensible_cooling_w: Some(-post_dse_sensible_w),
                 latent_cooling_w: Some(-post_dse_latent_w),
             },
@@ -1418,10 +1462,6 @@ impl CoolingCore {
 
         #[cfg(feature = "observe")]
         {
-            self.telemetry.set(
-                hares_types::telemetry_keys::BIQUADRATIC_INDEX_CLAMPED,
-                self.hvac.take_biquadratic_clamp_count() as f64,
-            );
             self.telemetry.set(
                 tk::STARTUP_TIMER_RESET_COUNT,
                 self.hvac.runtime.startup.reset_count as f64,
@@ -1464,13 +1504,13 @@ impl CoolingCore {
         env: &EnvironmentState,
         dt_min: f64,
     ) -> crate::Result<PerformanceResult> {
-        let zone = lookup_zone(env, self.hvac.config.zone_id)?;
+        let zone_id = self.hvac.config.served_zone()?;
+        let zone = lookup_zone(env, zone_id)?;
         let pressure_pa = env.weather.pressure_pa();
         let zone_wb_c = hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa);
         if !zone_wb_c.is_finite() {
             return Err(HaresError::Equipment(format!(
-                "zone {:?} wet_bulb_c must be finite before HVAC cooling step",
-                self.hvac.config.zone_id
+                "zone {zone_id:?} wet_bulb_c must be finite before HVAC cooling step"
             )));
         }
         self.telemetry
@@ -1743,12 +1783,14 @@ impl CoolingCore {
             let rated_latent_w = rated_cap_w * (1.0 - self.rated_shr);
             let actual_latent_w = total_capacity_w * (1.0 - steady_state_shr);
             effective_shr_with_latent_degradation(
-                steady_state_shr,
-                rtf,
-                zone.temperature_c,
-                coil_entering_wb_c,
-                rated_latent_w,
-                actual_latent_w,
+                CoilOperatingState {
+                    steady_state_shr,
+                    runtime_fraction: rtf,
+                    entering_db_c: zone.temperature_c,
+                    entering_wb_c: coil_entering_wb_c,
+                    rated_latent_capacity_w: rated_latent_w,
+                    actual_latent_capacity_w: actual_latent_w,
+                },
                 &self.latent_degradation,
                 None,
             )
@@ -1889,7 +1931,9 @@ impl CoolingCore {
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
         self.last_adp_c = decoded.last_adp_c;
         self.last_bypass_factor = decoded.last_bypass_factor;
-        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
+        self.hvac
+            .thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         self.hvac.runtime.time_at_current_speed_s = decoded.time_at_current_speed_s;
         self.hvac.thermostat_fsm.min_on_time_s = decoded.min_on_time_s;
         self.hvac.thermostat_fsm.min_off_time_s = decoded.min_off_time_s;
@@ -1950,12 +1994,6 @@ impl CoolingCore {
 
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
-            ControlSignal::ThermalSetpoint { deadband_c, .. } => {
-                self.hvac.apply_control_signal(signal)?;
-                if let Some(db) = deadband_c {
-                    self.hvac.thermostat_fsm.thermostat.hysteresis_c = *db;
-                }
-            }
             ControlSignal::DutyCycle { on_fraction, .. } => {
                 self.ctrl_duty_cycle = *on_fraction;
             }
@@ -1980,24 +2018,6 @@ impl CoolingCore {
                 self.hvac.control.max_capacity_fraction = *fraction;
             }
             _ => {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    // Signals reaching the hvac catch-all path with a declared
-                    // capability must be handled by HvacEquipment::apply_control_signal.
-                    // Currently ThermalSetpointDelta is the only variant that falls
-                    // through to this path; ThermalSetpoint and MaxCapacityFraction
-                    // are handled by explicit arms above.
-                    let required = signal.required_capability();
-                    if self.descriptor.control_capabilities.contains(required)
-                        && !matches!(signal, ControlSignal::ThermalSetpointDelta { .. })
-                    {
-                        return Err(HaresError::InvariantViolation {
-                            check_name: "ac_catchall_signal_type".to_string(),
-                            value: 0.0,
-                            tolerance: 0.0,
-                        });
-                    }
-                }
                 #[cfg(feature = "observe")]
                 tracing::debug!(
                     signal_variant = ?signal,
@@ -2019,7 +2039,7 @@ impl CoolingCore {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 
     fn apply_dr_level(&mut self, level: DRLevel) {
@@ -2138,6 +2158,7 @@ mod tests {
         outdoor_c: f64,
     ) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -2163,7 +2184,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -2419,7 +2441,7 @@ mod tests {
     fn room_ac_defaults() -> RoomAcConfig {
         RoomAcConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             capacity_w: 0.0,
             eir: 0.0,
             setpoint: HvacSetpointConfig {
@@ -2479,6 +2501,49 @@ mod tests {
             Some(0.0),
             "no power should be drawn when operating mode is Off",
         );
+    }
+
+    /// A cooling unit serving none of the load (`fraction_load_served = 0`,
+    /// a heating-only heat pump's dormant cooling side) still runs its
+    /// thermostat: on a cooling call the step delivers zone cooling while
+    /// the space-fraction-scaled electric draw is zero. The delivered
+    /// thermal flow is the unit's real output, so the published operating
+    /// mode must stay Cooling (the flow the mode-flow guard counts) and the
+    /// core output must satisfy the contract. Mirrors OCHRE HVAC.py:556-561:
+    /// power scales by the space fraction, "sensible/latent gains to
+    /// envelope are not updated".
+    #[test]
+    fn zero_fraction_cooling_step_satisfies_the_core_contract() {
+        let cfg = ac_config_with(|typed| typed.fraction_load_served = Some(0.0));
+        let mut eq = AirConditioner::new(cfg.clone());
+        let hot = env(26.0, 0.01, 19.0, 30.0);
+        eq.init(&cfg, &hot).unwrap();
+        assert_eq!(eq.update_control(&hot), OperatingMode::Cooling);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&hot, Duration::from_secs(60), &mut ports).unwrap();
+
+        // The OCHRE-faithful delivery: zone cooling happens, electric is
+        // scaled to zero by the zero fraction.
+        assert!(
+            ports.thermal[0].sensible_gain_w < 0.0,
+            "the cooling side still delivers its zone cooling"
+        );
+        assert_eq!(
+            ports.electrical.load_power_w, 0.0,
+            "a zero fraction scales the electric draw to zero"
+        );
+        let co = eq.core_output();
+        assert_eq!(
+            co.state.operating_mode,
+            Some(OperatingMode::Cooling),
+            "an active cooling delivery must report Cooling, not Standby"
+        );
+        hares_types::validate_core_contract(eq.descriptor(), co)
+            .expect("zero-fraction cooling step must satisfy the core-output contract");
     }
 
     /// Grid outage (de-energized bus): the compressor/blower have no supply,
@@ -2905,12 +2970,12 @@ mod tests {
     fn room_ac_vs_central_different_dse() {
         let central_with_duct_losses = ac_config_with(|typed| {
             typed.capacity_w = 3_500.0;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.duct.dse_cool = Some(0.80);
         });
         let central_no_duct_losses = ac_config_with(|typed| {
             typed.capacity_w = 3_500.0;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.duct.dse_cool = Some(1.0);
         });
 
@@ -2985,10 +3050,10 @@ mod tests {
 
     /// Two-speed AC selects the high stage when load fraction exceeds
     /// `low_speed_capacity_fraction` (default 0.72 per OCHRE/AHRI), and the low stage otherwise.
-    /// With `hysteresis_c=0` the thermostat activates at zone_temp > setpoint (24°C)
-    /// and `MIN_LOAD_FRACTION_DEADBAND_C=0.5°C` governs the load fraction:
-    ///   zone 24.4°C → load_fraction = 0.4/0.5 = 0.8 > 0.5 → stage 1 (8 000 W)
-    ///   zone 24.1°C → load_fraction = 0.1/0.5 = 0.2 ≤ 0.5 → stage 0 (4 000 W)
+    /// With `hysteresis_c=0.1` the thermostat activates at zone_temp > 24.08 and the
+    /// band-relative load fraction governs the stage choice:
+    ///   zone 24.4°C → load_fraction = (24.4-23.98)/0.1 → 1.0 > 0.5 → stage 1 (8 000 W)
+    ///   zone 24.1°C → load_fraction = (24.1-23.98)/0.1 = 0.2+ → stage 0 (4 000 W)
     /// The test verifies that two-speed stage selection routes to different capacity
     /// stages by observing the resulting electrical draw.
     #[test]
@@ -2996,7 +3061,7 @@ mod tests {
         // Zero hysteresis so activation threshold equals setpoint, not setpoint+1.
         let cfg = ac_config_with(|typed| {
             typed.number_of_speeds = 2;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.stage_capacities_w = Some(vec![4_000.0, 8_000.0]);
             typed.stage_eirs = Some(vec![0.33, 0.33]);
         });
@@ -3046,12 +3111,16 @@ mod tests {
         );
     }
 
-    /// Single-speed AC must run binary on/off at the thermostat timestep.
-    /// When cooling is called, duty is 1.0 regardless of setpoint error magnitude.
+    /// Single-speed AC runs the runtime fraction the zone needs: the load
+    /// fraction is the zone's position between the cooling setpoint (the
+    /// zero-delivery anchor) and the turn-on, the same one-runtime-fraction
+    /// path the multi-speed arms follow, with the span floored at 0.5 C so
+    /// a narrow hysteresis modulates over it.
     #[test]
-    fn single_speed_cooling_call_uses_full_duty_cycle() {
+    fn single_speed_cooling_call_uses_the_zone_needed_runtime_fraction() {
         // Zero hysteresis so thermostat activates right at setpoint (24°C).
-        let cfg = ac_config_with(|typed| typed.hysteresis_c = Some(0.0));
+        let cfg =
+            ac_config_with(|typed| typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C));
 
         // Both environments are above setpoint so cooling is On in both cases.
         let env_full = env(24.6, 0.010, 18.0, 35.0);
@@ -3069,11 +3138,18 @@ mod tests {
 
         assert!(
             (duty_full - 1.0).abs() < 1e-9,
-            "single-speed cooling call must use duty=1.0, got {duty_full}"
+            "single-speed cooling call past the floored span must use duty=1.0, got {duty_full}"
+        );
+        // The zero edge is the setpoint 24.0; the span floors at 0.5 C:
+        // (24.2 - 24.0) / 0.5 = 0.40.
+        assert!(
+            (duty_part - 0.40).abs() < 1e-9,
+            "single-speed cooling call near the setpoint must use the zone-needed \
+             fraction 0.40, got {duty_part}"
         );
         assert!(
-            (duty_part - 1.0).abs() < 1e-9,
-            "single-speed cooling call must use duty=1.0 even near setpoint, got {duty_part}"
+            duty_full > duty_part,
+            "the deeper the zone into the band, the larger the fraction"
         );
     }
 
@@ -3081,9 +3157,9 @@ mod tests {
     fn variable_speed_ideal_uses_fractional_duty_cycle() {
         let cfg = ac_config_with(|typed| {
             typed.number_of_speeds = 4;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
-        let env_part = env(24.25, 0.010, 18.0, 35.0); // load_fraction=(0.25/0.5)=0.5
+        let env_part = env(24.25, 0.010, 18.0, 35.0); // load_fraction=(24.25-23.98)/0.5=0.54
         let env_full = env(24.60, 0.010, 18.0, 35.0); // clamped to 1.0
 
         let mut eq_part = AirConditioner::new(cfg.clone());
@@ -3094,7 +3170,7 @@ mod tests {
         );
         eq_part.update_control(&env_part);
         assert!(
-            (eq_part.core.hvac.runtime.duty_cycle - 0.5).abs() < 1e-9,
+            (eq_part.core.hvac.runtime.duty_cycle - 0.54).abs() < 1e-9,
             "variable-speed ideal should preserve fractional duty cycle; got {}",
             eq_part.core.hvac.runtime.duty_cycle
         );
@@ -3113,7 +3189,7 @@ mod tests {
     fn central_four_speed_ac_uses_variable_speed_mode() {
         let cfg = ac_config_with(|typed| {
             typed.number_of_speeds = 4;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.startup_cd = None;
         });
         let env = env(24.25, 0.010, 18.0, 35.0);
@@ -3131,7 +3207,7 @@ mod tests {
 
         eq.update_control(&env);
         assert!(
-            (eq.core.hvac.runtime.duty_cycle - 0.5).abs() < 1e-9,
+            (eq.core.hvac.runtime.duty_cycle - 0.54).abs() < 1e-9,
             "central 4-speed variable cooling should preserve fractional duty; got {}",
             eq.core.hvac.runtime.duty_cycle
         );
@@ -3141,14 +3217,16 @@ mod tests {
     fn central_four_speed_variable_speed_interpolates_stage_ladder() {
         let cfg = ac_config_with(|typed| {
             typed.number_of_speeds = 4;
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.stage_capacities_w = Some(vec![2_000.0, 4_000.0, 6_000.0, 8_000.0]);
             typed.stage_eirs = Some(vec![0.20, 0.25, 0.30, 0.35]);
             typed.stage_shrs = Some(vec![0.75, 0.75, 0.75, 0.75]);
             typed.fan_power_w = Some(0.0);
             typed.startup_cd = None;
         });
-        let environment = env(24.25, 0.010, 18.0, 35.0);
+        // The load fraction 0.5 exactly: (24.23 - 23.98)/0.5, an exact match
+        // for the ladder's second stage (half of the 8 000 W max).
+        let environment = env(24.23, 0.010, 18.0, 35.0);
 
         let mut eq = AirConditioner::new(cfg.clone());
         eq.init(&cfg, &environment).unwrap();
@@ -3711,7 +3789,7 @@ mod tests {
             typed.stage_eirs = Some(vec![0.33, 0.33]);
             typed.fan_power_w = Some(0.0);
             typed.startup_cd = Some(0.0);
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         let environment = env(26.0, 0.010, 19.0, 35.0);
 
@@ -3745,7 +3823,7 @@ mod tests {
             typed.stage_eirs = Some(vec![0.33, 0.33]);
             typed.fan_power_w = Some(0.0);
             typed.startup_cd = Some(0.0);
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         let environment = env(26.0, 0.010, 19.0, 35.0);
 
@@ -3791,7 +3869,7 @@ mod tests {
             typed.stage_eirs = Some(vec![0.33, 0.33]);
             typed.fan_power_w = Some(0.0);
             typed.startup_cd = Some(0.0);
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         let environment = env(26.0, 0.010, 19.0, 35.0);
 
@@ -3919,7 +3997,7 @@ mod tests {
     #[test]
     fn checkpoint_time_at_current_speed_s() {
         let cfg = ac_config_with(|typed| {
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         let environment = env(28.0, 0.010, 19.0, 35.0);
         let mut eq = AirConditioner::new(cfg.clone());
@@ -3960,7 +4038,7 @@ mod tests {
     #[test]
     fn checkpoint_min_on_off_time_s() {
         let cfg = ac_config_with(|typed| {
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
         });
         let environment = env(28.0, 0.010, 19.0, 35.0);
         let mut eq = AirConditioner::new(cfg.clone());
@@ -4034,7 +4112,7 @@ mod tests {
     #[test]
     fn startup_config_survives_checkpoint_ac() {
         let cfg = ac_config_with(|typed| {
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.startup_cd = Some(0.25);
         });
         let environment = env(28.0, 0.010, 19.0, 35.0);
@@ -4110,7 +4188,7 @@ mod tests {
     #[test]
     fn ac_step_off_step_clears_was_on_and_restart_fires_fresh_ramp() {
         let cfg = ac_config_with(|typed| {
-            typed.hysteresis_c = Some(0.0);
+            typed.hysteresis_c = Some(hares_types::MIN_THERMOSTAT_BAND_C);
             typed.startup_cd = Some(0.25);
         });
         // Hot zone (28 °C > 24 °C cooling setpoint) → compressor on.
@@ -4599,8 +4677,13 @@ mod tests {
         );
     }
 
-    /// Every signal variant corresponding to a declared capability must return
-    /// Ok(()) when dispatched to the AirConditioner (T-0048 regression guard).
+    /// Every signal variant corresponding to a declared capability must
+    /// return Ok(()) when dispatched to the AirConditioner (regression
+    /// guard) AND land on an explicit control arm: each dispatched variant
+    /// must change the state field it drives. This pins the former gated
+    /// catch-all check over the `ControlSignal` variants: a new variant
+    /// with a declared capability that silently no-ops in the catch-all
+    /// fails here.
     #[test]
     fn all_declared_ac_capabilities_return_ok_on_apply_control() {
         let cfg = ac_config();
@@ -4671,6 +4754,16 @@ mod tests {
             ),
         ];
 
+        // Control state before the dispatch loop, for the effect assertions.
+        let baseline_hysteresis = eq.core.hvac.thermostat_fsm.thermostat.hysteresis_c;
+        let baseline_duty = eq.core.ctrl_duty_cycle;
+        let baseline_load = eq.core.ctrl_load_fraction;
+        let baseline_limit = eq.core.ctrl_power_limit_kw;
+        let baseline_mode = eq.core.ctrl_mode_override;
+        let baseline_dr = eq.core.dr_level;
+        let baseline_ideal = eq.core.ideal_capacity_w;
+        let baseline_max_cap = eq.core.hvac.control.max_capacity_fraction;
+
         for (label, signal) in signals {
             let required = signal.required_capability();
             assert!(
@@ -4683,6 +4776,31 @@ mod tests {
                 result.is_ok(),
                 "apply_control for '{label}' signal must return Ok(()), got {result:?}",
             );
+            // Each declared variant must land on an explicit arm and move the
+            // state field it drives; only ThermalSetpointDelta is routed
+            // through the hvac catch-all path (its effects are setpoint-side
+            // and pinned by the ThermalSetpointDelta test above).
+            let changed = match signal {
+                ControlSignal::ThermalSetpoint { .. } => {
+                    eq.core.hvac.thermostat_fsm.thermostat.hysteresis_c != baseline_hysteresis
+                }
+                ControlSignal::ThermalSetpointDelta { .. } => true,
+                ControlSignal::DutyCycle { .. } => eq.core.ctrl_duty_cycle != baseline_duty,
+                ControlSignal::LoadFraction { .. } => eq.core.ctrl_load_fraction != baseline_load,
+                ControlSignal::PowerLimit { .. } => eq.core.ctrl_power_limit_kw != baseline_limit,
+                ControlSignal::ModeOverride { .. } => eq.core.ctrl_mode_override != baseline_mode,
+                ControlSignal::DemandResponse { .. } => eq.core.dr_level != baseline_dr,
+                ControlSignal::IdealCapacity { .. } => eq.core.ideal_capacity_w != baseline_ideal,
+                ControlSignal::MaxCapacityFraction { .. } => {
+                    eq.core.hvac.control.max_capacity_fraction != baseline_max_cap
+                }
+                other => panic!("unhandled ControlSignal variant in test: {other:?}"),
+            };
+            assert!(
+                changed,
+                "signal '{label}' must reach an explicit control arm and change \
+                 the state it drives, not fall through to the catch-all"
+            );
         }
     }
 
@@ -4690,6 +4808,7 @@ mod tests {
 
     fn oat_lockout_env(outdoor_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 28.0,
@@ -4715,7 +4834,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -5031,6 +5151,43 @@ mod tests {
             "fix produces larger rated_latent_w baseline (3_000 > 1_500)"
         );
     }
+
+    #[test]
+    fn take_health_counts_reports_and_resets_curve_index_clamps() {
+        let mut eq = AirConditioner::new(ac_config());
+        eq.core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let _ = eq.core.hvac.evaluate_biquadratic(4, 20.0, 30.0);
+        let counts = Equipment::take_health_counts(&mut eq);
+        assert_eq!(
+            counts.curve_index_clamps, 1,
+            "one out-of-bounds evaluation → one clamp"
+        );
+        assert_eq!(
+            Equipment::take_health_counts(&mut eq).curve_index_clamps,
+            0,
+            "take resets the counters"
+        );
+    }
+
+    #[test]
+    fn room_ac_take_health_counts_reports_and_resets_curve_index_clamps() {
+        let mut eq = RoomAC::new(room_ac_config());
+        eq.core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let _ = eq.core.hvac.evaluate_biquadratic(5, 20.0, 30.0);
+        let counts = Equipment::take_health_counts(&mut eq);
+        assert_eq!(counts.curve_index_clamps, 1);
+        assert_eq!(
+            Equipment::take_health_counts(&mut eq).curve_index_clamps,
+            0,
+            "take resets the counters"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5051,6 +5208,7 @@ mod dr_tests {
     /// Zone above cooling setpoint, suitable for triggering active cooling.
     fn hot_env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -5076,7 +5234,8 @@ mod dr_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -5126,7 +5285,7 @@ mod dr_tests {
                     heating_setpoint_source: None,
                     cooling_setpoint_source: None,
                 },
-                hysteresis_c: Some(0.0),
+                hysteresis_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: Some(0.10),
@@ -5463,6 +5622,7 @@ mod crankcase_tests {
         outdoor_c: f64,
     ) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -5488,7 +5648,8 @@ mod crankcase_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -5557,6 +5718,7 @@ mod crankcase_tests {
 
     fn cold_env(outdoor_c: f64, zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -5582,7 +5744,8 @@ mod crankcase_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -5618,7 +5781,7 @@ mod crankcase_tests {
                     heating_setpoint_source: None,
                     cooling_setpoint_source: None,
                 },
-                hysteresis_c: Some(0.0),
+                hysteresis_c: Some(hares_types::MIN_THERMOSTAT_BAND_C),
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: Some(0.10),
@@ -5898,6 +6061,7 @@ mod ideal_capacity_tests {
     /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
     fn make_env(zone_temp_c: f64, time_res_s: i64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -5923,7 +6087,8 @@ mod ideal_capacity_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -6351,6 +6516,7 @@ mod defaults_tests {
 
     fn make_env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -6376,7 +6542,8 @@ mod defaults_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -6393,6 +6560,7 @@ mod defaults_tests {
     /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
     fn make_env_coarse(zone_temp_c: f64, time_res_s: i64, humidity_ratio: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -6418,7 +6586,8 @@ mod defaults_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -6720,6 +6889,7 @@ mod speed_selection_parity_tests {
     fn minimal_env() -> EnvironmentState {
         use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 26.0,
@@ -6745,7 +6915,8 @@ mod speed_selection_parity_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)

@@ -5,8 +5,10 @@ use hares_core::SimulationEngine;
 use std::time::Duration;
 
 fn bench_single_building(c: &mut Criterion) {
-    let schedule_path = common::unique_temp_path("hares-bench-schedule", "csv");
-    let weather_path = common::unique_temp_path("hares-bench-weather", "epw");
+    let temp = tempfile::tempdir().expect("benchmark directory");
+    let dir = temp.path();
+    let schedule_path = common::numbered_path(dir, "hares-bench-schedule", "csv");
+    let weather_path = common::numbered_path(dir, "hares-bench-weather", "epw");
     common::write_schedule_csv(&schedule_path);
     common::write_weather_epw(&weather_path);
 
@@ -26,9 +28,11 @@ fn bench_single_building(c: &mut Criterion) {
             |b, duration| {
                 b.iter(|| {
                     let cfg = common::build_dwelling_config(
+                        dir,
                         1,
                         schedule_path.clone(),
                         weather_path.clone(),
+                        Some(common::repo_defaults_path()),
                         *duration,
                     );
                     let _ = engine.run(cfg).expect("single building benchmark run");

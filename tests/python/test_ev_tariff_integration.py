@@ -4,10 +4,28 @@ These tests verify BEHAVIOR, not just structure. Each test asserts something
 that would fail if the underlying physics or actor logic were broken.
 """
 
-import pytest
-from conftest import make_dwelling
+from typing import NotRequired, TypedDict
 
-pl = pytest.importorskip("polars")
+import polars as pl
+import pytest
+from conftest import make_dwelling, output_in_test_dir
+
+
+class _OutputKwargs(TypedDict):
+    write_output: bool
+    output_path: NotRequired[str]
+
+
+# Tests that consume simulate() DataFrame columns need the output pipeline
+# (write_output=True).
+OUTPUT: _OutputKwargs = {"write_output": True}
+_output_in_test_dir = output_in_test_dir(OUTPUT, "dwelling_42.csv")
+
+
+def _scalar(value: object, what: str) -> float:
+    """Narrow a polars reduction (``PythonLiteral | None``) to a float."""
+    assert isinstance(value, (int, float)), f"{what} must be numeric, got {value!r}"
+    return float(value)
 
 
 def _build_flat_tariff(rate: float = 0.15):
@@ -99,7 +117,7 @@ class TestArchetypeTariffIntegration:
 
         def total_ev_kwh(archetype_id):
             dw = make_dwelling(
-                duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1,
+                duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
             )
             dw.initialize()
             dw.add_ev_with_driver(
@@ -108,7 +126,7 @@ class TestArchetypeTariffIntegration:
             df = dw.simulate()
             col = _ev_power_col(df, "Tesla Model Y LR AWD")
             # Sum of positive values = total charging energy
-            return df[col].filter(df[col] > 0).sum()
+            return _scalar(df[col].filter(df[col] > 0).sum(), "total EV charging energy")
 
         commuter_kwh = total_ev_kwh(EvArchetypeId.daily_commuter_l2())
         wfh_kwh = total_ev_kwh(EvArchetypeId.wfh_occasional())
@@ -148,7 +166,7 @@ class TestArchetypeTariffIntegration:
         from ochre_next import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -159,7 +177,7 @@ class TestArchetypeTariffIntegration:
         df = dw.simulate()
         col = _ev_power_col(df, "Toyota RAV4 Prime")
         max_power = df[col].max()
-        assert max_power > 0, (
+        assert isinstance(max_power, (int, float)) and max_power > 0, (
             f"PHEV must charge from grid at some point (max power={max_power})"
         )
 
@@ -169,7 +187,7 @@ class TestArchetypeTariffIntegration:
 
         def max_ev_power(archetype_id):
             dw = make_dwelling(
-                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1,
+                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
             )
             dw.initialize()
             dw.add_ev_with_driver(
@@ -177,12 +195,12 @@ class TestArchetypeTariffIntegration:
             )
             df = dw.simulate()
             col = _ev_power_col(df, "Nissan Leaf S 30kWh")
-            return df[col].max()
+            return _scalar(df[col].max(), "max EV power")
 
         l1_max = max_ev_power(EvArchetypeId.daily_commuter_l1())
         l2_max = max_ev_power(EvArchetypeId.daily_commuter_l2())
-        assert l1_max > 0, f"L1 must charge (got max={l1_max})"
-        assert l2_max > 0, f"L2 must charge (got max={l2_max})"
+        assert isinstance(l1_max, (int, float)) and l1_max > 0, f"L1 must charge (got max={l1_max})"
+        assert isinstance(l2_max, (int, float)) and l2_max > 0, f"L2 must charge (got max={l2_max})"
         assert l1_max < l2_max, (
             f"L1 max ({l1_max:.2f} kW) must be < L2 max ({l2_max:.2f} kW)"
         )
@@ -197,7 +215,7 @@ class TestChargingLoadProfile:
         from ochre_next import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=3
+            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=3, **OUTPUT
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -213,8 +231,7 @@ class TestChargingLoadProfile:
         )
         charging = df.filter(pl.col(col) > 0.5)
 
-        if charging.height == 0:
-            pytest.skip("No charging events in this seed")
+        assert charging.height > 0, "A daily commuter must charge within a week"
 
         # Commuter departs ~08:00, arrives ~18:00. Charging should be
         # concentrated in the evening/night (after arrival), not during
@@ -235,7 +252,7 @@ class TestChargingLoadProfile:
         from ochre_next import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -245,7 +262,7 @@ class TestChargingLoadProfile:
         )
         df = dw.simulate()
         col = _ev_power_col(df, "Tesla Model Y LR AWD")
-        max_power = df[col].max()
+        max_power = _scalar(df[col].max(), "max EV power")
 
         # Tesla Model Y LR has max_l2_power_kw = 11.5
         assert max_power <= 11.5 + 0.1, (
@@ -284,8 +301,7 @@ class TestChargingLoadProfile:
                     violations += 1
             prev_soc = soc
 
-        if total_driving_steps == 0:
-            pytest.skip("No driving events detected")
+        assert total_driving_steps > 0, "A daily commuter must drive within three days"
 
         assert violations == 0, (
             f"EV drew residential power during {violations}/{total_driving_steps} "
@@ -297,7 +313,7 @@ class TestChargingLoadProfile:
         from ochre_next import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -309,16 +325,15 @@ class TestChargingLoadProfile:
         col = _ev_power_col(df, "Nissan Leaf S 30kWh")
         charging = df.filter(pl.col(col) > 0.1)
 
-        if charging.height == 0:
-            pytest.skip("No charging in this seed")
+        assert charging.height > 0, "A daily L1 commuter must charge within three days"
 
         median_power = charging[col].median()
         max_power = charging[col].max()
 
-        assert max_power <= 1.9, (
+        assert isinstance(max_power, (int, float)) and max_power <= 1.9, (
             f"L1 max power {max_power:.2f} kW exceeds L1 limit (~1.8 kW)"
         )
-        assert median_power >= 0.5, (
+        assert isinstance(median_power, (int, float)) and median_power >= 0.5, (
             f"L1 median power {median_power:.2f} kW too low -- L1 should draw ~1.4 kW"
         )
 
@@ -363,12 +378,14 @@ class TestHpxmlDeclaredEv:
             bldg_id=42,
             master_seed=42,
             output_verbosity=1,
+            write_output=True,
+            output_path=str(tmp_path / "dwelling_42.csv"),
         )
         dw.initialize()
         df = dw.simulate()
 
         col = _ev_power_col(df, "EV")
-        charge_kwh = df[col].filter(df[col] > 0).sum()
+        charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
         assert charge_kwh > 10.0, (
             f"HPXML-declared default-strategy EV must charge over 3 days "
             f"(got {charge_kwh:.1f} kWh); a flat column means no driver actor "
@@ -397,7 +414,7 @@ class TestDefaultStrategyEv:
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -405,7 +422,7 @@ class TestDefaultStrategyEv:
         df = dw.simulate()
 
         col = _ev_power_col(df, "EV1")
-        charge_kwh = df[col].filter(df[col] > 0).sum()
+        charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
         assert charge_kwh > 10.0, (
             f"Default-strategy EV must charge over 3 days (got {charge_kwh:.1f} kWh); "
             "a flat column means no driver actor was attached to simulate driving"
@@ -421,14 +438,14 @@ class TestDefaultStrategyEv:
         from ochre_next import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
         df = dw.simulate()
 
         col = _ev_power_col(df, "EV1")
-        charge_kwh = df[col].filter(df[col] > 0).sum()
+        charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
         assert charge_kwh > 10.0, (
             f"Default-strategy EV must charge over 3 days without a tariff "
             f"(got {charge_kwh:.1f} kWh); a flat column means no driver actor "
@@ -476,7 +493,7 @@ class TestDefaultStrategyEv:
         from ochre_next import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -493,7 +510,7 @@ class TestDefaultStrategyEv:
         df = dw.simulate()
         for name in ("EV1", "EV2"):
             col = _ev_power_col(df, name)
-            charge_kwh = df[col].filter(df[col] > 0).sum()
+            charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), f"{name} charging energy")
             assert charge_kwh > 10.0, (
                 f"{name} must charge over 3 days (got {charge_kwh:.1f} kWh); "
                 "a flat column means its driver was lost on re-registration"
@@ -512,7 +529,7 @@ class TestDefaultStrategyEv:
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -534,7 +551,7 @@ class TestDefaultStrategyEv:
         df = dw.simulate()
         for label in ("EV1", "Tesla Model Y LR AWD"):
             col = _ev_power_col(df, label)
-            charge_kwh = df[col].filter(df[col] > 0).sum()
+            charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), f"{label} charging energy")
             assert charge_kwh > 10.0, (
                 f"{label} must charge over 3 days (got {charge_kwh:.1f} kWh)"
             )
@@ -551,7 +568,7 @@ class TestDefaultStrategyEv:
         from ochre_next import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.step()  # simulation is now in progress
@@ -596,7 +613,7 @@ class TestDefaultStrategyEv:
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -747,7 +764,7 @@ class TestDefaultStrategyEv:
         from ochre_next import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -794,7 +811,7 @@ class TestDefaultStrategyEv:
 
         def charging_kwh(readd: bool) -> float:
             dw = make_dwelling(
-                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
             )
             dw.initialize()
             dw.add_ev_with_driver(
@@ -811,7 +828,7 @@ class TestDefaultStrategyEv:
                 )
             df = dw.simulate()
             col = _ev_power_col(df, "Tesla Model Y LR AWD")
-            return df[col].filter(df[col] > 0).sum()
+            return _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
 
         control = charging_kwh(readd=False)
         readded = charging_kwh(readd=True)

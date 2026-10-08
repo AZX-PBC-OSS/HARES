@@ -669,6 +669,7 @@ impl PyTariffBuilder {
             rtp_schedule: None,
             cpp_config: None,
             ev_tou_period_name: None,
+            parse_warnings: Vec::new(),
         };
         tariff
             .validate()
@@ -1101,6 +1102,40 @@ mod tests {
             Ok::<_, pyo3::PyErr>(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn tariff_json_constructors_reject_unknown_key() {
+        pyo3::Python::attach(|py| {
+            let cls = py.get_type::<PyElectricTariff>();
+
+            // `from_json` deserializes through serde, so an unknown
+            // top-level key fails naming the key.
+            let with_extra = r#"{"name":"flat","tou_schedule":[],"energy_rates":[],"demand_rates":[],"tiered_rates":[],"export_rate":{"mode":"None","tou_credits":[]},"fixed_charges":{"monthly_usd":0.0,"daily_usd":0.0},"billing_cycle":"Monthly","unknown_key":1}"#;
+            let err = PyElectricTariff::from_json(&cls, with_extra)
+                .expect_err("from_json must reject an unknown top-level key");
+            assert!(
+                err.to_string().contains("unknown_key"),
+                "the error names the key: {err}"
+            );
+
+            // `from_dict` serializes the dict to JSON and deserializes
+            // through the same serde boundary, so an unknown key nested
+            // inside a period's window fails naming the key too.
+            let nested = r#"{"tou_schedule":[{"name":"p","schedule":[{"day":"Any","start_minute":0,"end_minute":1440,"value":0.0,"unknown_period_key":1}],"season":"All"}],"demand_tou_schedule":[],"energy_rates":[],"demand_rates":[],"tiered_rates":[],"export_rate":{"mode":"None","tou_credits":[]},"fixed_charges":{"monthly_usd":0.0,"daily_usd":0.0},"billing_cycle":"Monthly"}"#;
+            let value: serde_json::Value = serde_json::from_str(nested).unwrap();
+            let obj = json_value_to_py(py, &value).unwrap();
+            let dict = obj
+                .bind(py)
+                .cast::<PyDict>()
+                .expect("a JSON object casts to a dict");
+            let err = PyElectricTariff::from_dict(&cls, dict)
+                .expect_err("from_dict must reject an unknown key inside a period window");
+            assert!(
+                err.to_string().contains("unknown_period_key"),
+                "the error names the key: {err}"
+            );
+        });
     }
 
     #[test]

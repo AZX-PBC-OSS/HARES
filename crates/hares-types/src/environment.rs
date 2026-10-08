@@ -8,7 +8,7 @@ use std::fmt;
 use chrono::{DateTime, Duration, FixedOffset};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Offset between Kelvin and Celsius [K].
+/// Offset between Kelvin and Celsius (K).
 pub const KELVIN_OFFSET: f64 = 273.15;
 
 /// Default ground albedo for bare ground (EnergyPlus default: 0.2).
@@ -18,7 +18,7 @@ pub const KELVIN_OFFSET: f64 = 273.15;
 /// satellite-derived albedo via the `Surface Albedo` column.
 pub const DEFAULT_GROUND_ALBEDO: f64 = 0.2;
 
-use crate::{CoreOutput, DomainUpdate, EquipmentId};
+use crate::{CoreOutput, EquipmentId};
 
 /// Price-like external signals consumed by higher-level controllers.
 ///
@@ -45,20 +45,20 @@ pub struct PriceSignal {
 /// `pv_generation_kw` when `actual_pv_kw` is zero.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ElectricalSummary {
-    /// Total PV generation [kW], positive = producing.
+    /// Total PV generation (kW), positive = producing.
     /// In forecast-driven modes this may carry forecast values;
     /// in normal simulation it holds the prior-step actual output.
     pub pv_generation_kw: f64,
-    /// Total non-dispatchable load [kW], positive = consuming.
+    /// Total non-dispatchable load (kW), positive = consuming.
     /// Excludes battery and EV (those are dispatchable).
     pub base_load_kw: f64,
-    /// Net grid power [kW], positive = importing, negative = exporting.
+    /// Net grid power (kW), positive = importing, negative = exporting.
     pub net_grid_kw: f64,
-    /// Total battery power [kW], positive = charging, negative = discharging.
+    /// Total battery power (kW), positive = charging, negative = discharging.
     pub battery_power_kw: f64,
-    /// Total EV power [kW], positive = charging.
+    /// Total EV power (kW), positive = charging.
     pub ev_power_kw: f64,
-    /// Actual (observed) PV generation from equipment step [kW], positive = producing.
+    /// Actual (observed) PV generation from equipment step (kW), positive = producing.
     ///
     /// Always reflects real equipment output; never carries forecast values.
     /// Set to 0.0 when no PV equipment is present or when actual data is
@@ -129,17 +129,6 @@ pub struct ZoneState {
     pub volume_m3: f64,
 }
 
-impl Default for ZoneState {
-    fn default() -> Self {
-        Self {
-            id: ZoneId(0),
-            temperature_c: 20.0,
-            humidity_ratio: 0.008,
-            volume_m3: 200.0,
-        }
-    }
-}
-
 impl ZoneState {
     pub fn new(id: ZoneId, temperature_c: f64, humidity_ratio: f64, volume_m3: f64) -> Self {
         Self {
@@ -158,7 +147,7 @@ pub struct SurfaceIrradiance {
     pub direct_w_m2: f64,
     pub diffuse_w_m2: f64,
     pub reflected_w_m2: f64,
-    /// Angle of incidence between beam radiation and the surface normal [rad].
+    /// Angle of incidence between beam radiation and the surface normal (rad).
     ///
     /// Used by the thermal solver to apply window IAM corrections.
     /// Defaults to 0.0 (normal incidence) when not set or deserialized from
@@ -205,7 +194,7 @@ pub struct WeatherState {
     /// Diffuse horizontal irradiance (W/m2) from weather station / TMY data.
     #[serde(default)]
     pub dhi_w_m2: f64,
-    /// Solar altitude angle above the horizon [degrees].
+    /// Solar altitude angle above the horizon (degrees).
     /// Positive when sun is up, negative when below horizon.
     /// Computed from `solar_position()` each timestep.
     #[serde(default)]
@@ -219,7 +208,7 @@ pub struct WeatherState {
     /// Defaults to 10.0 (US annual average per ASHRAE/EnergyPlus) when environment data is unavailable.
     #[serde(default = "default_mains_temp_c")]
     pub mains_temp_c: f64,
-    /// Liquid precipitation depth for this timestep [m].
+    /// Liquid precipitation depth for this timestep (m).
     /// Parsed from EPW field 33 (Liquid Precipitation Depth).
     /// Zero when data is unavailable.
     #[serde(default)]
@@ -383,10 +372,10 @@ impl WeatherState {
 /// during outages.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GridState {
-    /// Utility service voltage [pu]. Exactly `0.0` = utility outage.
+    /// Utility service voltage (pu). Exactly `0.0` = utility outage.
     pub voltage_pu: f64,
     pub frequency_hz: f64,
-    /// Island-formed bus voltage [pu] during a utility outage.
+    /// Island-formed bus voltage (pu) during a utility outage.
     ///
     /// `Some(v)` when an on-site island-capable source (battery with usable
     /// charge, generator, discharging V2G/V2L EV) holds the home bus at `v`
@@ -413,7 +402,7 @@ impl GridState {
         self.voltage_pu == 0.0
     }
 
-    /// Voltage at the home's bus [pu]: the utility voltage when the utility
+    /// Voltage at the home's bus (pu): the utility voltage when the utility
     /// is up, or the island-formed bus voltage (if any) during an outage.
     /// `0.0` means the bus is de-energized.
     #[inline]
@@ -445,13 +434,106 @@ impl GridState {
     }
 }
 
+/// An HPXML equipment `Location` that names space with no modeled thermal
+/// zone. OS-HPXML runs equipment there against an ambient air series instead
+/// of a zone's state (`geometry.rb`, `get_space_or_schedule_from_location`
+/// and `get_temperature_scheduled_space_values`, v1.12.0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AmbientLocation {
+    OtherHeatedSpace,
+    OtherMultifamilyBufferSpace,
+    OtherNonFreezingSpace,
+    OtherHousingUnit,
+    /// "other exterior" and "outside": outdoor air, no space and no schedule.
+    OtherExterior,
+}
+
+impl AmbientLocation {
+    /// Classify an HPXML `Location` string (trimmed, case-insensitive).
+    /// `None` for every location that is not one of these placements: a
+    /// location naming a modeled zone resolves through that zone's id.
+    #[must_use]
+    pub fn from_location(location: &str) -> Option<Self> {
+        match location.trim().to_ascii_lowercase().as_str() {
+            "other heated space" => Some(Self::OtherHeatedSpace),
+            "other multifamily buffer space" => Some(Self::OtherMultifamilyBufferSpace),
+            "other non-freezing space" => Some(Self::OtherNonFreezingSpace),
+            "other housing unit" => Some(Self::OtherHousingUnit),
+            "other exterior" | "outside" => Some(Self::OtherExterior),
+            _ => None,
+        }
+    }
+
+    /// Whether the placement's air is defined relative to the dwelling's
+    /// conditioned zone (a non-zero indoor weight in OS-HPXML's
+    /// scheduled-space table, or an indoor humidity source).
+    #[must_use]
+    pub fn needs_conditioned_zone(self) -> bool {
+        matches!(
+            self,
+            Self::OtherHeatedSpace | Self::OtherMultifamilyBufferSpace | Self::OtherHousingUnit
+        )
+    }
+}
+
+/// Dry-bulb and thermodynamic wet-bulb temperature of one ambient air
+/// source, the evaporator-inlet state a heat pump water heater's
+/// performance curves take.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AmbientAirTemps {
+    pub dry_bulb_c: f64,
+    pub wet_bulb_c: f64,
+}
+
+/// Per-step air states for the scheduled-space placements, computed once
+/// per step by the environment manager and only for the placements some
+/// equipment occupies (`None` otherwise). "Other exterior" reads the
+/// weather's outdoor state and has no entry here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AmbientOtherSpaceTemps {
+    pub other_heated_space: Option<AmbientAirTemps>,
+    pub other_multifamily_buffer_space: Option<AmbientAirTemps>,
+    pub other_non_freezing_space: Option<AmbientAirTemps>,
+    pub other_housing_unit: Option<AmbientAirTemps>,
+}
+
+impl AmbientOtherSpaceTemps {
+    /// The slot holding `location`'s air; `None` for "other exterior".
+    #[must_use]
+    pub fn slot_mut(&mut self, location: AmbientLocation) -> Option<&mut Option<AmbientAirTemps>> {
+        match location {
+            AmbientLocation::OtherHeatedSpace => Some(&mut self.other_heated_space),
+            AmbientLocation::OtherMultifamilyBufferSpace => {
+                Some(&mut self.other_multifamily_buffer_space)
+            }
+            AmbientLocation::OtherNonFreezingSpace => Some(&mut self.other_non_freezing_space),
+            AmbientLocation::OtherHousingUnit => Some(&mut self.other_housing_unit),
+            AmbientLocation::OtherExterior => None,
+        }
+    }
+}
+
 /// Complete runtime environment state fed into physics calls.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EnvironmentState {
     pub zones: Vec<ZoneState>,
     pub weather: WeatherState,
     pub grid: GridState,
-    pub custom_domains: Vec<DomainUpdate>,
+    /// The per-domain update slots: one per built-in domain plus one per
+    /// installed custom solver. Written once per step by the environment
+    /// manager and the solvers, read without a search.
+    pub domains: crate::domain_solver::DomainSlots,
+    /// The schedule row this step reads: the row of the step's calendar
+    /// date and time, with the 365-day schedule's leap-day skip and year
+    /// wrap applied. The environment manager always sets it; it is `None`
+    /// only in a state built without one.
+    #[serde(default)]
+    pub schedule_row: Option<usize>,
+    /// Air states for the scheduled-space placements in use, computed once
+    /// per step; equipment in an "other ..." HPXML location reads these
+    /// instead of a zone's state.
+    #[serde(default)]
+    pub ambient_other_space_c: AmbientOtherSpaceTemps,
     /// Equipment telemetry snapshots from the previous timestep, keyed by
     /// equipment name. Populated by the dwelling before calling actors.
     /// Actors can read equipment state (SOC, power, connection_state, etc.)
@@ -481,6 +563,24 @@ pub struct EnvironmentState {
 }
 
 impl EnvironmentState {
+    /// The air an equipment placed at `location` draws this step: the
+    /// outdoor state for "other exterior", the precomputed scheduled-space
+    /// air otherwise (`None` when no equipment occupies that placement).
+    #[must_use]
+    pub fn ambient_air(&self, location: AmbientLocation) -> Option<AmbientAirTemps> {
+        let spaces = &self.ambient_other_space_c;
+        match location {
+            AmbientLocation::OtherHeatedSpace => spaces.other_heated_space,
+            AmbientLocation::OtherMultifamilyBufferSpace => spaces.other_multifamily_buffer_space,
+            AmbientLocation::OtherNonFreezingSpace => spaces.other_non_freezing_space,
+            AmbientLocation::OtherHousingUnit => spaces.other_housing_unit,
+            AmbientLocation::OtherExterior => Some(AmbientAirTemps {
+                dry_bulb_c: self.weather.outdoor_temp_c,
+                wet_bulb_c: self.weather.outdoor_wet_bulb_c,
+            }),
+        }
+    }
+
     /// Timestep duration in seconds as a float.
     ///
     /// Equivalent to `time_res.num_milliseconds() as f64 / 1000.0`. Prefer this over
@@ -489,37 +589,6 @@ impl EnvironmentState {
     #[inline]
     pub fn time_step_secs(&self) -> f64 {
         self.time_res.num_milliseconds() as f64 / 1000.0
-    }
-
-    /// Replace the domain update for `update.domain_id` in-place, or append if
-    /// no entry for that domain exists yet. Avoids the O(n) `retain` + `push`
-    /// pattern that would reallocate on every timestep.
-    #[inline]
-    pub fn upsert_domain(&mut self, update: DomainUpdate) {
-        if let Some(slot) = self
-            .custom_domains
-            .iter_mut()
-            .find(|u| u.domain_id == update.domain_id)
-        {
-            *slot = update;
-        } else {
-            self.custom_domains.push(update);
-        }
-    }
-
-    /// Like `upsert_domain` but clones from a reference, reusing the existing
-    /// slot's allocations via `clone_from` when the domain already exists.
-    #[inline]
-    pub fn upsert_domain_ref(&mut self, update: &DomainUpdate) {
-        if let Some(slot) = self
-            .custom_domains
-            .iter_mut()
-            .find(|u| u.domain_id == update.domain_id)
-        {
-            slot.clone_from(update);
-        } else {
-            self.custom_domains.push(update.clone());
-        }
     }
 }
 
@@ -547,6 +616,7 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+    use crate::DomainUpdate;
 
     #[test]
     fn grid_state_bus_semantics() {
@@ -606,13 +676,14 @@ mod tests {
 
     #[test]
     fn environment_state_round_trips_through_json() {
-        let state = EnvironmentState {
+        let mut state = EnvironmentState {
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.5,
                 humidity_ratio: 0.008,
                 volume_m3: 240.0,
             }],
+            ambient_other_space_c: AmbientOtherSpaceTemps::default(),
             weather: WeatherState {
                 outdoor_temp_c: 5.0,
                 outdoor_humidity_ratio: 0.004,
@@ -648,11 +719,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![DomainUpdate {
-                domain_id: crate::DomainId(9),
-                zone_temperatures_c: vec![(ZoneId(1), 21.0)],
-                custom_payload: Some(vec![1.0, 2.0, 3.0]),
-            }],
+            schedule_row: None,
+            domains: crate::domain_solver::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -664,6 +732,19 @@ mod tests {
             price_signal: PriceSignal::default(),
             electrical: ElectricalSummary::default(),
         };
+
+        let slot = state
+            .domains
+            .install_custom(crate::DomainId(9))
+            .expect("install custom domain");
+        state.domains.set_custom(
+            slot,
+            &DomainUpdate {
+                domain_id: crate::DomainId(9),
+                zone_temperatures_c: vec![(ZoneId(1), 21.0)],
+                custom_payload: Some(vec![1.0, 2.0, 3.0]),
+            },
+        );
 
         let json = serde_json::to_string(&state).expect("serialize environment state");
         let decoded: EnvironmentState =
@@ -680,13 +761,15 @@ mod tests {
                 humidity_ratio: 0.008,
                 volume_m3: 200.0,
             }],
+            ambient_other_space_c: AmbientOtherSpaceTemps::default(),
             weather: WeatherState::default(),
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: crate::domain_solver::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -747,7 +830,15 @@ mod tests {
                 "solar_irradiance": []
             },
             "grid": { "voltage_pu": 1.0, "frequency_hz": 60.0 },
-            "custom_domains": [],
+            "domains": {
+                "thermal": { "update": { "domain_id": 0, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "humidity": { "update": { "domain_id": 2, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "electrical": { "update": { "domain_id": 1, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "fluid": { "update": { "domain_id": 3, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "schedule": { "update": { "domain_id": 65535, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "mains_water": { "update": { "domain_id": 65534, "zone_temperatures_c": [], "custom_payload": null }, "present": false },
+                "custom": []
+            },
             "current_time": "2026-03-18T12:00:00+00:00",
             "time_res": 300000
         }"#;
@@ -758,64 +849,65 @@ mod tests {
     }
 
     #[test]
-    fn upsert_domain_inserts_when_empty() {
+    fn domain_slot_read_is_none_until_written() {
         let mut state = crate::test_utils::default_env();
-        state.custom_domains.clear();
+        assert!(state.domains.thermal.get().is_none());
         let update = DomainUpdate {
-            domain_id: crate::DomainId(99),
+            domain_id: crate::THERMAL,
             zone_temperatures_c: vec![(ZoneId(1), 22.0)],
             custom_payload: None,
         };
-        state.upsert_domain(update.clone());
-        assert_eq!(state.custom_domains.len(), 1);
-        assert_eq!(state.custom_domains[0], update);
+        state.domains.thermal.set_from(&update);
+        assert_eq!(state.domains.thermal.get(), Some(&update));
+        state.domains.thermal.clear();
+        assert!(state.domains.thermal.get().is_none());
     }
 
     #[test]
-    fn upsert_domain_replaces_existing() {
+    fn domain_slot_set_from_replaces_previous_update() {
         let mut state = crate::test_utils::default_env();
-        state.custom_domains.clear();
         let v1 = DomainUpdate {
-            domain_id: crate::DomainId(5),
+            domain_id: crate::THERMAL,
             zone_temperatures_c: vec![(ZoneId(1), 20.0)],
             custom_payload: Some(vec![1.0]),
         };
         let v2 = DomainUpdate {
-            domain_id: crate::DomainId(5),
+            domain_id: crate::THERMAL,
             zone_temperatures_c: vec![(ZoneId(1), 25.0)],
             custom_payload: Some(vec![2.0, 3.0]),
         };
-        state.upsert_domain(v1);
-        state.upsert_domain(v2.clone());
-        assert_eq!(state.custom_domains.len(), 1);
-        assert_eq!(state.custom_domains[0], v2);
+        state.domains.thermal.set_from(&v1);
+        state.domains.thermal.set_from(&v2);
+        assert_eq!(state.domains.thermal.get(), Some(&v2));
+        // A different domain's slot is untouched.
+        assert!(state.domains.humidity.get().is_none());
     }
 
     #[test]
-    fn upsert_domain_preserves_other_domains() {
-        let mut state = crate::test_utils::default_env();
-        state.custom_domains.clear();
-        let a = DomainUpdate {
-            domain_id: crate::DomainId(1),
-            zone_temperatures_c: vec![],
-            custom_payload: None,
-        };
-        let b = DomainUpdate {
-            domain_id: crate::DomainId(2),
-            zone_temperatures_c: vec![],
-            custom_payload: None,
-        };
-        let b_updated = DomainUpdate {
-            domain_id: crate::DomainId(2),
-            zone_temperatures_c: vec![(ZoneId(1), 30.0)],
-            custom_payload: Some(vec![99.0]),
-        };
-        state.upsert_domain(a.clone());
-        state.upsert_domain(b);
-        state.upsert_domain(b_updated.clone());
-        assert_eq!(state.custom_domains.len(), 2);
-        assert_eq!(state.custom_domains[0], a);
-        assert_eq!(state.custom_domains[1], b_updated);
+    fn install_custom_rejects_fixed_ids_and_duplicates() {
+        let mut slots = crate::domain_solver::DomainSlots::default();
+        let first = slots
+            .install_custom(crate::DomainId(42))
+            .expect("first custom install");
+        assert_eq!(slots.custom(first), None);
+        for fixed in [
+            crate::THERMAL,
+            crate::ELECTRICAL,
+            crate::HUMIDITY,
+            crate::FLUID,
+            crate::SCHEDULE_DOMAIN_ID,
+            crate::MAINS_WATER_DOMAIN_ID,
+        ] {
+            let err = slots
+                .install_custom(fixed)
+                .expect_err("a fixed id must be refused");
+            assert!(err.to_string().contains(&format!("{fixed:?}")));
+        }
+        let err = slots
+            .install_custom(crate::DomainId(42))
+            .expect_err("a duplicate id must be refused");
+        assert!(err.to_string().contains("DomainId(42)"));
+        assert_eq!(slots.custom(first), None);
     }
 
     /// WeatherState::default() must produce values that avoid NaN/Inf hazards

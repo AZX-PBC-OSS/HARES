@@ -91,6 +91,11 @@ pub fn length_ft_to_m(ft: f64) -> f64 {
 }
 
 #[inline]
+pub fn length_m_to_ft(m: f64) -> f64 {
+    UomLength::new::<meter>(m).get::<foot>()
+}
+
+#[inline]
 pub fn length_in_to_m(inches: f64) -> f64 {
     UomLength::new::<inch>(inches).get::<meter>()
 }
@@ -227,6 +232,11 @@ pub fn specific_heat_kj_kg_k_to_j_kg_k(kj: f64) -> f64 {
 #[inline]
 pub fn volume_ft3_to_m3(ft3: f64) -> f64 {
     UomVolume::new::<cubic_foot>(ft3).get::<cubic_meter>()
+}
+
+#[inline]
+pub fn volume_m3_to_ft3(m3: f64) -> f64 {
+    UomVolume::new::<cubic_meter>(m3).get::<cubic_foot>()
 }
 
 #[inline]

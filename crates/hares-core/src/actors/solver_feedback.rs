@@ -4,6 +4,11 @@
 //! calls the solver to back-compute the required capacity, and dispatches
 //! `IdealCapacity` signals through the standard Actor::decide() interface.
 //!
+//! It also dispatches each zone's non-HVAC share of the sensible input
+//! column (the solver's last-integrate split) to the zone's cycling
+//! equipment, so the band-position duty estimate nets the same share out
+//! of its delivery that the ideal solve nets out of its capacity.
+//!
 //! Uses equipment indices internally and pre-cached `DispatchTarget`s
 //! (set once via `set_dispatch_targets()`) to minimize per-step work.
 //! `decide()` clones cached `DispatchTarget`s (cheap Arc refcount bump).
@@ -11,7 +16,7 @@
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_envelope::ThermalSolver;
 use hares_equipment::Equipment;
-use hares_types::{ControlSignal, EnvironmentState};
+use hares_types::{ControlSignal, EnvironmentState, ZoneId};
 
 use crate::Actor;
 
@@ -24,6 +29,9 @@ pub struct SolverFeedbackActor {
     /// Pre-allocated buffer for pending ideal capacity dispatches.
     /// Each entry is (equipment_index, capacity_w, degraded).
     pending: Vec<(usize, f64, bool)>,
+    /// Pre-allocated buffer for pending non-HVAC share dispatches.
+    /// Each entry is (equipment_index, zone, non_hvac_input_w).
+    pending_shares: Vec<(usize, ZoneId, f64)>,
     /// Pre-cached dispatch targets indexed by equipment position.
     /// Set once at init via `set_dispatch_targets()`, avoids per-step name cloning.
     dispatch_targets: Vec<DispatchTarget>,
@@ -34,6 +42,7 @@ impl SolverFeedbackActor {
     pub fn new() -> Self {
         Self {
             pending: Vec::with_capacity(4),
+            pending_shares: Vec::with_capacity(8),
             dispatch_targets: Vec::new(),
         }
     }
@@ -61,6 +70,33 @@ impl SolverFeedbackActor {
                 let capacity_w = solver.solve_ideal_capacity_for_target(zone, target_c);
                 let degraded = solver.zone_capacity_degraded(zone);
                 self.pending.push((idx, capacity_w, degraded));
+            }
+        }
+        self.collect_shares(equipment, solver);
+    }
+
+    /// Collect the per-zone non-HVAC shares for every cycling-class
+    /// thermostat equipment.
+    ///
+    /// Each cycling unit receives every zone's share and keeps only its own
+    /// served zone's at apply time. The ideal controllers hold their
+    /// setpoints through the solver's own netted dispatch and the tank
+    /// thermostats are not zone-air equipment, so neither consumes the
+    /// share. The signals queue with the step's other actor signals and
+    /// apply before the dispatch pass's `update_control` re-run, so the
+    /// cycling duty sees the same share the ideal solve used.
+    pub fn collect_shares(&mut self, equipment: &[Box<dyn Equipment>], solver: &ThermalSolver) {
+        self.pending_shares.clear();
+        let shares = solver.non_hvac_zone_inputs();
+        if shares.is_empty() {
+            return;
+        }
+        for (idx, eq) in equipment.iter().enumerate() {
+            if eq.thermostat_band_class() != Some(hares_types::ThermostatBandClass::Cycling) {
+                continue;
+            }
+            for (&zone, &watts) in shares {
+                self.pending_shares.push((idx, zone, watts));
             }
         }
     }
@@ -116,6 +152,21 @@ impl Actor for SolverFeedbackActor {
     }
 
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        for (idx, zone, watts) in self.pending_shares.drain(..) {
+            let Some(target) = self.dispatch_targets.get(idx) else {
+                tracing::warn!(
+                    idx,
+                    len = self.dispatch_targets.len(),
+                    "dispatch_targets not synced with equipment"
+                );
+                continue;
+            };
+            out.push(DispatchRequest {
+                target: target.clone(),
+                signal: ControlSignal::NonHvacZoneInput { zone, watts },
+                priority: PriorityTier::Schedule,
+            });
+        }
         for (idx, capacity_w, degraded) in self.pending.drain(..) {
             let Some(target) = self.dispatch_targets.get(idx) else {
                 tracing::warn!(

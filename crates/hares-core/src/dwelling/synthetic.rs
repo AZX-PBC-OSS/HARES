@@ -5,7 +5,6 @@ use std::path::Path;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_io::{Building, ColumnAggregation, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_physics::check_specific_heat_plausible;
 use hares_physics::solar::{EOT_C0, EOT_C1, EOT_C2, EOT_C3, EOT_C4};
 use hares_types::HaresError;
@@ -128,19 +127,18 @@ pub(crate) struct SyntheticSimulationConfig {
     pub(crate) duration_s: i64,
     #[serde(default)]
     pub(crate) initialization_duration_s: Option<u64>,
+    #[serde(default = "default_max_consecutive_step_failures")]
+    pub(crate) max_consecutive_step_failures: u32,
+}
+
+fn default_max_consecutive_step_failures() -> u32 {
+    hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SyntheticGeometryConfig {
     pub(crate) floor_area_m2: f64,
     pub(crate) zone_volume_m3: f64,
-    #[serde(default = "default_wall_area_m2")]
-    #[allow(dead_code)]
-    // Why: wall_area_m2 is parsed from 30+ existing TOML configs and test
-    // fixtures for backward compatibility but is no longer read by
-    // build_synthetic_building — T-0226 replaces the single-wall default
-    // with geometry-derived wall areas from floor_area and zone_volume.
-    pub(crate) wall_area_m2: f64,
     #[serde(default)]
     pub(crate) mass_multiplier: Option<f64>,
 }
@@ -347,6 +345,12 @@ pub(crate) struct SyntheticBoundaryConfig {
     pub(crate) material_layers: Vec<SyntheticMaterialLayer>,
     #[serde(default)]
     pub(crate) r_value_m2_k_w: Option<f64>,
+    /// The outside material, as the HPXML value of the boundary's material
+    /// element (a wall's `Siding`, a roof's `RoofType`), which sets its
+    /// outside convective roughness. Omitted, it takes OS-HPXML's default
+    /// material with a warning.
+    #[serde(default)]
+    pub(crate) outside_material: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -422,10 +426,6 @@ fn default_exterior_zone() -> String {
     "Outdoor".to_string()
 }
 
-fn default_wall_area_m2() -> f64 {
-    120.0
-}
-
 fn default_outdoor_temp_c() -> f64 {
     10.0
 }
@@ -489,6 +489,19 @@ pub(crate) fn build_synthetic_building(
     // Validate material properties before constructing anything so users
     // get clear error messages referencing their TOML fields rather than
     // cryptic downstream errors (e.g. NonPositiveResistance in RC network).
+
+    // The geometry sizes the zone: a floor area and a volume, each finite and
+    // positive, give its ceiling height; there is no assumed one.
+    for (field, value) in [
+        ("geometry.floor_area_m2", config.geometry.floor_area_m2),
+        ("geometry.zone_volume_m3", config.geometry.zone_volume_m3),
+    ] {
+        if !(value.is_finite() && value > 0.0) {
+            return Err(HaresError::Dwelling(format!(
+                "{field} must be finite and positive, got {value}"
+            )));
+        }
+    }
 
     // wall_r_value_m2_k_w > 0.0 — reject 0, negative, NaN
     {
@@ -590,9 +603,8 @@ pub(crate) fn build_synthetic_building(
                 // Plausibility check for non-zero specific heat values.
                 // Catches unit mismatches (kJ vs J) that pass the non-negative gate
                 // but produce physically impossible values for building materials.
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
                 if ml.specific_heat_j_kg_k > 0.0 {
-                    check_specific_heat_plausible(ml.specific_heat_j_kg_k, &bc.id);
+                    check_specific_heat_plausible(ml.specific_heat_j_kg_k, &bc.id)?;
                 }
                 // Warn on zero density or specific_heat for layers with positive thickness
                 if ml.thickness_m > 0.0 && ml.density_kg_m3 == 0.0 {
@@ -623,11 +635,7 @@ pub(crate) fn build_synthetic_building(
         .hvac
         .heating_capacity_kbtu_h
         .map(|kbtu| kbtu * 1000.0);
-    let floor_area = if config.geometry.floor_area_m2 > 0.0 {
-        config.geometry.floor_area_m2
-    } else {
-        config.geometry.zone_volume_m3 / 2.5
-    };
+    let floor_area = config.geometry.floor_area_m2;
     let fuel = config
         .hvac
         .fuel
@@ -840,22 +848,24 @@ pub(crate) fn build_synthetic_building(
         // With FractionLost = 0 for internal gains, the full accounting is:
         //   radiant + convective + latent = 1.0
         // where convective = sensible - radiant and latent = 1 - sensible.
-        // Assert this at startup so a misconfigured fixture fails immediately
-        // rather than producing silently wrong heat splits at runtime.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Fixture-config input: a fraction split that does not account to 1.0
+        // or a radiant fraction outside [0, sensible] produces silently wrong
+        // heat splits; an unconditional typed error at build.
         if let Some(sf) = sensible_frac {
             let rf = radiant_frac_toplevel_or_infilt.unwrap_or(0.0);
             let cf = sf - rf;
             let lf = (1.0 - sf).max(0.0);
-            debug_assert!(
-                (rf + cf + lf - 1.0).abs() <= 1e-6,
-                "internal gains fraction accounting: radiant ({rf}) + convective ({cf}) + latent ({lf}) = {} (expected 1.0 ± 1e-6)",
-                rf + cf + lf,
-            );
-            debug_assert!(
-                rf >= 0.0 && rf <= sf,
-                "internal gains radiant_fraction ({rf}) must be in [0, sensible_fraction ({sf})]"
-            );
+            if (rf + cf + lf - 1.0).abs() > 1e-6 {
+                return Err(HaresError::Dwelling(format!(
+                    "internal gains fraction accounting: radiant ({rf}) + convective ({cf}) + latent ({lf}) = {} (expected 1.0 ± 1e-6)",
+                    rf + cf + lf,
+                )));
+            }
+            if !(rf >= 0.0 && rf <= sf) {
+                return Err(HaresError::Dwelling(format!(
+                    "internal gains radiant_fraction ({rf}) must be in [0, sensible_fraction ({sf})]"
+                )));
+            }
         }
         if is_constant || sensible_frac.is_some() || radiant_frac_toplevel_or_infilt.is_some() {
             let mut ext_children = Vec::new();
@@ -1116,7 +1126,7 @@ pub(crate) fn build_synthetic_building(
                     exterior_zone: Some(parse_zone_type(&bc.exterior_zone)),
                     material_layers: layers,
                     construction_type: None,
-                    finish_type: None,
+                    finish_type: bc.outside_material.clone(),
                     insulation_details: None,
                     has_radiant_barrier: false,
                     solar_absorptance: bc.solar_absorptance,
@@ -1138,16 +1148,9 @@ pub(crate) fn build_synthetic_building(
         // outdoor (walls + roof) or ground (floor).
         //
         // Footprint is square (aspect ratio 1.0).  Ceiling height is
-        // inferred from zone volume / floor area.  This replaces the
-        // pre-T-0226 single-wall default which produced a non-physical
-        // open envelope with one vertical surface.
-        let ceiling_height_m = if config.geometry.floor_area_m2 > 0.0 {
-            config.geometry.zone_volume_m3 / config.geometry.floor_area_m2
-        } else {
-            // Fallback to a reasonable ceiling height when floor area
-            // is zero (should not occur in normal configs).
-            2.5
-        };
+        // inferred from zone volume / floor area, both validated positive
+        // above.
+        let ceiling_height_m = config.geometry.zone_volume_m3 / config.geometry.floor_area_m2;
         let side_length_m = config.geometry.floor_area_m2.sqrt();
         let wall_area_m2 = side_length_m * ceiling_height_m;
         let r_value = config.materials.wall_r_value_m2_k_w;
@@ -1297,123 +1300,108 @@ pub(crate) fn build_synthetic_building(
     let mut wall_original_area: std::collections::HashMap<String, f64> =
         std::collections::HashMap::new();
     for win in &windows {
-        if let Some(ref wall_id) = win.attached_to_wall_id {
-            if let Some(wall) = boundaries.iter_mut().find(|b| b.id == *wall_id) {
-                wall_original_area
-                    .entry(wall_id.clone())
-                    .or_insert(wall.area_m2);
-                wall.area_m2 -= win.area_m2;
-                if wall.area_m2 < 0.0 {
-                    tracing::warn!(
-                        window_id = %win.id,
-                        host_wall_id = %wall_id,
-                        window_area_m2 = win.area_m2,
-                        host_wall_original_area_m2 = *wall_original_area.get(wall_id).unwrap_or(&0.0),
-                        "Window area exceeds host wall area; clamping wall opaque area to 0.0"
-                    );
-                    wall.area_m2 = 0.0;
-                }
+        if let Some(ref wall_id) = win.attached_to_wall_id
+            && let Some(wall) = boundaries.iter_mut().find(|b| b.id == *wall_id)
+        {
+            wall_original_area
+                .entry(wall_id.clone())
+                .or_insert(wall.area_m2);
+            wall.area_m2 -= win.area_m2;
+            if wall.area_m2 < 0.0 {
+                tracing::warn!(
+                    window_id = %win.id,
+                    host_wall_id = %wall_id,
+                    window_area_m2 = win.area_m2,
+                    host_wall_original_area_m2 = *wall_original_area.get(wall_id).unwrap_or(&0.0),
+                    "Window area exceeds host wall area; clamping wall opaque area to 0.0"
+                );
+                wall.area_m2 = 0.0;
             }
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        for boundary in &boundaries {
-            assert!(
-                boundary.area_m2 >= 0.0,
+    // Boundary area >= 0 is physics (a negative area is invalid input):
+    // a typed error. The wall + window reconstruction is an assembler
+    // identity: a debug-build check.
+    for boundary in &boundaries {
+        if boundary.area_m2 < 0.0 {
+            return Err(HaresError::Dwelling(format!(
                 "boundary {} has negative area_m2 = {}",
-                boundary.id,
-                boundary.area_m2
-            );
+                boundary.id, boundary.area_m2
+            )));
         }
-        for boundary in &boundaries {
-            if matches!(
-                boundary.boundary_type,
-                BoundaryType::Window | BoundaryType::Skylight
-            ) {
-                continue;
-            }
-            let attached_window_area: f64 = windows
-                .iter()
-                .filter(|w| w.attached_to_wall_id.as_deref() == Some(boundary.id.as_str()))
-                .map(|w| w.area_m2)
-                .sum();
-            if attached_window_area > 0.0 {
-                let reconstructed_original = boundary.area_m2 + attached_window_area;
-                if let Some(&stored_original) = wall_original_area.get(&boundary.id) {
-                    if boundary.area_m2 > 0.0 {
-                        // Normal case: opaque area remaining, so reconstructed
-                        // should equal stored original.
-                        assert!(
-                            (reconstructed_original - stored_original).abs() < 1e-9,
-                            "boundary {}: reconstructed original {reconstructed_original} != stored original {stored_original}",
-                            boundary.id
-                        );
-                    } else {
-                        // Clamped case: reconstructed will be >= stored original
-                        // because window area exceeded wall area.
-                        assert!(
-                            reconstructed_original >= stored_original - 1e-9,
-                            "boundary {}: reconstructed original {reconstructed_original} < stored original {stored_original}",
-                            boundary.id
-                        );
-                    }
+    }
+    #[cfg(debug_assertions)]
+    for boundary in &boundaries {
+        if matches!(
+            boundary.boundary_type,
+            BoundaryType::Window | BoundaryType::Skylight
+        ) {
+            continue;
+        }
+        let attached_window_area: f64 = windows
+            .iter()
+            .filter(|w| w.attached_to_wall_id.as_deref() == Some(boundary.id.as_str()))
+            .map(|w| w.area_m2)
+            .sum();
+        if attached_window_area > 0.0 {
+            let reconstructed_original = boundary.area_m2 + attached_window_area;
+            if let Some(&stored_original) = wall_original_area.get(&boundary.id) {
+                if boundary.area_m2 > 0.0 {
+                    // Normal case: opaque area remaining, so reconstructed
+                    // should equal stored original.
+                    assert!(
+                        (reconstructed_original - stored_original).abs() < 1e-9,
+                        "boundary {}: reconstructed original {reconstructed_original} != stored original {stored_original}",
+                        boundary.id
+                    );
+                } else {
+                    // Clamped case: reconstructed will be >= stored original
+                    // because window area exceeded wall area.
+                    assert!(
+                        reconstructed_original >= stored_original - 1e-9,
+                        "boundary {}: reconstructed original {reconstructed_original} < stored original {stored_original}",
+                        boundary.id
+                    );
                 }
             }
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        // Verify the synthetic building has a closed thermal envelope.
-        // A single-boundary envelope (the pre-T-0226 default) is an open,
-        // non-physical geometry.  We require at minimum two of the three
-        // structural face categories (Wall, Roof, Floor) when the zone
-        // volume is non-zero.
-        if config.geometry.zone_volume_m3 > 0.0 {
-            let non_window: Vec<&Boundary> = boundaries
-                .iter()
-                .filter(|b| {
-                    !matches!(
-                        b.boundary_type,
-                        BoundaryType::Window | BoundaryType::Skylight
-                    )
-                })
-                .collect();
-            let has_wall = non_window
-                .iter()
-                .any(|b| b.boundary_type == BoundaryType::Wall);
-            let has_roof = non_window
-                .iter()
-                .any(|b| b.boundary_type == BoundaryType::Roof);
-            let has_floor = non_window
-                .iter()
-                .any(|b| b.boundary_type == BoundaryType::Floor);
-            let face_categories = [has_wall, has_roof, has_floor]
-                .iter()
-                .filter(|&&x| x)
-                .count();
-            if face_categories < 2 {
-                tracing::error!(
-                    zone_volume_m3 = config.geometry.zone_volume_m3,
-                    boundary_count = non_window.len(),
-                    has_wall,
-                    has_roof,
-                    has_floor,
-                    "Synthetic building envelope is incomplete: fewer than 2 of 3 required \
-                     face categories (Wall, Roof, Floor) are present"
-                );
-            }
-            if non_window.len() == 1 {
-                tracing::error!(
-                    zone_volume_m3 = config.geometry.zone_volume_m3,
-                    single_boundary_id = %non_window[0].id,
-                    single_boundary_type = ?non_window[0].boundary_type,
-                    "Synthetic building has only one non-window boundary with non-zero \
-                     zone volume; thermal envelope is open and non-physical"
-                );
-            }
+    // Verify the synthetic building has a closed thermal envelope, in every
+    // build profile. A single-boundary envelope (the old one-boundary
+    // default) is an open, non-physical geometry: a zone with positive
+    // volume must carry at least two of the three structural face categories
+    // (Wall, Roof, Floor). This is the production constructor for every
+    // synthetic-TOML dwelling, so an open envelope is a Dwelling error, not
+    // a diagnostic.
+    if config.geometry.zone_volume_m3 > 0.0 {
+        // Only the zone's own faces with area close it. A foundation wall
+        // or rim joist is a wall and a slab is a floor; a door or window is
+        // an opening in a face, not a face.
+        let closes_with = |categories: &[BoundaryType]| {
+            boundaries.iter().any(|b| {
+                b.interior_zone == Some(ZoneType::Conditioned)
+                    && b.area_m2 > 0.0
+                    && categories.contains(&b.boundary_type)
+            })
+        };
+        let has_wall = closes_with(&[
+            BoundaryType::Wall,
+            BoundaryType::FoundationWall,
+            BoundaryType::RimJoist,
+        ]);
+        let has_roof = closes_with(&[BoundaryType::Roof]);
+        let has_floor = closes_with(&[BoundaryType::Floor, BoundaryType::Slab]);
+        let face_categories =
+            usize::from(has_wall) + usize::from(has_roof) + usize::from(has_floor);
+        if face_categories < 2 {
+            return Err(HaresError::Dwelling(format!(
+                "synthetic zone 'Conditioned' (zone_volume_m3 = {}) has an open thermal \
+                 envelope: at least two of the three face categories must be present \
+                 (Wall: {}, Roof: {}, Floor: {}); add the missing boundaries",
+                config.geometry.zone_volume_m3, has_wall, has_roof, has_floor
+            )));
         }
     }
 
@@ -1445,28 +1433,29 @@ pub(crate) fn build_synthetic_building(
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     {
         // Verify that explicit HVAC capacity is positive and finite relative
         // to floor area. The ratio is not clamped to a tight residential band
         // because synthetic test fixtures use deliberately extreme values
         // (e.g. 500 kBTU/h for stress testing). Autosized capacity
         // (hvac_capacity_w = None) is validated by the autosizer's internal
-        // invariants instead.
+        // invariants instead. Fixture-config input: a typed error.
         if let Some(capacity_w) = heating_capacity_btu_h.map(conv::power_btu_h_to_w)
             && capacity_w > 0.0
         {
-            assert!(
-                capacity_w.is_finite(),
-                "synthetic building explicit hvac_capacity_w is NaN or infinite"
-            );
+            if !capacity_w.is_finite() {
+                return Err(HaresError::Dwelling(
+                    "synthetic building explicit hvac_capacity_w is NaN or infinite".to_string(),
+                ));
+            }
             let w_per_m2 = capacity_w / floor_area;
-            assert!(
-                w_per_m2 > 0.0 && w_per_m2.is_finite(),
-                "synthetic building with floor_area_m2 = {floor_area} has explicit \
-                 hvac_capacity_w = {capacity_w:.0} W → {w_per_m2:.1} W/m², which is \
-                 non-positive or non-finite"
-            );
+            if !(w_per_m2 > 0.0 && w_per_m2.is_finite()) {
+                return Err(HaresError::Dwelling(format!(
+                    "synthetic building with floor_area_m2 = {floor_area} has explicit \
+                     hvac_capacity_w = {capacity_w:.0} W → {w_per_m2:.1} W/m², which is \
+                     non-positive or non-finite"
+                )));
+            }
         }
     }
 
@@ -1519,6 +1508,8 @@ pub(crate) fn build_synthetic_building(
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         boundaries,
         windows,
@@ -1539,16 +1530,23 @@ pub(crate) fn build_synthetic_building(
         cooling_weekend_setpoints_c: cooling_weekday,
         battery_round_trip_efficiency: None,
         pv_tilt_deg: None,
-        conditioned_volume_m3: Some(config.geometry.zone_volume_m3),
-        ceiling_height_m: None,
+        conditioned_volume_m3: config.geometry.zone_volume_m3,
+        // The synthetic house is one conditioned zone on one storey.
+        ceiling_height_m: config.geometry.zone_volume_m3 / config.geometry.floor_area_m2,
         infiltration_height_m: None,
-        floors_above_grade: None,
+        floors_above_grade: 1.0,
         has_flue_or_chimney: None,
         foundation_name: None,
+        conditioned_foundation_merged: false,
         residential_facility_type: None,
-        mass_multiplier_override: config.geometry.mass_multiplier,
+        temperature_capacitance_multiplier: config
+            .geometry
+            .mass_multiplier
+            .unwrap_or(hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT),
         hvac_deadband_c: config.hvac.deadband_c,
+        climate_zone_iecc: None,
         details_xml,
+        parse_warnings: Vec::new(),
     };
 
     // Post-construction debug assertions: verify ranges hold in the built object
@@ -1702,6 +1700,7 @@ pub(crate) fn build_synthetic_weather(
         source_step_secs: 3600,
         midpoint_offset_secs: 0,
         has_embedded_location: true,
+        station_wmo: None,
     };
 
     let outdoor_temp_c = config.weather.outdoor_temp_c;
@@ -1784,7 +1783,10 @@ pub(crate) fn build_synthetic_weather(
         (vec![0.0; n], vec![0.0; n], vec![0.0; n])
     };
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    // Debug-build checks of the closed-form generator's identities: the
+    // GHI decomposition (GHI = DNI·cos(zenith) + DHI) and the all-zero-GHI
+    // clear-sky guard are properties of the generator, not of any input.
+    #[cfg(debug_assertions)]
     {
         // Invariant: if GHI[t] > 0, then DNI[t] ≥ 0, DHI[t] ≥ 0, and
         // GHI ≈ DNI × cos(zenith) + DHI within tolerance.
@@ -1888,46 +1890,10 @@ pub(crate) fn build_synthetic_weather(
         vec![outdoor_temp_c; n]
     };
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        // Invariant: if diurnal amplitude > 0, the output must have non-zero
-        // variance (the diurnal model produced actual variation).
-        if diurnal_amp > 0.0 {
-            let min = dry_bulb_c.iter().copied().fold(f64::INFINITY, f64::min);
-            let max = dry_bulb_c.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let range = max - min;
-            assert!(
-                range > 0.01,
-                "diurnal_amplitude_c ({diurnal_amp}) > 0 but dry_bulb_c range ({range:.6}) ≈ 0 — \
-                 diurnal model produced degenerate flat output"
-            );
-            // Invariant: the daily peak temperature should occur during
-            // afternoon hours (13–17 local time at timezone offset 0), not
-            // at midnight or dawn.
-            //
-            // Check day 180 (June 29): summer, peak should be well into
-            // afternoon. Day index 179 (0-based, hour 4296..4319).
-            let day_start = 179 * 24;
-            let day_end = day_start + 24;
-            if day_end <= n {
-                let mut peak_hour = 0;
-                let mut peak_val = f64::NEG_INFINITY;
-                for (h, &val) in dry_bulb_c.iter().enumerate().take(day_end).skip(day_start) {
-                    if val > peak_val {
-                        peak_val = val;
-                        peak_hour = h % 24;
-                    }
-                }
-                assert!(
-                    (13..=17).contains(&peak_hour),
-                    "day 180 (June 29) peak dry-bulb hour ({peak_hour}) should be in 13–17 \
-                     (afternoon local time); diurnal_amplitude_c = {diurnal_amp}, \
-                     thermal_lag_h = {thermal_lag_h}",
-                );
-            }
-        }
-    }
-
+    // Invariant: if diurnal amplitude > 0, the output must have non-zero
+    // variance (the diurnal model produced actual variation) and the daily
+    // peak must fall in the afternoon. Properties of the closed-form
+    // generator: unit tests (`synthetic_weather_*`), not a per-build check.
     #[cfg(feature = "observe")]
     {
         let mut daily_ranges: Vec<f64> = Vec::with_capacity(365);
@@ -2106,26 +2072,47 @@ pub(crate) fn build_synthetic_schedule(
     })
 }
 
+/// Reads the process's peak resident set size in KiB (`VmHWM` from
+/// `/proc/self/status`). `None` off Linux. On Linux, a read or parse failure
+/// is logged with `tracing::warn!` naming the error and yields `None`,
+/// never a zero, which would read as a measurement.
 #[cfg(feature = "profiling")]
-pub(crate) fn current_process_hwm_kb() -> u64 {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-        return 0;
-    };
-
-    status
-        .lines()
-        .find_map(|line| {
-            if !line.starts_with("VmHWM:") {
-                return None;
+pub(crate) fn current_process_hwm_kb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        match process_vm_hwm_kb() {
+            Ok(kb) => Some(kb),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "could not read the process memory high-water mark; profiling reports no measurement",
+                );
+                None
             }
-            line.split_whitespace().nth(1)?.parse::<u64>().ok()
-        })
-        .unwrap_or(0)
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
-#[cfg(feature = "profiling")]
-pub(crate) fn hot_path_alloc_counter() -> u64 {
-    0
+/// Parses `VmHWM` out of `/proc/self/status`.
+#[cfg(all(feature = "profiling", target_os = "linux"))]
+fn process_vm_hwm_kb() -> std::result::Result<u64, String> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|error| format!("could not read /proc/self/status: {error}"))?;
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("VmHWM:"))
+        .ok_or("VmHWM line missing from /proc/self/status")?;
+    let value = line
+        .split_whitespace()
+        .nth(1)
+        .ok_or("VmHWM line carries no value")?;
+    value
+        .parse::<u64>()
+        .map_err(|error| format!("could not parse the VmHWM value `{value}` as KiB: {error}"))
 }
 
 #[cfg(test)]
@@ -2135,8 +2122,87 @@ mod tests {
     use hares_io::hpxml::{BoundaryType, ZoneType};
     use std::collections::HashSet;
 
-    fn find_xml_child<'a>(children: &'a [XmlNode], name: &str) -> Option<&'a XmlNode> {
+    fn find_xml_child<'a>(children: &'a [XmlNode], name: &'a str) -> Option<&'a XmlNode> {
         children.iter().find(|n| n.name == name)
+    }
+
+    // -------------------------------------------------------------------------
+    // Diurnal dry-bulb generator properties (replaced the gated per-build
+    // checks: the generator is closed-form, so the properties are unit tests)
+    // -------------------------------------------------------------------------
+
+    fn diurnal_config() -> SyntheticTomlConfig {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = 10.0
+diurnal_amplitude_c = 10.0
+"#;
+        toml::from_str(toml).expect("parse")
+    }
+
+    /// With diurnal amplitude > 0 the dry-bulb series must have non-zero
+    /// variance, and the June 29 daily peak must fall in the afternoon
+    /// (hours 13 to 17 local).
+    #[test]
+    fn synthetic_diurnal_has_variance_and_afternoon_peak() {
+        let config = diurnal_config();
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+
+        let min = weather
+            .dry_bulb_c
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let max = weather
+            .dry_bulb_c
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            max - min > 0.01,
+            "diurnal amplitude configured but the dry-bulb range ({:.6}) is degenerate",
+            max - min
+        );
+
+        // Day 180 = June 29: day index 179 (0-based).
+        let day_start = 179 * 24;
+        let day_end = day_start + 24;
+        assert!(day_end <= weather.dry_bulb_c.len(), "fixture too short");
+        let mut peak_hour = 0;
+        let mut peak_val = f64::NEG_INFINITY;
+        for (h, &val) in weather
+            .dry_bulb_c
+            .iter()
+            .enumerate()
+            .take(day_end)
+            .skip(day_start)
+        {
+            if val > peak_val {
+                peak_val = val;
+                peak_hour = h % 24;
+            }
+        }
+        assert!(
+            (13..=17).contains(&peak_hour),
+            "day 180 (June 29) peak dry-bulb hour ({peak_hour}) should be in 13-17"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -2403,17 +2469,8 @@ clear_sky_solar = false
         use crate::dwelling::Dwelling;
         use std::fs;
 
-        let toml_path = {
-            let mut path = std::env::temp_dir();
-            path.push(format!(
-                "hares-t0188-solar-{}.toml",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ));
-            path
-        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("solar.toml");
         // Minimum BESTEST-600-like config with no EPW path (synthetic weather),
         // start time at solar noon UTC (~19:00) for Denver longitude (-104.86°).
         let content = r#"building_id = 600
@@ -2432,6 +2489,8 @@ equipment_name = "None"
 [setpoints]
 heating_c = 20.0
 cooling_c = 27.0
+[infiltration]
+ach = 0.0
 [schedule]
 occupancy = 0.0
 occupants_present = false
@@ -2456,8 +2515,6 @@ master_seed = 0
         let ghi = env.weather.ghi_w_m2;
         let dni = env.weather.dni_w_m2;
         let dhi = env.weather.dhi_w_m2;
-
-        let _ = fs::remove_file(&toml_path);
 
         // At Denver lat 39.76° N on July 21, 19:00 UTC ≈ solar noon → GHI >> 0.
         assert!(
@@ -3023,13 +3080,24 @@ zone_volume_m3 = 120.0
 wall_r_value_m2_k_w = 2.0
 [hvac]
 equipment_name = "None"
-
 [[boundaries]]
 id = "wall-1"
 boundary_type = "Wall"
 area_m2 = 10.0
 interior_zone = "Conditioned"
 exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
 [[boundaries.material_layers]]
 thickness_m = 0.01
 conductivity_w_m_k = 0.1
@@ -3070,11 +3138,11 @@ attached_to_wall_id = "wall-1"
             win_boundary.area_m2
         );
 
-        // Total boundary area: 8.0 (wall) + 2.0 (window) = 10.0.
+        // Total boundary area: 8.0 (wall) + 2.0 (window) + 10.0 (floor) = 20.0.
         let total: f64 = building.boundaries.iter().map(|b| b.area_m2).sum();
         assert!(
-            (total - 10.0).abs() < 1e-9,
-            "Total area should be 10.0 m², got {}",
+            (total - 20.0).abs() < 1e-9,
+            "Total area should be 20.0 m², got {}",
             total
         );
     }
@@ -3229,6 +3297,207 @@ attached_to_wall_id = "south-wall"
             (total - expected_total).abs() < 1e-9,
             "Total boundary area should be {expected_total} m² (no double-counting), got {total}"
         );
+    }
+
+    /// A synthetic zone with positive volume and only one structural face
+    /// category (a single Wall, no Roof, no Floor) is an open, non-physical
+    /// envelope: a typed Dwelling error naming the zone's face categories,
+    /// in every build profile.
+    #[test]
+    fn synthetic_building_requires_a_floor_area_and_volume() {
+        for (floor_area, volume, field) in [
+            ("0.0", "120.0", "geometry.floor_area_m2"),
+            ("48.0", "-1.0", "geometry.zone_volume_m3"),
+        ] {
+            let toml = format!(
+                "building_id = 1\n[simulation]\nstart_time = \"2024-01-01T00:00:00Z\"\n\
+                 time_res_s = 3600\nduration_s = 3600\n[geometry]\nfloor_area_m2 = {floor_area}\n\
+                 zone_volume_m3 = {volume}\n[materials]\nwall_r_value_m2_k_w = 2.0\n[hvac]\n\
+                 equipment_name = \"None\"\n"
+            );
+            let config: SyntheticTomlConfig = toml::from_str(&toml).expect("parse");
+            let err = build_synthetic_building(&config, None, None)
+                .expect_err("a zone with no floor area or volume has no ceiling height");
+            assert!(err.to_string().contains(field), "{err}");
+        }
+    }
+
+    #[test]
+    fn synthetic_building_rejects_open_envelope() {
+        let toml = r#"
+building_id = 1
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+[materials]
+wall_r_value_m2_k_w = 2.0
+[hvac]
+equipment_name = "None"
+
+[[boundaries]]
+id = "wall-1"
+boundary_type = "Wall"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        let err = result.expect_err("a one-wall zone with positive volume must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("Conditioned"),
+            "the error must name the zone, got: {message}"
+        );
+        assert!(
+            message.contains("Wall") && message.contains("Roof") && message.contains("Floor"),
+            "the error must name the three face categories, got: {message}"
+        );
+    }
+
+    /// Two of the three structural face categories (Wall + Floor, no Roof)
+    /// close the envelope: the check is "at least 2 of 3", not "all 3".
+    #[test]
+    fn synthetic_building_accepts_two_of_three_face_categories() {
+        let toml = r#"
+building_id = 1
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+[materials]
+wall_r_value_m2_k_w = 2.0
+[hvac]
+equipment_name = "None"
+
+[[boundaries]]
+id = "wall-1"
+boundary_type = "Wall"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
+        assert!(
+            building
+                .boundaries
+                .iter()
+                .any(|b| b.boundary_type == BoundaryType::Floor),
+            "the Wall+Floor envelope must build with its floor present"
+        );
+    }
+
+    /// A synthetic TOML whose `[[boundaries]]` are the given
+    /// `(boundary_type, area_m2, interior_zone, exterior_zone)` faces.
+    fn closure_test_config(faces: &[(&str, f64, &str, &str)]) -> SyntheticTomlConfig {
+        let mut toml = String::from(
+            r#"
+building_id = 1
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+[materials]
+wall_r_value_m2_k_w = 2.0
+[hvac]
+equipment_name = "None"
+"#,
+        );
+        for (idx, (boundary_type, area_m2, interior, exterior)) in faces.iter().enumerate() {
+            toml.push_str(&format!(
+                r#"
+[[boundaries]]
+id = "face-{idx}"
+boundary_type = "{boundary_type}"
+area_m2 = {area_m2:.1}
+interior_zone = "{interior}"
+exterior_zone = "{exterior}"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+"#
+            ));
+        }
+        toml::from_str(&toml).expect("parse")
+    }
+
+    /// A slab is the zone's floor and a foundation wall is a wall: a
+    /// slab-on-grade box and a walled foundation under a roof are closed.
+    #[test]
+    fn synthetic_closure_counts_slab_as_floor_and_foundation_wall_as_wall() {
+        for faces in [
+            vec![
+                ("Wall", 10.0, "Conditioned", "Outdoor"),
+                ("Slab", 10.0, "Conditioned", "Ground"),
+            ],
+            vec![
+                ("FoundationWall", 10.0, "Conditioned", "Ground"),
+                ("Slab", 10.0, "Conditioned", "Ground"),
+                ("Roof", 10.0, "Conditioned", "Outdoor"),
+            ],
+        ] {
+            build_synthetic_building(&closure_test_config(&faces), None, None)
+                .unwrap_or_else(|err| panic!("{faces:?} is a closed envelope: {err}"));
+        }
+    }
+
+    /// A face with no area closes nothing.
+    #[test]
+    fn synthetic_closure_rejects_a_zero_area_face() {
+        let faces = [
+            ("Wall", 10.0, "Conditioned", "Outdoor"),
+            ("Roof", 0.0, "Conditioned", "Outdoor"),
+        ];
+        build_synthetic_building(&closure_test_config(&faces), None, None)
+            .expect_err("a zero-area roof must not close the envelope");
+    }
+
+    /// Only the conditioned zone's own boundaries close it: an attic's roof
+    /// is not the conditioned zone's roof.
+    #[test]
+    fn synthetic_closure_counts_only_the_zones_own_boundaries() {
+        let faces = [
+            ("Wall", 10.0, "Conditioned", "Outdoor"),
+            ("Roof", 10.0, "Attic", "Outdoor"),
+        ];
+        build_synthetic_building(&closure_test_config(&faces), None, None)
+            .expect_err("another zone's roof must not close the conditioned zone");
     }
 
     // -------------------------------------------------------------------------
@@ -3447,7 +3716,6 @@ duration_s = 86400
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.0
@@ -3630,8 +3898,9 @@ equipment_name = "None"
 
         let zone_inputs = vec![hares_envelope::ZoneInput {
             floor_area_m2: Some(48.0),
-            volume_m3: None,
-            mass_multiplier: hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(120.0),
+            temperature_capacitance_multiplier:
+                hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let zone_caps = hares_envelope::derive_zone_capacitances(
             &zone_inputs,
@@ -3725,8 +3994,9 @@ equipment_name = "None"
 
         let zone_inputs = vec![hares_envelope::ZoneInput {
             floor_area_m2: Some(48.0),
-            volume_m3: None,
-            mass_multiplier: hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(120.0),
+            temperature_capacitance_multiplier:
+                hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let zone_caps = hares_envelope::derive_zone_capacitances(
             &zone_inputs,
@@ -3823,8 +4093,9 @@ master_seed = 0
 
         let zone_inputs = vec![hares_envelope::ZoneInput {
             floor_area_m2: Some(48.0),
-            volume_m3: None,
-            mass_multiplier: hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(120.0),
+            temperature_capacitance_multiplier:
+                hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let zone_caps = hares_envelope::derive_zone_capacitances(
             &zone_inputs,
@@ -4351,6 +4622,18 @@ thickness_m = 0.1
 conductivity_w_m_k = 0.0
 density_kg_m3 = 500.0
 specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let result = build_synthetic_building(&config, None, None);
@@ -4402,6 +4685,18 @@ thickness_m = 0.1
 conductivity_w_m_k = 1.0
 density_kg_m3 = 0.0
 specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let result = build_synthetic_building(&config, None, None);
@@ -4443,6 +4738,18 @@ thickness_m = 0.1
 conductivity_w_m_k = 1.0
 density_kg_m3 = 500.0
 specific_heat_j_kg_k = 0.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let result = build_synthetic_building(&config, None, None);
@@ -4483,6 +4790,18 @@ exterior_zone = "Outdoor"
 thickness_m = 0.1
 conductivity_w_m_k = 1.0
 density_kg_m3 = -500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "floor-1"
+boundary_type = "Floor"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
 specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");

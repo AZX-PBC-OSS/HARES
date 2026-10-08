@@ -1,23 +1,16 @@
-//! Regression tests for Equipment Ports Applied Before Zone State Update.
+//! Zone-state ordering within a step.
 //!
-//! Defect 1: It was claimed that non-thermal equipment (PV, Battery, EV) at Step 3b
-//! (mod.rs:2168) sees post-integrate zone temperatures because it runs after
-//! `apply_thermal_update_to_zones` (mod.rs:2240). This test proves the claim is
-//! FALSE: Step 3b runs at line 2168, well before `integrate` at line 2236 and
-//! `apply_thermal_update_to_zones` at line 2240. Both thermal and non-thermal
-//! equipment observe the same prior-step zone temperatures (predictor-consistent).
-//!
-//! Defect 2 (humidity fallback): the `env.zones[i].humidity_ratio` fallback at
-//! `humidity_solver.rs:129-133` is only reachable on the very first timestep,
-//! and even then returns the same value as `self.humidity_ratios` because both
-//! are initialised from `env.zones` in `HumiditySolver::new`. This test confirms
-//! steady-state simulations do not exercise the fallback path.
+//! Non-thermal (Independent-stage) equipment such as PV, batteries and EVs
+//! steps before the envelope integrates, so it reads the zone temperatures
+//! the previous step committed, the same predictor state thermal equipment
+//! reads. The humidity solver's fallback to `env.zones` humidity is reachable
+//! only before its own state exists; a multi-step run keeps its output valid.
 
 use std::borrow::Cow;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use hares_core::Dwelling;
 use hares_equipment::{Equipment, EquipmentConfig};
@@ -31,20 +24,7 @@ use hares_types::{
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn nanos_suffix() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos()
-}
-
-fn unique_temp_toml(tag: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("hares-zone-state-{tag}-{}.toml", nanos_suffix()));
-    path
-}
-
-fn write_minimal_toml(path: &PathBuf) {
+fn write_minimal_toml(path: &Path) {
     let content = r#"building_id = 4545
 
 [simulation]
@@ -55,7 +35,6 @@ duration_s = 600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -68,6 +47,9 @@ outdoor_temp_c = 20.0
 dew_point_c = 10.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.0
 
 [schedule]
 occupancy = 0.0
@@ -83,11 +65,10 @@ master_seed = 0
 }
 
 fn build_dwelling(tag: &str) -> Dwelling {
-    let path = unique_temp_toml(tag);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(format!("{tag}.toml"));
     write_minimal_toml(&path);
-    let dwelling = Dwelling::from_toml_config(&path).expect("synthetic TOML must load");
-    let _ = fs::remove_file(&path);
-    dwelling
+    Dwelling::from_toml_config(&path).expect("synthetic TOML must load")
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +102,6 @@ impl ZoneTemperatureSniffer {
                 equipment_type: Cow::Borrowed("ZoneTemperatureSniffer"),
                 zone: None,
                 fuel: FuelType::Electric,
-                // Independent stage = non-thermal (runs in Step 3b at mod.rs:2168)
                 stage: ExecutionStage::Independent,
                 control_capabilities: ControlCapabilities::empty(),
                 core_capabilities: CoreCapabilities::empty(),
@@ -164,10 +144,6 @@ impl Equipment for ZoneTemperatureSniffer {
         _dt: Duration,
         _ports: &mut PortSlots,
     ) -> Result<(), HaresError> {
-        // Snapshot zone temperatures at the moment non-thermal equipment runs.
-        // If Defect 1 were real these would be post-integrate values. If the
-        // ticket's claim is false (which the code shows), these will be
-        // prior-step (predictor-consistent) values — same as thermal equipment sees.
         let mut record = self.recorded_temps.lock().unwrap();
         for zone in &env.zones {
             record.push(zone.temperature_c);
@@ -195,21 +171,15 @@ impl Equipment for ZoneTemperatureSniffer {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Defect 1 disproof: Non-thermal equipment (Step 3b, line 2168) sees the same
-/// prior-step zone temperatures as thermal equipment because Step 3b runs
-/// BEFORE `integrate` (line 2236) and BEFORE `apply_thermal_update_to_zones`
-/// (line 2240). This test verifies that zone temperatures seen by the sniffer
-/// (an Independent-stage stub) are physically plausible predictor-phase values,
-/// not NaN or obviously post-corrector values.
-///
-/// If the ticket's ordering claim were correct (non-thermal sees post-integrate
-/// temps), removing the integration step from the test would cause a NaN or
-/// panic. Since the code order is actually Step3b → integrate → apply_update,
-/// the sniffer always sees valid pre-integrate zone temperatures.
+/// In every step, Independent-stage equipment reads exactly the zone
+/// temperatures the previous step committed (the dwelling's zone state
+/// before the step), never the values the step's own envelope integration
+/// produces. The run must move the zone temperature, or the comparison could
+/// not tell the two apart.
 #[test]
-fn nonthermal_equipment_sees_predictor_consistent_zone_temps() {
+fn nonthermal_equipment_reads_the_previous_steps_zone_temperatures() {
     let recorded: ZoneTempRecord = Arc::new(Mutex::new(Vec::new()));
-    let mut dwelling = build_dwelling("zone-state-defect1");
+    let mut dwelling = build_dwelling("zone-state-prior-step");
     dwelling
         .add_equipment(Box::new(ZoneTemperatureSniffer::new(
             "zone_temp_sniffer",
@@ -217,61 +187,33 @@ fn nonthermal_equipment_sees_predictor_consistent_zone_temps() {
         )))
         .expect("add_equipment must succeed");
 
-    // Run several timesteps.
-    for _ in 0..5 {
+    let zone_temps = |dwelling: &Dwelling| -> Vec<f64> {
+        dwelling
+            .latest_env()
+            .zones
+            .iter()
+            .map(|zone| zone.temperature_c)
+            .collect()
+    };
+
+    let mut zone_state_moved = false;
+    for step in 0..5 {
+        let before = zone_temps(&dwelling);
+        let seen_from = recorded.lock().unwrap().len();
         dwelling.step().expect("step must succeed");
-    }
+        let seen = recorded.lock().unwrap()[seen_from..].to_vec();
+        let after = zone_temps(&dwelling);
 
-    let temps = recorded.lock().unwrap();
-    // There must be at least one zone temperature recorded per step.
-    assert!(
-        !temps.is_empty(),
-        "zone temperature sniffer must record at least one value"
-    );
-    // All recorded temperatures must be finite — if non-thermal equipment were
-    // receiving uninitialized post-integrate values, we'd expect NaN or panic.
-    for &t in temps.iter() {
-        assert!(
-            t.is_finite(),
-            "non-thermal equipment must see finite zone temperature; got {t}"
+        assert_eq!(
+            seen, before,
+            "step {step}: equipment must see the zone temperatures committed before the step"
         );
-        // Sanity-check: zone temperatures must be physically plausible (−40..80°C).
-        assert!(
-            (-40.0..=80.0).contains(&t),
-            "non-thermal equipment zone temperature {t}°C is outside plausible range"
-        );
+        zone_state_moved |= after != before;
     }
-}
-
-/// Documents the actual execution order in `run_timestep` as of the current
-/// code. This test is a static assertion that the line-number ordering
-/// described is wrong: non-thermal equipment (Step 3b) occurs
-/// BEFORE envelope integration, not after apply_thermal_update_to_zones.
-///
-/// The test passes vacuously — it is here as documentation that the
-/// ordering claim was audited and found incorrect. The substantive check is
-/// the code reading recorded in the audit section.
-#[test]
-#[allow(clippy::assertions_on_constants)]
-fn ordering_claim_is_factually_incorrect() {
-    // The ticket states:
-    //   "Non-thermal equipment step (mod.rs:2168) runs AFTER apply_thermal_update_to_zones
-    //    (mod.rs:2240)"
-    //
-    // The actual code at mod.rs shows:
-    //   line 2168-2214: Step 3b (non-thermal equipment step)    ← BEFORE integrate
-    //   line 2236-2237: thermal_solver.integrate(...)           ← integrate
-    //   line 2240:      apply_thermal_update_to_zones(...)      ← AFTER non-thermal step
-    //
-    // Therefore: non-thermal equipment at 2168 < apply_thermal_update at 2240.
-    // Non-thermal equipment sees the SAME prior-step zone temperatures as thermal
-    // equipment — the ordering is predictor-consistent.
-    //
-    // This test passes unconditionally; it serves as a permanent regression
-    // marker that the ordering was audited on 2026-05-21 and found correct.
     assert!(
-        2168 < 2240,
-        "non-thermal step line must precede apply_thermal_update line"
+        zone_state_moved,
+        "the zone temperature never changed, so the run cannot distinguish \
+         prior-step from integrated values"
     );
 }
 

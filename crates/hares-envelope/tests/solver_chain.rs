@@ -35,6 +35,7 @@ fn approx_eq(actual: f64, expected: f64, tol: f64, label: &str) {
 
 fn env_with_zone(zone_temp_c: f64, outdoor_temp_c: f64, humidity_ratio: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: zone_temp_c,
@@ -70,7 +71,8 @@ fn env_with_zone(zone_temp_c: f64, outdoor_temp_c: f64, humidity_ratio: f64) -> 
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()
@@ -136,7 +138,7 @@ fn electrical_solver_net_with_load_and_pv() {
     let ports = ports_with_electrical(2.0, -1.5);
     let dt = Duration::from_secs(60);
 
-    let update = solver.resolve_new(&ports, &env, dt);
+    let update = solver.resolve_new(&ports, &env, dt).unwrap();
 
     let payload = update
         .custom_payload
@@ -171,7 +173,9 @@ fn electrical_solver_generation_only_produces_negative_net() {
     let env = env_with_zone(21.0, 10.0, 0.008);
     let ports = ports_with_electrical(0.0, -3.0);
 
-    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&ports, &env, Duration::from_secs(60))
+        .unwrap();
     let net_kw = update.custom_payload.expect("payload must be Some")[0];
 
     assert!(
@@ -189,7 +193,9 @@ fn electrical_solver_zero_load_zero_generation_is_zero_net() {
     let env = env_with_zone(21.0, 10.0, 0.008);
     let ports = PortSlots::default();
 
-    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&ports, &env, Duration::from_secs(60))
+        .unwrap();
     let net_kw = update.custom_payload.expect("payload")[0];
 
     assert_eq!(
@@ -225,7 +231,9 @@ fn electrical_balance_invariant_holds_for_multiple_sources() {
             .expect("gen");
     }
 
-    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&ports, &env, Duration::from_secs(60))
+        .unwrap();
     let net_kw = update.custom_payload.expect("payload")[0];
     let expected = ports.electrical.net_active_w() / 1_000.0; // 2.5 + (-2.8) = -0.3
 
@@ -381,7 +389,7 @@ fn electrical_and_humidity_resolvers_are_independent() {
         })
         .expect("thermal accumulate");
 
-    let elec_update = elec_solver.resolve_new(&ports, &env, dt);
+    let elec_update = elec_solver.resolve_new(&ports, &env, dt).unwrap();
     let _hum_update = hum_solver.resolve_new(&ports, &env, dt);
 
     // Electrical result must still be correct after humidity resolved.

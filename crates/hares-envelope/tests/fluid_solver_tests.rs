@@ -9,8 +9,8 @@ use chrono::{FixedOffset, TimeZone};
 use hares_envelope::{FluidSolver, FluidSolverConfig};
 use hares_types::{
     DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidNodeId, FluidType,
-    GridState, HeatTransferDirection, LoopId, PortContribution, PortSlots, SurfaceIrradiance,
-    WeatherState, ZoneId, ZoneState,
+    GridState, HaresError, HeatTransferDirection, LoopId, PortContribution, PortSlots,
+    SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -19,6 +19,7 @@ use hares_types::{
 
 fn env() -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: 21.0,
@@ -60,7 +61,8 @@ fn env() -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()
@@ -107,32 +109,24 @@ fn make_ports_with_flow(
 /// P = ṁ × c_p × ΔT.
 ///
 /// With flow_rate=0.8 kg/s, supply=70°C, return=50°C (ΔT=20 K) and
-/// c_p=4186 J/(kg·K), the expected net power is 0.8 × 4186 × 20 = 66 976 W.
-///
-/// This test uses c_p=4186 (a non-default value) rather than the project's
-/// water cp constant (4180) to exercise the explicit config path — verifying
-/// the solver respects a caller-supplied cp, not just the built-in default.
+/// c_p=4180 J/(kg·K) (the built-in water cp), the expected net power is
+/// 0.8 × 4180 × 20 = 66 880 W.
 #[test]
 fn net_power_from_flow_and_temp_delta() {
-    // Textbook water cp at ~15°C per NIST; deliberately different from
-    // CP_LIQUID_WATER_J_KG_K (4180) to test explicit config override.
-    let cp = 4186.0;
     let flow = 0.8;
     let delta_t = 20.0;
-    let expected_w = flow * cp * delta_t;
+    let expected_w = flow * hares_physics::constants::cp_j_kg_k(FluidType::Water) * delta_t;
 
     let mut solver = FluidSolver::new(
-        FluidSolverConfig {
-            fluid_specific_heats: [(FluidType::Water, cp)].into_iter().collect(),
-            loop_topologies: std::collections::HashMap::new(),
-            loop_temp_limits: std::collections::HashMap::new(),
-        },
+        FluidSolverConfig::default(),
         &[(LoopId(1), FluidType::Water)],
     )
     .expect("FluidSolver::new must succeed for valid config");
 
     let ports = make_ports_with_flow(LoopId(1), FluidType::Water, flow, 70.0, 50.0);
-    let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&ports, &env(), Duration::from_secs(60))
+        .unwrap();
 
     let payload = update
         .custom_payload
@@ -165,7 +159,9 @@ fn zero_flow_zero_power() {
         ..Default::default()
     };
 
-    let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&ports, &env(), Duration::from_secs(60))
+        .unwrap();
     let payload = update
         .custom_payload
         .expect("payload must be Some: accumulator is present");
@@ -195,7 +191,9 @@ fn checkpoint_round_trip() {
 
     // Prime the solver: one step with real flow so last_known_temps is populated.
     let ports_with_flow = make_ports_with_flow(LoopId(3), FluidType::Water, 1.0, supply, ret);
-    solver.resolve_new(&ports_with_flow, &env(), Duration::from_secs(60));
+    solver
+        .resolve_new(&ports_with_flow, &env(), Duration::from_secs(60))
+        .unwrap();
 
     // Snapshot.
     let payload = solver.snapshot_payload();
@@ -220,8 +218,12 @@ fn checkpoint_round_trip() {
         ..Default::default()
     };
 
-    let update_orig = solver.resolve_new(&zero_ports, &env(), Duration::from_secs(60));
-    let update_restored = restored.resolve_new(&zero_ports, &env(), Duration::from_secs(60));
+    let update_orig = solver
+        .resolve_new(&zero_ports, &env(), Duration::from_secs(60))
+        .unwrap();
+    let update_restored = restored
+        .resolve_new(&zero_ports, &env(), Duration::from_secs(60))
+        .unwrap();
 
     let states_orig = FluidDomainPayload::decode(
         update_orig
@@ -263,4 +265,28 @@ fn checkpoint_round_trip() {
         "restored return_temp={} expected={ret}",
         states_restored[0].mean_return_temp_c
     );
+}
+
+/// An accumulator on a loop no port declared is an `InvariantViolation`,
+/// never a substituted value: with the declared map empty, resolving the
+/// accumulator's loop fails the step naming `fluid_loop_declared`.
+#[test]
+fn accumulator_on_an_undeclared_loop_is_an_invariant_violation() {
+    let mut solver =
+        FluidSolver::new(FluidSolverConfig::default(), &[]).expect("empty map is valid");
+
+    let ports = make_ports_with_flow(LoopId(1), FluidType::Water, 0.8, 70.0, 50.0);
+    let err = solver
+        .resolve_new(&ports, &env(), Duration::from_secs(60))
+        .expect_err("an undeclared accumulator loop must fail the step");
+
+    match err {
+        HaresError::InvariantViolation { check_name, .. } => {
+            assert_eq!(
+                check_name, "fluid_loop_declared",
+                "the violation names the undeclared-loop check"
+            );
+        }
+        other => panic!("expected InvariantViolation, got {other:?}"),
+    }
 }

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use hares_envelope::{
     NodeId, OutputMapping, RCNetwork, StateSpaceModel, discretize_zoh, van_loan_discretize,
 };
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DVector;
 
 /// Build a 6-node RC network representing a typical single-zone house.
 ///
@@ -126,8 +127,8 @@ fn bench_state_space_step(c: &mut Criterion) {
 
     c.bench_function("state_space_step_6node", |b| {
         b.iter(|| {
-            let x_next = model.step(criterion::black_box(&x), criterion::black_box(&u));
-            criterion::black_box(x_next);
+            let x_next = model.step(black_box(&x), black_box(&u));
+            black_box(x_next);
         });
     });
 }
@@ -142,8 +143,8 @@ fn bench_state_space_step_12node(c: &mut Criterion) {
 
     c.bench_function("state_space_step_12node", |b| {
         b.iter(|| {
-            let x_next = model.step(criterion::black_box(&x), criterion::black_box(&u));
-            criterion::black_box(x_next);
+            let x_next = model.step(black_box(&x), black_box(&u));
+            black_box(x_next);
         });
     });
 }
@@ -157,25 +158,17 @@ fn bench_discretize(c: &mut Criterion) {
 
     group.bench_function("zoh_6node", |b| {
         b.iter(|| {
-            let result = discretize_zoh(
-                criterion::black_box(&a_c),
-                criterion::black_box(&b_c),
-                criterion::black_box(dt),
-            )
-            .expect("ZOH discretization");
-            criterion::black_box(result);
+            let result = discretize_zoh(black_box(&a_c), black_box(&b_c), black_box(dt))
+                .expect("ZOH discretization");
+            black_box(result);
         });
     });
 
     group.bench_function("van_loan_6node", |b| {
         b.iter(|| {
-            let result = van_loan_discretize(
-                criterion::black_box(&a_c),
-                criterion::black_box(&b_c),
-                criterion::black_box(dt),
-            )
-            .expect("Van Loan discretization");
-            criterion::black_box(result);
+            let result = van_loan_discretize(black_box(&a_c), black_box(&b_c), black_box(dt))
+                .expect("Van Loan discretization");
+            black_box(result);
         });
     });
 
@@ -186,13 +179,9 @@ fn bench_discretize(c: &mut Criterion) {
             &dt_s,
             |b, &dt| {
                 b.iter(|| {
-                    let result = discretize_zoh(
-                        criterion::black_box(&a_c),
-                        criterion::black_box(&b_c),
-                        criterion::black_box(dt),
-                    )
-                    .expect("ZOH discretization");
-                    criterion::black_box(result);
+                    let result = discretize_zoh(black_box(&a_c), black_box(&b_c), black_box(dt))
+                        .expect("ZOH discretization");
+                    black_box(result);
                 });
             },
         );
@@ -209,19 +198,17 @@ fn bench_rc_network_build_matrices(c: &mut Criterion) {
 
     group.bench_function("build_matrices_6node", |b| {
         b.iter(|| {
-            let result = criterion::black_box(&net_6)
-                .build_matrices()
-                .expect("matrix assembly");
-            criterion::black_box(result);
+            let result = black_box(&net_6).build_matrices().expect("matrix assembly");
+            black_box(result);
         });
     });
 
     group.bench_function("build_matrices_12node", |b| {
         b.iter(|| {
-            let result = criterion::black_box(&net_12)
+            let result = black_box(&net_12)
                 .build_matrices()
                 .expect("matrix assembly");
-            criterion::black_box(result);
+            black_box(result);
         });
     });
 
@@ -246,7 +233,7 @@ fn bench_full_construction(c: &mut Criterion) {
             let x = DVector::from_element(n, 20.0);
             let u = DVector::from_element(b_c.ncols(), 5.0);
             let x_next = model.step(&x, &u);
-            criterion::black_box(x_next);
+            black_box(x_next);
         });
     });
 }
@@ -260,8 +247,6 @@ fn bench_coupled_step_identity(c: &mut Criterion) {
     let x = DVector::from_element(model.state_dim(), 20.0);
     let u = DVector::from_element(model.input_dim(), 5.0);
     let couplings: Vec<(usize, f64, f64)> = vec![(5, 0.3, 10.0), (3, 0.15, 5.0), (0, 0.2, 8.0)];
-
-    assert!(model.m_is_identity());
 
     let mut buf = black_box(DVector::zeros(model.state_dim()));
 
@@ -278,33 +263,6 @@ fn bench_coupled_step_identity(c: &mut Criterion) {
     });
 }
 
-fn bench_coupled_step_lu(c: &mut Criterion) {
-    // Measures the O(n³) LU-coupled step (old path) with same coupling config.
-    let dt = 60.0;
-    let net = build_6node_network();
-    let model = build_state_space(&net, dt);
-    let x = DVector::from_element(model.state_dim(), 20.0);
-    let u = DVector::from_element(model.input_dim(), 5.0);
-    let couplings: Vec<(usize, f64, f64)> = vec![(5, 0.3, 10.0), (3, 0.15, 5.0), (0, 0.2, 8.0)];
-    let n = model.state_dim();
-    let mut m_scratch = DMatrix::zeros(n, n);
-    let mut buf = black_box(DVector::zeros(n));
-
-    c.bench_function("coupled_step_lu_6node_3couplings", |b| {
-        b.iter(|| {
-            let lu = model.build_coupled_lu(&mut m_scratch, black_box(&couplings));
-            model.step_with_coupled_lu_into(
-                black_box(&x),
-                black_box(&u),
-                &mut buf,
-                &lu,
-                black_box(&couplings),
-            );
-            black_box(&buf);
-        });
-    });
-}
-
 criterion_group!(
     benches,
     bench_state_space_step,
@@ -313,6 +271,5 @@ criterion_group!(
     bench_rc_network_build_matrices,
     bench_full_construction,
     bench_coupled_step_identity,
-    bench_coupled_step_lu,
 );
 criterion_main!(benches);

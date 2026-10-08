@@ -49,6 +49,62 @@ pub enum ColumnAggregation {
     Sum,
 }
 
+/// Resolves the schedule's occupancy column, shared by the environment (which
+/// reads the column's values) and the unknown-schedule-column check (which
+/// treats the column the environment reads as read).
+///
+/// Resolution order: the exact keys `occupants` then `occupancy`, then a
+/// case-insensitive match on the first key starting with `occupan` (which
+/// reads the parity and BEopt files' `Occupancy (Persons)`). Returns the
+/// matched key with its column index.
+#[must_use]
+pub fn resolve_occupancy_column(column_index: &HashMap<String, usize>) -> Option<(String, usize)> {
+    if let Some(&idx) = column_index.get("occupants") {
+        return Some(("occupants".to_string(), idx));
+    }
+    if let Some(&idx) = column_index.get("occupancy") {
+        return Some(("occupancy".to_string(), idx));
+    }
+    // Case-insensitive fallback: matches "Occupancy (Persons)" and similar variants.
+    column_index
+        .iter()
+        .filter(|(key, _)| key.to_lowercase().starts_with("occupan"))
+        .min_by(|(a, _), (b, _)| a.to_lowercase().cmp(&b.to_lowercase()))
+        .map(|(key, &idx)| (key.clone(), idx))
+}
+
+/// Which schedule-file convention a CSV's columns follow, decided by its
+/// occupancy column.
+///
+/// OS-HPXML-derived inputs name the occupancy column `occupants` or
+/// `occupancy`; the BEopt/OCHRE event files name it `Occupancy (Persons)`
+/// and resolve only through [`resolve_occupancy_column`]'s case-insensitive
+/// fallback. The family decides the columns whose energy accounting differs
+/// between the two conventions: OS-HPXML v1.12.0 models no microwave
+/// appliance and its residual plug loads already carry the microwave energy,
+/// while a BEopt/OCHRE-format input models the microwave separately. A file
+/// with no occupancy column at all is treated as OS-HPXML-derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleFormatFamily {
+    /// An OS-HPXML-derived schedule (the `occupants` column family).
+    OsHpxml,
+    /// A BEopt/OCHRE event schedule (the `Occupancy (Persons)` family).
+    BeoptOchre,
+}
+
+/// Decides the schedule file's [`ScheduleFormatFamily`] from its headers.
+#[must_use]
+pub fn schedule_format_family(column_index: &HashMap<String, usize>) -> ScheduleFormatFamily {
+    if column_index.contains_key("occupants") || column_index.contains_key("occupancy") {
+        return ScheduleFormatFamily::OsHpxml;
+    }
+    if resolve_occupancy_column(column_index).is_some() {
+        ScheduleFormatFamily::BeoptOchre
+    } else {
+        ScheduleFormatFamily::OsHpxml
+    }
+}
+
 /// Column-major schedule time series.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleTimeSeries {
@@ -151,12 +207,11 @@ impl ScheduleTimeSeries {
         }
 
         let normalized = normalize_column_name(name);
-        if let Some(&existing_idx) = self.column_index.get(&normalized) {
-            if self.columns.get(existing_idx) == Some(&data)
-                && self.column_aggregations.get(existing_idx) == Some(&aggregation)
-            {
-                return Ok(existing_idx);
-            }
+        if let Some(&existing_idx) = self.column_index.get(&normalized)
+            && self.columns.get(existing_idx) == Some(&data)
+            && self.column_aggregations.get(existing_idx) == Some(&aggregation)
+        {
+            return Ok(existing_idx);
         }
 
         let mut candidate = normalized.clone();
@@ -687,7 +742,6 @@ fn parse_csv_line(line: &str) -> Result<Vec<String>, ScheduleError> {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::{DateTime, FixedOffset};
 
@@ -697,15 +751,13 @@ mod tests {
     };
     use crate::weather::WeatherMeta;
 
-    fn write_temp_csv(csv_contents: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before UNIX_EPOCH")
-            .as_nanos();
-        path.push(format!("hares-io-schedule-test-{nanos}.csv"));
+    /// Writes the CSV into a directory removed when the returned `TempDir`
+    /// drops (panics included).
+    fn write_temp_csv(csv_contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("schedule.csv");
         fs::write(&path, csv_contents).expect("failed to write temporary schedule CSV");
-        path
+        (dir, path)
     }
 
     fn schedule_csv_15min_with_tz() -> String {
@@ -730,6 +782,7 @@ mod tests {
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
             has_embedded_location: true,
+            station_wmo: None,
         }
     }
 
@@ -977,10 +1030,9 @@ mod tests {
     #[test]
     fn parse_schedule_csv_reads_from_path() {
         let csv = schedule_csv_15min_with_tz();
-        let path = write_temp_csv(&csv);
+        let (_dir, path) = write_temp_csv(&csv);
 
         let result = parse_schedule_csv(&path, &[], None, None);
-        let _ = fs::remove_file(path);
 
         assert!(result.is_ok());
     }

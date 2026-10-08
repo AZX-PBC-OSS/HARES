@@ -62,6 +62,42 @@ pub(crate) fn child_text(node: &XmlNode, child_name: &str) -> Option<String> {
     node.child(child_name).map(|n| n.text.trim().to_string())
 }
 
+/// Reads an `xs:boolean` element, whose lexical forms are `true`, `false`,
+/// `1` and `0` (XML Schema Part 2, 3.2.2). Any other text is an error.
+pub(crate) fn xs_boolean(
+    node: &XmlNode,
+    path: &'static str,
+    system_kind: &'static str,
+    system_id: &str,
+) -> Result<bool, super::HpxmlError> {
+    match node.text.trim() {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        other => Err(super::HpxmlError::InvalidField {
+            path,
+            system_kind,
+            system_id: system_id.to_string(),
+            value_received: other.to_string(),
+            reason: "an xs:boolean is one of true, false, 1 or 0",
+        }),
+    }
+}
+
+/// [`xs_boolean`] for the child `child_name`, `None` when it is absent.
+pub(crate) fn child_bool(
+    node: &XmlNode,
+    child_name: &str,
+    path: &'static str,
+    system_kind: &'static str,
+) -> Result<Option<bool>, super::HpxmlError> {
+    node.child(child_name)
+        .map(|child| {
+            let id = element_id(node).unwrap_or_else(|| "unknown".to_string());
+            xs_boolean(child, path, system_kind, &id)
+        })
+        .transpose()
+}
+
 pub(crate) fn child_f64(node: &XmlNode, child_name: &str) -> Option<f64> {
     node.child(child_name)
         .and_then(|n| parse_trimmed_f64(&n.text))
@@ -210,40 +246,77 @@ pub(crate) fn find_hvac_control(details: &XmlNode) -> Option<&XmlNode> {
 /// Parse a single HVAC setpoint schedule (24h array in °C) from an `HVACControl` node.
 ///
 /// Returns `None` if no setpoint data is found for the given `hvac_type`/`weekday` combination.
+/// A constant setpoint carries its daily setback (heating) or setup (cooling)
+/// as OS-HPXML applies it (hvac.rb:1785-1798, `get_hvac_setpoints`): the
+/// setback temperature for `TotalSetback{Hours}perWeek / 7` hours a day from
+/// the start hour, which defaults to 23:00 for heating and 09:00 for cooling
+/// (defaults.rb:2851-2859); weekends follow weekdays.
 /// Used by both `building.rs::parse_hvac_setpoints` and `resolve_hvac.rs::parse_hvac_setpoint_params`.
 pub(crate) fn parse_setpoint_from_control(
     control: &XmlNode,
     hvac_type: &str,
     weekday: bool,
-) -> Option<Vec<f64>> {
+) -> Result<Option<Vec<f64>>, super::HpxmlError> {
     let day_prefix = if weekday { "Weekday" } else { "Weekend" };
     let ext_key = format!("{day_prefix}SetpointTemps{hvac_type}Season");
 
-    if let Some(ext) = control.child("extension") {
-        if let Some(node) = ext.child(&ext_key) {
-            let vals: Vec<f64> = node
-                .text
-                .trim()
-                .split(',')
-                .filter_map(parse_trimmed_f64)
-                .map(conv::temperature_f_to_c)
-                .collect();
-            if vals.len() == 24 {
-                return Some(vals);
-            }
+    if let Some(ext) = control.child("extension")
+        && let Some(node) = ext.child(&ext_key)
+    {
+        let vals: Vec<f64> = node
+            .text
+            .trim()
+            .split(',')
+            .filter_map(parse_trimmed_f64)
+            .map(conv::temperature_f_to_c)
+            .collect();
+        if vals.len() == 24 {
+            return Ok(Some(vals));
         }
     }
 
     // Fallback: single constant value from <SetpointTemp{hvac_type}Season>
     let const_key = format!("SetpointTemp{hvac_type}Season");
-    if let Some(node) = control.child(&const_key) {
-        if let Some(f_val) = parse_trimmed_f64(&node.text) {
-            let c_val = conv::temperature_f_to_c(f_val);
-            return Some(vec![c_val; 24]);
+    let Some(setpoint_f) = control
+        .child(&const_key)
+        .and_then(|node| parse_trimmed_f64(&node.text))
+    else {
+        return Ok(None);
+    };
+    let mut setpoints = vec![conv::temperature_f_to_c(setpoint_f); 24];
+    let (setback_key, hours_key, start_key, default_start_hour) = if hvac_type == "Heating" {
+        (
+            "SetbackTempHeatingSeason",
+            "TotalSetbackHoursperWeekHeating",
+            "SetbackStartHourHeating",
+            23,
+        )
+    } else {
+        (
+            "SetupTempCoolingSeason",
+            "TotalSetupHoursperWeekCooling",
+            "SetupStartHourCooling",
+            9,
+        )
+    };
+    if let Some(setback_f) = child_f64(control, setback_key) {
+        let hours_per_week = child_f64(control, hours_key).ok_or_else(|| {
+            super::HpxmlError::Parse(
+                format!("HVACControl has {setback_key} but no {hours_key}").into(),
+            )
+        })?;
+        let start_hour = control
+            .child("extension")
+            .and_then(|ext| child_f64(ext, start_key))
+            .map_or(default_start_hour, |hour| hour as usize);
+        let setback_c = conv::temperature_f_to_c(setback_f);
+        // Ruby's Integer() truncates the daily hours.
+        let daily_hours = (hours_per_week / 7.0).trunc() as usize;
+        for hour in start_hour..start_hour + daily_hours {
+            setpoints[hour % 24] = setback_c;
         }
     }
-
-    None
+    Ok(Some(setpoints))
 }
 
 /// Parse schedule extension parameters from an `<extension>` child.
@@ -340,10 +413,10 @@ pub(crate) fn parse_schedule_extension_params(
     }
 
     if let Some(frac) = child_f64(ext, "FracSensible") {
-        out.push(("frac_sensible".to_string(), json!(frac)));
+        out.push(("sensible_gain_fraction".to_string(), json!(frac)));
     }
     if let Some(frac) = child_f64(ext, "FracLatent") {
-        out.push(("frac_latent".to_string(), json!(frac)));
+        out.push(("latent_gain_fraction".to_string(), json!(frac)));
     }
     if let Some(frac) = child_f64(ext, "FracRadiant") {
         out.push(("radiative_gain_fraction".to_string(), json!(frac)));
@@ -376,6 +449,36 @@ pub(crate) fn parse_schedule_extension_params(
     }
 
     out
+}
+
+/// Asserts that the element at `path` is read as an `xs:boolean`: `1` and
+/// `0` mean the same as `true` and `false`, which differ, and other text is
+/// an `InvalidField` naming `path`. `read` parses a document holding `text`
+/// in that element and returns what the element decides.
+#[cfg(test)]
+pub(crate) fn assert_reads_xs_boolean<T: PartialEq + std::fmt::Debug>(
+    path: &'static str,
+    read: impl Fn(&str) -> Result<T, super::HpxmlError>,
+) {
+    let yes = read("true").unwrap_or_else(|e| panic!("{path} true: {e:?}"));
+    let no = read("false").unwrap_or_else(|e| panic!("{path} false: {e:?}"));
+    assert_ne!(yes, no, "{path}: true and false must differ");
+    assert_eq!(
+        read("1").unwrap_or_else(|e| panic!("{path} 1: {e:?}")),
+        yes,
+        "{path}: 1"
+    );
+    assert_eq!(
+        read(" 0 ").unwrap_or_else(|e| panic!("{path} 0: {e:?}")),
+        no,
+        "{path}: 0"
+    );
+    for bad in ["yes", "True1", ""] {
+        match read(bad) {
+            Err(super::HpxmlError::InvalidField { path: got, .. }) if got == path => {}
+            other => panic!("{path} {bad:?}: expected InvalidField, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ use hares_physics::air_properties::dry_air_density_kg_m3;
 use hares_physics::units::length_m_to_mm;
 
 use crate::NodeId;
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+#[cfg(debug_assertions)]
 use crate::rc_network::sorted_internal_nodes;
 use crate::rc_network::{RCNetwork, parallel_resistance};
 
@@ -22,12 +22,11 @@ use crate::rc_network::{RCNetwork, parallel_resistance};
 /// Re-exported from hares_physics::constants::CP_DRY_AIR_J_KG_K for convenience.
 /// ASHRAE HOF 2021 Ch.1, Table 2 footnote, valid 0–60°C range.
 pub const AIR_CP_J_KG_K: f64 = hares_physics::constants::CP_DRY_AIR_J_KG_K;
-/// Default zone volume when floor area is unknown [m³].
-pub const DEFAULT_VOLUME_M3: f64 = 200.0;
-/// Default storey height [m].
-pub const DEFAULT_HEIGHT_M: f64 = 2.5;
-/// Interior mass multiplier applied to zone air capacitance.
-pub const INTERIOR_MASS_MULTIPLIER: f64 = 7.0;
+/// Multiplier on every zone's air capacitance: OS-HPXML's default
+/// `TemperatureCapacitanceMultiplier` (defaults.rb:219-221), applied to all
+/// zones through `ZoneCapacitanceMultiplier:ResearchSpecial`
+/// (simcontrols.rb:27-28).
+pub const TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT: f64 = 7.0;
 /// Floor capacitance for any RC node [J/K].
 pub const MIN_CAPACITANCE_J_K: f64 = 1_000.0;
 /// Default aggregate UA when no boundary data is available [W/K].
@@ -276,7 +275,7 @@ pub struct BoundaryInput {
     /// Populated from the building's boundary emissivity data by
     /// `building_to_boundary_inputs` in `hares-core`.
     pub interior_emissivity: f64,
-    /// Centroid depth of the boundary below grade [m].
+    /// Centroid depth of the boundary below grade (m).
     ///
     /// For ground-contacting boundaries (`ExteriorTarget::Ground`), this is the
     /// depth at which the Kusuda-Achenbach ground temperature is evaluated.
@@ -300,11 +299,11 @@ pub struct BoundaryInput {
 pub struct ZoneInput {
     pub floor_area_m2: Option<f64>,
     pub volume_m3: Option<f64>,
-    /// Effective thermal mass multiplier applied to zone air capacitance.
-    /// Accounts for furniture and interior mass. Typical values:
-    /// - Conditioned: 7.0 (standard furnished living space)
-    /// - Foundation / Attic / Garage: 1.0 (air capacitance only)
-    pub mass_multiplier: f64,
+    /// Multiplier on the zone air node's capacitance, EnergyPlus's
+    /// `ZoneVolCapMultpSens`: the building's one temperature capacitance
+    /// multiplier (OS-HPXML default 7.0) for every zone. Furniture and
+    /// partition mass are separate nodes and do not take it.
+    pub temperature_capacitance_multiplier: f64,
 }
 
 // ── Diagnostics ─────────────────────────────────────────────────────────────
@@ -361,7 +360,7 @@ pub struct BoundaryDiagnostic {
     pub inner_node: Option<NodeId>,
     /// Interior-facing longwave emissivity [-] for star-mesh radiation.
     pub interior_emissivity: f64,
-    /// Foundation depth below grade for ground-contacting boundaries [m].
+    /// Foundation depth below grade for ground-contacting boundaries (m).
     ///
     /// Copied from `BoundaryInput::foundation_depth_m`. 0.0 for above-grade
     /// boundaries. Used by solver_builder to attach depth-aware
@@ -487,7 +486,20 @@ pub enum InteriorLwrMethod {
 /// Errors raised during boundary RC construction.
 #[derive(Debug, Error)]
 pub enum BoundaryRcError {
-    /// Non-positive site atmospheric pressure [Pa] supplied to zone capacitance derivation.
+    /// A zone with no finite, positive air volume: its air capacitance has
+    /// no basis.
+    #[error("zone {zone_idx} has no usable air volume ({volume_m3:?} m3)")]
+    ZoneVolume {
+        zone_idx: usize,
+        volume_m3: Option<f64>,
+    },
+    /// A zone whose temperature capacitance multiplier is not finite and
+    /// positive: its air capacitance would be clamped to the floor silently.
+    #[error(
+        "zone {zone_idx} has a temperature capacitance multiplier of {multiplier}; it must be finite and positive"
+    )]
+    CapacitanceMultiplier { zone_idx: usize, multiplier: f64 },
+    /// Non-positive site atmospheric pressure (Pa) supplied to zone capacitance derivation.
     /// Site pressure must be physically positive; zero or negative indicates
     /// missing or corrupted weather/configuration data.
     #[error("invalid site_pressure_pa: expected > 0, got {value}")]
@@ -500,10 +512,10 @@ pub enum BoundaryRcError {
 /// Derive zone air-node capacitances [J/K] from zone volumes, mass multipliers,
 /// and site barometric pressure.
 ///
-/// Zone air capacitance: C = ρ × cp × V × mass_multiplier, where ρ is computed
+/// Zone air capacitance: C = ρ × cp × V × temperature_capacitance_multiplier, where ρ is computed
 /// from the ideal gas law: ρ = p / (R_da × T_ref).
 ///
-/// - `site_pressure_pa`: ISA standard atmospheric pressure at site elevation [Pa].
+/// - `site_pressure_pa`: ISA standard atmospheric pressure at site elevation (Pa).
 ///   Use [`hares_physics::air_properties::standard_pressure_pa`] to compute from
 ///   elevation, or [`hares_physics::constants::SEA_LEVEL_PRESSURE_PA`] (101 325 Pa)
 ///   when elevation is unknown (backward-compatible with the former sea-level constant).
@@ -527,16 +539,30 @@ pub fn derive_zone_capacitances(
     // ASHRAE HoF 2021 §1.8 Eq.28.
     let rho = dry_air_density_kg_m3(site_pressure_pa, 20.0);
 
-    Ok(zones
+    zones
         .iter()
-        .map(|z| {
-            let volume = z
-                .volume_m3
-                .or_else(|| z.floor_area_m2.map(|a| a * DEFAULT_HEIGHT_M))
-                .unwrap_or(DEFAULT_VOLUME_M3);
-            (rho * AIR_CP_J_KG_K * volume * z.mass_multiplier).max(MIN_CAPACITANCE_J_K)
+        .enumerate()
+        .map(|(zone_idx, z)| {
+            let volume = z.volume_m3.filter(|v| v.is_finite() && *v > 0.0).ok_or(
+                BoundaryRcError::ZoneVolume {
+                    zone_idx,
+                    volume_m3: z.volume_m3,
+                },
+            )?;
+            if !(z.temperature_capacitance_multiplier.is_finite()
+                && z.temperature_capacitance_multiplier > 0.0)
+            {
+                return Err(BoundaryRcError::CapacitanceMultiplier {
+                    zone_idx,
+                    multiplier: z.temperature_capacitance_multiplier,
+                });
+            }
+            Ok(
+                (rho * AIR_CP_J_KG_K * volume * z.temperature_capacitance_multiplier)
+                    .max(MIN_CAPACITANCE_J_K),
+            )
         })
-        .collect())
+        .collect()
 }
 
 /// Derive per-zone aggregate UA [W/K] from boundary R-values.
@@ -561,57 +587,40 @@ pub fn derive_zone_uas(boundaries: &[BoundaryInput], n_zones: usize) -> Vec<f64>
 /// Validate that every `SurfaceLayerInfo` entry's `inner_node` and `outer_node`
 /// are present in both the capacitance map and the node index.
 ///
-/// In debug/check_invariants builds the checks are `debug_assert!` that panic
-/// on first violation.  In all builds a `tracing::warn!` is emitted for any
-/// missing node so production deployments don't silently lose surface wiring.
+/// Unconditional in every build profile: a missing node is a wiring error, so
+/// the first violation is a typed error naming the boundary and the node.
 fn validate_surface_layer_info(
     layer_info: &HashMap<usize, SurfaceLayerInfo>,
     capacitances: &HashMap<NodeId, f64>,
     node_index: &HashMap<NodeId, usize>,
-) {
+) -> Result<(), String> {
     for (bd_idx, info) in layer_info {
-        let inner_has_cap = capacitances.contains_key(&info.inner_node);
-        let outer_has_cap = capacitances.contains_key(&info.outer_node);
-        let inner_in_index = node_index.contains_key(&info.inner_node);
-        let outer_in_index = node_index.contains_key(&info.outer_node);
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            debug_assert!(
-                inner_has_cap,
+        if !capacitances.contains_key(&info.inner_node) {
+            return Err(format!(
                 "SurfaceLayerInfo for boundary {bd_idx}: inner_node {:?} missing from capacitances",
                 info.inner_node
-            );
-            debug_assert!(
-                outer_has_cap,
+            ));
+        }
+        if !capacitances.contains_key(&info.outer_node) {
+            return Err(format!(
                 "SurfaceLayerInfo for boundary {bd_idx}: outer_node {:?} missing from capacitances",
                 info.outer_node
-            );
-            debug_assert!(
-                inner_in_index,
+            ));
+        }
+        if !node_index.contains_key(&info.inner_node) {
+            return Err(format!(
                 "SurfaceLayerInfo for boundary {bd_idx}: inner_node {:?} missing from node_index",
                 info.inner_node
-            );
-            debug_assert!(
-                outer_in_index,
+            ));
+        }
+        if !node_index.contains_key(&info.outer_node) {
+            return Err(format!(
                 "SurfaceLayerInfo for boundary {bd_idx}: outer_node {:?} missing from node_index",
                 info.outer_node
-            );
-        }
-
-        if !inner_has_cap {
-            tracing::warn!(bd_idx = bd_idx, node = ?info.inner_node, "SurfaceLayerInfo inner_node missing from capacitances");
-        }
-        if !outer_has_cap {
-            tracing::warn!(bd_idx = bd_idx, node = ?info.outer_node, "SurfaceLayerInfo outer_node missing from capacitances");
-        }
-        if !inner_in_index {
-            tracing::warn!(bd_idx = bd_idx, node = ?info.inner_node, "SurfaceLayerInfo inner_node missing from node_index");
-        }
-        if !outer_in_index {
-            tracing::warn!(bd_idx = bd_idx, node = ?info.outer_node, "SurfaceLayerInfo outer_node missing from node_index");
+            ));
         }
     }
+    Ok(())
 }
 
 /// Assemble the multi-layer RC network from pre-resolved boundary data.
@@ -1281,19 +1290,21 @@ pub fn assemble_building_rc(
         .map(|(idx, &nid)| (nid, idx))
         .collect();
 
-    // Invariant check: cardinality of node_index must match A_c nrows.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        debug_assert_eq!(
+    // Invariant: cardinality of node_index must match A_c nrows. A mismatch
+    // is a wiring error, so it is a typed error in every build profile.
+    if node_index.len() != a_c.nrows() {
+        return Err(format!(
+            "node_index cardinality {} != A_c nrows {}",
             node_index.len(),
-            a_c.nrows(),
-            "node_index cardinality {node_index_len} != A_c nrows {a_c_nrows}",
-            node_index_len = node_index.len(),
-            a_c_nrows = a_c.nrows()
-        );
+            a_c.nrows()
+        ));
+    }
 
-        // Cross-validate: the independently-sorted node list from sorted_internal_nodes()
-        // must agree element-for-element with the node_index keys in order.
+    // Cross-validate: the independently-sorted node list from sorted_internal_nodes()
+    // must agree element-for-element with the node_index keys in order. This
+    // re-sorts the node set, so it is a debug-only assertion.
+    #[cfg(debug_assertions)]
+    {
         let cross: Vec<NodeId> = sorted_internal_nodes(&rc.capacitances, rc.external_nodes());
         let node_index_sorted: Vec<NodeId> = {
             let mut keys: Vec<_> = node_index.keys().copied().collect();
@@ -1306,7 +1317,7 @@ pub fn assemble_building_rc(
         );
     }
 
-    validate_surface_layer_info(&layer_info, &rc.capacitances, &node_index);
+    validate_surface_layer_info(&layer_info, &rc.capacitances, &node_index)?;
 
     // Observer capture: record SurfaceLayerInfo wiring completeness per boundary.
     #[cfg(feature = "observe")]
@@ -1336,19 +1347,6 @@ pub fn assemble_building_rc(
         "RC assembly internal node mapping"
     );
 
-    // Emit error on cardinality mismatch in release-with-checks builds
-    // where debug_assert_eq is a no-op. No check in pure release builds.
-    #[cfg(feature = "check_invariants")]
-    {
-        if node_index.len() != a_c.nrows() {
-            tracing::error!(
-                node_index_len = node_index.len(),
-                a_c_nrows = a_c.nrows(),
-                "node_index cardinality does not match A_c nrows"
-            );
-        }
-    }
-
     // Zone air node → state-vector row.
     let mut zone_state_rows = Vec::with_capacity(n_zones);
     for zone_idx in 0..n_zones {
@@ -1366,100 +1364,103 @@ pub fn assemble_building_rc(
 
     let node_capacitances = rc.capacitances.clone();
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        // Only check when boundaries carry explicit material-layer definitions.
-        // Fallback-R-only networks (no material layers, empty precomputed_rc)
-        // legitimately produce zero boundary capacitance nodes — the single
-        // resistance path is intentional.
-        let has_material_layers = boundaries.iter().any(|b| !b.material_layers.is_empty());
-        if has_material_layers {
-            let has_cap_node = boundary_diagnostics.iter().any(|d| d.n_rc_nodes > 0);
-            assert!(
-                has_cap_node,
+    // Only check when boundaries carry explicit material-layer definitions.
+    // Fallback-R-only networks (no material layers, empty precomputed_rc)
+    // legitimately produce zero boundary capacitance nodes (the single
+    // resistance path is intentional. Zero density or specific_heat layers
+    // are reachable user input, so the violation is a typed error in every
+    // build profile.
+    let has_material_layers = boundaries.iter().any(|b| !b.material_layers.is_empty());
+    if has_material_layers {
+        let has_cap_node = boundary_diagnostics.iter().any(|d| d.n_rc_nodes > 0);
+        if !has_cap_node {
+            return Err(
                 "RC network has no capacitance-bearing boundary nodes despite \
                  material-layer definitions on at least one boundary. \
                  Verify that material layers have non-zero density \
                  (> 0 kg/m³) and specific_heat (> 0 J/(kg·K))."
+                    .to_string(),
             );
         }
+    }
 
-        // Verify same-zone precomputed boundaries have correct RC chain topology:
-        // the outermost (cut-surface) node must NOT connect directly to zone air
-        // (it is the dead end of the fin), and the innermost node must connect to
-        // zone air through a single path. This guards against wiring bugs that
-        // would short-circuit the fin or leave it disconnected.
-        for diag in &boundary_diagnostics {
-            if diag.path == RCPath::Precomputed
-                && diag.n_rc_nodes > 0
-                && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
-            {
-                if let Some(info) = layer_info.get(&diag.boundary_idx) {
-                    let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
-                    // Innermost node must connect to zone air.
-                    assert!(
-                        rc.resistances.contains_key(&(info.inner_node, zone_node))
-                            || rc.resistances.contains_key(&(zone_node, info.inner_node)),
-                        "same-zone precomputed boundary {}: inner node {:?} \
-                         not connected to zone {:?}",
-                        diag.boundary_idx,
-                        info.inner_node,
-                        zone_node
-                    );
-                    // Outermost (cut-surface) node must NOT connect directly to
-                    // zone air — the fin dead-ends there.
-                    if info.outer_node != info.inner_node {
-                        assert!(
-                            !rc.resistances.contains_key(&(info.outer_node, zone_node))
-                                && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
-                            "same-zone precomputed boundary {}: outer (cut-surface) node \
-                             {:?} incorrectly connected directly to zone {:?}",
-                            diag.boundary_idx,
-                            info.outer_node,
-                            zone_node
-                        );
-                    }
-                }
+    // Verify same-zone precomputed boundaries have correct RC chain topology:
+    // the outermost (cut-surface) node must NOT connect directly to zone air
+    // (it is the dead end of the fin), and the innermost node must connect to
+    // zone air through a single path. This guards against wiring bugs that
+    // would short-circuit the fin or leave it disconnected. Assembler
+    // topology no input reaches, so the checks are debug-only assertions.
+    #[cfg(debug_assertions)]
+    for diag in &boundary_diagnostics {
+        if diag.path == RCPath::Precomputed
+            && diag.n_rc_nodes > 0
+            && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
+            && let Some(info) = layer_info.get(&diag.boundary_idx)
+        {
+            let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
+            // Innermost node must connect to zone air.
+            assert!(
+                rc.resistances.contains_key(&(info.inner_node, zone_node))
+                    || rc.resistances.contains_key(&(zone_node, info.inner_node)),
+                "same-zone precomputed boundary {}: inner node {:?} \
+                     not connected to zone {:?}",
+                diag.boundary_idx,
+                info.inner_node,
+                zone_node
+            );
+            // Outermost (cut-surface) node must NOT connect directly to
+            // zone air; the fin dead-ends there.
+            if info.outer_node != info.inner_node {
+                assert!(
+                    !rc.resistances.contains_key(&(info.outer_node, zone_node))
+                        && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
+                    "same-zone precomputed boundary {}: outer (cut-surface) node \
+                         {:?} incorrectly connected directly to zone {:?}",
+                    diag.boundary_idx,
+                    info.outer_node,
+                    zone_node
+                );
             }
         }
+    }
 
-        // Verify same-zone material-layer boundaries have correct RC chain topology:
-        // mirrors the precomputed check above — the cut-surface (outer) node must
-        // NOT connect directly to zone air, and the innermost node must connect to
-        // zone air via the interior film resistance.
-        for diag in &boundary_diagnostics {
-            if diag.path == RCPath::MaterialLayer
-                && diag.n_rc_nodes > 0
-                && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
-            {
-                if let Some(info) = layer_info.get(&diag.boundary_idx) {
-                    let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
-                    // Innermost (interior-facing) node must connect to zone air via
-                    // the interior film resistance.
-                    assert!(
-                        rc.resistances.contains_key(&(info.inner_node, zone_node))
-                            || rc.resistances.contains_key(&(zone_node, info.inner_node)),
-                        "same-zone material-layer boundary {}: inner node {:?} \
-                         not connected to zone {:?} — interior wiring must fire for same-zone",
-                        diag.boundary_idx,
-                        info.inner_node,
-                        zone_node
-                    );
-                    // Outermost (cut-surface) node must NOT connect directly to
-                    // zone air — the exterior-side wiring must be skipped for same-zone.
-                    if info.outer_node != info.inner_node {
-                        assert!(
-                            !rc.resistances.contains_key(&(info.outer_node, zone_node))
-                                && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
-                            "same-zone material-layer boundary {}: outer (cut-surface) node \
-                             {:?} incorrectly connected directly to zone {:?} — \
-                             exterior wiring must be skipped for same-zone",
-                            diag.boundary_idx,
-                            info.outer_node,
-                            zone_node
-                        );
-                    }
-                }
+    // Verify same-zone material-layer boundaries have correct RC chain topology:
+    // mirrors the precomputed check above (the cut-surface (outer) node must
+    // NOT connect directly to zone air, and the innermost node must connect to
+    // zone air via the interior film resistance. Assembler topology, so the
+    // checks are debug-only assertions.
+    #[cfg(debug_assertions)]
+    for diag in &boundary_diagnostics {
+        if diag.path == RCPath::MaterialLayer
+            && diag.n_rc_nodes > 0
+            && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
+            && let Some(info) = layer_info.get(&diag.boundary_idx)
+        {
+            let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
+            // Innermost (interior-facing) node must connect to zone air via
+            // the interior film resistance.
+            assert!(
+                rc.resistances.contains_key(&(info.inner_node, zone_node))
+                    || rc.resistances.contains_key(&(zone_node, info.inner_node)),
+                "same-zone material-layer boundary {}: inner node {:?} \
+                     not connected to zone {:?}: interior wiring must fire for same-zone",
+                diag.boundary_idx,
+                info.inner_node,
+                zone_node
+            );
+            // Outermost (cut-surface) node must NOT connect directly to
+            // zone air; the exterior-side wiring must be skipped for same-zone.
+            if info.outer_node != info.inner_node {
+                assert!(
+                    !rc.resistances.contains_key(&(info.outer_node, zone_node))
+                        && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
+                    "same-zone material-layer boundary {}: outer (cut-surface) node \
+                         {:?} incorrectly connected directly to zone {:?}: \
+                         exterior wiring must be skipped for same-zone",
+                    diag.boundary_idx,
+                    info.outer_node,
+                    zone_node
+                );
             }
         }
     }
@@ -1929,8 +1930,8 @@ pub fn parallel_path_conductivity(k_cavity_w_m_k: f64, framing_factor: Option<f6
 /// `U_stud = 1 / r_stud`, `U_cavity = 1 / r_cavity`.
 ///
 /// # Parameters
-/// - `stud_width_m`: width of a single stud [m] (e.g. 0.0381 m = 1.5 in)
-/// - `stud_spacing_m`: on-center stud spacing [m] (e.g. 0.4064 m = 16 in)
+/// - `stud_width_m`: width of a single stud (m) (e.g. 0.0381 m = 1.5 in)
+/// - `stud_spacing_m`: on-center stud spacing (m) (e.g. 0.4064 m = 16 in)
 /// - `r_cavity_m2_k_w`: total R-value of the insulated cavity assembly (all
 ///   layers excluding the stud thermal bridge) [m²·K/W]
 /// - `r_stud_m2_k_w`: R-value through the stud cross-section [m²·K/W].
@@ -2126,57 +2127,78 @@ mod tests {
     // ── derive_zone_capacitances ────────────────────────────────────────
 
     #[test]
-    fn zone_capacitance_with_known_area() {
+    fn zone_capacitance_follows_the_zone_volume() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(300.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
         let caps = derive_zone_capacitances(&zones, p_pa).unwrap();
         assert_eq!(caps.len(), 1);
         // ρ computed from ideal gas law at 20 °C, not the 1.2041 constant.
         let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
-        let expected = rho * AIR_CP_J_KG_K * (100.0 * DEFAULT_HEIGHT_M) * INTERIOR_MASS_MULTIPLIER;
+        let expected = rho * AIR_CP_J_KG_K * 300.0 * TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT;
         assert!((caps[0] - expected).abs() < 1e-6);
     }
 
+    /// A zone with no usable volume is an error naming the zone, not a
+    /// volume guessed from the floor area or a constant.
     #[test]
-    fn zone_capacitance_prefers_explicit_volume() {
-        let zones = vec![ZoneInput {
-            floor_area_m2: Some(100.0),
-            volume_m3: Some(300.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-        }];
-        let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
-        let caps = derive_zone_capacitances(&zones, p_pa).unwrap();
-        // Should use 300 m³ (explicit), not 100 × 2.5 = 250 m³ (derived from area)
-        let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
-        let expected = rho * AIR_CP_J_KG_K * 300.0 * INTERIOR_MASS_MULTIPLIER;
-        assert!((caps[0] - expected).abs() < 1e-6);
+    fn zone_capacitance_requires_a_volume() {
+        for volume_m3 in [None, Some(0.0), Some(f64::NAN)] {
+            let zones = vec![
+                ZoneInput {
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+                },
+                ZoneInput {
+                    floor_area_m2: Some(100.0),
+                    volume_m3,
+                    temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+                },
+            ];
+            let err =
+                derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                    .expect_err("a zone with no usable volume must fail");
+            assert!(
+                matches!(err, BoundaryRcError::ZoneVolume { zone_idx: 1, .. }),
+                "{volume_m3:?}: got {err}"
+            );
+        }
     }
 
+    /// A temperature capacitance multiplier that is zero, negative or NaN is
+    /// an error naming the zone, not a capacitance clamped to the floor.
     #[test]
-    fn zone_capacitance_defaults_when_area_unknown() {
-        let zones = vec![ZoneInput {
-            floor_area_m2: None,
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-        }];
-        let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
-        let caps = derive_zone_capacitances(&zones, p_pa).unwrap();
-        let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
-        let expected = rho * AIR_CP_J_KG_K * DEFAULT_VOLUME_M3 * INTERIOR_MASS_MULTIPLIER;
-        assert!((caps[0] - expected).abs() < 1e-6);
+    fn zone_capacitance_requires_a_positive_multiplier() {
+        for multiplier in [0.0, -7.0, f64::NAN, f64::INFINITY] {
+            let zones = vec![ZoneInput {
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                temperature_capacitance_multiplier: multiplier,
+            }];
+            let err =
+                derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                    .expect_err("a non-positive multiplier must fail");
+            assert!(
+                matches!(
+                    err,
+                    BoundaryRcError::CapacitanceMultiplier { zone_idx: 0, .. }
+                ),
+                "{multiplier}: got {err}"
+            );
+        }
     }
 
     #[test]
     fn zone_capacitance_respects_minimum() {
-        // Tiny area → capacitance should be clamped to MIN_CAPACITANCE_J_K.
+        // Tiny volume → capacitance should be clamped to MIN_CAPACITANCE_J_K.
         let zones = vec![ZoneInput {
             floor_area_m2: Some(1e-12),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(2.5e-12),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2191,7 +2213,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let p_sea = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
         let p_denver = hares_physics::air_properties::standard_pressure_pa(1609.0);
@@ -2209,16 +2231,15 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let result = derive_zone_capacitances(&zones, 0.0);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            BoundaryRcError::InvalidSitePressure { value } => {
-                assert_eq!(value, 0.0);
-            }
-        }
+        assert!(
+            matches!(err, BoundaryRcError::InvalidSitePressure { value } if value == 0.0),
+            "got {err}"
+        );
     }
 
     #[test]
@@ -2226,16 +2247,15 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let result = derive_zone_capacitances(&zones, -1.0);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            BoundaryRcError::InvalidSitePressure { value } => {
-                assert_eq!(value, -1.0);
-            }
-        }
+        assert!(
+            matches!(err, BoundaryRcError::InvalidSitePressure { value } if value == -1.0),
+            "got {err}"
+        );
     }
 
     // ── Single zone, single boundary (no layers) ───────────────────────
@@ -2244,8 +2264,8 @@ mod tests {
     fn single_zone_no_layers_produces_valid_network() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2274,8 +2294,8 @@ mod tests {
     fn single_zone_with_layers_creates_layer_nodes() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2315,13 +2335,13 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(250.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(200.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -2348,8 +2368,8 @@ mod tests {
     fn ground_only_has_no_outdoor_col() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2392,13 +2412,13 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(250.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(200.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -2508,8 +2528,8 @@ mod tests {
     fn ground_only_multi_depth_has_no_outdoor_col() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2566,8 +2586,8 @@ mod tests {
     fn ground_cols_sorted_by_depth_when_boundaries_given_out_of_order() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2602,8 +2622,8 @@ mod tests {
     fn same_zone_no_layers_is_noop() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2622,8 +2642,8 @@ mod tests {
     fn same_zone_with_layers_creates_internal_mass() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2652,8 +2672,8 @@ mod tests {
     fn same_zone_odd_layers_halves_middle_capacitance() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2688,8 +2708,8 @@ mod tests {
     fn same_zone_single_layer_keeps_one_node_with_halved_cap() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2718,8 +2738,8 @@ mod tests {
     fn material_layer_same_zone_correct_topology() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2787,8 +2807,8 @@ mod tests {
         // inner→zone coupling reflects the interior film resistance (not exterior).
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -2901,8 +2921,8 @@ mod tests {
 
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3038,8 +3058,8 @@ mod tests {
     fn many_boundaries_no_node_id_collision() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3081,13 +3101,13 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(250.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(50.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(125.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -3110,8 +3130,8 @@ mod tests {
     fn no_boundaries_triggers_ua_fallback() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3129,13 +3149,13 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(250.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(200.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -3159,13 +3179,13 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(250.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(200.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -3189,8 +3209,8 @@ mod tests {
     fn a_c_diagonal_is_negative() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3215,8 +3235,8 @@ mod tests {
     fn zero_area_boundary_is_skipped() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3258,8 +3278,8 @@ mod tests {
     fn precomputed_single_layer_creates_one_node() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3292,8 +3312,8 @@ mod tests {
     fn precomputed_multi_layer_creates_correct_node_count() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3331,8 +3351,8 @@ mod tests {
     fn precomputed_zero_capacitance_layer_is_pruned() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3370,8 +3390,8 @@ mod tests {
     fn precomputed_outdoor_boundary_keeps_all_layers() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3413,13 +3433,13 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(250.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
             ZoneInput {
                 floor_area_m2: Some(100.0),
-                volume_m3: None,
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                volume_m3: Some(250.0),
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             },
         ];
         let caps =
@@ -3461,8 +3481,8 @@ mod tests {
     fn precomputed_all_zero_capacitance_falls_back_to_resistance() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3497,8 +3517,8 @@ mod tests {
     fn precomputed_takes_priority_over_material_layers() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3540,8 +3560,8 @@ mod tests {
     fn build_precomputed_boundary_same_zone_correct_topology() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3635,8 +3655,8 @@ mod tests {
     fn precomputed_same_zone_node_count_matches_material_path() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -3715,7 +3735,7 @@ mod tests {
                 &[ZoneInput {
                     floor_area_m2: Some(100.0),
                     volume_m3: Some(250.0),
-                    mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                    temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
                 }],
                 hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
             )
@@ -3878,22 +3898,22 @@ mod tests {
     fn zone_capacitance_uses_per_zone_multiplier() {
         let conditioned = ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: 7.0,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: 7.0,
         };
         let attic = ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: 1.0,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: 1.0,
         };
         let foundation = ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: 1.5,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: 1.5,
         };
         let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
         let caps = derive_zone_capacitances(&[conditioned, attic, foundation], p_pa).unwrap();
-        let vol = 100.0 * DEFAULT_HEIGHT_M;
+        let vol = 250.0;
         // Density computed from ideal gas law at 20 °C, not the 1.2041 constant.
         let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
         let base = rho * AIR_CP_J_KG_K * vol;
@@ -3983,8 +4003,8 @@ mod tests {
     fn r_zone_to_inner_uses_innermost_layer() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(48.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(120.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4030,8 +4050,8 @@ mod tests {
     fn r_zone_to_inner_uses_post_split_thickness() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(48.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(120.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4078,8 +4098,8 @@ mod tests {
     fn r_zone_to_inner_precomputed_path() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4130,7 +4150,7 @@ mod tests {
             &[ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             }],
             hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
         )
@@ -4175,7 +4195,7 @@ mod tests {
             &[ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             }],
             hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
         )
@@ -4221,7 +4241,7 @@ mod tests {
             &[ZoneInput {
                 floor_area_m2: Some(48.0),
                 volume_m3: Some(129.6),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
             }],
             hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
         )
@@ -4281,8 +4301,8 @@ mod tests {
         // Build boundary inputs with simple layered construction.
         let zones = vec![ZoneInput {
             floor_area_m2: Some(48.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(120.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4459,8 +4479,8 @@ mod tests {
     fn inner_node_does_not_collide_with_reserved_ids_material_path() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4495,8 +4515,8 @@ mod tests {
     fn inner_node_does_not_collide_with_reserved_ids_precomputed_path() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4543,8 +4563,8 @@ mod tests {
     fn node_index_cardinality_matches_a_c() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4566,8 +4586,8 @@ mod tests {
     fn surface_layer_info_nodes_in_capacitances() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4613,8 +4633,8 @@ mod tests {
     fn precomputed_negative_capacitance_asserts() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4638,8 +4658,8 @@ mod tests {
     fn precomputed_zero_r_total_asserts() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4659,8 +4679,8 @@ mod tests {
     fn material_negative_cap_asserts() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4675,8 +4695,8 @@ mod tests {
     fn fallback_zero_r_total_asserts() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
-            volume_m3: None,
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
         }];
         let caps =
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
@@ -4702,6 +4722,6 @@ mod tests {
         let capacitances: HashMap<NodeId, f64> = HashMap::new();
         let node_index: HashMap<NodeId, usize> = HashMap::new();
 
-        validate_surface_layer_info(&layer_info, &capacitances, &node_index);
+        validate_surface_layer_info(&layer_info, &capacitances, &node_index).unwrap();
     }
 }

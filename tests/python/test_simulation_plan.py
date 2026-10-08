@@ -17,6 +17,7 @@ def test_simulation_plan_single_segment():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
+        write_output=False,
     )
     plan.add_segment(
         start=datetime(2024, 1, 1, 0, 0),
@@ -36,6 +37,7 @@ def test_simulation_plan_two_segments_same_equipment():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
+        write_output=False,
     )
     plan.add_segment(
         start=datetime(2024, 1, 1, 0, 0),
@@ -59,6 +61,7 @@ def test_simulation_plan_empty_segments_raises():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=300,
+        write_output=False,
     )
     with pytest.raises(ValueError, match="no segments"):
         plan.run()
@@ -72,10 +75,15 @@ def test_simulation_plan_swap_furnace_to_ashp():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
+        write_output=False,
     )
+    # Hour-long segments: the furnace segment can end with the zone above the
+    # heating setpoint, and under the zone's full air capacitance it takes
+    # several minutes to drift down to the heat pump's turn-on; a few-minute
+    # segment can end before the heat pump is ever called.
     plan.add_segment(
         start=datetime(2024, 1, 1, 0, 0),
-        end=datetime(2024, 1, 1, 0, 5),
+        end=datetime(2024, 1, 1, 1, 0),
     )
 
     def setup_ashp(bp: DwellingBlueprint) -> None:
@@ -86,8 +94,8 @@ def test_simulation_plan_swap_furnace_to_ashp():
         bp.add_equipment(ASHPCooler("ASHP Cooler", capacity_w=10000, seer=18.0))
 
     plan.add_segment(
-        start=datetime(2024, 1, 1, 0, 5),
-        end=datetime(2024, 1, 1, 0, 10),
+        start=datetime(2024, 1, 1, 1, 0),
+        end=datetime(2024, 1, 1, 2, 0),
         setup=setup_ashp,
     )
     results = plan.run()
@@ -103,6 +111,7 @@ def test_simulation_plan_swap_furnace_to_ashp():
     power_col = "Total Electric Power (kW)"
     seg0_mean = results.filter(pl.col("segment") == 0)[power_col].mean()
     seg1_mean = results.filter(pl.col("segment") == 1)[power_col].mean()
+    assert isinstance(seg0_mean, (int, float)) and isinstance(seg1_mean, (int, float))
     assert seg1_mean > seg0_mean, (
         f"Expected ASHP segment electric power (mean={seg1_mean:.3f}) "
         f"to exceed gas-furnace segment (mean={seg0_mean:.3f})"
@@ -118,6 +127,7 @@ def test_thermal_continuity_across_segments():
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=300,
+        write_output=False,
     )
 
     plan.add_segment(
@@ -153,6 +163,7 @@ def test_post_build_callback_adds_battery():
         HPXML, SCHEDULE, WEATHER,
         defaults_path=str(HARES_DEFAULTS), bldg_id=42,
         time_res_s=300,
+        write_output=False,
     )
     battery_added = []
 

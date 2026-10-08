@@ -20,15 +20,15 @@ pub struct DwellingTelemetry {
     pub equipment_power_kw: Vec<f64>,
     pub setpoint_heat_c: Vec<f64>,
     pub setpoint_cool_c: Vec<f64>,
-    /// Per-zone energy balance residual [W] from the zone-air first-law check.
+    /// Per-zone energy balance residual (W) from the zone-air first-law check.
     /// One entry per zone in the same order as `zone_names`.
     pub energy_balance_residuals: Vec<f64>,
     pub total_power_kw: f64,
     pub reactive_power_kvar: f64,
-    /// Load [kW] the island sources failed to cover during islanded operation
+    /// Load (kW) the island sources failed to cover during islanded operation
     /// (would-be phantom grid import). Always 0.0 when not islanded.
     pub island_unserved_kw: f64,
-    /// Surplus on-site generation [kW] the island could not absorb during
+    /// Surplus on-site generation (kW) the island could not absorb during
     /// islanded operation (would-be phantom grid export). Always 0.0 when not
     /// islanded.
     pub island_excess_kw: f64,
@@ -45,11 +45,6 @@ pub struct DwellingTelemetry {
     /// 0/1 flag indicating whether the dwelling has been marked as permanently
     /// failed after a prior panic and will not be stepped again.
     pub dwelling_failed: bool,
-    /// False when telemetry self-consistency checks (electrical sum, per-zone
-    /// thermal totals) detect a mismatch. Consumers should inspect this flag
-    /// before using the snapshot. Always `true` in release builds where the
-    /// checks are not compiled in.
-    pub telemetry_consistency_flag: bool,
     /// `true` when at least one simulation `step()` has completed.
     /// Before the first step all fields reflect construction-time defaults
     /// rather than simulated state; consumers should treat all observation
@@ -64,28 +59,27 @@ static WARNED_ACTOR_TELEMETRY_DOT: AtomicBool = AtomicBool::new(false);
 static WARNED_ACTOR_TELEMETRY_BARE: AtomicBool = AtomicBool::new(false);
 
 impl DwellingTelemetry {
-    /// Verifies that `sum(equipment_power_kw) ≈ total_power_kw` within
-    /// `max(0.001, 1e-6 * |total_power_kw|)`. Sets `telemetry_consistency_flag`
-    /// to `false` and emits a `tracing::warn!` on mismatch.
+    /// Verifies that the per-equipment electric power sum matches the
+    /// solver's total within `max(0.001, 1e-6 * |total|)`.
     ///
-    /// Gated behind `debug_assertions` or `check_invariants` for zero
-    /// production overhead.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    pub fn verify_consistency(&mut self, step: u64) {
-        let sum_equip: f64 = self.equipment_power_kw.iter().sum();
-        let total = self.total_power_kw;
-        let tolerance = 0.001_f64.max(1e-6 * total.abs());
-        let diff = (sum_equip - total).abs();
+    /// Raised from `run_timestep` (where the inputs are computed) in every
+    /// build profile: a mismatch is a physics violation and fails the step
+    /// with a typed error.
+    pub fn verify_consistency(
+        step: u64,
+        sum_equipment_power_kw: f64,
+        total_power_kw: f64,
+    ) -> Result<(), HaresError> {
+        let tolerance = 0.001_f64.max(1e-6 * total_power_kw.abs());
+        let diff = (sum_equipment_power_kw - total_power_kw).abs();
         if diff > tolerance {
-            self.telemetry_consistency_flag = false;
-            tracing::warn!(
-                step = step,
-                sum_equipment_power_kw = sum_equip,
-                total_power_kw = total,
-                diff_kw = diff,
-                "Telemetry consistency: sum(equipment_power_kw) does not match total_power_kw"
-            );
+            return Err(HaresError::InvalidState(format!(
+                "telemetry electrical consistency at step {step}: \
+                 sum(equipment_power_kw) {sum_equipment_power_kw:.6} kW does not match \
+                 total_power_kw {total_power_kw:.6} kW (diff {diff:.6} kW)"
+            )));
         }
+        Ok(())
     }
 
     /// Selects named observation channels into a flat contiguous vector.
@@ -187,24 +181,23 @@ impl DwellingTelemetry {
 
             // Actor telemetry fallback: dot-separated <actor>.<channel>.
             let mut found_in_actors = false;
-            if let Some((actor_name, channel_name)) = field.split_once('.') {
-                if let Some(channels) = self.actor_telemetry.get(actor_name) {
-                    // allowed: actor_telemetry keys are user-defined strings, not static tk:: constants
-                    if let Some(&value) = channels.get(channel_name) {
-                        if WARNED_ACTOR_TELEMETRY_DOT
-                            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                            .is_ok()
-                        {
-                            tracing::warn!(
-                                field = field,
-                                actor_telemetry_key = channel_name,
-                                "resolving observation field via actor_telemetry (throttled to once per process)"
-                            );
-                        }
-                        out.push(value);
-                        found_in_actors = true;
-                    }
+            if let Some((actor_name, channel_name)) = field.split_once('.')
+                // allowed: actor_telemetry keys are user-defined strings, not static tk:: constants
+                && let Some(channels) = self.actor_telemetry.get(actor_name)
+                && let Some(&value) = channels.get(channel_name)
+            {
+                if WARNED_ACTOR_TELEMETRY_DOT
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    tracing::warn!(
+                        field = field,
+                        actor_telemetry_key = channel_name,
+                        "resolving observation field via actor_telemetry (throttled to once per process)"
+                    );
                 }
+                out.push(value);
+                found_in_actors = true;
             }
             // Bare field name: search all actors in sorted-name order
             // (BTreeMap), so duplicate channel names always resolve to the
@@ -309,7 +302,6 @@ mod tests {
             outdoor_humidity_ratio: 0.008,
             actor_telemetry: BTreeMap::new(),
             dwelling_failed: false,
-            telemetry_consistency_flag: true,
             initialized: true,
         }
     }
@@ -411,65 +403,29 @@ mod tests {
     }
 
     #[test]
-    fn consistency_flag_defaults_true() {
-        let t = sample();
-        assert!(t.telemetry_consistency_flag);
+    fn consistency_check_fails_on_mismatched_electrical_power() {
+        let err = DwellingTelemetry::verify_consistency(0, 3.0, 10.0)
+            .expect_err("sum(equipment_power)=3 != total=10 must fail");
+        assert!(err.to_string().contains("does not match"), "got: {err}");
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn consistency_check_flags_mismatched_electrical_power() {
-        let mut t = sample();
-        t.equipment_power_kw = vec![1.0, 2.0];
-        t.total_power_kw = 10.0;
-        t.telemetry_consistency_flag = true;
-        t.verify_consistency(0);
-        assert!(
-            !t.telemetry_consistency_flag,
-            "consistency flag should be false when sum(equipment_power) != total_power"
-        );
-    }
-
-    #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn consistency_check_passes_when_power_matches() {
-        let mut t = sample();
-        t.equipment_power_kw = vec![1.0, 2.0, 3.0];
-        t.total_power_kw = 6.0;
-        t.telemetry_consistency_flag = true;
-        t.verify_consistency(0);
-        assert!(
-            t.telemetry_consistency_flag,
-            "consistency flag should remain true when sum(equipment_power) == total_power"
-        );
+        DwellingTelemetry::verify_consistency(0, 6.0, 6.0)
+            .expect("equal sums must pass the consistency check");
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn consistency_check_detects_small_mismatch() {
-        let mut t = sample();
-        t.equipment_power_kw = vec![10.0];
-        t.total_power_kw = 10.1;
-        t.telemetry_consistency_flag = true;
-        t.verify_consistency(0);
-        assert!(
-            !t.telemetry_consistency_flag,
-            "0.1 kW mismatch exceeds 0.001 kW tolerance and should be flagged"
-        );
+        let err = DwellingTelemetry::verify_consistency(0, 10.0, 10.1)
+            .expect_err("0.1 kW mismatch exceeds 0.001 kW tolerance and must fail");
+        assert!(err.to_string().contains("does not match"), "got: {err}");
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn consistency_check_tolerates_sub_milliwatt_error() {
-        let mut t = sample();
-        t.equipment_power_kw = vec![100.0];
-        t.total_power_kw = 100.0001;
-        t.telemetry_consistency_flag = true;
-        t.verify_consistency(0);
-        assert!(
-            t.telemetry_consistency_flag,
-            "0.0001 kW error is within 0.001 kW absolute tolerance"
-        );
+        DwellingTelemetry::verify_consistency(0, 100.0001, 100.0)
+            .expect("0.0001 kW error is within 0.001 kW absolute tolerance");
     }
 
     // --- actor_telemetry resolution ---

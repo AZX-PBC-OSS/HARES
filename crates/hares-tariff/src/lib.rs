@@ -7,11 +7,13 @@
 
 pub mod billing;
 pub mod evaluator;
+pub mod snapshot;
 pub mod types;
 pub mod urdb;
 
 pub use billing::{BillingPeriodSummary, BillingState};
 pub use evaluator::TariffEvaluator;
+pub use snapshot::{TARIFF_SNAPSHOT_SCHEMA_VERSION, TariffSnapshot};
 pub use types::{
     CppConfig, DemandRate, ElectricTariff, EnergyRate, ExportMode, ExportRate, FixedCharges,
     GasTariff, GasTieredBlock, RatchetConfig, TieredBlock,

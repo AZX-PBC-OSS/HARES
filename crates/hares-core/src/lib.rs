@@ -1,8 +1,17 @@
 //! Core simulation engine: dwelling, clock, scheduler, and checkpoint.
 
+// The unit-test binary installs the counting allocator so the dwelling's
+// snapshot-path allocation tests read real per-thread counts; it applies
+// to this crate's test build alone.
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: hares_types::alloc_count::CountingAllocator =
+    hares_types::alloc_count::CountingAllocator;
+
 pub mod actor;
 pub mod actor_registry;
 pub mod actors;
+mod ambient_air;
 pub mod checkpoint;
 pub mod checksum;
 pub mod clock;
@@ -10,6 +19,7 @@ pub mod diagnostics;
 pub mod dwelling;
 pub mod engine;
 pub mod environment;
+pub mod health;
 pub mod invariants;
 #[cfg(feature = "observe")]
 pub mod observer;
@@ -18,19 +28,25 @@ mod observer_capture;
 pub mod rng;
 pub mod scheduler;
 pub mod telemetry;
+#[cfg(test)]
+#[path = "../../../tests/support/temp_file.rs"]
+mod temp_file;
 
-pub use actor::{Actor, ActorInterest};
+pub use actor::{Actor, ActorEquipment, ActorInterest, ActorTarget};
 pub use actor_registry::{ActorConfig, ActorFactory, ActorRegistry};
 pub use checkpoint::DwellingCheckpoint;
 pub use clock::SimClock;
 pub use dwelling::{
-    BatteryLutData, Dwelling, DwellingConfig, PremiseZip,
+    BatteryLutData, Dwelling, DwellingConfig, HpxmlInputs, PremiseZip,
     SimulationResults as DwellingSimulationResults, StepResult, building_to_boundary_inputs,
-    building_to_zone_inputs, mass_multiplier_for_zone,
+    building_to_zone_inputs, shipped_defaults_dir,
 };
 pub use engine::{KernelTimer, SimStatus, SimulationEngine, SimulationResults};
 pub use environment::{EnvironmentInitOptions, EnvironmentManager};
 pub use hares_io::SimulationConfig;
+#[cfg(feature = "profiling")]
+pub use health::{ActorTiming, ActorTimings};
+pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
 pub use rand_chacha::ChaCha8Rng;
 pub use rng::derive_dwelling_rng;
 pub use telemetry::DwellingTelemetry;

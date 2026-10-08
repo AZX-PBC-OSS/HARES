@@ -4,7 +4,7 @@
 //! orchestration. Both methods operate on the shared input vector `u` and read
 //! the current state vector `x` plus exterior surface temperature warm-starts.
 
-use hares_types::EnvironmentState;
+use hares_types::{EnvironmentState, HaresError};
 use nalgebra::DVector;
 
 use crate::longwave_radiation::{
@@ -31,7 +31,7 @@ impl ThermalSolver {
         &mut self,
         u: &mut DVector<f64>,
         env: &EnvironmentState,
-    ) {
+    ) -> std::result::Result<(), HaresError> {
         let t_ext = env.weather.outdoor_temp_c;
         let t_sky_raw = env.weather.sky_temp_c;
         let t_sky_valid = !t_sky_raw.is_nan();
@@ -116,18 +116,6 @@ impl ThermalSolver {
                     H_OUT_ASHRAE_PEAK
                 };
 
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    assert!(
-                        h_out >= 1.0,
-                        "invariant violation: h_out ({}) is below the 1.0 W/(m²·K) \
-                         natural convection floor — the guard above should have caught this. \
-                         surface_id={}",
-                        h_out,
-                        info.surface_id
-                    );
-                }
-
                 let delta_q_w = (u_factor / h_out) * delta_q_w_m2 * info.area_m2;
 
                 let indoor_zone = self
@@ -137,10 +125,10 @@ impl ThermalSolver {
                     .copied()
                     .unwrap_or(self.config.indoor_zone_id);
 
-                if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&indoor_zone) {
-                    if idx < u.len() {
-                        u[idx] += delta_q_w;
-                    }
+                if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&indoor_zone)
+                    && idx < u.len()
+                {
+                    u[idx] += delta_q_w;
                 }
 
                 self.window_exterior_lwr_w += delta_q_w;
@@ -346,12 +334,6 @@ impl ThermalSolver {
                 }
             }
 
-            // The flag is consumed only by the invariant block below. In
-            // plain release builds it is dead, so a no-op read keeps the
-            // declaration and assignments lint-clean under -D warnings.
-            #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-            let _ = converged;
-
             self.exterior_surface_temps[i] = t_surf;
 
             let q_lw = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
@@ -359,47 +341,36 @@ impl ThermalSolver {
             u[info.input_index] += injected;
 
             // Skin-balance closure invariant. Where the iteration CONVERGED
-            // (tolerance break, not
-            // the iteration cap), the skin must satisfy its own fixed point;
-            // the divider identity is exact regardless of convergence and
-            // checked unconditionally. Both are free to check and both hold
-            // exactly under the parallel (Thévenin) rad_res — the fixed-point
-            // check fails by ~3.9 K under the bare-film form in the
-            // thin-skin regime, i.e. it would have caught that defect the
-            // day it was written.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                let q_total = solar_w + q_lw;
-                if converged {
-                    let fixed_point_residual =
-                        (t_surf - (t_surf_init + q_total * info.rad_res_k_w)).abs();
-                    // Tolerance 0.5 K — the derived bound, not a guess. At
-                    // the break, |0.5·(F − t_prev) + 0.1·Δ_prev| < 0.01 with
-                    // Δ_prev (the previous step) bounded by the ±2 K clamp,
-                    // so |t_prev − F| ≤ (0.01 + 0.2)/0.5 = 0.42 and the
-                    // residual |t_surf − F| = |0.5(t_prev − F) + 0.1·Δ_prev|
-                    // ≤ 0.41 K. Observed: 0.051 K (warmup reproducibility)
-                    // and 0.223 K (batch-step synthetic dwelling). The
-                    // defect class this guards is multi-kelvin (3.9 K under
-                    // the bare-film rad_res), so the bound-derived tolerance
-                    // keeps ≈8× sensitivity margin.
-                    debug_assert!(
-                        fixed_point_residual <= 0.5,
+            // (tolerance break, not the iteration cap), the skin must satisfy
+            // its own fixed point. The check is unconditional and free (one
+            // subtraction), and holds exactly under the parallel (Thévenin)
+            // rad_res: the fixed-point check fails by ~3.9 K under the
+            // bare-film form in the thin-skin regime, i.e. it would have
+            // caught that defect the day it was written. A violation is a
+            // typed error in every build profile.
+            let q_total = solar_w + q_lw;
+            if converged {
+                let fixed_point_residual =
+                    (t_surf - (t_surf_init + q_total * info.rad_res_k_w)).abs();
+                // Tolerance 0.5 K: the derived bound, not a guess. At
+                // the break, |0.5·(F − t_prev) + 0.1·Δ_prev| < 0.01 with
+                // Δ_prev (the previous step) bounded by the ±2 K clamp,
+                // so |t_prev − F| ≤ (0.01 + 0.2)/0.5 = 0.42 and the
+                // residual |t_surf − F| = |0.5(t_prev − F) + 0.1·Δ_prev|
+                // ≤ 0.41 K. Observed: 0.051 K (warmup reproducibility)
+                // and 0.223 K (batch-step synthetic dwelling). The
+                // defect class this guards is multi-kelvin (3.9 K under
+                // the bare-film rad_res), so the bound-derived tolerance
+                // keeps ≈8× sensitivity margin.
+                if fixed_point_residual > 0.5 {
+                    return Err(HaresError::Envelope(format!(
                         "invariant violation: exterior skin {} off its fixed point by \
                          {fixed_point_residual:.4} K (t_skin={t_surf:.3}, \
                          t_init={t_surf_init:.3}, Q={q_total:.1} W, \
                          rad_res={} K/W)",
-                        info.surface_id,
-                        info.rad_res_k_w
-                    );
+                        info.surface_id, info.rad_res_k_w
+                    )));
                 }
-                let divider_residual = (injected - q_total * info.rad_frac).abs();
-                debug_assert!(
-                    divider_residual <= 1e-9 * q_total.abs().max(1.0),
-                    "invariant violation: exterior skin {} injection off the \
-                     divider identity by {divider_residual:.3e} W",
-                    info.surface_id
-                );
             }
 
             // Diagnostic split at skin-level semantics (OCHRE "Ext. Solar
@@ -422,6 +393,7 @@ impl ThermalSolver {
                     h_out_fallback_triggered: false,
                 });
         }
+        Ok(())
     }
 
     /// Interior longwave radiation exchange.
@@ -622,15 +594,15 @@ impl ThermalSolver {
                     &mut self.lwr_net_flux_buf,
                 );
             };
-            if let Some(saved) = self.interior_surface_temps.get_mut(zone_idx) {
-                if saved.len() == buf.len() {
-                    saved.copy_from_slice(buf);
-                }
+            if let Some(saved) = self.interior_surface_temps.get_mut(zone_idx)
+                && saved.len() == buf.len()
+            {
+                saved.copy_from_slice(buf);
             }
-            if let Some(saved_prev) = self.interior_surface_prev_temps.get_mut(zone_idx) {
-                if saved_prev.len() == prev_buf.len() {
-                    saved_prev.copy_from_slice(prev_buf);
-                }
+            if let Some(saved_prev) = self.interior_surface_prev_temps.get_mut(zone_idx)
+                && saved_prev.len() == prev_buf.len()
+            {
+                saved_prev.copy_from_slice(prev_buf);
             }
 
             let air_idx = self
@@ -646,13 +618,7 @@ impl ThermalSolver {
             // surfaces — a physically meaningful, non-zero indicator of how active
             // the interior radiation exchange is.
             let mut zone_exchange = 0.0_f64;
-            #[allow(clippy::unused_enumerate_index)]
-            for (_j, (info, &q)) in zone_cfg
-                .surfaces
-                .iter()
-                .zip(self.lwr_net_flux_buf.iter())
-                .enumerate()
-            {
+            for (info, &q) in zone_cfg.surfaces.iter().zip(self.lwr_net_flux_buf.iter()) {
                 zone_exchange += q.abs();
 
                 if info.driving_temp.is_none() && info.input_index < u.len() {
@@ -662,10 +628,10 @@ impl ThermalSolver {
                     //   surface.lwr_gain * surface.radiation_frac → surface h_idx
                     //   surface.lwr_gain * (1 - radiation_frac) → zone radiation_heat
                     u[info.input_index] += q * info.radiation_frac;
-                    if let Some(ai) = air_idx {
-                        if ai < u.len() {
-                            u[ai] += q * (1.0 - info.radiation_frac);
-                        }
+                    if let Some(ai) = air_idx
+                        && ai < u.len()
+                    {
+                        u[ai] += q * (1.0 - info.radiation_frac);
                     }
                 } else if info.driving_temp.is_some() {
                     // Window surfaces (no RC node, t_idx=None): OCHRE skips
@@ -677,17 +643,23 @@ impl ThermalSolver {
                     // lines 1187-1195: `if surface.t_idx is not None` guards
                     // the h_idx injection; windows always skip it.
                     let q_inject = q * (1.0 - info.radiation_frac);
-                    if let Some(ai) = air_idx {
-                        if ai < u.len() {
-                            u[ai] += q_inject;
-                        }
+                    if let Some(ai) = air_idx
+                        && ai < u.len()
+                    {
+                        u[ai] += q_inject;
                     }
                 }
-                #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            }
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            for (&surface_temp_c, &lwr_flux_w) in buf
+                .iter()
+                .zip(self.lwr_net_flux_buf.iter())
+                .take(zone_cfg.surfaces.len())
+            {
                 self.int_surface_diag_buf
                     .push(super::config::IntSurfaceDiag {
-                        surface_temp_c: buf[_j],
-                        lwr_flux_w: q,
+                        surface_temp_c,
+                        lwr_flux_w,
                     });
             }
             self.lwr_by_zone_buf
@@ -1019,7 +991,7 @@ mod tests {
                 u_factor_w_m2_k: 3.0,
                 h_out_w_m2_k,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         crate::thermal_solver::ThermalSolver::new(model, wiring, window_config, 60.0, env, 22.0)
@@ -1034,6 +1006,7 @@ mod tests {
         use hares_types::{GridState, WeatherState, ZoneId, ZoneState};
 
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 22.0,
@@ -1069,7 +1042,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -1095,8 +1069,12 @@ mod tests {
         let mut u_1_5 = DVector::zeros(solver_1_5.model.input_dim());
         let mut u_0 = DVector::zeros(solver_0.model.input_dim());
 
-        solver_1_5.apply_exterior_longwave_inputs_iterative(&mut u_1_5, &env);
-        solver_0.apply_exterior_longwave_inputs_iterative(&mut u_0, &env);
+        solver_1_5
+            .apply_exterior_longwave_inputs_iterative(&mut u_1_5, &env)
+            .unwrap();
+        solver_0
+            .apply_exterior_longwave_inputs_iterative(&mut u_0, &env)
+            .unwrap();
 
         let f_sky = sky_view_factor(90.0);
         let beta = beta_factor(90.0);
@@ -1136,7 +1114,9 @@ mod tests {
         let env = window_lwr_env();
         let mut solver = window_lwr_solver(0.0, &env);
         let mut u = DVector::zeros(solver.model.input_dim());
-        solver.apply_exterior_longwave_inputs_iterative(&mut u, &env);
+        solver
+            .apply_exterior_longwave_inputs_iterative(&mut u, &env)
+            .unwrap();
 
         let f_sky = sky_view_factor(90.0);
         let beta = beta_factor(90.0);
@@ -1166,8 +1146,12 @@ mod tests {
         let mut u_1_0 = DVector::zeros(solver_1_0.model.input_dim());
         let mut u_0_99 = DVector::zeros(solver_0_99.model.input_dim());
 
-        solver_1_0.apply_exterior_longwave_inputs_iterative(&mut u_1_0, &env);
-        solver_0_99.apply_exterior_longwave_inputs_iterative(&mut u_0_99, &env);
+        solver_1_0
+            .apply_exterior_longwave_inputs_iterative(&mut u_1_0, &env)
+            .unwrap();
+        solver_0_99
+            .apply_exterior_longwave_inputs_iterative(&mut u_0_99, &env)
+            .unwrap();
 
         let f_sky = sky_view_factor(90.0);
         let beta = beta_factor(90.0);
@@ -1260,7 +1244,7 @@ mod tests {
                 u_factor_w_m2_k: 0.0,
                 h_out_w_m2_k: 5.0,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, env, 20.0).unwrap()
@@ -1278,7 +1262,9 @@ mod tests {
         // Apply exterior LWR inputs.
         let mut u = nalgebra::DVector::zeros(2);
         u[0] = env.weather.outdoor_temp_c;
-        solver.apply_exterior_longwave_inputs_iterative(&mut u, &env);
+        solver
+            .apply_exterior_longwave_inputs_iterative(&mut u, &env)
+            .unwrap();
 
         // 1. u[input_index] (index 1) must be unchanged — no B·u injection.
         assert_eq!(
@@ -1345,7 +1331,9 @@ mod tests {
         // Apply LWR and build coupling.
         let mut u = nalgebra::DVector::zeros(2);
         u[0] = env.weather.outdoor_temp_c;
-        solver.apply_exterior_longwave_inputs_iterative(&mut u, &env);
+        solver
+            .apply_exterior_longwave_inputs_iterative(&mut u, &env)
+            .unwrap();
         solver.build_coupling();
 
         // Verify coupling_buf has 1 entry (from LWR, no infiltration in this config).
@@ -1483,7 +1471,7 @@ mod tests {
                 u_factor_w_m2_k: 0.0,
                 h_out_w_m2_k: 1.0 / r_film,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
 
         let mut env = window_lwr_env();
@@ -1508,7 +1496,9 @@ mod tests {
         solver.solar_irr_slot_buf.insert(200, 0);
 
         let mut u = DVector::zeros(2);
-        solver.apply_exterior_longwave_inputs_iterative(&mut u, &env);
+        solver
+            .apply_exterior_longwave_inputs_iterative(&mut u, &env)
+            .unwrap();
         let t_skin_solver = solver.exterior_surface_temps[0];
 
         // Exact skin balance by Newton iteration on
@@ -1596,7 +1586,7 @@ mod tests {
                 driving_temp: DrivingTemp::Outdoor,
                 category: BoundaryCategory::Wall,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1646,7 +1636,7 @@ mod tests {
                 surfaces: vec![],
                 scriptf: None,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1709,7 +1699,7 @@ mod tests {
                 driving_temp: DrivingTemp::Ground { depth_m: 2.0 },
                 category: BoundaryCategory::Wall,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1769,7 +1759,7 @@ mod tests {
                 driving_temp: DrivingTemp::Ground { depth_m: 8.0 },
                 category: BoundaryCategory::Wall,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1818,8 +1808,7 @@ mod tests {
             ..Default::default()
         };
         let config = ThermalSolverConfig {
-            indoor_zone_id: ZoneId(1),
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1876,7 +1865,7 @@ mod tests {
                 driving_temp: DrivingTemp::Outdoor,
                 category: BoundaryCategory::Wall,
             }],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =
@@ -1942,8 +1931,7 @@ mod tests {
         ];
         for (name_fragment, wiring) in cases {
             let config = ThermalSolverConfig {
-                indoor_zone_id: ZoneId(1),
-                ..Default::default()
+                ..ThermalSolverConfig::new(ZoneId(1))
             };
             let env = window_lwr_env();
             let err = crate::thermal_solver::ThermalSolver::new(
@@ -2016,7 +2004,7 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             exterior_surfaces: vec![surface(10), surface(11)],
-            ..Default::default()
+            ..ThermalSolverConfig::new(ZoneId(1))
         };
         let env = window_lwr_env();
         let err =

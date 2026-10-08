@@ -418,19 +418,19 @@ pub struct EvConfig {
     pub heater_threshold_c: Option<f64>,
     /// Battery pack thermal mass (J/K). Defaults to the capacity-derived
     /// value (pack mass × cell specific heat; see
-    /// [`default_thermal_mass_j_per_k`]).
+    /// `default_thermal_mass_j_per_k`).
     pub thermal_mass_j_per_k: Option<f64>,
     /// Pack-to-ambient heat transfer coefficient (W/K). Defaults to the
-    /// area-scaled value (see [`default_ua_w_per_k`]).
+    /// area-scaled value (see `default_ua_w_per_k`).
     pub ua_w_per_k: Option<f64>,
     /// Series cell count (sets pack voltage). Defaults to 96 (≈350–360 V
     /// nominal NMC, the prevailing EV architecture).
     pub n_series: Option<u32>,
     /// Parallel string count (sets pack current sharing and resistance).
     /// Defaults to a value derived from `capacity_kwh` (see
-    /// [`default_n_parallel`]).
+    /// `default_n_parallel`).
     pub n_parallel: Option<u32>,
-    /// Cell internal resistance [Ω] at mid-SOC, 25 °C. Drives the I²R
+    /// Cell internal resistance (Ω) at mid-SOC, 25 °C. Drives the I²R
     /// pack heating during charge, discharge, and drive. Defaults to the
     /// stationary Battery's 5 mΩ cell default so both packs share one
     /// parameterization.
@@ -465,7 +465,7 @@ pub struct EvConfig {
     /// Defaults to 1.0 (unity — EV onboard chargers have PFC front-ends at
     /// ~0.99+; default runs bit-identical to pre-reactive behaviour).
     pub power_factor: Option<f64>,
-    /// Charger/inverter AC apparent-power rating [kVA]. Used as the kVA
+    /// Charger/inverter AC apparent-power rating (kVA). Used as the kVA
     /// clamp for reactive power (active-power priority: P never curtailed).
     /// Defaults to `max(max_charging_power_kw, v2g_max_discharge_kw,
     /// v2l_max_discharge_kw)` at init time.
@@ -518,47 +518,47 @@ impl EvConfig {
                 "EV max_charging_power_kw must be finite and > 0".to_string(),
             ));
         }
-        if let Some(eff) = self.charging_efficiency {
-            if eff <= 0.0 || eff > 1.0 || !eff.is_finite() {
-                return Err(HaresError::Equipment(
-                    "EV charging_efficiency must be finite and within (0, 1]".to_string(),
-                ));
-            }
+        if let Some(eff) = self.charging_efficiency
+            && (eff <= 0.0 || eff > 1.0 || !eff.is_finite())
+        {
+            return Err(HaresError::Equipment(
+                "EV charging_efficiency must be finite and within (0, 1]".to_string(),
+            ));
         }
-        if let Some(soc_max) = self.soc_max {
-            if !soc_max.is_finite() || !(0.0..=1.0).contains(&soc_max) {
-                return Err(HaresError::Equipment(
-                    "EV soc_max must be finite and within [0, 1]".to_string(),
-                ));
-            }
+        if let Some(soc_max) = self.soc_max
+            && (!soc_max.is_finite() || !(0.0..=1.0).contains(&soc_max))
+        {
+            return Err(HaresError::Equipment(
+                "EV soc_max must be finite and within [0, 1]".to_string(),
+            ));
         }
-        if let Some(soc) = self.initial_soc {
-            if !soc.is_finite() || !(0.0..=1.0).contains(&soc) {
-                return Err(HaresError::Equipment(
-                    "EV initial_soc must be finite and within [0, 1]".to_string(),
-                ));
-            }
+        if let Some(soc) = self.initial_soc
+            && (!soc.is_finite() || !(0.0..=1.0).contains(&soc))
+        {
+            return Err(HaresError::Equipment(
+                "EV initial_soc must be finite and within [0, 1]".to_string(),
+            ));
         }
-        if let Some(current) = self.l1_current_a {
-            if !current.is_finite() || current <= 0.0 {
-                return Err(HaresError::Equipment(
-                    "EV l1_current_a must be finite and > 0".to_string(),
-                ));
-            }
+        if let Some(current) = self.l1_current_a
+            && (!current.is_finite() || current <= 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "EV l1_current_a must be finite and > 0".to_string(),
+            ));
         }
-        if let Some(voltage) = self.l1_voltage_v {
-            if !voltage.is_finite() || voltage <= 0.0 {
-                return Err(HaresError::Equipment(
-                    "EV l1_voltage_v must be finite and > 0".to_string(),
-                ));
-            }
+        if let Some(voltage) = self.l1_voltage_v
+            && (!voltage.is_finite() || voltage <= 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "EV l1_voltage_v must be finite and > 0".to_string(),
+            ));
         }
-        if let Some(power_w) = self.heater_power_w {
-            if !power_w.is_finite() || power_w < 0.0 {
-                return Err(HaresError::Equipment(
-                    "EV heater_power_w must be finite and >= 0".to_string(),
-                ));
-            }
+        if let Some(power_w) = self.heater_power_w
+            && (!power_w.is_finite() || power_w < 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "EV heater_power_w must be finite and >= 0".to_string(),
+            ));
         }
         // Temperature fields must be finite: a NaN temperature falls
         // through both comparison branches of `linear_temp_derate`
@@ -596,19 +596,19 @@ impl EvConfig {
                  inverted and charge at full power across the derate band"
             )));
         }
-        if let Some(mass) = self.thermal_mass_j_per_k {
-            if !mass.is_finite() || mass <= 0.0 {
-                return Err(HaresError::Equipment(
-                    "EV thermal_mass_j_per_k must be finite and > 0".to_string(),
-                ));
-            }
+        if let Some(mass) = self.thermal_mass_j_per_k
+            && (!mass.is_finite() || mass <= 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "EV thermal_mass_j_per_k must be finite and > 0".to_string(),
+            ));
         }
-        if let Some(ua) = self.ua_w_per_k {
-            if !ua.is_finite() || ua < 0.0 {
-                return Err(HaresError::Equipment(
-                    "EV ua_w_per_k must be finite and >= 0".to_string(),
-                ));
-            }
+        if let Some(ua) = self.ua_w_per_k
+            && (!ua.is_finite() || ua < 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "EV ua_w_per_k must be finite and >= 0".to_string(),
+            ));
         }
         if let Some(n) = self.n_series
             && n == 0
@@ -636,46 +636,46 @@ impl EvConfig {
             ("v2g_soc_reserve", self.v2g_soc_reserve),
             ("ready_soc", self.ready_soc),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() || !(0.0..=1.0).contains(&v) {
-                    return Err(HaresError::Equipment(format!(
-                        "EV {name} must be finite and within [0, 1]"
-                    )));
-                }
+            if let Some(v) = val
+                && (!v.is_finite() || !(0.0..=1.0).contains(&v))
+            {
+                return Err(HaresError::Equipment(format!(
+                    "EV {name} must be finite and within [0, 1]"
+                )));
             }
         }
         for (name, val) in [
             ("v2l_max_discharge_kw", self.v2l_max_discharge_kw),
             ("v2g_max_discharge_kw", self.v2g_max_discharge_kw),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() || v < 0.0 {
-                    return Err(HaresError::Equipment(format!(
-                        "EV {name} must be finite and >= 0"
-                    )));
-                }
+            if let Some(v) = val
+                && (!v.is_finite() || v < 0.0)
+            {
+                return Err(HaresError::Equipment(format!(
+                    "EV {name} must be finite and >= 0"
+                )));
             }
         }
-        if let Some(pf) = self.power_factor {
-            if !pf.is_finite() || pf <= 0.0 || pf > 1.0 {
-                return Err(HaresError::Equipment(
-                    "EV power_factor must be finite and within (0, 1]".to_string(),
-                ));
-            }
+        if let Some(pf) = self.power_factor
+            && (!pf.is_finite() || pf <= 0.0 || pf > 1.0)
+        {
+            return Err(HaresError::Equipment(
+                "EV power_factor must be finite and within (0, 1]".to_string(),
+            ));
         }
-        if let Some(kva) = self.charger_capacity_kva {
-            if !kva.is_finite() || kva <= 0.0 {
-                return Err(HaresError::Equipment(
-                    "EV charger_capacity_kva must be finite and > 0".to_string(),
-                ));
-            }
+        if let Some(kva) = self.charger_capacity_kva
+            && (!kva.is_finite() || kva <= 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "EV charger_capacity_kva must be finite and > 0".to_string(),
+            ));
         }
-        if let Some(soc) = self.cc_cv_transition_soc {
-            if !soc.is_finite() || !(0.0..=1.0).contains(&soc) {
-                return Err(HaresError::Equipment(
-                    "EV cc_cv_transition_soc must be finite and within [0, 1]".to_string(),
-                ));
-            }
+        if let Some(soc) = self.cc_cv_transition_soc
+            && (!soc.is_finite() || !(0.0..=1.0).contains(&soc))
+        {
+            return Err(HaresError::Equipment(
+                "EV cc_cv_transition_soc must be finite and within [0, 1]".to_string(),
+            ));
         }
         Ok(())
     }

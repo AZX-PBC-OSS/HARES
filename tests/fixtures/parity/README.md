@@ -42,6 +42,18 @@ To activate a fixture for numeric ballpark checks, add `schedule.csv`,
 `weather.epw`, and `reference_output.parquet` generated from OCHRE with
 matching inputs.
 
+## Starting temperature
+
+Each window starts cold. OCHRE draws its starting indoor temperature at
+random within half the deadband, unseeded, while HARES draws its own,
+seeded; a 1-hour window then measures the two draws. A fixture's
+`[ochre] initial_temp_setpoint_c` is the temperature HARES starts from,
+and `tests/python/generate_parity_reference.py` pins OCHRE to it. The
+harness fails when HARES no longer starts there or the reference does
+not, so a changed draw forces a re-pin and a regenerated reference. The
+generator seeds numpy with the fixture's `master_seed`, so a regenerated
+reference is reproducible.
+
 ## Tolerance bands
 
 The driver at `tests/parity/mod.rs` enforces tolerances configured in

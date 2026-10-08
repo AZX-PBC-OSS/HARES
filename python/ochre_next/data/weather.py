@@ -1,7 +1,7 @@
 """Weather data downloading and caching.
 
-Provides EPW file fetching for ResStock buildings by FIPS code, using NREL's
-BuildStock_TMY3_FIPS.zip dataset (https://data.nrel.gov/submissions/156).
+Provides EPW file fetching for ResStock buildings by FIPS code, using the
+BuildStock_TMY3_FIPS.zip dataset (https://data.nlr.gov/submissions/156).
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ from ochre_next.data._checksum import (
 log = logging.getLogger(__name__)
 
 
-# NREL Data Catalog: TMY3 EPW files by county FIPS code.
+# NLR Data Catalog: TMY3 EPW files by county FIPS code.
 # Covers all US counties. Corrected TMY3 data (Bianchi & Fontanini 2021).
-# Reference: https://data.nrel.gov/submissions/156
+# Reference: https://data.nlr.gov/submissions/156
 _TMY3_EPW_ZIP_URL = (
-    "https://data.nrel.gov/system/files/156/Buildstock_TMY3_FIPS-1678817889.zip"
+    "https://data.nlr.gov/system/files/156/Buildstock_TMY3_FIPS-1678817889.zip"
 )
 
 
@@ -160,7 +160,7 @@ def _download_large_file(url: str, dest: Path) -> None:
     try:
         # Try httpx first (supports streaming + progress)
         try:
-            import httpx  # type: ignore[import-not-found]
+            import httpx
 
             with httpx.Client(follow_redirects=True, timeout=300.0) as client:
                 with client.stream("GET", url) as resp:

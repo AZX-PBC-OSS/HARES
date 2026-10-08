@@ -5,29 +5,29 @@
 //! meaningful.
 
 use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
 
-use chrono::{Datelike, Duration, NaiveDate, Timelike, Utc};
+use chrono::{Datelike, Duration, NaiveDate, Timelike};
 use hares_core::{DwellingConfig, SimulationConfig};
 use hares_io::OutputFormat;
 
-static SEQ: AtomicU64 = AtomicU64::new(1);
+#[path = "../support/fixture_start.rs"]
+mod fixture_start;
+use fixture_start::fixture_start;
 
-pub fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before unix epoch")
-        .as_nanos();
-    let id = SEQ.fetch_add(1, Ordering::Relaxed);
-    p.push(format!("{prefix}-{nanos}-{id}.{ext}"));
-    p
+fn output_path(output_dir: &Path, bldg_id: i64) -> Option<PathBuf> {
+    Some(output_dir.join(format!("dwelling-{bldg_id}.csv")))
 }
 
 fn examples_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
+}
+
+/// The repo's defaults directory: equipment whose schedule source is missing
+/// (no schedule column, no HPXML fractions) resolves its default profile
+/// there instead of erroring.
+fn repo_defaults_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
 }
 
 pub fn ochre_hpxml_path() -> PathBuf {
@@ -67,17 +67,22 @@ pub fn assert_vendor_fixtures_exist() {
     }
 }
 
-pub fn build_beopt_dwelling_config(bldg_id: i64, duration: Duration, seed: u64) -> DwellingConfig {
+pub fn build_beopt_dwelling_config(
+    output_dir: &Path,
+    bldg_id: i64,
+    duration: Duration,
+    seed: u64,
+) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: ochre_hpxml_path(),
-        schedule_path: ochre_schedule_path(),
+        schedule_path: Some(ochre_schedule_path()),
         weather_path: ochre_weather_path(),
         sim_config: SimulationConfig {
-            start_time: Utc::now().into(),
+            start_time: fixture_start(),
             duration,
             time_res: Duration::minutes(1),
             output_verbosity: 0,
-            output_path: Some(unique_temp_path("hares-regr-output", "csv")),
+            output_path: output_path(output_dir, bldg_id),
             write_output: true,
             output_format: OutputFormat::Csv,
             output_chunk_size: 1024,
@@ -87,31 +92,33 @@ pub fn build_beopt_dwelling_config(bldg_id: i64, duration: Duration, seed: u64) 
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: true,
             rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,
         bldg_id,
         initialization_duration: None,
         resample_overrides: None,
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         patches: None,
     }
 }
 
 pub fn build_resstock_dwelling_config(
+    output_dir: &Path,
     bldg_id: i64,
     duration: Duration,
     seed: u64,
 ) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: resstock_hpxml_path(),
-        schedule_path: resstock_schedule_path(),
+        schedule_path: Some(resstock_schedule_path()),
         weather_path: ochre_weather_path(),
         sim_config: SimulationConfig {
-            start_time: Utc::now().into(),
+            start_time: fixture_start(),
             duration,
             time_res: Duration::minutes(1),
             output_verbosity: 0,
-            output_path: Some(unique_temp_path("hares-regr-output", "csv")),
+            output_path: output_path(output_dir, bldg_id),
             write_output: true,
             output_format: OutputFormat::Csv,
             output_chunk_size: 1024,
@@ -121,19 +128,14 @@ pub fn build_resstock_dwelling_config(
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: true,
             rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,
         bldg_id,
         initialization_duration: None,
         resample_overrides: None,
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         patches: None,
-    }
-}
-
-pub fn cleanup_paths(paths: &[PathBuf]) {
-    for p in paths {
-        let _ = fs::remove_file(p);
     }
 }
 
@@ -221,6 +223,7 @@ pub fn write_weather_epw(path: &PathBuf) {
 }
 
 pub fn build_dwelling_config(
+    output_dir: &Path,
     bldg_id: i64,
     schedule_path: PathBuf,
     weather_path: PathBuf,
@@ -229,14 +232,14 @@ pub fn build_dwelling_config(
 ) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
-        schedule_path,
+        schedule_path: Some(schedule_path),
         weather_path,
         sim_config: SimulationConfig {
-            start_time: Utc::now().into(),
+            start_time: fixture_start(),
             duration,
             time_res: Duration::minutes(1),
             output_verbosity: 0,
-            output_path: Some(unique_temp_path("hares-regr-output", "csv")),
+            output_path: output_path(output_dir, bldg_id),
             write_output: true,
             output_format: OutputFormat::Csv,
             output_chunk_size: 1024,
@@ -246,12 +249,13 @@ pub fn build_dwelling_config(
             site_location: hares_io::SiteLocationOverride::default(),
             retain_batches: true,
             rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,
         bldg_id,
         initialization_duration: None,
         resample_overrides: None,
-        defaults_path: None,
+        defaults_path: Some(repo_defaults_path()),
         patches: None,
     }
 }

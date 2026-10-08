@@ -5,40 +5,35 @@ from __future__ import annotations
 import importlib.util
 import socket
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 _SCRIPT = Path(__file__).resolve().parent.parent.parent / "scripts" / "download_resstock_fixtures.py"
 _spec = importlib.util.spec_from_file_location("download_resstock_fixtures", str(_SCRIPT))
+assert _spec is not None and _spec.loader is not None, f"cannot load {_SCRIPT}"
 _script = importlib.util.module_from_spec(_spec)
 # Import under mock to prevent real network access from top-level module body
 with mock.patch("ochre_next.data.fetch_resstock_building"):
     _spec.loader.exec_module(_script)
 
 
+class _HttpStatusError(Exception):
+    """An error carrying an httpx-style response with a status code."""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.response = SimpleNamespace(status_code=status_code)
+
+
 class TestIsTransientError:
     def test_http_503_is_transient(self):
-        class FakeResp:
-            status_code = 503
-
-        exc = Exception("boom")
-        exc.response = FakeResp  # type: ignore[attr-defined]
-        assert _script._is_transient_error(exc) is True
+        assert _script._is_transient_error(_HttpStatusError("boom", 503)) is True
 
     def test_http_200_is_not_transient(self):
-        class FakeResp:
-            status_code = 200
-
-        exc = Exception("ok")
-        exc.response = FakeResp  # type: ignore[attr-defined]
-        assert _script._is_transient_error(exc) is False
+        assert _script._is_transient_error(_HttpStatusError("ok", 200)) is False
 
     def test_http_429_is_transient(self):
-        class FakeResp:
-            status_code = 429
-
-        exc = Exception("rate limited")
-        exc.response = FakeResp  # type: ignore[attr-defined]
-        assert _script._is_transient_error(exc) is True
+        assert _script._is_transient_error(_HttpStatusError("rate limited", 429)) is True
 
     def test_socket_timeout_is_transient(self):
         assert _script._is_transient_error(socket.timeout("timed out")) is True

@@ -8,7 +8,6 @@ use hares_io::{
     epw::DesignConditions, hpxml::resolve_equipment, site_location::resolve_site_location,
 };
 use hares_types::{EndUse, HaresError};
-use serde_json::{Map, Value};
 
 use super::solver_builder::{WeatherAverages, compute_weather_averages};
 use crate::derive_dwelling_rng;
@@ -26,6 +25,12 @@ pub struct DwellingBlueprint {
     pub(super) defaults: DefaultsStore,
     pub defaults_path: Option<PathBuf>,
     pub equipment_specs: Vec<EquipmentSpec>,
+    /// Warnings raised while building the blueprint, in the order they are
+    /// reported: the HPXML parse warnings first, then the equipment
+    /// resolution warnings. The dwelling build moves these into its warning
+    /// log before the schedule-injection warnings and each equipment's
+    /// `init` warnings.
+    pub(super) equipment_warnings: Vec<hares_types::Warning>,
     pub(super) local_start: DateTime<FixedOffset>,
     pub(super) init_chrono: Duration,
     pub(super) time_res: std::time::Duration,
@@ -37,24 +42,17 @@ pub struct DwellingBlueprint {
 impl DwellingBlueprint {
     /// Build blueprint from a DwellingConfig by parsing HPXML, weather, and schedule files.
     pub fn from_config(config: DwellingConfig) -> Result<Self, HaresError> {
-        let building = hares_io::parse_hpxml(&config.hpxml_path)
+        let mut building = hares_io::parse_hpxml(&config.hpxml_path)
             .map_err(|err| HaresError::Io(format!("HPXML parse failed: {err}")))?;
 
         let weather = hares_io::parse_weather(&config.weather_path)
             .map_err(|err| HaresError::Io(format!("weather parse failed: {err}")))?;
+        hares_io::hpxml::climate_zone::apply_climate_zone_default(
+            &mut building,
+            weather.meta.station_wmo.as_deref(),
+        );
 
-        let schedule_raw = if config.schedule_path.exists() {
-            hares_io::parse_schedule_csv(&config.schedule_path, &[], Some(&weather.meta), None)
-                .map_err(|err| HaresError::Io(format!("schedule parse failed: {err}")))?
-        } else {
-            hares_io::hpxml_schedule::generate_schedule_from_hpxml(
-                &building,
-                config.sim_config.start_time,
-                config.sim_config.duration,
-                config.sim_config.time_res,
-                config.defaults_path.as_deref(),
-            )
-        };
+        let schedule_raw = config.load_schedule(&weather.meta)?;
 
         let target_step_secs =
             super::conversions::duration_to_u32_secs(config.sim_config.time_res)?;
@@ -68,9 +66,35 @@ impl DwellingBlueprint {
     /// Build blueprint from already-parsed building, weather, and schedule data.
     pub(super) fn from_parts(
         config: DwellingConfig,
+        building: hares_io::Building,
+        weather: WeatherTimeSeries,
+        schedule: ScheduleTimeSeries,
+    ) -> Result<Self, HaresError> {
+        let resolved_defaults_dir = config
+            .defaults_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("defaults"));
+        let defaults = DefaultsStore::load(&resolved_defaults_dir).map_err(|err| {
+            HaresError::Io(format!(
+                "defaults load failed for '{}': {err}",
+                resolved_defaults_dir.display()
+            ))
+        })?;
+        Self::from_parts_with_defaults(config, building, weather, schedule, defaults)
+    }
+
+    /// Build blueprint from already-parsed data and an explicit defaults
+    /// store: the typed constructor for a caller that has already loaded (or
+    /// deliberately declined) defaults. A synthetic dwelling, whose inputs
+    /// are fully explicit, passes [`DefaultsStore::empty`]; no caller reaches
+    /// an empty store through a missing file (one policy: the store's load
+    /// failure is an error naming the path).
+    pub(super) fn from_parts_with_defaults(
+        config: DwellingConfig,
         mut building: hares_io::Building,
         mut weather: WeatherTimeSeries,
         schedule: ScheduleTimeSeries,
+        defaults: DefaultsStore,
     ) -> Result<Self, HaresError> {
         let site_location = resolve_site_location(
             &building.site,
@@ -114,41 +138,27 @@ impl DwellingBlueprint {
             .transpose()?;
 
         let time_res = super::conversions::chrono_to_std_duration(config.sim_config.time_res)?;
-        let weather_avgs = compute_weather_averages(&weather);
+        let weather_avgs = compute_weather_averages(&weather, &building)?;
         let design_conditions = weather.design_conditions;
         let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
 
-        let resolved_defaults_dir = config
-            .defaults_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("defaults"));
-        let defaults = match DefaultsStore::load(&resolved_defaults_dir) {
-            Ok(store) => store,
-            // Corrupt defaults data must surface: continuing with an empty
-            // store would silently swap every equipment's resolved defaults
-            // (ZIP sidecars, HVAC curves) for class-table fallbacks — a
-            // structurally normal dwelling running different numbers.
-            Err(err @ hares_io::DefaultsError::MalformedToml { .. }) => {
-                return Err(HaresError::Io(err.to_string()));
-            }
-            // Unavailable defaults (missing dir / I/O error) keep the
-            // documented degradation: warn and run on the class tables.
-            Err(err) => {
-                tracing::warn!("defaults load failed; using empty defaults store: {err}");
-                DefaultsStore::empty()
-            }
-        };
-
-        let empty_overrides = Value::Object(Map::new());
-
+        // The blueprint's construction-time warnings, in report order: the
+        // HPXML parse warnings first, then the equipment resolution warnings.
+        let mut equipment_warnings = building.parse_warnings.clone();
         let equipment_specs = resolve_equipment(
             &building,
             &defaults,
-            &empty_overrides,
             config.patches.as_ref(),
+            &mut equipment_warnings,
         )
         .map_err(|e| HaresError::Io(e.to_string()))?;
 
+        // The config's own defaults directory, verbatim: the schedule
+        // profiles load from what the config named, and a config with
+        // no directory runs with no default profiles rather than on a
+        // working-directory guess. The store above keeps the resolved
+        // directory until the defaults path becomes required.
+        let config_defaults_path = config.defaults_path.clone();
         Ok(Self {
             config,
             building,
@@ -158,8 +168,9 @@ impl DwellingBlueprint {
             design_conditions,
             site_location,
             defaults,
-            defaults_path: Some(resolved_defaults_dir),
+            defaults_path: config_defaults_path,
             equipment_specs,
+            equipment_warnings,
             local_start,
             init_chrono,
             time_res,
@@ -206,7 +217,12 @@ impl DwellingBlueprint {
     /// Add an equipment spec.  Returns an error if an equipment with the same
     /// instance name (or canonical name, when instance name is absent) already
     /// exists in the blueprint.
-    pub fn add_equipment_spec(&mut self, spec: EquipmentSpec) -> Result<(), HaresError> {
+    pub fn add_equipment_spec(&mut self, mut spec: EquipmentSpec) -> Result<(), HaresError> {
+        // The caller's spec-level overrides land from the dedicated
+        // override field here, so the one config generation the assembly
+        // builds from carries them; an override key no schema field reads
+        // is an error naming the equipment and the field.
+        super::conversions::apply_spec_bag_to_typed_config(&mut spec)?;
         let name = spec.instance_name.as_deref().unwrap_or(&spec.name);
         if self
             .equipment_specs

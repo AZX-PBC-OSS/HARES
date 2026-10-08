@@ -3,9 +3,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use hares_physics::constants::{
-    CP_LIQUID_WATER_J_KG_K, CP_PROP_GLYCOL_50PCT_J_KG_K, CP_R134A_SAT_LIQUID_J_KG_K,
-};
 use hares_types::{
     DomainId, DomainSolver, DomainUpdate, FLUID, FluidDomainPayload, FluidLoopState, FluidNodeId,
     FluidNodeRole, FluidTempLimits, FluidType, HaresError, HeatTransferDirection, LoopId,
@@ -14,12 +11,8 @@ use hares_types::{
 
 const MIN_FLOW_KG_S: f64 = 1e-12;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct FluidSolverConfig {
-    /// Specific heat capacity [J/(kg·K)] per fluid type.
-    ///
-    /// Falls back to `CP_LIQUID_WATER_J_KG_K` if a fluid type is not in the map.
-    pub fluid_specific_heats: HashMap<FluidType, f64>,
     /// Optional per-loop hydraulic topology for mass-conservation verification.
     ///
     /// When present, the solver verifies that `|∑ inflow − ∑ outflow|`
@@ -39,33 +32,6 @@ pub struct FluidSolverConfig {
     /// defines `Real64 MinTemp` and `Real64 MaxTemp` per loop for this
     /// purpose.
     pub loop_temp_limits: HashMap<LoopId, FluidTempLimits>,
-}
-
-impl Default for FluidSolverConfig {
-    fn default() -> Self {
-        let mut heats = HashMap::new();
-        // ASHRAE HoF 2021 Ch.1: 4.18 kJ/(kg·K) ≈ 4180 J/(kg·K).
-        // Must match CP_LIQUID_WATER_J_KG_K from hares-physics so that
-        // equipment supply temperature calculations (using the same Cp)
-        // produce flow-implied energy that matches declared thermal_power_w.
-        heats.insert(FluidType::Water, CP_LIQUID_WATER_J_KG_K);
-        // 50% propylene glycol at ~60°C: cp ≈ 3_800 J/(kg·K).
-        // EnergyPlus FluidProperties.cc DefaultPropGlyCpData, conc=0.5 row,
-        // temp index 19 (60°C) gives 3_686 J/(kg·K); table range over
-        // practical HVAC temperatures is 3_455–3_937 J/(kg·K). 3_800 is the
-        // mid-range engineering default for single-zone residential simulation.
-        heats.insert(FluidType::Glycol, CP_PROP_GLYCOL_50PCT_J_KG_K);
-        // R-134a saturated liquid cp at typical heat pump evaporator conditions
-        // (~35°C): cp ≈ 1_450 J/(kg·K).
-        // ASHRAE Handbook of Refrigeration 2010, Ch.30, Table 9: R-134a
-        // saturated liquid cp ≈ 1_430–1_490 J/(kg·K) at 30–40°C.
-        heats.insert(FluidType::Refrigerant, CP_R134A_SAT_LIQUID_J_KG_K);
-        Self {
-            fluid_specific_heats: heats,
-            loop_topologies: HashMap::new(),
-            loop_temp_limits: HashMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +81,81 @@ pub struct FluidSolver {
     /// Per-loop: unclamped return temperature for diagnostic comparison [°C].
     #[cfg(feature = "observe")]
     pub raw_return_temp_c: HashMap<LoopId, f64>,
+    /// Per-loop pump flow check wiring, precomputed at construction: the
+    /// pump node (Source role, no parents) and the splitter branch nodes.
+    /// Present only for loops with a splitter topology; the per-step check
+    /// is a lookup plus a sum.
+    pump_flow_checks: HashMap<LoopId, PumpFlowCheck>,
+}
+
+/// Precomputed pump-flow wiring for one loop topology.
+#[derive(Debug, Clone)]
+struct PumpFlowCheck {
+    pump_node: FluidNodeId,
+    branch_nodes: Vec<FluidNodeId>,
+}
+
+/// Builds the loop-type map from declared `(loop_id, fluid_type)` pairs,
+/// rejecting two declarations of one loop with different fluid types,
+/// without constructing or mutating a `FluidSolver`. A caller that must
+/// validate a candidate roster before committing it (the dwelling's roster
+/// planner) installs the result with [`FluidSolver::install_loop_types`]
+/// once the candidate is accepted.
+pub fn plan_loop_types(
+    declared_loops: &[(LoopId, FluidType)],
+) -> Result<HashMap<LoopId, FluidType>, HaresError> {
+    let mut loop_types: HashMap<LoopId, FluidType> = HashMap::new();
+    for &(loop_id, fluid_type) in declared_loops {
+        if let Some(existing) = loop_types.insert(loop_id, fluid_type)
+            && existing != fluid_type
+        {
+            return Err(HaresError::Envelope(format!(
+                "loop {loop_id:?} declared with conflicting fluid types: {existing:?} and {fluid_type:?}"
+            )));
+        }
+    }
+    Ok(loop_types)
+}
+
+/// Precomputes the pump flow check wiring per declared loop: the pump node
+/// (Source role, zero parents) and the splitter branch node ids. Loops
+/// without a splitter topology carry no entry.
+fn pump_flow_checks(
+    config: &FluidSolverConfig,
+    loop_types: &HashMap<LoopId, FluidType>,
+) -> HashMap<LoopId, PumpFlowCheck> {
+    let mut checks: HashMap<LoopId, PumpFlowCheck> = HashMap::new();
+    for loop_id in loop_types.keys() {
+        let Some(topo) = config.loop_topologies.get(loop_id) else {
+            continue;
+        };
+        if topo.splitters.is_empty() {
+            continue;
+        }
+        let mut parent_count: HashMap<FluidNodeId, usize> = HashMap::new();
+        for (_, to) in &topo.edges {
+            *parent_count.entry(*to).or_default() += 1;
+        }
+        if let Some(pump) = topo.nodes.iter().find(|n| {
+            n.role == FluidNodeRole::Source
+                && parent_count.get(&n.node_id).copied().unwrap_or(0) == 0
+        }) {
+            let branch_nodes: Vec<FluidNodeId> = topo
+                .splitters
+                .iter()
+                .flat_map(|s| &s.branches)
+                .map(|b| b.node_id)
+                .collect();
+            checks.insert(
+                *loop_id,
+                PumpFlowCheck {
+                    pump_node: pump.node_id,
+                    branch_nodes,
+                },
+            );
+        }
+    }
+    checks
 }
 
 impl FluidSolver {
@@ -122,16 +163,10 @@ impl FluidSolver {
         config: FluidSolverConfig,
         declared_loops: &[(LoopId, FluidType)],
     ) -> Result<Self, HaresError> {
-        let mut loop_types: HashMap<LoopId, FluidType> = HashMap::new();
-        for &(loop_id, fluid_type) in declared_loops {
-            if let Some(existing) = loop_types.insert(loop_id, fluid_type)
-                && existing != fluid_type
-            {
-                return Err(HaresError::Envelope(format!(
-                    "loop {loop_id:?} declared with conflicting fluid types: {existing:?} and {fluid_type:?}"
-                )));
-            }
-        }
+        let loop_types = plan_loop_types(declared_loops)?;
+        // Precompute the pump flow check wiring per loop: the pump node
+        // (Source role, zero parents) and the splitter branch node ids.
+        let pump_flow_checks = pump_flow_checks(&config, &loop_types);
         Ok(Self {
             config,
             loop_types,
@@ -159,12 +194,30 @@ impl FluidSolver {
             raw_supply_temp_c: HashMap::new(),
             #[cfg(feature = "observe")]
             raw_return_temp_c: HashMap::new(),
+            pump_flow_checks,
         })
+    }
+
+    /// Assigns an already-validated loop-type map (from [`plan_loop_types`])
+    /// and rebuilds the pump-flow-check wiring that depends on it.
+    /// Infallible: every rejection a loop-type change can produce already
+    /// happened in [`plan_loop_types`], so installing its result cannot
+    /// fail.
+    pub fn install_loop_types(&mut self, loop_types: HashMap<LoopId, FluidType>) {
+        self.pump_flow_checks = pump_flow_checks(&self.config, &loop_types);
+        self.loop_types = loop_types;
     }
 
     #[must_use]
     pub fn loop_state(&self, loop_id: LoopId) -> Option<&FluidLoopState> {
         self.loop_states.get(&loop_id)
+    }
+
+    /// The fluid type a declared loop resolves to, or `None` when no port
+    /// declared that loop.
+    #[must_use]
+    pub fn loop_fluid_type(&self, loop_id: LoopId) -> Option<FluidType> {
+        self.loop_types.get(&loop_id).copied()
     }
 
     /// Serializes current solver state into a flat `Vec<f64>` for checkpointing.
@@ -184,27 +237,36 @@ impl FluidSolver {
         payload
     }
 
-    /// Restores solver state from a checkpoint payload produced by [`snapshot_payload`].
-    pub fn restore_from_payload(&mut self, payload: &[f64]) -> Result<(), HaresError> {
-        self.last_known_temps.clear();
-        if payload.is_empty() {
-            return Ok(());
-        }
+    /// Restores solver state from a checkpoint payload produced by [`Self::snapshot_payload`].
+    /// Checks that `payload` is a well-formed checkpoint payload: whole
+    /// `(loop_id, supply, return)` triples with integral loop ids in the
+    /// `LoopId` range.
+    pub fn validate_payload(payload: &[f64]) -> Result<(), HaresError> {
         if !payload.len().is_multiple_of(3) {
             return Err(HaresError::Envelope(format!(
                 "fluid checkpoint payload length {} is not a multiple of 3",
                 payload.len()
             )));
         }
-        for chunk in payload.chunks_exact(3) {
+        for chunk in payload.as_chunks::<3>().0 {
             let loop_id_raw = chunk[0];
-            if !loop_id_raw.is_finite() || loop_id_raw < 0.0 || loop_id_raw > f64::from(u16::MAX) {
+            if !(0.0..=f64::from(u16::MAX)).contains(&loop_id_raw) || loop_id_raw.fract() != 0.0 {
                 return Err(HaresError::Envelope(format!(
                     "invalid loop_id in fluid checkpoint: {loop_id_raw}"
                 )));
             }
-            let loop_id = LoopId(loop_id_raw as u16);
-            self.last_known_temps.insert(loop_id, (chunk[1], chunk[2]));
+        }
+        Ok(())
+    }
+
+    /// Restores the last known loop temperatures from a payload; validates
+    /// it before changing anything.
+    pub fn restore_from_payload(&mut self, payload: &[f64]) -> Result<(), HaresError> {
+        Self::validate_payload(payload)?;
+        self.last_known_temps.clear();
+        for chunk in payload.as_chunks::<3>().0 {
+            self.last_known_temps
+                .insert(LoopId(chunk[0] as u16), (chunk[1], chunk[2]));
         }
         Ok(())
     }
@@ -215,20 +277,13 @@ impl DomainSolver for FluidSolver {
         FLUID
     }
 
-    // Why: `total_declared_thermal_w` and observe-gated accumulator
-    // variables are assigned under `#[cfg(any(debug_assertions, ...))]`
-    // or `#[cfg(feature = "observe")]` but not read in release builds
-    // without those features. The compiler sees the assignment as
-    // unused; the suppression is the correct response to cfg-conditional
-    // variable use.
-    #[allow(unused_assignments)]
     fn resolve(
         &mut self,
         ports: &PortSlots,
         _env: &hares_types::EnvironmentState,
         _dt: Duration,
         out: &mut DomainUpdate,
-    ) {
+    ) -> Result<(), HaresError> {
         self.loop_states.clear();
 
         #[cfg(feature = "observe")]
@@ -258,50 +313,32 @@ impl DomainSolver for FluidSolver {
         }
 
         for (loop_id, entries) in grouped {
-            let fluid_type = self
-                .loop_types
-                .get(&loop_id)
-                .copied()
-                .unwrap_or(entries[0].fluid_type);
+            // The loop-type map is rebuilt from the live equipment's fluid
+            // port declarations at assembly and on every equipment-list
+            // refresh, so every loop carrying an accumulator is declared.
+            // A loop here without a declaration would mean the port-slot
+            // table and the loop map diverged; that is an invariant
+            // violation, not a case for a substitute value.
+            let Some(fluid_type) = self.loop_types.get(&loop_id).copied() else {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "fluid_loop_declared".to_string(),
+                    value: f64::from(loop_id.0),
+                    tolerance: 0.0,
+                });
+            };
 
-            // Runtime safety: verify all entries in the same loop agree on fluid_type.
-            // A mismatch is a configuration error that would silently produce wrong
-            // results in release builds; the invariant-check gate makes it a loud
-            // panic in debug/test; the observe gate counts mismatches per step.
-            #[cfg(any(debug_assertions, feature = "check_invariants", feature = "observe"))]
+            // The loop-type planning (`plan_loop_types`) enforces that all
+            // entries on a loop agree on fluid_type; the observe gate counts
+            // mismatches per step for diagnostics.
+            #[cfg(feature = "observe")]
+            if !entries
+                .windows(2)
+                .all(|w| w[0].fluid_type == w[1].fluid_type)
             {
-                let all_same = entries
-                    .windows(2)
-                    .all(|w| w[0].fluid_type == w[1].fluid_type);
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                if !all_same {
-                    let fts: Vec<_> = entries.iter().map(|e| e.fluid_type).collect();
-                    panic!(
-                        "fluid loop {loop_id:?}: entries have mismatched fluid types {fts:?}; \
-                         all entries contributing to the same loop must use the same fluid_type"
-                    );
-                }
-                #[cfg(feature = "observe")]
-                if !all_same {
-                    self.loop_fluid_type_mismatch_count += 1;
-                }
+                self.loop_fluid_type_mismatch_count += 1;
             }
 
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            if !self.loop_types.contains_key(&loop_id) {
-                tracing::warn!(
-                    loop_id = loop_id.0,
-                    ?fluid_type,
-                    "fluid loop not in declared loop type map; using cp fallback"
-                );
-            }
-
-            let cp = self
-                .config
-                .fluid_specific_heats
-                .get(&fluid_type)
-                .copied()
-                .unwrap_or(CP_LIQUID_WATER_J_KG_K);
+            let cp = hares_physics::constants::cp_j_kg_k(fluid_type);
 
             #[cfg(feature = "observe")]
             tracing::info!(
@@ -553,8 +590,6 @@ impl DomainSolver for FluidSolver {
                     // ── Topology-based conservation check ──
 
                     #[cfg(feature = "observe")]
-                    let mut violations = 0u32;
-                    #[cfg(feature = "observe")]
                     let mut max_imbalance = 0.0_f64;
 
                     // Precompute child count per node.
@@ -640,35 +675,17 @@ impl DomainSolver for FluidSolver {
                         if max_local_imbalance > MASS_FLOW_TOLERANCE {
                             #[cfg(feature = "observe")]
                             {
-                                violations += 1;
+                                self.num_conservation_violations += 1;
+                                self.max_mass_imbalance_kg_s =
+                                    self.max_mass_imbalance_kg_s.max(max_imbalance);
                             }
-                            tracing::warn!(
-                                loop_id = loop_id.0,
-                                node_id = node_id.0,
-                                ?node_role,
-                                node_flow_kg_s = node_flow,
-                                total_inflow_kg_s = total_inflow,
-                                total_outflow_kg_s = total_outflow,
-                                imbalance_kg_s = max_local_imbalance,
-                                tolerance_kg_s = MASS_FLOW_TOLERANCE,
-                                "mass conservation violated at fluid node"
-                            );
-                            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                            {
-                                panic!(
-                                    "fluid loop {loop_id:?} node {:?} ({:?}): mass conservation violated — \
-                                     node_flow = {:.6e} kg/s, total_inflow = {:.6e} kg/s, \
-                                     total_outflow = {:.6e} kg/s, imbalance = {:.6e} kg/s, \
-                                     tolerance = {:.6e} kg/s",
-                                    node_id,
-                                    node_role,
-                                    node_flow,
-                                    total_inflow,
-                                    total_outflow,
-                                    max_local_imbalance,
-                                    MASS_FLOW_TOLERANCE
-                                );
-                            }
+                            return Err(HaresError::Envelope(format!(
+                                "fluid loop {loop_id:?} node {node_id:?} ({node_role:?}): \
+                                 mass conservation violated: \
+                                 node_flow = {node_flow:.6e} kg/s, total_inflow = {total_inflow:.6e} kg/s, \
+                                 total_outflow = {total_outflow:.6e} kg/s, imbalance = {max_local_imbalance:.6e} kg/s, \
+                                 tolerance = {MASS_FLOW_TOLERANCE:.6e} kg/s"
+                            )));
                         }
                     }
 
@@ -676,7 +693,6 @@ impl DomainSolver for FluidSolver {
                     {
                         self.max_mass_imbalance_kg_s =
                             self.max_mass_imbalance_kg_s.max(max_imbalance);
-                        self.num_conservation_violations += u64::from(violations);
                     }
                 } else {
                     // ── Serial-flow consistency check (no topology) ──
@@ -685,36 +701,24 @@ impl DomainSolver for FluidSolver {
                         for acc in &entries[1..] {
                             let diff = (acc.total_flow_kg_s - first_flow).abs();
                             if diff > MASS_FLOW_TOLERANCE {
-                                tracing::warn!(
-                                    loop_id = loop_id.0,
-                                    node_a = entries[0].node_id.0,
-                                    flow_a = first_flow,
-                                    node_b = acc.node_id.0,
-                                    flow_b = acc.total_flow_kg_s,
-                                    diff_kg_s = diff,
-                                    "mass conservation violated: inconsistent serial loop flows"
-                                );
-                                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                                #[cfg(feature = "observe")]
                                 {
-                                    panic!(
-                                        "fluid loop {loop_id:?}: mass conservation violated — \
-                                         accumulators report inconsistent flow rates: \
-                                         node {:?} flow = {} kg/s, node {:?} flow = {} kg/s, \
-                                         diff = {:.6e} kg/s, tolerance = {:.6e} kg/s",
-                                        entries[0].node_id,
-                                        first_flow,
-                                        acc.node_id,
-                                        acc.total_flow_kg_s,
-                                        diff,
-                                        MASS_FLOW_TOLERANCE
-                                    );
+                                    self.num_conservation_violations += 1;
+                                    self.max_mass_imbalance_kg_s =
+                                        self.max_mass_imbalance_kg_s.max(diff);
                                 }
-                            }
-                            #[cfg(feature = "observe")]
-                            if diff > MASS_FLOW_TOLERANCE {
-                                self.num_conservation_violations += 1;
-                                self.max_mass_imbalance_kg_s =
-                                    self.max_mass_imbalance_kg_s.max(diff);
+                                return Err(HaresError::Envelope(format!(
+                                    "fluid loop {loop_id:?}: mass conservation violated: \
+                                     accumulators report inconsistent flow rates: \
+                                     node {:?} flow = {} kg/s, node {:?} flow = {} kg/s, \
+                                     diff = {:.6e} kg/s, tolerance = {:.6e} kg/s",
+                                    entries[0].node_id,
+                                    first_flow,
+                                    acc.node_id,
+                                    acc.total_flow_kg_s,
+                                    diff,
+                                    MASS_FLOW_TOLERANCE
+                                )));
                             }
                         }
                     }
@@ -939,76 +943,36 @@ impl DomainSolver for FluidSolver {
                 }
             }
 
-            // ── Post-clamping invariant (T-0257) ─────────────────────────
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                let limits = self
-                    .config
-                    .loop_temp_limits
-                    .get(&loop_id)
-                    .copied()
-                    .unwrap_or_else(|| FluidTempLimits::default_for(fluid_type));
-                debug_assert!(
-                    mean_supply_temp_c >= limits.min_temp_c
-                        && mean_supply_temp_c <= limits.max_temp_c,
-                    "fluid loop {loop_id:?}: supply temp {mean_supply_temp_c}°C outside [{}-{}] after clamping",
-                    limits.min_temp_c,
-                    limits.max_temp_c
-                );
-                debug_assert!(
-                    mean_return_temp_c >= limits.min_temp_c
-                        && mean_return_temp_c <= limits.max_temp_c,
-                    "fluid loop {loop_id:?}: return temp {mean_return_temp_c}°C outside [{}-{}] after clamping",
-                    limits.min_temp_c,
-                    limits.max_temp_c
-                );
-            }
-
             // ── Post-resolution invariant (T-0255) ────────────────────────
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            if let Some(ref resolved) = resolved_node_flows {
-                if let Some(topo) = self.config.loop_topologies.get(&loop_id) {
-                    let parent_count: HashMap<FluidNodeId, usize> = {
-                        let mut map = HashMap::new();
-                        for (_, to) in &topo.edges {
-                            *map.entry(*to).or_default() += 1;
-                        }
-                        map
-                    };
-                    if let Some(pump) = topo.nodes.iter().find(|n| {
-                        n.role == FluidNodeRole::Source
-                            && parent_count.get(&n.node_id).copied().unwrap_or(0) == 0
-                    }) {
-                        let pump_flow = resolved.get(&pump.node_id).copied().unwrap_or(0.0);
-                        let branch_sum: f64 = topo
-                            .splitters
-                            .iter()
-                            .flat_map(|s| &s.branches)
-                            .map(|b| resolved.get(&b.node_id).copied().unwrap_or(0.0))
-                            .sum();
-                        let diff = (pump_flow - branch_sum).abs();
-                        assert!(
-                            diff < MASS_FLOW_TOLERANCE,
-                            "fluid loop {loop_id:?}: flow resolution invariant violated — \
-                             pump flow = {:.6e} kg/s, sum of branch allocated flows = {:.6e} kg/s, \
-                             diff = {:.6e} kg/s, tolerance = {:.6e} kg/s",
-                            pump_flow,
-                            branch_sum,
-                            diff,
-                            MASS_FLOW_TOLERANCE
-                        );
-                    }
+            // The pump's allocated flow must equal the sum of branch
+            // allocations. The pump node and the splitter branch nodes are
+            // precomputed at construction, so the per-step cost is a lookup
+            // and a sum, never a topology rescan.
+            if let Some(ref resolved) = resolved_node_flows
+                && let Some(check) = self.pump_flow_checks.get(&loop_id)
+            {
+                let pump_flow = resolved.get(&check.pump_node).copied().unwrap_or(0.0);
+                let branch_sum: f64 = check
+                    .branch_nodes
+                    .iter()
+                    .map(|n| resolved.get(n).copied().unwrap_or(0.0))
+                    .sum();
+                let diff = (pump_flow - branch_sum).abs();
+                if diff >= MASS_FLOW_TOLERANCE {
+                    return Err(HaresError::Envelope(format!(
+                        "fluid loop {loop_id:?}: flow resolution invariant violated: \
+                             pump flow = {pump_flow:.6e} kg/s, sum of branch allocated flows = {branch_sum:.6e} kg/s, \
+                             diff = {diff:.6e} kg/s, tolerance = {MASS_FLOW_TOLERANCE:.6e} kg/s"
+                    )));
                 }
             }
 
             // ── System-level invariant (T-0084) ──────────────────────────
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             let total_declared_thermal_w: f64 =
                 entries.iter().map(|e| e.total_thermal_power_w).sum();
 
             let net_power_w = heating_power_w - cooling_power_w;
 
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             if total_declared_thermal_w > 0.0 {
                 // All declared thermal power should be from sources (heating),
                 // so compare against heating_power_w rather than net.
@@ -1017,28 +981,14 @@ impl DomainSolver for FluidSolver {
                         .abs()
                         .max(total_declared_thermal_w.abs())
                         .max(1.0);
-                debug_assert!(
-                    (heating_power_w - total_declared_thermal_w).abs() <= tol,
-                    "fluid loop {loop_id:?}: declared thermal power ({total_declared_thermal_w} W) \
-                     does not match flow-implied source power ({heating_power_w} W); \
-                     diff = {} W, tol = {tol:e} W",
-                    (heating_power_w - total_declared_thermal_w).abs()
-                );
-            }
-
-            // ── Energy balance invariant (T-0256) ─────────────────────────
-            // Warn when net power imbalance exceeds 1.0 W in steady-state
-            // conditions, as this indicates a physics violation.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            if net_power_w.abs() > 1.0 {
-                tracing::warn!(
-                    loop_id = loop_id.0,
-                    heating_power_w,
-                    cooling_power_w,
-                    net_power_w,
-                    imbalance_w = net_power_w.abs(),
-                    "fluid loop energy balance violation: |net_power_w| > 1.0 W"
-                );
+                if (heating_power_w - total_declared_thermal_w).abs() > tol {
+                    return Err(HaresError::Envelope(format!(
+                        "fluid loop {loop_id:?}: declared thermal power ({total_declared_thermal_w} W) \
+                         does not match flow-implied source power ({heating_power_w} W); \
+                         diff = {} W, tol = {tol:e} W",
+                        (heating_power_w - total_declared_thermal_w).abs()
+                    )));
+                }
             }
 
             // ── Observer captures (T-0256) ────────────────────────────────
@@ -1081,6 +1031,7 @@ impl DomainSolver for FluidSolver {
         out.domain_id = FLUID;
         out.zone_temperatures_c.clear();
         out.custom_payload = FluidDomainPayload::encode(&states);
+        Ok(())
     }
 }
 
@@ -1099,10 +1050,11 @@ mod tests {
         ZoneState,
     };
 
-    use crate::fluid_solver::{FluidSolver, FluidSolverConfig};
+    use crate::fluid_solver::{FluidSolver, FluidSolverConfig, plan_loop_types};
 
     fn env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -1144,7 +1096,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -1189,7 +1142,9 @@ mod tests {
             })
             .unwrap();
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         approx_eq(states[0].net_power_w, 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0);
     }
@@ -1233,7 +1188,9 @@ mod tests {
             })
             .unwrap();
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         let s = &states[0];
         approx_eq(
@@ -1279,7 +1236,9 @@ mod tests {
             )],
             ..Default::default()
         };
-        let update = solver.resolve_new(&zero_ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&zero_ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         approx_eq(states[0].mean_supply_temp_c, 52.0);
         approx_eq(states[0].mean_return_temp_c, 45.0);
@@ -1289,7 +1248,9 @@ mod tests {
     fn empty_ports_returns_none_payload_and_no_state() {
         let mut solver = FluidSolver::new(FluidSolverConfig::default(), &[]).unwrap();
         let ports = PortSlots::default();
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         assert_eq!(update.custom_payload, None);
         assert!(solver.loop_state(LoopId(1)).is_none());
     }
@@ -1351,6 +1312,41 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn plan_loop_types_maps_each_declared_loop_to_its_fluid() {
+        let single = plan_loop_types(&[(LoopId(1), FluidType::Water)]).expect("one loop");
+        assert_eq!(single, HashMap::from([(LoopId(1), FluidType::Water)]));
+
+        let distinct = plan_loop_types(&[
+            (LoopId(1), FluidType::Water),
+            (LoopId(2), FluidType::Glycol),
+        ])
+        .expect("two loops of different fluids");
+        assert_eq!(
+            distinct,
+            HashMap::from([
+                (LoopId(1), FluidType::Water),
+                (LoopId(2), FluidType::Glycol)
+            ])
+        );
+    }
+
+    #[test]
+    fn plan_loop_types_rejects_one_loop_with_two_fluids_naming_both() {
+        let err = plan_loop_types(&[
+            (LoopId(7), FluidType::Water),
+            (LoopId(7), FluidType::Glycol),
+        ])
+        .expect_err("one loop cannot carry two fluids");
+        let message = err.to_string();
+        assert!(
+            message.contains("LoopId(7)")
+                && message.contains("Water")
+                && message.contains("Glycol"),
+            "the error names the loop and both fluids: {message}"
+        );
+    }
+
     // =======================================================================
     // T-0084: System-level invariant — declared thermal_power_w matches flow balance
     // =======================================================================
@@ -1382,7 +1378,9 @@ mod tests {
             })
             .unwrap();
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         let declared = 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0;
         let diff = (states[0].net_power_w - declared).abs();
@@ -1488,7 +1486,9 @@ mod tests {
             })
             .unwrap();
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         // cp = CP_PROP_GLYCOL_50PCT_J_KG_K J/(kg·K): 0.5 kg/s × cp × 20 K
         approx_eq(
@@ -1550,7 +1550,9 @@ mod tests {
             })
             .unwrap();
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         assert_eq!(states.len(), 2);
         // Sort by loop_id for deterministic access
@@ -1560,111 +1562,15 @@ mod tests {
         approx_eq(glycol.net_power_w, 0.5 * CP_PROP_GLYCOL_50PCT_J_KG_K * 20.0);
     }
 
-    #[test]
-    fn unknown_fluid_type_falls_back_to_water_cp() {
-        // When a fluid type is not in the fluid_specific_heats map,
-        // the solver falls back to the water cp (CP_LIQUID_WATER_J_KG_K).
-        let mut heats = HashMap::new();
-        heats.insert(FluidType::Water, CP_LIQUID_WATER_J_KG_K);
-        let mut solver = FluidSolver::new(
-            FluidSolverConfig {
-                fluid_specific_heats: heats,
-                loop_topologies: HashMap::new(),
-                loop_temp_limits: HashMap::new(),
-            },
-            &[(LoopId(1), FluidType::Glycol)], // Glycol not in map
-        )
-        .unwrap();
-        let mut ports = PortSlots {
-            fluid: vec![FluidAccumulator::new(LoopId(1), FluidType::Glycol)],
-            ..Default::default()
-        };
-        ports
-            .accumulate(&PortContribution::Fluid {
-                loop_id: LoopId(1),
-                flow_rate_kg_s: 0.5,
-                supply_temp_c: 60.0,
-                return_temp_c: 40.0,
-                fluid_type: FluidType::Glycol,
-                thermal_power_w: None,
-                node_id: FluidNodeId(0),
-                direction: HeatTransferDirection::Source,
-            })
-            .unwrap();
-
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
-        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
-        // Should fall back to water cp: 0.5 × 4180 × 20 = 41 800 W
-        approx_eq(states[0].net_power_w, 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0);
-    }
-
-    #[test]
-    // Gated to match the cfg gating the panic in resolve().
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    #[should_panic(expected = "mismatched fluid types")]
-    fn resolve_panics_on_mixed_fluid_types_in_same_loop() {
-        // When two accumulators share the same loop_id but differ on fluid_type,
-        // the invariant check in resolve() must detect the inconsistency.
-        // This verifies the runtime guard that catches the port-declaration
-        // loophole where from_declarations creates separate accumulators
-        // keyed by (loop_id, fluid_type) but the solver groups by loop_id alone.
-        let mut solver = FluidSolver::new(
-            FluidSolverConfig::default(),
-            &[(LoopId(1), FluidType::Water)],
-        )
-        .unwrap();
-
-        // Build PortSlots with two FluidAccumulators for the same loop_id
-        // but different fluid types — simulating the config-error scenario.
-        let mut ports = PortSlots {
-            fluid: vec![
-                FluidAccumulator::new(LoopId(1), FluidType::Water),
-                FluidAccumulator::new(LoopId(1), FluidType::Glycol),
-            ],
-            ..Default::default()
-        };
-        ports
-            .accumulate(&PortContribution::Fluid {
-                loop_id: LoopId(1),
-                flow_rate_kg_s: 0.5,
-                supply_temp_c: 60.0,
-                return_temp_c: 40.0,
-                fluid_type: FluidType::Water,
-                thermal_power_w: None,
-                node_id: FluidNodeId(0),
-                direction: HeatTransferDirection::Source,
-            })
-            .unwrap();
-        ports
-            .accumulate(&PortContribution::Fluid {
-                loop_id: LoopId(1),
-                flow_rate_kg_s: 0.3,
-                supply_temp_c: 55.0,
-                return_temp_c: 45.0,
-                fluid_type: FluidType::Glycol,
-                thermal_power_w: None,
-                node_id: FluidNodeId(0),
-                direction: HeatTransferDirection::Source,
-            })
-            .unwrap();
-
-        // resolve() must panic when debug_assertions are enabled
-        // (which they are in test builds).
-        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
-    }
-
     // =======================================================================
     // T-0254: Mass-conservation invariant checks
     // =======================================================================
 
     #[test]
-    // Gated to match the cfg gating the panic in the serial-flow check.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    #[should_panic(expected = "mass conservation violated")]
-    fn serial_loop_divergent_flows_trigger_mass_conservation_panic() {
+    fn serial_loop_divergent_flows_are_a_typed_error() {
         // Two accumulators on the same loop with different flow rates.
         // In a serial hydronic loop, all equipment must carry the same mass flow.
-        // The invariant check must detect and panic on this violation.
+        // The check is unconditional and reports the violation as a typed error.
         let mut solver = FluidSolver::new(
             FluidSolverConfig::default(),
             &[(LoopId(1), FluidType::Water)],
@@ -1690,7 +1596,7 @@ mod tests {
                     loop_id: LoopId(1),
                     fluid_type: FluidType::Water,
                     node_id: FluidNodeId(1),
-                    total_flow_kg_s: 0.3, // mismatched flow — should trigger panic
+                    total_flow_kg_s: 0.3, // mismatched flow: must be a typed error
                     mean_supply_temp_c: 50.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
@@ -1700,7 +1606,12 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let result = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let err = result.expect_err("divergent serial flows must be a typed error");
+        assert!(
+            err.to_string().contains("mass conservation violated"),
+            "the error must name the check, got: {err}"
+        );
     }
 
     #[test]
@@ -2023,14 +1934,15 @@ mod tests {
         );
     }
 
-    #[test]
-    // Gated to match the cfg gating the panic in the topology check.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    #[should_panic(expected = "mass conservation violated")]
-    fn parallel_loop_splitter_mixer_topology_violation_panics() {
-        // Same topology as above but branch C reports 0.5 kg/s while the
-        // splitter reports 1.0 kg/s. Splitter inflow (1.0) does not equal
-        // sum of branch outflows (0.4 + 0.3 + 0.5 = 1.2) — violation.
+    /// Resolves the three-branch splitter → [A, B, C] → mixer loop with the
+    /// given flows for nodes 0 (splitter) to 4 (mixer) and checks that the
+    /// conservation violation is a typed error naming the violating node's
+    /// role, and that observe telemetry counts it with its imbalance.
+    fn assert_parallel_loop_violation(
+        flows_kg_s: [f64; 5],
+        violating_role: FluidNodeRole,
+        imbalance_kg_s: f64,
+    ) {
         let topology = LoopTopology::new(
             LoopId(1),
             vec![
@@ -2057,63 +1969,71 @@ mod tests {
 
         let mut solver = FluidSolver::new(config, &[(LoopId(1), FluidType::Water)]).unwrap();
 
+        // Supply and return temperatures [°C] per node: the splitter carries
+        // supply water, the mixer return water, and each branch drops 20 K.
+        let temps_c = [
+            (60.0, 60.0),
+            (60.0, 40.0),
+            (60.0, 40.0),
+            (60.0, 40.0),
+            (40.0, 40.0),
+        ];
         let ports = PortSlots {
-            fluid: vec![
-                FluidAccumulator {
+            fluid: (0u16..)
+                .zip(flows_kg_s.into_iter().zip(temps_c))
+                .map(|(node, (flow, (supply, ret)))| FluidAccumulator {
                     loop_id: LoopId(1),
                     fluid_type: FluidType::Water,
-                    node_id: FluidNodeId(0),
-                    total_flow_kg_s: 1.0,
-                    mean_supply_temp_c: 60.0,
-                    mean_return_temp_c: 60.0,
+                    node_id: FluidNodeId(node),
+                    total_flow_kg_s: flow,
+                    mean_supply_temp_c: supply,
+                    mean_return_temp_c: ret,
                     total_thermal_power_w: 0.0,
                     direction: None,
-                },
-                FluidAccumulator {
-                    loop_id: LoopId(1),
-                    fluid_type: FluidType::Water,
-                    node_id: FluidNodeId(1),
-                    total_flow_kg_s: 0.4,
-                    mean_supply_temp_c: 60.0,
-                    mean_return_temp_c: 40.0,
-                    total_thermal_power_w: 0.0,
-                    direction: None,
-                },
-                FluidAccumulator {
-                    loop_id: LoopId(1),
-                    fluid_type: FluidType::Water,
-                    node_id: FluidNodeId(2),
-                    total_flow_kg_s: 0.3,
-                    mean_supply_temp_c: 60.0,
-                    mean_return_temp_c: 40.0,
-                    total_thermal_power_w: 0.0,
-                    direction: None,
-                },
-                FluidAccumulator {
-                    loop_id: LoopId(1),
-                    fluid_type: FluidType::Water,
-                    node_id: FluidNodeId(3),
-                    total_flow_kg_s: 0.5, // mismatched: 1.0 != 0.4 + 0.3 + 0.5
-                    mean_supply_temp_c: 60.0,
-                    mean_return_temp_c: 40.0,
-                    total_thermal_power_w: 0.0,
-                    direction: None,
-                },
-                FluidAccumulator {
-                    loop_id: LoopId(1),
-                    fluid_type: FluidType::Water,
-                    node_id: FluidNodeId(4),
-                    total_flow_kg_s: 1.0,
-                    mean_supply_temp_c: 40.0,
-                    mean_return_temp_c: 40.0,
-                    total_thermal_power_w: 0.0,
-                    direction: None,
-                },
-            ],
+                })
+                .collect(),
             ..Default::default()
         };
 
-        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let err = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .expect_err("a splitter/mixer conservation violation must be a typed error");
+        let message = err.to_string();
+        assert!(
+            message.contains("mass conservation violated"),
+            "the error must name the check, got: {message}"
+        );
+        assert!(
+            message.contains(&format!("({violating_role:?})")),
+            "the violation must be at the {violating_role:?}, got: {message}"
+        );
+        assert!(
+            message.contains(&format!("imbalance = {imbalance_kg_s:.6e}")),
+            "the error must state the {imbalance_kg_s} kg/s imbalance, got: {message}"
+        );
+        #[cfg(feature = "observe")]
+        {
+            assert_eq!(solver.num_conservation_violations, 1);
+            assert!(
+                (solver.max_mass_imbalance_kg_s - imbalance_kg_s).abs() < 1e-12,
+                "expected peak imbalance {imbalance_kg_s} kg/s, got {}",
+                solver.max_mass_imbalance_kg_s
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_loop_splitter_topology_violation_is_a_typed_error() {
+        // Branch C reports 0.5 kg/s while the splitter reports 1.0 kg/s:
+        // splitter inflow 1.0 against branch outflows 0.4 + 0.3 + 0.5 = 1.2.
+        assert_parallel_loop_violation([1.0, 0.4, 0.3, 0.5, 1.0], FluidNodeRole::Splitter, 0.2);
+    }
+
+    #[test]
+    fn parallel_loop_mixer_topology_violation_is_a_typed_error() {
+        // The splitter and branches balance (1.0 = 0.4 + 0.3 + 0.3), but the
+        // mixer reports 1.3 kg/s leaving against 1.0 kg/s arriving.
+        assert_parallel_loop_violation([1.0, 0.4, 0.3, 0.3, 1.3], FluidNodeRole::Mixer, 0.3);
     }
 
     // =======================================================================
@@ -2225,7 +2145,9 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
 
         // Verify net power uses proportional allocation:
         // Each boiler gets 0.25 kg/s * (60-40)K * Cp = 0.25 * 20 * Cp
@@ -2339,7 +2261,9 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
 
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         // Each branch gets its requested 0.2 kg/s — net power = 2 * 0.2 * Cp * 20K
@@ -2378,7 +2302,9 @@ mod tests {
             })
             .unwrap();
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         approx_eq(states[0].net_power_w, 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0);
         approx_eq(states[0].mean_supply_temp_c, 60.0);
@@ -2490,7 +2416,9 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
 
         // Coil A: 0.12 kg/s * 10K * Cp, Coil B: 0.08 kg/s * 15K * Cp
@@ -2545,7 +2473,9 @@ mod tests {
 
         // Serial-flow consistency check requires matching flow rates when no
         // topology is configured. Both accumulators have the same flow.
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         assert_eq!(states.len(), 1);
 
@@ -2599,7 +2529,9 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         assert_eq!(states.len(), 1);
 
@@ -2640,7 +2572,9 @@ mod tests {
             })
             .unwrap();
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         let expected = 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0;
 
@@ -2689,7 +2623,9 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
 
         assert!(
@@ -2740,7 +2676,9 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
 
         approx_eq(states[0].mean_supply_temp_c, 0.0);
@@ -2774,7 +2712,9 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
 
         // No clamping should occur; temperatures pass through unchanged.
@@ -2806,7 +2746,9 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
 
         approx_eq(states[0].mean_supply_temp_c, 60.0);
@@ -2842,7 +2784,9 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let update = solver
+            .resolve_new(&ports, &env(), Duration::from_secs(60))
+            .unwrap();
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
 
         // Both temperatures must be clamped to min and finite.

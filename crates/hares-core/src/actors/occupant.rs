@@ -32,11 +32,11 @@ use serde::{Deserialize, Serialize};
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
-    ControlSignal, EndUse, EnvironmentState, EvConnectionState, HaresError, OperatingMode,
-    Telemetry,
+    ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EvConnectionState, HaresError,
+    OperatingMode, Telemetry,
 };
 
-use crate::Actor;
+use crate::{Actor, ActorTarget};
 
 /// Occupant presence state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -144,6 +144,8 @@ pub struct Occupant {
     /// Whether `with_presence_schedule()` was explicitly called.
     /// `false` + configured equipment targets = unwired schedule (dead code).
     schedule_configured: bool,
+    /// Every configured target with the capabilities its behavior sends.
+    targets: Vec<ActorTarget>,
     /// Cumulative count of presence transitions observed over the simulation.
     presence_change_count: f64,
     /// Actor telemetry: observable decision state for diagnostics.
@@ -169,6 +171,7 @@ impl Occupant {
             ev: None,
             plug_loads: None,
             schedule_configured: false,
+            targets: Vec::new(),
             presence_change_count: 0.0,
             telemetry,
         }
@@ -187,24 +190,62 @@ impl Occupant {
     /// Configures lighting equipment target and behavior.
     pub fn with_lighting(mut self, target_name: &str, behavior: EquipmentBehavior) -> Self {
         self.lighting = Some((DispatchTarget::ByName(target_name.into()), behavior));
-        self
+        self.declare_targets()
     }
 
     /// Configures appliance equipment target and behavior.
     pub fn with_appliance(mut self, target_name: &str, behavior: EquipmentBehavior) -> Self {
         self.appliance = Some((DispatchTarget::ByName(target_name.into()), behavior));
-        self
+        self.declare_targets()
     }
 
     /// Configures EV equipment target and behavior.
     pub fn with_ev(mut self, target_name: &str, behavior: EquipmentBehavior) -> Self {
         self.ev = Some((DispatchTarget::ByName(target_name.into()), behavior));
-        self
+        self.declare_targets()
     }
 
     /// Configures plug loads by end-use category.
     pub fn with_plug_loads(mut self, end_use: EndUse, behavior: EquipmentBehavior) -> Self {
         self.plug_loads = Some((DispatchTarget::ByEndUse(end_use), behavior));
+        self.declare_targets()
+    }
+
+    /// Rebuilds [`Actor::dispatch_targets`] from the configured targets:
+    /// an EV is plugged and unplugged, any other target switched by mode,
+    /// and each takes the power setpoint or load fraction it is given.
+    fn declare_targets(mut self) -> Self {
+        let required = |behavior: &EquipmentBehavior, is_ev: bool| {
+            let mut required = ControlCapabilities::empty();
+            if behavior.off_when_away || behavior.on_when_home {
+                required |= if is_ev {
+                    ControlCapabilities::EV_PLUG_IN
+                } else {
+                    ControlCapabilities::MODE_OVERRIDE
+                };
+            }
+            if behavior.power_setpoint_kw.is_some() {
+                required |= ControlCapabilities::POWER_SETPOINT;
+            }
+            if behavior.load_fraction.is_some() && !is_ev {
+                required |= ControlCapabilities::LOAD_FRACTION;
+            }
+            required
+        };
+        self.targets = [
+            (&self.lighting, false),
+            (&self.appliance, false),
+            (&self.ev, true),
+            (&self.plug_loads, false),
+        ]
+        .into_iter()
+        .filter_map(|(configured, is_ev)| {
+            configured.as_ref().map(|(target, behavior)| ActorTarget {
+                target: target.clone(),
+                required: required(behavior, is_ev),
+            })
+        })
+        .collect();
         self
     }
 
@@ -238,7 +279,7 @@ impl Occupant {
     fn advance_step(&mut self) {
         self.previous_presence = self.current_presence();
         self.current_step = self.current_step.saturating_add(1);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             let has_targets = self.lighting.is_some()
                 || self.appliance.is_some()
@@ -413,6 +454,10 @@ impl Actor for Occupant {
 
     fn telemetry(&self) -> Option<&Telemetry> {
         Some(&self.telemetry)
+    }
+
+    fn dispatch_targets(&self) -> &[ActorTarget] {
+        &self.targets
     }
 
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {

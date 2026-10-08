@@ -11,7 +11,7 @@ use hares_control::{DispatchTarget, PriorityTier};
 use hares_envelope::EnvelopeComponentGains;
 use hares_types::{
     ControlSignal, DomainId, DomainUpdate, EndUse, FluidType, FuelType, HeatTransferDirection,
-    LoopId, PortDeclaration, Telemetry, ZoneId,
+    LoopId, PortDeclaration, Telemetry, ZoneHeat, ZoneId,
 };
 
 /// Complete snapshot of a single simulation timestep, populated incrementally
@@ -28,8 +28,8 @@ pub struct StepSnapshot {
     /// Number of actors that were unhealthy (error flag set) after `decide()` this step.
     pub actor_error_count: usize,
     /// Per-step moisture invariant capture from `check_moisture`.
-    /// Populated when `check_invariants` is active; `None` when only
-    /// the `observe` feature is enabled without invariant checks.
+    /// Populated whenever the `observe` feature is on; `None` only in
+    /// builds without `observe`.
     #[cfg(feature = "observe")]
     pub moisture_invariant: Option<MoistureInvariantCapture>,
     /// sin(2π · fractional_hour / 24) for verifying time_sin observation field.
@@ -123,14 +123,13 @@ pub struct EquipmentObservation {
     pub contribution: EquipmentContribution,
     /// Snapshot of the aggregate port accumulators visible to this equipment before its `step()`.
     pub pre_step_ports: PortsCapture,
-    /// Whether zone_id was explicitly set in config (true) or fell back to ZoneId(1) (false).
-    pub zone_id_explicit: bool,
 }
 
 /// Per-equipment port contribution: the delta this equipment added to `PortSlots` during one step.
 #[derive(Debug, Clone)]
 pub struct EquipmentContribution {
-    pub thermal: Vec<(ZoneId, f64, f64)>,
+    /// The heat this equipment added to each zone, every path included.
+    pub thermal: Vec<(ZoneId, ZoneHeat)>,
     pub electrical_load_kw: f64,
     pub electrical_gen_kw: f64,
     pub electrical_reactive_kvar: f64,
@@ -152,7 +151,8 @@ pub struct FluidContributionCapture {
 /// Snapshot of all port accumulators at a phase boundary.
 #[derive(Debug, Clone)]
 pub struct PortsCapture {
-    pub thermal: Vec<(ZoneId, f64, f64)>,
+    /// Each zone's accumulated heat, every path included.
+    pub thermal: Vec<(ZoneId, ZoneHeat)>,
     pub electrical_load_kw: f64,
     pub electrical_gen_kw: f64,
     pub electrical_reactive_kvar: f64,
@@ -325,15 +325,15 @@ pub struct MoistureInvariantCapture {
 #[derive(Debug, Clone)]
 pub struct MoistureZoneInvariant {
     pub zone_id: ZoneId,
-    /// Sum of independently tracked moisture sources [kg].
+    /// Sum of independently tracked moisture sources (kg).
     pub expected_sources_kg: f64,
-    /// Sum of independently tracked moisture sinks [kg].
+    /// Sum of independently tracked moisture sinks (kg).
     pub expected_sinks_kg: f64,
-    /// Solver's actual moisture mass change in the zone air (dW · ρ · V) [kg].
+    /// Solver's actual moisture mass change in the zone air (dW · ρ · V) (kg).
     pub solver_delta_kg: f64,
-    /// Net material sorption/desorption: expected_sources_kg − expected_sinks_kg − solver_delta_kg [kg].
+    /// Net material sorption/desorption: expected_sources_kg − expected_sinks_kg − solver_delta_kg (kg).
     pub sorption_residual_kg: f64,
     /// Mass of moisture removed from (positive) or added to (negative) the zone
-    /// air by humidity-ratio clamp enforcement (condensation / frost deposition) [kg].
+    /// air by humidity-ratio clamp enforcement (condensation / frost deposition) (kg).
     pub condensation_kg: f64,
 }

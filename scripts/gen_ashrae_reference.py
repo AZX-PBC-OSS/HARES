@@ -9,10 +9,9 @@ below with inline citations.
 
 Run it with::
 
-    uv run python scripts/gen_ashrae_reference.py
+    uv run --locked --extra ochre python scripts/gen_ashrae_reference.py
 
-(``xmltodict`` is supplied by the ``ochre`` optional dependency group in
-``pyproject.toml``.)
+(``xmltodict`` is supplied by the ``ochre`` extra in ``pyproject.toml``.)
 
 Output: ``tests/fixtures/parity/ashrae_rc_reference.json``.  The file is
 deterministic (sorted keys, fixed rounding) so re-running produces an
@@ -103,9 +102,7 @@ T_CONDITIONED_C: float = 20.0
 T_OUTDOOR_OFFSET_C: float = 5.0
 
 
-def ashrae_simple_interior_h_conv(
-    tilt_deg: float, above_hotter: bool
-) -> float:
+def ashrae_simple_interior_h_conv(tilt_deg: float, above_hotter: bool) -> float:
     """ASHRAE "Simple" interior convection coefficient h_conv [W/(m²·K)].
 
     Fixed convection-only values by surface orientation, derived from
@@ -265,11 +262,13 @@ def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
         # Ground is a fixed-temperature node — no convective exterior film.
         # Matches HARES conversions.rs:308 r_film_ext = 0.0 for slabs.
         r_ext = 0.0
+        raw_dt = 0.0
         delta_t = 0.0
         h_natural = 0.0
         floored = False
     else:
         r_ext = r_int
+        raw_dt = 0.0
         delta_t = 0.0
         h_natural = 0.0
         floored = False
@@ -363,6 +362,7 @@ _ATTIC_FLOOR_LAYERS: list[_Material] = [
     ("GYPSUM BOARD", 0.0127, 0.16, 801, 837.4),
 ]
 
+
 def f2_coefficient(insulation_r_m2_k_w: float, heated: bool) -> float:
     """Perimeter loss coefficient F2 [W/(m·K)] per ASHRAE 90.1-2022 Table A6.3.1.
 
@@ -389,6 +389,7 @@ def f2_coefficient(insulation_r_m2_k_w: float, heated: bool) -> float:
         return 2.267 if heated else 1.246
     # Uninsulated slab
     return 2.336 if heated else 1.263
+
 
 # Pitched attic roof: asphalt/fibreglass shingles over OSB sheathing, with a
 # thin roof rigid-insulation layer per BEopt "Unfinished, Uninsulated,
@@ -429,7 +430,7 @@ def _assembly_r_capacitance_kj(layers: list[_Material]) -> tuple[float, float]:
 
     r_total = 0.0
     cap_kj_m2_k = 0.0
-    for _name, thickness, k, density, cp_j_kg_k in layers:
+    for _, thickness, k, density, cp_j_kg_k in layers:
         r_total += thickness / k
         # Convert specific heat J/(kg*K) -> kJ/(kg*K) by /1000, then apply
         # the layer mass density * thickness to yield kJ/(m^2*K).
@@ -484,7 +485,7 @@ def _as_list(x: Any) -> list[Any]:
 
 
 def _float(x: Any) -> float:
-    return float(x) if isinstance(x, str) else float(x)
+    return float(x)
 
 
 def _wall_zone_labels(wall: dict[str, Any]) -> tuple[str, str]:
@@ -502,13 +503,21 @@ def _wall_zone_labels(wall: dict[str, Any]) -> tuple[str, str]:
     return mapping[interior], mapping[exterior]
 
 
+@dataclass(frozen=True)
+class _Slab:
+    id: str
+    area_m2: float
+    perimeter_m: float | None
+    perimeter_insulation_r_si: float
+
+
 @dataclass
 class ParsedBuilding:
     walls_exterior: list[dict[str, float]]
     walls_attic: list[dict[str, float]]
     roofs: list[dict[str, float]]
     floors: list[dict[str, float]]
-    slabs: list[dict[str, float]]
+    slabs: list[_Slab]
     doors: list[dict[str, float]]
     windows: list[dict[str, float]]
     conditioned_volume_m3: float
@@ -577,7 +586,7 @@ def parse_hpxml(path: str) -> ParsedBuilding:
             }
         )
 
-    slabs: list[dict[str, float]] = []
+    slabs: list[_Slab] = []
     for slab in _as_list(enclosure.get("Slabs", {}).get("Slab", [])):
         perimeter_m: float | None = None
         if "ExposedPerimeter" in slab:
@@ -588,12 +597,12 @@ def parse_hpxml(path: str) -> ParsedBuilding:
             for layer in _as_list(pi.get("Layer", [])):
                 insulation_r_ip += _float(layer.get("NominalRValue", 0.0))
         slabs.append(
-            {
-                "id": slab["SystemIdentifier"]["@id"],
-                "area_m2": _float(slab["Area"]) * FT2_TO_M2,
-                "perimeter_m": perimeter_m,
-                "perimeter_insulation_r_si": insulation_r_ip * R_IP_TO_SI,
-            }
+            _Slab(
+                id=str(slab["SystemIdentifier"]["@id"]),
+                area_m2=_float(slab["Area"]) * FT2_TO_M2,
+                perimeter_m=perimeter_m,
+                perimeter_insulation_r_si=insulation_r_ip * R_IP_TO_SI,
+            )
         )
 
     doors: list[dict[str, float]] = []
@@ -782,11 +791,12 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     # Ref: ANSI/ASHRAE 90.1-2022 Table A6.3.1;
     # EnergyPlus Eng.Ref "Slab-on-grade and Underground Floors Defined
     # with F-factors".
-    slab_area = sum(s["area_m2"] for s in b.slabs)
+    slab_area = sum(s.area_m2 for s in b.slabs)
     perimeter_m = sum(
-        (s["perimeter_m"] if s.get("perimeter_m") is not None else 4.0 * s["area_m2"] ** 0.5) for s in b.slabs
+        (s.perimeter_m if s.perimeter_m is not None else 4.0 * s.area_m2**0.5)
+        for s in b.slabs
     )
-    insulation_r = sum(s.get("perimeter_insulation_r_si", 0.0) for s in b.slabs)
+    insulation_r = sum(s.perimeter_insulation_r_si for s in b.slabs)
     # F2 perimeter heat loss coefficient per ASHRAE 90.1-2022 Table A6.3.1.
     # Unheated residential slab (heated=False). Matches
     # crates/hares-physics/src/ground.rs::f2_coefficient.

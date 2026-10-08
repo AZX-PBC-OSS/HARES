@@ -11,7 +11,12 @@ Deterministic power consumption driven by time-indexed schedules (CSV columns or
 ### Operating Model
 
 - Power schedule (electrical) + optional gas schedule
-- Monthly multipliers for seasonal variation (e.g., ceiling fans off in winter)
+- Monthly multipliers (`month_multiplier_0` to `month_multiplier_11`) for
+  seasonal variation (e.g., ceiling fans off in winter); they scale the
+  electric and gas schedules whatever their source, a daily profile's own
+  month factors included; a negative or non-finite multiplier is an error
+  (OCHRE only zeroes a month whose multiplier is 0: divergence D-013 in
+  [DIVERGENCES.md](../alignment/DIVERGENCES.md))
 - ZIP voltage-dependent load model (full ZIP with byte-identical arithmetic per [power-factor.md](./power-factor.md)):
   ```
   P = P_base * (zp·V² + ip·V + pp)    where V = voltage_pu / v0
@@ -23,15 +28,27 @@ Deterministic power consumption driven by time-indexed schedules (CSV columns or
 
 ### Zone Thermal Routing
 
-Zone assignment by equipment name convention:
-- Contains "Exterior"/"Outdoor" -> no zone (outdoor loss)
-- Contains "Garage" -> ZoneId(2)
-- Contains "Basement" -> ZoneId(3)
-- Otherwise -> ZoneId(1) (primary conditioned)
+Zone assignment (`load_zone.rs`):
+- An explicit `zone_id` names the zone (the HPXML resolver sets it from the
+  appliance's `Location`)
+- EV charging, and a load named "Exterior"/"Outdoor" without a `zone_id`, gives
+  no zone heat
+- Otherwise the zone of the role the name implies (garage, basement,
+  crawlspace or attic, else the conditioned zone) from the dwelling's zone map
+- A load that gives zone heat with no zone to give it to, or a zone the
+  environment does not have, fails the build
 
-Heat distribution:
-- `sensible_gain = (electric_kw * 1000 + gas_w) * sensible_gain_fraction`
-- `latent_gain = same * latent_gain_fraction`
+Heat distribution (`gain_fractions.rs`), per watt of electric plus fuel input:
+- `sensible_gain_fraction` of it is sensible heat, `latent_gain_fraction` latent
+- Of the sensible heat, `radiant_share_of_sensible` is long-wave radiant (to the
+  interior surfaces), `visible_share_of_sensible` short-wave (absorbed by the
+  interior surfaces as transmitted diffuse solar), the rest convective (to the
+  zone air); an absolute `radiative_gain_fraction` replaces the radiant share
+- OpenStudio-HPXML v1.12.0 defaults: appliances and plug loads 0.6 radiant
+  share; lights 0.6 radiant and 0.2 visible; ceiling fans 0.558 radiant (see
+  `docs/alignment/DIVERGENCES.md`, D-005 to D-007)
+- The HPXML extension's `FracSensible` and `FracLatent` set the sensible and
+  latent fractions; an override may give either spelling, never both
 - Category: `ThermalCategory::InternalGain`
 
 ### Control Signals
@@ -76,7 +93,9 @@ stateDiagram-v2
 ### Wet Appliance Variant
 
 Multi-phase cycles (e.g., washer: fill -> wash -> spin):
-- Array of (power_kw, duration_s) phases
+- `phase_len` phases, each `phase_<n>_power_kw`, `phase_<n>_duration_s` and
+  optionally `phase_<n>_has_water_draw`; with no `phase_len`, one phase of
+  `active_power_kw` for `active_duration_s`
 - Optional `hot_water_draw_rate_kg_s` for DHW consumption (writes to `DHW_DEMAND_LOOP`)
 
 ### Control Signals
@@ -93,6 +112,35 @@ Multi-phase cycles (e.g., washer: fill -> wash -> spin):
 - **Electrical**: phase-based or setpoint-overridden power
 - **Thermal**: sensible + latent gains to zone
 - **Fuel**: optional if `fuel_type != Electric`
+
+## Parameters and Overrides
+
+**Source**: `crates/hares-equipment/src/raw_params.rs`
+
+Each kind of load (scheduled load, event load, wet appliance) has one list
+of the parameters it reads and the kind each is read as (a number, text,
+true or false, a list of numbers), beside the constants its code reads them
+by; in debug and test builds a read of a key off its list, or as another
+kind, fails, so the list cannot fall behind the code. The dwelling's
+equipment overrides use the same lists:
+
+- An equipment's own override entry may set only parameters its kind reads,
+  `zip` (the ZIP coefficients) aside; any other key, and the reserved
+  `equipment_id`, fails the build naming the key and listing what the load
+  reads. The HPXML spellings `frac_sensible` and `frac_latent` stand for
+  `sensible_gain_fraction` and `latent_gain_fraction`; both spellings of one
+  fraction in a layer are an error.
+- The wildcard override (`all` or `*`, one of them; both is an error) reaches
+  every equipment: each takes the wildcard parameters it reads once every
+  override layer is applied (a numbered key such as `phase_4_power_kw` only
+  within its family's count; a typed config the fields its schema has) and
+  skips the rest. A wildcard parameter no equipment of the dwelling reads
+  fails the build.
+- A parameter a load reads given a value of another kind (a string for a
+  number, a null, an object) fails the build rather than reading as absent.
+- A raw-parameter spec of a class with no list (equipment that is not a load,
+  added through a blueprint without a typed config) takes the whole wildcard
+  and its own entry unchecked, and vouches for no wildcard parameter.
 
 ## Grid Outage Behaviour
 

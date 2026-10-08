@@ -35,7 +35,7 @@ impl ChargingPreference for SocTarget {
     /// (`Immediate`, `Nightly`, `V2H`, `V2G`) reports the "no estimate"
     /// sentinel, which the composer collapses to 0.0 — indistinguishable
     /// from "nothing to charge" while the battery sits well below target.
-    fn needed_charge_hours(&self, ctx: &DecisionContext) -> f64 {
+    fn needed_charge_hours(&self, ctx: &DecisionContext) -> Result<f64, hares_types::HaresError> {
         needed_charge_hours_to_target(self.target_soc, self.charging_efficiency, ctx)
     }
 }
@@ -72,7 +72,7 @@ mod tests {
         let raw: f64 = 24.0 / (7.2 * 0.9);
         let step_hours: f64 = 1.0 / 60.0;
         let expected = (raw / step_hours).ceil() * step_hours;
-        let hours = pref.needed_charge_hours(&ctx);
+        let hours = pref.needed_charge_hours(&ctx).unwrap();
         assert!(
             (hours - expected).abs() < 1e-9,
             "needed_charge_hours ({hours}) should equal the constant-efficiency expected ({expected}) at 22C"
@@ -90,7 +90,7 @@ mod tests {
         // At target: gap 0 — genuinely nothing to charge.
         let ctx_at = make_ctx(&env, 0.9);
         assert!(
-            pref.needed_charge_hours(&ctx_at).abs() < 1e-9,
+            pref.needed_charge_hours(&ctx_at).unwrap().abs() < 1e-9,
             "needed_charge_hours must be 0.0 when the SOC gap is zero"
         );
 
@@ -98,7 +98,7 @@ mod tests {
         // a discharge-time.
         let ctx_above = make_ctx(&env, 0.95);
         assert!(
-            pref.needed_charge_hours(&ctx_above).abs() < 1e-9,
+            pref.needed_charge_hours(&ctx_above).unwrap().abs() < 1e-9,
             "needed_charge_hours must be 0.0 when SOC is above target"
         );
     }
@@ -121,7 +121,7 @@ mod tests {
         let mut ctx = make_ctx(&env, 0.5);
         ctx.max_charge_kw = -1.0;
         assert_eq!(
-            pref.needed_charge_hours(&ctx),
+            pref.needed_charge_hours(&ctx).unwrap(),
             f64::INFINITY,
             "negative max charge rate must yield INFINITY (cannot charge)"
         );
@@ -132,7 +132,7 @@ mod tests {
         let mut ctx = make_ctx(&env, 0.9);
         ctx.max_charge_kw = 0.0;
         assert_eq!(
-            pref.needed_charge_hours(&ctx),
+            pref.needed_charge_hours(&ctx).unwrap(),
             0.0,
             "zero gap needs zero hours even with no charge capability — the \
              gap check runs before the capability checks"
@@ -151,7 +151,7 @@ mod tests {
 
         let mut ctx = make_ctx(&env, 0.5);
         ctx.time_res_minutes = 0.0;
-        let hours = pref.needed_charge_hours(&ctx);
+        let hours = pref.needed_charge_hours(&ctx).unwrap();
         let raw: f64 = 24.0 / (7.2 * 0.9);
         assert!(
             (hours - raw).abs() < 1e-9,

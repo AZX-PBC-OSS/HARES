@@ -11,7 +11,8 @@ use hares_control::DispatchRequest;
 use hares_core::ChaCha8Rng;
 use hares_core::actor::{Actor, testing::test_env};
 use hares_core::actors::{
-    BatteryManagementActor, DrCompliance, EvDriverActor, IdealThermostat, Occupant,
+    BatteryManagementActor, BmsParams, DrCompliance, EvDriverActor, EvDriverParams,
+    IdealThermostat, Occupant,
 };
 use hares_types::{
     BmsMode, ChargingStrategy, DRLevel, EnvironmentState, GridExportRule, PlugInPolicy,
@@ -139,13 +140,15 @@ fn ideal_thermostat_cleared_override_reports_default() {
 fn bms_telemetry_reports_action_and_state() {
     let mut actor = BatteryManagementActor::new(
         "Battery",
-        BmsMode::Manual,
-        GridExportRule::Unrestricted,
-        5.0,
-        5.0,
-        None,
-        1440,
-        0,
+        BmsParams {
+            bms_mode: BmsMode::Manual,
+            grid_export_rule: GridExportRule::Unrestricted,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            price_schedule: None,
+            steps_per_day: 1440,
+            min_dwell_steps: 0,
+        },
     );
 
     let env = test_env().build();
@@ -216,20 +219,22 @@ fn ev_driver_telemetry_reports_soc_and_phase() {
     let mut actor = EvDriverActor::new(
         "TestDriver",
         "EV1",
-        ChargingStrategy::Immediate { target_soc: 1.0 },
-        PlugInPolicy::Always,
-        ScheduleSource::Constant(30.0),
-        ScheduleSource::Constant(480.0),
-        ScheduleSource::Constant(600.0),
-        None,
-        1.0,
-        0.3,
-        60.0,
-        7.2,
-        30.0,
-        20.0,
-        0.0,
-        0.0,
+        EvDriverParams {
+            strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
+            plug_in_policy: PlugInPolicy::Always,
+            daily_drive_miles: ScheduleSource::Constant(30.0),
+            departure_time: ScheduleSource::Constant(480.0),
+            trip_duration: ScheduleSource::Constant(600.0),
+            arrival_time: None,
+            event_day_ratio: 1.0,
+            fuel_economy_kwh_per_mi: 0.3,
+            capacity_kwh: 60.0,
+            max_charge_kw: 7.2,
+            average_speed_mph: 30.0,
+            range_anxiety_miles: 20.0,
+            away_charge_fraction: 0.0,
+            away_charge_power_kw: 0.0,
+        },
         ChaCha8Rng::from_seed([42u8; 32]),
     );
 
@@ -286,13 +291,15 @@ fn all_observable_actors_return_some_telemetry() {
     {
         let mut bms = BatteryManagementActor::new(
             "Battery",
-            BmsMode::Manual,
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            1440,
-            0,
+            BmsParams {
+                bms_mode: BmsMode::Manual,
+                grid_export_rule: GridExportRule::Unrestricted,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+                price_schedule: None,
+                steps_per_day: 1440,
+                min_dwell_steps: 0,
+            },
         );
         assert_actor_has_telemetry(&mut bms, &env);
     }
@@ -309,20 +316,22 @@ fn all_observable_actors_return_some_telemetry() {
         let mut ev = EvDriverActor::new(
             "TestDriver",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 1.0 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            None,
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.0,
-            0.0,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: None,
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             ChaCha8Rng::from_seed([42u8; 32]),
         );
         assert_actor_has_telemetry(&mut ev, &env);

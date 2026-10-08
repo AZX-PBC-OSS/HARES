@@ -1,21 +1,23 @@
 """OCHRE parity test -- runs both OCHRE and HARES on identical inputs and compares.
 
 Requires:
-    uv sync --group dev
-    uv pip install -e vendors/OCHRE
+    uv sync --all-groups (the ochre group supplies OCHRE's dependencies)
     uv run maturin develop -m crates/hares-python/Cargo.toml
+
+`import ochre` resolves to the vendors/OCHRE submodule via pyproject's
+pytest pythonpath.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import sys
 from pathlib import Path
 
 import pytest
+from ochre_names import resolve_hares_kwh
+from ochre_units import register_removed_units
 
 ROOT = Path(__file__).resolve().parents[2]
-VENDOR_OCHRE = ROOT / "vendors" / "OCHRE"
 EXAMPLES = ROOT / "data" / "examples"
 HARES_DEFAULTS = ROOT / "defaults"
 
@@ -25,11 +27,20 @@ WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
 # Denver LST = UTC-7.  13:00 local = 20:00 UTC.
 # Both OCHRE and HARES take local standard time as the start time.
-START_LOCAL = dt.datetime(2019, 5, 5, 13, 0)  # naive local for OCHRE
+START_LOCAL = dt.datetime(2019, 5, 5, 13, 0)  # noqa: DTZ001 (naive local for OCHRE)
 # HARES takes an ISO string; EPW timezone offset (-7h) is applied internally.
 START_HARES = "2019-05-05T13:00:00"
 DURATION_H = 1
 TIME_RES_MIN = 1
+
+# The 24 h window the one-hour window hides gaps from (midnight local).
+START_LOCAL_24H = dt.datetime(2019, 5, 5, 0, 0)  # noqa: DTZ001
+START_HARES_24H = "2019-05-05T00:00:00"
+DURATION_H_24 = 24
+
+# OCHRE seeds numpy's global RNG only when given a seed or an output path;
+# unseeded, its stochastic equipment makes the reference differ run to run.
+OCHRE_SEED = 42
 
 # ZOH resampling for all continuous weather fields -- matches OCHRE's pandas ffill().
 # Note: sky_temp is not overridable -- HARES always recomputes it from the
@@ -49,12 +60,9 @@ OCHRE_COMPAT_RESAMPLE: dict[str, str] = {
 # OCHRE runner
 # ---------------------------------------------------------------------------
 
+
 def _run_ochre() -> dict[str, float]:
     """Run OCHRE and return {column_name: kWh} for 1-hour window."""
-    # Ensure vendored OCHRE is importable
-    if str(VENDOR_OCHRE) not in sys.path:
-        sys.path.insert(0, str(VENDOR_OCHRE))
-
     from ochre import Dwelling as OchreDwelling
 
     dwelling = OchreDwelling(
@@ -67,61 +75,61 @@ def _run_ochre() -> dict[str, float]:
         weather_file=WEATHER,
         verbosity=6,
         save_results=False,
+        seed=OCHRE_SEED,
     )
-    df, metrics, _hourly = dwelling.simulate()
+    result = dwelling.simulate()
+    assert isinstance(result, tuple) and len(result) == 3, (
+        "OCHRE simulate must return (df, metrics_by_end_use, ...)"
+    )
+    df = result[0]
+    assert isinstance(df, pd.DataFrame), "OCHRE simulate must return a results DataFrame"
 
     time_res_h = TIME_RES_MIN / 60.0
-    result: dict[str, float] = {}
+    totals: dict[str, float] = {}
     for col in df.columns:
-        if col.endswith("(kW)") or col.endswith("(therms/hour)"):
-            result[col] = float((df[col] * time_res_h).sum())
-    return result
+        if col.endswith(("(kW)", "(therms/hour)")):
+            totals[col] = float((df[col] * time_res_h).sum())
+    return totals
+
+
+def _run_ochre_24h() -> dict[str, float]:
+    """Run OCHRE and return {column_name: kWh} for the 24-hour window."""
+    from ochre import Dwelling as OchreDwelling
+
+    dwelling = OchreDwelling(
+        name="parity_24h",
+        start_time=START_LOCAL_24H,
+        time_res=dt.timedelta(minutes=TIME_RES_MIN),
+        duration=dt.timedelta(hours=DURATION_H_24),
+        hpxml_file=HPXML,
+        hpxml_schedule_file=SCHEDULE,
+        weather_file=WEATHER,
+        verbosity=6,
+        save_results=False,
+        seed=OCHRE_SEED,
+    )
+    result = dwelling.simulate()
+    assert isinstance(result, tuple) and len(result) == 3, (
+        "OCHRE simulate must return (df, metrics_by_end_use, ...)"
+    )
+    df = result[0]
+    assert isinstance(df, pd.DataFrame), "OCHRE simulate must return a results DataFrame"
+
+    time_res_h = TIME_RES_MIN / 60.0
+    totals: dict[str, float] = {}
+    for col in df.columns:
+        if col.endswith(("(kW)", "(therms/hour)")):
+            totals[col] = float((df[col] * time_res_h).sum())
+    return totals
 
 
 # ---------------------------------------------------------------------------
 # HARES runner
 # ---------------------------------------------------------------------------
 
-def _run_hares() -> dict[str, float]:
-    """Run HARES via Python bindings and return {column_name: kWh}."""
-    from ochre_next import Dwelling as HaresDwelling
 
-    dwelling = HaresDwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time=START_HARES,
-        time_res_s=TIME_RES_MIN * 60,
-        duration_s=DURATION_H * 3600,
-        output_verbosity=6,
-        defaults_path=str(HARES_DEFAULTS),
-        master_seed=42,
-        resample_overrides=OCHRE_COMPAT_RESAMPLE,
-    )
-    dwelling.initialize()
-
-    # Step through and accumulate per-column power sums
-    time_res_h = TIME_RES_MIN / 60.0
-    n_steps = DURATION_H * 60 // TIME_RES_MIN
-    sums: dict[str, float] = {}
-    for _ in range(n_steps):
-        step = dwelling.step()
-        for key, val in step.items():
-            if key == "timestamp":
-                continue
-            sums[key] = sums.get(key, 0.0) + val
-
-    # step() returns a flat dict; column naming may differ from CSV output.
-    # Convert to kWh
-    result: dict[str, float] = {}
-    for col, total in sums.items():
-        result[col] = total * time_res_h
-    return result
-
-
-def _run_hares_simulate() -> dict[str, float]:
+def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
     """Run HARES via simulate() and parse the DataFrame for column kWh."""
-    pl = pytest.importorskip("polars")
     from ochre_next import Dwelling as HaresDwelling
 
     dwelling = HaresDwelling.from_hpxml(
@@ -135,6 +143,8 @@ def _run_hares_simulate() -> dict[str, float]:
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
         resample_overrides=OCHRE_COMPAT_RESAMPLE,
+        write_output=True,
+        output_path=str(output_dir / "hares_parity.csv"),
     )
     dwelling.initialize()
     df = dwelling.simulate()
@@ -142,47 +152,56 @@ def _run_hares_simulate() -> dict[str, float]:
     time_res_h = TIME_RES_MIN / 60.0
     result: dict[str, float] = {}
     for col in df.columns:
-        if col.endswith("(kW)") or col.endswith("(therms/hour)"):
+        if col.endswith(("(kW)", "(therms/hour)")):
             result[col] = float(df[col].sum()) * time_res_h
     return result
 
 
-# ---------------------------------------------------------------------------
-# Column name mapping: OCHRE → HARES
-# ---------------------------------------------------------------------------
+def _run_hares_simulate_24h(output_dir: Path) -> dict[str, float]:
+    """Run HARES via simulate() and parse the DataFrame for the 24-hour window."""
+    from ochre_next import Dwelling as HaresDwelling
 
-OCHRE_TO_HARES: dict[str, list[str]] = {
-    "HVAC Heating Electric Power (kW)": [
-        "ASHP Heater Electric Power (kW)",
-        "MSHP Heater Electric Power (kW)",
-        "Gas Furnace Electric Power (kW)",
-        "Electric Furnace Electric Power (kW)",
-    ],
-    "HVAC Cooling Electric Power (kW)": [
-        "ASHP Cooler Electric Power (kW)",
-        "MSHP Cooler Electric Power (kW)",
-        "Air Conditioner Electric Power (kW)",
-        "Room AC Electric Power (kW)",
-    ],
-}
+    dwelling = HaresDwelling.from_hpxml(
+        HPXML,
+        SCHEDULE,
+        WEATHER,
+        start_time=START_HARES_24H,
+        time_res_s=TIME_RES_MIN * 60,
+        duration_s=DURATION_H_24 * 3600,
+        output_verbosity=6,
+        defaults_path=str(HARES_DEFAULTS),
+        master_seed=42,
+        resample_overrides=OCHRE_COMPAT_RESAMPLE,
+        write_output=True,
+        output_path=str(output_dir / "hares_parity_24h.csv"),
+    )
+    dwelling.initialize()
+    df = dwelling.simulate()
 
-
-def _resolve_hares_kwh(ochre_col: str, hares: dict[str, float]) -> float | None:
-    """Look up an OCHRE column name in HARES results, handling aliases."""
-    if ochre_col in hares:
-        return hares[ochre_col]
-    aliases = OCHRE_TO_HARES.get(ochre_col, [])
-    matched = [hares[a] for a in aliases if a in hares]
-    if matched:
-        return sum(matched)
-    return None
+    time_res_h = TIME_RES_MIN / 60.0
+    result: dict[str, float] = {}
+    for col in df.columns:
+        if col.endswith(("(kW)", "(therms/hour)")):
+            result[col] = float(df[col].sum()) * time_res_h
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-ochre = pytest.importorskip("ochre", reason="OCHRE not installed")
+# Requires the ochre dependency group: tests/python/conftest.py collects this
+# module only in runs that select the ochre marker (CI's OCHRE comparison
+# job), where a broken OCHRE import is a collection error, not a skip.
+pytestmark = pytest.mark.ochre
+
+# OCHRE's infiltration model converts with a unit name pint 0.25 removed from
+# the default registry; re-register it before any dwelling is built.
+from ochre.utils import units as ochre_unit_registry
+
+register_removed_units(ochre_unit_registry.ureg)
+
+import pandas as pd
 
 
 @pytest.fixture(scope="module")
@@ -191,184 +210,242 @@ def ochre_results() -> dict[str, float]:
 
 
 @pytest.fixture(scope="module")
-def hares_results() -> dict[str, float]:
-    return _run_hares_simulate()
+def hares_results(tmp_path_factory: pytest.TempPathFactory) -> dict[str, float]:
+    return _run_hares_simulate(tmp_path_factory.mktemp("hares_parity"))
 
 
-def test_print_comparison(ochre_results: dict[str, float], hares_results: dict[str, float]) -> None:
-    """Print side-by-side comparison (always runs, never fails)."""
-    print("\n{'='*80}")
-    print("OCHRE vs HARES -- BEopt 1h parity (May 5, 2019, 19:00 UTC)")
-    print("=" * 80)
-    print(f"{'Column':<55} {'OCHRE':>8} {'HARES':>8} {'Diff%':>8}")
-    print("-" * 80)
-
-    for col in sorted(ochre_results):
-        o_val = ochre_results[col]
-        h_val = _resolve_hares_kwh(col, hares_results)
-        if h_val is None:
-            h_str = "   N/A"
-            d_str = "   N/A"
-        else:
-            h_str = f"{h_val:8.4f}"
-            d_str = (
-                f"{(h_val - o_val) / o_val * 100:+7.1f}%"
-                if abs(o_val) > 1e-9
-                else "    -"
-            )
-        print(f"{col:<55} {o_val:8.4f} {h_str} {d_str}")
+@pytest.fixture(scope="module")
+def ochre_results_24h() -> dict[str, float]:
+    return _run_ochre_24h()
 
 
-# Tolerances per THERMAL-008 / ASHRAE 140-2023 §5.2.
-# Schedule-driven loads: 2% (exact match expected).
-# HVAC: 15% (ASHRAE 140 acceptance range for annual heating energy).
-# Total: 10% (allows for unimplemented event-driven equipment).
-PARITY_CHECKS: list[tuple[str, float]] = [
-    ("Total Electric Power (kW)", 0.10),
-    ("HVAC Cooling Electric Power (kW)", 0.05),
-    ("HVAC Heating Electric Power (kW)", 0.15),
-    ("Ventilation Fan Electric Power (kW)", 0.02),
-    ("MELs Electric Power (kW)", 0.02),
-    ("TV Electric Power (kW)", 0.02),
-    ("Refrigerator Electric Power (kW)", 0.02),
-    ("Indoor Lighting Electric Power (kW)", 0.05),
-    ("Exterior Lighting Electric Power (kW)", 0.10),
+@pytest.fixture(scope="module")
+def hares_results_24h(tmp_path_factory: pytest.TempPathFactory) -> dict[str, float]:
+    return _run_hares_simulate_24h(tmp_path_factory.mktemp("hares_parity_24h"))
+
+
+PARITY_COLUMNS: list[str] = [
+    "Total Electric Power (kW)",
+    "HVAC Cooling Electric Power (kW)",
+    "HVAC Heating Electric Power (kW)",
+    "Ventilation Fan Electric Power (kW)",
+    "MELs Electric Power (kW)",
+    "TV Electric Power (kW)",
+    "Refrigerator Electric Power (kW)",
+    "Indoor Lighting Electric Power (kW)",
+    "Exterior Lighting Electric Power (kW)",
+    "Water Heating Electric Power (kW)",
+    "Lighting Electric Power (kW)",
+    "Other Electric Power (kW)",
 ]
 
+# Over the parity hour both simulators run the same schedules on the same
+# resampled weather, and every case that agrees does so to floating-point
+# rounding (largest measured relative error 1.8e-15, Exterior Lighting). The
+# tolerance holds that agreement with room for summation-order differences
+# across platforms, so any change to a compared quantity fails the case.
+AGREEMENT_REL_TOL = 1e-9
+# HVAC Heating and Water Heating draw nothing in this hour on either side
+# (both measured exactly 0.0 kWh); a nonzero HARES value is a change.
+ZERO_ABS_TOL_KWH = 1e-12
 
-@pytest.mark.parametrize("col,tol", PARITY_CHECKS, ids=[c for c, _ in PARITY_CHECKS])
+# Declared divergences: a case whose measured relative error exceeds the
+# tolerance stays as a strict xfail citing the measured pair, so a future fix
+# that closes the gap turns the XPASS into a visible test failure and the
+# mark gets removed. Only the comparison assertion is expected: a missing
+# column raises LookupError, which fails the case even under the mark, and
+# test_parity_columns_present pins every column without a mark.
+# The Lighting mark came off (2026-10-07): columns.rs's LIGHTING arm tags
+# "Exterior Lighting", the aggregate holds indoor plus exterior, and the case
+# passes within the tolerance.
+PARITY_XFAILS: dict[str, str] = {}
+
+
+def _parity_cases() -> list[object]:
+    """Build the parametrize cases, carrying the declared divergences' marks."""
+    cases: list[object] = []
+    for col in PARITY_COLUMNS:
+        reason = PARITY_XFAILS.get(col)
+        if reason is None:
+            cases.append(pytest.param(col, id=col))
+        else:
+            cases.append(
+                pytest.param(
+                    col,
+                    id=col,
+                    marks=pytest.mark.xfail(
+                        reason=reason, raises=AssertionError, strict=True
+                    ),
+                )
+            )
+    return cases
+
+
+def _lookup(
+    col: str, ochre_results: dict[str, float], hares_results: dict[str, float]
+) -> tuple[float, float]:
+    o_val = ochre_results.get(col)
+    if o_val is None:
+        raise LookupError(f"OCHRE output has no column '{col}'")
+    h_val = resolve_hares_kwh(col, hares_results)
+    if h_val is None:
+        raise LookupError(f"HARES output has no column matching '{col}'")
+    return o_val, h_val
+
+
+def test_parity_columns_present(
+    ochre_results: dict[str, float], hares_results: dict[str, float]
+) -> None:
+    """Every compared column resolves on both simulators' results."""
+    missing: list[str] = []
+    for col in PARITY_COLUMNS:
+        if col not in ochre_results:
+            missing.append(f"OCHRE: '{col}'")
+        if resolve_hares_kwh(col, hares_results) is None:
+            missing.append(f"HARES: '{col}'")
+    assert not missing, f"Parity columns missing: {', '.join(missing)}"
+
+
+@pytest.mark.parametrize("col", _parity_cases())
 def test_parity(
     col: str,
-    tol: float,
     ochre_results: dict[str, float],
     hares_results: dict[str, float],
 ) -> None:
-    o_val = ochre_results.get(col)
-    if o_val is None:
-        pytest.skip(f"OCHRE has no column '{col}'")
-    h_val = _resolve_hares_kwh(col, hares_results)
-    if h_val is None:
-        pytest.skip(f"HARES has no column matching '{col}'")
+    o_val, h_val = _lookup(col, ochre_results, hares_results)
 
-    if abs(o_val) < 1e-9:
-        assert abs(h_val) < 1e-3, f"{col}: OCHRE≈0 but HARES={h_val:.4f}"
+    if o_val == 0.0:
+        assert abs(h_val) <= ZERO_ABS_TOL_KWH, f"{col}: OCHRE 0 kWh but HARES {h_val!r} kWh"
         return
 
     rel_err = abs(h_val - o_val) / abs(o_val)
-    assert rel_err <= tol, (
-        f"{col}: relative error {rel_err:.1%} exceeds tolerance {tol:.0%} "
-        f"(OCHRE={o_val:.4f}, HARES={h_val:.4f})"
+    assert rel_err <= AGREEMENT_REL_TOL, (
+        f"{col}: relative error {rel_err:.3e} exceeds {AGREEMENT_REL_TOL:.0e} "
+        f"(OCHRE={o_val!r} kWh, HARES={h_val!r} kWh)"
     )
 
 
 # ---------------------------------------------------------------------------
-# 7-day performance + parity benchmark
+# 24 h window (seeded both sides)
+#
+# One hour cannot see gaps that build up over a day. Measured over the 24 h
+# from 2019-05-05 00:00 at the 2026-10-07 physics tip, the schedule-driven
+# end uses agree to floating-point rounding (worst measured relative error
+# 1.9e-14, the Other aggregate), and two end uses still differ because OCHRE
+# deviates from the reference:
+#
+# - Water Heating: OCHRE 1.008 kWh against HARES 12.283 kWh (12.2x). OCHRE's
+#   tank never receives its fixtures' hot-water draw: its schedule builder
+#   emits the fixtures column as "Water Fixtures (L/min)"
+#   (ochre/utils/schedule.py:47, convert_water_column at :350-368) while its
+#   tank reads "Water Heating (L/min)" (ochre/Models/Water.py:179, :287), so
+#   the draw silently vanishes; only the dishwasher and clothes washer
+#   columns reach the tank (0.0 for the washer this day). HARES keeps the
+#   reference draw (DIVERGENCES D-017): the fixtures' 256 L/day at the
+#   40.6 C delivery temperature is 8.1 kWh of delivered enthalpy, plus the
+#   tank's standby and the appliances' draws.
+# - HVAC Heating: HARES 32.495 kWh against OCHRE's 30.997 kWh (+4.8%). The
+#   two envelope models put the same constructions' capacitance in
+#   different places (DIVERGENCES D-012's class), so the thermostat's
+#   duty integrates differently over a day.
 # ---------------------------------------------------------------------------
 
-BENCH_DURATION_H = 7 * 24  # 1 week
+# Measured 2026-10-07, both sides seeded 42 (kWh).
+PARITY_24H_HEATING_OCHRE_KWH = 30.9974
+PARITY_24H_HEATING_HARES_KWH = 32.4953
+PARITY_24H_WATER_HEATING_OCHRE_KWH = 1.0083
+PARITY_24H_WATER_HEATING_HARES_KWH = 12.2835
+PARITY_24H_TOTAL_OCHRE_KWH = 43.0500
+PARITY_24H_TOTAL_HARES_KWH = 55.8231
+
+PARITY_24H_XFAILS: dict[str, str] = {
+    "HVAC Heating Electric Power (kW)": (
+        "OCHRE 30.997 kWh against HARES 32.495 kWh over 24 h (+4.8%): the two "
+        "envelope models' capacitance placement differs (DIVERGENCES D-012's class)"
+    ),
+    "Water Heating Electric Power (kW)": (
+        "OCHRE 1.008 kWh against HARES 12.283 kWh over 24 h (12.2x): OCHRE's tank "
+        "never receives the fixtures draw (schedule.py:47 names the column Water "
+        "Fixtures (L/min); Water.py:287 reads Water Heating (L/min)); HARES keeps "
+        "the reference draw (DIVERGENCES D-017)"
+    ),
+    "Total Electric Power (kW)": (
+        "OCHRE 43.050 kWh against HARES 55.823 kWh over 24 h: the sum of the two "
+        "declared end-use divergences above"
+    ),
+}
 
 
-def _run_ochre_7d() -> tuple[dict[str, float], float, float]:
-    """Run OCHRE for 7 days, return (kwh_dict, init_elapsed, sim_elapsed)."""
-    import time
+def _parity_24h_cases() -> list[object]:
+    """Build the 24 h parametrize cases with the declared divergences' marks."""
+    cases: list[object] = []
+    for col in PARITY_COLUMNS:
+        reason = PARITY_24H_XFAILS.get(col)
+        if reason is None:
+            cases.append(pytest.param(col, id=col))
+        else:
+            cases.append(
+                pytest.param(
+                    col,
+                    id=col,
+                    marks=pytest.mark.xfail(
+                        reason=reason, raises=AssertionError, strict=True
+                    ),
+                )
+            )
+    return cases
 
-    if str(VENDOR_OCHRE) not in sys.path:
-        sys.path.insert(0, str(VENDOR_OCHRE))
-    from ochre import Dwelling as OchreDwelling
 
-    t0 = time.perf_counter()
-    dwelling = OchreDwelling(
-        name="bench_ochre_7d",
-        start_time=START_LOCAL,
-        time_res=dt.timedelta(minutes=TIME_RES_MIN),
-        duration=dt.timedelta(hours=BENCH_DURATION_H),
-        hpxml_file=HPXML,
-        hpxml_schedule_file=SCHEDULE,
-        weather_file=WEATHER,
-        verbosity=6,
-        save_results=False,
+@pytest.mark.parametrize("col", _parity_24h_cases())
+def test_parity_24h(
+    col: str,
+    ochre_results_24h: dict[str, float],
+    hares_results_24h: dict[str, float],
+) -> None:
+    o_val, h_val = _lookup(col, ochre_results_24h, hares_results_24h)
+
+    if o_val == 0.0:
+        assert abs(h_val) <= ZERO_ABS_TOL_KWH, f"{col}: OCHRE 0 kWh but HARES {h_val!r} kWh"
+        return
+
+    rel_err = abs(h_val - o_val) / abs(o_val)
+    assert rel_err <= AGREEMENT_REL_TOL, (
+        f"{col}: relative error {rel_err:.3e} exceeds {AGREEMENT_REL_TOL:.0e} "
+        f"(OCHRE={o_val!r} kWh, HARES={h_val!r} kWh)"
     )
-    init_elapsed = time.perf_counter() - t0
-
-    t1 = time.perf_counter()
-    df, _metrics, _hourly = dwelling.simulate()
-    sim_elapsed = time.perf_counter() - t1
-
-    time_res_h = TIME_RES_MIN / 60.0
-    result: dict[str, float] = {}
-    for col in df.columns:
-        if col.endswith("(kW)") or col.endswith("(therms/hour)"):
-            result[col] = float((df[col] * time_res_h).sum())
-    return result, init_elapsed, sim_elapsed
 
 
-def _run_hares_7d() -> tuple[dict[str, float], float, float]:
-    """Run HARES for 7 days, return (kwh_dict, init_elapsed, sim_elapsed)."""
-    import time
+def test_parity_24h_records(ochre_results_24h: dict[str, float], hares_results_24h: dict[str, float]) -> None:
+    """The 24 h xfail reasons' measured pairs cannot go stale.
 
-    from ochre_next import Dwelling as HaresDwelling
-
-    t0 = time.perf_counter()
-    dwelling = HaresDwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time=START_HARES,
-        time_res_s=TIME_RES_MIN * 60,
-        duration_s=BENCH_DURATION_H * 3600,
-        output_verbosity=6,
-        defaults_path=str(HARES_DEFAULTS),
-        master_seed=42,
-        resample_overrides=OCHRE_COMPAT_RESAMPLE,
-    )
-    # OCHRE initializes inside its constructor; include HARES' explicit
-    # initialize() in the init timing for a fair comparison.
-    dwelling.initialize()
-    init_elapsed = time.perf_counter() - t0
-
-    t1 = time.perf_counter()
-    df = dwelling.simulate()
-    sim_elapsed = time.perf_counter() - t1
-
-    time_res_h = TIME_RES_MIN / 60.0
-    result: dict[str, float] = {}
-    for col in df.columns:
-        if col.endswith("(kW)") or col.endswith("(therms/hour)"):
-            result[col] = float(df[col].sum()) * time_res_h
-    return result, init_elapsed, sim_elapsed
-
-
-def test_7day_benchmark():
-    """7-day performance benchmark: energy parity + execution speed."""
-    ochre_kwh, ochre_init, ochre_sim = _run_ochre_7d()
-    hares_kwh, hares_init, hares_sim = _run_hares_7d()
-
-    print("\n" + "=" * 90)
-    print(f"7-DAY BENCHMARK -- {BENCH_DURATION_H}h at {TIME_RES_MIN}-min resolution ({BENCH_DURATION_H * 60} steps)")
-    print("=" * 90)
-
-    # Performance
-    print(f"\n  PERFORMANCE:")
-    print(f"    {'':30} {'OCHRE':>10} {'HARES':>10} {'Speedup':>10}")
-    print(f"    {'Init time (s)':30} {ochre_init:10.3f} {hares_init:10.3f} {ochre_init / max(hares_init, 1e-9):10.1f}x")
-    print(f"    {'Sim time (s)':30} {ochre_sim:10.3f} {hares_sim:10.3f} {ochre_sim / max(hares_sim, 1e-9):10.1f}x")
-    total_ochre = ochre_init + ochre_sim
-    total_hares = hares_init + hares_sim
-    print(f"    {'Total (s)':30} {total_ochre:10.3f} {total_hares:10.3f} {total_ochre / max(total_hares, 1e-9):10.1f}x")
-    steps = BENCH_DURATION_H * 60 // TIME_RES_MIN
-    print(f"    {'Steps/sec (sim only)':30} {steps / max(ochre_sim, 1e-9):10.0f} {steps / max(hares_sim, 1e-9):10.0f}")
-
-    # Energy parity
-    print(f"\n  ENERGY PARITY (kWh over {BENCH_DURATION_H}h):")
-    print(f"    {'Column':<55} {'OCHRE':>8} {'HARES':>8} {'Diff%':>8}")
-    print("    " + "-" * 80)
-
-    for col in sorted(ochre_kwh):
-        o_val = ochre_kwh[col]
-        h_val = _resolve_hares_kwh(col, hares_kwh)
-        if h_val is None:
-            continue
-        if abs(o_val) < 1e-6 and abs(h_val) < 1e-6:
-            continue
-        d_pct = (h_val - o_val) / o_val * 100 if abs(o_val) > 1e-9 else 0.0
-        print(f"    {col:<55} {o_val:8.2f} {h_val:8.2f} {d_pct:+7.1f}%")
+    These records bind the strict xfails' quoted values: a moved pair more
+    than 2% off its record fails here, outside the marks.
+    """
+    for col, o_record, h_record in [
+        (
+            "HVAC Heating Electric Power (kW)",
+            PARITY_24H_HEATING_OCHRE_KWH,
+            PARITY_24H_HEATING_HARES_KWH,
+        ),
+        (
+            "Water Heating Electric Power (kW)",
+            PARITY_24H_WATER_HEATING_OCHRE_KWH,
+            PARITY_24H_WATER_HEATING_HARES_KWH,
+        ),
+        (
+            "Total Electric Power (kW)",
+            PARITY_24H_TOTAL_OCHRE_KWH,
+            PARITY_24H_TOTAL_HARES_KWH,
+        ),
+    ]:
+        o_val, h_val = _lookup(col, ochre_results_24h, hares_results_24h)
+        for name, measured, record in [
+            (f"{col} OCHRE", o_val, o_record),
+            (f"{col} HARES", h_val, h_record),
+        ]:
+            rel = abs(measured - record) / abs(record)
+            assert rel <= 0.02, (
+                f"{name}: measured {measured:.4f} kWh is {rel:.1%} off its "
+                f"record {record:.4f} kWh; re-capture the 24 h record with the "
+                f"delta and the cause"
+            )

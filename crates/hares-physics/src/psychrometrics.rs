@@ -39,21 +39,7 @@ const SPECIFIC_HEAT_ICE_KJ_KG_K: f64 = 2.1;
 /// ASHRAE HOF 2017 Ch.1 Eq. 37: c_s_wb = c_p_ice − c_p_v = 2.1 − 1.86 = 0.24.
 const SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE: f64 = 0.24;
 
-/// Invariant: sub-freezing psychrometer coefficient must satisfy the
-/// derivation c_p_ice − c_p_v = 2.1 − 1.86 = 0.24 within 1e-6 tolerance.
-/// Checked once at first access in debug/check_invariants builds.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-static CHECK_PSYCHROMETER_INVARIANT: std::sync::LazyLock<()> = std::sync::LazyLock::new(|| {
-    let expected = SPECIFIC_HEAT_ICE_KJ_KG_K - SPECIFIC_HEAT_WATER_VAPOUR_KJ_KG_K;
-    let actual = SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE;
-    assert!(
-        (actual - expected).abs() < 1e-6,
-        "SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE ({actual}) does not satisfy \
-         c_p_ice − c_p_v = {expected}"
-    );
-});
-
-/// Saturation vapor pressure for water [Pa] at temperature `t_c` [°C].
+/// Saturation vapor pressure for water (Pa) at temperature `t_c` [°C].
 ///
 /// Uses the ASHRAE piecewise polynomial form used by PsychroLib.
 pub fn saturation_pressure_pa(t_c: f64) -> f64 {
@@ -79,7 +65,7 @@ pub fn saturation_pressure(t: Temperature) -> Pressure {
     pressure_from_pascal(saturation_pressure_pa(t_c))
 }
 
-/// Humidity ratio from dew-point [°C] and pressure [Pa].
+/// Humidity ratio from dew-point [°C] and pressure (Pa).
 pub fn humidity_ratio_from_tdp(t_dp_c: f64, p_pa: f64) -> f64 {
     let p_ws = saturation_pressure_pa(t_dp_c);
     let w = EPSILON * p_ws / (p_pa - p_ws);
@@ -91,13 +77,8 @@ pub fn humidity_ratio_from_tdp_typed(t_dp: Temperature, p: Pressure) -> f64 {
     humidity_ratio_from_tdp(temperature_to_celsius(t_dp), pressure_to_pascal(p))
 }
 
-/// Humidity ratio from dry-bulb [°C], wet-bulb [°C], and pressure [Pa].
+/// Humidity ratio from dry-bulb [°C], wet-bulb [°C], and pressure (Pa).
 pub fn humidity_ratio_from_twb(t_db_c: f64, t_wb_c: f64, p_pa: f64) -> f64 {
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        *CHECK_PSYCHROMETER_INVARIANT;
-    }
-
     let w_sat = humidity_ratio_from_tdp(t_wb_c, p_pa);
 
     let w = if t_wb_c >= 0.0 {
@@ -134,7 +115,7 @@ pub fn humidity_ratio_from_twb_typed(t_db: Temperature, t_wb: Temperature, p: Pr
     )
 }
 
-/// Relative humidity (0-1) from dry-bulb [°C], humidity ratio, and pressure [Pa].
+/// Relative humidity (0-1) from dry-bulb [°C], humidity ratio, and pressure (Pa).
 pub fn relative_humidity(t_db_c: f64, w: f64, p_pa: f64) -> f64 {
     let w_eff = w.max(MIN_HUMIDITY_RATIO);
     let p_v = p_pa * w_eff / (EPSILON + w_eff);
@@ -147,7 +128,7 @@ pub fn relative_humidity_typed(t_db: Temperature, w: f64, p: Pressure) -> f64 {
     relative_humidity(temperature_to_celsius(t_db), w, pressure_to_pascal(p))
 }
 
-/// Wet-bulb [°C] from dry-bulb [°C], humidity ratio, and pressure [Pa].
+/// Wet-bulb [°C] from dry-bulb [°C], humidity ratio, and pressure (Pa).
 ///
 /// Solves by bisection between dew-point and dry-bulb.
 pub fn wet_bulb_from_humidity_ratio(t_db_c: f64, w: f64, p_pa: f64) -> f64 {
@@ -199,7 +180,7 @@ pub fn zone_wet_bulb_c(zone: &hares_types::ZoneState, pressure_pa: f64) -> f64 {
     wet_bulb_from_humidity_ratio(zone.temperature_c, zone.humidity_ratio, pressure_pa)
 }
 
-/// Dew-point [°C] from humidity ratio and pressure [Pa].
+/// Dew-point [°C] from humidity ratio and pressure (Pa).
 pub fn dew_point(w: f64, p_pa: f64) -> f64 {
     let w_eff = w.max(MIN_HUMIDITY_RATIO);
     let p_v = p_pa * w_eff / (EPSILON + w_eff);
@@ -263,6 +244,18 @@ fn bisect<F: Fn(f64) -> f64>(
 mod tests {
     use super::*;
     use crate::test_utils::approx_eq;
+
+    #[test]
+    fn sub_freezing_psychrometer_coefficient_satisfies_the_derivation() {
+        // ASHRAE HOF 2017 Ch.1 Eq. 37: c_s_wb = c_p_ice − c_p_v = 2.1 − 1.86 = 0.24.
+        let expected = SPECIFIC_HEAT_ICE_KJ_KG_K - SPECIFIC_HEAT_WATER_VAPOUR_KJ_KG_K;
+        assert!(
+            (SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE - expected).abs() < 1e-6,
+            "SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE ({}) does not satisfy \
+             c_p_ice − c_p_v = {expected}",
+            SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE
+        );
+    }
 
     #[test]
     fn saturation_pressure_matches_reference_points() {

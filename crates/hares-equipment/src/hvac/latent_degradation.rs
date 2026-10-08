@@ -61,7 +61,6 @@ pub(super) fn compute_coil_ao_by_stage(
         ao.push(10.0);
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     check_coil_ao_invariant(cooling_capacities_w.len().max(1), stage_shrs, &ao)?;
 
     Ok(ao)
@@ -72,16 +71,9 @@ pub(super) fn compute_coil_ao_by_stage(
 /// across stages while SHR differs means the per-stage SHR was silently
 /// ignored -- the exact defect this fix guards against reintroducing.
 ///
-/// Returns `Err(HaresError::InvariantViolation)` rather than using
-/// `debug_assert!`.  `debug_assert!` is gated on Rust's own `debug_assertions`
-/// cfg, which is *off* in release builds, so it compiles to nothing under CI's
-/// `cargo nextest run --workspace --release -F check_invariants` job -- the one
-/// build specifically configured to run this check
-/// (docs/invariants-and-observability.md: `--release -F check_invariants` =>
-/// "Checks active? Yes").  A returned typed error keeps the gate live in that
-/// build, matching the established pattern in `hvac/dehumidifier.rs:411-428`
-/// and `pv/mod.rs:979-991`.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+/// Runs in every build profile as a typed error: the check is init-only
+/// (no per-step cost), and a per-stage SHR silently ignored is a physics
+/// wiring error.
 fn check_coil_ao_invariant(
     expected_stage_count: usize,
     stage_shrs: &[f64],
@@ -180,11 +172,8 @@ mod tests {
     }
 
     // The invariant must fire on the original bug's signature -- per-stage SHR
-    // values differ but Ao is identical across stages -- and it must do so via
-    // a returned typed error, not a `debug_assert!`, so it survives the
-    // release-mode `check_invariants` CI build.  This test compiles under both
-    // the default (debug) test run and `--release -F check_invariants`.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    // values differ but Ao is identical across stages -- via a returned typed
+    // error, ungated.
     #[test]
     fn coil_ao_invariant_fires_when_shr_differs_but_ao_identical() {
         use hares_types::HaresError;
@@ -205,7 +194,6 @@ mod tests {
 
     // Consistent per-stage Ao (differing SHR that legitimately maps to
     // differing Ao) must pass the invariant.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     #[test]
     fn coil_ao_invariant_passes_when_ao_tracks_shr() {
         let stage_shrs = [0.80, 0.70];

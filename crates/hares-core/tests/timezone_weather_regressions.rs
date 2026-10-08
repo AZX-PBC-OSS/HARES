@@ -7,7 +7,6 @@ use hares_io::hpxml::building::XmlNode;
 use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
 use hares_io::schedule::ColumnAggregation;
 use hares_io::{ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
-use hares_types::SCHEDULE_DOMAIN_ID;
 
 fn offset_east(seconds: i32) -> FixedOffset {
     FixedOffset::east_opt(seconds).expect("valid offset")
@@ -42,12 +41,14 @@ fn minimal_building() -> hares_io::Building {
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
-            volume_m3: None,
+            volume_m3: Some(244.0),
             attached_wall_ids: vec![],
             duct_systems: vec![],
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }],
         boundaries: vec![Boundary {
             id: "wall".to_string(),
@@ -80,7 +81,7 @@ fn minimal_building() -> hares_io::Building {
         infiltration_ach_natural: None,
         infiltration_cfm_natural: None,
         infiltration_ela_cm2: None,
-        infiltration_constant_ach: None,
+        infiltration_constant_ach: Some(0.0),
         hvac_capacity_w: None,
         seer2: None,
         hspf2: None,
@@ -91,16 +92,19 @@ fn minimal_building() -> hares_io::Building {
         cooling_weekend_setpoints_c: None,
         battery_round_trip_efficiency: None,
         pv_tilt_deg: None,
-        conditioned_volume_m3: None,
-        ceiling_height_m: None,
+        conditioned_volume_m3: 400.0,
+        ceiling_height_m: 2.5,
         infiltration_height_m: None,
-        floors_above_grade: None,
+        floors_above_grade: 1.0,
         has_flue_or_chimney: None,
         foundation_name: None,
+        conditioned_foundation_merged: false,
         residential_facility_type: None,
-        mass_multiplier_override: None,
+        temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
+        climate_zone_iecc: None,
         details_xml,
+        parse_warnings: Vec::new(),
     }
 }
 
@@ -134,6 +138,7 @@ fn sequential_weather(start_temp_c: f64, rows: usize, timezone_offset_h: f64) ->
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
             has_embedded_location: true,
+            station_wmo: None,
         },
         design_conditions: None,
         dry_bulb_c: seq(start_temp_c),
@@ -155,9 +160,9 @@ fn sequential_weather(start_temp_c: f64, rows: usize, timezone_offset_h: f64) ->
 }
 
 fn schedule_value(env: &hares_types::EnvironmentState) -> f64 {
-    env.custom_domains
-        .iter()
-        .find(|domain| domain.domain_id == SCHEDULE_DOMAIN_ID)
+    env.domains
+        .schedule
+        .get()
         .and_then(|domain| domain.custom_payload.as_ref())
         .and_then(|payload| payload.first())
         .copied()
@@ -646,83 +651,72 @@ fn spring_forward_day_of_year_at_15min_resolution_all_steps() {
             clock.next();
         }
     }
+}
 
-    #[cfg(feature = "dst")]
-    #[test]
-    fn spring_forward_day_of_year_consistent_across_solar_and_perez() {
-        // T-0212: Verify that at the spring-forward DST boundary, the day_of_year
-        // used by solar_position() for solar geometry is the same value used by
-        // the Perez irradiance functions. After the T-0212 refactor, day_of_year
-        // is computed once and passed to all consumers — this is trivially true.
-        // The test documents the contract: at the boundary hour, day_of_year must
-        // match the DST-aware civil ordinal, and solar irradiance must be computed.
-        let start = offset_west(5 * 3600)
-            .with_ymd_and_hms(2024, 3, 10, 0, 0, 0)
-            .single()
-            .expect("valid spring-forward start");
+#[cfg(feature = "dst")]
+#[test]
+fn spring_forward_day_of_year_at_hourly_boundary_steps() {
+    let start = offset_west(5 * 3600)
+        .with_ymd_and_hms(2024, 3, 10, 0, 0, 0)
+        .single()
+        .expect("valid spring-forward start");
 
-        // Use sunny weather so irradiance is non-zero — verifies the path through
-        // perez_tilted_irradiance/omni_directional_irradiance is exercised.
-        let mut manager = EnvironmentManager::new(
-            sunny_weather(24, 40.7128, -74.0060, -5.0),
-            hourly_schedule(start),
-            &minimal_building(),
-            StdDuration::from_secs(3600),
-            start,
-            Some("America/New_York"),
-        )
-        .expect("manager");
-        let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(24));
+    // Use sunny weather so irradiance is non-zero, verifying the path through
+    // perez_tilted_irradiance/omni_directional_irradiance is exercised.
+    let mut manager = EnvironmentManager::new(
+        sunny_weather(24, 40.7128, -74.0060, -5.0),
+        hourly_schedule(start),
+        &minimal_building(),
+        StdDuration::from_secs(3600),
+        start,
+        Some("America/New_York"),
+    )
+    .expect("manager");
+    let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(24));
 
-        // Test steps 22, 23, 24 — the spring-forward boundary hour.
-        // Step 22: civil time = 22:00 EST March 10, ordinal = 70.
-        // Step 23: civil time = 23:00 EST = 00:00 EDT March 11, ordinal = 71.
-        // Step 24: civil time = 00:00 EDT → 01:00 EDT March 11, ordinal = 71.
-        for _ in 0..22 {
-            clock.next();
-        }
-        // Step 22
-        let env22 = manager.update(&clock, &[]).unwrap();
-        assert_eq!(
-            env22.weather.day_of_year, 70.0,
-            "step 22: day_of_year must be 70 (March 10, DST-aware civil), got {}",
-            env22.weather.day_of_year
-        );
-        // Irradiance buffers are populated — all components use the same day_of_year.
-        assert!(
-            !env22.weather.solar_irradiance.is_empty(),
-            "step 22: solar_irradiance must be populated"
-        );
-
-        // Step 23 — boundary hour where civil time crosses midnight.
+    // Test steps 22, 23, 24, the spring-forward boundary hour.
+    // Step 22: civil time = 22:00 EST March 10, ordinal = 70.
+    // Step 23: civil time = 23:00 EST = 00:00 EDT March 11, ordinal = 71.
+    // Step 24: civil time = 00:00 EDT → 01:00 EDT March 11, ordinal = 71.
+    for _ in 0..22 {
         clock.next();
-        let env23 = manager.update(&clock, &[]).unwrap();
-        assert_eq!(
-            env23.weather.day_of_year, 71.0,
-            "step 23: day_of_year must be 71 (March 11, DST-aware civil after spring-forward), got {}",
-            env23.weather.day_of_year
-        );
-        assert!(
-            !env23.weather.solar_irradiance.is_empty(),
-            "step 23: solar_irradiance must be populated"
-        );
-
-        // Step 24
-        clock.next();
-        let env24 = manager.update(&clock, &[]).unwrap();
-        assert_eq!(
-            env24.weather.day_of_year, 71.0,
-            "step 24: day_of_year must be 71 (March 11, DST-aware civil), got {}",
-            env24.weather.day_of_year
-        );
-        assert!(
-            !env24.weather.solar_irradiance.is_empty(),
-            "step 24: solar_irradiance must be populated"
-        );
-
-        // T-0212 invariant: day_of_year is the same variable passed to solar_position()
-        // and both Perez irradiance functions. The consistency is structural — all
-        // consumers read `day_of_year` from the same let-binding in update_in_place().
-        // No separate assertion needed; this comment documents the contract.
     }
+    // Step 22
+    let env22 = manager.update(&clock, &[]).unwrap();
+    assert_eq!(
+        env22.weather.day_of_year, 70.0,
+        "step 22: day_of_year must be 70 (March 10, DST-aware civil), got {}",
+        env22.weather.day_of_year
+    );
+    // Irradiance buffers are populated: all components use the same day_of_year.
+    assert!(
+        !env22.weather.solar_irradiance.is_empty(),
+        "step 22: solar_irradiance must be populated"
+    );
+
+    // Step 23, the boundary hour where civil time crosses midnight.
+    clock.next();
+    let env23 = manager.update(&clock, &[]).unwrap();
+    assert_eq!(
+        env23.weather.day_of_year, 71.0,
+        "step 23: day_of_year must be 71 (March 11, DST-aware civil after spring-forward), got {}",
+        env23.weather.day_of_year
+    );
+    assert!(
+        !env23.weather.solar_irradiance.is_empty(),
+        "step 23: solar_irradiance must be populated"
+    );
+
+    // Step 24
+    clock.next();
+    let env24 = manager.update(&clock, &[]).unwrap();
+    assert_eq!(
+        env24.weather.day_of_year, 71.0,
+        "step 24: day_of_year must be 71 (March 11, DST-aware civil), got {}",
+        env24.weather.day_of_year
+    );
+    assert!(
+        !env24.weather.solar_irradiance.is_empty(),
+        "step 24: solar_irradiance must be populated"
+    );
 }

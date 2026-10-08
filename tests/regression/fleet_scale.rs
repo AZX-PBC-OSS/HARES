@@ -9,14 +9,16 @@ const FLEET_SIZE: usize = 1000;
 const SIM_DURATION_HOURS: i64 = 24;
 
 pub fn run_fleet_scale_check() -> Result<(), Vec<String>> {
-    let schedule_path = helpers::unique_temp_path("hares-regr-fleet-sched", "csv");
-    let weather_path = helpers::unique_temp_path("hares-regr-fleet-weather", "epw");
+    let scratch = tempfile::tempdir().expect("create scratch directory");
+    let schedule_path = scratch.path().join("schedule.csv");
+    let weather_path = scratch.path().join("weather.epw");
     helpers::write_schedule_csv(&schedule_path);
     helpers::write_weather_epw(&weather_path);
 
     let configs: Vec<_> = (0..FLEET_SIZE)
         .map(|idx| {
             helpers::build_dwelling_config(
+                scratch.path(),
                 idx as i64 + 1,
                 schedule_path.clone(),
                 weather_path.clone(),
@@ -73,8 +75,6 @@ pub fn run_fleet_scale_check() -> Result<(), Vec<String>> {
     }
 
     eprintln!("[fleet_scale] {FLEET_SIZE} dwellings: {ok_count} ok, {fail_count} failed");
-
-    helpers::cleanup_paths(&[schedule_path, weather_path]);
 
     if failures.is_empty() {
         Ok(())

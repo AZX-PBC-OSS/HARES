@@ -12,9 +12,7 @@
 mod tests {
     use std::path::PathBuf;
 
-    use hares_core::{
-        building_to_boundary_inputs, building_to_zone_inputs, mass_multiplier_for_zone,
-    };
+    use hares_core::{building_to_boundary_inputs, building_to_zone_inputs};
     use hares_envelope::{
         ExteriorTarget, InteriorLwrMethod, RCPath, assemble_building_rc, derive_zone_capacitances,
     };
@@ -43,6 +41,24 @@ mod tests {
     // OCHRE attic volume: 0.5 * floor_area * sqrt(gable_area * tan(pitch))
     // Ref: ochre/utils/hpxml.py parse_hpxml_zones(), gable_area=13.42 m², pitch=6/12
     const OCHRE_ATTIC_VOLUME_M3: f64 = 144.415918;
+
+    /// The gable attic's geometric volume: half the footprint under the 6/12
+    /// roofs (roof area / sqrt(1 + slope^2)) times the ridge rise over the
+    /// house's 30 ft span, (span / 2) x slope. OCHRE's rise comes from the
+    /// gable wall area, which includes the eaves, and is 13 % higher.
+    fn gable_attic_volume_m3() -> f64 {
+        let slope: f64 = 6.0 / 12.0;
+        let footprint_m2 = ATTIC_ROOF_TOTAL_M2 / (1.0 + slope * slope).sqrt();
+        let rise_m = ATTIC_SPAN_M / 2.0 * slope;
+        footprint_m2 * rise_m / 2.0
+    }
+
+    /// The span under the gable: the 30 ft side of the 30 x 40 ft house.
+    const ATTIC_SPAN_M: f64 = 30.0 * 0.3048;
+
+    /// OS-HPXML's zone temperature capacitance multiplier, one for every zone
+    /// (simcontrols.rb:27-28, default 7 at defaults.rb:219-221).
+    const OS_HPXML_TCM: f64 = 7.0;
 
     // Zone capacitances [J/K]: C = rho * cp * V * TCM
     // OCHRE uses rho=1.2041 kg/m³; HARES uses 1.2 kg/m³ → ~0.3% difference
@@ -127,11 +143,10 @@ mod tests {
             .expect("conditioned volume must be set");
         assert_within_pct(cond_vol, OCHRE_INDOOR_VOLUME_M3, 1.0, "conditioned volume");
 
-        // Attic volume: computed from gable wall area + roof pitch (triangular prism).
         let attic_vol = attic
             .volume_m3
-            .expect("attic volume must be computed from gable geometry");
-        assert_within_pct(attic_vol, OCHRE_ATTIC_VOLUME_M3, 2.0, "attic volume");
+            .expect("attic volume must be computed from its roofs");
+        assert_within_pct(attic_vol, gable_attic_volume_m3(), 0.01, "attic volume");
 
         // Floor area
         let cond_area = conditioned.floor_area_m2.expect("conditioned floor area");
@@ -399,15 +414,9 @@ mod tests {
         let cond_idx = zone_index(&building, ZoneType::Conditioned);
         let attic_idx = zone_index(&building, ZoneType::Attic);
 
-        // Conditioned zone capacitance: C = rho_air * cp_air * V * TCM.
-        // BEopt HPXML generates furniture boundaries (conditioned_furniture) which
-        // provide explicit RC thermal-mass nodes equivalent to E+ InternalMass
-        // objects. Per E+ convention, ZoneCapacitanceMultiplier and InternalMass are
-        // mutually exclusive, so TCM = 1.0 (air capacitance only) when furniture
-        // boundaries are present. This avoids double-counting the ~39% overstating
-        // that occurs when both the 7.0 multiplier and furniture RC nodes are used.
-        // See: building_to_zone_inputs (conversions.rs); E+ InputOutputRef.
-        let hares_indoor_cap = 1.2 * 1006.0 * OCHRE_INDOOR_VOLUME_M3 * 1.0; // furniture boundaries present → TCM = 1.0
+        // Zone capacitance: C = rho_air * cp_air * V * TCM, with OS-HPXML's one
+        // TCM for every zone, furniture mass or not.
+        let hares_indoor_cap = 1.2 * 1006.0 * OCHRE_INDOOR_VOLUME_M3 * OS_HPXML_TCM;
         assert_within_pct(
             zone_caps[cond_idx],
             hares_indoor_cap,
@@ -415,12 +424,7 @@ mod tests {
             "indoor zone capacitance",
         );
 
-        // Attic zone capacitance uses TCM = 1.0 (air only: unconditioned attics have
-        // no furniture boundaries). OCHRE applies x7 uniformly, which
-        // overstates attic inertia ~7x. HARES attic mass = air only; see
-        // `mass_multiplier_for_zone` in hares-core/src/dwelling/conversions.rs.
-        let hares_attic_cap =
-            1.2 * 1006.0 * OCHRE_ATTIC_VOLUME_M3 * mass_multiplier_for_zone(&ZoneType::Attic);
+        let hares_attic_cap = 1.2 * 1006.0 * gable_attic_volume_m3() * OS_HPXML_TCM;
         assert_within_pct(
             zone_caps[attic_idx],
             hares_attic_cap,
@@ -1039,20 +1043,17 @@ mod tests {
             );
         }
 
-        // Zone capacitances within 1%. Conditioned zone TCM = 1.0 because
-        // furniture boundaries are present (see building_to_zone_inputs);
-        // attic TCM = 1.0 (air only). OCHRE's uniform x7 over-counts both.
+        // Zone capacitances within 1%, OS-HPXML's one TCM for every zone.
         let cond_idx = zone_index(&building, ZoneType::Conditioned);
         let attic_idx = zone_index(&building, ZoneType::Attic);
-        let hares_indoor_cap = 1.2 * 1006.0 * OCHRE_INDOOR_VOLUME_M3 * 1.0; // furniture boundaries present → TCM = 1.0
+        let hares_indoor_cap = 1.2 * 1006.0 * OCHRE_INDOOR_VOLUME_M3 * OS_HPXML_TCM;
         assert_within_pct(
             zone_caps[cond_idx],
             hares_indoor_cap,
             1.0,
             "indoor zone capacitance",
         );
-        let hares_attic_cap =
-            1.2 * 1006.0 * OCHRE_ATTIC_VOLUME_M3 * mass_multiplier_for_zone(&ZoneType::Attic);
+        let hares_attic_cap = 1.2 * 1006.0 * gable_attic_volume_m3() * OS_HPXML_TCM;
         assert_within_pct(
             zone_caps[attic_idx],
             hares_attic_cap,

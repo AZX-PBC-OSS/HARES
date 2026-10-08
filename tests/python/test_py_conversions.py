@@ -1,44 +1,22 @@
 """Tests for Arrow to Polars zero-copy conversion."""
 
 from pathlib import Path
-import pytest
 
 import polars as pl
-
+import pytest
+from ochre_next import Dwelling, DwellingConfig, Fleet, SimulationConfig
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
-
-
-def _dwelling_class():
-    try:
-        from ochre_next import Dwelling
-    except ModuleNotFoundError:
-        pytest.skip("ochre_next.Dwelling is not available in this environment")
-    return Dwelling
-
-
-def _fleet_class():
-    try:
-        from ochre_next import Fleet
-    except ModuleNotFoundError:
-        pytest.skip("ochre_next.Fleet is not available in this environment")
-    return Fleet
+HPXML = str(EXAMPLES / "BEopt_example.xml")
+SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")
+WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
 
 @pytest.fixture(scope="session")
 def dwelling():
-    """Create a Dwelling using the test fixtures."""
-    dwelling_class = _dwelling_class()
-
-    if (EXAMPLES / "BEopt_example.xml").exists():
-        hpxml = str(EXAMPLES / "BEopt_example.xml")
-        schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
-        weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
-    else:
-        pytest.skip("OCHRE fixtures not available")
-
-    dw = dwelling_class.from_hpxml(hpxml, schedule, weather)
+    """Create a Dwelling from the committed BEopt example inputs."""
+    dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, write_output=False)
     dw.initialize()
     return dw
 
@@ -49,29 +27,29 @@ def simulated_df(dwelling):
     return dwelling.simulate()
 
 
-RESSTOCK_METADATA = ROOT / "tests" / "fixtures" / "resstock_metadata.parquet"
-RESSTOCK_HPXML_DIR = ROOT / "tests" / "fixtures" / "building_energy_models"
-RESSTOCK_WEATHER_DIR = ROOT / "tests" / "fixtures" / "weather"
+# One ResStock 2025.1 fixture building (committed): HPXML + schedule + weather.
+RESSTOCK_ROOT = ROOT / "tests" / "fixtures" / "resstock" / "2025.1"
+BUILDING_DIR = RESSTOCK_ROOT / "bldg0000002"
+BUILDING_WEATHER = RESSTOCK_ROOT / "weather" / "G0900090_2018.csv"
 
 
 @pytest.fixture
-def fleet():
-    """Create a minimal fleet for testing.
-
-    Requires pre-processed ResStock fixtures (HPXML zips, weather files,
-    metadata parquet) that are not checked in. Tests skip automatically
-    when these are absent.
-    """
-    if not RESSTOCK_METADATA.exists():
-        pytest.skip("ResStock test fixtures not available")
-
-    fleet_class = _fleet_class()
-    return fleet_class.from_resstock(
-        str(RESSTOCK_METADATA),
-        str(RESSTOCK_HPXML_DIR),
-        str(RESSTOCK_WEATHER_DIR),
-        resstock_version="2024.2",
+def fleet(tmp_path: Path):
+    """Build a one-dwelling fleet from a ResStock 2025.1 fixture building."""
+    config = DwellingConfig(
+        hpxml=str(BUILDING_DIR / "home.xml"),
+        schedule=str(BUILDING_DIR / "in.schedules.csv"),
+        weather=str(BUILDING_WEATHER),
+        config=SimulationConfig(
+            start_time="2018-01-01T00:00:00-05:00",
+            duration_s=86400,
+            time_res_s=3600,
+            write_output=True,
+            output_path=str(tmp_path / "fleet_bldg0000002.csv"),
+        ),
+        defaults_path=str(ROOT / "defaults"),
     )
+    return Fleet.from_buildings([config])
 
 
 # ---------------------------------------------------------------------------
@@ -91,21 +69,14 @@ def test_results_before_simulate_returns_dataframe(dwelling):
 
     Note: uses a fresh dwelling (not the simulated one) to test the pre-simulate path.
     """
-    dwelling_class = _dwelling_class()
-
-    if not (EXAMPLES / "BEopt_example.xml").exists():
-        pytest.skip("OCHRE fixtures not available")
-
-    fresh = dwelling_class.from_hpxml(
-        str(EXAMPLES / "BEopt_example.xml"),
-        str(EXAMPLES / "BEopt_example_schedule.csv"),
-        str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-    )
+    fresh = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, write_output=False)
     df = fresh.results()
 
     assert isinstance(df, pl.DataFrame)
     assert df.height == 0, "Results before simulate should be empty"
-    assert df.width > 0, "Schema should have columns even when no rows have been produced"
+    assert df.width > 0, (
+        "Schema should have columns even when no rows have been produced"
+    )
     assert "Time" in df.columns, "Schema should include a Time column"
 
 
@@ -142,7 +113,9 @@ def test_results_dataframe_time_is_string(simulated_df):
 
 def test_results_dataframe_has_expected_columns(simulated_df):
     """Verify DataFrame has expected columns for energy metrics."""
-    energy_columns = [col for col in simulated_df.columns if "(kWh)" in col or "(kW)" in col]
+    energy_columns = [
+        col for col in simulated_df.columns if "(kWh)" in col or "(kW)" in col
+    ]
     assert len(energy_columns) > 0, "Should have energy-related columns"
 
 
@@ -156,7 +129,7 @@ def test_results_column_dtypes(simulated_df):
 
 
 # ---------------------------------------------------------------------------
-# Fleet tests -- skipped at fixture level when HPXML data is unavailable
+# Fleet tests -- run against one ResStock 2025.1 fixture building
 # ---------------------------------------------------------------------------
 
 
@@ -168,12 +141,19 @@ def test_fleet_aggregate_timeseries_returns_dataframe(fleet):
     assert isinstance(df, pl.DataFrame)
 
 
-def test_fleet_aggregate_timeseries_has_rows(fleet):
-    """Verify aggregate DataFrame has rows."""
+def test_fleet_aggregate_timeseries_shape(fleet):
+    """Verify aggregate DataFrame has the fixture's exact shape.
+
+    One day at 3600 s gives 24 hourly rows; the aggregate frame carries the
+    6 reserved aggregate columns (Time, the three totals, outdoor and indoor
+    temperature) for the one-building fleet.
+    """
     results = fleet.simulate()
     df = results.aggregate_timeseries
 
-    assert df.height > 0, "Aggregate DataFrame should have rows"
+    assert df.shape == (24, 6), (
+        f"Aggregate DataFrame shape {df.shape} != (24, 6); columns: {df.columns}"
+    )
 
 
 def test_fleet_aggregate_timeseries_has_time_column(fleet):
@@ -193,7 +173,11 @@ def test_fleet_per_dwelling_metrics_returns_dataframe(fleet):
 
 
 def test_fleet_per_dwelling_metrics_schema(fleet):
-    """Verify per_dwelling_metrics has expected schema."""
+    """Verify per_dwelling_metrics has exactly the expected schema.
+
+    Exact set equality: the per-dwelling frame is pinned to (1, 5) elsewhere,
+    so a column added to or removed from the frame must update a pin.
+    """
     results = fleet.simulate()
     df = results.per_dwelling_metrics
 
@@ -205,14 +189,37 @@ def test_fleet_per_dwelling_metrics_schema(fleet):
         "failed",
     }
     actual_columns = set(df.columns)
-    assert expected_columns.issubset(actual_columns), (
-        f"Missing columns: {expected_columns - actual_columns}"
+    assert actual_columns == expected_columns, (
+        f"Column mismatch; missing: {expected_columns - actual_columns}, "
+        f"unexpected: {actual_columns - expected_columns}"
     )
 
 
 def test_fleet_per_dwelling_metrics_row_count(fleet):
-    """Verify per_dwelling_metrics has correct row count."""
+    """Verify the per-dwelling frame's exact shape and the weighting math.
+
+    One building with no sample_weights gets the default weight 1.0, so the
+    per-dwelling metrics must equal the aggregate frame's electric series
+    directly: its total energy is the summed power over the 1 h steps and its
+    peak power is the series maximum.
+    """
     results = fleet.simulate()
     df = results.per_dwelling_metrics
 
-    assert df.height == 1, "Should have 1 dwelling in test fixture"
+    assert df.shape == (1, 5), f"Per-dwelling DataFrame shape {df.shape} != (1, 5)"
+    row = df.row(0, named=True)
+    assert row["sample_weight"] == 1.0, (
+        f"One building with no sample_weights must weigh 1.0, got {row['sample_weight']}"
+    )
+
+    aggregate = results.aggregate_timeseries
+    electric_kw = aggregate["Total Electric Power (kW)"]
+    assert row["total_energy_kwh"] == pytest.approx(
+        float(electric_kw.sum()), rel=1e-12
+    ), (
+        "total_energy_kwh must equal the weighted aggregate's summed electric "
+        "power over the 1 h steps"
+    )
+    assert row["peak_power_kw"] == pytest.approx(float(electric_kw.max()), rel=1e-12), (
+        "peak_power_kw must equal the weighted aggregate's peak electric power"
+    )

@@ -15,31 +15,19 @@
 //! [`cycling_energy_equals_rated_power_times_on_duration`], which codifies
 //! the per-cycle energy semantic the parity suites depend on.
 
+#[path = "../support/denver_offset.rs"]
+mod denver_offset;
+
 #[cfg(test)]
 mod tests {
+    use super::denver_offset::denver_offset;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
 
-    use chrono::{Duration, FixedOffset, TimeZone};
+    use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
-
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let tid = std::thread::current().id();
-        format!("{base}_{nanos}_{tid:?}.{ext}")
-    }
-
-    struct TempFile(std::path::PathBuf);
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
 
     /// Parse a CSV into column-name -> Vec<f64> map.
     /// Non-numeric cells (headers, timestamps) are silently skipped per-cell.
@@ -58,10 +46,10 @@ mod tests {
             }
             let fields: Vec<&str> = line.split(',').collect();
             for (i, field) in fields.iter().enumerate() {
-                if i < columns.len() {
-                    if let Ok(v) = field.trim().parse::<f64>() {
-                        data.get_mut(&columns[i]).unwrap().push(v);
-                    }
+                if i < columns.len()
+                    && let Ok(v) = field.trim().parse::<f64>()
+                {
+                    data.get_mut(&columns[i]).unwrap().push(v);
                 }
             }
         }
@@ -240,13 +228,12 @@ mod tests {
     fn beopt_config(duration_hours: i64, output_path: PathBuf) -> DwellingConfig {
         DwellingConfig {
             hpxml_path: examples_dir().join("BEopt_example.xml"),
-            schedule_path: examples_dir().join("BEopt_example_schedule.csv"),
+            schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
             weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
                 // Match OCHRE smoke: May 5, 2019, 12:00 PM Denver (UTC-7)
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .expect("Denver UTC-7 offset")
+                start_time: denver_offset()
                     .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
                     .unwrap(),
                 duration: Duration::hours(duration_hours),
@@ -262,6 +249,7 @@ mod tests {
                 site_location: hares_io::SiteLocationOverride::default(),
                 retain_batches: true,
                 rotation: hares_io::RotationPolicy::None,
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,
             bldg_id: 1,
@@ -287,10 +275,10 @@ mod tests {
             }
             let fields: Vec<&str> = line.split(',').collect();
             for (i, field) in fields.iter().enumerate() {
-                if i < sums.len() {
-                    if let Ok(v) = field.trim().parse::<f64>() {
-                        sums[i] += v;
-                    }
+                if i < sums.len()
+                    && let Ok(v) = field.trim().parse::<f64>()
+                {
+                    sums[i] += v;
                 }
             }
             count += 1;
@@ -329,9 +317,8 @@ mod tests {
     /// `tests/conditioned_oracle.rs::conditioned_dynamic_spring_72h`.
     #[test]
     fn smoke_beopt_1h() {
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_smoke_beopt_1h", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("create output directory");
+        let output_path = output_dir.path().join("smoke_beopt_1h.csv");
 
         let engine = SimulationEngine::new();
         let result = engine
@@ -457,21 +444,19 @@ mod tests {
     /// (building 0112631, gas furnace + gas water heater, Denver TMY3).
     #[test]
     fn smoke_resstock_1h_runs_to_completion() {
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_smoke_resstock_1h", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("create output directory");
+        let output_path = output_dir.path().join("smoke_resstock_1h.csv");
 
         let engine = SimulationEngine::new();
         let config = DwellingConfig {
             hpxml_path: examples_dir().join("bldg0112631-up00.xml"),
-            schedule_path: examples_dir().join("bldg0112631_schedule.csv"),
+            schedule_path: Some(examples_dir().join("bldg0112631_schedule.csv")),
             weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
                 // Denver local noon (UTC-7) on May 5 2019 -- mild spring noon,
                 // neither heating nor cooling is expected to dominate.
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .expect("Denver UTC-7 offset")
+                start_time: denver_offset()
                     .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
                     .unwrap(),
                 duration: Duration::hours(1),
@@ -487,6 +472,7 @@ mod tests {
                 site_location: hares_io::SiteLocationOverride::default(),
                 retain_batches: true,
                 rotation: hares_io::RotationPolicy::None,
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,
             bldg_id: 2,
@@ -699,8 +685,8 @@ mod tests {
     /// column, which `discover_end_use_columns` maps to key `"hvac_heating"`.
     #[test]
     fn beopt_smoke_end_use_aggregates_by_category() {
-        let output_path = std::env::temp_dir().join(unique_temp_name("hares_beopt_enduse", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("create output directory");
+        let output_path = output_dir.path().join("beopt_enduse.csv");
 
         let engine = SimulationEngine::new();
         let result = engine

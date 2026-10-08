@@ -9,7 +9,9 @@ from unittest import mock
 
 _SCRIPT = Path(__file__).resolve().parent.parent.parent / "scripts" / "download_resstock_fixtures.py"
 _spec = importlib.util.spec_from_file_location("download_resstock_fixtures", str(_SCRIPT))
+assert _spec is not None and _spec.loader is not None, f"cannot load {_SCRIPT}"
 _script = importlib.util.module_from_spec(_spec)
+# Import under mock to prevent real network access from top-level module body
 with mock.patch("ochre_next.data.fetch_resstock_building"):
     _spec.loader.exec_module(_script)
 

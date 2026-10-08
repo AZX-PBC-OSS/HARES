@@ -79,17 +79,18 @@ debug_assert!(
 );
 ```
 
-These compile to nothing in `--release`.  For checks that must fire in
-production, use `InvariantChecker` (see below).
+`debug_assert!`-style checks on internally-produced values compile to
+nothing in `--release`.  Physics, conservation, non-finite and wiring
+checks never rely on that gate: they run in every build profile and
+return typed errors (see below).
 
 ### Runtime invariant checking
 
 `InvariantChecker` in `hares-core/src/invariants.rs` runs per-timestep
 numerical sanity checks (energy balance, temperature bounds, humidity
-ratio sign).  These are gated by
-`cfg(any(debug_assertions, feature = "check_invariants"))` so they run
-in tests and debug builds by default, and can be opted into in release
-via the Cargo feature flag.  See [docs/development.md](docs/development.md)
+ratio sign).  These are unconditional: they run in every build profile
+and fail the step with a typed `HaresError`.  See
+[docs/development.md](docs/development.md)
 for build commands and [docs/invariants-and-observability.md](docs/invariants-and-observability.md)
 for the full check catalogue.
 

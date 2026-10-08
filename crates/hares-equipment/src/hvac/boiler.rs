@@ -7,9 +7,9 @@ use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FLUID, FluidDomainPayload, FluidNodeId, FluidType, FuelPower, FuelType,
-    HaresError, HeatTransferDirection, LoopId, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    ExecutionStage, FluidDomainPayload, FluidNodeId, FluidType, FuelPower, FuelType, HaresError,
+    HeatTransferDirection, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots,
+    Telemetry, TelemetryField, ThermalCategory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,10 +21,10 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
-        apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        compute_and_write_ebm_telemetry, lookup_zone, loop_id_from_config, outage_forces_off,
-        register_ebm_telemetry_keys, update_heating_control, zone_id_from_config_or_default,
+        apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
+        apply_simple_mode_override_in_control, lookup_zone, loop_id_from_config, outage_forces_off,
+        register_ebm_telemetry_keys, served_zone_ports, step_equivalent_battery,
+        update_heating_control, write_ebm_telemetry, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -83,7 +83,7 @@ pub struct ElectricBoiler {
     hvac: HvacEquipment,
     rated_capacity_w: f64,
     eir: f64,
-    loop_id: LoopId,
+    loop_id: Option<LoopId>,
     fluid_type: FluidType,
     flow_rate_kg_s: f64,
     default_return_temp_c: f64,
@@ -95,8 +95,6 @@ pub struct ElectricBoiler {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// External ModeOverride control (sticky).
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
@@ -117,7 +115,7 @@ pub struct GasBoiler {
     core_output: CoreOutput,
     hvac: HvacEquipment,
     rated_capacity_w: f64,
-    loop_id: LoopId,
+    loop_id: Option<LoopId>,
     fluid_type: FluidType,
     flow_rate_kg_s: f64,
     default_return_temp_c: f64,
@@ -133,8 +131,6 @@ pub struct GasBoiler {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// External ModeOverride control (sticky).
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
@@ -144,12 +140,17 @@ pub struct GasBoiler {
     zip: hares_types::zip::ResolvedZip,
 }
 
+/// Version 2: the thermostat hysteresis is persisted.
+const BOILER_CHECKPOINT_VERSION: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BoilerState {
     mode: ThermostatMode,
     duty_cycle: f64,
     last_mode_switch_at: Option<DateTime<FixedOffset>>,
     runtime_setpoints: Option<RuntimeSetpointOverride>,
+    /// The hysteresis in force, which a named `ThermalSetpoint` may have set.
+    thermostat_hysteresis_c: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
     electric_kw: f64,
@@ -165,22 +166,22 @@ struct BoilerState {
 impl ElectricBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
-        let loop_id =
-            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
+        let zone = zone_id_from_config(&config);
+        let loop_id = loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Electric Boiler"),
-            zone: Some(zone),
+            zone,
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY
                 | ControlCapabilities::MODE_OVERRIDE
-                | ControlCapabilities::DEMAND_RESPONSE,
+                | ControlCapabilities::DEMAND_RESPONSE
+                | ControlCapabilities::NON_HVAC_ZONE_INPUT,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_MODE
@@ -192,10 +193,7 @@ impl ElectricBoiler {
 
         Self {
             descriptor,
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::fluid(loop_id, FluidType::Water),
-            ],
+            ports: vec![PortDeclaration::electrical(), declared_fluid_port(loop_id)],
             telemetry: electric_boiler_default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::Other, zone),
@@ -209,7 +207,6 @@ impl ElectricBoiler {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
-            zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ResolvedZip::reactive_only(
@@ -221,6 +218,10 @@ impl ElectricBoiler {
 }
 
 impl Equipment for ElectricBoiler {
+    fn checkpoint_version() -> u32 {
+        BOILER_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -233,28 +234,26 @@ impl Equipment for ElectricBoiler {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed = config.require_typed::<ElectricBoilerConfig>("Electric Boiler")?;
+        self.loop_id = Some(require_loop_id(
+            typed.loop_id,
+            "Electric Boiler",
+            &config.name,
+        )?);
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         // The circulation pump is a secondary motor component (pf 0.84); the
         // unit ZIP describes the primary component (resistive element, pf 1.0).
         self.pump_zip =
             super::reactive::secondary_motor_zip(&self.zip, super::reactive::LOOP_PUMP_ZIP);
-        let typed = config.require_typed::<ElectricBoilerConfig>("Electric Boiler")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
         self.pump_kw = power_w_to_kw(typed.fan_power_w.unwrap_or(0.0));
-        if let Some(lid) = typed.loop_id {
-            self.loop_id = LoopId(lid);
-        }
         self.fluid_type = typed.fluid_type;
         self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
         self.default_return_temp_c = typed.return_temp_c;
@@ -266,9 +265,20 @@ impl Equipment for ElectricBoiler {
         }
         self.hvac.config.eir_by_stage = vec![self.eir];
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
-        self.hvac.update_zone_heat_fractions();
+        self.hvac.update_zone_heat_fractions()?;
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
-        self.ports[1].loop_id = Some(self.loop_id);
+        self.descriptor.zone = self.hvac.config.zone_id;
+        // The fluid port's declared loop id and fluid type follow the
+        // configuration: rebuild_thermal_ports pushes the thermal ports to
+        // the end of the vector, so the fluid port is located by type, not
+        // by index. A glycol boiler declares a glycol loop, and a shared
+        // loop with a water port is the conflicting-type construction error.
+        for port in &mut self.ports {
+            if port.port_type == hares_types::PortType::Fluid {
+                port.loop_id = self.loop_id;
+                port.fluid_type = Some(self.fluid_type);
+            }
+        }
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = electric_boiler_default_telemetry();
@@ -298,7 +308,14 @@ impl Equipment for ElectricBoiler {
             self.operating_mode = mode;
             return mode;
         }
-        self.operating_mode = update_heating_control(&mut self.hvac, env);
+        self.operating_mode =
+            match update_heating_control(&mut self.hvac, env, &self.descriptor.name) {
+                Ok(mode) => mode,
+                Err(err) => {
+                    self.hvac.record_control_error(err);
+                    OperatingMode::Off
+                }
+            };
         self.operating_mode
     }
 
@@ -308,6 +325,9 @@ impl Equipment for ElectricBoiler {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        if let Some(err) = self.hvac.take_control_error() {
+            return Err(err);
+        }
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty * sf;
@@ -322,17 +342,9 @@ impl Equipment for ElectricBoiler {
         };
         let electric_kw = element_kw + pump_kw;
 
-        let return_temp_c =
-            loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
+        let loop_id = bound_loop_id(self.loop_id, "Electric Boiler", &self.descriptor.name)?;
+        let return_temp_c = loop_return_temp_c(env, loop_id).unwrap_or(self.default_return_temp_c);
         let cp_used = cp_j_kg_k(self.fluid_type);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            assert!(
-                cp_used > 0.0 && cp_used.is_finite(),
-                "ElectricBoiler fluid_type {:?} returned invalid cp {cp_used}",
-                self.fluid_type
-            );
-        }
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
             return_temp_c + thermal_output_w / (self.flow_rate_kg_s * cp_used)
         } else {
@@ -348,6 +360,7 @@ impl Equipment for ElectricBoiler {
             + self
                 .pump_zip
                 .reactive_kvar(pump_kw, env.grid.bus_voltage_pu());
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: power_kw_to_w(electric_kw),
@@ -357,7 +370,7 @@ impl Equipment for ElectricBoiler {
 
         if thermal_output_w > 0.0 {
             ports.accumulate(&PortContribution::Fluid {
-                loop_id: self.loop_id,
+                loop_id,
                 flow_rate_kg_s: self.flow_rate_kg_s,
                 supply_temp_c,
                 return_temp_c,
@@ -380,6 +393,11 @@ impl Equipment for ElectricBoiler {
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
+        // The runtime fraction and the part-load ratio coincide for a
+        // resistance element (EnergyPlus HeatingCoils.cc:1873: `ElecUseLoad
+        // *= PartLoadRatio`).
+        self.telemetry.set(tk::RUNTIME_FRACTION, duty);
+        self.telemetry.set(tk::PART_LOAD_RATIO, duty);
         self.telemetry.set(tk::BOILER_CP_USED_J_KG_K, cp_used);
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
@@ -393,15 +411,7 @@ impl Equipment for ElectricBoiler {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            thermal_output_w,
-            &mut self.telemetry,
-        );
+        write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -433,6 +443,16 @@ impl Equipment for ElectricBoiler {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(self.hvac.thermostat_fsm.thermostat.band_class)
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Heating,
+        ))
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
@@ -444,6 +464,7 @@ impl Equipment for ElectricBoiler {
                 duty_cycle: self.hvac.runtime.duty_cycle,
                 last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
                 runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -471,6 +492,9 @@ impl Equipment for ElectricBoiler {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac
+            .thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -528,7 +552,7 @@ impl Equipment for ElectricBoiler {
         )? {
             return Ok(());
         }
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Boiler")?;
+        self.hvac.apply_control_signal(signal)?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
     }
@@ -538,29 +562,29 @@ impl Equipment for ElectricBoiler {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 }
 
 impl GasBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
-        let loop_id =
-            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
+        let zone = zone_id_from_config(&config);
+        let loop_id = loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Gas Boiler"),
-            zone: Some(zone),
+            zone,
             fuel: FuelType::Gas,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY
                 | ControlCapabilities::MODE_OVERRIDE
-                | ControlCapabilities::DEMAND_RESPONSE,
+                | ControlCapabilities::DEMAND_RESPONSE
+                | ControlCapabilities::NON_HVAC_ZONE_INPUT,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::FUEL
                 | CoreCapabilities::REACTIVE
@@ -573,12 +597,14 @@ impl GasBoiler {
 
         Self {
             descriptor,
-            ports: vec![
-                PortDeclaration::fuel(),
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-                PortDeclaration::fluid(loop_id, FluidType::Water),
-            ],
+            ports: served_zone_ports(
+                &[PortDeclaration::fuel(), PortDeclaration::electrical()],
+                zone,
+                false,
+            )
+            .into_iter()
+            .chain([declared_fluid_port(loop_id)])
+            .collect(),
             telemetry: gas_boiler_default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::Other, zone),
@@ -597,7 +623,6 @@ impl GasBoiler {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
-            zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ResolvedZip::reactive_only(
@@ -637,6 +662,10 @@ impl GasBoiler {
 }
 
 impl Equipment for GasBoiler {
+    fn checkpoint_version() -> u32 {
+        BOILER_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -649,23 +678,17 @@ impl Equipment for GasBoiler {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed = config.require_typed::<GasBoilerConfig>("Gas Boiler")?;
+        self.loop_id = Some(require_loop_id(typed.loop_id, "Gas Boiler", &config.name)?);
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
-        let typed = config.require_typed::<GasBoilerConfig>("Gas Boiler")?;
         typed.validate()?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
-        if let Some(lid) = typed.loop_id {
-            self.loop_id = LoopId(lid);
-        }
         self.fluid_type = typed.fluid_type;
         self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
         self.default_return_temp_c = typed.return_temp_c;
@@ -686,9 +709,20 @@ impl Equipment for GasBoiler {
         self.non_condensing_eir_coeffs = DEFAULT_NON_CONDENSING_EIR_COEFFS;
         self.hvac.config.eir_by_stage = vec![self.eir_max];
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
-        self.hvac.update_zone_heat_fractions();
+        self.hvac.update_zone_heat_fractions()?;
         self.hvac.rebuild_thermal_ports(&mut self.ports, false);
-        self.ports[3].loop_id = Some(self.loop_id);
+        self.descriptor.zone = self.hvac.config.zone_id;
+        // The fluid port's declared loop id and fluid type follow the
+        // configuration: rebuild_thermal_ports pushes the thermal ports to
+        // the end of the vector, so the fluid port is located by type, not
+        // by index. A glycol boiler declares a glycol loop, and a shared
+        // loop with a water port is the conflicting-type construction error.
+        for port in &mut self.ports {
+            if port.port_type == hares_types::PortType::Fluid {
+                port.loop_id = self.loop_id;
+                port.fluid_type = Some(self.fluid_type);
+            }
+        }
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = gas_boiler_default_telemetry();
@@ -718,7 +752,14 @@ impl Equipment for GasBoiler {
             self.operating_mode = mode;
             return mode;
         }
-        self.operating_mode = update_heating_control(&mut self.hvac, env);
+        self.operating_mode =
+            match update_heating_control(&mut self.hvac, env, &self.descriptor.name) {
+                Ok(mode) => mode,
+                Err(err) => {
+                    self.hvac.record_control_error(err);
+                    OperatingMode::Off
+                }
+            };
         self.operating_mode
     }
 
@@ -728,19 +769,17 @@ impl Equipment for GasBoiler {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        if let Some(err) = self.hvac.take_control_error() {
+            return Err(err);
+        }
         let plr = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * plr * sf;
-        let return_temp_c =
-            loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
+        let loop_id = bound_loop_id(self.loop_id, "Gas Boiler", &self.descriptor.name)?;
+        let return_temp_c = loop_return_temp_c(env, loop_id).unwrap_or(self.default_return_temp_c);
         // Condensing EIR polynomial uses zone air temperature (OCHRE HVAC.py:651:
         // t_in = self.zone.temperature), not return water temperature.
-        let zone_temp_c = env
-            .zones
-            .iter()
-            .find(|z| z.id == self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
+        let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
         let eir = if thermal_output_w > 0.0 {
             self.current_eir(plr, zone_temp_c)?
         } else {
@@ -749,14 +788,6 @@ impl Equipment for GasBoiler {
         let fuel_input_w = thermal_output_w * eir;
 
         let cp_used = cp_j_kg_k(self.fluid_type);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            assert!(
-                cp_used > 0.0 && cp_used.is_finite(),
-                "GasBoiler fluid_type {:?} returned invalid cp {cp_used}",
-                self.fluid_type
-            );
-        }
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
             return_temp_c + thermal_output_w / (self.flow_rate_kg_s * cp_used)
         } else {
@@ -768,6 +799,7 @@ impl Equipment for GasBoiler {
         } else {
             0.0
         };
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
 
         if fuel_input_w > 0.0 {
             ports.accumulate(&PortContribution::Fuel {
@@ -786,7 +818,7 @@ impl Equipment for GasBoiler {
         }
         if thermal_output_w > 0.0 {
             ports.accumulate(&PortContribution::Fluid {
-                loop_id: self.loop_id,
+                loop_id,
                 flow_rate_kg_s: self.flow_rate_kg_s,
                 supply_temp_c,
                 return_temp_c,
@@ -801,23 +833,25 @@ impl Equipment for GasBoiler {
                 0.0,
                 ThermalCategory::HvacHeating,
             )?;
-            self.run_time_s += dt.as_secs_f64();
         }
 
         // Jacket loss: fuel energy minus useful thermal output, plus pump electrical.
         // For condensing boilers (EIR < 1), jacket loss is zero -- the extra output
         // comes from latent heat recovery, not from the room.
         let jacket_loss_w = (fuel_input_w + electric_kw * 1e3 - thermal_output_w).max(0.0);
-        if let Some(zone) = self.descriptor.zone {
-            if jacket_loss_w > 0.0 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: jacket_loss_w,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::JacketLoss,
-                })?;
-            }
+        if let Some(zone) = self.descriptor.zone
+            && jacket_loss_w > 0.0
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: jacket_loss_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::JacketLoss,
+            })?;
+        }
+        if thermal_output_w > 0.0 {
+            self.run_time_s += dt.as_secs_f64();
         }
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
@@ -827,6 +861,11 @@ impl Equipment for GasBoiler {
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry.set(tk::JACKET_LOSS_W, jacket_loss_w);
         self.telemetry.set(tk::EIR, eir);
+        // The runtime fraction and the part-load ratio coincide for a fuel
+        // boiler: it delivers `plr` of rated for the whole step and burns for
+        // that fraction (EnergyPlus HeatingCoils.cc:1873).
+        self.telemetry.set(tk::RUNTIME_FRACTION, plr);
+        self.telemetry.set(tk::PART_LOAD_RATIO, plr);
         self.telemetry.set(tk::BOILER_CP_USED_J_KG_K, cp_used);
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
@@ -840,15 +879,7 @@ impl Equipment for GasBoiler {
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            thermal_output_w,
-            &mut self.telemetry,
-        );
+        write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -883,6 +914,16 @@ impl Equipment for GasBoiler {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(self.hvac.thermostat_fsm.thermostat.band_class)
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Heating,
+        ))
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
@@ -894,6 +935,7 @@ impl Equipment for GasBoiler {
                 duty_cycle: self.hvac.runtime.duty_cycle,
                 last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
                 runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -921,6 +963,9 @@ impl Equipment for GasBoiler {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac
+            .thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -981,7 +1026,7 @@ impl Equipment for GasBoiler {
         )? {
             return Ok(());
         }
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Gas Boiler")?;
+        self.hvac.apply_control_signal(signal)?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
     }
@@ -991,7 +1036,7 @@ impl Equipment for GasBoiler {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 }
 
@@ -1006,13 +1051,43 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     );
 }
 
+/// A boiler's water-side port as `new` declares it: bound to the config's
+/// loop id when the config carries one, and unbound otherwise until `init`
+/// binds it or fails.
+fn declared_fluid_port(loop_id: Option<LoopId>) -> PortDeclaration {
+    PortDeclaration {
+        port_type: hares_types::PortType::Fluid,
+        zone: None,
+        loop_id,
+        domain_id: None,
+        fluid_type: Some(FluidType::Water),
+        fluid_node_id: None,
+    }
+}
+
+/// The typed config's loop id, or the construction error naming the boiler.
+fn require_loop_id(loop_id: Option<u16>, kind: &str, name: &str) -> crate::Result<LoopId> {
+    loop_id.map(LoopId).ok_or_else(|| {
+        HaresError::Equipment(format!(
+            "{kind} '{name}': its config carries no fluid loop id. Every resolved \
+             boiler carries the loop id its wiring or loop allocation assigned, and \
+             a boiler without one cannot declare its hydronic loop"
+        ))
+    })
+}
+
+/// The loop `init` bound; stepping a boiler whose init did not bind one is
+/// an error rather than a step on a stand-in loop.
+fn bound_loop_id(loop_id: Option<LoopId>, kind: &str, name: &str) -> crate::Result<LoopId> {
+    loop_id.ok_or_else(|| {
+        HaresError::Equipment(format!(
+            "{kind} '{name}' stepped with no fluid loop bound: init did not run or failed"
+        ))
+    })
+}
+
 fn loop_return_temp_c(env: &EnvironmentState, loop_id: LoopId) -> Option<f64> {
-    let payload = env
-        .custom_domains
-        .iter()
-        .find(|update| update.domain_id == FLUID)?
-        .custom_payload
-        .as_ref()?;
+    let payload = env.domains.fluid.get()?.custom_payload.as_ref()?;
     let states = FluidDomainPayload::decode(payload).ok()?;
     states
         .into_iter()
@@ -1026,6 +1101,8 @@ fn electric_boiler_default_telemetry() -> Telemetry {
     telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::PUMP_POWER_KW, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
+    telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::BOILER_CP_USED_J_KG_K, cp_j_kg_k(FluidType::Water));
     telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
     telemetry.insert(tk::RETURN_TEMP_C, 0.0);
@@ -1041,6 +1118,8 @@ fn gas_boiler_default_telemetry() -> Telemetry {
     telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
+    telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::JACKET_LOSS_W, 0.0);
     telemetry.insert(tk::EIR, 0.0);
     telemetry.insert(tk::BOILER_CP_USED_J_KG_K, cp_j_kg_k(FluidType::Water));
@@ -1084,6 +1163,17 @@ fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::PUMP_POWER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Hydronic circulation pump electric draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "Fraction of the step the element runs (equals the part-load ratio)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Delivered capacity as a fraction of rated".to_string(),
         },
         TelemetryField {
             name: tk::THERMAL_OUTPUT_W.to_string(),
@@ -1164,6 +1254,17 @@ fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
             description: "Gas boiler fuel input power".to_string(),
         },
         TelemetryField {
+            name: tk::RUNTIME_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "Fraction of the step the burner runs (equals the part-load ratio)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Delivered capacity as a fraction of rated".to_string(),
+        },
+        TelemetryField {
             name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Thermal output transferred to hydronic loop".to_string(),
@@ -1239,6 +1340,7 @@ mod tests {
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+    use hares_physics::constants::cp_j_kg_k;
     use hares_types::{
         ControlSignal, CoreCapabilities, DRLevel, DomainUpdate, EnvironmentState, ExecutionStage,
         FLUID, FluidDomainPayload, FluidLoopState, FluidType, GridState, LoopId, OperatingMode,
@@ -1249,11 +1351,25 @@ mod tests {
         DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_NON_CONDENSING_EIR_COEFFS, ElectricBoiler, GasBoiler,
     };
 
+    /// The per-fluid cp table must be positive and finite for every fluid
+    /// type (exhaustive match: a fluid type without a cp cannot compile).
+    /// Replaced the gated per-step asserts in both boiler step paths.
+    #[test]
+    fn cp_table_positive_and_finite_for_every_fluid_type() {
+        for fluid_type in [FluidType::Water, FluidType::Glycol, FluidType::Refrigerant] {
+            let cp = cp_j_kg_k(fluid_type);
+            assert!(
+                cp > 0.0 && cp.is_finite(),
+                "{fluid_type:?}: cp must be positive and finite, got {cp}"
+            );
+        }
+    }
     use crate::hvac::heating_config::{ElectricBoilerConfig, GasBoilerConfig};
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -1280,7 +1396,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1322,6 +1439,145 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// A boiler built with no loop id is a construction error naming the
+    /// boiler: every resolved boiler carries the loop id its wiring or loop
+    /// allocation assigned, so a `None` reached init only if that channel
+    /// dropped it.
+    #[test]
+    fn boiler_without_loop_id_is_a_construction_error() {
+        let env = env(18.0);
+
+        let electric_cfg = EquipmentConfig::from_typed(
+            "Electric Boiler".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: None,
+                eir: 1.0,
+                capacity_w: 5_000.0,
+                ..ElectricBoilerConfig::default()
+            },
+        )
+        .expect("the config builds");
+        let mut electric = ElectricBoiler::new(electric_cfg.clone());
+        let electric_err = electric
+            .init(&electric_cfg, &env)
+            .expect_err("a boiler with no loop id fails init");
+        assert!(
+            electric_err.to_string().contains("Electric Boiler"),
+            "the error names the boiler: {electric_err}"
+        );
+
+        let gas_cfg = EquipmentConfig::from_typed(
+            "Gas Boiler".to_string(),
+            "Gas Boiler".to_string(),
+            GasBoilerConfig {
+                zone_id: Some(1),
+                loop_id: None,
+                afue: 0.85,
+                capacity_w: 10_000.0,
+                ..GasBoilerConfig::default()
+            },
+        )
+        .expect("the config builds");
+        let mut gas = GasBoiler::new(gas_cfg.clone());
+        let gas_err = gas
+            .init(&gas_cfg, &env)
+            .expect_err("a boiler with no loop id fails init");
+        assert!(
+            gas_err.to_string().contains("Gas Boiler"),
+            "the error names the boiler: {gas_err}"
+        );
+    }
+
+    /// Before init, a boiler whose config carries no loop id declares its
+    /// fluid port with no loop: no placeholder loop stands in for the
+    /// missing id, so nothing can plan or step against a loop the input
+    /// never named.
+    #[test]
+    fn boiler_without_loop_id_declares_no_placeholder_loop() {
+        let electric = ElectricBoiler::new(
+            EquipmentConfig::from_typed(
+                "Electric Boiler".to_string(),
+                "Electric Boiler".to_string(),
+                ElectricBoilerConfig {
+                    zone_id: Some(1),
+                    loop_id: None,
+                    ..ElectricBoilerConfig::default()
+                },
+            )
+            .expect("the config builds"),
+        );
+        let gas = GasBoiler::new(
+            EquipmentConfig::from_typed(
+                "Gas Boiler".to_string(),
+                "Gas Boiler".to_string(),
+                GasBoilerConfig {
+                    zone_id: Some(1),
+                    loop_id: None,
+                    ..GasBoilerConfig::default()
+                },
+            )
+            .expect("the config builds"),
+        );
+        for (name, ports) in [("electric", electric.ports()), ("gas", gas.ports())] {
+            let fluid: Vec<_> = ports
+                .iter()
+                .filter(|port| port.port_type == hares_types::PortType::Fluid)
+                .collect();
+            assert_eq!(fluid.len(), 1, "the {name} boiler declares one fluid port");
+            assert_eq!(
+                fluid[0].loop_id, None,
+                "the {name} boiler's fluid port has no loop before init binds one"
+            );
+        }
+    }
+
+    /// A boiler stepped with no loop bound is an error naming it, never a
+    /// step on a stand-in loop.
+    #[test]
+    fn boiler_stepped_with_no_loop_bound_is_an_error() {
+        let env = env(18.0);
+        let mut electric = ElectricBoiler::new(
+            EquipmentConfig::from_typed(
+                "EB".to_string(),
+                "Electric Boiler".to_string(),
+                ElectricBoilerConfig {
+                    zone_id: Some(1),
+                    loop_id: None,
+                    ..ElectricBoilerConfig::default()
+                },
+            )
+            .expect("the config builds"),
+        );
+        let mut gas = GasBoiler::new(
+            EquipmentConfig::from_typed(
+                "GB".to_string(),
+                "Gas Boiler".to_string(),
+                GasBoilerConfig {
+                    zone_id: Some(1),
+                    loop_id: None,
+                    ..GasBoilerConfig::default()
+                },
+            )
+            .expect("the config builds"),
+        );
+        let errors = [
+            electric
+                .step(&env, Duration::from_secs(60), &mut PortSlots::default())
+                .expect_err("an electric boiler with no loop cannot step"),
+            gas.step(&env, Duration::from_secs(60), &mut PortSlots::default())
+                .expect_err("a gas boiler with no loop cannot step"),
+        ];
+        for (err, name) in errors.iter().zip(["EB", "GB"]) {
+            let msg = err.to_string();
+            assert!(
+                msg.contains(name) && msg.contains("no fluid loop"),
+                "the error names the boiler and the missing loop, got: {msg}"
+            );
+        }
     }
 
     #[test]
@@ -1463,7 +1719,7 @@ mod tests {
         eq.hvac.runtime.duty_cycle = 0.5;
         eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
 
-        env.custom_domains.push(DomainUpdate {
+        env.domains.fluid.set_from(&DomainUpdate {
             domain_id: FLUID,
             zone_temperatures_c: vec![],
             custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
@@ -2300,7 +2556,7 @@ mod tests {
         eq.pump_kw = 0.1;
         eq.hvac.runtime.duty_cycle = 0.5;
         eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
-        env.custom_domains.push(DomainUpdate {
+        env.domains.fluid.set_from(&DomainUpdate {
             domain_id: FLUID,
             zone_temperatures_c: vec![],
             custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
@@ -2455,7 +2711,7 @@ mod tests {
         let mut eq = GasBoiler::new(config.clone());
         let mut env = env(25.0);
         eq.init(&config, &env).unwrap();
-        env.custom_domains.push(DomainUpdate {
+        env.domains.fluid.set_from(&DomainUpdate {
             domain_id: FLUID,
             zone_temperatures_c: vec![],
             custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
@@ -2549,5 +2805,88 @@ mod tests {
             (actual - expected_efficiency).abs() < 1e-9,
             "ElectricBoiler EBM efficiency should be 1/1.05 = {expected_efficiency}, got {actual}"
         );
+    }
+
+    /// Port declarations are truthful: `init` sets the fluid port's declared
+    /// fluid type from the configured `fluid_type`, where it already sets the
+    /// port's loop id, so a glycol boiler declares a glycol loop and the
+    /// default configuration declares water.
+    #[test]
+    fn boiler_port_declares_configured_fluid_type() {
+        let env = env(18.0);
+
+        // Electric boiler configured Glycol.
+        let cfg = EquipmentConfig::from_typed(
+            "EB".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                fluid_type: FluidType::Glycol,
+                ..ElectricBoilerConfig::default()
+            },
+        )
+        .unwrap();
+        let mut eq = ElectricBoiler::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        let fluid_ports: Vec<_> = eq
+            .ports()
+            .iter()
+            .filter(|p| p.port_type == hares_types::PortType::Fluid)
+            .collect();
+        assert_eq!(fluid_ports.len(), 1);
+        assert_eq!(
+            fluid_ports[0].fluid_type,
+            Some(FluidType::Glycol),
+            "an electric boiler configured Glycol must declare a Glycol fluid port after init"
+        );
+
+        // Electric boiler, default configuration: Water.
+        let cfg = eb_config(8_000.0, 1.05);
+        let mut eq = ElectricBoiler::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        let fluid_ports: Vec<_> = eq
+            .ports()
+            .iter()
+            .filter(|p| p.port_type == hares_types::PortType::Fluid)
+            .collect();
+        assert_eq!(fluid_ports[0].fluid_type, Some(FluidType::Water));
+
+        // Gas boiler configured Glycol.
+        let cfg = EquipmentConfig::from_typed(
+            "GB".to_string(),
+            "Gas Boiler".to_string(),
+            GasBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                fluid_type: FluidType::Glycol,
+                ..GasBoilerConfig::default()
+            },
+        )
+        .unwrap();
+        let mut eq = GasBoiler::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        let fluid_ports: Vec<_> = eq
+            .ports()
+            .iter()
+            .filter(|p| p.port_type == hares_types::PortType::Fluid)
+            .collect();
+        assert_eq!(fluid_ports.len(), 1);
+        assert_eq!(
+            fluid_ports[0].fluid_type,
+            Some(FluidType::Glycol),
+            "a gas boiler configured Glycol must declare a Glycol fluid port after init"
+        );
+
+        // Gas boiler, default configuration: Water.
+        let cfg = gb_config(8_000.0, 0.95);
+        let mut eq = GasBoiler::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        let fluid_ports: Vec<_> = eq
+            .ports()
+            .iter()
+            .filter(|p| p.port_type == hares_types::PortType::Fluid)
+            .collect();
+        assert_eq!(fluid_ports[0].fluid_type, Some(FluidType::Water));
     }
 }

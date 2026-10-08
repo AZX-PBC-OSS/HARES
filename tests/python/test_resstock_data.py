@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import io
 import sys
 import zipfile
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import polars as pl
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -90,18 +92,18 @@ class TestVersionConfig:
         assert "bldg0000007-up01.zip" in url
 
     def test_v2025_1_metadata_baseline(self):
-        from ochre_next.data.resstock import _version_config, _metadata_url
+        from ochre_next.data.resstock import _version_config, metadata_url
 
         cfg = _version_config("2025.1")
-        url = _metadata_url(cfg, upgrade_id=0)
+        url = metadata_url(cfg, upgrade_id=0)
         assert "upgrade0.parquet" in url
         assert "upgrade00" not in url  # NOT zero-padded for 2025.1
 
     def test_v2024_2_metadata_upgrade(self):
-        from ochre_next.data.resstock import _version_config, _metadata_url
+        from ochre_next.data.resstock import _version_config, metadata_url
 
         cfg = _version_config("2024.2")
-        url = _metadata_url(cfg, upgrade_id=3)
+        url = metadata_url(cfg, upgrade_id=3)
         assert "upgrade03_metadata_and_annual_results.parquet" in url
 
     def test_weather_url_v2024_2(self):
@@ -141,8 +143,11 @@ class TestResStockBuilding:
             schedule_path=Path("/b.csv"),
             weather_path=Path("/c.csv"),
         )
-        with pytest.raises((dataclasses.FrozenInstanceError if False else Exception)):
-            b.bldg_id = 99  # type: ignore[misc]
+        # Typed as Any: the static checker rejects an assignment to a frozen
+        # field, and the runtime rejection is what this test pins.
+        mutable_view: Any = b
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            mutable_view.bldg_id = 99
 
     def test_fields_accessible(self):
         from ochre_next.data.resstock import ResStockBuilding
@@ -150,18 +155,6 @@ class TestResStockBuilding:
         b = ResStockBuilding(1, 2.5, Path("/h.xml"), Path("/s.csv"), Path("/w.csv"))
         assert b.bldg_id == 1
         assert b.sample_weight == 2.5
-
-
-import dataclasses  # noqa: E402 – needed for test_frozen above
-
-
-class TestResStockBuildingFrozen:
-    def test_mutation_raises(self):
-        from ochre_next.data.resstock import ResStockBuilding
-
-        b = ResStockBuilding(1, 1.0, Path("/a"), Path("/b"), Path("/c"))
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            b.bldg_id = 2  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +602,147 @@ class TestFallbackToUrllib:
         assert dest.exists()
         assert dest.stat().st_size > 0
 
+    def test_urllib_fallback_bounds_a_stalled_download(self, tmp_path: Path):
+        """The urllib fallback gets the same timeout as the httpx client."""
+        from ochre_next.data import resstock
+
+        with (
+            mock.patch.dict(sys.modules, {"httpx": None, "boto3": None}),
+            mock.patch("urllib.request.urlopen", return_value=io.BytesIO(b"")) as urlopen,
+        ):
+            resstock._try_download("https://example.com/test.zip", tmp_path / "out.zip")
+
+        assert urlopen.call_args.kwargs["timeout"] == resstock._DOWNLOAD_TIMEOUT_S
+
+
+class TestSharedHttpClient:
+    def test_downloads_share_one_client_with_the_long_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Every download reuses one thread-safe client with the 120 s timeout."""
+        httpx = pytest.importorskip("httpx")
+        from ochre_next.data import resstock
+        from ochre_next.data._cuttable_transport import CuttableTransport
+
+        clients: list[dict[str, object]] = []
+        streamed: list[str] = []
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_bytes(self, chunk_size: int):
+                return iter([b"zip"])
+
+        class _Client:
+            def __init__(self, **kwargs) -> None:
+                clients.append(kwargs)
+
+            def stream(self, method: str, url: str, **_kwargs: object) -> _Response:
+                streamed.append(url)
+                return _Response()
+
+            def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(httpx, "Client", _Client)
+        monkeypatch.setattr(resstock, "_shared_client", resstock._SharedClient())
+        resstock._try_download("https://example.com/a.zip", tmp_path / "a.zip")
+        resstock._try_download("https://example.com/b.zip", tmp_path / "b.zip")
+
+        (kwargs,) = clients
+        assert kwargs.pop("follow_redirects") is True
+        assert kwargs.pop("timeout") == 120.0
+        assert isinstance(kwargs.pop("transport"), CuttableTransport)
+        assert kwargs == {}
+        assert streamed == ["https://example.com/a.zip", "https://example.com/b.zip"]
+
+    def test_the_first_burst_of_downloads_builds_one_client(self, monkeypatch: pytest.MonkeyPatch):
+        """Sixteen fleet workers asking at once get one client, closed once at exit."""
+        import atexit
+        import contextlib
+        import threading
+
+        httpx = pytest.importorskip("httpx")
+        from ochre_next.data import resstock
+
+        built: list[object] = []
+        registered: list[object] = []
+        second_construction = threading.Barrier(2)
+
+        class _Client:
+            def __init__(self, **_kwargs: object) -> None:
+                built.append(self)
+                # Holds the first construction open so that a second one, if
+                # construction were not serialised, would start meanwhile.
+                with contextlib.suppress(threading.BrokenBarrierError):
+                    second_construction.wait(timeout=0.5)
+
+            def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(httpx, "Client", _Client)
+        monkeypatch.setattr(atexit, "register", registered.append)
+
+        shared = resstock._SharedClient()
+        start = threading.Barrier(16)
+        received: list[object] = []
+
+        def first_download() -> None:
+            start.wait()
+            received.append(shared.get())
+
+        workers = [threading.Thread(target=first_download) for _ in range(16)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+
+        assert len(built) == 1
+        assert received == built * 16
+        assert len(registered) == 1
+
+    @pytest.mark.parametrize("stage", ["reading", "tls-handshake", "connecting"])
+    def test_aborting_the_client_ends_a_download_at_any_stage(
+        self, stage: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A download stalled reading, in its TLS handshake or connecting ends once the client is aborted."""
+        import threading
+
+        pytest.importorskip("httpx")
+        from ochre_next.data import resstock
+
+        shared = resstock._SharedClient()
+        monkeypatch.setattr(resstock, "_shared_client", shared)
+        # The client exists before the download starts, so an abort that
+        # lands before the download connects still cuts it.
+        shared.get()
+        failures: list[BaseException] = []
+
+        def download(url: str) -> None:
+            try:
+                resstock._try_download(url, tmp_path / "bldg1.zip")
+            except BaseException as exc:
+                failures.append(exc)
+
+        with _stalled_at(stage) as (url, stalled):
+            downloader = threading.Thread(target=download, args=(url,))
+            downloader.start()
+            assert stalled(), f"the download never stalled {stage}"
+            shared.abort()
+            # The bound only turns a hang into a failure: without the abort
+            # cutting the socket the download waits for the 120 s timeout.
+            downloader.join(timeout=30)
+            assert not downloader.is_alive(), f"the download {stage} outlived the abort"
+
+        assert len(failures) == 1
+
 
 # ---------------------------------------------------------------------------
 # 6. HPXML weather station parsing
@@ -664,6 +798,7 @@ class TestResStockVersion:
 
     def test_default_version_is_2024_2(self):
         import inspect
+
         from ochre_next.data.resstock import fetch_resstock_building
 
         sig = inspect.signature(fetch_resstock_building)
@@ -720,6 +855,164 @@ def _fake_fleet_building(tmp_path: Path):
         )
 
     return _inner
+
+
+class _StallingServer:
+    """A loopback HTTP server that starts every response body and then stalls.
+
+    A download from it blocks reading until its connection is cut, which is
+    the state an interrupted fetch has to end. Every request's path is
+    recorded.
+    """
+
+    def __init__(self) -> None:
+        import socket
+        import threading
+
+        self._listener = socket.create_server(("127.0.0.1", 0))
+        self.port: int = self._listener.getsockname()[1]
+        self.paths: list[str] = []
+        self._requests = threading.Condition()
+        self._closed = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        import threading
+
+        while True:
+            try:
+                conn, _ = self._listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._answer, args=(conn,), daemon=True).start()
+
+    def _answer(self, conn) -> None:
+        with conn:
+            request = b""
+            while b"\r\n\r\n" not in request:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                request += chunk
+            with self._requests:
+                self.paths.append(request.split()[1].decode())
+                self._requests.notify_all()
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\nPK")
+            self._closed.wait()
+
+    def wait_for_requests(self, count: int) -> bool:
+        """Wait until ``count`` requests have arrived (a bound against a hang only)."""
+        with self._requests:
+            return self._requests.wait_for(lambda: len(self.paths) >= count, timeout=60)
+
+    def __enter__(self) -> _StallingServer:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        import contextlib
+        import socket
+
+        self._closed.set()
+        with contextlib.suppress(OSError):
+            self._listener.shutdown(socket.SHUT_RDWR)
+        self._listener.close()
+
+
+def _connects_waiting(port: int) -> int:
+    """Loopback sockets the kernel lists as waiting for ``port`` to answer their connect (SYN_SENT)."""
+    target = f"0100007F:{port:04X}"
+    with open("/proc/net/tcp") as table:
+        rows = [line.split() for line in table.readlines()[1:]]
+    return sum(1 for row in rows if row[2] == target and row[3] == "02")
+
+
+def _wait_until(condition, bound_s: float = 60.0) -> bool:
+    """Poll ``condition`` until it holds; the bound only turns a hang into a failure."""
+    import threading
+    import time
+
+    deadline = time.monotonic() + bound_s
+    pause = threading.Event()
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        pause.wait(0.01)
+    return True
+
+
+@contextlib.contextmanager
+def _stalled_at(stage: str):
+    """A loopback URL whose download stalls at ``stage``, and a wait until it has.
+
+    ``reading``: the response body starts and stops. ``tls-handshake``: the
+    server takes the client's hello and never answers. ``connecting``: the
+    server's accept queue is full, so the connect is never answered.
+    """
+    import socket
+    import threading
+
+    if stage == "reading":
+        with _StallingServer() as server:
+            yield f"http://127.0.0.1:{server.port}/bldg1.zip", lambda: server.wait_for_requests(1)
+        return
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(0)
+    port = listener.getsockname()[1]
+    held: list[socket.socket] = []
+    hello = threading.Event()
+    closed = threading.Event()
+    try:
+        if stage == "tls-handshake":
+
+            def take_hello() -> None:
+                conn, _ = listener.accept()
+                held.append(conn)
+                if conn.recv(65536):
+                    hello.set()
+                closed.wait()
+
+            threading.Thread(target=take_hello, daemon=True).start()
+            yield f"https://127.0.0.1:{port}/bldg1.zip", lambda: hello.wait(timeout=60)
+        else:
+            # Connections the server never accepts fill its queue; a further
+            # connect gets no answer.
+            for _ in range(4):
+                filler = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                filler.setblocking(False)
+                with contextlib.suppress(BlockingIOError):
+                    filler.connect(("127.0.0.1", port))
+                held.append(filler)
+            fillers_waiting = _connects_waiting(port)
+            yield (
+                f"http://127.0.0.1:{port}/bldg1.zip",
+                lambda: _wait_until(lambda: _connects_waiting(port) > fillers_waiting),
+            )
+    finally:
+        closed.set()
+        for sock in held:
+            sock.close()
+        listener.close()
+
+
+# A fleet of four buildings on two download workers, every download from the
+# stalling server given as argv[1]; argv[2] is the metadata, argv[3] the cache.
+# A runner that starts the suite with SIGINT ignored passes that on to the
+# child, so the child takes Ctrl-C the way a terminal session does.
+_FLEET_OF_FOUR_ON_TWO_WORKERS = """
+import signal
+import sys
+from pathlib import Path
+
+signal.signal(signal.SIGINT, signal.default_int_handler)
+
+from ochre_next.data import resstock
+
+resstock._OEDI_BASE = f"http://127.0.0.1:{sys.argv[1]}/"
+resstock._FLEET_DOWNLOAD_WORKERS = 2
+resstock.fetch_resstock_fleet(Path(sys.argv[2]), bldg_ids=[1, 2, 3, 4], cache_dir=Path(sys.argv[3]))
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -887,33 +1180,6 @@ class _FakeHTTPStatusError(Exception):
         self.response = type("_Resp", (), {"status_code": status_code})()
 
 
-class _FakeAsyncResponse:
-    def __init__(
-        self, *, content: bytes = b"", status_error: Exception | None = None
-    ) -> None:
-        self.content = content
-        self._status_error = status_error
-
-    def raise_for_status(self) -> None:
-        if self._status_error is not None:
-            raise self._status_error
-
-
-class _FakeAsyncClient:
-    """Async client whose ``get`` replays a queued list of responses/exceptions."""
-
-    def __init__(self, responses: list) -> None:
-        self._responses = list(responses)
-        self.get_calls = 0
-
-    async def get(self, url: str):
-        self.get_calls += 1
-        item = self._responses.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-
 class TestDownloadRetry:
     def test_download_retry_on_503(self, tmp_path: Path):
         """A 503 on the first two attempts followed by a 200 succeeds."""
@@ -931,13 +1197,13 @@ class TestDownloadRetry:
 
         with (
             mock.patch.object(resstock, "_try_download", side_effect=flaky),
-            mock.patch.object(resstock.time, "sleep") as sleep,
+            mock.patch.object(resstock, "_wait_before_retry") as pause,
         ):
             resstock._download_file("https://oedi/out.zip", dest)
 
         assert dest.read_bytes() == zip_bytes
         assert len(attempts) == 3
-        assert sleep.call_count == 2  # slept before each of the two retries
+        assert pause.call_count == 2  # paused before each of the two retries
 
     def test_download_exhausts_retries(self, tmp_path: Path):
         """Persistent transient failure raises after exactly 3 attempts."""
@@ -952,7 +1218,7 @@ class TestDownloadRetry:
 
         with (
             mock.patch.object(resstock, "_try_download", side_effect=always_503),
-            mock.patch.object(resstock.time, "sleep"),
+            mock.patch.object(resstock, "_wait_before_retry"),
             pytest.raises(_FakeHTTPStatusError),
         ):
             resstock._download_file("https://oedi/out.zip", dest)
@@ -975,67 +1241,14 @@ class TestDownloadRetry:
 
         with (
             mock.patch.object(resstock, "_try_download", side_effect=always_404),
-            mock.patch.object(resstock.time, "sleep") as sleep,
+            mock.patch.object(resstock, "_wait_before_retry") as pause,
             pytest.raises(_FakeHTTPStatusError),
         ):
             resstock._download_file("https://oedi/out.zip", dest)
 
         assert len(attempts) == 1  # 404 is permanent — no retry
-        assert sleep.call_count == 0
+        assert pause.call_count == 0
         assert not dest.exists()
-
-    def test_async_download_retries_then_succeeds(self, tmp_path: Path):
-        """The async path retries a transient 503 and extracts on success."""
-        import asyncio
-
-        from ochre_next.data import resstock
-
-        zip_bytes = _make_zip()
-        cfg = resstock._version_config("2024.2")
-        bldg_dir = tmp_path / "bldg0000001"
-        client = _FakeAsyncClient(
-            [
-                _FakeAsyncResponse(status_error=_FakeHTTPStatusError(503)),
-                _FakeAsyncResponse(status_error=_FakeHTTPStatusError(503)),
-                _FakeAsyncResponse(content=zip_bytes),
-            ]
-        )
-
-        with mock.patch.object(
-            resstock.asyncio, "sleep", new_callable=mock.AsyncMock
-        ) as sleep:
-            asyncio.run(resstock._download_building_async(client, cfg, 1, 0, bldg_dir))
-
-        assert (bldg_dir / "home.xml").exists()
-        assert (bldg_dir / "in.schedules.csv").exists()
-        assert client.get_calls == 3
-        assert sleep.await_count == 2
-
-    def test_async_download_no_retry_on_404(self, tmp_path: Path):
-        """The async path fails fast on a permanent 404."""
-        import asyncio
-
-        from ochre_next.data import resstock
-
-        cfg = resstock._version_config("2024.2")
-        bldg_dir = tmp_path / "bldg0000001"
-        client = _FakeAsyncClient(
-            [
-                _FakeAsyncResponse(status_error=_FakeHTTPStatusError(404)),
-            ]
-        )
-
-        with (
-            mock.patch.object(
-                resstock.asyncio, "sleep", new_callable=mock.AsyncMock
-            ) as sleep,
-            pytest.raises(_FakeHTTPStatusError),
-        ):
-            asyncio.run(resstock._download_building_async(client, cfg, 1, 0, bldg_dir))
-
-        assert client.get_calls == 1
-        assert sleep.await_count == 0
-
 
 class TestFleetResilience:
     def _metadata_file(self, tmp_path: Path, bldg_ids: list[int], **kwargs) -> Path:
@@ -1045,12 +1258,7 @@ class TestFleetResilience:
         return p
 
     def test_fleet_download_continues_after_building_failure(self, tmp_path: Path):
-        """One failed building is skipped; the rest of the fleet is returned.
-
-        Forces the httpx-absent synchronous fallback so the behaviour is
-        deterministic regardless of whether the optional httpx dependency is
-        installed in the test environment.
-        """
+        """One failed building is skipped; the rest of the fleet is returned in order."""
         from ochre_next.data import resstock
 
         meta = self._metadata_file(tmp_path, [1, 2, 3])
@@ -1061,73 +1269,125 @@ class TestFleetResilience:
                 raise ConnectionError("network down for bldg 2")
             return good(bldg_id, **kwargs)
 
-        with (
-            mock.patch.dict(sys.modules, {"httpx": None, "boto3": None}),
-            mock.patch.object(resstock, "fetch_resstock_building", side_effect=flaky),
-        ):
+        with mock.patch.object(resstock, "fetch_resstock_building", side_effect=flaky):
             results = resstock.fetch_resstock_fleet(
                 meta,
                 bldg_ids=[1, 2, 3],
                 cache_dir=tmp_path,
             )
 
-        returned_ids = {r.bldg_id for r in results}
-        assert returned_ids == {1, 3}
+        assert [r.bldg_id for r in results] == [1, 3]
 
-    def test_fleet_async_download_continues_after_building_failure(
-        self, tmp_path: Path
-    ):
-        """The async gather tolerates one building's exhausted-retry failure."""
-        import asyncio
-        import types
+    def test_fleet_returns_request_order_when_buildings_finish_out_of_order(self, tmp_path: Path):
+        """Building 1 finishes only after building 2; the result still starts with 1."""
+        import threading
 
         from ochre_next.data import resstock
 
-        cfg = resstock._version_config("2024.2")
+        meta = self._metadata_file(tmp_path, [1, 2, 3])
+        good = _fake_fleet_building(tmp_path)
+        second_done = threading.Event()
+        finished: list[int] = []
 
-        fake_httpx = types.ModuleType("httpx")
+        def out_of_order(bldg_id: int, **kwargs):
+            if bldg_id == 1:
+                second_done.wait()
+            building = good(bldg_id, **kwargs)
+            finished.append(bldg_id)
+            if bldg_id == 2:
+                second_done.set()
+            return building
 
-        class _FakeAC:
-            def __init__(self, **kwargs) -> None:
-                pass
+        with mock.patch.object(resstock, "fetch_resstock_building", side_effect=out_of_order):
+            results = resstock.fetch_resstock_fleet(meta, bldg_ids=[1, 2, 3], cache_dir=tmp_path)
 
-            async def __aenter__(self):
-                return self
+        assert finished.index(2) < finished.index(1)
+        assert [r.bldg_id for r in results] == [1, 2, 3]
 
-            async def __aexit__(self, *exc):
-                return False
+    def test_fleet_logs_what_failed_for_a_skipped_building(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        """A failure after the download is reported as itself, not as a download failure."""
+        from ochre_next.data import resstock
 
-        fake_httpx.AsyncClient = _FakeAC  # type: ignore[attr-defined]
+        meta = self._metadata_file(tmp_path, [1, 2])
+        good = _fake_fleet_building(tmp_path)
 
-        async def fake_download(client, cfg_, bid, upgrade, bdir, **kwargs) -> None:
-            if bid == 2:
-                raise ConnectionError("boom for bldg 2")
-            bdir.mkdir(parents=True, exist_ok=True)
-            (bdir / "home.xml").write_text(_minimal_hpxml("G0800130"))
-            (bdir / "in.schedules.csv").write_text("hour,val\n0,1\n")
+        def weather_fails(bldg_id: int, **kwargs):
+            if bldg_id == 2:
+                raise ValueError("climate zone 2A does not occur in CO")
+            return good(bldg_id, **kwargs)
 
         with (
-            mock.patch.dict(sys.modules, {"httpx": fake_httpx}),
-            mock.patch.object(
-                resstock, "_download_building_async", side_effect=fake_download
-            ),
-            mock.patch.object(
-                resstock, "_fetch_weather", return_value=tmp_path / "w.csv"
-            ),
+            mock.patch.object(resstock, "fetch_resstock_building", side_effect=weather_fails),
+            caplog.at_level("ERROR", logger="ochre_next.data.resstock"),
         ):
-            results = asyncio.run(
-                resstock._fetch_fleet_async(
-                    [1, 2, 3],
-                    cfg,
-                    "2024.2",
-                    tmp_path,
-                    0,
-                    {1: 1.0, 2: 1.0, 3: 1.0},
-                )
-            )
+            resstock.fetch_resstock_fleet(meta, bldg_ids=[1, 2], cache_dir=tmp_path)
 
-        returned_ids = {r.bldg_id for r in results}
-        assert returned_ids == {1, 3}
+        (message,) = [r.getMessage() for r in caplog.records]
+        assert message == (
+            "ResStock building 2 skipped: ValueError: climate zone 2A does not occur in CO"
+        )
+
+    def test_an_unknown_version_is_refused_before_any_building_is_fetched(self, tmp_path: Path):
+        """A mistyped dataset version fails the fetch instead of skipping every building."""
+        from ochre_next.data import resstock
+
+        meta = self._metadata_file(tmp_path, [1, 2, 3])
+
+        with (
+            mock.patch.object(resstock, "fetch_resstock_building") as fetch,
+            pytest.raises(ValueError, match="Unknown ResStock version '2024.99'"),
+        ):
+            resstock.fetch_resstock_fleet(meta, bldg_ids=[1, 2, 3], version="2024.99", cache_dir=tmp_path)
+
+        fetch.assert_not_called()
+
+    def test_ctrl_c_stops_a_fleet_with_downloads_in_flight(self, tmp_path: Path):
+        """SIGINT ends the fetch at once: in-flight downloads are cut, queued ones never start."""
+        import signal
+        import subprocess
+
+        meta = self._metadata_file(tmp_path, [1, 2, 3, 4])
+        with _StallingServer() as server:
+            child = subprocess.Popen(
+                [sys.executable, "-c", _FLEET_OF_FOUR_ON_TWO_WORKERS, str(server.port), str(meta), str(tmp_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert server.wait_for_requests(2), "both workers should be downloading"
+                child.send_signal(signal.SIGINT)
+                # The bound only turns a hang into a failure: a fleet that
+                # waited for its stalled downloads would never exit.
+                _, stderr = child.communicate(timeout=60)
+            finally:
+                child.kill()
+                child.wait()
+
+        assert child.returncode == -signal.SIGINT, stderr
+        assert "KeyboardInterrupt" in stderr
+        assert len(server.paths) == 2, f"queued or retried downloads were started: {server.paths}"
+
+
+class TestWeatherLock:
+    def test_weather_cache_work_runs_under_the_fleet_weather_lock(self, tmp_path: Path):
+        """Concurrent buildings share weather caches, so their cache work is serialised."""
+        from ochre_next.data import resstock
+
+        hpxml = tmp_path / "home.xml"
+        hpxml.write_text(_minimal_hpxml("G0800130"))
+        held: list[bool] = []
+
+        def record_lock(*args, **kwargs):
+            held.append(resstock._WEATHER_LOCK.locked())
+            return tmp_path / "w.epw"
+
+        with mock.patch.object(resstock, "_fetch_weather_for_station", side_effect=record_lock):
+            resstock._fetch_weather(resstock._version_config("2024.2"), hpxml, tmp_path, "2024.2")
+
+        assert held == [True]
 
 
 # ---------------------------------------------------------------------------
@@ -1204,7 +1464,7 @@ class TestZipIntegrity:
             mock.patch(
                 "ochre_next.data.resstock._download_file", side_effect=flaky_download
             ),
-            mock.patch("ochre_next.data.resstock.time.sleep"),
+            mock.patch("ochre_next.data.resstock._wait_before_retry"),
         ):
             from ochre_next.data.resstock import _download_and_extract_zip
 
@@ -1212,48 +1472,6 @@ class TestZipIntegrity:
 
         assert (dest_dir / "home.xml").exists()
         assert call_count[0] == 2
-
-    def test_async_download_retries_on_corrupt_zip(self, tmp_path: Path):
-        """_download_building_async retries on ZIP corruption."""
-        import asyncio
-
-        from ochre_next.data import resstock
-
-        zip_bytes = _make_zip()
-        cfg = resstock._version_config("2024.2")
-        bldg_dir = tmp_path / "bldg0000001"
-        truncated = zip_bytes[: len(zip_bytes) // 2]
-
-        # Return truncated data first, then valid ZIP
-        call_count = [0]
-
-        async def flaky_download(client, url, *, max_attempts=3):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return truncated
-            return zip_bytes
-
-        with (
-            mock.patch.object(
-                resstock, "_download_bytes_async", side_effect=flaky_download
-            ),
-            mock.patch.object(
-                resstock.asyncio, "sleep", new_callable=mock.AsyncMock
-            ) as sleep_mock,
-        ):
-            asyncio.run(
-                resstock._download_building_async(
-                    None,
-                    cfg,
-                    1,
-                    0,
-                    bldg_dir,  # client unused when _download_bytes_async is mocked
-                )
-            )
-
-        assert (bldg_dir / "home.xml").exists()
-        assert call_count[0] == 2
-        assert sleep_mock.await_count >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -1268,7 +1486,9 @@ class TestSha256Sidecar:
             compute_sha256_hex,
             sha256_path,
         )
-        from ochre_next.data.resstock import _validate_cache_integrity
+        from ochre_next.data._checksum import (
+            validate_cache_integrity as _validate_cache_integrity,
+        )
 
         f = tmp_path / "data.csv"
         f.write_text("col1,col2\n1.0,2.0\n")
@@ -1280,7 +1500,9 @@ class TestSha256Sidecar:
     def test_sidecar_hash_mismatch(self, tmp_path: Path):
         """_validate_cache_integrity returns False when sidecar mismatches."""
         from ochre_next.data._checksum import sha256_path
-        from ochre_next.data.resstock import _validate_cache_integrity
+        from ochre_next.data._checksum import (
+            validate_cache_integrity as _validate_cache_integrity,
+        )
 
         f = tmp_path / "data.csv"
         f.write_text("col1,col2\n1.0,2.0\n")
@@ -1290,7 +1512,9 @@ class TestSha256Sidecar:
 
     def test_no_sidecar_returns_true(self, tmp_path: Path):
         """_validate_cache_integrity returns True when no sidecar exists."""
-        from ochre_next.data.resstock import _validate_cache_integrity
+        from ochre_next.data._checksum import (
+            validate_cache_integrity as _validate_cache_integrity,
+        )
 
         f = tmp_path / "data.csv"
         f.write_text("col1,col2\n1.0,2.0\n")
@@ -1299,8 +1523,10 @@ class TestSha256Sidecar:
 
     def test_remove_cache_with_sidecar(self, tmp_path: Path):
         """_remove_cache_with_sidecar deletes both file and sidecar."""
+        from ochre_next.data._checksum import (
+            remove_cache_with_sidecar as _remove_cache_with_sidecar,
+        )
         from ochre_next.data._checksum import sha256_path
-        from ochre_next.data.resstock import _remove_cache_with_sidecar
 
         f = tmp_path / "data.csv"
         f.write_text("data")
@@ -1320,7 +1546,9 @@ class TestSha256Sidecar:
 class TestWeatherCacheIntegrity:
     def test_csv_cache_reused_when_sidecar_matches(self, tmp_path: Path):
         """Weather CSV with valid sidecar is reused without re-download."""
-        from ochre_next.data.resstock import _write_sha256_sidecar
+        from ochre_next.data._checksum import (
+            write_sha256_sidecar as _write_sha256_sidecar,
+        )
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text(_minimal_hpxml("G0800130"))
@@ -1400,7 +1628,9 @@ class TestWeatherCacheIntegrity:
             )
 
         assert len(download_calls) == 1
-        from ochre_next.data.resstock import _validate_cache_integrity
+        from ochre_next.data._checksum import (
+            validate_cache_integrity as _validate_cache_integrity,
+        )
 
         assert _validate_cache_integrity(weather_dest) is True
 
@@ -1505,7 +1735,7 @@ class TestWeatherEpwIntegrity:
             mock.patch.object(
                 weather, "_download_large_file", side_effect=flaky_download
             ),
-            mock.patch.object(weather.time, "sleep"),
+            mock.patch("time.sleep"),
         ):
             weather._ensure_tmy3_zip_extracted(epw_dir, tmp_path)
 

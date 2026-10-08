@@ -6,9 +6,10 @@ use crate::constants::{
     SEA_LEVEL_PRESSURE_PA,
 };
 use crate::units::*;
+use hares_types::HaresError;
 use uom::si::length::meter;
 
-/// ISA standard pressure at altitude [Pa].
+/// ISA standard pressure at altitude (Pa).
 pub fn standard_pressure_pa(elevation_m: f64) -> f64 {
     SEA_LEVEL_PRESSURE_PA * (1.0 - ISA_LAPSE_COEFFICIENT * elevation_m).powf(ISA_PRESSURE_EXPONENT)
 }
@@ -58,18 +59,21 @@ pub fn dry_air_density(p: Pressure, t: Temperature) -> f64 {
 /// Values outside this range indicate either a unit error (Pa vs kPa) or corrupted
 /// weather data.
 ///
-/// Gated behind `debug_assertions` or `check_invariants` feature to avoid per-timestep
-/// overhead in production release builds.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub fn check_air_density_plausible(rho: f64, context: &str) {
-    assert!(
-        rho.is_finite(),
-        "air density is non-finite: {rho} at {context}"
-    );
-    assert!(
-        (0.6..=1.6).contains(&rho),
-        "air density {rho:.5} kg/m³ out of plausible range [0.6, 1.6] at {context}"
-    );
+/// Unconditional in every build profile: non-finite density from bad weather
+/// pressure or temperature is the reachable case, and a panic on the run path
+/// would take the whole process down instead of failing the run.
+pub fn check_air_density_plausible(rho: f64, context: &str) -> Result<(), HaresError> {
+    if !rho.is_finite() {
+        return Err(HaresError::Physics(format!(
+            "air density is non-finite: {rho} at {context}"
+        )));
+    }
+    if !(0.6..=1.6).contains(&rho) {
+        return Err(HaresError::Physics(format!(
+            "air density {rho:.5} kg/m³ out of plausible range [0.6, 1.6] at {context}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -214,25 +218,31 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn invariant_check_accepts_plausible_density() {
-        check_air_density_plausible(1.2041, "sea level 20°C");
-        check_air_density_plausible(0.99, "Denver 20°C");
-        check_air_density_plausible(1.30, "cold day");
-        check_air_density_plausible(0.73, "La Paz 4000m");
+        check_air_density_plausible(1.2041, "sea level 20°C").unwrap();
+        check_air_density_plausible(0.99, "Denver 20°C").unwrap();
+        check_air_density_plausible(1.30, "cold day").unwrap();
+        check_air_density_plausible(0.73, "La Paz 4000m").unwrap();
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    #[should_panic(expected = "out of plausible range")]
     fn invariant_check_rejects_too_low_density() {
-        check_air_density_plausible(0.5, "too low");
+        let result = check_air_density_plausible(0.5, "too low");
+        assert!(result.is_err(), "0.5 kg/m³ is below the plausible range");
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    #[should_panic(expected = "out of plausible range")]
     fn invariant_check_rejects_too_high_density() {
-        check_air_density_plausible(2.0, "too high");
+        let result = check_air_density_plausible(2.0, "too high");
+        assert!(result.is_err(), "2.0 kg/m³ is above the plausible range");
+    }
+
+    #[test]
+    fn invariant_check_rejects_non_finite_density() {
+        let result = check_air_density_plausible(f64::NAN, "NaN from bad weather input");
+        assert!(
+            result.is_err(),
+            "a non-finite density must be a typed error in every build profile"
+        );
     }
 }

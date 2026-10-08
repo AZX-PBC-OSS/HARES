@@ -7,10 +7,8 @@ license.workspace = true
 
 [features]
 profiling = []
-actor_profiling = []
 observe = ["hares-types/observe", "hares-io/observe", "hares-equipment/observe", "hares-envelope/observe", "hares-physics/observe", "hares-tariff/observe"]
 observe_detailed = ["observe", "hares-envelope/observe_detailed"]
-check_invariants = ["hares-io/check_invariants", "hares-equipment/check_invariants", "hares-envelope/check_invariants", "hares-tariff/check_invariants", "hares-physics/check_invariants"]
 dst = []
 
 [dependencies]
@@ -44,8 +42,9 @@ hares-fleet = { workspace = true }
 rayon = { workspace = true }
 tempfile = { workspace = true }
 libc = "0.2"
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "3", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+serde-reflection = "0.6.0"
 
 [[test]]
 name = "regression"
@@ -62,6 +61,10 @@ path = "../../tests/bestest/mod.rs"
 [[test]]
 name = "conditioned_oracle"
 path = "../../tests/conditioned_oracle.rs"
+
+[[test]]
+name = "conditioned_basement"
+path = "../../tests/conditioned_basement.rs"
 
 [[test]]
 name = "freefloat_oracle"

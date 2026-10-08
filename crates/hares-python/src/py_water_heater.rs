@@ -18,6 +18,7 @@ use crate::utils::{insert_opt, make_spec};
 // ---------------------------------------------------------------------------
 
 /// Gas-fired storage water heater. Supports autosizing when `autosize=True`.
+/// `zone_id` (keyword, required) is the zone the heater stands in.
 #[pyclass(name = "GasWaterHeater", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyGasWaterHeater {
@@ -34,7 +35,7 @@ pub struct PyGasWaterHeater {
     #[pyo3(get)]
     pub setpoint_c: Option<f64>,
     #[pyo3(get)]
-    pub zone_id: Option<u16>,
+    pub zone_id: u16,
     #[pyo3(get)]
     pub avg_water_draw_l_per_day: Option<f64>,
     #[pyo3(get)]
@@ -44,7 +45,7 @@ pub struct PyGasWaterHeater {
 #[pymethods]
 impl PyGasWaterHeater {
     #[new]
-    #[pyo3(signature = (name, autosize=true, tank_volume_m3=None, uniform_energy_factor=None, heating_capacity_w=None, setpoint_c=None, zone_id=None, avg_water_draw_l_per_day=None, oversizing_factor=None))]
+    #[pyo3(signature = (name, autosize=true, tank_volume_m3=None, uniform_energy_factor=None, heating_capacity_w=None, setpoint_c=None, *, zone_id, avg_water_draw_l_per_day=None, oversizing_factor=None))]
     // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -54,7 +55,7 @@ impl PyGasWaterHeater {
         uniform_energy_factor: Option<f64>,
         heating_capacity_w: Option<f64>,
         setpoint_c: Option<f64>,
-        zone_id: Option<u16>,
+        zone_id: u16,
         avg_water_draw_l_per_day: Option<f64>,
         oversizing_factor: Option<f64>,
     ) -> PyResult<Self> {
@@ -63,12 +64,12 @@ impl PyGasWaterHeater {
                 "GasWaterHeater: both tank_volume_m3 and heating_capacity_w are required when autosize=False",
             ));
         }
-        if let Some(v) = tank_volume_m3 {
-            if v <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "GasWaterHeater: tank_volume_m3 must be positive",
-                ));
-            }
+        if let Some(v) = tank_volume_m3
+            && v <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "GasWaterHeater: tank_volume_m3 must be positive",
+            ));
         }
         Ok(Self {
             name,
@@ -106,23 +107,31 @@ pub fn gas_wh_spec_from_py(wh: &PyGasWaterHeater) -> PyResult<EquipmentSpec> {
     );
     insert_opt(&mut params, "heating_capacity_w", wh.heating_capacity_w);
     insert_opt(&mut params, "setpoint_c", wh.setpoint_c);
-    insert_opt(&mut params, "zone_id", wh.zone_id);
+    params.insert("zone_id".into(), json!(wh.zone_id));
     insert_opt(
         &mut params,
         "avg_water_draw_l_per_day",
         wh.avg_water_draw_l_per_day,
     );
-    if wh.autosize {
-        if let Some(v) = wh.oversizing_factor {
-            params.insert("autosize_water_heater_factor".into(), json!(v));
-        }
+    if wh.autosize
+        && let Some(v) = wh.oversizing_factor
+    {
+        params.insert("autosize_water_heater_factor".into(), json!(v));
     }
 
     let typed_config = if wh.autosize {
         None
     } else {
-        let volume = Some(wh.tank_volume_m3.unwrap_or(0.19));
-        let capacity = Some(wh.heating_capacity_w.unwrap_or(4500.0));
+        // The constructor rejected a non-autosized gas water heater without
+        // both values, so they are present here; no fallback exists.
+        let volume = Some(
+            wh.tank_volume_m3
+                .expect("constructor checked tank_volume_m3"),
+        );
+        let capacity = Some(
+            wh.heating_capacity_w
+                .expect("constructor checked heating_capacity_w"),
+        );
         let cfg = GasWaterHeaterConfig {
             fan_power_w: None,
             fuel_type: FuelType::Gas,
@@ -130,7 +139,7 @@ pub fn gas_wh_spec_from_py(wh: &PyGasWaterHeater) -> PyResult<EquipmentSpec> {
             uniform_energy_factor: wh.uniform_energy_factor,
             heating_capacity_w: capacity,
             setpoint_c: wh.setpoint_c,
-            zone_id: wh.zone_id,
+            zone_id: Some(wh.zone_id),
             avg_water_draw_l_per_day: wh.avg_water_draw_l_per_day,
             equipment_id: None,
             loop_id: None,
@@ -177,6 +186,7 @@ pub fn gas_wh_spec_from_py(wh: &PyGasWaterHeater) -> PyResult<EquipmentSpec> {
 // ---------------------------------------------------------------------------
 
 /// Electric resistance storage water heater. Supports autosizing when `autosize=True`.
+/// `zone_id` (keyword, required) is the zone the heater stands in.
 #[pyclass(name = "ElectricResistanceWH", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyElectricResistanceWH {
@@ -193,7 +203,7 @@ pub struct PyElectricResistanceWH {
     #[pyo3(get)]
     pub setpoint_c: Option<f64>,
     #[pyo3(get)]
-    pub zone_id: Option<u16>,
+    pub zone_id: u16,
     #[pyo3(get)]
     pub avg_water_draw_l_per_day: Option<f64>,
     #[pyo3(get)]
@@ -203,7 +213,7 @@ pub struct PyElectricResistanceWH {
 #[pymethods]
 impl PyElectricResistanceWH {
     #[new]
-    #[pyo3(signature = (name, autosize=true, tank_volume_m3=None, uniform_energy_factor=None, heating_capacity_w=None, setpoint_c=None, zone_id=None, avg_water_draw_l_per_day=None, oversizing_factor=None))]
+    #[pyo3(signature = (name, autosize=true, tank_volume_m3=None, uniform_energy_factor=None, heating_capacity_w=None, setpoint_c=None, *, zone_id, avg_water_draw_l_per_day=None, oversizing_factor=None))]
     // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -213,7 +223,7 @@ impl PyElectricResistanceWH {
         uniform_energy_factor: Option<f64>,
         heating_capacity_w: Option<f64>,
         setpoint_c: Option<f64>,
-        zone_id: Option<u16>,
+        zone_id: u16,
         avg_water_draw_l_per_day: Option<f64>,
         oversizing_factor: Option<f64>,
     ) -> PyResult<Self> {
@@ -222,12 +232,12 @@ impl PyElectricResistanceWH {
                 "ElectricResistanceWH: both tank_volume_m3 and heating_capacity_w are required when autosize=False",
             ));
         }
-        if let Some(v) = tank_volume_m3 {
-            if v <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "ElectricResistanceWH: tank_volume_m3 must be positive",
-                ));
-            }
+        if let Some(v) = tank_volume_m3
+            && v <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "ElectricResistanceWH: tank_volume_m3 must be positive",
+            ));
         }
         Ok(Self {
             name,
@@ -264,29 +274,38 @@ pub fn elec_res_wh_spec_from_py(wh: &PyElectricResistanceWH) -> PyResult<Equipme
     );
     insert_opt(&mut params, "heating_capacity_w", wh.heating_capacity_w);
     insert_opt(&mut params, "setpoint_c", wh.setpoint_c);
-    insert_opt(&mut params, "zone_id", wh.zone_id);
+    params.insert("zone_id".into(), json!(wh.zone_id));
     insert_opt(
         &mut params,
         "avg_water_draw_l_per_day",
         wh.avg_water_draw_l_per_day,
     );
-    if wh.autosize {
-        if let Some(v) = wh.oversizing_factor {
-            params.insert("autosize_water_heater_factor".into(), json!(v));
-        }
+    if wh.autosize
+        && let Some(v) = wh.oversizing_factor
+    {
+        params.insert("autosize_water_heater_factor".into(), json!(v));
     }
 
     let typed_config = if wh.autosize {
         None
     } else {
-        let volume = Some(wh.tank_volume_m3.unwrap_or(0.19));
-        let capacity = Some(wh.heating_capacity_w.unwrap_or(4500.0));
+        // The constructor rejected a non-autosized electric-resistance water
+        // heater without both values, so they are present here; no fallback
+        // exists.
+        let volume = Some(
+            wh.tank_volume_m3
+                .expect("constructor checked tank_volume_m3"),
+        );
+        let capacity = Some(
+            wh.heating_capacity_w
+                .expect("constructor checked heating_capacity_w"),
+        );
         let cfg = ElectricResistanceWaterHeaterConfig {
             tank_volume_m3: volume,
             uniform_energy_factor: wh.uniform_energy_factor,
             heating_capacity_w: capacity,
             setpoint_c: wh.setpoint_c,
-            zone_id: wh.zone_id,
+            zone_id: Some(wh.zone_id),
             avg_water_draw_l_per_day: wh.avg_water_draw_l_per_day,
             equipment_id: None,
             loop_id: None,
@@ -335,6 +354,8 @@ pub fn elec_res_wh_spec_from_py(wh: &PyElectricResistanceWH) -> PyResult<Equipme
 // ---------------------------------------------------------------------------
 
 /// Heat pump water heater with electric backup. Supports autosizing when `autosize=True`.
+/// `zone_id` (keyword, required) is the zone the heater stands in and draws
+/// its evaporator air from.
 #[pyclass(name = "HeatPumpWH", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyHeatPumpWH {
@@ -353,7 +374,7 @@ pub struct PyHeatPumpWH {
     #[pyo3(get)]
     pub setpoint_c: Option<f64>,
     #[pyo3(get)]
-    pub zone_id: Option<u16>,
+    pub zone_id: u16,
     #[pyo3(get)]
     pub avg_water_draw_l_per_day: Option<f64>,
     #[pyo3(get)]
@@ -363,7 +384,7 @@ pub struct PyHeatPumpWH {
 #[pymethods]
 impl PyHeatPumpWH {
     #[new]
-    #[pyo3(signature = (name, autosize=true, tank_volume_m3=None, cop=None, backup_capacity_w=None, compressor_power_w=None, setpoint_c=None, zone_id=None, avg_water_draw_l_per_day=None, oversizing_factor=None))]
+    #[pyo3(signature = (name, autosize=true, tank_volume_m3=None, cop=None, backup_capacity_w=None, compressor_power_w=None, setpoint_c=None, *, zone_id, avg_water_draw_l_per_day=None, oversizing_factor=None))]
     // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -374,7 +395,7 @@ impl PyHeatPumpWH {
         backup_capacity_w: Option<f64>,
         compressor_power_w: Option<f64>,
         setpoint_c: Option<f64>,
-        zone_id: Option<u16>,
+        zone_id: u16,
         avg_water_draw_l_per_day: Option<f64>,
         oversizing_factor: Option<f64>,
     ) -> PyResult<Self> {
@@ -383,17 +404,17 @@ impl PyHeatPumpWH {
                 "HeatPumpWH: both tank_volume_m3 and backup_capacity_w are required when autosize=False",
             ));
         }
-        if let Some(v) = tank_volume_m3 {
-            if v <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "HeatPumpWH: tank_volume_m3 must be positive",
-                ));
-            }
+        if let Some(v) = tank_volume_m3
+            && v <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "HeatPumpWH: tank_volume_m3 must be positive",
+            ));
         }
-        if let Some(v) = cop {
-            if v <= 0.0 || !v.is_finite() {
-                return Err(PyValueError::new_err("HeatPumpWH: cop must be positive"));
-            }
+        if let Some(v) = cop
+            && (v <= 0.0 || !v.is_finite())
+        {
+            return Err(PyValueError::new_err("HeatPumpWH: cop must be positive"));
         }
         Ok(Self {
             name,
@@ -428,23 +449,32 @@ pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> PyResult<EquipmentSpec> {
     insert_opt(&mut params, "backup_element_power_w", wh.backup_capacity_w);
     insert_opt(&mut params, "compressor_power_w", wh.compressor_power_w);
     insert_opt(&mut params, "setpoint_c", wh.setpoint_c);
-    insert_opt(&mut params, "zone_id", wh.zone_id);
+    params.insert("zone_id".into(), json!(wh.zone_id));
     insert_opt(
         &mut params,
         "avg_water_draw_l_per_day",
         wh.avg_water_draw_l_per_day,
     );
-    if wh.autosize {
-        if let Some(v) = wh.oversizing_factor {
-            params.insert("autosize_water_heater_factor".into(), json!(v));
-        }
+    if wh.autosize
+        && let Some(v) = wh.oversizing_factor
+    {
+        params.insert("autosize_water_heater_factor".into(), json!(v));
     }
 
     let typed_config = if wh.autosize {
         None
     } else {
-        let volume = Some(wh.tank_volume_m3.unwrap_or(0.19));
-        let backup = Some(wh.backup_capacity_w.unwrap_or(4500.0));
+        // The constructor rejected a non-autosized heat pump water heater
+        // without tank_volume_m3 and backup_capacity_w, so they are present
+        // here; no fallback exists. The COP is genuinely optional.
+        let volume = Some(
+            wh.tank_volume_m3
+                .expect("constructor checked tank_volume_m3"),
+        );
+        let backup = Some(
+            wh.backup_capacity_w
+                .expect("constructor checked backup_capacity_w"),
+        );
         let cop = Some(wh.cop.unwrap_or(3.5));
         let cfg = HeatPumpWaterHeaterConfig {
             tank_volume_m3: volume,
@@ -452,7 +482,7 @@ pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> PyResult<EquipmentSpec> {
             backup_element_power_w: backup,
             compressor_power_w: wh.compressor_power_w,
             setpoint_c: wh.setpoint_c,
-            zone_id: wh.zone_id,
+            zone_id: Some(wh.zone_id),
             avg_water_draw_l_per_day: wh.avg_water_draw_l_per_day,
             equipment_id: None,
             loop_id: None,
@@ -508,6 +538,7 @@ pub fn hpwh_spec_from_py(wh: &PyHeatPumpWH) -> PyResult<EquipmentSpec> {
 // ---------------------------------------------------------------------------
 
 /// Tankless (on-demand) gas water heater. Supports autosizing when `autosize=True`.
+/// `zone_id` (keyword, required) is the zone the heater stands in.
 #[pyclass(name = "TanklessWaterHeater", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyTanklessWaterHeater {
@@ -522,7 +553,7 @@ pub struct PyTanklessWaterHeater {
     #[pyo3(get)]
     pub setpoint_c: Option<f64>,
     #[pyo3(get)]
-    pub zone_id: Option<u16>,
+    pub zone_id: u16,
     #[pyo3(get)]
     pub avg_water_draw_l_per_day: Option<f64>,
     #[pyo3(get)]
@@ -532,7 +563,7 @@ pub struct PyTanklessWaterHeater {
 #[pymethods]
 impl PyTanklessWaterHeater {
     #[new]
-    #[pyo3(signature = (name, autosize=true, heating_capacity_w=None, uniform_energy_factor=None, setpoint_c=None, zone_id=None, avg_water_draw_l_per_day=None, oversizing_factor=None))]
+    #[pyo3(signature = (name, autosize=true, heating_capacity_w=None, uniform_energy_factor=None, setpoint_c=None, *, zone_id, avg_water_draw_l_per_day=None, oversizing_factor=None))]
     // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -541,7 +572,7 @@ impl PyTanklessWaterHeater {
         heating_capacity_w: Option<f64>,
         uniform_energy_factor: Option<f64>,
         setpoint_c: Option<f64>,
-        zone_id: Option<u16>,
+        zone_id: u16,
         avg_water_draw_l_per_day: Option<f64>,
         oversizing_factor: Option<f64>,
     ) -> PyResult<Self> {
@@ -550,12 +581,12 @@ impl PyTanklessWaterHeater {
                 "TanklessWaterHeater: heating_capacity_w is required when autosize=False",
             ));
         }
-        if let Some(v) = uniform_energy_factor {
-            if v <= 0.0 || v > 1.5 {
-                return Err(PyValueError::new_err(
-                    "TanklessWaterHeater: uniform_energy_factor must be between 0 and 1.5",
-                ));
-            }
+        if let Some(v) = uniform_energy_factor
+            && (v <= 0.0 || v > 1.5)
+        {
+            return Err(PyValueError::new_err(
+                "TanklessWaterHeater: uniform_energy_factor must be between 0 and 1.5",
+            ));
         }
         Ok(Self {
             name,
@@ -591,16 +622,16 @@ pub fn tankless_wh_spec_from_py(wh: &PyTanklessWaterHeater) -> PyResult<Equipmen
     );
     insert_opt(&mut params, "heating_capacity_w", wh.heating_capacity_w);
     insert_opt(&mut params, "setpoint_c", wh.setpoint_c);
-    insert_opt(&mut params, "zone_id", wh.zone_id);
+    params.insert("zone_id".into(), json!(wh.zone_id));
     insert_opt(
         &mut params,
         "avg_water_draw_l_per_day",
         wh.avg_water_draw_l_per_day,
     );
-    if wh.autosize {
-        if let Some(v) = wh.oversizing_factor {
-            params.insert("autosize_water_heater_factor".into(), json!(v));
-        }
+    if wh.autosize
+        && let Some(v) = wh.oversizing_factor
+    {
+        params.insert("autosize_water_heater_factor".into(), json!(v));
     }
 
     let typed_config = if wh.autosize {
@@ -611,7 +642,7 @@ pub fn tankless_wh_spec_from_py(wh: &PyTanklessWaterHeater) -> PyResult<Equipmen
             uniform_energy_factor: wh.uniform_energy_factor,
             heating_capacity_w: wh.heating_capacity_w,
             setpoint_c: wh.setpoint_c,
-            zone_id: wh.zone_id,
+            zone_id: Some(wh.zone_id),
             avg_water_draw_l_per_day: wh.avg_water_draw_l_per_day,
             equipment_id: None,
             loop_id: None,
@@ -646,6 +677,7 @@ pub fn tankless_wh_spec_from_py(wh: &PyTanklessWaterHeater) -> PyResult<Equipmen
 // ---------------------------------------------------------------------------
 
 /// Indirect storage tank heated by a boiler. Supports autosizing when `autosize=True`.
+/// `zone_id` (keyword, required) is the zone the tank stands in.
 #[pyclass(name = "IndirectTank", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyIndirectTank {
@@ -660,7 +692,7 @@ pub struct PyIndirectTank {
     #[pyo3(get)]
     pub setpoint_c: Option<f64>,
     #[pyo3(get)]
-    pub zone_id: Option<u16>,
+    pub zone_id: u16,
     #[pyo3(get)]
     pub boiler_loop_id: Option<u16>,
     #[pyo3(get)]
@@ -672,7 +704,7 @@ pub struct PyIndirectTank {
 #[pymethods]
 impl PyIndirectTank {
     #[new]
-    #[pyo3(signature = (name, autosize=true, tank_volume_m3=None, hx_ua_w_per_k=None, setpoint_c=None, zone_id=None, boiler_loop_id=None, avg_water_draw_l_per_day=None, oversizing_factor=None))]
+    #[pyo3(signature = (name, autosize=true, tank_volume_m3=None, hx_ua_w_per_k=None, setpoint_c=None, *, zone_id, boiler_loop_id=None, avg_water_draw_l_per_day=None, oversizing_factor=None))]
     // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -681,7 +713,7 @@ impl PyIndirectTank {
         tank_volume_m3: Option<f64>,
         hx_ua_w_per_k: Option<f64>,
         setpoint_c: Option<f64>,
-        zone_id: Option<u16>,
+        zone_id: u16,
         boiler_loop_id: Option<u16>,
         avg_water_draw_l_per_day: Option<f64>,
         oversizing_factor: Option<f64>,
@@ -691,12 +723,12 @@ impl PyIndirectTank {
                 "IndirectTank: tank_volume_m3 is required when autosize=False",
             ));
         }
-        if let Some(v) = tank_volume_m3 {
-            if v <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "IndirectTank: tank_volume_m3 must be positive",
-                ));
-            }
+        if let Some(v) = tank_volume_m3
+            && v <= 0.0
+        {
+            return Err(PyValueError::new_err(
+                "IndirectTank: tank_volume_m3 must be positive",
+            ));
         }
         Ok(Self {
             name,
@@ -728,17 +760,17 @@ pub fn indirect_tank_spec_from_py(it: &PyIndirectTank) -> PyResult<EquipmentSpec
     insert_opt(&mut params, "tank_volume_m3", it.tank_volume_m3);
     insert_opt(&mut params, "hx_ua_w_per_k", it.hx_ua_w_per_k);
     insert_opt(&mut params, "setpoint_c", it.setpoint_c);
-    insert_opt(&mut params, "zone_id", it.zone_id);
+    params.insert("zone_id".into(), json!(it.zone_id));
     insert_opt(&mut params, "boiler_loop_id", it.boiler_loop_id);
     insert_opt(
         &mut params,
         "avg_water_draw_l_per_day",
         it.avg_water_draw_l_per_day,
     );
-    if it.autosize {
-        if let Some(v) = it.oversizing_factor {
-            params.insert("autosize_water_heater_factor".into(), json!(v));
-        }
+    if it.autosize
+        && let Some(v) = it.oversizing_factor
+    {
+        params.insert("autosize_water_heater_factor".into(), json!(v));
     }
 
     let typed_config = if it.autosize {
@@ -748,7 +780,7 @@ pub fn indirect_tank_spec_from_py(it: &PyIndirectTank) -> PyResult<EquipmentSpec
             tank_volume_m3: it.tank_volume_m3,
             hx_ua_w_per_k: it.hx_ua_w_per_k,
             setpoint_c: it.setpoint_c,
-            zone_id: it.zone_id,
+            zone_id: Some(it.zone_id),
             boiler_loop_id: it.boiler_loop_id,
             avg_water_draw_l_per_day: it.avg_water_draw_l_per_day,
             equipment_id: None,

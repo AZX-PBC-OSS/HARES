@@ -22,7 +22,7 @@ pub enum ExtrapolationStrategy {
     /// Return NaN if any coordinate is out of bounds.
     NaN,
     /// Extrapolate linearly using the edge-segment slope.
-    /// Fractional positions outside [0,1] are allowed, producing weights <0 or >1.
+    /// Fractional positions outside `[0,1]` are allowed, producing weights <0 or >1.
     ///
     /// # Warning
     /// Linear extrapolation can produce physically nonsensical values (negative
@@ -298,17 +298,10 @@ impl RegularGridInterpolator {
     ///
     /// # Errors
     /// Returns `HaresError::Equipment` if `point.len() != self.ndim()`.
-    ///
-    /// In debug/check_invariants builds, panics if any coordinate is non-finite
-    /// (NaN or ±Inf).
-    /// In debug/check_invariants builds, panics if strategy is `NaN` and any
-    /// coordinate is out of bounds.
-    ///
-    /// # Returns
-    /// In release builds without `check_invariants`, returns `f32::NAN` as a
-    /// sentinel when any coordinate is non-finite, or when strategy is `NaN`
-    /// and any coordinate is out of bounds. Callers should treat NaN results
-    /// as an error signal.
+    /// Returns `HaresError::Equipment` when any coordinate is non-finite
+    /// (NaN or ±Inf), and when strategy is `NaN` and any coordinate is out
+    /// of bounds (naming the coordinate and its bounds): a NaN result
+    /// sentinel would be a silent value.
     pub fn interpolate(&mut self, point: &[f64]) -> crate::Result<f32> {
         if point.len() != self.ndim() {
             return Err(HaresError::Equipment(format!(
@@ -318,19 +311,14 @@ impl RegularGridInterpolator {
             )));
         }
 
-        // Guard against non-finite query coordinates. In debug/invariant builds
-        // the assertion fires first with a descriptive message; in optimized
-        // release builds the early return produces a detectable NaN poison value.
+        // Guard against non-finite query coordinates: a NaN query is a
+        // caller bug, and a NaN result would silently poison every
+        // downstream value.
         let all_finite = point.iter().all(|v| v.is_finite());
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        assert!(
-            all_finite,
-            "RegularGridInterpolator::interpolate: non-finite coordinate in query point {:?}",
-            point
-        );
-
         if !all_finite {
-            return Ok(f32::NAN);
+            return Err(HaresError::Equipment(format!(
+                "RegularGridInterpolator::interpolate: non-finite coordinate in query point {point:?}"
+            )));
         }
 
         let ndim = self.axes.len();
@@ -356,19 +344,12 @@ impl RegularGridInterpolator {
                     {
                         self.oob_count.fetch_add(1, Ordering::Relaxed);
                     }
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        panic!(
-                            "RegularGridInterpolator: NaN strategy: coord[{dim}] = {x} \
-                             is out of bounds [{}, {}]",
-                            axis[0],
-                            axis[axis.len() - 1]
-                        );
-                    }
-                    #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-                    {
-                        return Ok(f32::NAN);
-                    }
+                    return Err(HaresError::Equipment(format!(
+                        "RegularGridInterpolator: NaN strategy: coord[{dim}] = {x} \
+                         is out of bounds [{}, {}]",
+                        axis[0],
+                        axis[axis.len() - 1]
+                    )));
                 }
             }
         }
@@ -451,25 +432,25 @@ impl RegularGridInterpolator {
 
         // Check fallback mask: warn once if any contributing corner cell was
         // produced by fallback extrapolation rather than direct solve.
-        if let Some(ref mask) = self.fallback_mask {
-            if !self.fallback_warned.load(Ordering::Relaxed) {
-                let any_fallback = (0..n_corners).any(|corner| {
-                    let mut flat_idx = 0usize;
-                    for (dim, lo) in lo_indices.iter().enumerate().take(ndim) {
-                        let bit = (corner >> dim) & 1;
-                        let idx = lo + bit as usize;
-                        let idx = idx.min(self.axes[dim].len() - 1);
-                        flat_idx += idx * self.strides[dim];
-                    }
-                    mask[flat_idx] != 0
-                });
-                if any_fallback {
-                    self.fallback_warned.store(true, Ordering::Relaxed);
-                    tracing::warn!(
-                        "Interpolating from charging-curve LUT cells that were filled by fallback \
-                         extrapolation; charge-rate limits may be conservative"
-                    );
+        if let Some(ref mask) = self.fallback_mask
+            && !self.fallback_warned.load(Ordering::Relaxed)
+        {
+            let any_fallback = (0..n_corners).any(|corner| {
+                let mut flat_idx = 0usize;
+                for (dim, lo) in lo_indices.iter().enumerate().take(ndim) {
+                    let bit = (corner >> dim) & 1;
+                    let idx = lo + bit as usize;
+                    let idx = idx.min(self.axes[dim].len() - 1);
+                    flat_idx += idx * self.strides[dim];
                 }
+                mask[flat_idx] != 0
+            });
+            if any_fallback {
+                self.fallback_warned.store(true, Ordering::Relaxed);
+                tracing::warn!(
+                    "Interpolating from charging-curve LUT cells that were filled by fallback \
+                         extrapolation; charge-rate limits may be conservative"
+                );
             }
         }
 
@@ -868,36 +849,24 @@ mod tests {
         assert!((interp.interpolate(&[0.5, 2.0]).unwrap() - 6.0).abs() < 1e-5);
     }
 
-    /// In debug/check_invariants builds, NaN strategy panics on OOB.
-    /// In release builds without check_invariants, it returns NaN.
+    /// NaN strategy on an out-of-bounds coordinate is a typed error in
+    /// every build naming the coordinate and its bounds.
     #[test]
-    #[cfg_attr(
-        any(debug_assertions, feature = "check_invariants"),
-        should_panic(expected = "NaN strategy")
-    )]
-    fn strategy_nan_fully_oob_returns_nan() {
+    fn strategy_nan_fully_oob_is_a_typed_error() {
         let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NaN);
-        let result = interp.interpolate(&[2.0, 2.0]).unwrap();
-        #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-        assert!(result.is_nan());
-        // In invariant builds the panic already asserted — disable the unused warning
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        let _ = result;
+        let err = interp
+            .interpolate(&[2.0, 2.0])
+            .expect_err("fully OOB NaN-strategy query must error");
+        assert!(err.to_string().contains("NaN strategy"), "got: {err}");
     }
 
-    /// In debug/check_invariants builds, NaN strategy panics on OOB.
     #[test]
-    #[cfg_attr(
-        any(debug_assertions, feature = "check_invariants"),
-        should_panic(expected = "NaN strategy")
-    )]
-    fn strategy_nan_mixed_oob_returns_nan() {
+    fn strategy_nan_mixed_oob_is_a_typed_error() {
         let mut interp = make_2d_grid_with_strategy(ExtrapolationStrategy::NaN);
-        let result = interp.interpolate(&[0.5, 2.0]).unwrap();
-        #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-        assert!(result.is_nan());
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        let _ = result;
+        let err = interp
+            .interpolate(&[0.5, 2.0])
+            .expect_err("partially OOB NaN-strategy query must error");
+        assert!(err.to_string().contains("NaN strategy"), "got: {err}");
     }
 
     #[test]
@@ -1150,75 +1119,62 @@ mod tests {
 
     // ── Non-finite query coordinate tests ───────────────────────────────
     //
-    // These tests use catch_unwind so the sentinel-return path (f32::NAN)
-    // is verified in every build configuration, not just the bare --release
-    // profile that has neither debug_assertions nor check_invariants active.
+    // A non-finite query coordinate is a typed error in every build
+    // profile: the NaN result sentinel is removed.
 
     #[test]
-    fn interpolate_returns_nan_for_nan_input() {
+    fn interpolate_rejects_nan_input() {
         let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 1.0]],
             vec![0.0, 10.0],
             ExtrapolationStrategy::Clamp,
         )
         .unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            interp.interpolate(&[f64::NAN]).unwrap()
-        }));
-        match result {
-            Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
-            Err(_) => { /* debug/check_invariants build — assert fired as expected */ }
-        }
+        let err = interp
+            .interpolate(&[f64::NAN])
+            .expect_err("non-finite coordinate must error");
+        assert!(err.to_string().contains("non-finite"), "got: {err}");
     }
 
     #[test]
-    fn interpolate_returns_nan_for_inf_input() {
+    fn interpolate_rejects_inf_input() {
         let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 1.0]],
             vec![0.0, 10.0],
             ExtrapolationStrategy::Clamp,
         )
         .unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            interp.interpolate(&[f64::INFINITY]).unwrap()
-        }));
-        match result {
-            Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
-            Err(_) => { /* debug/check_invariants build — assert fired as expected */ }
-        }
+        let err = interp
+            .interpolate(&[f64::INFINITY])
+            .expect_err("non-finite coordinate must error");
+        assert!(err.to_string().contains("non-finite"), "got: {err}");
     }
 
     #[test]
-    fn interpolate_returns_nan_for_neg_inf_input() {
+    fn interpolate_rejects_neg_inf_input() {
         let mut interp = RegularGridInterpolator::new(
             vec![vec![0.0, 1.0]],
             vec![0.0, 10.0],
             ExtrapolationStrategy::Clamp,
         )
         .unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            interp.interpolate(&[f64::NEG_INFINITY]).unwrap()
-        }));
-        match result {
-            Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
-            Err(_) => { /* debug/check_invariants build — assert fired as expected */ }
-        }
+        let err = interp
+            .interpolate(&[f64::NEG_INFINITY])
+            .expect_err("non-finite coordinate must error");
+        assert!(err.to_string().contains("non-finite"), "got: {err}");
     }
 
     #[test]
-    fn interpolate_returns_nan_for_mixed_finite_nan_input() {
+    fn interpolate_rejects_mixed_finite_nan_input() {
         let axes = vec![vec![0.0, 1.0], vec![0.0, 1.0], vec![0.0, 1.0]];
         let total: usize = axes.iter().map(|a| a.len()).product();
         let values = vec![0.5f32; total];
         let mut interp =
             RegularGridInterpolator::new(axes, values, ExtrapolationStrategy::Clamp).unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            interp.interpolate(&[0.5, f64::NAN, 0.5]).unwrap()
-        }));
-        match result {
-            Ok(val) => assert!(val.is_nan(), "sentinel NaN return for non-finite input"),
-            Err(_) => { /* debug/check_invariants build — assert fired as expected */ }
-        }
+        let err = interp
+            .interpolate(&[0.5, f64::NAN, 0.5])
+            .expect_err("non-finite coordinate must error");
+        assert!(err.to_string().contains("non-finite"), "got: {err}");
     }
 
     // ── Fallback mask tests ──────────────────────────────────────────────

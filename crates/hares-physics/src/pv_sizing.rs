@@ -474,27 +474,41 @@ fn resolve_azimuth(plane: &RoofPlane, wall_azimuths: &[f64]) -> f64 {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Optional site and equipment tuning shared by [`compute_usable_area`] and
+/// [`enumerate_pv_candidates`]. `None` options fall back to module defaults.
+#[derive(Debug, Clone, Copy)]
+pub struct PvRoofTuning<'a> {
+    /// Fallback orientations when roof planes lack an explicit azimuth.
+    pub wall_azimuths: &'a [f64],
+    /// Decimal degrees; enables latitude-dependent scoring and flat-roof tilt
+    /// selection.
+    pub latitude: Option<f64>,
+    /// Panel wattage override (`None` → `DEFAULT_PANEL_WATTS`).
+    pub panel_watts: Option<u32>,
+    /// Panel area override in m² (`None` → `DEFAULT_PANEL_AREA_M2`).
+    pub panel_area_m2: Option<f64>,
+    /// Annual-average DHI/GHI ratio from weather data; when `None` the scoring
+    /// falls back to the NREL PVWatts Table 4 empirical model.
+    pub diffuse_fraction: Option<f64>,
+    /// Whether `roof_shape` came from explicit user input rather than
+    /// inference.
+    pub roof_shape_user_override: bool,
+}
+
 /// Compute the usable roof area and maximum PV capacity for a building.
-///
-/// `wall_azimuths` provides fallback orientation when roof planes lack an
-/// explicit azimuth. `latitude` enables latitude-dependent scoring and
-/// flat-roof tilt selection. `diffuse_fraction` is the annual-average
-/// DHI/GHI ratio from weather data; when `None` the scoring falls back to
-/// the NREL PVWatts Table 4 empirical model.
-// Why: the parameter count reflects the complete set of tunable PV sizing
-// inputs; constructing a builder/params type would add indirection for no
-// benefit at this call site.
-#[allow(clippy::too_many_arguments)]
 pub fn compute_usable_area(
     roof: &RoofInfo,
     roof_shape: RoofShape,
-    wall_azimuths: &[f64],
-    latitude: Option<f64>,
-    panel_watts: Option<u32>,
-    panel_area_m2: Option<f64>,
-    diffuse_fraction: Option<f64>,
-    roof_shape_user_override: bool,
+    tuning: PvRoofTuning<'_>,
 ) -> Result<UsableRoofArea, PvSizingError> {
+    let PvRoofTuning {
+        wall_azimuths,
+        latitude,
+        panel_watts,
+        panel_area_m2,
+        diffuse_fraction,
+        roof_shape_user_override,
+    } = tuning;
     let panel_watts = panel_watts.unwrap_or(DEFAULT_PANEL_WATTS);
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
 
@@ -508,21 +522,15 @@ pub fn compute_usable_area(
     // Invariant: panel physical parameters must be in valid ranges.
     // No residential panel exceeds ~3.5 m²; the 5.0 m² upper bound allows
     // for future large-format utility panels without being physically
-    // impossible.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            panel_watts > 0,
-            "panel_watts must be positive, got {panel_watts}"
-        );
-        assert!(
-            panel_area_m2 > 0.0,
-            "panel_area_m2 must be positive, got {panel_area_m2}"
-        );
-        assert!(
-            panel_area_m2 < 5.0,
-            "panel_area_m2 must be < 5.0 m² (no residential panel exceeds ~3.5 m²), got {panel_area_m2}"
-        );
+    // impossible. The values are user input, so a violation is a typed
+    // error in every build profile.
+    if panel_watts == 0 {
+        return Err(PvSizingError::InvalidPanelWatts { watts: panel_watts });
+    }
+    if !(panel_area_m2 > 0.0 && panel_area_m2 < 5.0) {
+        return Err(PvSizingError::InvalidPanelArea {
+            area_m2: panel_area_m2,
+        });
     }
 
     if roof.planes.is_empty() {
@@ -614,22 +622,13 @@ pub fn compute_usable_area(
 
     let lat = latitude.unwrap_or(35.0);
 
-    // Invariant: computed diffuse fraction must be physically valid.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    if let Some(kd) = diffuse_fraction {
-        assert!(
-            (0.0..=1.0).contains(&kd),
-            "computed diffuse fraction Kd={:.4} out of range [0, 1]",
-            kd
-        );
-        if !(0.10..=0.30).contains(&kd) {
-            tracing::warn!(
-                pv_diffuse_fraction = kd,
-                pv_latitude = lat,
-                "computed diffuse fraction Kd={:.4} outside expected continental-US range [0.10, 0.30]",
-                kd
-            );
-        }
+    // Invariant: computed diffuse fraction must be physically valid. The
+    // fraction is user/weather input, so out-of-range is a typed error in
+    // every build profile.
+    if let Some(kd) = diffuse_fraction
+        && !(0.0..=1.0).contains(&kd)
+    {
+        return Err(PvSizingError::InvalidDiffuseFraction { kd });
     }
 
     // Diagnostic: log the computed diffuse fraction when available.
@@ -640,87 +639,6 @@ pub fn compute_usable_area(
             "PV sizing using location-specific diffuse fraction Kd={:.4}",
             kd
         );
-    }
-
-    // Invariant: East-facing panels must not be worse than West-facing.
-    // Physical basis: afternoon ambient temperatures are higher than morning
-    // temperatures, reducing PV efficiency via negative temperature coefficient
-    // (typically -0.3% to -0.5%/°C). Lave & Kleissl (2010) find west-facing
-    // panels produce 1–3% less than east-facing annually at most US locations.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let east_factor = azimuth_production_factor(90.0, lat);
-        let west_factor = azimuth_production_factor(270.0, lat);
-        assert!(
-            east_factor >= west_factor,
-            "East production factor ({:.4}) must be >= West ({:.4}) — afternoon heat penalty",
-            east_factor,
-            west_factor
-        );
-    }
-
-    // Invariant: East/West factor must stay in physical range.
-    // The old model collapsed to DIFFUSE_FRAC (0.18) for east/west;
-    // a latitude-aware model must stay above 0.50 (diffuse + morning/afternoon
-    // direct beam) and below 0.95 (always less than south-facing).
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let east_factor = azimuth_production_factor(90.0, lat);
-        assert!(
-            east_factor > 0.5,
-            "East/West production factor ({:.4}) too low — must exceed 0.5 for lat={}",
-            east_factor,
-            lat
-        );
-        assert!(
-            east_factor < 0.95,
-            "East/West production factor ({:.4}) too close to south — must be < 0.95 for lat={}",
-            east_factor,
-            lat
-        );
-    }
-
-    // Invariant: flat-roof GCR monotonically decreases with increasing tilt
-    // (fixed latitude) and with increasing latitude (fixed tilt).
-    // Appelbaum & Bany (1979) Solar Energy 23(6):497-500.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        for test_lat in [25.0, 35.0, 50.0] {
-            for pair in [(5.0, 25.0), (5.0, 45.0), (25.0, 45.0)] {
-                let gcr_lo = flat_roof_gcr(Some(test_lat), pair.0);
-                let gcr_hi = flat_roof_gcr(Some(test_lat), pair.1);
-                assert!(
-                    gcr_lo >= gcr_hi,
-                    "GCR must not increase with tilt: lat={test_lat} tilt={},{} → GCR={gcr_lo:.4},{gcr_hi:.4}",
-                    pair.0,
-                    pair.1,
-                );
-            }
-        }
-        for test_tilt in [5.0, 25.0, 45.0] {
-            let gcr_lo = flat_roof_gcr(Some(25.0), test_tilt);
-            let gcr_hi = flat_roof_gcr(Some(50.0), test_tilt);
-            assert!(
-                gcr_lo >= gcr_hi,
-                "GCR must not increase with latitude: tilt={test_tilt} lat 25→50 gives {gcr_lo:.4},{gcr_hi:.4}",
-            );
-        }
-    }
-
-    // Invariant: GCR × usable_fraction must be in [0.15, 0.55] for flat roofs.
-    // Values outside indicate parameterization error.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    if roof_shape == RoofShape::Flat {
-        for test_lat in [10.0, 25.0, 35.0, 50.0] {
-            for test_tilt in [5.0, 15.0, 25.0, 45.0] {
-                let gcr = flat_roof_gcr(Some(test_lat), test_tilt);
-                let effective = gcr * FLAT_USABLE_FRACTION;
-                assert!(
-                    (0.15..=0.55).contains(&effective),
-                    "flat roof GCR×usable_fraction={effective:.4} out of [0.15, 0.55] range at lat={test_lat} tilt={test_tilt}"
-                );
-            }
-        }
     }
 
     // Select the best plane.
@@ -799,19 +717,6 @@ pub fn compute_usable_area(
                     "PV Hip aggregation per-plane telemetry"
                 );
             }
-        }
-
-        // Invariant: north-facing production factor decreases with latitude.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let low_lat_north = azimuth_production_factor(0.0, 25.0);
-            let high_lat_north = azimuth_production_factor(0.0, 48.0);
-            assert!(
-                low_lat_north > high_lat_north,
-                "north-facing production factor must decrease with latitude (25°N: {:.4}, 48°N: {:.4})",
-                low_lat_north,
-                high_lat_north
-            );
         }
 
         #[cfg(feature = "observe")]
@@ -917,6 +822,26 @@ pub fn compute_usable_area(
     })
 }
 
+/// Optional equipment and interconnection tuning for [`size_pv_system`].
+/// `None` options fall back to module defaults.
+#[derive(Debug, Clone, Copy)]
+pub struct PvSystemTuning {
+    /// System losses fraction 0–1 (`None` → `DEFAULT_SYSTEM_LOSSES`).
+    pub system_losses: Option<f64>,
+    /// Panel wattage override (`None` → `DEFAULT_PANEL_WATTS`).
+    pub panel_watts: Option<u32>,
+    /// Panel area override in m² (`None` → `DEFAULT_PANEL_AREA_M2`).
+    pub panel_area_m2: Option<f64>,
+    /// Inverter AC power rating for the DC-side clamp.
+    pub inverter_kw_ac: Option<f64>,
+    /// Maximum DC:AC oversizing ratio.
+    pub max_dc_ac_ratio: Option<f64>,
+    /// Main electrical panel ampacity (NEC 120% busbar backfeed rule).
+    pub main_panel_ampacity: Option<u32>,
+    /// Main breaker ampacity; `None` defaults to `main_panel_ampacity`.
+    pub main_breaker_ampacity: Option<u32>,
+}
+
 /// Size a PV system to a target capacity, clamped by roof constraints.
 ///
 /// When both `inverter_kw_ac` and `max_dc_ac_ratio` are provided, the DC-side
@@ -943,23 +868,22 @@ pub fn compute_usable_area(
 /// is `None` (overcurrent protection sized to busbar rating in typical
 /// residential installations). Callers may override via `main_breaker_ampacity`
 /// for non-typical configurations (e.g. 200 A panel with 150 A main breaker).
-// Why: the parameter count reflects the complete set of tunable PV sizing
-// inputs; constructing a builder/params type would add indirection for no
-// benefit at this call site.
-#[allow(clippy::too_many_arguments)]
 pub fn size_pv_system(
     usable: &UsableRoofArea,
     target_kw: f64,
     min_kw: f64,
     max_kw: f64,
-    system_losses: Option<f64>,
-    panel_watts: Option<u32>,
-    panel_area_m2: Option<f64>,
-    inverter_kw_ac: Option<f64>,
-    max_dc_ac_ratio: Option<f64>,
-    main_panel_ampacity: Option<u32>,
-    main_breaker_ampacity: Option<u32>,
+    tuning: PvSystemTuning,
 ) -> Result<PvSizingResult, PvSizingError> {
+    let PvSystemTuning {
+        system_losses,
+        panel_watts,
+        panel_area_m2,
+        inverter_kw_ac,
+        max_dc_ac_ratio,
+        main_panel_ampacity,
+        main_breaker_ampacity,
+    } = tuning;
     let panel_watts = panel_watts.unwrap_or(DEFAULT_PANEL_WATTS);
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
     let system_losses = system_losses.unwrap_or(DEFAULT_SYSTEM_LOSSES);
@@ -967,24 +891,18 @@ pub fn size_pv_system(
     // Invariant: panel physical parameters must be in valid ranges.
     // No residential panel exceeds ~3.5 m²; the 5.0 m² upper bound allows
     // for future large-format panels without being physically impossible.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            panel_watts > 0,
-            "panel_watts must be positive, got {panel_watts}"
-        );
-        assert!(
-            panel_area_m2 > 0.0,
-            "panel_area_m2 must be positive, got {panel_area_m2}"
-        );
-        assert!(
-            panel_area_m2 < 5.0,
-            "panel_area_m2 must be < 5.0 m² (no residential panel exceeds ~3.5 m²), got {panel_area_m2}"
-        );
-        assert!(
-            (0.0..=0.99).contains(&system_losses),
-            "system_losses must be in [0, 0.99], got {system_losses}"
-        );
+    // The values are user input, so a violation is a typed error in every
+    // build profile.
+    if panel_watts == 0 {
+        return Err(PvSizingError::InvalidPanelWatts { watts: panel_watts });
+    }
+    if !(panel_area_m2 > 0.0 && panel_area_m2 < 5.0) {
+        return Err(PvSizingError::InvalidPanelArea {
+            area_m2: panel_area_m2,
+        });
+    }
+    if !(0.0..=0.99).contains(&system_losses) {
+        return Err(PvSizingError::InvalidSystemLosses { system_losses });
     }
 
     if usable.max_capacity_kw < min_kw {
@@ -1056,7 +974,7 @@ pub fn size_pv_system(
             );
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             assert!(
                 max_ac_kw >= 0.0,
@@ -1092,12 +1010,8 @@ pub fn size_pv_system(
     let collector_area_m2 = (num_panels as f64) * panel_area_m2;
 
     // Invariant: computed capacity must be finite and non-negative.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            capacity_kw.is_finite() && capacity_kw >= 0.0,
-            "computed capacity kW must be finite and non-negative, got {capacity_kw}"
-        );
+    if !capacity_kw.is_finite() || capacity_kw < 0.0 {
+        return Err(PvSizingError::InvalidCapacity { capacity_kw });
     }
 
     #[cfg(feature = "observe")]
@@ -1189,20 +1103,19 @@ pub fn required_main_panel_ampacity(target_ac_kw: f64, main_breaker_amps: Option
 /// Returns `Err(PvSizingError::AllNorthFacing)` if the roof has planes but
 /// every one was filtered out for facing north; returns `Ok(vec![])` only
 /// when the roof genuinely has zero planes.
-// Why: the parameter count reflects the complete set of tunable PV sizing
-// inputs; constructing a builder/params type would add indirection for no
-// benefit at this call site.
-#[allow(clippy::too_many_arguments)]
 pub fn enumerate_pv_candidates(
     roof: &RoofInfo,
     roof_shape: RoofShape,
-    wall_azimuths: &[f64],
-    latitude: Option<f64>,
-    panel_watts: Option<u32>,
-    panel_area_m2: Option<f64>,
-    diffuse_fraction: Option<f64>,
-    roof_shape_user_override: bool,
+    tuning: PvRoofTuning<'_>,
 ) -> Result<Vec<PvCandidate>, PvSizingError> {
+    let PvRoofTuning {
+        wall_azimuths,
+        latitude,
+        panel_watts,
+        panel_area_m2,
+        diffuse_fraction,
+        roof_shape_user_override,
+    } = tuning;
     let panel_watts = panel_watts.unwrap_or(DEFAULT_PANEL_WATTS);
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
     let lat = latitude.unwrap_or(35.0);
@@ -1358,17 +1271,6 @@ pub fn enumerate_pv_candidates(
         return Err(PvSizingError::AllNorthFacing);
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        // Invariant: after calling enumerate_pv_candidates, an Ok(vec) result
-        // with vec.is_empty() only occurs when there are truly zero roof planes.
-        // If roof planes exist but all were filtered, we returned Err above.
-        debug_assert!(
-            !candidates.is_empty() || roof.planes.is_empty(),
-            "enumerate_pv_candidates returned Ok empty vec but roof planes exist — all-north-facing filter should have returned Err"
-        );
-    }
-
     // Sort by solar score descending (best first).
     candidates.sort_by(|a, b| {
         b.solar_score
@@ -1410,6 +1312,18 @@ pub enum PvSizingError {
     InsufficientRoof { available_kw: f64, min_kw: f64 },
     #[error("main panel ampacity must be positive, got {ampacity} A")]
     InvalidMainPanelAmpacity { ampacity: u32 },
+    #[error("panel_watts must be positive, got {watts}")]
+    InvalidPanelWatts { watts: u32 },
+    #[error(
+        "panel_area_m2 must be positive and < 5.0 m² (no residential panel exceeds ~3.5 m²), got {area_m2}"
+    )]
+    InvalidPanelArea { area_m2: f64 },
+    #[error("system_losses must be in [0, 0.99], got {system_losses}")]
+    InvalidSystemLosses { system_losses: f64 },
+    #[error("computed diffuse fraction Kd={kd:.4} out of range [0, 1]")]
+    InvalidDiffuseFraction { kd: f64 },
+    #[error("computed capacity kW must be finite and non-negative, got {capacity_kw}")]
+    InvalidCapacity { capacity_kw: f64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -1443,22 +1357,6 @@ pub fn infer_roof_shape(
     // All planes have tilt ≈ 0 → Flat.
     if !roof.planes.is_empty() && roof.planes.iter().all(|p| p.tilt_deg < 1.0) {
         return RoofShape::Flat;
-    }
-
-    // Compile-time invariant: each RoofPlane must either have azimuth_deg set
-    // or have a wall-fallback resolution path available.
-    // NOTE: tracing::debug! is used here rather than assert! because the
-    // condition is not a violation — unresolved planes are handled
-    // conservatively below by counting each as a unique direction. An
-    // assert! would panic on valid input that the algorithm already accepts.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    for plane in &roof.planes {
-        if plane.azimuth_deg.is_none() && wall_azimuths.is_empty() {
-            tracing::debug!(
-                pv_plane_index = roof.planes.iter().position(|p| std::ptr::eq(p, plane)),
-                "roof plane has no explicit azimuth and no wall fallback — orientation is unresolved"
-            );
-        }
     }
 
     // Resolve azimuth for every plane before counting distinct orientations.
@@ -1653,6 +1551,32 @@ mod tests {
         }
     }
 
+    /// Roof tuning with only `wall_azimuths` and `latitude` set; every other
+    /// option is `None`/`false` so the module defaults apply.
+    fn roof_tuning<'a>(wall_azimuths: &'a [f64], latitude: Option<f64>) -> PvRoofTuning<'a> {
+        PvRoofTuning {
+            wall_azimuths,
+            latitude,
+            panel_watts: None,
+            panel_area_m2: None,
+            diffuse_fraction: None,
+            roof_shape_user_override: false,
+        }
+    }
+
+    /// System tuning with every option `None` so the module defaults apply.
+    fn system_tuning() -> PvSystemTuning {
+        PvSystemTuning {
+            system_losses: None,
+            panel_watts: None,
+            panel_area_m2: None,
+            inverter_kw_ac: None,
+            max_dc_ac_ratio: None,
+            main_panel_ampacity: None,
+            main_breaker_ampacity: None,
+        }
+    }
+
     #[test]
     fn south_distance_symmetric() {
         assert!((south_distance(180.0) - 0.0).abs() < 1e-10);
@@ -1678,17 +1602,8 @@ mod tests {
             planes: vec![plane(100.0, 26.0, Some(180.0))],
             total_roof_area_m2: 100.0,
         };
-        let usable = compute_usable_area(
-            &roof,
-            RoofShape::Gable,
-            &[],
-            Some(40.0),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let usable =
+            compute_usable_area(&roof, RoofShape::Gable, roof_tuning(&[], Some(40.0))).unwrap();
         // Single gable plane → halved, then ×0.75.
         assert!((usable.usable_m2 - 100.0 / 2.0 * 0.75).abs() < 0.01);
         assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
@@ -1704,17 +1619,8 @@ mod tests {
             ],
             total_roof_area_m2: 100.0,
         };
-        let usable = compute_usable_area(
-            &roof,
-            RoofShape::Gable,
-            &[],
-            Some(40.0),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let usable =
+            compute_usable_area(&roof, RoofShape::Gable, roof_tuning(&[], Some(40.0))).unwrap();
         // Two planes → no halving; south plane used directly.
         assert!((usable.usable_m2 - 50.0 * 0.75).abs() < 0.01);
     }
@@ -1725,8 +1631,7 @@ mod tests {
             planes: vec![plane(100.0, 26.0, Some(0.0))],
             total_roof_area_m2: 100.0,
         };
-        let result =
-            compute_usable_area(&roof, RoofShape::Gable, &[], None, None, None, None, false);
+        let result = compute_usable_area(&roof, RoofShape::Gable, roof_tuning(&[], None));
         assert!(result.is_err());
     }
 
@@ -1736,8 +1641,7 @@ mod tests {
             planes: vec![plane(100.0, 26.0, Some(0.0))],
             total_roof_area_m2: 100.0,
         };
-        let result =
-            enumerate_pv_candidates(&roof, RoofShape::Gable, &[], None, None, None, None, false);
+        let result = enumerate_pv_candidates(&roof, RoofShape::Gable, roof_tuning(&[], None));
         assert!(result.is_err());
         match result {
             Err(PvSizingError::AllNorthFacing) => {}
@@ -1751,8 +1655,7 @@ mod tests {
             planes: vec![],
             total_roof_area_m2: 0.0,
         };
-        let result =
-            enumerate_pv_candidates(&roof, RoofShape::Gable, &[], None, None, None, None, false);
+        let result = enumerate_pv_candidates(&roof, RoofShape::Gable, roof_tuning(&[], None));
         assert!(result.is_ok());
         let candidates = result.unwrap();
         assert!(candidates.is_empty());
@@ -1764,8 +1667,7 @@ mod tests {
             planes: vec![plane(50.0, 26.0, Some(0.0)), plane(40.0, 26.0, Some(360.0))],
             total_roof_area_m2: 90.0,
         };
-        let result =
-            enumerate_pv_candidates(&roof, RoofShape::Gable, &[], None, None, None, None, false);
+        let result = enumerate_pv_candidates(&roof, RoofShape::Gable, roof_tuning(&[], None));
         assert!(result.is_err());
         match result {
             Err(PvSizingError::AllNorthFacing) => {}
@@ -1779,17 +1681,8 @@ mod tests {
             planes: vec![plane(200.0, 0.0, Some(180.0))],
             total_roof_area_m2: 200.0,
         };
-        let usable = compute_usable_area(
-            &roof,
-            RoofShape::Flat,
-            &[],
-            Some(35.0),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let usable =
+            compute_usable_area(&roof, RoofShape::Flat, roof_tuning(&[], Some(35.0))).unwrap();
         // Flat: effective = 200 × 0.70 = 140 m².
         // Panel footprint = 2.1 / 0.403 ≈ 5.21 m² (lat 35 → geometric GCR ≈ 0.403).
         // Max panels = floor(140 / 5.21) ≈ 26.
@@ -1809,17 +1702,8 @@ mod tests {
             ],
             total_roof_area_m2: 140.0,
         };
-        let usable = compute_usable_area(
-            &roof,
-            RoofShape::Hip,
-            &[],
-            Some(40.0),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let usable =
+            compute_usable_area(&roof, RoofShape::Hip, roof_tuning(&[], Some(40.0))).unwrap();
         // South: 60×0.35=21 m² → 10 panels, factor=1.0 → +10
         // ENE (θ=120°): 40×0.35=14 m² → 6 panels, k(40)=0.5154, x=0.667
         //   factor=1-0.5154×0.444=0.771, weighted=floor(6×0.771)=4
@@ -1841,28 +1725,10 @@ mod tests {
             ],
             total_roof_area_m2: 140.0,
         };
-        let low_lat = compute_usable_area(
-            &roof,
-            RoofShape::Hip,
-            &[],
-            Some(25.0),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
-        let high_lat = compute_usable_area(
-            &roof,
-            RoofShape::Hip,
-            &[],
-            Some(48.0),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let low_lat =
+            compute_usable_area(&roof, RoofShape::Hip, roof_tuning(&[], Some(25.0))).unwrap();
+        let high_lat =
+            compute_usable_area(&roof, RoofShape::Hip, roof_tuning(&[], Some(48.0))).unwrap();
         assert!(
             low_lat.max_panels > high_lat.max_panels,
             "max_panels at 25°N ({}) should exceed max_panels at 48°N ({})",
@@ -1999,10 +1865,7 @@ mod tests {
             azimuth_deg: 180.0,
             tilt_deg: 26.0,
         };
-        let result = size_pv_system(
-            &usable, 10.0, 2.0, 14.0, None, None, None, None, None, None, None,
-        )
-        .unwrap();
+        let result = size_pv_system(&usable, 10.0, 2.0, 14.0, system_tuning()).unwrap();
         assert!(result.capacity_kw <= usable.max_capacity_kw + 0.01);
         assert!(result.num_panels <= usable.max_panels);
     }
@@ -2018,9 +1881,7 @@ mod tests {
             azimuth_deg: 180.0,
             tilt_deg: 26.0,
         };
-        let result = size_pv_system(
-            &usable, 6.0, 2.0, 14.0, None, None, None, None, None, None, None,
-        );
+        let result = size_pv_system(&usable, 6.0, 2.0, 14.0, system_tuning());
         assert!(result.is_err());
     }
 
@@ -2039,10 +1900,7 @@ mod tests {
         };
 
         // Default 440 W panel: ceil(10000/440)=23 panels → 10.12 kW
-        let result_default = size_pv_system(
-            &usable, 10.0, 2.0, 14.0, None, None, None, None, None, None, None,
-        )
-        .unwrap();
+        let result_default = size_pv_system(&usable, 10.0, 2.0, 14.0, system_tuning()).unwrap();
 
         // 500 W panel: ceil(10000/500)=20 panels → 10.0 kW
         // Fewer panels for the same target because each panel produces more.
@@ -2051,13 +1909,11 @@ mod tests {
             10.0,
             2.0,
             14.0,
-            None,
-            Some(500),
-            Some(2.2),
-            None,
-            None,
-            None,
-            None,
+            PvSystemTuning {
+                panel_watts: Some(500),
+                panel_area_m2: Some(2.2),
+                ..system_tuning()
+            },
         )
         .unwrap();
 
@@ -2093,10 +1949,7 @@ mod tests {
         };
 
         // Without inverter constraint: target 12 kW → 28 panels × 440W = 12.32 kW
-        let result_no_inverter = size_pv_system(
-            &usable, 12.0, 2.0, 14.0, None, None, None, None, None, None, None,
-        )
-        .unwrap();
+        let result_no_inverter = size_pv_system(&usable, 12.0, 2.0, 14.0, system_tuning()).unwrap();
 
         // With inverter: 7.6 kW AC × 1.2 DC:AC ratio → max 9.12 kW DC
         // Target 12 kW should be clamped to 9.12 kW
@@ -2105,13 +1958,11 @@ mod tests {
             12.0,
             2.0,
             14.0,
-            None,
-            None,
-            None,
-            Some(7.6),
-            Some(1.2),
-            None,
-            None,
+            PvSystemTuning {
+                inverter_kw_ac: Some(7.6),
+                max_dc_ac_ratio: Some(1.2),
+                ..system_tuning()
+            },
         )
         .unwrap();
 
@@ -2157,21 +2008,15 @@ mod tests {
             12.0,
             2.0,
             14.0,
-            None,
-            None,
-            None,
-            Some(7.6),
-            None,
-            None,
-            None,
+            PvSystemTuning {
+                inverter_kw_ac: Some(7.6),
+                ..system_tuning()
+            },
         )
         .unwrap();
 
         // Neither provided
-        let result_none = size_pv_system(
-            &usable, 12.0, 2.0, 14.0, None, None, None, None, None, None, None,
-        )
-        .unwrap();
+        let result_none = size_pv_system(&usable, 12.0, 2.0, 14.0, system_tuning()).unwrap();
 
         assert_eq!(
             result_ac_only.capacity_kw, result_none.capacity_kw,
@@ -2201,13 +2046,10 @@ mod tests {
             10.0,
             2.0,
             14.0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(0),
-            None,
+            PvSystemTuning {
+                main_panel_ampacity: Some(0),
+                ..system_tuning()
+            },
         );
         assert!(result.is_err());
         match result {
@@ -2239,13 +2081,10 @@ mod tests {
             10.0,
             2.0,
             14.0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(100),
-            None,
+            PvSystemTuning {
+                main_panel_ampacity: Some(100),
+                ..system_tuning()
+            },
         )
         .unwrap();
         // 100 A panel → ~4.8 kW AC → ~5.6 kW DC, should be well below 10 kW target
@@ -2280,13 +2119,10 @@ mod tests {
             10.0,
             2.0,
             14.0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(100),
-            None,
+            PvSystemTuning {
+                main_panel_ampacity: Some(100),
+                ..system_tuning()
+            },
         )
         .unwrap();
         let result_200a = size_pv_system(
@@ -2294,13 +2130,10 @@ mod tests {
             10.0,
             2.0,
             14.0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(200),
-            None,
+            PvSystemTuning {
+                main_panel_ampacity: Some(200),
+                ..system_tuning()
+            },
         )
         .unwrap();
         assert!(
@@ -2324,10 +2157,7 @@ mod tests {
             azimuth_deg: 180.0,
             tilt_deg: 26.0,
         };
-        let result = size_pv_system(
-            &usable, 10.0, 2.0, 14.0, None, None, None, None, None, None, None,
-        )
-        .unwrap();
+        let result = size_pv_system(&usable, 10.0, 2.0, 14.0, system_tuning()).unwrap();
         // Without electrical limit, target 10 kW should be achievable.
         // ceil(10 × 1000 / 440) = 23 panels → 10.12 kW
         assert!(
@@ -2356,13 +2186,10 @@ mod tests {
             10.0,
             2.0,
             14.0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(60),
-            None,
+            PvSystemTuning {
+                main_panel_ampacity: Some(60),
+                ..system_tuning()
+            },
         )
         .unwrap();
         assert!(
@@ -2392,23 +2219,17 @@ mod tests {
             10.0,
             2.0,
             14.0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(100),
-            None,
+            PvSystemTuning {
+                main_panel_ampacity: Some(100),
+                ..system_tuning()
+            },
         )
         .unwrap();
         assert_eq!(with_elec.max_ac_kw, Some(4.8));
         assert_eq!(with_elec.max_backfeed_amps, Some(20.0));
         assert!(with_elec.electrical_constraint_binding);
 
-        let without = size_pv_system(
-            &usable, 10.0, 2.0, 14.0, None, None, None, None, None, None, None,
-        )
-        .unwrap();
+        let without = size_pv_system(&usable, 10.0, 2.0, 14.0, system_tuning()).unwrap();
         assert_eq!(without.max_ac_kw, None);
         assert_eq!(without.max_backfeed_amps, None);
         assert!(!without.electrical_constraint_binding);
@@ -2534,8 +2355,7 @@ mod tests {
         let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[]);
         assert_eq!(shape, RoofShape::Gable);
 
-        let usable =
-            compute_usable_area(&roof, shape, &[], Some(40.0), None, None, None, false).unwrap();
+        let usable = compute_usable_area(&roof, shape, roof_tuning(&[], Some(40.0))).unwrap();
         // Gable with 2 planes (no halving): south plane (60 m², not north-facing)
         // → 60 × 0.75 = 45 m², 45 / 2.1 (panel_area) = 21 panels,
         // 21 × 440 W / 1000 = 9.24 kW.
@@ -2568,17 +2388,8 @@ mod tests {
             ],
             total_roof_area_m2: 180.0,
         };
-        let candidates = enumerate_pv_candidates(
-            &roof,
-            RoofShape::Gable,
-            &[],
-            Some(40.0),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let candidates =
+            enumerate_pv_candidates(&roof, RoofShape::Gable, roof_tuning(&[], Some(40.0))).unwrap();
         // 3 non-north planes.
         assert_eq!(candidates.len(), 3);
         // Best first (south with most area).
@@ -2599,12 +2410,7 @@ mod tests {
         let usable = compute_usable_area(
             &roof,
             RoofShape::Gable,
-            &[90.0, 180.0, 270.0],
-            Some(40.0),
-            None,
-            None,
-            None,
-            false,
+            roof_tuning(&[90.0, 180.0, 270.0], Some(40.0)),
         )
         .unwrap();
         assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
@@ -2733,28 +2539,10 @@ mod tests {
             total_roof_area_m2: 180.0,
         };
         let lat = 40.0;
-        let usable = compute_usable_area(
-            &roof,
-            RoofShape::Hip,
-            &[],
-            Some(lat),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
-        let candidates = enumerate_pv_candidates(
-            &roof,
-            RoofShape::Hip,
-            &[],
-            Some(lat),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let usable =
+            compute_usable_area(&roof, RoofShape::Hip, roof_tuning(&[], Some(lat))).unwrap();
+        let candidates =
+            enumerate_pv_candidates(&roof, RoofShape::Hip, roof_tuning(&[], Some(lat))).unwrap();
 
         // The top enumerated candidate should match compute_usable_area's best plane.
         assert!(
@@ -2962,12 +2750,10 @@ mod tests {
         let result_low_kd = compute_usable_area(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(35.0),
-            None,
-            None,
-            Some(0.12),
-            false,
+            PvRoofTuning {
+                diffuse_fraction: Some(0.12),
+                ..roof_tuning(&[], Some(35.0))
+            },
         )
         .unwrap();
         assert_eq!(
@@ -2979,12 +2765,10 @@ mod tests {
         let result_high_kd = compute_usable_area(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(35.0),
-            None,
-            None,
-            Some(0.28),
-            false,
+            PvRoofTuning {
+                diffuse_fraction: Some(0.28),
+                ..roof_tuning(&[], Some(35.0))
+            },
         )
         .unwrap();
         assert_eq!(
@@ -3120,6 +2904,22 @@ mod tests {
         }
     }
 
+    /// GCR times the flat-roof usable fraction must stay in [0.15, 0.55]:
+    /// values outside indicate parameterization error.
+    #[test]
+    fn flat_roof_gcr_times_usable_fraction_stays_in_band() {
+        for lat in [10.0, 25.0, 35.0, 50.0] {
+            for tilt in [5.0, 15.0, 25.0, 45.0] {
+                let effective = flat_roof_gcr(Some(lat), tilt) * FLAT_USABLE_FRACTION;
+                assert!(
+                    (0.15..=0.55).contains(&effective),
+                    "flat roof GCR×usable_fraction={effective:.4} out of [0.15, 0.55] \
+                     range at lat={lat} tilt={tilt}"
+                );
+            }
+        }
+    }
+
     /// GCR values are continuous (no step-cliffs) near the old band boundaries.
     /// Two latitudes 0.1° apart on opposite sides of the old 40.0° boundary
     /// must produce nearly identical GCR.
@@ -3165,17 +2965,8 @@ mod tests {
             planes: vec![plane(200.0, 0.0, Some(180.0))],
             total_roof_area_m2: 200.0,
         };
-        let usable = compute_usable_area(
-            &roof,
-            RoofShape::Flat,
-            &[],
-            Some(35.0),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let usable =
+            compute_usable_area(&roof, RoofShape::Flat, roof_tuning(&[], Some(35.0))).unwrap();
         // 200 × 0.70 = 140 m² usable. GCR ≈ 0.40 at lat=35° tilt=25°.
         // Panel footprint = 2.1 / ~0.403 ≈ 5.21 m². 140 / 5.21 ≈ 26.87 → 26.
         assert_eq!(usable.max_panels, 26);
@@ -3192,17 +2983,8 @@ mod tests {
         };
         let mut prev_panels = u32::MAX;
         for lat in [30.0, 35.0, 40.0, 45.0, 50.0] {
-            let usable = compute_usable_area(
-                &roof,
-                RoofShape::Flat,
-                &[],
-                Some(lat),
-                None,
-                None,
-                None,
-                false,
-            )
-            .unwrap();
+            let usable =
+                compute_usable_area(&roof, RoofShape::Flat, roof_tuning(&[], Some(lat))).unwrap();
             assert!(
                 usable.max_panels <= prev_panels,
                 "capacity must not increase with latitude: lat={lat} panels={} > prev={prev_panels}",
@@ -3229,17 +3011,8 @@ mod tests {
         };
 
         // New geometric GCR at lat=45°, tilt=25° (the cap)
-        let usable_new = compute_usable_area(
-            &roof,
-            RoofShape::Flat,
-            &[],
-            Some(45.0),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let usable_new =
+            compute_usable_area(&roof, RoofShape::Flat, roof_tuning(&[], Some(45.0))).unwrap();
 
         // Old step-table GCR=0.35 would give:
         // usable=140, footprint=2.0/0.35=5.714, panels=140/5.714=24.5→24
@@ -3269,17 +3042,8 @@ mod tests {
             ],
             total_roof_area_m2: 200.0,
         };
-        let candidates = enumerate_pv_candidates(
-            &roof,
-            RoofShape::Flat,
-            &[],
-            Some(45.0),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let candidates =
+            enumerate_pv_candidates(&roof, RoofShape::Flat, roof_tuning(&[], Some(45.0))).unwrap();
         assert_eq!(candidates.len(), 2);
         for c in &candidates {
             assert!(c.max_panels > 0);
@@ -3311,28 +3075,18 @@ mod tests {
         let lat = 40.0;
 
         // Default path (None for panel params).
-        let result_default = compute_usable_area(
-            &roof,
-            RoofShape::Gable,
-            &[],
-            Some(lat),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let result_default =
+            compute_usable_area(&roof, RoofShape::Gable, roof_tuning(&[], Some(lat))).unwrap();
 
         // Explicit override equal to compile-time constants.
         let result_explicit = compute_usable_area(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(lat),
-            Some(DEFAULT_PANEL_WATTS),
-            Some(DEFAULT_PANEL_AREA_M2),
-            None,
-            false,
+            PvRoofTuning {
+                panel_watts: Some(DEFAULT_PANEL_WATTS),
+                panel_area_m2: Some(DEFAULT_PANEL_AREA_M2),
+                ..roof_tuning(&[], Some(lat))
+            },
         )
         .unwrap();
 
@@ -3361,28 +3115,18 @@ mod tests {
         };
         let lat = 40.0;
 
-        let result_440w = compute_usable_area(
-            &roof,
-            RoofShape::Gable,
-            &[],
-            Some(lat),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let result_440w =
+            compute_usable_area(&roof, RoofShape::Gable, roof_tuning(&[], Some(lat))).unwrap();
 
-        // Hypothetical low-wattage panel: 300 W, 1.6 m² (older/smaller module).
+        // Hypothetical low-wattage panel: 300 W, 1.6 m² (older/smaller module).
         let result_300w = compute_usable_area(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(lat),
-            Some(300),
-            Some(1.6),
-            None,
-            false,
+            PvRoofTuning {
+                panel_watts: Some(300),
+                panel_area_m2: Some(1.6),
+                ..roof_tuning(&[], Some(lat))
+            },
         )
         .unwrap();
 
@@ -3397,32 +3141,18 @@ mod tests {
 
         // Result from size_pv_system with explicit losses must match explicit
         // vs None (default losses = 0.14).
-        let sizing_default = size_pv_system(
-            &result_440w,
-            5.0,
-            2.0,
-            14.0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let sizing_default = size_pv_system(&result_440w, 5.0, 2.0, 14.0, system_tuning()).unwrap();
         let sizing_explicit = size_pv_system(
             &result_440w,
             5.0,
             2.0,
             14.0,
-            Some(0.14),
-            Some(440),
-            Some(2.0),
-            None,
-            None,
-            None,
-            None,
+            PvSystemTuning {
+                system_losses: Some(0.14),
+                panel_watts: Some(440),
+                panel_area_m2: Some(2.0),
+                ..system_tuning()
+            },
         )
         .unwrap();
         assert_eq!(
@@ -3454,24 +3184,20 @@ mod tests {
         let usable_gable = compute_usable_area(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(40.0),
-            None,
-            None,
-            None,
-            true,
+            PvRoofTuning {
+                roof_shape_user_override: true,
+                ..roof_tuning(&[], Some(40.0))
+            },
         )
         .unwrap();
         // Hip override — same roof, same params, different shape.
         let usable_hip = compute_usable_area(
             &roof,
             RoofShape::Hip,
-            &[],
-            Some(40.0),
-            None,
-            None,
-            None,
-            true,
+            PvRoofTuning {
+                roof_shape_user_override: true,
+                ..roof_tuning(&[], Some(40.0))
+            },
         )
         .unwrap();
 
@@ -3504,17 +3230,8 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         // Default path (false) — same as existing single_south_gable test.
-        let usable = compute_usable_area(
-            &roof,
-            RoofShape::Gable,
-            &[],
-            Some(40.0),
-            None,
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let usable =
+            compute_usable_area(&roof, RoofShape::Gable, roof_tuning(&[], Some(40.0))).unwrap();
         assert!((usable.usable_m2 - 100.0 / 2.0 * 0.75).abs() < 0.01);
         assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
         assert_eq!(usable.roof_shape, RoofShape::Gable);
@@ -3539,12 +3256,10 @@ mod tests {
         let candidates = enumerate_pv_candidates(
             &roof,
             RoofShape::Gable,
-            &[],
-            Some(40.0),
-            None,
-            None,
-            None,
-            true,
+            PvRoofTuning {
+                roof_shape_user_override: true,
+                ..roof_tuning(&[], Some(40.0))
+            },
         )
         .unwrap();
         assert_eq!(candidates.len(), 3);
@@ -3865,12 +3580,10 @@ mod tests {
         let usable = compute_usable_area(
             &roof,
             RoofShape::FlatEastWest,
-            &[],
-            Some(35.0),
-            None,
-            None,
-            None,
-            true,
+            PvRoofTuning {
+                roof_shape_user_override: true,
+                ..roof_tuning(&[], Some(35.0))
+            },
         )
         .unwrap();
 
@@ -3898,24 +3611,20 @@ mod tests {
         let ew = compute_usable_area(
             &roof,
             RoofShape::FlatEastWest,
-            &[],
-            Some(35.0),
-            None,
-            None,
-            None,
-            true,
+            PvRoofTuning {
+                roof_shape_user_override: true,
+                ..roof_tuning(&[], Some(35.0))
+            },
         )
         .unwrap();
 
         let sf = compute_usable_area(
             &roof,
             RoofShape::Flat,
-            &[],
-            Some(35.0),
-            None,
-            None,
-            None,
-            true,
+            PvRoofTuning {
+                roof_shape_user_override: true,
+                ..roof_tuning(&[], Some(35.0))
+            },
         )
         .unwrap();
 
@@ -3944,12 +3653,10 @@ mod tests {
         let candidates = enumerate_pv_candidates(
             &roof,
             RoofShape::FlatEastWest,
-            &[],
-            Some(35.0),
-            None,
-            None,
-            None,
-            true,
+            PvRoofTuning {
+                roof_shape_user_override: true,
+                ..roof_tuning(&[], Some(35.0))
+            },
         )
         .unwrap();
         assert_eq!(candidates.len(), 2);
@@ -3978,12 +3685,10 @@ mod tests {
         let candidates = enumerate_pv_candidates(
             &roof,
             RoofShape::FlatEastWest,
-            &[],
-            Some(35.0),
-            None,
-            None,
-            None,
-            true,
+            PvRoofTuning {
+                roof_shape_user_override: true,
+                ..roof_tuning(&[], Some(35.0))
+            },
         )
         .unwrap();
 
@@ -4023,12 +3728,10 @@ mod tests {
         let usable = compute_usable_area(
             &roof,
             RoofShape::FlatEastWest,
-            &[],
-            Some(35.0),
-            None,
-            None,
-            None,
-            true,
+            PvRoofTuning {
+                roof_shape_user_override: true,
+                ..roof_tuning(&[], Some(35.0))
+            },
         )
         .unwrap();
         // 80 × 0.70 = 56; footprint = 2.1/0.85 = 2.471; total = 22; paired = 22
@@ -4046,12 +3749,10 @@ mod tests {
         let usable = compute_usable_area(
             &roof,
             RoofShape::FlatEastWest,
-            &[180.0],
-            None,
-            None,
-            None,
-            None,
-            true,
+            PvRoofTuning {
+                roof_shape_user_override: true,
+                ..roof_tuning(&[180.0], None)
+            },
         )
         .unwrap();
         assert!(usable.max_panels > 0);
@@ -4071,12 +3772,11 @@ mod tests {
         let result = compute_usable_area(
             &roof,
             RoofShape::FlatEastWest,
-            &[], // no wall azimuths — all planes resolve to 0°
-            Some(35.0),
-            None,
-            None,
-            None,
-            true,
+            PvRoofTuning {
+                // no wall azimuths: all planes resolve to 0°
+                roof_shape_user_override: true,
+                ..roof_tuning(&[], Some(35.0))
+            },
         );
         assert!(
             result.is_ok(),

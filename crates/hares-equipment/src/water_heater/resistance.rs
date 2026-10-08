@@ -11,19 +11,21 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidNodeId, FluidType, FuelType, HaresError, HeatTransferDirection, LoopId,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
+    TelemetryField, ThermalCategory, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
-use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
+use super::siting::{self, Siting};
+use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
-    hysteresis_call, parse_usize, resolve_storage_step_inputs, weighted_average_tank_temp,
+    hysteresis_call, parse_usize, resolve_storage_step_inputs, restored_tank_deadband_c,
+    tank_thermostat_update, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
-use crate::hvac::helpers::{loop_id_from_config, zone_id_from_config_or_default};
+use crate::hvac::helpers::loop_id_from_config;
 
 /// Element priority control mode for dual-element electric resistance water heaters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -85,6 +87,9 @@ pub struct ResistanceWH {
     max_combined_power_w: Option<f64>,
     setpoint_c: f64,
     deadband_c: f64,
+    /// The configured setpoint and deadband, which the release form restores.
+    configured_setpoint_c: f64,
+    configured_deadband_c: f64,
     max_tank_temp_c: f64,
     duty_cycle: f64,
     mode_override: Option<OperatingMode>,
@@ -115,8 +120,8 @@ pub struct ResistanceWH {
     dr_level: DRLevel,
     // Transient load fraction from LoadFraction control signal; reset each step.
     ctrl_load_fraction: f64,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
+    /// The zone or no-zone location the tank sits in, resolved at init.
+    siting: Siting,
     /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
     draw_tracker: super::DrawVolumeTracker,
 }
@@ -143,7 +148,7 @@ fn parse_element_priority_mode(mode: Option<&str>) -> Result<ElementPriorityMode
 impl ResistanceWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let siting = Siting::from_constructor_config(&config);
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -174,7 +179,7 @@ impl ResistanceWH {
                 name: config.name,
                 end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Resistance Water Heater"),
-                zone: Some(zone),
+                zone: siting.zone(),
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -189,12 +194,7 @@ impl ResistanceWH {
                 telemetry_fields: telemetry_fields(n_nodes),
                 zone_type: None,
             },
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-                PortDeclaration::fluid(loop_id, FluidType::Water),
-                PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
-            ],
+            ports: siting::storage_ports(&[PortDeclaration::electrical()], &siting, loop_id),
             telemetry: {
                 let mut t = default_telemetry();
                 tank.register_node_telemetry(&mut t);
@@ -209,6 +209,8 @@ impl ResistanceWH {
             max_combined_power_w: None,
             setpoint_c: DEFAULT_SETPOINT_C,
             deadband_c: DEFAULT_DEADBAND_C,
+            configured_setpoint_c: DEFAULT_SETPOINT_C,
+            configured_deadband_c: DEFAULT_DEADBAND_C,
             max_tank_temp_c: DEFAULT_MAX_TANK_TEMP_C,
             duty_cycle: 1.0,
             mode_override: None,
@@ -233,7 +235,7 @@ impl ResistanceWH {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
-            zone_id_explicit,
+            siting,
             draw_tracker: super::DrawVolumeTracker::new(),
         }
     }
@@ -276,18 +278,6 @@ impl ResistanceWH {
             temps[self.lower_node]
         }
     }
-
-    fn ambient_temp_c(&self, env: &EnvironmentState) -> f64 {
-        self.descriptor
-            .zone
-            .and_then(|zone| {
-                env.zones
-                    .iter()
-                    .find(|z| z.id == zone)
-                    .map(|z| z.temperature_c)
-            })
-            .unwrap_or(env.weather.outdoor_temp_c)
-    }
 }
 
 impl ResistanceWH {
@@ -301,15 +291,6 @@ impl ResistanceWH {
         )?;
         c.validate()?;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if c.zone_id.is_none() && c.zone_type.is_some() {
-            warn!(
-                water_heater = %config.name,
-                zone_type = ?c.zone_type,
-                "zone_id not resolved from HPXML Location; falling back to ZoneId(1)"
-            );
-        }
-
         // Preserve-when-absent: an absent `equipment_id` key keeps the
         // descriptor's existing (assembly-injected) identity instead of
         // clobbering it — `None` from the tri-state reader means "not
@@ -317,12 +298,12 @@ impl ResistanceWH {
         if let Some(id) = equipment_id_from_config(config)? {
             self.descriptor.id = EquipmentId(id);
         }
-        let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
-        self.descriptor.zone = zone;
+        self.siting.resolve(config, c.zone_type.as_deref())?;
+        self.descriptor.zone = self.siting.zone();
         self.descriptor.zone_type = c.zone_type.clone();
-        self.ports[1].zone = zone;
         self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
-        self.ports[2].loop_id = Some(self.loop_id);
+        self.ports =
+            siting::storage_ports(&[PortDeclaration::electrical()], &self.siting, self.loop_id);
 
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
         let height_m = c.tank_height_m.unwrap_or(DEFAULT_TANK_HEIGHT_M).max(0.2);
@@ -365,6 +346,8 @@ impl ResistanceWH {
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
         self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
+        self.configured_setpoint_c = self.setpoint_c;
+        self.configured_deadband_c = self.deadband_c;
         self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
         self.duty_cycle = 1.0;
         self.mode_override = None;
@@ -447,8 +430,8 @@ impl Equipment for ResistanceWH {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
+    fn ambient_location(&self) -> Option<hares_types::AmbientLocation> {
+        self.siting.ambient_location()
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -544,6 +527,7 @@ impl Equipment for ResistanceWH {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        let ambient_c = self.siting.dry_bulb_c(env, &self.descriptor.name)?;
         let mode = self.update_control(env);
         let ctrl_duty =
             (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
@@ -555,7 +539,6 @@ impl Equipment for ResistanceWH {
         let use_ideal = env.time_res.num_seconds() >= 300;
         let (upper_power_w, mut lower_power_w) = if use_ideal && mode == OperatingMode::Heating {
             let dt_s = dt.as_secs_f64();
-            let ambient_c = self.ambient_temp_c(env);
             let up = if self.upper_element_on && self.upper_element_power_w > 0.0 {
                 let ideal_w = self.tank.ideal_capacity_for_node(
                     self.upper_node,
@@ -603,12 +586,12 @@ impl Equipment for ResistanceWH {
         // its full required power, and the lower element is bounded by whatever
         // capacity remains under the ceiling. NEC Table 210.24(1): 30 A / 240 V
         // branch circuit → 7,200 W continuous with 80% derate.
-        if self.element_priority == ElementPriorityMode::Simultaneous {
-            if let Some(max_w) = self.max_combined_power_w {
-                let combined = upper_power_w + lower_power_w;
-                if combined > max_w {
-                    lower_power_w = (max_w - upper_power_w).max(0.0);
-                }
+        if self.element_priority == ElementPriorityMode::Simultaneous
+            && let Some(max_w) = self.max_combined_power_w
+        {
+            let combined = upper_power_w + lower_power_w;
+            if combined > max_w {
+                lower_power_w = (max_w - upper_power_w).max(0.0);
             }
         }
 
@@ -628,11 +611,12 @@ impl Equipment for ResistanceWH {
         let mains_temp_c_source = self.mains_temp_c_source.as_mut();
         let (mains_temp_c, draw_flow_rate_kg_s) = resolve_storage_step_inputs(
             env,
+            &self.descriptor.name,
             self.mains_temp_c,
             self.draw_flow_rate_kg_s,
             draw_l_per_min_source,
             mains_temp_c_source,
-        );
+        )?;
         let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
         let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
         // Use step_tempered: TMV mixes hot tank water with cold mains to deliver
@@ -647,10 +631,12 @@ impl Equipment for ResistanceWH {
             draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
-            self.ambient_temp_c(env),
-            tempered_flow_m3_s,
-            hot_flow_m3_s,
-            mains_temp_c,
+            TemperedDrawInputs {
+                ambient_temp_c: ambient_c,
+                tempered_flow_m3_s,
+                hot_flow_m3_s,
+                mains_temp_c,
+            },
             heat_injections,
             tmv,
             dt,
@@ -693,18 +679,19 @@ impl Equipment for ResistanceWH {
             })?;
         }
 
-        // Jacket loss: tank skin heat flows into the conditioned zone.
+        // Jacket loss: tank skin heat flows into the heater's zone; a heater
+        // in a location with no modeled zone loses it to that ambient.
         let skin_loss_w = self.tank.skin_loss_w();
-        if let Some(zone) = self.descriptor.zone {
-            if skin_loss_w.abs() > 1e-3 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: skin_loss_w,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::JacketLoss,
-                })?;
-            }
+        if let Some(zone) = self.descriptor.zone
+            && skin_loss_w.abs() > 1e-3
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: skin_loss_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::JacketLoss,
+            })?;
         }
 
         let avg_temp_c =
@@ -769,6 +756,10 @@ impl Equipment for ResistanceWH {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(hares_types::ThermostatBandClass::Tank)
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
@@ -811,7 +802,7 @@ impl Equipment for ResistanceWH {
         )?;
         self.setpoint_c = decoded.setpoint_c;
         self.target_setpoint_c = decoded.target_setpoint_c;
-        self.deadband_c = decoded.deadband_c;
+        self.deadband_c = restored_tank_deadband_c(decoded.deadband_c)?;
         self.upper_element_on = decoded.upper_element_on;
         self.lower_element_on = decoded.lower_element_on;
         self.duty_cycle = decoded.duty_cycle;
@@ -891,25 +882,16 @@ impl Equipment for ResistanceWH {
                 cooling_setpoint_c,
                 deadband_c,
             } => {
-                if let Some(sp) = heating_setpoint_c.or(*cooling_setpoint_c) {
-                    if !sp.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "invalid water-heater setpoint: {sp}"
-                        )));
-                    }
+                let update =
+                    tank_thermostat_update(*heating_setpoint_c, *cooling_setpoint_c, *deadband_c)?;
+                if update.changes_setpoint() {
+                    let sp = update.setpoint_c(self.target_setpoint_c, self.configured_setpoint_c);
                     self.target_setpoint_c = sp;
                     if self.setpoint_ramp_rate_c_per_s.is_none() {
                         self.setpoint_c = sp;
                     }
                 }
-                if let Some(db) = deadband_c {
-                    if !db.is_finite() || *db < 0.0 {
-                        return Err(HaresError::Control(format!(
-                            "invalid water-heater deadband: {db}"
-                        )));
-                    }
-                    self.deadband_c = *db;
-                }
+                self.deadband_c = update.deadband_c(self.deadband_c, self.configured_deadband_c);
             }
             ControlSignal::DutyCycle { on_fraction, .. } => {
                 if !on_fraction.is_finite() || !(0.0..=1.0).contains(on_fraction) {
@@ -1066,14 +1048,14 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
     fields.push(TelemetryField {
         name: tk::SKIN_LOSS_W.to_string(),
         unit: "W".to_string(),
-        description: "Tank jacket (skin) heat loss to zone".to_string(),
+        description: "Tank jacket (skin) heat loss to the surrounding zone or ambient location"
+            .to_string(),
     });
     fields
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -1088,6 +1070,7 @@ mod tests {
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -1114,7 +1097,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1133,10 +1117,41 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn a_failing_schedule_read_fails_the_step_naming_the_equipment() {
+        let mut typed = typed_config();
+        // The draw source reads a schedule column; the environment carries
+        // no schedule payload, so the read fails. The failure must fail the
+        // step naming the equipment, not fall back to the configured draw
+        // silently.
+        typed.draw_flow_rate_source = Some(hares_types::ScheduleSourceConfig::ColumnRef {
+            col_idx: 0,
+            boundary: hares_types::BoundaryPolicy::Clamp,
+        });
+        let cfg = config_from_typed(typed);
+
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &env(21.0)).unwrap();
+
+        let mut p = ports();
+        let err = wh
+            .step(&env(21.0), Duration::from_secs(60), &mut p)
+            .expect_err("a schedule read failure must fail the step");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WH"),
+            "the error must name the equipment: {msg}"
+        );
+        assert!(
+            msg.contains("schedule"),
+            "the error must name the schedule read failure: {msg}"
+        );
+    }
+
     fn typed_config() -> ElectricResistanceWaterHeaterConfig {
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1198,6 +1213,102 @@ mod tests {
         );
     }
 
+    /// A day of constant tempered draw heats the fixtures' volume from the
+    /// mains to the delivery temperature plus the tank's standby loss, within
+    /// the deadband's storage drift: the closed form an EnergyPlus
+    /// `WaterHeater:Mixed` satisfies under load. This pins the draw reaching
+    /// the tank at its normalized volume: the OCHRE reference's tank silently
+    /// drops its fixtures' draw column (its schedule builder names it
+    /// "Water Fixtures (L/min)" at ochre/utils/schedule.py:47 while the tank
+    /// reads "Water Heating (L/min)" at ochre/Models/Water.py:287), and a
+    /// tank that lost the draw would sit near the standby floor, about a
+    /// tenth of the draw-day energy here.
+    #[test]
+    fn element_energy_matches_the_draw_enthalpy_closed_form() {
+        use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+        use hares_physics::water_density_kg_m3;
+
+        // The parity week's unit: 50 gal rated (45 gal actual after the
+        // electric volume correction), UEF 0.92, 125 F setpoint, ambient 21 C.
+        let volume_m3 = 0.170_3;
+        let setpoint_c = 51.667_f64;
+        let mut typed = typed_config();
+        typed.tank_volume_m3 = Some(volume_m3);
+        typed.ua_w_per_k = Some(1.325_5);
+        typed.setpoint_c = Some(setpoint_c);
+        typed.initial_tank_temp_c = Some(setpoint_c);
+        typed.element_power_w = Some(5_500.0);
+        // 256.06 L/day of tempered fixture draw, the normalized draw volume
+        // the parity week's draw schedule integrates to.
+        let fixture_draw_kg_s = 2.963_7e-3;
+        typed.draw_flow_rate_kg_s = Some(fixture_draw_kg_s);
+        let cfg = config_from_typed(typed);
+
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &env(21.0)).unwrap();
+
+        let dt = Duration::from_secs(60);
+        let mut p = ports();
+        // One step populates the telemetry; the 24 h integration starts from
+        // the initialized tank, not the pre-population zeros.
+        wh.step(&env(21.0), dt, &mut p).unwrap();
+        let mut electric_j = 0.0_f64;
+        let mut standby_j = 0.0_f64;
+        let mut draw_l = 0.0_f64;
+        let t_start_avg = wh
+            .telemetry()
+            .get(tk::TANK_AVG_TEMP_C)
+            .expect("tank avg temp telemetry");
+        for _ in 1..(24 * 60) {
+            wh.step(&env(21.0), dt, &mut p).unwrap();
+            let telem = wh.telemetry();
+            electric_j += telem.get(tk::ELECTRIC_POWER_W).unwrap_or(0.0) * dt.as_secs_f64();
+            standby_j += telem.get(tk::SKIN_LOSS_W).unwrap_or(0.0) * dt.as_secs_f64();
+            draw_l += telem.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0) * dt.as_secs_f64()
+                / water_density_kg_m3(setpoint_c)
+                * 1000.0;
+        }
+        let t_end_avg = wh.telemetry().get(tk::TANK_AVG_TEMP_C).expect("end temp");
+        // Liters to kilograms: 1 L = 1e-3 m3 of water.
+        let storage_j = volume_m3 * 1000.0 * CP_LIQUID_WATER_J_KG_K * (t_end_avg - t_start_avg);
+
+        // The delivery enthalpy the TMV guarantees: the drawn volume (liters)
+        // heated from the 10 C equipment-default mains to the 40.6 C
+        // delivery temperature.
+        let mains_c = 10.0_f64;
+        let delivery_c = 40.6_f64;
+        let draw_enthalpy_j = draw_l
+            * 1.0e-3
+            * water_density_kg_m3(delivery_c)
+            * CP_LIQUID_WATER_J_KG_K
+            * (delivery_c - mains_c);
+        let expected_j = draw_enthalpy_j + standby_j + storage_j;
+
+        eprintln!("24 h water-heater decomposition:");
+        eprintln!("  electric        {} kWh", electric_j / 3.6e6);
+        eprintln!("  draw volume     {draw_l} L");
+        eprintln!("  draw enthalpy   {} kWh", draw_enthalpy_j / 3.6e6);
+        eprintln!("  standby loss    {} kWh", standby_j / 3.6e6);
+        eprintln!("  storage change  {} kWh", storage_j / 3.6e6);
+
+        assert!(
+            (electric_j - expected_j).abs() / expected_j < 0.02,
+            "element energy {:.4} kWh must match draw enthalpy + standby + \
+             storage {:.4} kWh (the closed form)",
+            electric_j / 3.6e6,
+            expected_j / 3.6e6
+        );
+        // And the draw-day scale: the element energy is an order of magnitude
+        // above the standby-only floor a lost draw would leave.
+        assert!(
+            electric_j > 5.0 * standby_j,
+            "element energy {:.3} kWh must dominate the standby floor {:.3} kWh: \
+             the fixtures' draw must reach the tank",
+            electric_j / 3.6e6,
+            standby_j / 3.6e6
+        );
+    }
+
     /// Reactive-power contract for the resistive element family:
     /// class pf = 1.0 → Q is exactly Some(0.0) while drawing power, the
     /// REACTIVE capability is declared, and port/CoreOutput/telemetry agree.
@@ -1246,7 +1357,6 @@ mod tests {
             )],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         }
     }
 
@@ -1427,6 +1537,53 @@ mod tests {
                 "error must name the field for {bad_setpoint}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn thermal_setpoint_band_follows_the_shared_contract() {
+        let mut eq = ResistanceWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+        super::super::assert_tank_thermostat_contract(
+            &mut eq,
+            |e| (e.setpoint_c, e.deadband_c),
+            |e, db| e.deadband_c = db,
+        );
+    }
+
+    /// Under a setpoint ramp the release returns the target to the
+    /// configured setpoint at once, and the setpoint ramps back to it.
+    #[test]
+    fn a_release_ramps_the_setpoint_back_to_the_configured_one() {
+        use hares_types::ControlSignal;
+        let mut typed = typed_config();
+        typed.max_setpoint_ramp_rate_c_per_min = Some(1.0);
+        let cfg = config_from_typed(typed);
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let env = env(21.0);
+        eq.init(&cfg, &env).unwrap();
+        let configured = eq.setpoint_c;
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(configured + 5.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        for _ in 0..3 {
+            eq.update_control(&env);
+        }
+        let raised = eq.setpoint_c;
+        assert!(raised > configured && raised < configured + 5.0, "{raised}");
+
+        eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
+        assert_eq!(eq.target_setpoint_c, configured);
+        assert_eq!(
+            eq.setpoint_c, raised,
+            "the setpoint ramps, it does not jump"
+        );
+        for _ in 0..10 {
+            eq.update_control(&env);
+        }
+        assert_eq!(eq.setpoint_c, configured);
     }
 
     #[test]
@@ -1855,7 +2012,7 @@ mod tests {
         let make_cfg = |jacket: Option<f64>| {
             config_from_typed(ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -2038,7 +2195,6 @@ mod tests {
 
 #[cfg(test)]
 mod element_priority_tests {
-    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -2052,6 +2208,7 @@ mod element_priority_tests {
 
     fn env_state() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -2078,7 +2235,8 @@ mod element_priority_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -2100,7 +2258,7 @@ mod element_priority_tests {
             "Resistance Water Heater".to_string(),
             crate::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -2143,7 +2301,6 @@ mod element_priority_tests {
             )],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         }
     }
 
@@ -2427,7 +2584,7 @@ mod element_priority_tests {
     fn simultaneous_max_combined_power_clamps_lower_element() {
         let cfg = crate::ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -2503,7 +2660,7 @@ mod element_priority_tests {
         for max_w in [None, Some(7_200.0)] {
             let cfg = crate::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -2570,7 +2727,7 @@ mod element_priority_tests {
     fn state_round_trip_preserves_max_combined_power_w() {
         let cfg = crate::ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -2655,6 +2812,227 @@ mod element_priority_tests {
         hares_types::validate_core_contract(restored.descriptor(), restored.core_output()).expect(
             "a restored checkpoint must satisfy the core contract (presence rules \
                  and mode/flow guard)",
+        );
+    }
+}
+
+#[cfg(test)]
+mod ambient_tests {
+    use chrono::TimeZone;
+    use hares_types::{EnvironmentState, ZoneId};
+
+    use super::ResistanceWH;
+    use crate::{ElectricResistanceWaterHeaterConfig, Equipment, EquipmentConfig};
+    use hares_types::AmbientLocation;
+
+    /// `ElectricResistanceWaterHeaterConfig` with the shared test defaults
+    /// and the given zone wiring.
+    fn typed_config() -> ElectricResistanceWaterHeaterConfig {
+        ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: Some(1),
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: Some(52.0),
+            deadband_c: Some(2.0),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(40.0),
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
+            max_combined_power_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+        }
+    }
+
+    /// Environment with a known conditioned-zone temperature and outdoor
+    /// temperature, and the precomputed ambient series for that pair per the
+    /// table: heated max(12.0, 20.0) = 20.0, buffer max(12.0, 10.0) = 12.0,
+    /// non-freezing max(2.0, 4.44) = 4.44.
+    fn ambient_test_env(conditioned_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
+        EnvironmentState {
+            ambient_other_space_c: super::super::siting::test_ambient_air(),
+            zones: vec![hares_types::ZoneState {
+                id: ZoneId(1),
+                temperature_c: conditioned_temp_c,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            }],
+            weather: hares_types::WeatherState {
+                outdoor_temp_c,
+                mains_temp_c: 10.0,
+                ..Default::default()
+            },
+            grid: hares_types::GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    /// An electric resistance water heater in an HPXML location with no modeled
+    /// zone runs against the "other housing unit" ambient series instead of a
+    /// zone id: the conditioned zone's temperature read directly.
+    #[test]
+    fn resistance_ambient_source_for_other_housing_unit_location() {
+        let typed = ElectricResistanceWaterHeaterConfig {
+            zone_id: None,
+            zone_type: Some("other housing unit".to_string()),
+            ..typed_config()
+        };
+        let cfg = EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            typed,
+        )
+        .unwrap();
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let e = ambient_test_env(22.0, 2.0);
+        eq.init(&cfg, &e).unwrap();
+        assert_eq!(
+            eq.ambient_location(),
+            Some(AmbientLocation::OtherHousingUnit),
+            "init must resolve the classified ambient placement"
+        );
+        assert_eq!(eq.descriptor().zone, None);
+        assert!((eq.siting.dry_bulb_c(&e, "WH").unwrap() - 22.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resistance_errors_on_unresolved_zone_and_unclassified_location() {
+        let typed = ElectricResistanceWaterHeaterConfig {
+            zone_id: None,
+            zone_type: Some("in between somewhere".to_string()),
+            ..typed_config()
+        };
+        let cfg = EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            typed,
+        )
+        .unwrap();
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &ambient_test_env(21.0, 10.0))
+            .expect_err("an unclassifiable location with no zone must fail init");
+        let message = err.to_string();
+        assert!(
+            message.contains("WH"),
+            "the error must name the water heater, got: {message}"
+        );
+        assert!(
+            message.contains("in between somewhere"),
+            "the error must name the unresolved zone_type, got: {message}"
+        );
+    }
+
+    fn resistance_config(zone_id: Option<u16>, zone_type: Option<&str>) -> EquipmentConfig {
+        let typed = ElectricResistanceWaterHeaterConfig {
+            zone_id,
+            zone_type: zone_type.map(str::to_string),
+            ..typed_config()
+        };
+        EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            typed,
+        )
+        .unwrap()
+    }
+
+    /// A water heater whose config names neither a zone nor an HPXML
+    /// location has no placement: init must fail naming the equipment
+    /// instead of running in whichever zone happens to be first.
+    #[test]
+    fn resistance_errors_when_neither_zone_nor_location_resolves() {
+        let cfg = resistance_config(None, None);
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &ambient_test_env(21.0, 10.0))
+            .expect_err("no zone_id and no location must fail init");
+        assert!(
+            err.to_string().contains("WH"),
+            "the error must name the water heater, got: {err}"
+        );
+    }
+
+    /// "Other housing unit" reads the conditioned zone's air; when that air
+    /// is not available for the step the heater must fail the step rather
+    /// than substitute the outdoor temperature.
+    #[test]
+    fn resistance_other_housing_unit_errors_when_conditioned_air_is_unavailable() {
+        let cfg = resistance_config(None, Some("other housing unit"));
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let mut e = ambient_test_env(22.0, 2.0);
+        eq.init(&cfg, &e).unwrap();
+        e.ambient_other_space_c.other_housing_unit = None;
+        let mut ports = hares_types::PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        eq.step(&e, std::time::Duration::from_secs(60), &mut ports)
+            .expect_err("missing conditioned-zone air must fail the step");
+    }
+
+    /// A tank in a location with no modeled zone loses its standing heat to
+    /// that location's ambient, never into a modeled zone.
+    #[test]
+    fn ambient_placed_resistance_heater_contributes_nothing_to_any_zone() {
+        let cfg = resistance_config(None, Some("other heated space"));
+        let mut eq = ResistanceWH::new(cfg.clone());
+        let e = ambient_test_env(22.0, 2.0);
+        eq.init(&cfg, &e).unwrap();
+        let mut ports = hares_types::PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            eq.step(&e, std::time::Duration::from_secs(60), &mut ports)
+                .unwrap();
+        }
+        let zone = &ports.thermal[0];
+        assert_eq!(
+            (
+                zone.sensible_gain_w,
+                zone.radiant_gain_w,
+                zone.latent_gain_w
+            ),
+            (0.0, 0.0, 0.0),
+            "an ambient-placed tank must not add heat to zone 1"
+        );
+        assert!(
+            eq.ports()
+                .iter()
+                .all(|p| p.port_type != hares_types::PortType::Thermal),
+            "an ambient-placed tank declares no thermal port"
         );
     }
 }

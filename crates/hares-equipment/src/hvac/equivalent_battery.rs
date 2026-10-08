@@ -3,6 +3,7 @@
 use super::hvac_core::HvacEquipment;
 use super::thermostat::ThermostatMode;
 use hares_physics::units::power_w_to_kw;
+use hares_types::{HaresError, MIN_THERMOSTAT_BAND_C};
 
 /// OCHRE reference temperature for heating mode: temperature at which Energy=0.
 /// Matches OCHRE `HVAC.make_equivalent_battery_model()` (HVAC.py:626).
@@ -25,23 +26,23 @@ const REF_TEMP_COOLING_C: f64 = 30.0;
 /// envelope solver's state variables. State-of-charge is `(energy - min) / (max - min)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EquivalentBatteryModel {
-    /// Current energy state [kWh]. Computed as absolute thermal energy relative to
+    /// Current energy state (kWh). Computed as absolute thermal energy relative to
     /// reference temperature. `None` when equipment is in Deadband mode.
     pub energy_kwh: Option<f64>,
-    /// Minimum energy state [kWh]. Energy at the thermostat turn-on threshold,
+    /// Minimum energy state (kWh). Energy at the thermostat turn-on threshold,
     /// computed as `capacitance * (t_on - ref_temp) * hvac_direction`.
     pub min_energy_kwh: f64,
-    /// Maximum energy state [kWh]. Energy at the thermostat turn-off threshold,
+    /// Maximum energy state (kWh). Energy at the thermostat turn-off threshold,
     /// computed as `capacitance * (t_off - ref_temp) * hvac_direction`.
     /// `None` when rated capacity is unavailable.
     pub max_energy_kwh: Option<f64>,
-    /// Maximum power consumption [kW]. `None` when rated capacity is unavailable.
+    /// Maximum power consumption (kW). `None` when rated capacity is unavailable.
     pub max_power_kw: Option<f64>,
     /// Charging efficiency [-]. Coefficient of performance `COP = 1 / EIR`: the
     /// thermal energy delivered to (or removed from) the building per unit of
     /// electrical energy consumed. Matches OCHRE `1 / self.eir` (HVAC.py:639).
     pub efficiency: f64,
-    /// Baseline disturbance power [kW]: the steady-state electrical power the
+    /// Baseline disturbance power (kW): the steady-state electrical power the
     /// system must draw to hold the current setpoint against envelope losses.
     /// Computed as `capacity_ideal_w * eir / 1000` — the ideal thermal capacity
     /// needed to maintain setpoint, divided by the COP to convert thermal load
@@ -53,6 +54,30 @@ pub struct EquivalentBatteryModel {
 }
 
 impl HvacEquipment {
+    /// The axis the equivalent battery window publishes for: the thermostat's
+    /// active mode when it names an axis the unit serves (has rated capacity
+    /// for), otherwise the unit's own populated capacity axis. A unit with no
+    /// capacity on either axis has no window.
+    ///
+    /// OCHRE publishes each end use's EBM window every step, independent of
+    /// the thermostat's call (`results.update(self.make_equivalent_battery_model())`
+    /// in `update_results`, HVAC.py:601-602, model at HVAC.py:620-641): the
+    /// window is a property of the zone state and the setpoints, not of the
+    /// on/off latch. HARES carries one set of EBM keys per unit, so the
+    /// window follows the served axis and does not vanish when the FSM rests
+    /// while the ideal-capacity loop still delivers.
+    fn ebm_axis(&self) -> ThermostatMode {
+        let serves_heating = self.config.heating_capacities_w.iter().any(|&w| w > 0.0);
+        let serves_cooling = self.config.cooling_capacities_w.iter().any(|&w| w > 0.0);
+        match self.thermostat_fsm.mode {
+            ThermostatMode::Heating if serves_heating => ThermostatMode::Heating,
+            ThermostatMode::Cooling if serves_cooling => ThermostatMode::Cooling,
+            _ if serves_cooling && !serves_heating => ThermostatMode::Cooling,
+            _ if serves_heating => ThermostatMode::Heating,
+            _ => ThermostatMode::Deadband,
+        }
+    }
+
     /// Compute Equivalent Battery Model parameters from current equipment state.
     ///
     /// Energy state tracks absolute thermal energy stored in the building relative
@@ -71,47 +96,58 @@ impl HvacEquipment {
     ///
     /// `rated_eir` is the equipment's energy input ratio (electrical input per unit
     /// thermal output); `efficiency = 1 / rated_eir` is the resulting COP
-    /// (OCHRE HVAC.py:639). `capacity_ideal_w` is the ideal thermal capacity [W]
+    /// (OCHRE HVAC.py:639). `capacity_ideal_w` is the ideal thermal capacity (W)
     /// needed to hold the setpoint against envelope losses (OCHRE `capacity_ideal`,
     /// HVAC.py:640); `baseline_power_kw = capacity_ideal_w * rated_eir / 1000` is the
     /// steady-state electrical draw to maintain state.
     ///
     /// Returns `None` fields in Deadband mode or when rated capacity is zero.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `rated_eir <= 0.0`: a non-positive energy input ratio implies
-    /// infinite or negative COP, which is physically impossible.
-    #[must_use]
+    /// The errors of `equivalent_battery_window` and
+    /// `EquivalentBatteryWindow::with_load`.
     pub fn make_equivalent_battery_model(
         &self,
         zone_temp_c: f64,
         zone_capacitance_kwh_per_k: f64,
         rated_eir: f64,
         capacity_ideal_w: f64,
-    ) -> EquivalentBatteryModel {
-        assert!(
-            rated_eir > 0.0,
-            "EBM requires rated_eir > 0.0 (COP = 1/EIR must be finite and positive), got {rated_eir}"
-        );
-        // COP = 1/EIR (OCHRE HVAC.py:639) and steady-state electrical draw to hold
-        // setpoint = ideal thermal capacity * EIR (OCHRE HVAC.py:640, converted from
-        // the thermal quantity to electrical draw via the EIR).
+    ) -> crate::Result<EquivalentBatteryModel> {
+        self.equivalent_battery_window(zone_temp_c, zone_capacitance_kwh_per_k, rated_eir)?
+            .with_load(capacity_ideal_w)
+    }
+
+    /// The load-independent part of the equivalent battery model: the energy
+    /// state and window, the power limit and the efficiency, with every
+    /// invariant on the equipment's state checked. A step computes it before
+    /// it commits any state, so these failures leave the equipment as it was.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when `rated_eir <= 0.0` (a non-positive energy
+    /// input ratio implies infinite or negative COP, physically impossible)
+    /// or when the energy window is not above f64 resolution.
+    pub(crate) fn equivalent_battery_window(
+        &self,
+        zone_temp_c: f64,
+        zone_capacitance_kwh_per_k: f64,
+        rated_eir: f64,
+    ) -> crate::Result<EquivalentBatteryWindow> {
+        if rated_eir <= 0.0 || !rated_eir.is_finite() {
+            return Err(HaresError::Equipment(format!(
+                "EBM requires rated_eir > 0.0 (COP = 1/EIR must be finite and positive), got {rated_eir}"
+            )));
+        }
+        // COP = 1/EIR (OCHRE HVAC.py:639).
         let efficiency = 1.0 / rated_eir;
-        let baseline_power_kw = power_w_to_kw(capacity_ideal_w * rated_eir);
 
         let setpoints = self.effective_setpoints();
         let hysteresis = self.thermostat_fsm.thermostat.hysteresis_c;
+        // `deadband_offset` is validated at thermostat construction
+        // (`ThermostatConfig::validate`), so no per-step range check or
+        // silent clamp is needed here.
         let offset = self.thermostat_fsm.thermostat.deadband_offset;
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            assert!(
-                (0.0..=1.0).contains(&offset),
-                "deadband_offset must be in [0.0, 1.0], got {offset}"
-            );
-        }
-        let offset = offset.clamp(0.0, 1.0);
 
         // Turn-on / turn-off threshold temperatures for both heating and cooling
         // modes. Computed once for observer diagnostics and reused in the match
@@ -123,8 +159,7 @@ impl HvacEquipment {
         let t_cool_on = setpoints.cooling_c + hysteresis * (1.0 - offset);
 
         let (max_power_kw, energy_kwh, min_energy_kwh, max_energy_kwh, _ref_temp_c) = match self
-            .thermostat_fsm
-            .mode
+            .ebm_axis()
         {
             ThermostatMode::Heating => {
                 let rated_w = self.rated_capacity_w(ThermostatMode::Heating);
@@ -160,92 +195,113 @@ impl HvacEquipment {
             ThermostatMode::Deadband => (None, None, 0.0, None, f64::NAN),
         };
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // The energy window must be open whenever the zone capacitance is
+        // positive. The energies themselves may be negative: the reference
+        // temperature is a datum, and a setpoint beyond it (a heating
+        // setback below 10 C) is valid, as in OCHRE.
+        if zone_capacitance_kwh_per_k > 0.0
+            && let Some(max_e) = max_energy_kwh
         {
-            assert!(
-                efficiency > 0.0,
-                "EBM invariant violation: efficiency={efficiency} must be > 0 \
-                 (COP = 1/EIR with EIR={rated_eir})."
-            );
-            assert!(
-                baseline_power_kw >= 0.0,
-                "EBM invariant violation: baseline_power_kw={baseline_power_kw} must be >= 0 \
-                 (capacity_ideal_w={capacity_ideal_w} * eir={rated_eir})."
-            );
-        }
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if zone_capacitance_kwh_per_k > 0.0 {
-            if let Some(max_e) = max_energy_kwh {
-                if max_e <= 0.0 {
-                    panic!(
-                        "EBM invariant violation: zone_capacitance_kwh_per_k={} > 0 \
-                         but max_energy_kwh={} <= 0. Capacitance is positive but \
-                         the computed energy capacity is non-positive — check \
-                         deadband and reference temperature computation.",
-                        zone_capacitance_kwh_per_k, max_e
-                    );
-                }
-                // max_energy_kwh must exceed min_energy_kwh when deadband > 0
-                let deadband_range = (max_e - min_energy_kwh).max(0.0);
-                if deadband_range <= f64::EPSILON && zone_capacitance_kwh_per_k > f64::EPSILON {
-                    panic!(
-                        "EBM invariant violation: max_energy_kwh={} equals min_energy_kwh={}, \
-                         implying zero deadband range while capacitance is positive ({zone_capacitance_kwh_per_k}). \
-                         Check thermostat thresholds.",
-                        max_e, min_energy_kwh
-                    );
-                }
+            let deadband_range = (max_e - min_energy_kwh).max(0.0);
+            if deadband_range <= f64::EPSILON && zone_capacitance_kwh_per_k > f64::EPSILON {
+                return Err(HaresError::Equipment(format!(
+                    "EBM invariant violation: the energy window max_energy_kwh={max_e} - \
+                     min_energy_kwh={min_energy_kwh} is not above f64 resolution. It is the \
+                     zone capacitance ({zone_capacitance_kwh_per_k} kWh/K) times the \
+                     thermostat band ({hysteresis} °C), and every source of the band is \
+                     validated to at least {MIN_THERMOSTAT_BAND_C} °C, so the zone \
+                     capacitance is not physical."
+                )));
             }
         }
 
         #[cfg(feature = "observe")]
-        if let Some(max_e) = max_energy_kwh {
-            if let Some(e) = energy_kwh {
-                let fill_ratio = if max_e > f64::EPSILON {
-                    (e - min_energy_kwh) / (max_e - min_energy_kwh).max(f64::EPSILON)
-                } else {
-                    0.0
-                };
-                let deadband_range_c = if zone_capacitance_kwh_per_k > f64::EPSILON {
-                    (max_e - min_energy_kwh) / zone_capacitance_kwh_per_k
-                } else {
-                    0.0
-                };
-                tracing::debug!(
-                    energy_kwh = e,
-                    zone_temp_c,
-                    ref_temp_c = _ref_temp_c,
-                    fill_ratio,
-                    min_energy_kwh,
-                    max_energy_kwh = max_e,
-                    zone_capacitance_kwh_per_k,
-                    deadband_range_c,
-                    efficiency,
-                    baseline_power_kw,
-                    rated_eir,
-                    capacity_ideal_w,
-                    t_min_heat_c = t_heat_on,
-                    t_max_heat_c = t_heat_off,
-                    t_min_cool_c = t_cool_off,
-                    t_max_cool_c = t_cool_on,
-                    deadband_offset = offset,
-                    hysteresis_c = hysteresis,
-                    heating_setpoint_c = setpoints.heating_c,
-                    cooling_setpoint_c = setpoints.cooling_c,
-                    "EquivalentBatteryModel parameters computed"
-                );
-            }
+        if let Some(max_e) = max_energy_kwh
+            && let Some(e) = energy_kwh
+        {
+            let fill_ratio = if max_e > f64::EPSILON {
+                (e - min_energy_kwh) / (max_e - min_energy_kwh).max(f64::EPSILON)
+            } else {
+                0.0
+            };
+            let deadband_range_c = if zone_capacitance_kwh_per_k > f64::EPSILON {
+                (max_e - min_energy_kwh) / zone_capacitance_kwh_per_k
+            } else {
+                0.0
+            };
+            tracing::debug!(
+                energy_kwh = e,
+                zone_temp_c,
+                ref_temp_c = _ref_temp_c,
+                fill_ratio,
+                min_energy_kwh,
+                max_energy_kwh = max_e,
+                zone_capacitance_kwh_per_k,
+                deadband_range_c,
+                efficiency,
+                rated_eir,
+                t_min_heat_c = t_heat_on,
+                t_max_heat_c = t_heat_off,
+                t_min_cool_c = t_cool_off,
+                t_max_cool_c = t_cool_on,
+                deadband_offset = offset,
+                hysteresis_c = hysteresis,
+                heating_setpoint_c = setpoints.heating_c,
+                cooling_setpoint_c = setpoints.cooling_c,
+                "EquivalentBatteryModel window computed"
+            );
         }
 
-        EquivalentBatteryModel {
+        Ok(EquivalentBatteryWindow {
             energy_kwh,
             min_energy_kwh,
             max_energy_kwh,
             max_power_kw,
             efficiency,
-            baseline_power_kw,
+            rated_eir,
+        })
+    }
+}
+
+/// The load-independent part of an [`EquivalentBatteryModel`], from
+/// [`HvacEquipment::equivalent_battery_window`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct EquivalentBatteryWindow {
+    energy_kwh: Option<f64>,
+    min_energy_kwh: f64,
+    max_energy_kwh: Option<f64>,
+    max_power_kw: Option<f64>,
+    efficiency: f64,
+    rated_eir: f64,
+}
+
+impl EquivalentBatteryWindow {
+    /// Completes the model with the step's load: the steady-state electrical
+    /// draw to hold the setpoint is the ideal thermal capacity times the EIR
+    /// (OCHRE HVAC.py:640, converted from the thermal quantity to electrical
+    /// draw).
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when `capacity_ideal_w` is negative or
+    /// non-finite (the baseline power would be).
+    pub(crate) fn with_load(self, capacity_ideal_w: f64) -> crate::Result<EquivalentBatteryModel> {
+        let baseline_power_kw = power_w_to_kw(capacity_ideal_w * self.rated_eir);
+        if baseline_power_kw.is_nan() || baseline_power_kw < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "EBM baseline_power_kw={baseline_power_kw} must be >= 0 \
+                 (capacity_ideal_w={capacity_ideal_w} * eir={})",
+                self.rated_eir
+            )));
         }
+        Ok(EquivalentBatteryModel {
+            energy_kwh: self.energy_kwh,
+            min_energy_kwh: self.min_energy_kwh,
+            max_energy_kwh: self.max_energy_kwh,
+            max_power_kw: self.max_power_kw,
+            efficiency: self.efficiency,
+            baseline_power_kw,
+        })
     }
 }
 
@@ -328,6 +384,32 @@ mod tests {
         setpoint + hysteresis * (1.0 - offset)
     }
 
+    /// The reference temperature is a datum: a heating setpoint below it (a
+    /// freeze-protection setback) gives negative energies, as in OCHRE, and
+    /// an intact window.
+    #[test]
+    fn a_setpoint_below_the_reference_temperature_gives_negative_energies() {
+        let capacitance = 2.0;
+        let eq = heating_equipment(5.0, 10_000.0, 1.0, 0.2);
+        let ebm = eq
+            .make_equivalent_battery_model(4.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .expect("a setback below the reference temperature is valid");
+        let max_e = ebm.max_energy_kwh.expect("heating mode has a window");
+        assert!(max_e < 0.0 && ebm.min_energy_kwh < max_e);
+        assert!((max_e - ebm.min_energy_kwh - capacitance * 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_window_below_f64_resolution_names_the_capacitance() {
+        let eq = heating_equipment(21.0, 10_000.0, hares_types::MIN_THERMOSTAT_BAND_C, 0.2);
+        let err = eq
+            .make_equivalent_battery_model(20.5, 1e-15, TEST_EIR, TEST_CAP_IDEAL_W)
+            .expect_err("a window below f64 resolution is an invariant violation");
+        let msg = err.to_string();
+        assert!(msg.contains("capacitance is not physical"), "{msg}");
+        assert!(msg.contains("0.1 °C"), "{msg}");
+    }
+
     // ---------------------------------------------------------------------------
     // Existing tests updated for absolute energy tracking
     // ---------------------------------------------------------------------------
@@ -344,7 +426,9 @@ mod tests {
         let deadband = t_off - t_on; // 1.0
         let capacitance = 2.5; // kWh/K
 
-        let ebm = eq.make_equivalent_battery_model(20.5, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(20.5, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         let max_e = ebm.max_energy_kwh.unwrap();
         let min_e = ebm.min_energy_kwh;
         let range = max_e - min_e;
@@ -374,7 +458,9 @@ mod tests {
         let capacitance = 3.5; // kWh/K
         let hvac_dir = -1.0;
 
-        let ebm = eq.make_equivalent_battery_model(24.5, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(24.5, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         let max_e = ebm.max_energy_kwh.unwrap();
         let min_e = ebm.min_energy_kwh;
         let range = max_e - min_e;
@@ -401,10 +487,12 @@ mod tests {
         let cap_small = 0.5; // kWh/K — light apartment
         let cap_large = 100.0; // kWh/K — heavy warehouse
 
-        let ebm_small =
-            eq.make_equivalent_battery_model(20.5, cap_small, TEST_EIR, TEST_CAP_IDEAL_W);
-        let ebm_large =
-            eq.make_equivalent_battery_model(20.5, cap_large, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm_small = eq
+            .make_equivalent_battery_model(20.5, cap_small, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
+        let ebm_large = eq
+            .make_equivalent_battery_model(20.5, cap_large, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
 
         let range_small = ebm_small.max_energy_kwh.unwrap() - ebm_small.min_energy_kwh;
         let range_large = ebm_large.max_energy_kwh.unwrap() - ebm_large.min_energy_kwh;
@@ -425,10 +513,12 @@ mod tests {
         let eq_zero = heating_equipment(setpoint, 10_000.0, hysteresis, 0.0);
         let eq_default = heating_equipment(setpoint, 10_000.0, hysteresis, 0.2);
 
-        let ebm_zero =
-            eq_zero.make_equivalent_battery_model(20.5, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
-        let ebm_default =
-            eq_default.make_equivalent_battery_model(20.5, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm_zero = eq_zero
+            .make_equivalent_battery_model(20.5, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
+        let ebm_default = eq_default
+            .make_equivalent_battery_model(20.5, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
 
         let range_zero = ebm_zero.max_energy_kwh.unwrap() - ebm_zero.min_energy_kwh;
         let range_default = ebm_default.max_energy_kwh.unwrap() - ebm_default.min_energy_kwh;
@@ -438,6 +528,69 @@ mod tests {
             (range_zero - range_default).abs() < 1e-10,
             "energy range should be identical regardless of deadband_offset (same deadband width)"
         );
+    }
+
+    /// OCHRE publishes the EBM window every step regardless of the
+    /// thermostat's call (HVAC.py:601-602, 620-641). A heating unit whose FSM
+    /// rests in Deadband (the zone between the bands, the ideal-capacity loop
+    /// still dispatching) publishes its heating window.
+    #[test]
+    fn the_window_publishes_while_the_thermostat_rests_in_deadband() {
+        let eq = heating_equipment(21.0, 10_000.0, 1.0, 0.2);
+        assert_eq!(eq.thermostat_fsm.mode, ThermostatMode::Heating);
+        // The zone between the bands: the FSM rests in Deadband.
+        let mut eq = eq;
+        eq.thermostat_fsm.mode = ThermostatMode::Deadband;
+
+        let ebm = eq
+            .make_equivalent_battery_model(20.5, 2.5, TEST_EIR, TEST_CAP_IDEAL_W)
+            .expect("a resting thermostat still has an EBM window");
+        assert!(ebm.energy_kwh.is_some(), "energy publishes in Deadband");
+        assert!(
+            ebm.max_energy_kwh.is_some(),
+            "max_energy_kwh publishes in Deadband"
+        );
+        assert!(
+            ebm.max_power_kw.is_some(),
+            "max_power_kw publishes in Deadband"
+        );
+        let range = ebm.max_energy_kwh.unwrap() - ebm.min_energy_kwh;
+        assert!((range - 2.5 * 1.0).abs() < 1e-10);
+    }
+
+    /// A cooling-only unit whose shared FSM sits in Heating (no heating
+    /// capacity behind it) publishes its COOLING window, not zeros: the
+    /// window follows the served axis, not the FSM's transient mode.
+    #[test]
+    fn a_cooling_only_unit_publishes_its_cooling_window_regardless_of_fsm_mode() {
+        let mut eq = cooling_equipment(24.0, 10_000.0, 1.0, 0.2);
+        eq.thermostat_fsm.mode = ThermostatMode::Heating;
+
+        let ebm = eq
+            .make_equivalent_battery_model(24.5, 3.5, TEST_EIR, TEST_CAP_IDEAL_W)
+            .expect("a cooling unit in FSM Heating still has its cooling window");
+        let range = ebm.max_energy_kwh.unwrap() - ebm.min_energy_kwh;
+        assert!((range - 3.5 * 1.0).abs() < 1e-10);
+        // Below the 30 C cooling reference the stored "coolth" energy is
+        // positive (hvac_dir -1 times a negative temperature difference).
+        assert!(ebm.max_energy_kwh.unwrap() > 0.0);
+    }
+
+    /// A unit with no capacity on either axis has no window (the fields stay
+    /// `None`) and the EBM constructor still succeeds.
+    #[test]
+    fn a_capacity_less_unit_has_no_window() {
+        let mut eq = heating_equipment(21.0, 10_000.0, 1.0, 0.2);
+        eq.config.heating_capacities_w.clear();
+        eq.thermostat_fsm.mode = ThermostatMode::Deadband;
+
+        let ebm = eq
+            .make_equivalent_battery_model(20.5, 2.5, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
+        assert!(ebm.energy_kwh.is_none());
+        assert!(ebm.max_energy_kwh.is_none());
+        assert!(ebm.max_power_kw.is_none());
+        assert_eq!(ebm.min_energy_kwh, 0.0);
     }
 
     #[test]
@@ -450,7 +603,9 @@ mod tests {
 
         let t_on = heating_t_on(setpoint, hysteresis, offset);
 
-        let ebm = eq.make_equivalent_battery_model(t_on, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(t_on, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         assert!(
             (ebm.energy_kwh.unwrap() - ebm.min_energy_kwh).abs() < 1e-10,
             "energy at t_on should equal min_energy_kwh"
@@ -467,7 +622,9 @@ mod tests {
 
         let t_off = heating_t_off(setpoint, hysteresis, offset);
 
-        let ebm = eq.make_equivalent_battery_model(t_off, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(t_off, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         assert!(
             (ebm.energy_kwh.unwrap() - ebm.max_energy_kwh.unwrap()).abs() < 1e-10,
             "energy at t_off should equal max_energy_kwh"
@@ -484,7 +641,9 @@ mod tests {
 
         let t_on = cooling_t_on(setpoint, hysteresis, offset);
 
-        let ebm = eq.make_equivalent_battery_model(t_on, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(t_on, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         assert!(
             (ebm.energy_kwh.unwrap() - ebm.min_energy_kwh).abs() < 1e-10,
             "energy at t_on should equal min_energy_kwh"
@@ -501,7 +660,9 @@ mod tests {
 
         let t_off = cooling_t_off(setpoint, hysteresis, offset);
 
-        let ebm = eq.make_equivalent_battery_model(t_off, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(t_off, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         assert!(
             (ebm.energy_kwh.unwrap() - ebm.max_energy_kwh.unwrap()).abs() < 1e-10,
             "energy at t_off should equal max_energy_kwh"
@@ -511,7 +672,9 @@ mod tests {
     #[test]
     fn zero_capacitance_produces_zero_max_energy() {
         let eq = heating_equipment(21.0, 10_000.0, 1.0, 0.2);
-        let ebm = eq.make_equivalent_battery_model(20.5, 0.0, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(20.5, 0.0, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         let range = ebm.max_energy_kwh.unwrap() - ebm.min_energy_kwh;
         assert!(
             range < 1e-10,
@@ -530,8 +693,9 @@ mod tests {
         let capacitance = 10.0;
         let zone_temp = 25.0;
 
-        let ebm =
-            eq.make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         let expected = -capacitance * (zone_temp - REF_TEMP_COOLING_C);
         assert!(
             (ebm.energy_kwh.unwrap() - expected).abs() < 1e-10,
@@ -547,10 +711,12 @@ mod tests {
         let capacitance = 10.0;
         let hvac_dir = -1.0;
 
-        let ebm_warm =
-            eq.make_equivalent_battery_model(25.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
-        let ebm_cool =
-            eq.make_equivalent_battery_model(23.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm_warm = eq
+            .make_equivalent_battery_model(25.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
+        let ebm_cool = eq
+            .make_equivalent_battery_model(23.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
 
         let energy_warm = capacitance * (25.0 - REF_TEMP_COOLING_C) * hvac_dir;
         let energy_cool = capacitance * (23.0 - REF_TEMP_COOLING_C) * hvac_dir;
@@ -578,8 +744,9 @@ mod tests {
         let capacitance = 10.0;
         let zone_temp = 20.5;
 
-        let ebm =
-            eq.make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         let expected = capacitance * (zone_temp - REF_TEMP_HEATING_C) * 1.0;
         assert!(
             (ebm.energy_kwh.unwrap() - expected).abs() < 1e-10,
@@ -594,10 +761,12 @@ mod tests {
         let eq = heating_equipment(21.0, 10_000.0, 1.0, 0.2);
         let capacitance = 10.0;
 
-        let ebm_cooler =
-            eq.make_equivalent_battery_model(20.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
-        let ebm_warmer =
-            eq.make_equivalent_battery_model(22.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm_cooler = eq
+            .make_equivalent_battery_model(20.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
+        let ebm_warmer = eq
+            .make_equivalent_battery_model(22.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
 
         let delta = ebm_warmer.energy_kwh.unwrap() - ebm_cooler.energy_kwh.unwrap();
         let expected_delta = capacitance * 2.0;
@@ -615,8 +784,12 @@ mod tests {
         let eq = cooling_equipment(24.0, 10_000.0, 1.0, 0.2);
         let capacitance = 10.0;
 
-        let ebm_a = eq.make_equivalent_battery_model(25.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
-        let ebm_b = eq.make_equivalent_battery_model(25.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm_a = eq
+            .make_equivalent_battery_model(25.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
+        let ebm_b = eq
+            .make_equivalent_battery_model(25.0, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
 
         assert!(
             (ebm_a.energy_kwh.unwrap() - ebm_b.energy_kwh.unwrap()).abs() < 1e-10,
@@ -639,10 +812,12 @@ mod tests {
         let t_on = heating_t_on(setpoint, hysteresis, offset);
         let t_off = heating_t_off(setpoint, hysteresis, offset);
 
-        let ebm_on =
-            eq.make_equivalent_battery_model(t_on, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
-        let ebm_off =
-            eq.make_equivalent_battery_model(t_off, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm_on = eq
+            .make_equivalent_battery_model(t_on, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
+        let ebm_off = eq
+            .make_equivalent_battery_model(t_off, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
 
         let range = ebm_on.max_energy_kwh.unwrap() - ebm_on.min_energy_kwh;
         let soc_on = (ebm_on.energy_kwh.unwrap() - ebm_on.min_energy_kwh) / range;
@@ -669,10 +844,12 @@ mod tests {
         let t_on = cooling_t_on(setpoint, hysteresis, offset);
         let t_off = cooling_t_off(setpoint, hysteresis, offset);
 
-        let ebm_on =
-            eq.make_equivalent_battery_model(t_on, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
-        let ebm_off =
-            eq.make_equivalent_battery_model(t_off, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm_on = eq
+            .make_equivalent_battery_model(t_on, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
+        let ebm_off = eq
+            .make_equivalent_battery_model(t_off, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
 
         let range = ebm_on.max_energy_kwh.unwrap() - ebm_on.min_energy_kwh;
         let soc_on = (ebm_on.energy_kwh.unwrap() - ebm_on.min_energy_kwh) / range;
@@ -697,7 +874,9 @@ mod tests {
         });
         eq.thermostat_fsm.mode = ThermostatMode::Deadband;
 
-        let ebm = eq.make_equivalent_battery_model(22.0, 5.0, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(22.0, 5.0, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         assert!(ebm.energy_kwh.is_none());
         assert!(ebm.max_energy_kwh.is_none());
         assert!(ebm.max_power_kw.is_none());
@@ -714,8 +893,9 @@ mod tests {
         let ref_temp = REF_TEMP_COOLING_C;
         let hvac_dir = -1.0;
 
-        let ebm =
-            eq.make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         let expected = capacitance * (zone_temp - ref_temp) * hvac_dir;
         assert!(
             expected < 0.0,
@@ -739,8 +919,9 @@ mod tests {
         let ref_temp = REF_TEMP_HEATING_C;
         let hvac_dir = 1.0;
 
-        let ebm =
-            eq.make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         let expected = capacitance * (zone_temp - ref_temp) * hvac_dir;
         assert!(
             expected < 0.0,
@@ -756,7 +937,9 @@ mod tests {
     #[test]
     fn zero_rated_capacity_returns_none_fields() {
         let eq = heating_equipment(21.0, 0.0, 1.0, 0.2);
-        let ebm = eq.make_equivalent_battery_model(20.5, 5.0, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(20.5, 5.0, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         assert!(ebm.energy_kwh.is_none());
         assert!(ebm.max_energy_kwh.is_none());
         assert!(ebm.max_power_kw.is_none());
@@ -770,7 +953,9 @@ mod tests {
     fn efficiency_is_cop_and_baseline_is_ideal_capacity_times_eir() {
         // eir=0.2 → COP=5.0; capacity_ideal=5000 W → baseline = 5000*0.2/1000 = 1.0 kW.
         let eq = heating_equipment(21.0, 10_000.0, 1.0, 0.2);
-        let ebm = eq.make_equivalent_battery_model(20.5, 2.5, 0.2, 5_000.0);
+        let ebm = eq
+            .make_equivalent_battery_model(20.5, 2.5, 0.2, 5_000.0)
+            .unwrap();
 
         assert!(
             (ebm.efficiency - 5.0).abs() < 1e-10,
@@ -785,17 +970,21 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "rated_eir > 0.0")]
-    fn zero_eir_panics() {
+    fn zero_eir_is_a_typed_error() {
         let eq = heating_equipment(21.0, 10_000.0, 1.0, 0.2);
-        let _ = eq.make_equivalent_battery_model(20.5, 2.5, 0.0, 5_000.0);
+        let err = eq
+            .make_equivalent_battery_model(20.5, 2.5, 0.0, 5_000.0)
+            .expect_err("zero EIR must be rejected");
+        assert!(err.to_string().contains("rated_eir > 0.0"), "got: {err}");
     }
 
     #[test]
-    #[should_panic(expected = "rated_eir > 0.0")]
-    fn negative_eir_panics() {
+    fn negative_eir_is_a_typed_error() {
         let eq = heating_equipment(21.0, 10_000.0, 1.0, 0.2);
-        let _ = eq.make_equivalent_battery_model(20.5, 2.5, -0.3, 5_000.0);
+        let err = eq
+            .make_equivalent_battery_model(20.5, 2.5, -0.3, 5_000.0)
+            .expect_err("negative EIR must be rejected");
+        assert!(err.to_string().contains("rated_eir > 0.0"), "got: {err}");
     }
 
     #[test]
@@ -815,7 +1004,9 @@ mod tests {
             "eir_at_stage(0) should equal configured eir_by_stage[0]={rated_eir}, got {config_eir}"
         );
 
-        let ebm = eq.make_equivalent_battery_model(24.5, 5.0, config_eir, capacity_w);
+        let ebm = eq
+            .make_equivalent_battery_model(24.5, 5.0, config_eir, capacity_w)
+            .unwrap();
 
         assert!(
             (ebm.efficiency - 1.0 / config_eir).abs() < 1e-10,
@@ -853,8 +1044,9 @@ mod tests {
         );
 
         let eq = heating_equipment(setpoint, 10_000.0, hysteresis, offset);
-        let ebm =
-            eq.make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
 
         let range = ebm.max_energy_kwh.unwrap() - ebm.min_energy_kwh;
         let soc = (ebm.energy_kwh.unwrap() - ebm.min_energy_kwh) / range;
@@ -892,8 +1084,9 @@ mod tests {
         );
 
         let eq = heating_equipment(setpoint, 10_000.0, hysteresis, offset);
-        let ebm =
-            eq.make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm = eq
+            .make_equivalent_battery_model(zone_temp, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         let range = ebm.max_energy_kwh.unwrap() - ebm.min_energy_kwh;
         let soc = (ebm.energy_kwh.unwrap() - ebm.min_energy_kwh) / range;
 
@@ -923,16 +1116,18 @@ mod tests {
         let deadband_h = t_off_h - t_on_h;
 
         let eq_h = heating_equipment(setpoint_h, 10_000.0, hysteresis, offset);
-        let ebm_ref =
-            eq_h.make_equivalent_battery_model(t_on_h, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm_ref = eq_h
+            .make_equivalent_battery_model(t_on_h, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         let min_h = ebm_ref.min_energy_kwh;
         let max_h = ebm_ref.max_energy_kwh.unwrap();
         let range_h = max_h - min_h;
 
         for fraction in [0.00, 0.10, 0.25, 0.50, 0.75, 0.90, 1.00] {
             let zone = t_on_h + fraction * deadband_h;
-            let ebm =
-                eq_h.make_equivalent_battery_model(zone, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+            let ebm = eq_h
+                .make_equivalent_battery_model(zone, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+                .unwrap();
             let soc = (ebm.energy_kwh.unwrap() - min_h) / range_h;
             assert!(
                 (soc - fraction).abs() < 1e-10,
@@ -947,16 +1142,18 @@ mod tests {
         let deadband_c = t_on_c - t_off_c;
 
         let eq_c = cooling_equipment(setpoint_c, 10_000.0, hysteresis, offset);
-        let ebm_ref =
-            eq_c.make_equivalent_battery_model(t_on_c, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+        let ebm_ref = eq_c
+            .make_equivalent_battery_model(t_on_c, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+            .unwrap();
         let min_c = ebm_ref.min_energy_kwh;
         let max_c = ebm_ref.max_energy_kwh.unwrap();
         let range_c = max_c - min_c;
 
         for fraction in [0.00, 0.10, 0.25, 0.50, 0.75, 0.90, 1.00] {
             let zone = t_on_c - fraction * deadband_c;
-            let ebm =
-                eq_c.make_equivalent_battery_model(zone, capacitance, TEST_EIR, TEST_CAP_IDEAL_W);
+            let ebm = eq_c
+                .make_equivalent_battery_model(zone, capacitance, TEST_EIR, TEST_CAP_IDEAL_W)
+                .unwrap();
             let soc = (ebm.energy_kwh.unwrap() - min_c) / range_c;
             assert!(
                 (soc - fraction).abs() < 1e-10,
@@ -965,19 +1162,69 @@ mod tests {
         }
     }
 
-    #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    #[should_panic(expected = "deadband_offset must be in [0.0, 1.0]")]
-    fn deadband_offset_below_zero_panics() {
-        let eq = heating_equipment(21.0, 10_000.0, 1.0, -0.1);
-        let _ = eq.make_equivalent_battery_model(20.5, 5.0, TEST_EIR, TEST_CAP_IDEAL_W);
+    /// A minimal environment state for thermostat config validation.
+    fn thermostat_test_env() -> hares_types::EnvironmentState {
+        use chrono::TimeZone;
+        hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
+            zones: vec![hares_types::ZoneState {
+                id: hares_types::ZoneId(1),
+                temperature_c: 21.0,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            }],
+            weather: hares_types::WeatherState::default(),
+            grid: hares_types::GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: Default::default(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 15, 12, 0, 0)
+                .single()
+                .expect("valid time"),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
     }
 
     #[test]
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    #[should_panic(expected = "deadband_offset must be in [0.0, 1.0]")]
-    fn deadband_offset_above_one_panics() {
-        let eq = heating_equipment(21.0, 10_000.0, 1.0, 1.1);
-        let _ = eq.make_equivalent_battery_model(20.5, 5.0, TEST_EIR, TEST_CAP_IDEAL_W);
+    fn deadband_offset_below_zero_is_a_construction_error() {
+        let env = thermostat_test_env();
+        let mut cfg = ThermostatConfig {
+            deadband_offset: -0.1,
+            ..ThermostatConfig::default()
+        };
+        let err = cfg
+            .validate(&env)
+            .expect_err("a negative deadband_offset must be rejected at construction");
+        assert!(
+            err.to_string()
+                .contains("deadband_offset must be in [0.0, 1.0]"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn deadband_offset_above_one_is_a_construction_error() {
+        let env = thermostat_test_env();
+        let mut cfg = ThermostatConfig {
+            deadband_offset: 1.1,
+            ..ThermostatConfig::default()
+        };
+        let err = cfg
+            .validate(&env)
+            .expect_err("a deadband_offset above 1.0 must be rejected at construction");
+        assert!(
+            err.to_string()
+                .contains("deadband_offset must be in [0.0, 1.0]"),
+            "got: {err}"
+        );
     }
 }

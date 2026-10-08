@@ -19,7 +19,7 @@ use crate::{Equipment, EquipmentConfig};
 use super::super::ac_config::{CentralAirConditionerConfig, HeatPumpCoolerConfig};
 use super::super::air_conditioner::AirConditioner;
 use super::super::heating_config::HvacSetpointConfig;
-use super::super::helpers::zone_id_from_config_or_default;
+use super::super::helpers::resolve_served_zone;
 use crate::config::constructor_equipment_id;
 
 /// MSHP crankcase heater: 15 W rated, activates at or below 0 °C.
@@ -36,8 +36,6 @@ pub struct HpCooler {
     /// Set by the system coordinator after the heater step so that the cooler
     /// can compute crankcase power using `max(cooling_rtf, heating_rtf)`.
     companion_heating_rtf: Option<f64>,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
 }
 
 impl HpCooler {
@@ -59,14 +57,13 @@ impl HpCooler {
             inner.core.hvac.config.equipment_type = ashp_cool_type;
             inner.core.hvac.config.airflow_m3_s_per_w = ashp_cool_type.default_airflow_m3_s_per_w();
         }
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(constructor_equipment_id(&config)),
                 name: config.name,
                 end_use: EndUse::HVAC_COOLING,
                 equipment_type: Cow::Borrowed(equipment_type),
-                zone: Some(zone),
+                zone: inner.descriptor().zone,
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -76,7 +73,8 @@ impl HpCooler {
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
-                    | ControlCapabilities::IDEAL_CAPACITY,
+                    | ControlCapabilities::IDEAL_CAPACITY
+                    | ControlCapabilities::NON_HVAC_ZONE_INPUT,
                 core_capabilities: CoreCapabilities::ELECTRIC
                     | CoreCapabilities::HAS_MODE
                     | CoreCapabilities::THERMAL
@@ -91,7 +89,6 @@ impl HpCooler {
             inner,
             is_mshp,
             companion_heating_rtf: None,
-            zone_id_explicit,
         }
     }
 
@@ -210,6 +207,8 @@ impl HpCooler {
         // tests, or a user "zip" override) reach the inner AirConditioner that
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
+        cfg.zone_map = source.zone_map.clone();
+        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
         Ok(cfg)
     }
 }
@@ -227,19 +226,18 @@ impl Equipment for HpCooler {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         let typed_hp_cfg = config.require_typed::<HeatPumpCoolerConfig>("Heat Pump Cooler")?;
+        resolve_served_zone(config, self.descriptor.zone)?;
         typed_hp_cfg.validate()?;
         let mapped = Self::typed_hp_to_central_ac_config(config, &typed_hp_cfg)?;
         self.inner.init(&mapped, env)?;
+        self.descriptor.zone = self.inner.descriptor().zone;
+        self.ports = self.inner.ports().to_vec();
         let n_speeds = self.inner.core.hvac.config.cooling_capacities_w.len();
         if let Some(shrs) = &typed_hp_cfg.stage_shrs {
             if !shrs.is_empty() && shrs.len() != n_speeds {
@@ -261,8 +259,6 @@ impl Equipment for HpCooler {
                 MSHP_CRANKCASE_HEATER_THRESHOLD_C,
             );
         }
-        // Re-sync ports after inner init may have added duct/basement zone thermals.
-        self.ports = self.inner.ports().to_vec();
         Ok(())
     }
 
@@ -291,6 +287,14 @@ impl Equipment for HpCooler {
         self.inner.core_output()
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        self.inner.thermostat_band_class()
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        self.inner.thermostat_axes()
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor ZIP resolved by the inner
         // AirConditioner (the user "zip" sidecar is propagated to it).
@@ -311,6 +315,10 @@ impl Equipment for HpCooler {
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.inner.ideal_target()
+    }
+
+    fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
+        self.inner.take_health_counts()
     }
 }
 
@@ -334,8 +342,6 @@ pub struct GshpCooler {
     /// honouring the unit-level pf=0 sentinel. The compressor/fan/crankcase
     /// reactive comes from the inner [`AirConditioner`].
     pump_zip: hares_types::zip::ZipLoad,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
 }
 
 impl GshpCooler {
@@ -354,14 +360,13 @@ impl GshpCooler {
                 hares_physics::borehole::BoreholeConfig::default(),
             )),
         };
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(constructor_equipment_id(&config)),
                 name: config.name,
                 end_use: EndUse::HVAC_COOLING,
                 equipment_type: Cow::Borrowed("GSHP Cooler"),
-                zone: Some(zone),
+                zone: inner.descriptor().zone,
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -371,7 +376,8 @@ impl GshpCooler {
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
-                    | ControlCapabilities::IDEAL_CAPACITY,
+                    | ControlCapabilities::IDEAL_CAPACITY
+                    | ControlCapabilities::NON_HVAC_ZONE_INPUT,
                 core_capabilities: CoreCapabilities::ELECTRIC
                     | CoreCapabilities::HAS_MODE
                     | CoreCapabilities::THERMAL
@@ -392,7 +398,6 @@ impl GshpCooler {
             pump_motor_efficiency: 0.40,
             pump_system_head_loss_m: 3.0,
             pump_zip: hares_types::zip::ZipLoad::constant_power(),
-            zone_id_explicit,
         }
     }
 
@@ -480,6 +485,8 @@ impl GshpCooler {
         // tests, or a user "zip" override) reach the inner AirConditioner that
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
+        cfg.zone_map = source.zone_map.clone();
+        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
         Ok(cfg)
     }
 
@@ -502,19 +509,18 @@ impl Equipment for GshpCooler {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         let typed_hp_cfg = config.require_typed::<HeatPumpCoolerConfig>("GSHP Cooler")?;
+        resolve_served_zone(config, self.descriptor.zone)?;
         typed_hp_cfg.validate()?;
         let mapped = Self::typed_gshp_to_central_ac_config(config, &typed_hp_cfg)?;
         self.inner.init(&mapped, env)?;
+        self.descriptor.zone = self.inner.descriptor().zone;
+        self.ports = self.inner.ports().to_vec();
         // GSHP: compressor is indoors; no crankcase heater needed.
         // Override post-init because AirConditioner::init_from_typed unconditionally
         // writes the central-AC default (0.05 kW / 12.8°C) when crankcase_heater_kw
@@ -708,6 +714,14 @@ impl Equipment for GshpCooler {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        self.inner.thermostat_band_class()
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        self.inner.thermostat_axes()
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor ZIP resolved by the inner
         // AirConditioner (the user "zip" sidecar is propagated to it); the
@@ -741,6 +755,10 @@ impl Equipment for GshpCooler {
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.inner.ideal_target()
     }
+
+    fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
+        self.inner.take_health_counts()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -763,8 +781,6 @@ pub struct WshpCooler {
     /// honouring the unit-level pf=0 sentinel. The compressor/fan/crankcase
     /// reactive comes from the inner [`AirConditioner`].
     pump_zip: hares_types::zip::ZipLoad,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
 }
 
 impl WshpCooler {
@@ -778,14 +794,13 @@ impl WshpCooler {
         inner.set_crankcase_defaults_if_unconfigured(&config, 0.0, f64::NEG_INFINITY);
         // Source temperature: constant entering water temperature.
         inner.core.source_temp = SourceTemperature::Constant(10.0);
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(constructor_equipment_id(&config)),
                 name: config.name,
                 end_use: EndUse::HVAC_COOLING,
                 equipment_type: Cow::Borrowed("WSHP Cooler"),
-                zone: Some(zone),
+                zone: inner.descriptor().zone,
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -795,7 +810,8 @@ impl WshpCooler {
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
-                    | ControlCapabilities::IDEAL_CAPACITY,
+                    | ControlCapabilities::IDEAL_CAPACITY
+                    | ControlCapabilities::NON_HVAC_ZONE_INPUT,
                 core_capabilities: CoreCapabilities::ELECTRIC
                     | CoreCapabilities::HAS_MODE
                     | CoreCapabilities::THERMAL
@@ -816,7 +832,6 @@ impl WshpCooler {
             pump_motor_efficiency: 0.40,
             pump_system_head_loss_m: 3.0,
             pump_zip: hares_types::zip::ZipLoad::constant_power(),
-            zone_id_explicit,
         }
     }
 
@@ -902,6 +917,8 @@ impl WshpCooler {
         // tests, or a user "zip" override) reach the inner AirConditioner that
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
+        cfg.zone_map = source.zone_map.clone();
+        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
         Ok(cfg)
     }
 
@@ -923,19 +940,18 @@ impl Equipment for WshpCooler {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         let typed_hp_cfg = config.require_typed::<HeatPumpCoolerConfig>("WSHP Cooler")?;
+        resolve_served_zone(config, self.descriptor.zone)?;
         typed_hp_cfg.validate()?;
         let mapped = Self::typed_wshp_to_central_ac_config(config, &typed_hp_cfg)?;
         self.inner.init(&mapped, env)?;
+        self.descriptor.zone = self.inner.descriptor().zone;
+        self.ports = self.inner.ports().to_vec();
         // WSHP: compressor is indoors; no crankcase heater needed.
         self.inner.core.crankcase_rated_kw = 0.0;
         self.inner.core.crankcase_threshold_c = f64::NEG_INFINITY;
@@ -1052,6 +1068,14 @@ impl Equipment for WshpCooler {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        self.inner.thermostat_band_class()
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        self.inner.thermostat_axes()
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         // Primary component: the compressor ZIP resolved by the inner
         // AirConditioner (the user "zip" sidecar is propagated to it); the
@@ -1082,6 +1106,10 @@ impl Equipment for WshpCooler {
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.inner.ideal_target()
     }
+
+    fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
+        self.inner.take_health_counts()
+    }
 }
 
 #[cfg(test)]
@@ -1104,6 +1132,7 @@ mod tests {
 
     fn cooling_env(zone_temp_c: f64, outdoor_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -1130,7 +1159,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1149,6 +1179,7 @@ mod tests {
             "HP Cooler".to_string(),
             "ASHP Cooler".to_string(),
             crate::HeatPumpCoolerConfig {
+                reject_unknown_keys: crate::RejectUnknownKeys,
                 common: crate::HeatPumpCommonConfig {
                     equipment_id: None,
                     zone_id: Some(1),
@@ -1207,6 +1238,64 @@ mod tests {
                 data,
             },
         )
+    }
+
+    /// The served zone's thermal capacitance the dwelling hands a heat pump
+    /// cooler reaches the inner air conditioner, where the equivalent
+    /// battery model reads it, for every cooler wrapper.
+    #[test]
+    fn heat_pump_coolers_pass_zone_capacitance_to_the_inner_air_conditioner() {
+        let hp_common = || crate::HeatPumpCommonConfig {
+            zone_id: Some(1),
+            cooling_capacity_w: Some(8_000.0),
+            cooling_eir: Some(0.33),
+            enter_water_temp_c: Some(20.0),
+            ..Default::default()
+        };
+        let config_for = |class: &str| {
+            let mut cfg = EquipmentConfig::from_typed(
+                class.to_string(),
+                class.to_string(),
+                crate::HeatPumpCoolerConfig {
+                    common: hp_common(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            cfg.zone_capacitance_kwh_per_k = 2.5;
+            cfg
+        };
+        let env = cooling_env(21.0, 10.0);
+
+        let cfg = config_for("ASHP Cooler");
+        let mut ashp = HpCooler::ashp_cooler(cfg.clone());
+        ashp.init(&cfg, &env).unwrap();
+        let cfg = config_for("GSHP Cooler");
+        let mut gshp = GshpCooler::new(cfg.clone());
+        gshp.init(&cfg, &env).unwrap();
+        let cfg = config_for("WSHP Cooler");
+        let mut wshp = WshpCooler::new(cfg.clone());
+        wshp.init(&cfg, &env).unwrap();
+
+        for (class, capacitance) in [
+            (
+                "ASHP",
+                ashp.inner.core.hvac.config.zone_capacitance_kwh_per_k,
+            ),
+            (
+                "GSHP",
+                gshp.inner.core.hvac.config.zone_capacitance_kwh_per_k,
+            ),
+            (
+                "WSHP",
+                wshp.inner.core.hvac.config.zone_capacitance_kwh_per_k,
+            ),
+        ] {
+            assert_eq!(
+                capacitance, 2.5,
+                "{class} cooler dropped the zone capacitance"
+            );
+        }
     }
 
     /// Zone above cooling setpoint -- cooler must remove heat (negative thermal
@@ -1494,7 +1583,7 @@ mod tests {
                 "cooling_eir": 16.0,
                 "number_of_speeds": 1,
                 "is_mini_split": true,
-                "hysteresis_c": 0.0
+                "hysteresis_c": hares_types::MIN_THERMOSTAT_BAND_C
             }),
             "MSHP Cooler",
         );
@@ -1507,7 +1596,7 @@ mod tests {
         eq.apply_control(&ControlSignal::ThermalSetpoint {
             heating_setpoint_c: Some(18.0),
             cooling_setpoint_c: Some(24.0),
-            deadband_c: Some(0.0),
+            deadband_c: None,
         })
         .unwrap();
 
@@ -1567,6 +1656,7 @@ mod tests {
                     "gshp_cooler".to_string(),
                     "GSHP Cooler".to_string(),
                     crate::HeatPumpCoolerConfig {
+                        reject_unknown_keys: crate::RejectUnknownKeys,
                         common: crate::HeatPumpCommonConfig {
                             zone_id: Some(1),
                             cooling_capacity_w: Some(8_000.0),
@@ -2282,6 +2372,51 @@ mod tests {
         assert!(
             any_reactive,
             "the pf 0.96 twin must produce reactive power while cooling"
+        );
+    }
+
+    #[test]
+    fn hp_cooler_take_health_counts_forwards_to_inner_air_conditioner() {
+        let mut eq = HpCooler::ashp_cooler(base_config());
+        eq.inner.core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let _ = eq.inner.core.hvac.evaluate_biquadratic(4, 20.0, 30.0);
+        assert_eq!(
+            Equipment::take_health_counts(&mut eq).curve_index_clamps,
+            1,
+            "the cooler must surface the inner air conditioner's clamp counter"
+        );
+    }
+
+    #[test]
+    fn gshp_cooler_take_health_counts_forwards_to_inner_air_conditioner() {
+        let mut eq = GshpCooler::new(base_config());
+        eq.inner.core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let _ = eq.inner.core.hvac.evaluate_biquadratic(4, 20.0, 30.0);
+        assert_eq!(
+            Equipment::take_health_counts(&mut eq).curve_index_clamps,
+            1,
+            "the cooler must surface the inner air conditioner's clamp counter"
+        );
+    }
+
+    #[test]
+    fn wshp_cooler_take_health_counts_forwards_to_inner_air_conditioner() {
+        let mut eq = WshpCooler::new(base_config());
+        eq.inner.core.hvac.config.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let _ = eq.inner.core.hvac.evaluate_biquadratic(4, 20.0, 30.0);
+        assert_eq!(
+            Equipment::take_health_counts(&mut eq).curve_index_clamps,
+            1,
+            "the cooler must surface the inner air conditioner's clamp counter"
         );
     }
 }

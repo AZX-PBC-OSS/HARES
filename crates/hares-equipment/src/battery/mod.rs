@@ -19,7 +19,7 @@ use hares_types::{
     CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, Soc, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId,
+    ThermalCategory, Warning, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -417,12 +417,8 @@ pub struct Battery {
     /// setters. Set to `true` by `Dwelling::add_equipment` → `mark_initialized()`.
     initialized: bool,
 
-    /// Count of SOCTarget signals that violated SOC ordering constraints
-    /// (min_soc < target_soc < max_soc) and were auto-corrected.
-    /// Gated on `observe` feature for diagnostic CSV output.
-    #[cfg(feature = "observe")]
-    #[allow(dead_code)]
-    setpoint_violation_count: u64,
+    /// Warnings raised since the last drain (init plausibility checks).
+    warnings: Vec<Warning>,
 }
 
 impl Battery {
@@ -521,8 +517,7 @@ impl Battery {
             min_dwell_steps: 0,
             grid_forming: true,
             initialized: false,
-            #[cfg(feature = "observe")]
-            setpoint_violation_count: 0,
+            warnings: Vec::new(),
         }
     }
 
@@ -598,21 +593,21 @@ impl Battery {
         }
 
         // Priority 2: SOC target (simple proportional controller)
-        if let Some(target) = self.soc_target {
-            if dt_hours > 0.0 {
-                let error = target - self.soc;
-                // DC power needed to hit target in one step.
-                let dc_power = error * self.capacity_kwh / dt_hours;
-                // Convert DC→AC: compute_electrical expects AC (grid-side) power.
-                // Charging (dc_power > 0): AC = DC / charge_eta
-                // Discharging (dc_power < 0): AC = DC * discharge_eta
-                let ac_power = if dc_power > 0.0 {
-                    dc_power / self.charge_efficiency
-                } else {
-                    dc_power * self.discharge_efficiency
-                };
-                return self.clamp_power(ac_power);
-            }
+        if let Some(target) = self.soc_target
+            && dt_hours > 0.0
+        {
+            let error = target - self.soc;
+            // DC power needed to hit target in one step.
+            let dc_power = error * self.capacity_kwh / dt_hours;
+            // Convert DC→AC: compute_electrical expects AC (grid-side) power.
+            // Charging (dc_power > 0): AC = DC / charge_eta
+            // Discharging (dc_power < 0): AC = DC * discharge_eta
+            let ac_power = if dc_power > 0.0 {
+                dc_power / self.charge_efficiency
+            } else {
+                dc_power * self.discharge_efficiency
+            };
+            return self.clamp_power(ac_power);
         }
 
         // Priority 3: self-consumption
@@ -844,115 +839,104 @@ impl Battery {
         if has_cell_params
             && (self.derivation_source == DerivationSource::CellParameters
                 || self.derivation_source == DerivationSource::Mixed)
+            && let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell)
+            && ah > 0.0
+            && vc > 0.0
         {
-            if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
-                if ah > 0.0 && vc > 0.0 {
-                    let implied_kwh =
-                        self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
-                    let relative_error =
-                        (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
-                    // With ceil(), implied_kwh >= declared_kwh; the check guards
-                    // against pathological cell-parameter combinations where a
-                    // single cell's Ah capacity dwarfs the pack requirement,
-                    // producing a physically invalid topology.
-                    if relative_error > 0.10 {
-                        tracing::error!(
-                            self.n_series,
-                            self.n_parallel,
-                            ah_cell = ah,
-                            v_cell = vc,
-                            capacity_kwh = self.capacity_kwh,
-                            implied_capacity_kwh = implied_kwh,
-                            relative_error,
-                            "Battery topology derived from cell parameters is inconsistent \
+            let implied_kwh = self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
+            let relative_error = (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
+            // With ceil(), implied_kwh >= declared_kwh; the check guards
+            // against pathological cell-parameter combinations where a
+            // single cell's Ah capacity dwarfs the pack requirement,
+            // producing a physically invalid topology.
+            if relative_error > 0.10 {
+                tracing::error!(
+                    self.n_series,
+                    self.n_parallel,
+                    ah_cell = ah,
+                    v_cell = vc,
+                    capacity_kwh = self.capacity_kwh,
+                    implied_capacity_kwh = implied_kwh,
+                    relative_error,
+                    "Battery topology derived from cell parameters is inconsistent \
                              with declared capacity: implied {:.2} kWh vs declared {:.2} kWh \
                              (relative error {:.1}% > 10%)",
-                            implied_kwh,
-                            self.capacity_kwh,
-                            relative_error * 100.0,
-                        );
-                        return Err(HaresError::Equipment(format!(
-                            "derived battery topology (n_series={}, n_parallel={}) implies capacity \
+                    implied_kwh,
+                    self.capacity_kwh,
+                    relative_error * 100.0,
+                );
+                return Err(HaresError::Equipment(format!(
+                    "derived battery topology (n_series={}, n_parallel={}) implies capacity \
                              {:.2} kWh, which differs from declared {:.2} kWh by {:.1}% (>10% threshold). \
                              Cell parameters (ah_cell={} Ah, v_cell={} V) are incompatible with the \
                              declared pack capacity",
-                            self.n_series,
-                            self.n_parallel,
-                            implied_kwh,
-                            self.capacity_kwh,
-                            relative_error * 100.0,
-                            ah,
-                            vc,
-                        )));
-                    }
-                }
+                    self.n_series,
+                    self.n_parallel,
+                    implied_kwh,
+                    self.capacity_kwh,
+                    relative_error * 100.0,
+                    ah,
+                    vc,
+                )));
             }
         }
 
         // Invariant check: when both explicit topology and cell params were
         // provided, verify the explicit values are reasonably close to what
-        // cell-parameter derivation would have produced.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // cell-parameter derivation would have produced. Always-on warning at
+        // init: an explicit topology may legitimately differ, but silently.
         {
-            if has_any_explicit && has_cell_params {
-                if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
-                    if ah > 0.0 && vc > 0.0 {
-                        let target_pack_v = c.pack_voltage_v.unwrap_or(350.0);
-                        let derived_series = {
-                            let s = (target_pack_v / vc).round() as u32;
-                            if s == 0 { 1 } else { s }
-                        };
-                        let pack_v = derived_series as f64 * vc;
-                        let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
-                        let derived_parallel = {
-                            let p = (pack_ah / ah).ceil() as u32;
-                            if p == 0 { 1 } else { p }
-                        };
-                        let series_diff =
-                            (self.n_series as i64 - derived_series as i64).unsigned_abs();
-                        let parallel_diff =
-                            (self.n_parallel as i64 - derived_parallel as i64).unsigned_abs();
-                        if series_diff > 1 || parallel_diff > 1 {
-                            tracing::warn!(
-                                self.n_series,
-                                self.n_parallel,
-                                derived_n_series = derived_series,
-                                derived_n_parallel = derived_parallel,
-                                series_diff,
-                                parallel_diff,
-                                "Battery topology invariant: explicit topology differs \
-                                 from cell-parameter derivation by >1 cell"
-                            );
-                        }
+            if has_any_explicit
+                && has_cell_params
+                && let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell)
+                && ah > 0.0
+                && vc > 0.0
+            {
+                let target_pack_v = c.pack_voltage_v.unwrap_or(350.0);
+                let derived_series = {
+                    let s = (target_pack_v / vc).round() as u32;
+                    if s == 0 { 1 } else { s }
+                };
+                let pack_v = derived_series as f64 * vc;
+                let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
+                let derived_parallel = {
+                    let p = (pack_ah / ah).ceil() as u32;
+                    if p == 0 { 1 } else { p }
+                };
+                let series_diff = (self.n_series as i64 - derived_series as i64).unsigned_abs();
+                let parallel_diff =
+                    (self.n_parallel as i64 - derived_parallel as i64).unsigned_abs();
+                if series_diff > 1 || parallel_diff > 1 {
+                    self.warnings.push(Warning::new(
+                        "battery",
+                        format!(
+                            "battery topology invariant: explicit topology \
+                             ({}, {}) differs from cell-parameter derivation \
+                             ({derived_series}, {derived_parallel}) by >1 cell",
+                            self.n_series, self.n_parallel
+                        ),
+                    ));
+                }
 
-                        // Capacity consistency invariant: warn when the declared
-                        // capacity_kwh and the topology (whether explicit or derived)
-                        // produce an implied capacity mismatch >10%.
-                        // This catches pathological configs that slip through
-                        // the main derivation check (e.g. explicit topology that
-                        // the user believes matches the cell parameters but doesn't).
-                        let implied_kwh =
-                            self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
-                        let relative_error =
-                            (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
-                        if relative_error > 0.10 {
-                            tracing::warn!(
-                                self.n_series,
-                                self.n_parallel,
-                                ah_cell = ah,
-                                v_cell = vc,
-                                capacity_kwh = self.capacity_kwh,
-                                implied_capacity_kwh = implied_kwh,
-                                relative_error,
-                                "Battery topology invariant: declared capacity_kwh \
-                                 ({:.2} kWh) inconsistent with topology-implied \
-                                 capacity ({:.2} kWh, {:.1}% error)",
-                                self.capacity_kwh,
-                                implied_kwh,
-                                relative_error * 100.0,
-                            );
-                        }
-                    }
+                // Capacity consistency invariant: warn when the declared
+                // capacity_kwh and the topology (whether explicit or derived)
+                // produce an implied capacity mismatch >10%.
+                // This catches pathological configs that slip through
+                // the main derivation check (e.g. explicit topology that
+                // the user believes matches the cell parameters but doesn't).
+                let implied_kwh = self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
+                let relative_error = (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
+                if relative_error > 0.10 {
+                    self.warnings.push(Warning::new(
+                        "battery",
+                        format!(
+                            "battery topology invariant: declared capacity_kwh \
+                             ({:.2} kWh) inconsistent with topology-implied \
+                             capacity ({implied_kwh:.2} kWh, {:.1}% error)",
+                            self.capacity_kwh,
+                            relative_error * 100.0,
+                        ),
+                    ));
                 }
             }
         }
@@ -1011,16 +995,16 @@ impl Battery {
         self.import_limit_kw = c.import_limit_w.map(power_w_to_kw);
         self.export_limit_kw = c.export_limit_w.map(power_w_to_kw);
         self.heater_power_w = c.heater_power_w.unwrap_or(DEFAULT_HEATER_POWER_W);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if self.heater_power_w > 700.0 {
-                tracing::warn!(
-                    heater_power_w = self.heater_power_w,
-                    "Battery heater power {:.0} W exceeds 700 W plausibility threshold \
-                     for residential batteries; verify catalog entry or config",
-                    self.heater_power_w,
-                );
-            }
+        if self.heater_power_w > 700.0 {
+            self.warnings.push(Warning::new(
+                "battery",
+                format!(
+                    "battery heater power {:.0} W exceeds 700 W plausibility \
+                     threshold for residential batteries; verify catalog entry \
+                     or config",
+                    self.heater_power_w
+                ),
+            ));
         }
         self.heater_threshold_c = c.heater_threshold_c.unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
         self.min_discharge_temp_c = c
@@ -1144,7 +1128,12 @@ impl Equipment for Battery {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        self.warnings.clear();
         self.init_typed(config, env)
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
     }
 
     fn island_source_available(&self) -> bool {
@@ -1263,15 +1252,12 @@ impl Equipment for Battery {
         // -- Temperature-dependent capacity derating --
         let capacity_derate = self.capacity_derate_model.evaluate(self.cell_temp_c);
         self.capacity_kwh = self.capacity_kwh_nominal * capacity_derate;
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !(self.capacity_kwh.is_finite() && self.capacity_kwh >= 0.0) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "battery_capacity_kwh_finite_nonneg".to_string(),
-                    value: self.capacity_kwh,
-                    tolerance: 0.0,
-                });
-            }
+        if !(self.capacity_kwh.is_finite() && self.capacity_kwh >= 0.0) {
+            return Err(HaresError::InvariantViolation {
+                check_name: "battery_capacity_kwh_finite_nonneg".to_string(),
+                value: self.capacity_kwh,
+                tolerance: 0.0,
+            });
         }
 
         // -- Compute electrical model --
@@ -1422,16 +1408,16 @@ impl Equipment for Battery {
         // The heater energy enters the cell thermal mass and reaches the zone through the
         // lumped UA conductance above. Adding heater_w here directly would double-count it.
         // Only ohmic losses dissipate directly into the zone without passing through the cell model.
-        if let Some(zone) = self.descriptor.zone {
-            if ohmic_loss_w > 0.0 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: ohmic_loss_w,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::InternalGain,
-                })?;
-            }
+        if let Some(zone) = self.descriptor.zone
+            && ohmic_loss_w > 0.0
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: ohmic_loss_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::InternalGain,
+            })?;
         }
 
         // -- Update mode based on cell electrochemical power --
@@ -1454,12 +1440,19 @@ impl Equipment for Battery {
         let current_day = Self::day_ordinal(env);
         if current_day != self.last_daily_update_day {
             // Capture pre-update state for observer diagnostics.
+            // sum_sq_dod is read before reset_daily() below, so it is the day being
+            // closed, the value update_daily() just consumed.
             #[cfg(feature = "observe")]
-            let (q_li1_before, cell_temp_for_tafel) =
-                { (self.degradation.q_li1, self.degradation.daily_mean_temp_k()) };
+            let (q_li1_before, cell_temp_for_tafel, sum_sq_dod) = {
+                (
+                    self.degradation.q_li1,
+                    self.degradation.daily_mean_temp_k(),
+                    self.rainflow.sum_squared_dod_daily(),
+                )
+            };
 
             self.degradation
-                .update_daily(&self.u_neg_table, &self.rainflow);
+                .update_daily(&self.u_neg_table, &self.rainflow)?;
 
             #[cfg(feature = "observe")]
             {
@@ -1475,15 +1468,12 @@ impl Equipment for Battery {
 
             let soh = 1.0 - self.degradation.capacity_fade_fraction();
             self.capacity_kwh_nominal = self.capacity_kwh_rated * soh;
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                if !(self.capacity_kwh_nominal > 0.0 || soh <= 0.0) {
-                    return Err(HaresError::InvariantViolation {
-                        check_name: "battery_capacity_nominal_underflow".to_string(),
-                        value: self.capacity_kwh_nominal,
-                        tolerance: 0.0,
-                    });
-                }
+            if !(self.capacity_kwh_nominal > 0.0 || soh <= 0.0) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "battery_capacity_nominal_underflow".to_string(),
+                    value: self.capacity_kwh_nominal,
+                    tolerance: 0.0,
+                });
             }
             tracing::debug!(
                 soh,
@@ -1494,7 +1484,8 @@ impl Equipment for Battery {
             self.rainflow.reset_daily();
 
             // Invariant: after reset, per-day accumulators must be zero.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            // Reset-logic debug check, compiled out of release builds.
+            #[cfg(debug_assertions)]
             {
                 const EPS: f64 = 1e-15;
                 if self.degradation.b1_accum.abs() >= EPS {
@@ -1528,20 +1519,6 @@ impl Equipment for Battery {
             }
 
             self.last_daily_update_day = current_day;
-        }
-
-        // Invariant: after the boundary block, last_daily_update_day must
-        // equal current_day (either the block ran and advanced it, or no
-        // boundary was crossed).
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if self.last_daily_update_day != current_day {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "battery_last_daily_update_day_mismatch".to_string(),
-                    value: self.last_daily_update_day as f64,
-                    tolerance: 0.0,
-                });
-            }
         }
 
         // -- Rainflow tracking (current step belongs to the new day) --
@@ -1886,11 +1863,6 @@ impl Equipment for Battery {
                 self.self_consumption_enabled = false;
 
                 if was_clamped {
-                    #[cfg(feature = "observe")]
-                    {
-                        self.setpoint_violation_count =
-                            self.setpoint_violation_count.saturating_add(1);
-                    }
                     tracing::warn!(
                         raw_target_soc = raw_target,
                         raw_min_soc = raw_min,
@@ -1902,7 +1874,7 @@ impl Equipment for Battery {
                     );
                 }
 
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                #[cfg(debug_assertions)]
                 {
                     let stored_min = self.soc_target_min.unwrap_or(self.min_soc);
                     let stored_max = self.soc_target_max.unwrap_or(self.max_soc);
@@ -2241,6 +2213,7 @@ mod tests {
 
     fn base_env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -2266,7 +2239,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -4413,16 +4387,16 @@ mod tests {
             rf.push(0.2);
             rf.push(0.8);
             rf.push(0.2); // completes the reversal → half-cycle range 0.6
-            state.update_daily(&u_neg, &rf);
+            state.update_daily(&u_neg, &rf).unwrap();
             state.reset_day_tracking(soc);
             let _ = day; // suppress lint
         }
 
         // The break-in loss (q_li3, a positive loss relaxing toward ≈ +2.8 %)
         // and the calendar/cycle losses must all be accumulating after a
-        // year; the usable-capacity fade is 1 − min(QLi, Qneg), which starts
-        // negative (capacity above nameplate at BOL, the reference model's
-        // b0 = 1.07 intercept capped by the negative-electrode branch).
+        // year; the usable-capacity fade is 1 − min(QLi, Qneg) floored at
+        // the reported state, which stays at 0 while the raw model level is
+        // above nameplate (see the capacity_fade field).
         assert!(
             state.q_li1 > 0.0,
             "q_li1 (calendar) must be positive after 1 year: got {}",
@@ -4465,7 +4439,9 @@ mod tests {
                 state.accumulate(dt_s, cell_temp_k, v_oc, 0.5).unwrap(); // constant SOC = 0.5
             }
             // No cycles: a fresh, empty counter.
-            state.update_daily(&u_neg, &RainflowCounter::default());
+            state
+                .update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
             state.reset_day_tracking(0.5);
         }
 
@@ -4501,7 +4477,7 @@ mod tests {
                 for _ in 0..steps_per_day {
                     state.accumulate(dt_s, temp_k, v_oc, 0.5).unwrap();
                 }
-                state.update_daily(&u_neg, &rf);
+                state.update_daily(&u_neg, &rf).unwrap();
                 state.reset_day_tracking(0.5);
             }
             state
@@ -4566,8 +4542,11 @@ mod tests {
         );
     }
 
-    /// After several days of cycling, save a checkpoint, load into a fresh Battery,
-    /// and verify `capacity_kwh_nominal` matches the original (non-zero degradation).
+    /// After a capacity fade is in effect, save a checkpoint, load into a fresh
+    /// Battery, and verify `capacity_kwh_nominal` matches the original. The
+    /// fade is injected (7 days of this cycling still floors at the nameplate
+    /// state under the reference model's bound), then set by crossing one
+    /// midnight so the day-boundary update path applies it.
     #[test]
     fn load_state_preserves_nominal_capacity_after_degradation() {
         let config = typed_battery_config(None, None);
@@ -4578,31 +4557,38 @@ mod tests {
         let dt = Duration::from_secs(300);
         let steps_per_day = 288;
 
-        // Run 7 days of cycling to accumulate measurable degradation.
-        for _day in 0..7 {
-            for step in 0..steps_per_day {
-                env.current_time += ChronoDuration::seconds(300);
-                let power = if step < steps_per_day / 2 { 5.0 } else { -5.0 };
-                bat1.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-                    active_power_kw: power,
-                    reactive_power_kvar: None,
-                    min_soc: None,
-                    max_soc: None,
-                })
-                .unwrap();
-                let mut ports = default_ports();
-                bat1.step(&env, dt, &mut ports).unwrap();
-            }
+        // Inject the fade a long-aged pack carries, then run one day of
+        // cycling so the day-boundary update applies it through the same
+        // path a natural fade takes.
+        bat1.degradation.capacity_fade = 0.05;
+        for step in 0..steps_per_day {
+            env.current_time += ChronoDuration::seconds(300);
+            let power = if step < steps_per_day / 2 { 5.0 } else { -5.0 };
+            bat1.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                active_power_kw: power,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+            let mut ports = default_ports();
+            bat1.step(&env, dt, &mut ports).unwrap();
         }
 
         let fade1 = bat1.degradation.capacity_fade_fraction();
         let nominal1 = bat1.capacity_kwh_nominal;
         let rated = bat1.capacity_kwh_rated;
 
-        // Degradation should be non-zero after 7 days.
+        // The injected fade survives the day-boundary update (monotone
+        // non-decreasing) and the nominal capacity moved off rated.
         assert!(
-            fade1.abs() > 0.0,
-            "expected non-zero fade after 7 days, got {fade1}"
+            (fade1 - 0.05).abs() < 1e-9,
+            "the day-boundary update must preserve the injected fade, got {fade1}"
+        );
+        assert!(
+            (nominal1 - rated * (1.0 - fade1)).abs() < 1e-9,
+            "nominal {nominal1} must equal rated·(1−fade) = {}",
+            rated * (1.0 - fade1)
         );
 
         // Save and restore into a fresh battery.
@@ -4654,10 +4640,11 @@ mod tests {
     /// calendar-only aging. This confirms the mechanism produces no fade contribution
     /// The break-in mechanism follows the reference model (Smith 2017 Eq. 4
     /// and 7, NREL SSC): a positive Li LOSS relaxing toward the b3 integral
-    /// over ~τ = 5 days, and the BOL usable capacity sits slightly ABOVE
-    /// the nameplate rating (the b0 = 1.07 Li intercept capped by the
-    /// negative-electrode branch at ≈ +0.9 %) — negative fade at BOL,
-    /// decaying as the losses accumulate.
+    /// over ~τ = 5 days, and the reported capacity stays AT the nameplate
+    /// rating while the raw min(QLi, Qneg) level sits above it (the b0 = 1.07
+    /// Li intercept capped by the negative-electrode branch at ≈ +0.9 %),
+    /// so the reported fade floors at 0, decaying the raw margin as the
+    /// losses accumulate (see the capacity_fade field).
     #[test]
     fn degradation_break_in_loss_and_bol_capacity_follow_reference_model() {
         let u_neg = UNegTable::default_li_nmc();
@@ -4675,7 +4662,9 @@ mod tests {
             for _ in 0..steps_per_day {
                 state_5.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
             }
-            state_5.update_daily(&u_neg, &RainflowCounter::default());
+            state_5
+                .update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
             state_5.reset_day_tracking(soc);
         }
 
@@ -4693,13 +4682,15 @@ mod tests {
              days (~tau): got {}",
             state_5.q_li3
         );
-        // BOL usable capacity above nameplate: negative fade from the
-        // min(QLi, Qneg) structure (Li branch ≈ +7 %, capped by the
-        // negative-electrode branch at ≈ +0.9 %).
+        // BOL usable capacity at nameplate: the reported fade floors at 0
+        // while the raw min(QLi, Qneg) level is above nameplate (Li branch
+        // ≈ +7 %, capped by the negative-electrode branch at ≈ +0.9 %; the
+        // reference implementation's capacity layer absorbs that excess,
+        // see the capacity_fade field).
         assert!(
-            state_5.capacity_fade < 0.0,
-            "capacity fade at BOL must be negative (capacity above \
-             nameplate per the reference model): got {}",
+            state_5.capacity_fade == 0.0,
+            "capacity fade at BOL must floor at the nameplate state (capacity \
+             at its rating), got {}",
             state_5.capacity_fade
         );
 
@@ -4711,7 +4702,9 @@ mod tests {
             for _ in 0..steps_per_day {
                 state_60.accumulate(dt_s, cell_temp_k, v_oc, soc).unwrap();
             }
-            state_60.update_daily(&u_neg, &RainflowCounter::default());
+            state_60
+                .update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
             state_60.reset_day_tracking(soc);
         }
 
@@ -5731,6 +5724,14 @@ mod tests {
             "nominal should equal rated at init"
         );
 
+        // Inject the fade a long-aged pack carries: a year of this cycling
+        // still floors at the nameplate state (the raw model level's BOL
+        // margin, the d0·b0 and c0/Ah intercepts, outlasts 365 days at
+        // this temperature and duty; see the capacity_fade field). The
+        // day-boundary updates must preserve it (monotone non-decreasing)
+        // and keep the SOH→capacity algebra through the year.
+        bat.degradation.capacity_fade = 0.10;
+
         let dt = Duration::from_secs(300);
         let steps_per_day = 288; // 5-min steps
 
@@ -5774,12 +5775,19 @@ mod tests {
             }
         }
 
-        // After 365 days, the algebraic invariant must still hold.
+        // After 365 days, the algebraic invariant must still hold, and the
+        // year of day-boundary updates must have preserved the injected
+        // fade (monotone non-decreasing, never reversed).
         let fade = bat.degradation.capacity_fade_fraction();
         let expected_fade = 1.0 - (bat.capacity_kwh_nominal / rated);
         assert!(
             (fade - expected_fade).abs() < 1e-6,
             "capacity_fade_fraction ({fade}) should match 1 - nominal/rated ({expected_fade})"
+        );
+        assert!(
+            (fade - 0.10).abs() < 1e-6,
+            "the year of day-boundary updates must preserve the injected \
+             fade (monotone non-decreasing), got {fade}"
         );
 
         // Capacity_kwh_nominal should differ from rated (degradation had an effect).
@@ -7310,7 +7318,9 @@ mod tests {
             for _ in 0..steps_per_day {
                 ds_ref.accumulate(dt_s, temp_k_day, v_oc, 0.5).unwrap();
             }
-            ds_ref.update_daily(&u_neg, &RainflowCounter::default());
+            ds_ref
+                .update_daily(&u_neg, &RainflowCounter::default())
+                .unwrap();
             ds_ref.reset_day_tracking(0.5);
         }
 
@@ -7371,5 +7381,38 @@ mod tests {
             "first timestep of new day must accumulate into b1_accum, got {}",
             bat.degradation.b1_accum
         );
+    }
+
+    /// The init plausibility warning (heater power above 700 W) reaches the
+    /// drain, not just the tracing log.
+    #[test]
+    fn battery_heater_above_700_w_warns_at_init() {
+        let config = EquipmentConfig::from_typed(
+            "Test Battery".to_string(),
+            "Battery".to_string(),
+            BatteryConfig {
+                heater_power_w: Some(900.0),
+                ..battery_config(&[])
+                    .typed::<BatteryConfig>()
+                    .expect("typed battery config")
+            },
+        )
+        .unwrap();
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        let mut drained: Vec<Warning> = Vec::new();
+        bat.drain_warnings(&mut drained);
+        assert_eq!(drained.len(), 1, "one drained warning, got {drained:?}");
+        assert!(
+            drained[0].message.contains("900") || drained[0].message.contains("700"),
+            "the warning must name the heater power: {}",
+            drained[0].message
+        );
+        // Drain is a take: a second drain is empty.
+        let mut again: Vec<Warning> = Vec::new();
+        bat.drain_warnings(&mut again);
+        assert!(again.is_empty());
     }
 }

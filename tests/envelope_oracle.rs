@@ -9,31 +9,19 @@
 //! physics-grounded bounds for plausibility and flag large OCHRE deltas as
 //! diagnostics rather than correctness failures.
 
+#[path = "support/denver_offset.rs"]
+mod denver_offset;
+
 #[cfg(test)]
 mod tests {
+    use super::denver_offset::denver_offset;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
 
-    use chrono::{Duration, FixedOffset, TimeZone};
+    use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
-
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let tid = std::thread::current().id();
-        format!("{base}_{nanos}_{tid:?}.{ext}")
-    }
-
-    struct TempFile(std::path::PathBuf);
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
 
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
@@ -50,13 +38,12 @@ mod tests {
     fn beopt_config(output_path: PathBuf) -> DwellingConfig {
         DwellingConfig {
             hpxml_path: examples_dir().join("BEopt_example.xml"),
-            schedule_path: examples_dir().join("BEopt_example_schedule.csv"),
+            schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
             weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
                 // Denver local noon (UTC-7).
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .expect("Denver UTC-7 offset")
+                start_time: denver_offset()
                     .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
                     .unwrap(),
                 duration: Duration::hours(1),
@@ -72,6 +59,7 @@ mod tests {
                 site_location: hares_io::SiteLocationOverride::default(),
                 retain_batches: false,
                 rotation: hares_io::RotationPolicy::None,
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,
             bldg_id: 1,
@@ -85,9 +73,7 @@ mod tests {
     // BEopt 1h (May 5 2019, 12:00 PM, Denver, 1-min resolution, 60 steps)
     // Source: vendors/OCHRE smoke test output (OCHRE 0.9.2)
 
-    #[allow(dead_code)]
     struct OracleValue {
-        name: &'static str,
         mean: f64,
         min: f64,
         max: f64,
@@ -95,13 +81,11 @@ mod tests {
 
     // Zone temperatures
     const OCHRE_TEMP_INDOOR: OracleValue = OracleValue {
-        name: "Temperature - Indoor (C)",
         mean: 21.3,
         min: 20.8,
         max: 22.0,
     };
     const OCHRE_TEMP_ATTIC: OracleValue = OracleValue {
-        name: "Temperature - Attic (C)",
         mean: 14.5,
         min: 12.0,
         max: 18.2,
@@ -109,31 +93,26 @@ mod tests {
 
     // Exterior surface solar gains [W] (absorbed at exterior surface)
     const OCHRE_EXT_WALL_SOLAR: OracleValue = OracleValue {
-        name: "Exterior Wall Ext. Solar Gain (W)",
         mean: 18_572.5,
         min: 16_329.1,
         max: 20_765.3,
     };
     const OCHRE_ATTIC_WALL_SOLAR: OracleValue = OracleValue {
-        name: "Attic Wall Ext. Solar Gain (W)",
         mean: 4_306.4,
         min: 2_929.5,
         max: 5_717.6,
     };
     const OCHRE_ATTIC_ROOF_SOLAR: OracleValue = OracleValue {
-        name: "Attic Roof Ext. Solar Gain (W)",
         mean: 92_799.5,
         min: 89_911.1,
         max: 96_054.7,
     };
     const OCHRE_WINDOW_EXT_SOLAR: OracleValue = OracleValue {
-        name: "Window Ext. Solar Gain (W)",
         mean: 536.8,
         min: 503.2,
         max: 583.7,
     };
     const OCHRE_DOOR_EXT_SOLAR: OracleValue = OracleValue {
-        name: "Door Ext. Solar Gain (W)",
         mean: 159.5,
         min: 151.7,
         max: 168.1,
@@ -141,13 +120,11 @@ mod tests {
 
     // Exterior surface LWR gains [W] (net LW radiation, always negative = cooling)
     const OCHRE_EXT_WALL_LWR: OracleValue = OracleValue {
-        name: "Exterior Wall Ext. LWR Gain (W)",
         mean: -7_007.4,
         min: -8_303.2,
         max: -2_285.6,
     };
     const OCHRE_ATTIC_ROOF_LWR: OracleValue = OracleValue {
-        name: "Attic Roof Ext. LWR Gain (W)",
         mean: -29_359.3,
         min: -43_591.9,
         max: -7_719.4,
@@ -155,13 +132,11 @@ mod tests {
 
     // Exterior surface temperatures [C]
     const OCHRE_EXT_WALL_SURF_TEMP: OracleValue = OracleValue {
-        name: "Exterior Wall Ext. Surface Temperature (C)",
         mean: 23.4,
         min: 12.1,
         max: 26.8,
     };
     const OCHRE_ATTIC_ROOF_SURF_TEMP: OracleValue = OracleValue {
-        name: "Attic Roof Ext. Surface Temperature (C)",
         mean: 42.3,
         min: 12.1,
         max: 60.0,
@@ -169,55 +144,46 @@ mod tests {
 
     // Indoor zone heat gains [W] (positive = heating the zone)
     const OCHRE_WALL_HEAT_GAIN: OracleValue = OracleValue {
-        name: "Wall Heat Gain - Indoor (W)",
         mean: -344.8,
         min: -520.3,
         max: 9.5,
     };
     const OCHRE_ROOF_HEAT_GAIN: OracleValue = OracleValue {
-        name: "Roof Heat Gain - Indoor (W)",
         mean: -171.1,
         min: -295.7,
         max: -2.3,
     };
     const OCHRE_FLOOR_HEAT_GAIN: OracleValue = OracleValue {
-        name: "Floor Heat Gain - Indoor (W)",
         mean: -758.7,
         min: -931.7,
         max: 107.5,
     };
     const OCHRE_WINDOW_HEAT_GAIN: OracleValue = OracleValue {
-        name: "Window Heat Gain - Indoor (W)",
         mean: -52.5,
         min: -68.5,
         max: 1.2,
     };
     const OCHRE_WINDOW_SOLAR_TRANSMITTED: OracleValue = OracleValue {
-        name: "Window Transmitted Solar Gain (W)",
         mean: 356.1,
         min: 333.9,
         max: 387.3,
     };
     const OCHRE_INFILTRATION_INDOOR: OracleValue = OracleValue {
-        name: "Infiltration Heat Gain - Indoor (W)",
         mean: -11.7,
         min: -14.3,
         max: -9.7,
     };
     const OCHRE_VENTILATION_INDOOR: OracleValue = OracleValue {
-        name: "Forced Ventilation Heat Gain - Indoor (W)",
         mean: -267.6,
         min: -300.5,
         max: -238.5,
     };
     const OCHRE_INTERNAL_GAIN: OracleValue = OracleValue {
-        name: "Internal Heat Gain - Indoor (W)",
         mean: 341.9,
         min: 341.9,
         max: 341.9,
     };
     const OCHRE_RADIATION_INDOOR: OracleValue = OracleValue {
-        name: "Radiation Heat Gain - Indoor (W)",
         mean: 95.7,
         min: 59.4,
         max: 120.8,
@@ -225,13 +191,11 @@ mod tests {
 
     // Attic zone
     const OCHRE_INFILTRATION_ATTIC: OracleValue = OracleValue {
-        name: "Infiltration Heat Gain - Attic (W)",
         mean: -376.1,
         min: -933.9,
         max: -81.3,
     };
     const OCHRE_RADIATION_ATTIC: OracleValue = OracleValue {
-        name: "Radiation Heat Gain - Attic (W)",
         mean: 380.1,
         min: -72.5,
         max: 590.1,
@@ -312,10 +276,10 @@ mod tests {
             }
             let fields: Vec<&str> = line.split(',').collect();
             for (i, field) in fields.iter().enumerate() {
-                if i < columns.len() {
-                    if let Ok(v) = field.trim().parse::<f64>() {
-                        data.get_mut(columns[i]).unwrap().push(v);
-                    }
+                if i < columns.len()
+                    && let Ok(v) = field.trim().parse::<f64>()
+                {
+                    data.get_mut(columns[i]).unwrap().push(v);
                 }
             }
         }
@@ -346,12 +310,10 @@ mod tests {
 
     // ── Comparison helpers ──────────────────────────────────────────────────
 
-    #[allow(dead_code)]
     struct Check {
         name: String,
         ochre: f64,
         hares: f64,
-        tolerance_pct: f64,
         passed: bool,
         note: String,
     }
@@ -376,7 +338,6 @@ mod tests {
                 name: name.to_string(),
                 ochre: ochre.mean,
                 hares,
-                tolerance_pct,
                 passed: deviation_pct <= tolerance_pct || hares.is_nan(),
                 note: if hares.is_nan() {
                     format!("MISSING -- {note}")
@@ -412,9 +373,8 @@ mod tests {
     ///     These large OCHRE deltas are logged as diagnostics, not hard failures.
     #[test]
     fn envelope_oracle_beopt_1h() {
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_envelope_oracle_beopt", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = output_dir.path().join("hares_envelope_oracle_beopt.csv");
 
         let engine = SimulationEngine::new();
         let result = engine
@@ -439,7 +399,6 @@ mod tests {
             actual_path.display()
         );
         let hares = parse_csv_columns(&actual_path);
-        let _actual_guard = TempFile(actual_path.clone());
 
         // Also load OCHRE reference CSV for timeseries comparison
         let ochre_csv = fixture_dir().join("ochre_reference.csv");
@@ -686,7 +645,6 @@ mod tests {
                 name: "ASHP Heater energy".to_string(),
                 ochre: ochre_heater_kwh,
                 hares: h,
-                tolerance_pct: 100.0,
                 passed: pct <= 100.0,
                 note: format!("diff={pct:.1}% -- envelope tightness affects heating load"),
             });
@@ -753,8 +711,7 @@ mod tests {
                         name: "Indoor temp timeseries MAE".to_string(),
                         ochre: 0.0,
                         hares: mae,
-                        tolerance_pct: 100.0, // not a percentage; just tracking
-                        passed: mae < 5.0,    // hard fail if > 5 C mean deviation
+                        passed: mae < 5.0, // hard fail if > 5 C mean deviation
                         note: format!("MAE={mae:.2}C RMSE={rmse:.2}C"),
                     });
                 }
@@ -862,9 +819,8 @@ mod tests {
         use hares_core::Dwelling;
         use hares_types::ZoneId;
 
-        let output_path =
-            std::env::temp_dir().join(unique_temp_name("hares_per_equip_oracle", "csv"));
-        let _guard = TempFile(output_path.clone());
+        let output_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = output_dir.path().join("hares_per_equip_oracle.csv");
 
         let config = beopt_config(output_path.clone());
         let mut dwelling = Dwelling::from_config(config).expect("dwelling init");
@@ -895,8 +851,8 @@ mod tests {
                         .contribution
                         .thermal
                         .iter()
-                        .filter(|(z, _, _)| *z == zone_indoor)
-                        .map(|(_, s, _)| s)
+                        .filter(|(z, _)| *z == zone_indoor)
+                        .map(|(_, heat)| heat.sensible_w())
                         .sum();
                     *equip_totals.entry(obs.name.clone()).or_default() += sensible_w;
                     *equip_counts.entry(obs.name.clone()).or_default() += 1;

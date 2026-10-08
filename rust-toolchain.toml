@@ -1,0 +1,6 @@
+# The pinned toolchain every job (local and CI) runs: rustup reads this file
+# for any cargo command in the tree and installs it on first use. The golden
+# captures are taken on, and compared on, this release.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]

@@ -1,2 +1,12 @@
+# Test parallelism is bounded: each running test is its own process, and several
+# suites simulate a full simulated year, so an unbounded run (nextest defaults to one
+# process per logical core) exhausts memory on 64 GB hosts and in CI. Eight concurrent
+# tests keeps peak memory well inside the machine and the suite fast. Build-job
+# parallelism has no config key; cap it per invocation with --build-jobs when memory
+# is tight.
+[profile.default]
+test-threads = 8
+
 [profile.ci]
+test-threads = 8
 junit.path = "nextest-results.xml"

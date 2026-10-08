@@ -12,11 +12,9 @@ use hares_types::{
     CoreState, DRLevel, DutyCycleComponent, ElectricPower, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidNodeId, FluidType, FuelType, HaresError,
     HeatTransferDirection, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots,
-    Telemetry, TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
+    Telemetry, TelemetryField, ThermalCategory, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)] // warn! used only under debug_assertions or check_invariants
-use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
@@ -31,23 +29,28 @@ use super::hpwh_compressor::{
     DEFAULT_PARASITIC_POWER_W, DEFAULT_RATED_COP, DEFAULT_SHR, DEFAULT_TANK_TEMP_BOUNDS_C,
     DEFAULT_ZONE_TEMP_BOUNDS_C,
 };
-use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
+use super::siting::{self, Siting};
+use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::wh_config::HeatPumpWaterHeaterConfig;
-use super::{hysteresis_call, parse_usize, weighted_average_tank_temp};
+use super::{
+    hysteresis_call, parse_usize, restored_tank_deadband_c, tank_thermostat_update,
+    weighted_average_tank_temp,
+};
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
-use crate::hvac::helpers::{loop_id_from_config, zone_id_from_config_or_default};
+use crate::hvac::helpers::loop_id_from_config;
 
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
 };
 
-const HPWH_CHECKPOINT_VERSION: u32 = 2;
+/// v3: the state no longer carries a ramp target setpoint (this type has
+/// no setpoint ramp).
+const HPWH_CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HpwhState {
     setpoint_c: f64,
-    target_setpoint_c: f64,
     deadband_c: f64,
     compressor_on: bool,
     backup_on: bool,
@@ -98,10 +101,13 @@ pub struct HeatPumpWH {
     /// Fractional weights for distributing condenser heat across tank nodes.
     /// Must sum to a positive value; weights are normalized before use.
     condenser_node_weights: Vec<f64>,
+    /// The tank setpoint; a control sets it at once (this type has no
+    /// setpoint ramp).
     setpoint_c: f64,
-    target_setpoint_c: f64,
-    setpoint_ramp_rate_c_per_s: Option<f64>,
     deadband_c: f64,
+    /// The configured setpoint and deadband, which the release form restores.
+    configured_setpoint_c: f64,
+    configured_deadband_c: f64,
     duty_cycle: f64,
     /// Per-component duty cycle override for compressor (1.0 = full, 0.0 = off).
     hp_duty_cycle: f64,
@@ -188,8 +194,8 @@ pub struct HeatPumpWH {
     dr_level: DRLevel,
     // Transient load fraction from LoadFraction control signal; reset each step.
     ctrl_load_fraction: f64,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
+    /// The zone or no-zone location the heater sits in, resolved at init.
+    siting: Siting,
     /// Tracks hourly/daily draw volumes for observer capture and invariant checks.
     draw_tracker: super::DrawVolumeTracker,
 }
@@ -216,7 +222,7 @@ fn parse_element_hp_control_mode(mode: Option<&str>) -> Result<ElementHpControlM
 impl HeatPumpWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let siting = Siting::from_constructor_config(&config);
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -247,7 +253,7 @@ impl HeatPumpWH {
                 name: config.name,
                 end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Heat Pump Water Heater"),
-                zone: Some(zone),
+                zone: siting.zone(),
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
@@ -262,12 +268,7 @@ impl HeatPumpWH {
                 telemetry_fields: telemetry_fields(n_nodes),
                 zone_type: None,
             },
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-                PortDeclaration::fluid(loop_id, FluidType::Water),
-                PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
-            ],
+            ports: siting::storage_ports(&[PortDeclaration::electrical()], &siting, loop_id),
             telemetry: {
                 let mut t = default_telemetry();
                 tank.register_node_telemetry(&mut t);
@@ -280,9 +281,9 @@ impl HeatPumpWH {
             condenser_node,
             condenser_node_weights: default_condenser_weights(n_nodes),
             setpoint_c: DEFAULT_SETPOINT_C,
-            target_setpoint_c: DEFAULT_SETPOINT_C,
-            setpoint_ramp_rate_c_per_s: None,
             deadband_c: DEFAULT_DEADBAND_C,
+            configured_setpoint_c: DEFAULT_SETPOINT_C,
+            configured_deadband_c: DEFAULT_DEADBAND_C,
             duty_cycle: 1.0,
             hp_duty_cycle: 1.0,
             er_duty_cycle: 1.0,
@@ -342,38 +343,9 @@ impl HeatPumpWH {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
-            zone_id_explicit,
+            siting,
             draw_tracker: super::DrawVolumeTracker::new(),
         }
-    }
-
-    fn zone_temp_c(&self, env: &EnvironmentState) -> f64 {
-        self.descriptor
-            .zone
-            .and_then(|zone| {
-                env.zones
-                    .iter()
-                    .find(|z| z.id == zone)
-                    .map(|z| z.temperature_c)
-            })
-            .unwrap_or(env.weather.outdoor_temp_c)
-    }
-
-    /// Wet-bulb temperature of the zone (used for COP/capacity curve input).
-    /// Falls back to dry-bulb when the zone is not found.
-    fn zone_wet_bulb_c(&self, env: &EnvironmentState) -> f64 {
-        self.descriptor
-            .zone
-            .and_then(|zone| {
-                env.zones.iter().find(|z| z.id == zone).map(|z| {
-                    hares_physics::psychrometrics::zone_wet_bulb_c(z, env.weather.pressure_pa())
-                })
-            })
-            .unwrap_or_else(|| self.zone_temp_c(env))
-    }
-
-    fn ambient_temp_c(&self, env: &EnvironmentState) -> f64 {
-        self.zone_temp_c(env)
     }
 
     /// Composite thermostat temperature: 3/4 upper node + 1/4 lower node.
@@ -411,15 +383,6 @@ impl HeatPumpWH {
         let c = config.require_typed::<HeatPumpWaterHeaterConfig>("Heat Pump Water Heater")?;
         c.validate()?;
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if c.zone_id.is_none() && c.zone_type.is_some() {
-            warn!(
-                water_heater = %config.name,
-                zone_type = ?c.zone_type,
-                "zone_id not resolved from HPXML Location; falling back to ZoneId(1)"
-            );
-        }
-
         // Preserve-when-absent: an absent `equipment_id` key keeps the
         // descriptor's existing (assembly-injected) identity instead of
         // clobbering it — `None` from the tri-state reader means "not
@@ -427,12 +390,12 @@ impl HeatPumpWH {
         if let Some(id) = equipment_id_from_config(config)? {
             self.descriptor.id = EquipmentId(id);
         }
-        let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
-        self.descriptor.zone = zone;
+        self.siting.resolve(config, c.zone_type.as_deref())?;
+        self.descriptor.zone = self.siting.zone();
         self.descriptor.zone_type = c.zone_type.clone();
-        self.ports[1].zone = zone;
         self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
-        self.ports[2].loop_id = Some(self.loop_id);
+        self.ports =
+            siting::storage_ports(&[PortDeclaration::electrical()], &self.siting, self.loop_id);
 
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
         let height_m = c.tank_height_m.unwrap_or(DEFAULT_TANK_HEIGHT_M).max(0.2);
@@ -447,8 +410,8 @@ impl HeatPumpWH {
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
         self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
-        self.setpoint_ramp_rate_c_per_s = None;
-        self.target_setpoint_c = self.setpoint_c;
+        self.configured_setpoint_c = self.setpoint_c;
+        self.configured_deadband_c = self.deadband_c;
 
         let initial_tank_temp_c = c
             .initial_tank_temp_c
@@ -512,7 +475,7 @@ impl HeatPumpWH {
             self.cop_scale = cop_rated;
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             if !self.cop_curve_is_normalized {
                 debug_assert!(
@@ -642,7 +605,7 @@ impl HeatPumpWH {
         };
         self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             if use_widened_bounds {
                 debug_assert!(
@@ -678,12 +641,19 @@ impl HeatPumpWH {
 
         self.shr = c.shr.unwrap_or(DEFAULT_SHR);
         self.lost_heat_fraction = c.lost_heat_fraction.unwrap_or(DEFAULT_LOST_HEAT_FRACTION);
-        self.wall_heat_fraction = c
-            .wall_heat_fraction
-            .unwrap_or(match c.zone_type.as_deref() {
-                Some("conditioned") => 0.5,
-                _ => 0.0,
-            });
+        // OS-HPXML adds every HPWH gain to the zone air convectively
+        // (waterheater.rb, apply_hpwh_zone_heat_gain_program: frac_radiant 0),
+        // so with no explicit value nothing goes to a wall. OCHRE's
+        // living-zone partition-wall split arrives as an explicit value from
+        // the HPXML parse. A wall share needs a modeled zone's wall to land on.
+        self.wall_heat_fraction = c.wall_heat_fraction.unwrap_or(0.0);
+        if self.wall_heat_fraction != 0.0 && self.siting.zone().is_none() {
+            return Err(HaresError::Equipment(format!(
+                "{}: wall_heat_fraction {} needs a modeled zone, but the heater sits in a \
+                 location with none",
+                config.name, self.wall_heat_fraction
+            )));
+        }
         self.fan_power_w = c.fan_power_w.unwrap_or(DEFAULT_FAN_POWER_W);
         self.parasitic_power_w = c.parasitic_power_w.unwrap_or(DEFAULT_PARASITIC_POWER_W);
         self.backup_efficiency = c.backup_efficiency.unwrap_or(DEFAULT_BACKUP_EFFICIENCY);
@@ -753,8 +723,8 @@ impl Equipment for HeatPumpWH {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
+    fn ambient_location(&self) -> Option<hares_types::AmbientLocation> {
+        self.siting.ambient_location()
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -767,12 +737,6 @@ impl Equipment for HeatPumpWH {
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
-
-        // Ramp setpoint toward target.
-        if let Some(rate) = self.setpoint_ramp_rate_c_per_s {
-            self.setpoint_c =
-                super::ramp_limited_setpoint(self.setpoint_c, self.target_setpoint_c, rate, dt_s);
-        }
 
         // Advance DR duration; auto-revert to Normal when expired.
         if let Some(remaining) = self.dr_duration_remaining_s {
@@ -821,9 +785,14 @@ impl Equipment for HeatPumpWH {
         }
 
         let call_for_heat = self.call_for_heat() && self.duty_cycle > 0.0;
-        let ambient_c = self.ambient_temp_c(env);
-        let ambient_in_range =
-            ambient_c >= self.min_ambient_temp_c && ambient_c <= self.max_ambient_temp_c;
+        // An unresolvable inlet keeps the compressor off here; `step` reads
+        // the same inlet first and fails the step with the reason.
+        let ambient_in_range = self
+            .siting
+            .dry_bulb_c(env, &self.descriptor.name)
+            .is_ok_and(|ambient_c| {
+                ambient_c >= self.min_ambient_temp_c && ambient_c <= self.max_ambient_temp_c
+            });
 
         // Minimum off-time guard: prevent compressor restart until min_off_time_s has elapsed.
         let min_off_elapsed = self
@@ -912,6 +881,8 @@ impl Equipment for HeatPumpWH {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        // Evaporator inlet: the zone's air, or the location's ambient air.
+        let inlet = self.siting.inlet_air(env, &self.descriptor.name)?;
         let mode = self.update_control(env);
         let base_fraction =
             (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
@@ -933,7 +904,7 @@ impl Equipment for HeatPumpWH {
             weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3());
         // Use wet-bulb temperature for COP/capacity curves: HPWH performance depends
         // on available enthalpy in the ambient air, not dry-bulb temperature alone.
-        let wet_bulb_c = self.zone_wet_bulb_c(env);
+        let wet_bulb_c = inlet.wet_bulb_c;
         let cop_raw = if self.low_power_blend_factor > 0.0 {
             let std_cop = self.cop_curve.evaluate(wet_bulb_c, tank_avg_temp_c);
             let lp_cop = self
@@ -1007,10 +978,12 @@ impl Equipment for HeatPumpWH {
             self.draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
-            self.ambient_temp_c(env),
-            tempered_flow_m3_s,
-            hot_flow_m3_s,
-            self.mains_temp_c,
+            TemperedDrawInputs {
+                ambient_temp_c: inlet.dry_bulb_c,
+                tempered_flow_m3_s,
+                hot_flow_m3_s,
+                mains_temp_c: self.mains_temp_c,
+            },
             &heat_injections,
             tmv,
             dt,
@@ -1054,8 +1027,7 @@ impl Equipment for HeatPumpWH {
         // OCHRE WaterHeater.py:666-674: zone heat gains decomposed by SHR and lost_heat_fraction.
         // hp_waste = power_hp - delivered_hp (negative: HP extracts heat from zone)
         // er_waste = power_er - delivered_er (zero for 100% efficient electric)
-        let dry_bulb_c = self.zone_temp_c(env);
-        let shr = if (dry_bulb_c - wet_bulb_c) > 0.1 {
+        let shr = if (inlet.dry_bulb_c - wet_bulb_c) > 0.1 {
             self.shr
         } else {
             1.0
@@ -1110,16 +1082,16 @@ impl Equipment for HeatPumpWH {
         }
 
         let skin_loss_w = self.tank.skin_loss_w();
-        if let Some(zone) = self.descriptor.zone {
-            if skin_loss_w.abs() > 1e-3 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: skin_loss_w,
-                    radiant_gain_w: 0.0,
-                    latent_gain_w: 0.0,
-                    category: ThermalCategory::JacketLoss,
-                })?;
-            }
+        if let Some(zone) = self.descriptor.zone
+            && skin_loss_w.abs() > 1e-3
+        {
+            ports.accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: skin_loss_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::JacketLoss,
+            })?;
         }
 
         if total_draw_kg_s > 0.0 {
@@ -1141,15 +1113,15 @@ impl Equipment for HeatPumpWH {
             tk::TANK_AVG_TEMP_C,
             weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3()),
         );
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if !cop.is_finite() || !(0.0..=8.0).contains(&cop) {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "hpwh_cop_bounds".to_string(),
-                    value: cop,
-                    tolerance: 0.0,
-                });
-            }
+        // HPWH COP finite and in [0, 8] after the clamp: non-finite input
+        // survives the clamp, so the finiteness half is a typed error in
+        // every build; the range half is tautological.
+        if !cop.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "hpwh_cop_finite".to_string(),
+                value: cop,
+                tolerance: 0.0,
+            });
         }
         self.telemetry.set(tk::COP, cop);
         self.telemetry.set(tk::CAP_MULT, cap_mult);
@@ -1218,6 +1190,10 @@ impl Equipment for HeatPumpWH {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(hares_types::ThermostatBandClass::Tank)
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
@@ -1226,7 +1202,6 @@ impl Equipment for HeatPumpWH {
         try_save_versioned(
             &HpwhState {
                 setpoint_c: self.setpoint_c,
-                target_setpoint_c: self.target_setpoint_c,
                 deadband_c: self.deadband_c,
                 compressor_on: self.compressor_on,
                 backup_on: self.backup_on,
@@ -1275,8 +1250,7 @@ impl Equipment for HeatPumpWH {
             self.descriptor().id,
         )?;
         self.setpoint_c = decoded.setpoint_c;
-        self.target_setpoint_c = decoded.target_setpoint_c;
-        self.deadband_c = decoded.deadband_c;
+        self.deadband_c = restored_tank_deadband_c(decoded.deadband_c)?;
         self.compressor_on = decoded.compressor_on;
         self.backup_on = decoded.backup_on;
         self.duty_cycle = decoded.duty_cycle;
@@ -1374,25 +1348,13 @@ impl Equipment for HeatPumpWH {
                 cooling_setpoint_c,
                 deadband_c,
             } => {
-                if let Some(sp) = heating_setpoint_c.or(*cooling_setpoint_c) {
-                    if !sp.is_finite() {
-                        return Err(HaresError::Control(format!(
-                            "invalid water-heater setpoint: {sp}"
-                        )));
-                    }
-                    self.target_setpoint_c = sp;
-                    if self.setpoint_ramp_rate_c_per_s.is_none() {
-                        self.setpoint_c = sp;
-                    }
+                let update =
+                    tank_thermostat_update(*heating_setpoint_c, *cooling_setpoint_c, *deadband_c)?;
+                if update.changes_setpoint() {
+                    self.setpoint_c =
+                        update.setpoint_c(self.setpoint_c, self.configured_setpoint_c);
                 }
-                if let Some(db) = deadband_c {
-                    if !db.is_finite() || *db < 0.0 {
-                        return Err(HaresError::Control(format!(
-                            "invalid water-heater deadband: {db}"
-                        )));
-                    }
-                    self.deadband_c = *db;
-                }
+                self.deadband_c = update.deadband_c(self.deadband_c, self.configured_deadband_c);
             }
             ControlSignal::DutyCycle {
                 on_fraction,
@@ -1597,7 +1559,8 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
     fields.push(TelemetryField {
         name: tk::SKIN_LOSS_W.to_string(),
         unit: "W".to_string(),
-        description: "Tank jacket (skin) heat loss to zone".to_string(),
+        description: "Tank jacket (skin) heat loss to the surrounding zone or ambient location"
+            .to_string(),
     });
     fields
 }
@@ -1612,7 +1575,6 @@ fn default_condenser_weights(n_nodes: usize) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -1632,6 +1594,7 @@ mod tests {
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -1657,7 +1620,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1727,6 +1691,43 @@ mod tests {
 
     pub(super) fn config() -> EquipmentConfig {
         equipment_config(base_typed_config())
+    }
+
+    #[test]
+    fn thermal_setpoint_band_follows_the_shared_contract() {
+        let mut eq = HeatPumpWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+        super::super::assert_tank_thermostat_contract(
+            &mut eq,
+            |e| (e.setpoint_c, e.deadband_c),
+            |e, db| e.deadband_c = db,
+        );
+    }
+
+    /// A heat pump water heater has no setpoint ramp: a setpoint override
+    /// and its release both take effect at once and hold across control
+    /// updates.
+    #[test]
+    fn a_release_restores_the_configured_setpoint_at_once() {
+        use hares_types::ControlSignal;
+        let mut eq = HeatPumpWH::new(config());
+        let env = env(21.0);
+        eq.init(&config(), &env).unwrap();
+        let configured = eq.setpoint_c;
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(configured + 5.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        assert_eq!(eq.setpoint_c, configured + 5.0);
+        eq.update_control(&env);
+        assert_eq!(eq.setpoint_c, configured + 5.0);
+
+        eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
+        assert_eq!(eq.setpoint_c, configured);
+        eq.update_control(&env);
+        assert_eq!(eq.setpoint_c, configured);
     }
 
     #[test]
@@ -2394,7 +2395,6 @@ mod tests {
             )],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         }
     }
 
@@ -2408,6 +2408,7 @@ mod tests {
             pressure_pa,
         );
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -2433,7 +2434,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -2516,6 +2518,196 @@ mod tests {
         assert!(
             cop_high_wb > cop_low_wb,
             "COP at WB=20°C ({cop_high_wb:.4}) should exceed COP at WB=14°C ({cop_low_wb:.4})"
+        );
+    }
+
+    fn placed_config(zone_id: Option<u16>, zone_type: &str) -> EquipmentConfig {
+        let typed = HeatPumpWaterHeaterConfig {
+            zone_id,
+            zone_type: Some(zone_type.to_string()),
+            ..base_typed_config()
+        };
+        equipment_config(typed)
+    }
+
+    /// COP after one step from the shared cold-tank start.
+    fn cop_after_one_step(cfg: &EquipmentConfig, e: &EnvironmentState) -> f64 {
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(cfg, e).unwrap();
+        let mut p = ports();
+        eq.step(e, Duration::from_secs(60), &mut p).unwrap();
+        eq.telemetry().get(tk::COP).unwrap()
+    }
+
+    /// "Other housing unit" is the neighbouring unit's conditioned air, so a
+    /// heat pump water heater placed there must see the same evaporator
+    /// inlet (dry-bulb and wet-bulb) as one placed in the conditioned zone,
+    /// and so run at the same COP.
+    #[test]
+    fn hpwh_other_housing_unit_runs_on_the_conditioned_zone_air() {
+        let mut e = env_with_wet_bulb(22.0, 14.0);
+        // The conditioned zone's air, as the environment manager publishes
+        // it for the "other housing unit" placement.
+        e.ambient_other_space_c.other_housing_unit = Some(hares_types::AmbientAirTemps {
+            dry_bulb_c: e.zones[0].temperature_c,
+            wet_bulb_c: hares_physics::psychrometrics::zone_wet_bulb_c(
+                &e.zones[0],
+                e.weather.pressure_pa(),
+            ),
+        });
+        let zone_cop = cop_after_one_step(&placed_config(Some(1), "conditioned space"), &e);
+        let housing_cop = cop_after_one_step(&placed_config(None, "other housing unit"), &e);
+        assert!(
+            (zone_cop - housing_cop).abs() < 1e-9,
+            "other housing unit COP {housing_cop:.6} must equal the conditioned-zone \
+             COP {zone_cop:.6}: both draw the conditioned zone's air"
+        );
+    }
+
+    /// An outside heat pump water heater draws outdoor air: its COP must
+    /// follow the outdoor wet-bulb, the same as a unit in a zone holding the
+    /// same dry-bulb and wet-bulb.
+    #[test]
+    fn hpwh_outside_runs_on_the_outdoor_wet_bulb() {
+        let mut e = env_with_wet_bulb(30.0, 21.0);
+        e.weather.outdoor_temp_c = 30.0;
+        e.weather.outdoor_humidity_ratio = e.zones[0].humidity_ratio;
+        e.weather.outdoor_wet_bulb_c =
+            hares_physics::psychrometrics::zone_wet_bulb_c(&e.zones[0], e.weather.pressure_pa());
+        let zone_cop = cop_after_one_step(&placed_config(Some(1), "conditioned space"), &e);
+        let outside_cop = cop_after_one_step(&placed_config(None, "outside"), &e);
+        assert!(
+            (zone_cop - outside_cop).abs() < 1e-6,
+            "outside COP {outside_cop:.6} must equal the COP at the same outdoor \
+             dry-bulb and wet-bulb {zone_cop:.6}"
+        );
+    }
+
+    /// Measurement of the evaporator-moisture rule for a heat pump water
+    /// heater in "other heated space" on a winter hour: conditioned zone
+    /// 22 °C / 40 % RH, outdoors 0 °C / 80 % RH, sea-level pressure. The
+    /// 50/50 dry-bulb blend, 11 °C, rises to the 20 °C floor. HARES blends
+    /// the humidity ratio, which conserves vapour (ASHRAE Fundamentals 2021
+    /// ch. 1 adiabatic mixing), and holds it through the floor; OS-HPXML
+    /// averages the relative humidities to 60 % and applies that at 20 °C
+    /// (waterheater.rb `apply_hpwh_loc_temp_rh_sensors`). The vapour-
+    /// conserving inlet is 3.8 K lower in wet-bulb (11.33 °C against
+    /// 15.14 °C) and, from the shared cold-tank start, runs the default COP
+    /// curve 9.3 % below the RH-average inlet.
+    #[test]
+    fn hpwh_winter_cop_under_the_vapour_conserving_blend_against_the_rh_average() {
+        use hares_physics::psychrometrics::{
+            EPSILON, saturation_pressure_pa, wet_bulb_from_humidity_ratio,
+        };
+        let p_pa = 101_325.0;
+        let humidity_ratio = |t_c: f64, rh: f64| {
+            let p_v = rh * saturation_pressure_pa(t_c);
+            EPSILON * p_v / (p_pa - p_v)
+        };
+        let blended_w = 0.5 * humidity_ratio(22.0, 0.4) + 0.5 * humidity_ratio(0.0, 0.8);
+        let vapour_conserving_wb = wet_bulb_from_humidity_ratio(20.0, blended_w, p_pa);
+        let rh_average_wb = wet_bulb_from_humidity_ratio(20.0, humidity_ratio(20.0, 0.6), p_pa);
+        let cop_at = |wet_bulb_c: f64| {
+            let mut e = env_with_wet_bulb(22.0, 14.0);
+            e.ambient_other_space_c.other_heated_space = Some(hares_types::AmbientAirTemps {
+                dry_bulb_c: 20.0,
+                wet_bulb_c,
+            });
+            cop_after_one_step(&placed_config(None, "other heated space"), &e)
+        };
+        let cop_ratio = cop_at(vapour_conserving_wb) / cop_at(rh_average_wb);
+        assert!(
+            (vapour_conserving_wb - 11.33).abs() < 0.01 && (rh_average_wb - 15.14).abs() < 0.01,
+            "wet-bulbs {vapour_conserving_wb:.3} °C (vapour-conserving) and \
+             {rh_average_wb:.3} °C (RH average)"
+        );
+        assert!(
+            (cop_ratio - 0.907).abs() < 0.001,
+            "COP ratio vapour-conserving / RH average {cop_ratio:.4}"
+        );
+    }
+
+    /// The wall share of the HPWH sensible gain is an OCHRE construct for
+    /// the living zone's partition walls; OS-HPXML places every HPWH gain
+    /// convectively in the zone air. With no explicit value the share is
+    /// zero, whatever the location text says.
+    #[test]
+    fn hpwh_wall_heat_default_is_zero_without_an_explicit_value() {
+        for location in [
+            "basement - conditioned",
+            "crawlspace - conditioned",
+            "garage - conditioned",
+            "conditioned space",
+        ] {
+            let cfg = equipment_config(HeatPumpWaterHeaterConfig {
+                zone_id: Some(1),
+                zone_type: Some(location.to_string()),
+                wall_heat_fraction: None,
+                ..base_typed_config()
+            });
+            let mut eq = HeatPumpWH::new(cfg.clone());
+            eq.init(&cfg, &env(24.0)).unwrap();
+            assert_eq!(
+                eq.wall_heat_fraction, 0.0,
+                "{location}: unset wall_heat_fraction must default to 0.0"
+            );
+        }
+    }
+
+    /// A wall share needs a modeled zone's wall to land on; an explicit
+    /// non-zero share for a placement with no modeled zone is a config error.
+    #[test]
+    fn hpwh_rejects_a_wall_share_in_a_location_with_no_modeled_zone() {
+        let typed = HeatPumpWaterHeaterConfig {
+            zone_id: None,
+            zone_type: Some("other heated space".to_string()),
+            wall_heat_fraction: Some(0.5),
+            ..base_typed_config()
+        };
+        let cfg = equipment_config(typed);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env(24.0))
+            .expect_err("a wall share with no modeled zone must fail init");
+        assert!(
+            err.to_string().contains("wall_heat_fraction"),
+            "the error must name the field, got: {err}"
+        );
+    }
+
+    /// The evaporator draw, fan heat and standing loss of a heat pump water
+    /// heater in a location with no modeled zone stay in that location,
+    /// never in a modeled zone.
+    #[test]
+    fn ambient_placed_hpwh_contributes_nothing_to_any_zone() {
+        let cfg = placed_config(None, "other non-freezing space");
+        let mut e = env(24.0);
+        e.ambient_other_space_c.other_non_freezing_space = Some(hares_types::AmbientAirTemps {
+            dry_bulb_c: 24.0,
+            wet_bulb_c: 16.0,
+        });
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+        let mut p = ports();
+        for _ in 0..10 {
+            eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+        }
+        assert!(eq.telemetry().get(tk::COMPRESSOR_POWER_W).unwrap_or(0.0) > 0.0);
+        let zone = &p.thermal[0];
+        assert_eq!(
+            (
+                zone.sensible_gain_w,
+                zone.radiant_gain_w,
+                zone.latent_gain_w
+            ),
+            (0.0, 0.0, 0.0),
+            "an ambient-placed HPWH must not add or remove heat in zone 1"
+        );
+        assert!(
+            eq.ports()
+                .iter()
+                .all(|port| port.port_type != hares_types::PortType::Thermal),
+            "an ambient-placed HPWH declares no thermal port"
         );
     }
 
@@ -3425,7 +3617,6 @@ mod tests {
 
 #[cfg(test)]
 mod mutual_exclusion_tests {
-    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -3440,6 +3631,7 @@ mod mutual_exclusion_tests {
 
     fn env_state() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 24.0,
@@ -3465,7 +3657,8 @@ mod mutual_exclusion_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -3510,7 +3703,6 @@ mod mutual_exclusion_tests {
             )],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         }
     }
 
@@ -3749,7 +3941,6 @@ mod mutual_exclusion_tests {
 
 #[cfg(test)]
 mod dr_tests {
-    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -3764,6 +3955,7 @@ mod dr_tests {
 
     fn env_state() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 24.0,
@@ -3789,7 +3981,8 @@ mod dr_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -3833,7 +4026,6 @@ mod dr_tests {
             )],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         }
     }
 
@@ -4064,7 +4256,6 @@ mod dr_tests {
 
 #[cfg(test)]
 mod new_feature_tests {
-    #![allow(clippy::needless_update)]
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -4076,9 +4267,11 @@ mod new_feature_tests {
     use super::HeatPumpWH;
     use crate::water_heater::heat_pump_wh::tests::{base_typed_config, equipment_config};
     use crate::{Equipment, EquipmentConfig, HeatPumpWaterHeaterConfig};
+    use hares_types::AmbientLocation;
 
     fn env_at(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -4104,7 +4297,8 @@ mod new_feature_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -4136,7 +4330,6 @@ mod new_feature_tests {
             )],
             custom: vec![],
             humidity: vec![],
-            ..Default::default()
         }
     }
 
@@ -4243,11 +4436,6 @@ mod new_feature_tests {
             eq.lost_heat_fraction.abs() < 1e-12,
             "unset lost_heat_fraction must default to 0.0, got {}",
             eq.lost_heat_fraction
-        );
-        assert!(
-            (eq.wall_heat_fraction - 0.5).abs() < 1e-12,
-            "conditioned-zone default wall_heat_fraction should be 0.5, got {}",
-            eq.wall_heat_fraction
         );
     }
 
@@ -4543,6 +4731,54 @@ mod new_feature_tests {
             rel_err < 1e-9,
             "compressor_kw {compressor_kw:.6} + element_kw {element_kw:.6} = {sub_sum:.6} \
              must equal electric_kw {electric_kw:.6} (rel_err={rel_err:.2e})"
+        );
+    }
+
+    /// A heat pump water heater in an HPXML location with no modeled zone
+    /// runs against the "other multifamily buffer space" air instead of a
+    /// zone. The environment carries distinct air states per placement, so
+    /// the read proves which source the equipment uses, and the evaporator
+    /// inlet takes that placement's own wet-bulb, not its dry-bulb.
+    #[test]
+    fn heat_pump_wh_ambient_source_for_other_multifamily_buffer_space_location() {
+        let mut typed = base_typed_config();
+        typed.zone_id = None;
+        typed.zone_type = Some("other multifamily buffer space".to_string());
+        let cfg = equipment_config(typed);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        let mut e = env_at(22.0);
+        e.weather.outdoor_temp_c = 2.0;
+        e.ambient_other_space_c = super::super::siting::test_ambient_air();
+        eq.init(&cfg, &e).unwrap();
+        assert_eq!(
+            eq.ambient_location(),
+            Some(AmbientLocation::OtherMultifamilyBufferSpace),
+            "init must resolve the classified ambient placement"
+        );
+        assert_eq!(eq.descriptor().zone, None);
+        let inlet = eq.siting.inlet_air(&e, "HPWH").unwrap();
+        assert!((inlet.dry_bulb_c - 12.0).abs() < 1e-9);
+        assert!((inlet.wet_bulb_c - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn heat_pump_wh_errors_on_unresolved_zone_and_unclassified_location() {
+        let mut typed = base_typed_config();
+        typed.zone_id = None;
+        typed.zone_type = Some("in between somewhere".to_string());
+        let cfg = equipment_config(typed);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env_at(21.0))
+            .expect_err("an unclassifiable location with no zone must fail init");
+        let message = err.to_string();
+        assert!(
+            message.contains("HPWH"),
+            "the error must name the water heater, got: {message}"
+        );
+        assert!(
+            message.contains("in between somewhere"),
+            "the error must name the unresolved zone_type, got: {message}"
         );
     }
 }

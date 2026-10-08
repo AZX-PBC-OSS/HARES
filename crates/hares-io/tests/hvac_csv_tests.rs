@@ -315,6 +315,33 @@ fn efficiency_lookup_falls_back_to_closest_when_no_exact_match() {
          MSHP Cooler,16.0 SEER,2,0.70,0.80,4.3,1.0,1.0,3.0,0.80,0.75\n",
     )
     .unwrap();
+    // The generator efficiency curve is mandatory at load.
+    std::fs::create_dir_all(dir.path().join("generator")).unwrap();
+    std::fs::write(
+        dir.path().join("generator").join("efficiency_curve.toml"),
+        "[[points]]\ncapacity_ratio = 0.0\nefficiency_ratio = 0.0\n\
+         [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
+    )
+    .unwrap();
+    // The EV vehicle mapping is mandatory at load.
+    let ev_dir = dir.path().join("ev");
+    std::fs::create_dir_all(&ev_dir).unwrap();
+    let mut mapping = String::from(
+        "profile_column,vehicle_type,profile_file,capacity_kwh,charger_power_kw,efficiency\n",
+    );
+    for i in 1..=35 {
+        mapping.push_str(&format!(
+            "Vehicle {i},MY2030_BEV_SUV,pdf_Veh{},117.6,10.26,0.9\n",
+            ((i - 1) % 4) + 1
+        ));
+    }
+    for i in 36..=50 {
+        mapping.push_str(&format!(
+            "Vehicle {i},MY2030_PHEV_SUV,pdf_Veh{},14.8,7.2,0.9\n",
+            ((i - 1) % 4) + 1
+        ));
+    }
+    std::fs::write(ev_dir.join("vehicle_mapping.csv"), mapping).unwrap();
 
     let store = DefaultsStore::load(dir.path()).expect("load defaults");
 

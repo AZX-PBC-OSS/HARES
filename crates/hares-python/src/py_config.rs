@@ -62,6 +62,7 @@ pub struct PySimulationConfig {
     utc_offset_h: Option<f64>,
     retain_batches: bool,
     rotation: Option<String>,
+    max_consecutive_step_failures: u32,
 }
 
 #[pymethods]
@@ -86,6 +87,7 @@ impl PySimulationConfig {
             utc_offset_h = None,
             retain_batches = None,
             rotation = None,
+            max_consecutive_step_failures = None,
         )
     )]
     // PyO3 #[new] with kwargs maps 1:1 to Python kwargs; builder adds no value here.
@@ -108,6 +110,7 @@ impl PySimulationConfig {
         utc_offset_h: Option<f64>,
         retain_batches: Option<bool>,
         rotation: Option<String>,
+        max_consecutive_step_failures: Option<u32>,
     ) -> PyResult<Self> {
         let start_time = match start_time {
             Some(s) => parse_datetime_str(&s)?,
@@ -146,44 +149,44 @@ impl PySimulationConfig {
             return Err(PyValueError::new_err("output_verbosity must be 0-8"));
         }
 
-        if let Some(deadband) = setpoint_deadband_c {
-            if !deadband.is_finite() || deadband < 0.0 {
-                return Err(PyValueError::new_err(
-                    "setpoint_deadband_c must be finite and >= 0",
-                ));
-            }
+        if let Some(deadband) = setpoint_deadband_c
+            && (!deadband.is_finite() || deadband < 0.0)
+        {
+            return Err(PyValueError::new_err(
+                "setpoint_deadband_c must be finite and >= 0",
+            ));
         }
 
-        if let Some(lat) = latitude {
-            if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
-                return Err(PyValueError::new_err(
-                    "latitude must be finite and within [-90, 90]",
-                ));
-            }
+        if let Some(lat) = latitude
+            && (!lat.is_finite() || !(-90.0..=90.0).contains(&lat))
+        {
+            return Err(PyValueError::new_err(
+                "latitude must be finite and within [-90, 90]",
+            ));
         }
 
-        if let Some(lon) = longitude {
-            if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
-                return Err(PyValueError::new_err(
-                    "longitude must be finite and within [-180, 180]",
-                ));
-            }
+        if let Some(lon) = longitude
+            && (!lon.is_finite() || !(-180.0..=180.0).contains(&lon))
+        {
+            return Err(PyValueError::new_err(
+                "longitude must be finite and within [-180, 180]",
+            ));
         }
 
-        if let Some(elev) = elevation_m {
-            if !elev.is_finite() || !(-500.0..=9000.0).contains(&elev) {
-                return Err(PyValueError::new_err(
-                    "elevation_m must be finite and within [-500, 9000]",
-                ));
-            }
+        if let Some(elev) = elevation_m
+            && (!elev.is_finite() || !(-500.0..=9000.0).contains(&elev))
+        {
+            return Err(PyValueError::new_err(
+                "elevation_m must be finite and within [-500, 9000]",
+            ));
         }
 
-        if let Some(offset) = utc_offset_h {
-            if !offset.is_finite() || !(-14.0..=14.0).contains(&offset) {
-                return Err(PyValueError::new_err(
-                    "utc_offset_h must be finite and within [-14, 14]",
-                ));
-            }
+        if let Some(offset) = utc_offset_h
+            && (!offset.is_finite() || !(-14.0..=14.0).contains(&offset))
+        {
+            return Err(PyValueError::new_err(
+                "utc_offset_h must be finite and within [-14, 14]",
+            ));
         }
 
         let output_chunk_size = output_chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
@@ -210,6 +213,8 @@ impl PySimulationConfig {
             utc_offset_h,
             retain_batches: retain_batches.unwrap_or(true),
             rotation,
+            max_consecutive_step_failures: max_consecutive_step_failures
+                .unwrap_or(hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES),
         })
     }
 
@@ -323,12 +328,12 @@ impl PySimulationConfig {
 
     #[setter]
     pub fn set_setpoint_deadband_c(&mut self, value: Option<f64>) -> PyResult<()> {
-        if let Some(deadband) = value {
-            if !deadband.is_finite() || deadband < 0.0 {
-                return Err(PyValueError::new_err(
-                    "setpoint_deadband_c must be finite and >= 0",
-                ));
-            }
+        if let Some(deadband) = value
+            && (!deadband.is_finite() || deadband < 0.0)
+        {
+            return Err(PyValueError::new_err(
+                "setpoint_deadband_c must be finite and >= 0",
+            ));
         }
         self.setpoint_deadband_c = value;
         Ok(())
@@ -361,12 +366,12 @@ impl PySimulationConfig {
 
     #[setter]
     pub fn set_latitude(&mut self, value: Option<f64>) -> PyResult<()> {
-        if let Some(lat) = value {
-            if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
-                return Err(PyValueError::new_err(
-                    "latitude must be finite and within [-90, 90]",
-                ));
-            }
+        if let Some(lat) = value
+            && (!lat.is_finite() || !(-90.0..=90.0).contains(&lat))
+        {
+            return Err(PyValueError::new_err(
+                "latitude must be finite and within [-90, 90]",
+            ));
         }
         self.latitude = value;
         Ok(())
@@ -379,12 +384,12 @@ impl PySimulationConfig {
 
     #[setter]
     pub fn set_longitude(&mut self, value: Option<f64>) -> PyResult<()> {
-        if let Some(lon) = value {
-            if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
-                return Err(PyValueError::new_err(
-                    "longitude must be finite and within [-180, 180]",
-                ));
-            }
+        if let Some(lon) = value
+            && (!lon.is_finite() || !(-180.0..=180.0).contains(&lon))
+        {
+            return Err(PyValueError::new_err(
+                "longitude must be finite and within [-180, 180]",
+            ));
         }
         self.longitude = value;
         Ok(())
@@ -397,12 +402,12 @@ impl PySimulationConfig {
 
     #[setter]
     pub fn set_elevation_m(&mut self, value: Option<f64>) -> PyResult<()> {
-        if let Some(elev) = value {
-            if !elev.is_finite() || !(-500.0..=9000.0).contains(&elev) {
-                return Err(PyValueError::new_err(
-                    "elevation_m must be finite and within [-500, 9000]",
-                ));
-            }
+        if let Some(elev) = value
+            && (!elev.is_finite() || !(-500.0..=9000.0).contains(&elev))
+        {
+            return Err(PyValueError::new_err(
+                "elevation_m must be finite and within [-500, 9000]",
+            ));
         }
         self.elevation_m = value;
         Ok(())
@@ -415,12 +420,12 @@ impl PySimulationConfig {
 
     #[setter]
     pub fn set_utc_offset_h(&mut self, value: Option<f64>) -> PyResult<()> {
-        if let Some(offset) = value {
-            if !offset.is_finite() || !(-14.0..=14.0).contains(&offset) {
-                return Err(PyValueError::new_err(
-                    "utc_offset_h must be finite and within [-14, 14]",
-                ));
-            }
+        if let Some(offset) = value
+            && (!offset.is_finite() || !(-14.0..=14.0).contains(&offset))
+        {
+            return Err(PyValueError::new_err(
+                "utc_offset_h must be finite and within [-14, 14]",
+            ));
         }
         self.utc_offset_h = value;
         Ok(())
@@ -448,6 +453,16 @@ impl PySimulationConfig {
         }
         self.rotation = value;
         Ok(())
+    }
+
+    #[getter]
+    pub fn max_consecutive_step_failures(&self) -> u32 {
+        self.max_consecutive_step_failures
+    }
+
+    #[setter]
+    pub fn set_max_consecutive_step_failures(&mut self, value: u32) {
+        self.max_consecutive_step_failures = value;
     }
 
     pub fn __repr__(&self) -> String {
@@ -512,6 +527,7 @@ impl PySimulationConfig {
                 .map(parse_rotation_policy)
                 .transpose()?
                 .unwrap_or(hares_io::RotationPolicy::None),
+            max_consecutive_step_failures: self.max_consecutive_step_failures,
         })
     }
 
@@ -543,6 +559,7 @@ impl PySimulationConfig {
                 hares_io::RotationPolicy::Monthly => Some("monthly".to_string()),
                 hares_io::RotationPolicy::Yearly => Some("yearly".to_string()),
             },
+            max_consecutive_step_failures: config.max_consecutive_step_failures,
         }
     }
 }
@@ -551,7 +568,9 @@ impl PySimulationConfig {
 #[derive(Debug, Clone)]
 pub struct PyDwellingConfig {
     hpxml: String,
-    schedule: String,
+    /// `None` requests a schedule generated from the HPXML; a set path is
+    /// read as the dwelling's schedule and any read failure is an error.
+    schedule: Option<String>,
     weather: String,
     config: Option<PySimulationConfig>,
     defaults_path: Option<String>,
@@ -584,7 +603,7 @@ impl PyDwellingConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         hpxml: String,
-        schedule: String,
+        schedule: Option<String>,
         weather: String,
         config: Option<PySimulationConfig>,
         defaults_path: Option<String>,
@@ -637,12 +656,12 @@ impl PyDwellingConfig {
             None
         };
 
-        if let Some(init_dur) = initialization_duration {
-            if init_dur < 0 {
-                return Err(PyValueError::new_err(
-                    "initialization_duration must be non-negative",
-                ));
-            }
+        if let Some(init_dur) = initialization_duration
+            && init_dur < 0
+        {
+            return Err(PyValueError::new_err(
+                "initialization_duration must be non-negative",
+            ));
         }
 
         let initialization_duration = initialization_duration.filter(|&d| d != 0);
@@ -666,8 +685,8 @@ impl PyDwellingConfig {
     }
 
     #[getter]
-    pub fn schedule(&self) -> &str {
-        &self.schedule
+    pub fn schedule(&self) -> Option<&str> {
+        self.schedule.as_deref()
     }
 
     #[getter]
@@ -727,9 +746,14 @@ impl PyDwellingConfig {
     }
 
     pub fn __repr__(&self) -> String {
+        let schedule = self
+            .schedule
+            .as_deref()
+            .map(|s| format!("'{s}'"))
+            .unwrap_or_else(|| "None".to_string());
         format!(
-            "DwellingConfig(hpxml='{}', schedule='{}', weather='{}', bldg_id={})",
-            self.hpxml, self.schedule, self.weather, self.bldg_id
+            "DwellingConfig(hpxml='{}', schedule={}, weather='{}', bldg_id={})",
+            self.hpxml, schedule, self.weather, self.bldg_id
         )
     }
 }
@@ -753,6 +777,7 @@ impl PyDwellingConfig {
                 site_location: hares_io::SiteLocationOverride::default(),
                 retain_batches: true,
                 rotation: hares_io::RotationPolicy::None,
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
         };
 
@@ -798,7 +823,7 @@ impl PyDwellingConfig {
 
         Ok(DwellingConfig {
             hpxml_path: PathBuf::from(&self.hpxml),
-            schedule_path: PathBuf::from(&self.schedule),
+            schedule_path: self.schedule.as_deref().map(PathBuf::from),
             weather_path: PathBuf::from(&self.weather),
             defaults_path: self.defaults_path.clone().map(PathBuf::from),
             sim_config,
@@ -820,7 +845,9 @@ mod tests {
 
     use chrono::DateTime;
 
-    use super::{DEFAULT_START, MAX_CHRONO_SECONDS, PySimulationConfig, default_start_time};
+    use super::{
+        DEFAULT_START, MAX_CHRONO_SECONDS, PyDwellingConfig, PySimulationConfig, default_start_time,
+    };
 
     #[test]
     fn new_rejects_duration_s_above_chrono_bound() {
@@ -830,6 +857,7 @@ mod tests {
                 None,
                 Some(too_large),
                 Some(60),
+                None,
                 None,
                 None,
                 None,
@@ -874,6 +902,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
@@ -889,6 +918,7 @@ mod tests {
                 None,
                 Some(MAX_CHRONO_SECONDS),
                 Some(5),
+                None,
                 None,
                 None,
                 None,
@@ -926,5 +956,52 @@ mod tests {
             dt.format("%Y-%m-%dT%H:%M:%S%z").to_string(),
             "2019-01-01T00:00:00+0000"
         );
+    }
+
+    #[test]
+    fn schedule_none_requests_the_generated_schedule() {
+        Python::attach(|_py| {
+            let cfg = PyDwellingConfig::new(
+                "building.xml".to_string(),
+                None,
+                "weather.epw".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("a None schedule constructs");
+            let rust_config = cfg.to_dwelling_config().expect("the config converts");
+            assert!(
+                rust_config.schedule_path.is_none(),
+                "a None schedule must request the generated schedule"
+            );
+        });
+    }
+
+    #[test]
+    fn schedule_path_keeps_the_given_file() {
+        Python::attach(|_py| {
+            let cfg = PyDwellingConfig::new(
+                "building.xml".to_string(),
+                Some("schedules.csv".to_string()),
+                "weather.epw".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("a schedule path constructs");
+            let rust_config = cfg.to_dwelling_config().expect("the config converts");
+            assert_eq!(
+                rust_config.schedule_path,
+                Some(std::path::PathBuf::from("schedules.csv")),
+                "a set schedule must reach the Rust config as the path to read"
+            );
+        });
     }
 }

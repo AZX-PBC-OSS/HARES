@@ -1,8 +1,5 @@
 //! Named constants for heat-pump models.
 
-pub const DEFAULT_ZONE_ID: u16 = 1;
-pub const DEFAULT_EQUIPMENT_ID: u32 = 0;
-
 pub const DEFROST_ENABLE_TEMP_C: f64 = 4.4445;
 pub const DEFROST_COIL_TEMP_SLOPE: f64 = 0.82;
 pub const DEFROST_COIL_TEMP_OFFSET_C: f64 = -8.589;
@@ -80,22 +77,22 @@ pub const DEFAULT_HEATING_EIR: f64 = 0.35;
 pub const DEFAULT_BACKUP_CAPACITY_W: f64 = 5_000.0;
 pub const DEFAULT_BACKUP_EIR: f64 = 1.0;
 pub const MSHP_PAN_HEATER_DEFAULT_TEMP_C: f64 = 0.0;
-/// Pan heater rated power for MSHP condensate management [kW].
+/// Pan heater rated power for MSHP condensate management (kW).
 /// Per OCHRE MinisplitAHSPHeater class attribute (HVAC.py:1482).
 pub const MSHP_PAN_HEATER_DEFAULT_KW: f64 = 0.150;
 
 pub const HEATER_TELEMETRY_CAPACITY: usize = 58;
 
 // Discrete defrost cycle parameters (HARES-specific enhancement, not from EnergyPlus)
-/// Default defrost cycle duration [s]. 3.5 min ≈ typical residential ASHP reverse-cycle
+/// Default defrost cycle duration (s). 3.5 min ≈ typical residential ASHP reverse-cycle
 /// defrost period. EnergyPlus ERM 26.1 — Coils: Single-Speed Electric DX Air Heating Coil — Defrost Operation uses a continuous model; HARES adds discrete
 /// ON/OFF cycling for subhourly dispatch fidelity.
 pub const DEFAULT_DEFROST_CYCLE_DURATION_S: f64 = 210.0;
-/// Maximum defrost cycle duration [s]. Hard cap prevents runaway defrost; 10 min
+/// Maximum defrost cycle duration (s). Hard cap prevents runaway defrost; 10 min
 /// is the practical upper bound for residential equipment safety.
 pub const MAX_DEFROST_CYCLE_DURATION_S: f64 = 600.0;
 /// Time constant for the exponentially-weighted moving average of defrost
-/// `time_fraction` [s]. A 10-minute τ smooths step-to-step fluctuations in
+/// `time_fraction` (s). A 10-minute τ smooths step-to-step fluctuations in
 /// the FSM's inter-defrost interval when OAT oscillates around the defrost
 /// threshold, preventing duty-cycle drift. HARES-specific (not from EnergyPlus
 /// or OCHRE — both use instantaneous conditions).
@@ -111,9 +108,9 @@ pub const DEFROST_EWMA_TAU_S: f64 = 600.0;
 // accelerates as OAT rises. Linear interpolation between the two anchor points
 // at 0°C (~1 h τ) and 10°C (~10 min τ). Exact values vary with wind speed and
 // coil geometry.
-/// Decay time constant at 0°C OAT [s]. Below 0°C, frost does not decay.
+/// Decay time constant at 0°C OAT (s). Below 0°C, frost does not decay.
 pub const FROST_DECAY_TAU_AT_0C_S: f64 = 3600.0;
-/// Decay time constant at 10°C OAT [s].
+/// Decay time constant at 10°C OAT (s).
 pub const FROST_DECAY_TAU_AT_10C_S: f64 = 600.0;
 /// OAT below which frost decay is disabled [°C].
 pub const FROST_DECAY_CLEAR_TEMP_C: f64 = 0.0;

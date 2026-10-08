@@ -178,31 +178,3 @@ pub(crate) fn check_mode_flow_consistency(
 
     Ok(())
 }
-
-/// Invariant re-verification: runs the same consistency checks independently
-/// and logs a warning if a violation is found. Called AFTER the production check
-/// has passed — a warning here means the production path has a logic bug.
-///
-/// Exists only in debug or `check_invariants` builds.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub(crate) fn invariant_recheck_mode_flow_consistency(desc: &EquipmentDescriptor, co: &CoreOutput) {
-    if let Err(violation) = check_mode_flow_consistency(desc, co) {
-        tracing::warn!(
-            equipment = %desc.name,
-            operating_mode = ?co.state.operating_mode,
-            electric_kw = ?co.flows.electric_kw,
-            thermal_output_w = ?co.flows.thermal_output_w,
-            fuel_w = ?co.flows.fuel_w,
-            reactive_power_kvar = ?co.flows.reactive_power_kvar,
-            "invariant violation: {} (production check should have caught this)",
-            violation.message,
-        );
-    }
-}
-
-#[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-pub(crate) fn invariant_recheck_mode_flow_consistency(
-    _desc: &EquipmentDescriptor,
-    _co: &CoreOutput,
-) {
-}

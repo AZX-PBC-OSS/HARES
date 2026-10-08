@@ -17,22 +17,12 @@ struct FixtureConfig {
 #[derive(Debug, Deserialize)]
 struct BoundaryConfig {
     id: String,
-    // Required for serde/toml to deserialize the fixture's full
-    // `boundary_type` field; the test itself only reads `id` and
-    // `material_layers`.
-    #[allow(dead_code)]
-    boundary_type: Option<String>,
     material_layers: Vec<MaterialLayerConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 struct MaterialLayerConfig {
     thickness_m: f64,
-    // Required for serde/toml to deserialize the fixture's full
-    // `conductivity_w_m_k` field; the test itself only reads
-    // `thickness_m`, `density_kg_m3`, and `specific_heat_j_kg_k`.
-    #[allow(dead_code)]
-    conductivity_w_m_k: Option<f64>,
     density_kg_m3: f64,
     specific_heat_j_kg_k: f64,
 }

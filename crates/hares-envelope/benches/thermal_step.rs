@@ -14,9 +14,10 @@
 //! formula).
 
 use std::collections::HashMap;
+use std::hint::black_box;
 
-use chrono::{FixedOffset, TimeZone};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use chrono::TimeZone;
+use criterion::{Criterion, criterion_group, criterion_main};
 use hares_envelope::thermal_solver::{
     BoundaryCategory, ExteriorSurfaceInfo, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
 };
@@ -26,6 +27,9 @@ use hares_types::{
     WeatherState, ZoneId, ZoneState,
 };
 use nalgebra::DMatrix;
+
+#[path = "../../../tests/support/denver_offset.rs"]
+mod denver_offset;
 
 const ZONE: ZoneId = ZoneId(1);
 
@@ -69,6 +73,7 @@ fn bench_env() -> EnvironmentState {
         },
     ];
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZONE,
             temperature_c: 24.0,
@@ -104,11 +109,11 @@ fn bench_env() -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: HashMap::new(),
         equipment_core: Default::default(),
-        current_time: FixedOffset::east_opt(-7 * 3600)
-            .unwrap()
+        current_time: denver_offset::denver_offset()
             .with_ymd_and_hms(2026, 7, 19, 14, 0, 0)
             .single()
             .expect("valid time"),
@@ -227,9 +232,8 @@ fn bench_solver(env: &EnvironmentState) -> ThermalSolver {
     };
 
     let config = ThermalSolverConfig {
-        indoor_zone_id: ZONE,
         exterior_surfaces: surfaces,
-        ..Default::default()
+        ..ThermalSolverConfig::new(ZONE)
     };
     // Light infiltration so the semi-implicit coupling path runs every step.
     // Infiltration left empty: the semi-implicit coupling path is exercised
@@ -251,11 +255,11 @@ fn thermal_step_benchmark(c: &mut Criterion) {
         // Warm the exterior-surface-temperature fixed points so the measured
         // step is the steady-state hot path, not the first-call transient.
         for _ in 0..20 {
-            solver.resolve(&ports, &env, std::time::Duration::from_secs(900), &mut out);
+            let _ = solver.resolve(&ports, &env, std::time::Duration::from_secs(900), &mut out);
             out.clear();
         }
         b.iter(|| {
-            solver.resolve(
+            let _ = solver.resolve(
                 black_box(&ports),
                 black_box(&env),
                 black_box(std::time::Duration::from_secs(900)),

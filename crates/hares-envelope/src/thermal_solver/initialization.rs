@@ -127,7 +127,12 @@ pub(crate) fn initialize_steady_state(
     // path reaches initialization. OCHRE uses np.linalg.inv(A) directly —
     // NumPy raises LinAlgError on singularity rather than silently substituting
     // uniform temperatures.
-    const ZONE_PINNING_MIN_CAPACITANCE_J_K: f64 = 1e-6;
+    // Absolute physical minimum for a meaningful pinned thermal capacitance.
+    // The guard rejects anything below it as a typed error in every build
+    // profile; values in [1e-6, 1.0) would represent a suspicious path that
+    // passed the soft error guard but indicates a latent construction or
+    // configuration issue.
+    const ZONE_PINNING_MIN_CAPACITANCE_J_K: f64 = 1.0;
 
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     {
@@ -144,38 +149,18 @@ pub(crate) fn initialize_steady_state(
         );
     }
 
-    // Guard: reject zones whose capacitance is too small for the state-pinning
-    // solve before we inspect the matrices. This fires as a returned error
-    // (not a panic) so callers can handle the condition at the construction
-    // boundary without crashing the entire process in debug builds.
+    // Guard: reject zones whose capacitance is below the absolute minimum for
+    // the state-pinning solve before we inspect the matrices. This fires as a
+    // returned error (not a panic) so callers can handle the condition at the
+    // construction boundary without crashing the entire process.
     for zone_id in pinned_zones {
-        if let Some(&c_zone) = wiring.c_zone_j_k.get(zone_id) {
-            if c_zone < ZONE_PINNING_MIN_CAPACITANCE_J_K {
-                return Err(ThermalSolverError::SingularInitialization {
-                    zone_id: *zone_id,
-                    capacitance_j_k: c_zone,
-                });
-            }
-        }
-    }
-
-    // Invariant check: in debug/test builds and when check_invariants is
-    // enabled, assert every pinned zone has at least 1 J/K. Zones that reached
-    // this point have already passed the guard above (c_zone >= 1e-6 J/K), but
-    // 1 J/K is the absolute physical minimum for a meaningful thermal
-    // capacitance. Values in [1e-6, 1.0) represent a suspicious path that
-    // passed the soft error guard but indicates a latent construction or
-    // configuration issue that should be investigated.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        for zone_id in pinned_zones {
-            if let Some(&c_zone) = wiring.c_zone_j_k.get(zone_id) {
-                assert!(
-                    c_zone >= 1.0,
-                    "zone {zone_id:?} capacitance {c_zone:.3e} J/K below absolute minimum 1 J/K \
-                     for state pinning"
-                );
-            }
+        if let Some(&c_zone) = wiring.c_zone_j_k.get(zone_id)
+            && c_zone < ZONE_PINNING_MIN_CAPACITANCE_J_K
+        {
+            return Err(ThermalSolverError::SingularInitialization {
+                zone_id: *zone_id,
+                capacitance_j_k: c_zone,
+            });
         }
     }
 
@@ -296,6 +281,7 @@ mod tests {
 
     fn minimal_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -337,7 +323,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)

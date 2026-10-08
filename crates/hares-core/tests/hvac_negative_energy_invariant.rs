@@ -6,12 +6,11 @@
 //! (`NegativeDeliveredEnergy`) when deliberately negative HVAC power values are
 //! injected via the test seam.
 //!
-//! Tests are gated on `debug_assertions` because the invariant check is
-//! compiled only when `cfg(any(debug_assertions, feature = "check_invariants"))`
-//! is active.
+//! Tests are gated on `debug_assertions` because the test seam itself is
+//! `cfg(any(test, debug_assertions))`: the invariant check it arms runs
+//! unconditionally in every build profile.
 #![cfg(debug_assertions)]
 
-use std::env;
 use std::fs;
 
 use hares_core::Dwelling;
@@ -45,6 +44,9 @@ dew_point_c = 10.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
 
+[infiltration]
+ach = 0.0
+
 [schedule]
 occupancy = 0.0
 
@@ -57,25 +59,20 @@ master_seed = 0
 "#;
 
 /// Builds a minimal synthetic dwelling from the shared TOML fixture.
-fn minimal_dwelling() -> (std::path::PathBuf, Dwelling) {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock before epoch")
-        .as_nanos();
-    let tmp = env::temp_dir().join(format!("hares_hvac_negative_invariant_test_{nanos}.toml"));
-    fs::write(&tmp, SYNTHETIC_TOML).expect("write toml");
-    let dwelling = Dwelling::from_toml_config(&tmp).expect("create dwelling");
-    (tmp, dwelling)
+fn minimal_dwelling() -> Dwelling {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("dwelling.toml");
+    fs::write(&path, SYNTHETIC_TOML).expect("write toml");
+    Dwelling::from_toml_config(&path).expect("create dwelling")
 }
 
 /// Verifies that a correctly-functioning dwelling steps cleanly through the
 /// HVAC delivered-energy invariant checks without false positives.
 #[test]
 fn dwelling_step_hvac_energy_invariant_wired() {
-    let (tmp, mut dwelling) = minimal_dwelling();
+    let mut dwelling = minimal_dwelling();
 
     let result = dwelling.step();
-    let _ = fs::remove_file(&tmp);
 
     assert!(
         result.is_ok(),
@@ -85,7 +82,7 @@ fn dwelling_step_hvac_energy_invariant_wired() {
 }
 
 /// Verifies that the HVAC negative-energy invariant wiring inside
-/// `Dwelling::check_invariants` catches deliberately incorrect HVAC power
+/// `Dwelling::check_step_invariants` catches deliberately incorrect HVAC power
 /// values injected via the test seam.
 ///
 /// Steps the dwelling once to confirm the invariant passes for correct models,
@@ -94,11 +91,11 @@ fn dwelling_step_hvac_energy_invariant_wired() {
 /// `Err(HaresError::NegativeDeliveredEnergy { .. })`.
 ///
 /// If the `check_hvac_power_non_negative` or `check_heating_accumulator`
-/// calls were accidentally removed from `check_invariants`, this test would
+/// calls were accidentally removed from `check_step_invariants`, this test would
 /// fail — the seam would have no effect and `step()` would return `Ok`.
 #[test]
 fn hvac_negative_energy_invariant_catches_injected_negative() {
-    let (tmp, mut dwelling) = minimal_dwelling();
+    let mut dwelling = minimal_dwelling();
 
     // Step once: confirm the invariant passes for a correct model.
     dwelling
@@ -113,7 +110,6 @@ fn hvac_negative_energy_invariant_catches_injected_negative() {
 
     // This step must fail with NegativeDeliveredEnergy.
     let result = dwelling.step();
-    let _ = fs::remove_file(&tmp);
 
     match result {
         Err(HaresError::NegativeDeliveredEnergy { .. }) => {
@@ -133,14 +129,13 @@ fn hvac_negative_energy_invariant_catches_injected_negative() {
 /// end-to-end wiring of the per-step guard.
 #[test]
 fn hvac_negative_energy_accumulator_wiring_present() {
-    let (tmp, mut dwelling) = minimal_dwelling();
+    let mut dwelling = minimal_dwelling();
 
     // Step once: confirm the invariant passes.
     dwelling.step().expect("first step must pass");
 
     dwelling.set_hvac_negative_energy_failure_for_test();
     let result = dwelling.step();
-    let _ = fs::remove_file(&tmp);
 
     assert!(
         result.is_err(),

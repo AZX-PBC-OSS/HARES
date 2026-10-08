@@ -197,14 +197,21 @@ mod tests {
 
         // Use 1-hour timesteps so warmup convergence (24 h/day iterations) is fast.
         // A short duration keeps the test lightweight.
-        let mut dwelling = Dwelling::from_hpxml(
-            &hpxml,
-            &schedule,
-            &weather,
+        let mut dwelling = Dwelling::from_hpxml_with_write_output(
+            hares_core::HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
             start_time,
             Duration::hours(1),
             Duration::hours(2),
             None,
+            Some(false),
+            // The BEopt example schedule does not name every mapped column,
+            // and an equipment with no schedule source is a construction
+            // error: the profiles load from the repo's defaults directory.
+            Some(project_root().join("defaults")),
         )
         .expect("HPXML dwelling must build");
 

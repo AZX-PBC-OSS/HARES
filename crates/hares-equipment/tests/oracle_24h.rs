@@ -39,6 +39,7 @@ const HOURS_24: f64 = 24.0;
 
 fn base_env() -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: 18.0,
@@ -74,7 +75,8 @@ fn base_env() -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
@@ -273,7 +275,7 @@ fn oracle_ideal_hvac_24h_50pct_load() {
             rated_fan_power_w: None,
             rated_eir: None,
             capacity_min_w: None,
-            fuel_type: None,
+            fuel_type: Some(FuelType::Gas),
             capacity_biquadratic_coeffs: None,
             eir_biquadratic_coeffs: None,
         },
@@ -419,8 +421,8 @@ fn oracle_pv_24h_lut_parity() {
     // Build a synthetic Parquet LUT with one entry matching the weather
     // conditions. The LUT's AC output is set to the analytically expected
     // AC power so the LUT correction is identity (SAM and HARES match).
-    let lut_path =
-        std::env::temp_dir().join(format!("pv_lut_oracle_{}.parquet", std::process::id()));
+    let lut_dir = tempfile::tempdir().expect("temp dir");
+    let lut_path = lut_dir.path().join("pv_lut_oracle.parquet");
     {
         let schema = Schema::new(vec![
             Field::new("solar_zenith_deg", DataType::Float64, false),
@@ -620,7 +622,7 @@ fn oracle_generator_24h_constant_load() {
         GeneratorConfig {
             equipment_id: None,
             zone_id: None,
-            fuel_type: None,
+            fuel_type: Some(FuelType::Gas),
             rated_power_kw: rated_kw,
             eta_electric: Some(eta_electric),
             eta_thermal: Some(0.0),

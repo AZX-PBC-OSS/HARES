@@ -3,33 +3,52 @@
 use std::collections::HashMap;
 
 use quick_xml::Reader;
+use quick_xml::XmlVersion;
+use quick_xml::events::BytesStart;
 use quick_xml::events::Event;
+use quick_xml::events::attributes::AttrError;
 
-use hares_types::{normalize_ascii, parse_trimmed_f64};
+use hares_types::{Warning, normalize_ascii, parse_trimmed_f64};
 
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_physics::check_specific_heat_plausible;
 use hares_physics::infiltration::{NATURAL_TO_50PA_EXPONENT, ach_nat_to_ach50};
 use hares_physics::units as conv;
 
 use super::HpxmlError;
 use super::ParseError;
-use super::xml_helpers::element_id;
+use super::xml_helpers::{element_id, xs_boolean};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// HPXML `<SiteType>` -- the terrain class of the building's surroundings.
+///
+/// Allowed values per the HPXML data dictionary: `rural`, `suburban`,
+/// `urban`. OpenStudio-HPXML defaults a missing element to `suburban`
+/// ("HPXML Site", Workflow Inputs); HARES resolves the missing case the
+/// same way in `site_type_to_terrain`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SiteType {
     Rural,
     Suburban,
     Urban,
-    Other(String),
+}
+
+/// HPXML `<ShieldingofHome>` -- the wind shielding class of the site.
+///
+/// Allowed values per the HPXML data dictionary: `normal`, `exposed`,
+/// `well-shielded`. A missing element stays `None` for the solver's
+/// shielding default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShieldingOfHome {
+    Normal,
+    Exposed,
+    WellShielded,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Site {
     pub elevation_m: Option<f64>,
     pub site_type: Option<SiteType>,
-    /// HPXML `<ShieldingOfHome>` -- string value ("normal", "exposed", "well-shielded").
-    pub shielding_of_home: Option<String>,
+    /// HPXML `<ShieldingofHome>` -- parsed enum value.
+    pub shielding_of_home: Option<ShieldingOfHome>,
     pub latitude_deg: Option<f64>,
     pub longitude_deg: Option<f64>,
     /// HPXML `<Site>/<TimeZone>/<UTCOffset>` — the site's offset from UTC in
@@ -97,13 +116,15 @@ pub struct Boundary {
     pub material_layers: Vec<MaterialLayer>,
     /// HPXML construction type (e.g. "WoodStud", "ConcreteMasonryUnit") for LUT matching.
     pub construction_type: Option<String>,
-    /// Exterior finish type (e.g. "vinyl siding", "asphalt or fiberglass shingles").
+    /// Outside material: a wall's or rim joist's `Siding` (e.g. "vinyl
+    /// siding"), a roof's `RoofType` (e.g. "asphalt or fiberglass
+    /// shingles"), a foundation wall's `Type` (e.g. "solid concrete").
     pub finish_type: Option<String>,
     /// Insulation details string (e.g. "R-13", "Uninsulated") for LUT matching.
     pub insulation_details: Option<String>,
     /// Whether an attic radiant barrier is present on this boundary surface.
     ///
-    /// When true, longwave emissivity should be set to [`EMISSIVITY_RADIANT_BARRIER`]
+    /// When true, longwave emissivity should be set to [`hares_envelope::EMISSIVITY_RADIANT_BARRIER`]
     /// (0.05) rather than the default 0.90.  Applies to roof/attic boundary types.
     pub has_radiant_barrier: bool,
     /// Solar absorptance [-] from HPXML `<SolarAbsorptance>`.
@@ -125,7 +146,7 @@ pub struct Boundary {
     pub lut_boundary_name: Option<String>,
     /// HPXML `<FloorOrCeiling>` -- distinguishes adjacent floors from ceilings.
     pub floor_or_ceiling: Option<FloorOrCeiling>,
-    /// Surface tilt angle [degrees].
+    /// Surface tilt angle (degrees).
     ///
     /// 0 = horizontal facing up (flat roof), 90 = vertical (wall),
     /// 180 = horizontal facing down (floor from above).
@@ -138,7 +159,7 @@ pub struct Boundary {
     /// Typical values: 0.23 for 2x4 @ 16" OC, 0.22 for 2x6 @ 16" OC.
     /// `None` means no framing correction (insulation R-value used uniformly).
     pub framing_factor: Option<f64>,
-    /// Exposed perimeter length [m] for slab-on-grade boundaries.
+    /// Exposed perimeter length (m) for slab-on-grade boundaries.
     ///
     /// Parsed from HPXML `<Slab>/<ExposedPerimeter>` (HPXML 4.x) or
     /// `<Slab>/<Perimeter>` (HPXML 3.x), in feet; converted to meters via
@@ -152,7 +173,7 @@ pub struct Boundary {
     /// (converted from IP ft²·°F·h/Btu). Used to select the ASHRAE F2 perimeter
     /// heat loss coefficient via [`hares_physics::ground::f2_coefficient`].
     pub perimeter_insulation_r_m2_k_w: Option<f64>,
-    /// Foundation depth below grade [m] for ground temperature calculations.
+    /// Foundation depth below grade (m) for ground temperature calculations.
     ///
     /// For foundation walls: the centroid depth of the below-grade portion
     /// (typically `DepthBelowGrade / 2.0`). For slabs: the depth below grade
@@ -222,6 +243,13 @@ pub struct Zone {
     pub zone_type: ZoneType,
     pub floor_area_m2: Option<f64>,
     pub volume_m3: Option<f64>,
+    /// Height of the space: the attic's gable rise or hip peak, the
+    /// foundation or garage height (OS-HPXML `calculate_zone_height`). The one height
+    /// the volume and the infiltration model both read.
+    pub height_m: Option<f64>,
+    /// The HPXML location covering most of the zone's floor
+    /// (`"crawlspace - vented"`, `"basement - unconditioned"`, ...).
+    pub hpxml_location: Option<String>,
     pub attached_wall_ids: Vec<String>,
     pub duct_systems: Vec<DuctSystem>,
     pub vented: bool,
@@ -264,30 +292,93 @@ pub struct Building {
     pub cooling_weekend_setpoints_c: Option<Vec<f64>>,
     pub battery_round_trip_efficiency: Option<f64>,
     pub pv_tilt_deg: Option<f64>,
-    pub conditioned_volume_m3: Option<f64>,
-    pub ceiling_height_m: Option<f64>,
+    /// `ConditionedBuildingVolume`, or OS-HPXML's default for it.
+    pub conditioned_volume_m3: f64,
+    /// Average ceiling height in metres: the conditioned volume over the
+    /// conditioned floor area, which the parser requires.
+    pub ceiling_height_m: f64,
     /// `<InfiltrationHeight>` converted from ft to m.
     pub infiltration_height_m: Option<f64>,
-    /// `<NumberofConditionedFloorsAboveGrade>` from `<BuildingConstruction>`.
-    pub floors_above_grade: Option<f64>,
+    /// `<NumberofConditionedFloorsAboveGrade>` from `<BuildingConstruction>`;
+    /// the parser requires the element.
+    pub floors_above_grade: f64,
     /// `<extension><HasFlueOrChimneyInConditionedSpace>` boolean.
     pub has_flue_or_chimney: Option<bool>,
     /// Foundation type name for LUT matching (e.g. "Unfinished Basement", "Crawlspace").
     /// Derived from `<Foundation>/<FoundationType>` per OCHRE hpxml.py:276-286.
     pub foundation_name: Option<String>,
+    /// A foundation the HPXML declares conditioned (a finished basement, or
+    /// an explicitly conditioned crawlspace) is merged into the conditioned
+    /// space per OS-HPXML (geometry.rb `create_or_get_space`, 1704-1716;
+    /// hpxml.rb `conditioned_locations`, 12311-12316) and has no thermal
+    /// zone of its own. HARES models at most one foundation, matching the
+    /// single-foundation read of `foundation_name`.
+    pub conditioned_foundation_merged: bool,
     /// Residential facility type from `<BuildingConstruction>/<ResidentialFacilityType>`.
     /// Used for adjusted bedroom count in water heater draw profiles.
     pub residential_facility_type: Option<String>,
-    /// Override the zone mass multiplier for all zones.
-    /// When set, replaces the default zone-type-based multiplier.
-    pub mass_multiplier_override: Option<f64>,
+    /// The zone air temperature capacitance multiplier, one for every zone,
+    /// as OS-HPXML's `ZoneCapacitanceMultiplier:ResearchSpecial`
+    /// (simcontrols.rb:27-28): `SoftwareInfo/extension/SimulationControl/
+    /// AdvancedResearchFeatures/TemperatureCapacitanceMultiplier`, else 7
+    /// (defaults.rb:219-221).
+    pub temperature_capacitance_multiplier: f64,
     /// HVAC thermostat deadband/hysteresis in °C.
     /// When set, overrides the default 1.0°C hysteresis for IdealHVAC.
     /// BESTEST/ASHRAE 140 requires 0.0 (ideal setpoint tracking).
     pub hvac_deadband_c: Option<f64>,
+    /// The first `ClimateandRiskZones/ClimateZoneIECC/ClimateZone`, or, when
+    /// the HPXML has none, the zone OS-HPXML derives from the weather
+    /// station (`climate_zone::apply_climate_zone_default`).
+    pub climate_zone_iecc: Option<String>,
     /// Raw HPXML parse tree retained for downstream consumers that still read
     /// fields which have not been promoted to typed members on `Building`.
     pub details_xml: XmlNode,
+    /// Schema warnings the parse raised (for example the HPXML 3.x
+    /// deprecated-`EnergyFactor` notice), carried to the run instead of
+    /// living only as `tracing` lines.
+    pub parse_warnings: Vec<Warning>,
+}
+
+/// A building declares more than one conditioned zone. HARES models one
+/// conditioned zone per dwelling unit, as OS-HPXML does, and resolves
+/// everything defined relative to "the conditioned zone" (HVAC, the
+/// dehumidifier, ventilation, the thermal solver's indoor zone, the
+/// scheduled-space ambient air) through it; with several there is no single
+/// answer, so the building is rejected rather than resolved to whichever
+/// comes first.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("the building declares {count} conditioned zones; HARES models one per dwelling unit")]
+pub struct MultipleConditionedZones {
+    pub count: usize,
+}
+
+impl Building {
+    /// Index into `zones` of the building's conditioned zone (its 1-indexed
+    /// `ZoneId` is the index plus one); `None` when there is none.
+    pub fn conditioned_zone_index(&self) -> Result<Option<usize>, MultipleConditionedZones> {
+        let mut conditioned = self
+            .zones
+            .iter()
+            .enumerate()
+            .filter(|(_, zone)| zone.zone_type == ZoneType::Conditioned)
+            .map(|(idx, _)| idx);
+        match (conditioned.next(), conditioned.count()) {
+            (first, 0) => Ok(first),
+            (_, others) => Err(MultipleConditionedZones { count: others + 1 }),
+        }
+    }
+
+    /// Whether a garage is modeled: the building resolves at least one
+    /// Garage zone. Gates garage-only equipment (garage lighting): OCHRE
+    /// hpxml.py:1703-1709 creates it only when a garage is modeled, and an
+    /// equipment giving zone heat to a Garage zone that does not exist
+    /// cannot join the dwelling.
+    pub fn models_garage(&self) -> bool {
+        self.zones
+            .iter()
+            .any(|z| matches!(z.zone_type, ZoneType::Garage))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -349,6 +440,80 @@ fn byte_to_line_col(input: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
+/// Parse one start (or empty) tag's attributes into the node's map.
+///
+/// An attribute the reader rejects (a missing quote, a duplicated name) or a
+/// value it cannot unescape (an undefined entity) fails the parse naming the
+/// element, the attribute and the byte position. Nothing is dropped: the
+/// rejected attribute previously vanished from the map and the unescape
+/// failure became the empty string, and the element parsed as if the
+/// attribute were absent or empty.
+fn parse_attributes(
+    xml: &str,
+    tag: &BytesStart<'_>,
+    position: usize,
+) -> Result<HashMap<String, String>, HpxmlError> {
+    let element = normalize_name(tag.name().as_ref());
+    let mut attrs = HashMap::new();
+    for attr in tag.attributes() {
+        let attr = match attr {
+            Ok(attr) => attr,
+            Err(err) => {
+                // The reader reports a duplicated name by the name's offset
+                // into the tag content, so the name is recoverable; the other
+                // rejections (a missing `=` or quote) give no name.
+                let attribute = match &err {
+                    AttrError::Duplicated(offset, _) => duplicated_attribute_name(tag, *offset),
+                    _ => None,
+                };
+                let detail = attribute
+                    .map(|name| format!("attribute `{name}`: {err}"))
+                    .unwrap_or_else(|| format!("attribute: {err}"));
+                let (line, column) = byte_to_line_col(xml, position);
+                return Err(HpxmlError::Parse(ParseError {
+                    message: format!("element <{element}> has a malformed {detail}"),
+                    byte_offset: position,
+                    line,
+                    column,
+                    element_name: Some(element.clone()),
+                }));
+            }
+        };
+        let key = normalize_name(attr.key.as_ref());
+        let value = attr
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|err| {
+                let (line, column) = byte_to_line_col(xml, position);
+                HpxmlError::Parse(ParseError {
+                    message: format!(
+                        "element <{element}> has an attribute `{key}` whose value \
+                         cannot be unescaped: {err}"
+                    ),
+                    byte_offset: position,
+                    line,
+                    column,
+                    element_name: Some(element.clone()),
+                })
+            })?;
+        attrs.insert(key, value.into_owned());
+    }
+    Ok(attrs)
+}
+
+/// Recover a duplicated attribute's name from the tag's raw attributes. The
+/// reader reports the name's start offset relative to the tag content, which
+/// begins with the tag's own name; the name ends at the next whitespace or
+/// `=`.
+fn duplicated_attribute_name(tag: &BytesStart<'_>, offset: usize) -> Option<String> {
+    let raw = tag.attributes_raw();
+    let start = offset.checked_sub(tag.name().as_ref().len())?;
+    let rest = raw.get(start..)?;
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '=')
+        .unwrap_or(rest.len());
+    (end > 0).then(|| rest[..end].to_string())
+}
+
 pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -360,16 +525,8 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(tag)) => {
-                let name = normalize_name(&String::from_utf8_lossy(tag.name().as_ref()));
-                let mut attrs = HashMap::new();
-                for attr in tag.attributes().flatten() {
-                    let key = normalize_name(&String::from_utf8_lossy(attr.key.as_ref()));
-                    let value = attr
-                        .decode_and_unescape_value(reader.decoder())
-                        .map(|v| v.into_owned())
-                        .unwrap_or_default();
-                    attrs.insert(key, value);
-                }
+                let name = normalize_name(tag.name().as_ref());
+                let attrs = parse_attributes(xml, &tag, reader.buffer_position() as usize)?;
                 stack.push(XmlNode {
                     name,
                     attrs,
@@ -378,16 +535,8 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
                 });
             }
             Ok(Event::Empty(tag)) => {
-                let name = normalize_name(&String::from_utf8_lossy(tag.name().as_ref()));
-                let mut attrs = HashMap::new();
-                for attr in tag.attributes().flatten() {
-                    let key = normalize_name(&String::from_utf8_lossy(attr.key.as_ref()));
-                    let value = attr
-                        .decode_and_unescape_value(reader.decoder())
-                        .map(|v| v.into_owned())
-                        .unwrap_or_default();
-                    attrs.insert(key, value);
-                }
+                let name = normalize_name(tag.name().as_ref());
+                let attrs = parse_attributes(xml, &tag, reader.buffer_position() as usize)?;
                 let node = XmlNode {
                     name,
                     attrs,
@@ -401,15 +550,14 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
                 }
             }
             Ok(Event::Text(text)) => {
-                if let Some(node) = stack.last_mut() {
-                    if let Ok(value) = text.decode() {
-                        if !value.trim().is_empty() {
-                            if !node.text.is_empty() {
-                                node.text.push(' ');
-                            }
-                            node.text.push_str(value.trim());
-                        }
+                let value = text.xml_content(XmlVersion::Implicit1_0);
+                if let Some(node) = stack.last_mut()
+                    && !value.trim().is_empty()
+                {
+                    if !node.text.is_empty() {
+                        node.text.push(' ');
                     }
+                    node.text.push_str(value.trim());
                 }
             }
             Ok(Event::End(_)) => {
@@ -488,13 +636,15 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     let elevation_m = elevation_primary
         .or(elevation_fallback1)
         .or(elevation_fallback2);
-    let site_type = site_node
-        .child("SiteType")
-        .map(|node| parse_site_type(node.text.trim()));
-    let shielding_of_home = site_node
-        .child("ShieldingOfHome")
-        .map(|n| normalize_ascii(&n.text))
-        .filter(|s| !s.is_empty());
+    let site_type = match site_node.child("SiteType") {
+        Some(node) => Some(parse_site_type(&node.text)?),
+        None => None,
+    };
+    // HPXML.xsd spells the element ShieldingofHome.
+    let shielding_of_home = match site_node.child("ShieldingofHome") {
+        Some(node) => Some(parse_shielding_of_home(&node.text)?),
+        None => None,
+    };
     let latitude_primary = root
         .path(&["Building", "Site", "Latitude"])
         .and_then(XmlNode::text_as_f64);
@@ -521,34 +671,50 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         ValueKind::Area,
     )?;
 
-    let conditioned_volume_m3 = parse_value_with_units(
-        summary.path(&["BuildingConstruction", "ConditionedBuildingVolume"]),
-        ValueKind::Volume,
-    )?;
-
-    let ceiling_height_m = match (conditioned_volume_m3, conditioned_floor_area_m2) {
-        (Some(vol), Some(area)) if area > 0.0 => vol / area,
-        (Some(_), Some(_)) => {
+    let mut parse_warnings = Vec::new();
+    let conditioned_floor_area_m2 = match conditioned_floor_area_m2 {
+        Some(area) if area > 0.0 => area,
+        Some(_) => {
             return Err(HpxmlError::Parse(
                 "ConditionedFloorArea must be positive to derive ceiling height".into(),
             ));
         }
-        (None, None) => {
-            return Err(HpxmlError::Parse(
-                "missing both ConditionedBuildingVolume and ConditionedFloorArea; cannot derive ceiling height".into(),
-            ));
-        }
-        (None, Some(_)) => {
-            return Err(HpxmlError::Parse(
-                "missing ConditionedBuildingVolume; cannot derive ceiling height".into(),
-            ));
-        }
-        (Some(_), None) => {
+        None => {
             return Err(HpxmlError::Parse(
                 "missing ConditionedFloorArea; cannot derive ceiling height".into(),
             ));
         }
     };
+    let given_conditioned_volume_m3 = parse_value_with_units(
+        summary.path(&["BuildingConstruction", "ConditionedBuildingVolume"]),
+        ValueKind::Volume,
+    )?;
+    let average_ceiling_height_m = super::zone_geometry::average_ceiling_height_m(
+        details,
+        summary.path(&["BuildingConstruction", "AverageCeilingHeight"]),
+        given_conditioned_volume_m3,
+        conditioned_floor_area_m2,
+        &mut parse_warnings,
+    )?;
+    let conditioned_volume_m3 = match given_conditioned_volume_m3 {
+        Some(volume) => volume,
+        None => {
+            let volume = super::zone_geometry::default_conditioned_volume_m3(
+                details,
+                average_ceiling_height_m,
+                conditioned_floor_area_m2,
+                &mut parse_warnings,
+            )?;
+            parse_warnings.push(Warning::new(
+                "hpxml",
+                format!(
+                    "no ConditionedBuildingVolume; defaulted to {volume:.1} m3 as OS-HPXML does"
+                ),
+            ));
+            volume
+        }
+    };
+    let ceiling_height_m = conditioned_volume_m3 / conditioned_floor_area_m2;
 
     let total_conditioned_floors = parse_value_with_units(
         summary.path(&["BuildingConstruction", "NumberofConditionedFloors"]),
@@ -560,7 +726,12 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             "NumberofConditionedFloorsAboveGrade",
         ]),
         ValueKind::Raw,
-    )?;
+    )?.ok_or_else(|| HpxmlError::MissingField {
+        path: "BuildingSummary/BuildingConstruction/NumberofConditionedFloorsAboveGrade",
+        system_kind: "Building",
+        system_id: "construction".to_string(),
+        reason: "the number of conditioned floors above grade is required to set up infiltration and foundations; no silent default permitted",
+    })?;
 
     let residential_facility_type = summary
         .path(&["BuildingConstruction", "ResidentialFacilityType"])
@@ -590,11 +761,25 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // <BuildingAirLeakage><UnitofMeasure>CFM</UnitofMeasure>... (HPXML 3.x wrapper form).
     let (infiltration_cfm50, infiltration_cfm_natural) = parse_air_leakage_cfm50(details)?;
 
-    // <extension><HasFlueOrChimneyInConditionedSpace> -- boolean text
+    // <extension><HasFlueOrChimneyInConditionedSpace> -- xsd:boolean text.
+    // The element's older name <HasFlueOrChimney> is not read; a document
+    // carrying it is rejected so the declaration cannot be dropped silently.
+    if details.first_descendant("HasFlueOrChimney").is_some() {
+        return Err(HpxmlError::Parse(
+            "deprecated element <HasFlueOrChimney>; rename it to <HasFlueOrChimneyInConditionedSpace>".into(),
+        ));
+    }
     let has_flue_or_chimney = details
         .first_descendant("HasFlueOrChimneyInConditionedSpace")
-        .map(|n| n.text.trim().eq_ignore_ascii_case("true"));
-
+        .map(|n| {
+            xs_boolean(
+                n,
+                "extension/HasFlueOrChimneyInConditionedSpace",
+                "Building",
+                "building",
+            )
+        })
+        .transpose()?;
     // Foundation type name for LUT matching of foundation wall boundaries.
     // OCHRE hpxml.py:276-286: FoundationType child tag → "Crawlspace" | "Unfinished Basement" | "Finished Basement".
     //
@@ -615,17 +800,16 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 match tag {
                     "Crawlspace" => Some("Crawlspace".to_string()),
                     "Basement" => {
-                        // Prefer HPXML 4.x <Conditioned> element if present.
-                        // Fall back to OCHRE heuristic: total_floors > floors_above_grade
-                        // means basement is conditioned (finished).
-                        let explicit = child
-                            .child("Conditioned")
-                            .map(|n| n.text.trim().eq_ignore_ascii_case("true"));
-                        let inferred = match (total_conditioned_floors, floors_above_grade) {
-                            (Some(total), Some(above)) => total > above,
-                            _ => false,
-                        };
-                        let is_finished = explicit.unwrap_or(inferred);
+                        let foundation_id = details
+                            .path(&["Enclosure", "Foundations", "Foundation"])
+                            .and_then(element_id)
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let is_finished = foundation_node_is_conditioned(
+                            child,
+                            &foundation_id,
+                            total_conditioned_floors,
+                            floors_above_grade,
+                        )?;
                         if is_finished {
                             Some("Finished Basement".to_string())
                         } else {
@@ -665,7 +849,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         None => None,
     };
 
-    let (mut boundaries, pitch_absent_ids) = parse_boundaries(details)?;
+    let (mut boundaries, pitch_absent_ids) = parse_boundaries(details, &mut parse_warnings)?;
     let windows = parse_windows(details, &mut boundaries)?;
     let skylights = parse_skylights(details, &mut boundaries)?;
 
@@ -685,18 +869,18 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             }
         }
         // Doors also have AttachedToWall in HPXML.
-        if let Some(enclosure) = details.child("Enclosure") {
-            if let Some(doors) = enclosure.child("Doors") {
-                for door in doors.children_named("Door") {
-                    if let Some(wall_id) = door
-                        .child("AttachedToWall")
-                        .and_then(|n| n.attrs.get("idref"))
-                    {
-                        let area = parse_value_with_units(door.child("Area"), ValueKind::Area)?
-                            .unwrap_or(0.0);
-                        if area > 0.0 {
-                            *boundary_reductions.entry(wall_id.clone()).or_default() += area;
-                        }
+        if let Some(enclosure) = details.child("Enclosure")
+            && let Some(doors) = enclosure.child("Doors")
+        {
+            for door in doors.children_named("Door") {
+                if let Some(wall_id) = door
+                    .child("AttachedToWall")
+                    .and_then(|n| n.attrs.get("idref"))
+                {
+                    let area =
+                        parse_value_with_units(door.child("Area"), ValueKind::Area)?.unwrap_or(0.0);
+                    if area > 0.0 {
+                        *boundary_reductions.entry(wall_id.clone()).or_default() += area;
                     }
                 }
             }
@@ -719,27 +903,22 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 
     // Attempt geometric inference for roofs with missing Pitch. Uses gable
     // end wall area and attic floor area to compute a better tilt estimate
-    // than the 4:12 default. Must run before zone volume computation because
-    // compute_attic_volume() consumes the roof tilt value.
+    // than the 4:12 default.
     infer_roof_tilt_from_geometry(&mut boundaries, &pitch_absent_ids);
 
     // Post-process foundation wall boundaries: override construction_type with
     // foundation_name, apply insulation details and area scaling.
     // OCHRE hpxml.py:408-410: boundaries["Foundation Wall"]["Construction Type"] = foundation_name
-    let mut foundation_height_m: Option<f64> = None;
     let mut foundation_depth_m: Option<f64> = None;
     for bd in &mut boundaries {
         if bd.boundary_type == BoundaryType::FoundationWall {
             if let Some(ref fnd_name) = foundation_name {
                 bd.construction_type = Some(fnd_name.clone());
             }
-            let (insulation, area_scale, height_m, depth_below_grade) =
+            let (insulation, area_scale, depth_below_grade) =
                 extract_foundation_wall_insulation(details, &bd.id)?;
             bd.insulation_details = insulation;
             bd.area_m2 *= area_scale;
-            if foundation_height_m.is_none() {
-                foundation_height_m = height_m;
-            }
             if foundation_depth_m.is_none() && depth_below_grade > 0.0 {
                 foundation_depth_m = Some(depth_below_grade);
             }
@@ -776,7 +955,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         .map(|id| id == &bd.id)
                         .unwrap_or(false)
                 }) {
-                    bd.insulation_details = extract_slab_insulation(slab_node);
+                    bd.insulation_details = extract_slab_insulation(slab_node)?;
 
                     // Parse exposed perimeter length for F-factor method.
                     // HPXML 4.x <ExposedPerimeter> and 3.x <Perimeter>, in feet;
@@ -802,66 +981,117 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 
     // The conditioned zone should exclude below-grade foundation area when a basement
     // is present. OCHRE: indoor_floor_area = conditioned_floor_area - first_floor_area * below_grade_floors.
-    // If foundation floor area is missing, fall back to the floor-count ratio split.
-    let indoor_floor_area_m2 = match (
-        conditioned_floor_area_m2,
-        total_conditioned_floors,
-        floors_above_grade,
-        foundation_floor_area_m2,
-    ) {
-        (Some(total), Some(n_total), Some(n_above), Some(foundation_area))
-            if n_total > 0.0 && n_above >= 0.0 && n_above < n_total =>
+    // When the HPXML declares no <Foundation><FloorArea>, the foundation's
+    // floor area is its slabs' area sum, as OS-HPXML v1.12.0 derives it
+    // (geometry.rb:1315-1324, calculate_zone_volume: a foundation zone's
+    // floor area is the area of the slabs adjacent to it; geometry.rb
+    // 750-771, apply_conditioned_floor_area: the conditioned floor area is
+    // the floors and slabs adjacent to conditioned space, so the
+    // foundation's own area is what leaves it). A home whose below-grade
+    // foundation has no slabs has no foundation zone at all (a space exists
+    // only where a surface names it, geometry.rb create_or_get_space), so
+    // the conditioned zone holds the full conditioned floor area.
+    let total = conditioned_floor_area_m2;
+    let derived_foundation_floor_area_m2: f64 = boundaries
+        .iter()
+        .filter(|bd| {
+            bd.boundary_type == BoundaryType::Slab
+                && bd.interior_zone.as_ref() == Some(&ZoneType::Foundation)
+        })
+        .map(|bd| bd.area_m2)
+        .sum();
+    let indoor_floor_area_m2 = match (total_conditioned_floors, foundation_floor_area_m2) {
+        (Some(n_total), Some(foundation_area))
+            if n_total > 0.0 && floors_above_grade >= 0.0 && floors_above_grade < n_total =>
         {
-            let below_grade_floors = (n_total - n_above).max(0.0);
+            let below_grade_floors = (n_total - floors_above_grade).max(0.0);
             Some((total - foundation_area * below_grade_floors).max(0.0))
         }
-        (Some(total), Some(n_total), Some(n_above), None)
-            if n_total > 0.0 && n_above >= 0.0 && n_above < n_total =>
+        (Some(n_total), None)
+            if n_total > 0.0
+                && floors_above_grade >= 0.0
+                && floors_above_grade < n_total
+                && derived_foundation_floor_area_m2 > 0.0 =>
         {
-            Some(total * n_above / n_total)
+            let below_grade_floors = (n_total - floors_above_grade).max(0.0);
+            parse_warnings.push(Warning::new(
+                "hpxml",
+                format!(
+                    "the foundation declares no FloorArea; its floor area is its slabs' area \
+                     sum ({derived_foundation_floor_area_m2:.1} m2), as OS-HPXML v1.12.0 derives \
+                     it (geometry.rb:1315-1324, calculate_zone_volume; the conditioned floor \
+                     area's split, geometry.rb:750-771, apply_conditioned_floor_area)"
+                ),
+            ));
+            Some((total - derived_foundation_floor_area_m2 * below_grade_floors).max(0.0))
         }
-        _ => conditioned_floor_area_m2,
+        _ => Some(total),
     };
 
-    let mut zones = build_zone_map(details, indoor_floor_area_m2)?;
+    let (mut zones, conditioned_foundation_merged) = build_zone_map(
+        details,
+        Some(conditioned_floor_area_m2),
+        indoor_floor_area_m2,
+        total_conditioned_floors,
+        floors_above_grade,
+    )?;
     ensure_referenced_zones_exist(&boundaries, &mut zones);
+    // A space exists where an enclosure surface is adjacent to it: OS-HPXML
+    // creates spaces only for the locations surfaces name (geometry.rb:1738,
+    // `create_or_get_space`), and OCHRE builds no foundation zone for a
+    // slab, ambient or above-apartment foundation (hpxml.py:286) and no
+    // attic zone without an attic roof (hpxml.py:577). An attic, garage or
+    // foundation the HPXML groups declare with neither a floor area nor a
+    // surface touching it (a below-apartment attic, a slab-on-grade
+    // foundation) has no geometry and is no zone. A zone ducts run in
+    // stays, so their data is not dropped; with no geometry its volume is
+    // then an error.
     assign_walls_to_zones(&boundaries, &mut zones);
     parse_duct_systems(details, &mut zones)?;
+    zones.retain(|_, zone| {
+        !matches!(
+            zone.zone_type,
+            ZoneType::Attic | ZoneType::Garage | ZoneType::Foundation
+        ) || zone.floor_area_m2.is_some()
+            || !zone.duct_systems.is_empty()
+            || boundaries.iter().any(|b| {
+                b.interior_zone.as_ref() == Some(&zone.zone_type)
+                    || b.exterior_zone.as_ref() == Some(&zone.zone_type)
+            })
+    });
 
     // Auto-generate interior wall boundary (partition thermal mass).
     // Area = conditioned floor area, same-zone (Conditioned→Conditioned).
     if let Some(cond_zone) = zones
         .values()
         .find(|z| z.zone_type == ZoneType::Conditioned)
+        && let Some(area) = cond_zone.floor_area_m2
+        && area > 0.0
     {
-        if let Some(area) = cond_zone.floor_area_m2 {
-            if area > 0.0 {
-                boundaries.push(Boundary {
-                    id: "interior_wall".to_string(),
-                    boundary_type: BoundaryType::Wall,
-                    area_m2: area,
-                    azimuth_deg: None,
-                    assembly_r_value_m2_k_w: None,
-                    r_value_layers_m2_k_w: Vec::new(),
-                    interior_zone: Some(ZoneType::Conditioned),
-                    exterior_zone: Some(ZoneType::Conditioned),
-                    material_layers: Vec::new(),
-                    framing_factor: None,
-                    construction_type: None,
-                    finish_type: None,
-                    insulation_details: Some("Standard".to_string()),
-                    has_radiant_barrier: false,
-                    solar_absorptance: None,
-                    emittance: None,
-                    tilt_deg: Some(90.0),
-                    lut_boundary_name: Some("Interior Wall".to_string()),
-                    floor_or_ceiling: None,
-                    perimeter_m: None,
-                    perimeter_insulation_r_m2_k_w: None,
-                    foundation_depth_m: None,
-                });
-            }
-        }
+        boundaries.push(Boundary {
+            id: "interior_wall".to_string(),
+            boundary_type: BoundaryType::Wall,
+            area_m2: area,
+            azimuth_deg: None,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Conditioned),
+            material_layers: Vec::new(),
+            framing_factor: None,
+            construction_type: None,
+            finish_type: None,
+            insulation_details: Some("Standard".to_string()),
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            tilt_deg: Some(90.0),
+            lut_boundary_name: Some("Interior Wall".to_string()),
+            floor_or_ceiling: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
+        });
     }
 
     // Auto-generate furniture boundaries per zone (same-zone thermal mass).
@@ -876,51 +1106,51 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         // Attic: 0 (no furniture)
     ];
     for (zone_type, default_fraction) in FURNITURE_FRACTIONS {
-        if let Some(zone) = zones.values().find(|z| z.zone_type == *zone_type) {
-            if let Some(area) = zone.floor_area_m2 {
-                let fraction = if *zone_type == ZoneType::Conditioned {
-                    furniture_area_fraction_override.unwrap_or(*default_fraction)
-                } else {
-                    *default_fraction
+        if let Some(zone) = zones.values().find(|z| z.zone_type == *zone_type)
+            && let Some(area) = zone.floor_area_m2
+        {
+            let fraction = if *zone_type == ZoneType::Conditioned {
+                furniture_area_fraction_override.unwrap_or(*default_fraction)
+            } else {
+                *default_fraction
+            };
+            let furniture_area = area * fraction;
+            if furniture_area > 0.0 {
+                let lut_name = match zone_type {
+                    ZoneType::Conditioned => "Indoor Furniture",
+                    ZoneType::Foundation => "Foundation Furniture",
+                    ZoneType::Garage => "Garage Furniture",
+                    // Unreachable: the FURNITURE_FRACTIONS loop above iterates
+                    // exactly Conditioned, Foundation, and Garage; no other
+                    // ZoneType variants can appear here.
+                    _ => unreachable!(
+                        "FURNITURE_FRACTIONS iterated {zone_type:?} which has no furniture LUT entry"
+                    ),
                 };
-                let furniture_area = area * fraction;
-                if furniture_area > 0.0 {
-                    let lut_name = match zone_type {
-                        ZoneType::Conditioned => "Indoor Furniture",
-                        ZoneType::Foundation => "Foundation Furniture",
-                        ZoneType::Garage => "Garage Furniture",
-                        // Unreachable: the FURNITURE_FRACTIONS loop above iterates
-                        // exactly Conditioned, Foundation, and Garage — no other
-                        // ZoneType variants can appear here.
-                        _ => unreachable!(
-                            "FURNITURE_FRACTIONS iterated {zone_type:?} which has no furniture LUT entry"
-                        ),
-                    };
-                    boundaries.push(Boundary {
-                        id: format!("{}_furniture", zone_key(zone_type)),
-                        boundary_type: BoundaryType::Wall,
-                        area_m2: furniture_area,
-                        azimuth_deg: None,
-                        assembly_r_value_m2_k_w: None,
-                        r_value_layers_m2_k_w: Vec::new(),
-                        interior_zone: Some(zone_type.clone()),
-                        exterior_zone: Some(zone_type.clone()),
-                        material_layers: Vec::new(),
-                        framing_factor: None,
-                        construction_type: None,
-                        finish_type: None,
-                        insulation_details: Some("Standard".to_string()),
-                        has_radiant_barrier: false,
-                        solar_absorptance: None,
-                        emittance: None,
-                        tilt_deg: Some(90.0),
-                        lut_boundary_name: Some(lut_name.to_string()),
-                        floor_or_ceiling: None,
-                        perimeter_m: None,
-                        perimeter_insulation_r_m2_k_w: None,
-                        foundation_depth_m: None,
-                    });
-                }
+                boundaries.push(Boundary {
+                    id: format!("{}_furniture", zone_key(zone_type)),
+                    boundary_type: BoundaryType::Wall,
+                    area_m2: furniture_area,
+                    azimuth_deg: None,
+                    assembly_r_value_m2_k_w: None,
+                    r_value_layers_m2_k_w: Vec::new(),
+                    interior_zone: Some(zone_type.clone()),
+                    exterior_zone: Some(zone_type.clone()),
+                    material_layers: Vec::new(),
+                    framing_factor: None,
+                    construction_type: None,
+                    finish_type: None,
+                    insulation_details: Some("Standard".to_string()),
+                    has_radiant_barrier: false,
+                    solar_absorptance: None,
+                    emittance: None,
+                    tilt_deg: Some(90.0),
+                    lut_boundary_name: Some(lut_name.to_string()),
+                    floor_or_ceiling: None,
+                    perimeter_m: None,
+                    perimeter_insulation_r_m2_k_w: None,
+                    foundation_depth_m: None,
+                });
             }
         }
     }
@@ -937,45 +1167,6 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         })
         .collect();
     zones_vec.sort_by_key(|zone| zone_sort_key(&zone.zone_type));
-
-    // Compute garage geometry (protruded area) from wall boundaries.
-    // Ref: OCHRE hpxml.py:439-494.
-    let garage_floor_area_m2 = zones_vec
-        .iter()
-        .find(|z| z.zone_type == ZoneType::Garage)
-        .and_then(|z| z.floor_area_m2)
-        .unwrap_or(0.0);
-    let garage_geometry = if garage_floor_area_m2 > 0.0 {
-        compute_garage_geometry(&boundaries, garage_floor_area_m2)
-    } else {
-        None
-    };
-    if garage_floor_area_m2 > 0.0 && garage_geometry.is_none() {
-        tracing::warn!(
-            garage_floor_area_m2,
-            "could not derive garage geometry; compound attic volume unavailable"
-        );
-    }
-
-    // Garage roof tilt for volume augmentation. Prefer direct Garage→Roof
-    // boundaries; fall back to Attic→Roof tilt when none exist.
-    let garage_roof_tilt_rad = boundaries
-        .iter()
-        .filter(|b| {
-            b.boundary_type == BoundaryType::Roof
-                && b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-        })
-        .find_map(|b| b.tilt_deg)
-        .or_else(|| {
-            boundaries
-                .iter()
-                .filter(|b| {
-                    b.boundary_type == BoundaryType::Roof
-                        && b.interior_zone.as_ref() == Some(&ZoneType::Attic)
-                })
-                .find_map(|b| b.tilt_deg)
-        })
-        .map(|d| d.to_radians());
 
     // Attic floor area: OCHRE defines attic_floor_area as the top-floor
     // boundary area (Attic Floor / Roof / Adjacent Ceiling) plus Garage Ceiling area.
@@ -1023,109 +1214,46 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         }
     }
 
-    // Assign volumes to all zones from available geometry.
+    // Zone geometry, one rule per zone type. Conditioned: floor area times
+    // the ceiling height. Foundation and garage: OS-HPXML's slab-area times
+    // tallest-wall rule (`zone_geometry::slab_space_geometry`). Attic: a
+    // gable attic's geometric volume, else OS-HPXML's square hip under its
+    // roofs (`zone_geometry::attic_geometry`). Each zone carries the
+    // height its rule used. A zone with no geometry keeps no volume and the
+    // environment rejects it.
     for zone in &mut zones_vec {
-        zone.volume_m3 = match zone.zone_type {
-            ZoneType::Conditioned => zone.floor_area_m2.map(|a| a * ceiling_height_m),
-            ZoneType::Attic => {
-                compute_attic_volume(&boundaries, zone.floor_area_m2, garage_geometry.as_ref())
+        let geometry = match zone.zone_type {
+            ZoneType::Conditioned => {
+                zone.volume_m3 = zone.floor_area_m2.map(|a| a * ceiling_height_m);
+                zone.height_m = Some(ceiling_height_m);
+                continue;
             }
-            ZoneType::Garage => zone.floor_area_m2.map(|floor_area| {
-                let volume = compute_garage_volume(
-                    floor_area,
-                    ceiling_height_m,
-                    garage_roof_tilt_rad,
-                    garage_geometry.as_ref(),
-                );
-                #[cfg(feature = "observe")]
-                {
-                    let rectangular = floor_area * ceiling_height_m;
-                    let augmentation = volume - rectangular;
-                    tracing::debug!(
-                        target: "observe",
-                        garage_rectangular_volume_m3 = rectangular,
-                        garage_roof_volume_augmentation_m3 = augmentation,
-                        garage_total_volume_m3 = volume,
-                        garage_tilt_rad = garage_roof_tilt_rad,
-                    );
-                }
-                volume
-            }),
-            ZoneType::Foundation => zone
-                .floor_area_m2
-                .zip(foundation_height_m)
-                .map(|(a, h)| a * h),
+            ZoneType::Attic => super::zone_geometry::attic_geometry(
+                details,
+                total_conditioned_floors.map(|all| super::zone_geometry::Storey {
+                    wall_height_m: floors_above_grade * average_ceiling_height_m,
+                    floor_area_m2: conditioned_floor_area_m2 / all,
+                }),
+                &mut parse_warnings,
+            )?,
+            ZoneType::Garage | ZoneType::Foundation => super::zone_geometry::slab_space_geometry(
+                details,
+                &zone.zone_type,
+                zone.floor_area_m2,
+                &mut parse_warnings,
+            )?,
             // Outdoor, Ground, Adjacent are filtered above; Other has no volume model.
             ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent | ZoneType::Other(_) => None,
         };
-    }
-
-    // Remove Attic↔Garage wall boundaries consumed by Path A attic volume computation.
-    // Matches OCHRE's del boundaries["Attic Garage Wall"] workaround (hpxml.py:596).
-    // The walls were merged into the gable-area derivation inside compute_attic_volume;
-    // retaining them would double-count thermal coupling between Garage and Attic zones.
-    #[cfg(feature = "observe")]
-    {
-        let removed_count = boundaries
-            .iter()
-            .filter(|b| {
-                b.boundary_type == BoundaryType::Wall
-                    && ((b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-                        && b.exterior_zone.as_ref() == Some(&ZoneType::Attic))
-                        || (b.interior_zone.as_ref() == Some(&ZoneType::Attic)
-                            && b.exterior_zone.as_ref() == Some(&ZoneType::Garage)))
-            })
-            .count();
-        let removed_area_m2: f64 = boundaries
-            .iter()
-            .filter(|b| {
-                b.boundary_type == BoundaryType::Wall
-                    && ((b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-                        && b.exterior_zone.as_ref() == Some(&ZoneType::Attic))
-                        || (b.interior_zone.as_ref() == Some(&ZoneType::Attic)
-                            && b.exterior_zone.as_ref() == Some(&ZoneType::Garage)))
-            })
-            .map(|b| b.area_m2)
-            .sum();
-        if removed_count > 0 {
-            tracing::debug!(
-                target: "observe",
-                removed_count,
-                removed_area_m2,
-                "removed Attic↔Garage wall boundaries consumed by Path A attic volume computation"
-            );
+        if let Some(geometry) = geometry {
+            zone.floor_area_m2 = zone.floor_area_m2.or(Some(geometry.floor_area_m2));
+            zone.volume_m3 = Some(geometry.volume_m3);
+            zone.height_m = Some(geometry.height_m);
+            zone.hpxml_location = Some(geometry.location);
         }
     }
-
-    boundaries.retain(|b| {
-        !(b.boundary_type == BoundaryType::Wall
-            && ((b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-                && b.exterior_zone.as_ref() == Some(&ZoneType::Attic))
-                || (b.interior_zone.as_ref() == Some(&ZoneType::Attic)
-                    && b.exterior_zone.as_ref() == Some(&ZoneType::Garage))))
-    });
-
-    // Invariant: after attic volume computation, no Wall boundaries between
-    // Garage and Attic remain. The compound attic volume formula already
-    // geometrically accounts for the shared attic-garage space; keeping the
-    // wall boundary would double-count thermal coupling.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let has_attic = zones_vec.iter().any(|z| z.zone_type == ZoneType::Attic);
-        let has_garage = zones_vec.iter().any(|z| z.zone_type == ZoneType::Garage);
-        if has_attic && has_garage {
-            for bd in &boundaries {
-                assert!(
-                    !(bd.boundary_type == BoundaryType::Wall
-                        && ((bd.interior_zone.as_ref() == Some(&ZoneType::Garage)
-                            && bd.exterior_zone.as_ref() == Some(&ZoneType::Attic))
-                            || (bd.interior_zone.as_ref() == Some(&ZoneType::Attic)
-                                && bd.exterior_zone.as_ref() == Some(&ZoneType::Garage)))),
-                    "boundary '{}' is an Attic↔Garage wall; should have been removed after Path A attic volume computation",
-                    bd.id
-                );
-            }
-        }
+    for zone in &mut zones_vec {
+        default_vented_space_sla(zone, &mut parse_warnings);
     }
 
     // <AirLeakage> ACH50 / ACHnatural (HPXML 4.x inline or HPXML 3.x wrapper).
@@ -1135,7 +1263,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // OCHRE hpxml.py:96-97 rewrites exterior=interior when exterior is "Adjacent";
     // HARES applies the same rewrite via rewrite_adjacent_zone_pair during boundary
     // and window parsing. An Adjacent zone surviving to this point is a bug.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    // Debug-build check of the rewrite logic: no input reaches it.
+    #[cfg(debug_assertions)]
     {
         for bd in &boundaries {
             assert!(
@@ -1148,58 +1277,6 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 "boundary '{}' exterior_zone is Adjacent after rewrite stage",
                 bd.id
             );
-        }
-
-        // Detect multifamily building types where the zone adjacency logic
-        // produces only a single conditioned zone. HARES models each HPXML
-        // file as a single dwelling unit — the correct interpretation of the
-        // HPXML spec, which represents one unit per file. Multi-unit fleet
-        // simulation composes multiple files at the orchestration layer, not
-        // within a single building parse.
-        if let Some(ref facility_type) = residential_facility_type {
-            let is_multifamily = {
-                let lower = facility_type.to_ascii_lowercase();
-                lower.contains("apartment") || lower.contains("multifamily")
-            };
-            if is_multifamily {
-                let conditioned_zone_count = zones_vec
-                    .iter()
-                    .filter(|z| z.zone_type == ZoneType::Conditioned)
-                    .count();
-                if conditioned_zone_count <= 1 {
-                    tracing::warn!(
-                        facility_type = %facility_type,
-                        conditioned_zone_count = conditioned_zone_count,
-                        "multifamily building parsed as single conditioned zone; \
-                         HPXML represents one dwelling per file — multi-unit fleet \
-                         simulation composes multiple files at the orchestration layer"
-                    );
-                }
-            }
-        }
-    }
-
-    // Invariant: Roof boundary with zero tilt must come from an explicit
-    // HPXML <Pitch> value of 0, not from a missing <Pitch> element. Missing
-    // <Pitch> now defaults to 4:12 (~18.4°) — see parse_boundary(). A 0°
-    // tilt here signals a deliberate flat-roof declaration and is valid,
-    // but unusual for single-family residential — flag for review.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        for bd in &boundaries {
-            if bd.boundary_type == BoundaryType::Roof
-                && bd.tilt_deg == Some(0.0)
-                && bd.area_m2 > 0.0
-            {
-                tracing::warn!(
-                    boundary_id = bd.id,
-                    area_m2 = bd.area_m2,
-                    interior_zone = ?bd.interior_zone,
-                    exterior_zone = ?bd.exterior_zone,
-                    "Roof boundary has tilt=0° (explicit flat roof); if this is a pitched roof \
-                     verify that <Pitch> is present in the HPXML input"
-                );
-            }
         }
     }
 
@@ -1233,10 +1310,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             Some(wh) => find_descendant_f64(wh, "HotWaterTemperature", ValueKind::Temperature)?,
             None => None,
         },
-        heating_weekday_setpoints_c: parse_hvac_setpoints(details, "Heating", true),
-        heating_weekend_setpoints_c: parse_hvac_setpoints(details, "Heating", false),
-        cooling_weekday_setpoints_c: parse_hvac_setpoints(details, "Cooling", true),
-        cooling_weekend_setpoints_c: parse_hvac_setpoints(details, "Cooling", false),
+        heating_weekday_setpoints_c: parse_hvac_setpoints(details, "Heating", true)?,
+        heating_weekend_setpoints_c: parse_hvac_setpoints(details, "Heating", false)?,
+        cooling_weekday_setpoints_c: parse_hvac_setpoints(details, "Cooling", true)?,
+        cooling_weekend_setpoints_c: parse_hvac_setpoints(details, "Cooling", false)?,
         battery_round_trip_efficiency: find_descendant_f64(
             details,
             "RoundTripEfficiency",
@@ -1244,15 +1321,24 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         )?,
         pv_tilt_deg: find_descendant_f64(details, "Tilt", ValueKind::Raw)?,
         conditioned_volume_m3,
-        ceiling_height_m: Some(ceiling_height_m),
+        ceiling_height_m,
         infiltration_height_m,
         floors_above_grade,
         has_flue_or_chimney,
         foundation_name,
+        conditioned_foundation_merged,
         residential_facility_type,
-        mass_multiplier_override: None,
+        temperature_capacitance_multiplier: temperature_capacitance_multiplier(
+            root,
+            &mut parse_warnings,
+        )?,
         hvac_deadband_c: None,
+        climate_zone_iecc: details
+            .path(&["ClimateandRiskZones", "ClimateZoneIECC"])
+            .and_then(|iecc| super::xml_helpers::child_text(iecc, "ClimateZone"))
+            .filter(|zone| !zone.is_empty()),
         details_xml: details.clone(),
+        parse_warnings,
     })
 }
 
@@ -1260,12 +1346,23 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 ///
 /// Delegates to the shared `xml_helpers::parse_setpoint_from_control` after
 /// locating the HVACControl node.
-fn parse_hvac_setpoints(details: &XmlNode, hvac_type: &str, weekday: bool) -> Option<Vec<f64>> {
-    let control = super::xml_helpers::find_hvac_control(details)?;
-    super::xml_helpers::parse_setpoint_from_control(control, hvac_type, weekday)
+fn parse_hvac_setpoints(
+    details: &XmlNode,
+    hvac_type: &str,
+    weekday: bool,
+) -> Result<Option<Vec<f64>>, HpxmlError> {
+    match super::xml_helpers::find_hvac_control(details) {
+        Some(control) => {
+            super::xml_helpers::parse_setpoint_from_control(control, hvac_type, weekday)
+        }
+        None => Ok(None),
+    }
 }
 
-fn parse_boundaries(details: &XmlNode) -> Result<(Vec<Boundary>, Vec<String>), HpxmlError> {
+fn parse_boundaries(
+    details: &XmlNode,
+    _parse_warnings: &mut Vec<Warning>,
+) -> Result<(Vec<Boundary>, Vec<String>), HpxmlError> {
     let mut out = Vec::new();
     let mut pitch_absent_ids = Vec::new();
     let boundary_specs = [
@@ -1300,6 +1397,71 @@ fn parse_boundaries(details: &XmlNode) -> Result<(Vec<Boundary>, Vec<String>), H
                     boundary_type.clone(),
                     &mut pitch_absent_ids,
                 )?);
+            }
+        }
+    }
+
+    // A subsurface (door) inherits the zones of the wall it is attached to:
+    // OS-HPXML gives a subsurface its parent surface's outside boundary
+    // condition (hpxml.rb subsurface handling, `OutsideBoundaryCondition`
+    // from AttachedToWall), so an exterior adjacency the door does not state
+    // is derived from the wall, never defaulted to Outdoor. An attached
+    // wall the boundary list does not hold is an error naming both ids.
+    // A subsurface (door) inherits the zones of the wall it is attached to:
+    // OS-HPXML gives a subsurface its parent surface's outside boundary
+    // condition (hpxml.rb subsurface handling, `OutsideBoundaryCondition`
+    // from AttachedToWall), so an exterior adjacency the door does not state
+    // is derived from the wall, never defaulted to Outdoor. An attached
+    // wall the boundary list does not hold is an error naming both ids.
+    // The derivation is recorded as a parse warning naming the door and the
+    // wall it was taken from.
+    if let Some(doors) = enclosure.child("Doors") {
+        for door in doors.children_named("Door") {
+            let Some(wall_id) = door
+                .child("AttachedToWall")
+                .and_then(|n| n.attrs.get("idref"))
+                .map(|id| id.to_string())
+            else {
+                continue;
+            };
+            let door_id = element_id(door).unwrap_or_else(|| "unknown".to_string());
+            let Some(wall) = out.iter().find(|bd| bd.id == wall_id) else {
+                return Err(HpxmlError::MissingField {
+                    path: "Door/AttachedToWall",
+                    system_kind: "Door",
+                    system_id: door_id,
+                    reason: "the attached wall's idref matches no parsed boundary, so \
+                             the door's zones cannot be derived from it",
+                });
+            };
+            let (wall_interior, wall_exterior) =
+                (wall.interior_zone.clone(), wall.exterior_zone.clone());
+            let Some(bd) = out
+                .iter_mut()
+                .find(|bd| bd.boundary_type == BoundaryType::Door && bd.id == door_id)
+            else {
+                continue;
+            };
+            let mut inherited: Vec<String> = Vec::new();
+            if bd.interior_zone.is_none() {
+                bd.interior_zone = wall_interior;
+                inherited.push("interior".to_string());
+            }
+            if bd.exterior_zone.is_none() {
+                bd.exterior_zone = wall_exterior;
+                inherited.push("exterior".to_string());
+            }
+            if !inherited.is_empty() {
+                // A derivation from stated input (the wall's own adjacency),
+                // not a substituted default: recorded as a parse trace, not
+                // a run warning.
+                tracing::debug!(
+                    door = %door_id,
+                    wall = %wall_id,
+                    zones = %inherited.join(" and "),
+                    "door zones derived from its attached wall (the subsurface's \
+                     parent surface's boundary condition, as OS-HPXML does)"
+                );
             }
         }
     }
@@ -1622,7 +1784,8 @@ fn parse_boundary(
 
     let has_radiant_barrier = node
         .first_descendant("RadiantBarrier")
-        .map(|n| n.text.trim().eq_ignore_ascii_case("true"))
+        .map(|n| xs_boolean(n, "RadiantBarrier", "Envelope Surface", &id))
+        .transpose()?
         .unwrap_or(false);
 
     // Solar absorptance and emittance from HPXML, validated to [0, 1].
@@ -1646,11 +1809,8 @@ fn parse_boundary(
     let tilt_deg = match boundary_type {
         BoundaryType::Roof => {
             let pitch = parse_value_with_units(node.child("Pitch"), ValueKind::Raw)?;
-            // `pitch_source` is only used inside `#[cfg(feature = "observe")]`;
-            // without that feature the compiler warns it is unused.
-            #[allow(unused_variables)]
-            let (pitch_value, pitch_source) = match pitch {
-                Some(p) => (p, "explicit"),
+            let pitch_value = match pitch {
+                Some(p) => p,
                 None => {
                     tracing::warn!(
                         boundary_id = id,
@@ -1668,11 +1828,16 @@ fn parse_boundary(
                     // (vendors/EnergyPlus/src/EnergyPlus/PVWatts.hh:188).
                     // HPXML v4.0: Roof/Pitch is optional (0..1 per hpxml-elements.md).
                     pitch_absent_ids.push(id.clone());
-                    (4.0, "defaulted")
+                    4.0
                 }
             };
             #[cfg(feature = "observe")]
             {
+                let pitch_source = if pitch.is_some() {
+                    "explicit"
+                } else {
+                    "defaulted"
+                };
                 tracing::info!(
                     target: "observe",
                     column = "pitch_source",
@@ -1803,10 +1968,11 @@ fn parse_framing_factor(
     // Explicit FramingFactor from HPXML
     // Range (0, 1) excludes boundaries: 0.0 = no framing (equivalent to None),
     // 1.0 = all framing (physically impossible for an insulated wall).
-    if let Some(ff) = find_descendant_f64(node, "FramingFactor", ValueKind::Raw)? {
-        if ff > 0.0 && ff < 1.0 {
-            return Ok(Some(ff));
-        }
+    if let Some(ff) = find_descendant_f64(node, "FramingFactor", ValueKind::Raw)?
+        && ff > 0.0
+        && ff < 1.0
+    {
+        return Ok(Some(ff));
     }
 
     // Derive assembly framing fraction from stud geometry and wall height.
@@ -1814,50 +1980,52 @@ fn parse_framing_factor(
     // includes studs, plates, headers, corners, and miscellaneous members.
     let stud_spacing = find_descendant_f64(node, "StudSpacing", ValueKind::Raw)?;
     let stud_width = find_descendant_f64(node, "StudWidth", ValueKind::Raw)?;
-    if let (Some(spacing_in), Some(width_in)) = (stud_spacing, stud_width) {
-        if spacing_in > 0.0 && width_in > 0.0 && width_in < spacing_in {
-            // WallHeight defaults to 96 in (8 ft) per ASHRAE/HPXML convention.
-            // HPXML WallHeight is typically in feet; convert to inches.
-            let wall_height_in = node
-                .child("WallHeight")
-                .and_then(|n| {
-                    let raw = n.text_as_f64()?;
-                    let units_norm = n
-                        .attrs
-                        .get("units")
-                        .or_else(|| n.attrs.get("unit"))
-                        .map(|u| normalize_ascii(u));
-                    let inches = match units_norm.as_deref() {
-                        Some("ft") | Some("feet") => raw * 12.0,
-                        Some("in") | Some("inch") | Some("inches") => raw,
-                        None => raw * 12.0, // HPXML default: feet
-                        _ => {
-                            tracing::warn!(
-                                units = ?units_norm,
-                                value = raw,
-                                "unrecognized unit for WallHeight; assuming feet"
-                            );
-                            raw * 12.0
-                        }
-                    };
-                    if inches <= 0.0 {
+    if let (Some(spacing_in), Some(width_in)) = (stud_spacing, stud_width)
+        && spacing_in > 0.0
+        && width_in > 0.0
+        && width_in < spacing_in
+    {
+        // WallHeight defaults to 96 in (8 ft) per ASHRAE/HPXML convention.
+        // HPXML WallHeight is typically in feet; convert to inches.
+        let wall_height_in = node
+            .child("WallHeight")
+            .and_then(|n| {
+                let raw = n.text_as_f64()?;
+                let units_norm = n
+                    .attrs
+                    .get("units")
+                    .or_else(|| n.attrs.get("unit"))
+                    .map(|u| normalize_ascii(u));
+                let inches = match units_norm.as_deref() {
+                    Some("ft") | Some("feet") => raw * 12.0,
+                    Some("in") | Some("inch") | Some("inches") => raw,
+                    None => raw * 12.0, // HPXML default: feet
+                    _ => {
                         tracing::warn!(
-                            wall_height_in = inches,
-                            "WallHeight must be positive; defaulting to 96 in (8 ft)"
+                            units = ?units_norm,
+                            value = raw,
+                            "unrecognized unit for WallHeight; assuming feet"
                         );
-                        None
-                    } else {
-                        Some(inches)
+                        raw * 12.0
                     }
-                })
-                .unwrap_or(96.0);
+                };
+                if inches <= 0.0 {
+                    tracing::warn!(
+                        wall_height_in = inches,
+                        "WallHeight must be positive; defaulting to 96 in (8 ft)"
+                    );
+                    None
+                } else {
+                    Some(inches)
+                }
+            })
+            .unwrap_or(96.0);
 
-            return Ok(Some(assembly_framing_factor(
-                width_in,
-                spacing_in,
-                wall_height_in,
-            )));
-        }
+        return Ok(Some(assembly_framing_factor(
+            width_in,
+            spacing_in,
+            wall_height_in,
+        )));
     }
 
     // Default by construction type per ASHRAE Handbook of Fundamentals.
@@ -1890,6 +2058,10 @@ fn parse_boundary_area(
     id: &str,
 ) -> Result<f64, HpxmlError> {
     let area = parse_value_with_units(node.child("Area"), ValueKind::Area)?;
+    let interior = node
+        .child("InteriorAdjacentTo")
+        .map(|n| n.text.trim().to_string())
+        .unwrap_or_default();
     match boundary_type {
         BoundaryType::FoundationWall => {
             if let Some(a) = area {
@@ -1937,12 +2109,9 @@ fn parse_boundary_area(
                 }
                 return Ok(a);
             }
-            tracing::warn!(
-                boundary_id = id,
-                boundary_type = boundary_type_label(boundary_type),
-                "Area element missing; defaulting to 0.0 — heat loss through this surface will be zero"
-            );
-            Ok(0.0)
+            Err(HpxmlError::Parse(
+                format!("slab in '{interior}' has no Area").into(),
+            ))
         }
         _ => {
             let area_m2 = area.ok_or_else(|| {
@@ -2003,21 +2172,21 @@ fn infer_exterior_zone(boundary_type: &BoundaryType) -> Option<ZoneType> {
     }
 }
 
-/// Extract foundation wall insulation details, area scale factor, height,
-/// and depth below grade [m].
+/// Extract foundation wall insulation details, area scale factor and depth
+/// below grade [m].
 ///
 /// Mirrors OCHRE `get_fnd_wall_insulation` (envelope.py:434-459):
 /// - Area scaled by `DepthBelowGrade / Height` when they differ.
 /// - Insulation details: "Half R{n}", "R{n}", or "Uninsulated".
 ///
-/// Returns `(insulation_details, area_scale, height_m, depth_below_grade_m)`.
+/// Returns `(insulation_details, area_scale, depth_below_grade_m)`.
 /// `depth_below_grade_m` defaults to the wall height when absent from HPXML.
 ///
 /// `details` is the BuildingDetails node; `wall_id` identifies which FoundationWall.
 fn extract_foundation_wall_insulation(
     details: &XmlNode,
     wall_id: &str,
-) -> Result<(Option<String>, f64, Option<f64>, f64), HpxmlError> {
+) -> Result<(Option<String>, f64, f64), HpxmlError> {
     // Find the FoundationWall element matching this boundary's ID.
     let wall_node = details
         .path(&["Enclosure", "FoundationWalls"])
@@ -2030,7 +2199,7 @@ fn extract_foundation_wall_insulation(
             })
         });
     let Some(node) = wall_node else {
-        return Ok((Some("Uninsulated".to_string()), 1.0, None, 0.0));
+        return Ok((Some("Uninsulated".to_string()), 1.0, 0.0));
     };
 
     // Area scaling: depth_below_grade / height.
@@ -2095,12 +2264,7 @@ fn extract_foundation_wall_insulation(
         "Uninsulated".to_string()
     };
 
-    Ok((
-        Some(insulation_details),
-        area_scale,
-        height_m,
-        depth_below_grade,
-    ))
+    Ok((Some(insulation_details), area_scale, depth_below_grade))
 }
 
 /// Extract slab insulation details for LUT matching.
@@ -2111,7 +2275,7 @@ fn extract_foundation_wall_insulation(
 ///
 /// All numeric values are raw IP (HPXML native) -- no unit conversion needed
 /// since the LUT CSV uses IP values.
-fn extract_slab_insulation(node: &XmlNode) -> Option<String> {
+fn extract_slab_insulation(node: &XmlNode) -> Result<Option<String>, HpxmlError> {
     let r_perimeter = node
         .path(&["PerimeterInsulation", "Layer", "NominalRValue"])
         .and_then(|n| n.text_as_f64())
@@ -2136,7 +2300,15 @@ fn extract_slab_insulation(node: &XmlNode) -> Option<String> {
     } else if r_perimeter <= 0.0 && r_under > 0.0 {
         let full_width = node
             .path(&["UnderSlabInsulation", "Layer", "InsulationSpansEntireSlab"])
-            .map(|n| n.text.trim().eq_ignore_ascii_case("true"))
+            .map(|n| {
+                xs_boolean(
+                    n,
+                    "UnderSlabInsulation/Layer/InsulationSpansEntireSlab",
+                    "Slab",
+                    &element_id(node).unwrap_or_else(|| "unknown".to_string()),
+                )
+            })
+            .transpose()?
             .unwrap_or(false);
         let r = r_under.round() as i32;
         if full_width {
@@ -2153,7 +2325,7 @@ fn extract_slab_insulation(node: &XmlNode) -> Option<String> {
         "Uninsulated".to_string()
     };
 
-    Some(insulation)
+    Ok(Some(insulation))
 }
 
 /// Extract construction type and finish type from HPXML boundary elements.
@@ -2167,8 +2339,16 @@ fn extract_construction_metadata(
                 .child("WallType")
                 .and_then(|wt| wt.children.first())
                 .map(|child| child.name.clone());
+            // A foundation wall's outside material is its own Type (solid
+            // concrete, concrete block, double brick, wood); HPXML gives
+            // walls and rim joists a Siding.
+            let material_element = if matches!(boundary_type, BoundaryType::FoundationWall) {
+                "Type"
+            } else {
+                "Siding"
+            };
             let finish_type = node
-                .child("Siding")
+                .child(material_element)
                 .map(|n| n.text.trim().to_string())
                 .filter(|s| !s.is_empty());
             (construction_type, finish_type)
@@ -2252,11 +2432,10 @@ fn parse_material_layers(node: &XmlNode, area_m2: f64) -> Result<Vec<MaterialLay
             area_m2,
         });
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if let Some(cp) = specific_heat_j_kg_k {
-            if cp > 0.0 {
-                check_specific_heat_plausible(cp, "HPXML material layer");
-            }
+        if let Some(cp) = specific_heat_j_kg_k
+            && cp > 0.0
+        {
+            check_specific_heat_plausible(cp, "HPXML material layer")?;
         }
     }
 
@@ -2300,25 +2479,46 @@ fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
     }
 }
 
+/// Whether an HPXML `<Foundation>` node's foundation is conditioned: the
+/// explicit `<Conditioned>` flag (HPXML 4.x, read under either
+/// `<Basement>` or `<Crawlspace>`), else the OCHRE finished-basement
+/// inference for a basement (hpxml.py:276-280: total floors above the
+/// above-grade floors). A crawlspace with no explicit flag is
+/// unconditioned.
+fn foundation_node_is_conditioned(
+    ft_child: &XmlNode,
+    foundation_id: &str,
+    total_conditioned_floors: Option<f64>,
+    floors_above_grade: f64,
+) -> Result<bool, HpxmlError> {
+    let path: &'static str = match ft_child.name.as_str() {
+        "Crawlspace" => "Crawlspace/Conditioned",
+        _ => "Basement/Conditioned",
+    };
+    let explicit = ft_child
+        .child("Conditioned")
+        .map(|n| xs_boolean(n, path, "Foundation", foundation_id))
+        .transpose()?;
+    Ok(match explicit {
+        Some(flag) => flag,
+        None => {
+            ft_child.name == "Basement"
+                && total_conditioned_floors.is_some_and(|total| total > floors_above_grade)
+        }
+    })
+}
+
 fn build_zone_map(
     details: &XmlNode,
     conditioned_floor_area_m2: Option<f64>,
-) -> Result<HashMap<String, Zone>, HpxmlError> {
+    above_grade_floor_area_m2: Option<f64>,
+    total_conditioned_floors: Option<f64>,
+    floors_above_grade: f64,
+) -> Result<(HashMap<String, Zone>, bool), HpxmlError> {
+    // A conditioned foundation (finished basement, conditioned crawlspace)
+    // merges into the conditioned space per OS-HPXML and builds no zone.
+    let mut merged = false;
     let mut zones: HashMap<String, Zone> = HashMap::new();
-
-    zones.insert(
-        "conditioned".to_string(),
-        Zone {
-            zone_type: ZoneType::Conditioned,
-            floor_area_m2: conditioned_floor_area_m2,
-            volume_m3: None,
-            attached_wall_ids: Vec::new(),
-            duct_systems: Vec::new(),
-            vented: false,
-            ventilation_ach: None,
-            ventilation_sla: None,
-        },
-    );
 
     zones.insert(
         "outdoor".to_string(),
@@ -2331,6 +2531,8 @@ fn build_zone_map(
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         },
     );
 
@@ -2340,10 +2542,10 @@ fn build_zone_map(
             for node in group.children_named("Attic") {
                 // <FlatRoof/> means no attic cavity; skip zone creation (OCHRE hpxml.py:575-576).
                 let attic_type_child = node.child("AtticType").and_then(|at| at.children.first());
-                if let Some(child) = attic_type_child {
-                    if child.name == "FlatRoof" {
-                        continue;
-                    }
+                if let Some(child) = attic_type_child
+                    && child.name == "FlatRoof"
+                {
+                    continue;
                 }
 
                 let floor_area_m2 =
@@ -2352,7 +2554,15 @@ fn build_zone_map(
                 // Parse vented status from <AtticType><Attic><Vented>
                 let vented = attic_type_child
                     .and_then(|child| child.child("Vented"))
-                    .map(|v| v.text.trim().eq_ignore_ascii_case("true"))
+                    .map(|v| {
+                        xs_boolean(
+                            v,
+                            "Attic/AtticType/Attic/Vented",
+                            "Attic",
+                            &element_id(node).unwrap_or_else(|| "unknown".to_string()),
+                        )
+                    })
+                    .transpose()?
                     .unwrap_or(true); // default vented for attics
 
                 let (ventilation_ach, ventilation_sla) = parse_ventilation_rate(node);
@@ -2370,6 +2580,8 @@ fn build_zone_map(
                     vented,
                     ventilation_ach,
                     ventilation_sla,
+                    height_m: None,
+                    hpxml_location: None,
                 });
             }
         }
@@ -2388,6 +2600,8 @@ fn build_zone_map(
                     vented: false,
                     ventilation_ach: None,
                     ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
                 });
             }
         }
@@ -2405,9 +2619,35 @@ fn build_zone_map(
                     .child("FoundationType")
                     .and_then(|ft| ft.children.first());
                 let foundation_type = ft_child.map(|child| child.name.as_str());
+
+                // A conditioned foundation is part of the conditioned space
+                // (OS-HPXML geometry.rb `create_or_get_space`, 1704-1716; the
+                // surfaces name it conditioned through `parse_zone_label`) and
+                // has no Foundation zone of its own.
+                if let Some(ft_child) = ft_child {
+                    let foundation_id = element_id(node).unwrap_or_else(|| "unknown".to_string());
+                    if foundation_node_is_conditioned(
+                        ft_child,
+                        &foundation_id,
+                        total_conditioned_floors,
+                        floors_above_grade,
+                    )? {
+                        merged = true;
+                        continue;
+                    }
+                }
+
                 let vented_explicit = ft_child
                     .and_then(|child| child.child("Vented"))
-                    .map(|v| v.text.trim().eq_ignore_ascii_case("true"));
+                    .map(|v| {
+                        xs_boolean(
+                            v,
+                            "Foundation/FoundationType/Vented",
+                            "Foundation",
+                            &element_id(node).unwrap_or_else(|| "unknown".to_string()),
+                        )
+                    })
+                    .transpose()?;
                 let vented = match foundation_type {
                     Some("Crawlspace") => vented_explicit.unwrap_or(true),
                     Some("Basement") => vented_explicit.unwrap_or(false),
@@ -2440,12 +2680,39 @@ fn build_zone_map(
                     vented,
                     ventilation_ach,
                     ventilation_sla,
+                    height_m: None,
+                    hpxml_location: None,
                 });
             }
         }
     }
 
-    Ok(zones)
+    // The conditioned zone. A merged conditioned foundation is part of it
+    // (OS-HPXML geometry.rb `create_or_get_space`, 1704-1716), so its floor
+    // area is the HPXML ConditionedFloorArea, the basement's included
+    // (OCHRE hpxml.py:253, "indoor + foundation"); otherwise only the
+    // above-grade share, the foundation zone holding the rest.
+    zones.insert(
+        "conditioned".to_string(),
+        Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: if merged {
+                conditioned_floor_area_m2
+            } else {
+                above_grade_floor_area_m2
+            },
+            volume_m3: None,
+            attached_wall_ids: Vec::new(),
+            duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
+        },
+    );
+
+    Ok((zones, merged))
 }
 
 fn ensure_referenced_zones_exist(boundaries: &[Boundary], zones: &mut HashMap<String, Zone>) {
@@ -2472,6 +2739,8 @@ fn ensure_referenced_zones_exist(boundaries: &[Boundary], zones: &mut HashMap<St
                             vented,
                             ventilation_ach: None,
                             ventilation_sla: None,
+                            height_m: None,
+                            hpxml_location: None,
                         }
                     });
                 }
@@ -2575,10 +2844,15 @@ fn parse_duct_systems(
                             leakage_cfm25_by_type.insert(dtype, value);
                         }
                         _ => {
-                            tracing::warn!(
-                                units = %units,
-                                "unsupported duct leakage unit (cannot convert to fraction without fan flow); skipping"
-                            );
+                            return Err(HpxmlError::UnrecognisedUnit {
+                                value,
+                                unit: units.clone(),
+                                context: format!(
+                                    "a DuctLeakageMeasurement on duct type '{dtype}' \
+                                     (a fraction, percent or cfm25 value is required; \
+                                     the measurement is dropped otherwise)"
+                                ),
+                            });
                         }
                     }
                 }
@@ -2683,6 +2957,44 @@ fn parse_nominal_r_layers(node: &XmlNode) -> Result<Vec<f64>, HpxmlError> {
     Ok(values)
 }
 
+/// OS-HPXML v1.12's zone temperature capacitance multiplier (hpxml.rb:1051):
+/// `AdvancedResearchFeatures/TemperatureCapacitanceMultiplier`, a positive
+/// number, else 7 (defaults.rb:219-221). The pre-v1.11 element directly under
+/// `SimulationControl`, which v1.12 no longer reads, is ignored with a
+/// warning.
+fn temperature_capacitance_multiplier(
+    root: &XmlNode,
+    parse_warnings: &mut Vec<Warning>,
+) -> Result<f64, HpxmlError> {
+    const ELEMENT: &str = "TemperatureCapacitanceMultiplier";
+    let Some(control) = root.path(&["SoftwareInfo", "extension", "SimulationControl"]) else {
+        return Ok(hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT);
+    };
+    if let Some(legacy) = control.child(ELEMENT) {
+        parse_warnings.push(Warning::new(
+            "hpxml",
+            format!(
+                "SimulationControl/{ELEMENT} ({}) is ignored, as OS-HPXML v1.12 reads it only \
+                 under AdvancedResearchFeatures",
+                legacy.text.trim()
+            ),
+        ));
+    }
+    let Some(node) = control.path(&["AdvancedResearchFeatures", ELEMENT]) else {
+        return Ok(hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT);
+    };
+    match node.text_as_f64() {
+        Some(value) if value.is_finite() && value > 0.0 => Ok(value),
+        _ => Err(HpxmlError::Parse(
+            format!(
+                "AdvancedResearchFeatures/{ELEMENT} must be a positive number, got '{}'",
+                node.text.trim()
+            )
+            .into(),
+        )),
+    }
+}
+
 fn find_descendant_f64(
     root: &XmlNode,
     name: &str,
@@ -2695,7 +3007,7 @@ fn find_descendant_f64(
 }
 
 #[derive(Clone, Copy)]
-enum ValueKind {
+pub(super) enum ValueKind {
     Raw,
     Area,
     UValue,
@@ -2708,7 +3020,7 @@ enum ValueKind {
     Volume,
 }
 
-fn parse_value_with_units(
+pub(super) fn parse_value_with_units(
     node: Option<&XmlNode>,
     kind: ValueKind,
 ) -> Result<Option<f64>, HpxmlError> {
@@ -3102,12 +3414,33 @@ fn parse_air_leakage_ach50(details: &XmlNode) -> Result<(Option<f64>, Option<f64
     Ok((None, None))
 }
 
-fn parse_site_type(text: &str) -> SiteType {
+fn parse_site_type(text: &str) -> Result<SiteType, HpxmlError> {
     match normalize_ascii(text).as_str() {
-        "rural" => SiteType::Rural,
-        "suburban" => SiteType::Suburban,
-        "urban" => SiteType::Urban,
-        other => SiteType::Other(other.to_string()),
+        "rural" => Ok(SiteType::Rural),
+        "suburban" => Ok(SiteType::Suburban),
+        "urban" => Ok(SiteType::Urban),
+        _ => Err(HpxmlError::Parse(
+            format!(
+                "invalid SiteType value '{}'; allowed values are 'rural', 'suburban' and 'urban'",
+                text.trim()
+            )
+            .into(),
+        )),
+    }
+}
+
+fn parse_shielding_of_home(text: &str) -> Result<ShieldingOfHome, HpxmlError> {
+    match normalize_ascii(text).as_str() {
+        "normal" => Ok(ShieldingOfHome::Normal),
+        "exposed" => Ok(ShieldingOfHome::Exposed),
+        "well-shielded" => Ok(ShieldingOfHome::WellShielded),
+        _ => Err(HpxmlError::Parse(
+            format!(
+                "invalid ShieldingofHome value '{}'; allowed values are 'normal', 'exposed' and 'well-shielded'",
+                text.trim()
+            )
+            .into(),
+        )),
     }
 }
 
@@ -3118,13 +3451,24 @@ fn parse_zone_ref(node: Option<&XmlNode>) -> Option<ZoneType> {
 
 pub(crate) fn parse_zone_label(text: &str) -> ZoneType {
     let norm = normalize_ascii(text);
+    // A conditioned foundation is conditioned space, not a separate zone:
+    // OS-HPXML merges every conditioned location ("basement - conditioned",
+    // "crawlspace - conditioned") into the one conditioned space
+    // (geometry.rb `create_or_get_space`, 1704-1716; hpxml.rb
+    // `conditioned_locations`, 12311-12316). "unconditioned" contains
+    // "conditioned" as a substring, so the negation is checked first.
+    let is_conditioned = norm.contains("condition") && !norm.contains("unconditioned");
     if norm.contains("attic") {
         ZoneType::Attic
     } else if norm.contains("garage") {
         ZoneType::Garage
     } else if norm.contains("foundation") || norm.contains("basement") || norm.contains("crawl") {
-        ZoneType::Foundation
-    } else if norm.contains("condition") || norm == "living space" {
+        if is_conditioned {
+            ZoneType::Conditioned
+        } else {
+            ZoneType::Foundation
+        }
+    } else if is_conditioned || norm == "living space" {
         ZoneType::Conditioned
     } else if norm == "ground" {
         ZoneType::Ground
@@ -3137,6 +3481,22 @@ pub(crate) fn parse_zone_label(text: &str) -> ZoneType {
     } else {
         ZoneType::Other(text.trim().to_string())
     }
+}
+
+/// Whether an HPXML location label names the living space itself rather
+/// than a conditioned foundation merged into it. OCHRE builds the
+/// "Interior Wall" surface only in the living zone (hpxml.py
+/// `add_interior_boundaries`), so the splits that assume that surface
+/// (the HPWH wall interaction) key on the living space, not on any
+/// conditioned label.
+pub(crate) fn is_living_space_label(text: &str) -> bool {
+    let norm = normalize_ascii(text);
+    norm == "living space"
+        || (norm.contains("condition")
+            && !norm.contains("unconditioned")
+            && !norm.contains("basement")
+            && !norm.contains("crawl")
+            && !norm.contains("foundation"))
 }
 
 /// Rewrite `ZoneType::Adjacent` to match the non-Adjacent zone in the pair.
@@ -3194,177 +3554,10 @@ pub(crate) fn zone_key(zone_type: &ZoneType) -> String {
     }
 }
 
-/// Garage geometry derived from wall areas and azimuths.
-///
-/// `garage_protruded_area_m2` is the portion of the garage footprint that protrudes
-/// beyond the main building rectangle. Used by the compound attic volume formula.
-///
-/// Ref: OCHRE `hpxml.py` lines 449–494.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-struct GarageGeometry {
-    floor_area_m2: f64,
-    wall_height_m: f64,
-    protruded_area_m2: f64,
-}
-
-/// Derive garage geometry from boundary wall areas and azimuths.
-///
-/// The algorithm:
-/// 1. Collect exterior garage walls (Garage→Outdoor) and adjacent garage walls
-///    (Garage→Garage); group by azimuth mod 180° and take the max area per direction.
-/// 2. The two perpendicular directions yield areas a1, a2.
-///    `garage_wall_height = sqrt(a1 * a2 / garage_floor_area)`
-/// 3. Count attached walls (Conditioned→Garage walls). Depending on count:
-///    - 1 wall: `garage_area_in_main = 0` (detached or single-face)
-///    - 2 walls: `garage_area_in_main = a1 * a2 / wall_height²`
-///    - 3 walls: group by azimuth mod 180°, take largest per direction → same formula
-/// 4. `protruded_area = floor_area - garage_area_in_main`
-///
-/// Ref: OCHRE `hpxml.py` lines 449–494.
-fn compute_garage_geometry(
-    boundaries: &[Boundary],
-    garage_floor_area_m2: f64,
-) -> Option<GarageGeometry> {
-    if garage_floor_area_m2 <= 0.0 {
-        return None;
-    }
-
-    // Collect exterior garage wall areas and azimuths (Garage→Outdoor + Garage→Garage).
-    let mut wall_areas: Vec<f64> = Vec::new();
-    let mut wall_azimuths: Vec<f64> = Vec::new();
-    for b in boundaries {
-        if b.boundary_type != BoundaryType::Wall {
-            continue;
-        }
-        let is_garage_exterior = b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-            && matches!(b.exterior_zone.as_ref(), Some(&ZoneType::Outdoor) | None);
-        let is_adjacent_garage = b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-            && b.exterior_zone.as_ref() == Some(&ZoneType::Garage);
-        if is_garage_exterior || is_adjacent_garage {
-            if let Some(az) = b.azimuth_deg {
-                wall_areas.push(b.area_m2);
-                wall_azimuths.push(az % 180.0);
-            }
-        }
-    }
-
-    // Group by azimuth mod 180 and find the two perpendicular max areas.
-    let perpendicular_maxes = max_areas_by_azimuth(&wall_areas, &wall_azimuths)?;
-    let (a1, a2) = perpendicular_maxes;
-    let wall_height = (a1 * a2 / garage_floor_area_m2).sqrt();
-    if wall_height <= 0.0 {
-        return None;
-    }
-
-    // Collect attached walls (Conditioned→Garage or Garage→Conditioned walls).
-    let mut attached_areas: Vec<f64> = Vec::new();
-    let mut attached_azimuths: Vec<f64> = Vec::new();
-    for b in boundaries {
-        if b.boundary_type != BoundaryType::Wall {
-            continue;
-        }
-        let is_attached = (b.interior_zone.as_ref() == Some(&ZoneType::Conditioned)
-            && b.exterior_zone.as_ref() == Some(&ZoneType::Garage))
-            || (b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-                && b.exterior_zone.as_ref() == Some(&ZoneType::Conditioned));
-        if is_attached {
-            attached_areas.push(b.area_m2);
-            if let Some(az) = b.azimuth_deg {
-                attached_azimuths.push(az % 180.0);
-            }
-        }
-    }
-
-    let garage_area_in_main = match attached_areas.len() {
-        0 | 1 => 0.0,
-        2 => {
-            let (aa1, aa2) = (attached_areas[0], attached_areas[1]);
-            aa1 * aa2 / (wall_height * wall_height)
-        }
-        3 => {
-            if let Some((aa1, aa2)) = max_areas_by_azimuth(&attached_areas, &attached_azimuths) {
-                aa1 * aa2 / (wall_height * wall_height)
-            } else {
-                tracing::warn!(
-                    n_attached = 3,
-                    "garage: 3 attached walls but max_areas_by_azimuth returned None; treating as detached"
-                );
-                0.0
-            }
-        }
-        n => {
-            tracing::warn!(
-                n_attached = n,
-                garage_floor_area_m2,
-                "garage: unsupported attached wall count (expected 0-3); treating as detached"
-            );
-            0.0
-        }
-    };
-
-    let protruded = (garage_floor_area_m2 - garage_area_in_main).max(0.0);
-
-    Some(GarageGeometry {
-        floor_area_m2: garage_floor_area_m2,
-        wall_height_m: wall_height,
-        protruded_area_m2: protruded,
-    })
-}
-
-/// Given parallel arrays of wall areas and azimuths (mod 180°), return
-/// the maximum area for each of the two perpendicular azimuth groups.
-/// Returns None if there aren't exactly 2 distinct azimuth groups.
-fn max_areas_by_azimuth(areas: &[f64], azimuths: &[f64]) -> Option<(f64, f64)> {
-    use std::collections::BTreeMap;
-    // Group by azimuth (quantized to nearest degree to handle floating-point).
-    let mut groups: BTreeMap<i32, f64> = BTreeMap::new();
-    for (&area, &az) in areas.iter().zip(azimuths.iter()) {
-        let key = az.round() as i32;
-        let entry = groups.entry(key).or_insert(0.0_f64);
-        if area > *entry {
-            *entry = area;
-        }
-    }
-    if groups.len() != 2 {
-        return None;
-    }
-    let vals: Vec<f64> = groups.into_values().collect();
-    Some((vals[0], vals[1]))
-}
-
-/// Compute garage zone volume with optional roof-space augmentation.
-///
-/// OCHRE hpxml.py:730-734 adds a triangular-prism roof-space term for the
-/// protruded garage portion:
-///
-/// ```text
-/// V_garage = floor_area * wall_height + 0.5 * tan(roof_tilt) * protruded_area
-/// ```
-///
-/// HARES uses `tan()`, correcting the apparent `atan()` mis-use in the OCHRE
-/// reference. Falls back to the rectangular formula when roof tilt or garage
-/// geometry is unavailable.
-fn compute_garage_volume(
-    floor_area_m2: f64,
-    wall_height_m: f64,
-    garage_tilt_rad: Option<f64>,
-    garage_geometry: Option<&GarageGeometry>,
-) -> f64 {
-    let rectangular = floor_area_m2 * wall_height_m;
-    let augmentation = match (garage_tilt_rad, garage_geometry) {
-        (Some(tilt), Some(geom)) if tilt > 0.0 && geom.protruded_area_m2 > 0.0 => {
-            0.5 * tilt.tan() * geom.protruded_area_m2
-        }
-        _ => 0.0,
-    };
-    rectangular + augmentation
-}
-
 /// Attempt to infer roof tilt from attic geometry for roofs that are missing
 /// an explicit HPXML `<Pitch>` element.
 ///
-/// Uses the same geometric relationship as [`compute_attic_volume`]:
+/// Uses the gable relationship
 /// `attic_height = sqrt(gable_area * tan(tilt))` and the gable triangular
 /// area formula `gable_area = W² * tan(tilt) / 4`, where W is the building
 /// width (the dimension the gable sits on). Solving for tilt:
@@ -3417,8 +3610,7 @@ fn infer_roof_tilt_from_geometry(boundaries: &mut [Boundary], pitch_absent_ids: 
         return;
     }
 
-    // Use the median gable wall area — the most representative,
-    // following the same selection pattern as compute_attic_volume().
+    // Use the median gable wall area, the most representative.
     gable_areas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let gable_area = gable_areas[gable_areas.len() / 2];
     if gable_area <= 0.0 {
@@ -3469,192 +3661,29 @@ fn infer_roof_tilt_from_geometry(boundaries: &mut [Boundary], pitch_absent_ids: 
     }
 }
 
-/// Compute attic volume from gable wall areas, roof pitch, and garage geometry.
-///
-/// Two paths following OCHRE `parse_hpxml_zones()` (hpxml.py:582–633):
-///
-/// **Path A** -- Attic Garage Wall boundaries exist (walls between Garage and Attic):
-///   Merge all attic-exterior and attic-garage wall areas; use the max of
-///   the first two as gable_area. Simple prism formula.
-///
-/// **Path B** -- No Attic Garage Wall, has garage, 3 gable walls:
-///   Compound formula:
-///   ```text
-///   V = 0.5 * (attic_floor_area - garage_protruded_area) * attic_height
-///     + 0.5 * garage_protruded_area * garage_height
-///     + (1/6) * garage_width * garage_depth_in_house * garage_height
-///   ```
-///
-/// Otherwise: simple prism `0.5 * floor_area * attic_height`.
-fn compute_attic_volume(
-    boundaries: &[Boundary],
-    attic_floor_area_m2: Option<f64>,
-    garage_geometry: Option<&GarageGeometry>,
-) -> Option<f64> {
-    // Attic floor area: prefer explicit zone value, fall back to the Floor boundary
-    // between conditioned space and attic (OCHRE calls this "Attic Floor").
-    let floor_area = attic_floor_area_m2
-        .or_else(|| {
-            boundaries
-                .iter()
-                .find(|b| {
-                    b.boundary_type == BoundaryType::Floor
-                        && ((b.interior_zone.as_ref() == Some(&ZoneType::Conditioned)
-                            && b.exterior_zone.as_ref() == Some(&ZoneType::Attic))
-                            || (b.interior_zone.as_ref() == Some(&ZoneType::Attic)
-                                && b.exterior_zone.as_ref() == Some(&ZoneType::Conditioned)))
-                })
-                .map(|b| b.area_m2)
-        })
-        .filter(|&a| a > 0.0)?;
-
-    // Attic gable walls: Wall boundaries with interior=Attic, exterior=Outdoor.
-    let mut attic_outdoor_walls: Vec<f64> = boundaries
-        .iter()
-        .filter(|b| {
-            b.boundary_type == BoundaryType::Wall
-                && b.interior_zone.as_ref() == Some(&ZoneType::Attic)
-                && matches!(b.exterior_zone.as_ref(), Some(&ZoneType::Outdoor) | None)
-        })
-        .map(|b| b.area_m2)
-        .collect();
-
-    // Attic-Garage walls: Wall boundaries between Garage and Attic.
-    let attic_garage_walls: Vec<f64> = boundaries
-        .iter()
-        .filter(|b| {
-            b.boundary_type == BoundaryType::Wall
-                && ((b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-                    && b.exterior_zone.as_ref() == Some(&ZoneType::Attic))
-                    || (b.interior_zone.as_ref() == Some(&ZoneType::Attic)
-                        && b.exterior_zone.as_ref() == Some(&ZoneType::Garage)))
-        })
-        .map(|b| b.area_m2)
-        .collect();
-
-    // Adjacent attic walls (Attic→Attic).
-    let adjacent_attic_walls: Vec<f64> = boundaries
-        .iter()
-        .filter(|b| {
-            b.boundary_type == BoundaryType::Wall
-                && b.interior_zone.as_ref() == Some(&ZoneType::Attic)
-                && b.exterior_zone.as_ref() == Some(&ZoneType::Attic)
-        })
-        .map(|b| b.area_m2)
-        .collect();
-
-    // Attic roof tilt.
-    let roof_tilt_deg: Option<f64> = boundaries
-        .iter()
-        .filter(|b| {
-            b.boundary_type == BoundaryType::Roof
-                && b.interior_zone.as_ref() == Some(&ZoneType::Attic)
-        })
-        .find_map(|b| b.tilt_deg);
-
-    let roof_tilt_rad = roof_tilt_deg?.to_radians();
-    if roof_tilt_rad <= 0.0 {
-        return None;
+/// A vented crawlspace or vented attic with no `VentilationRate` takes
+/// OS-HPXML's default specific leakage area, 1/150 and 1/300 rounded to six
+/// places (defaults.rb:1120-1131 and 1022-1031, values at 5717-5727, after
+/// ANSI/RESNET/ICC 301 Table 4.2.2(1)), recorded as a warning.
+fn default_vented_space_sla(zone: &mut Zone, warnings: &mut Vec<Warning>) {
+    if zone.ventilation_sla.is_some() || zone.ventilation_ach.is_some() {
+        return;
     }
-
-    // Garage roof tilt (for compound formula). Falls back to attic roof tilt.
-    let garage_tilt_rad = boundaries
-        .iter()
-        .filter(|b| {
-            b.boundary_type == BoundaryType::Roof
-                && b.interior_zone.as_ref() == Some(&ZoneType::Garage)
-        })
-        .find_map(|b| b.tilt_deg)
-        .map(|d| d.to_radians())
-        .unwrap_or(roof_tilt_rad);
-
-    let has_garage = garage_geometry.is_some();
-
-    // Path A: Attic Garage Wall exists -- merge wall areas, use max of first two.
-    if !attic_garage_walls.is_empty() {
-        let mut merged = attic_outdoor_walls;
-        merged.extend_from_slice(&adjacent_attic_walls);
-        merged.extend_from_slice(&attic_garage_walls);
-        if merged.len() < 2 {
-            return if merged.len() == 1 {
-                let h = (merged[0] * roof_tilt_rad.tan()).sqrt();
-                Some(0.5 * floor_area * h)
-            } else {
-                None
-            };
-        }
-        let gable_area = merged[0].max(merged[1]);
-        let attic_height = (gable_area * roof_tilt_rad.tan()).sqrt();
-        return Some(0.5 * floor_area * attic_height);
-    }
-
-    // Merge attic outdoor walls + adjacent attic walls for standard path.
-    attic_outdoor_walls.extend_from_slice(&adjacent_attic_walls);
-    let gable_areas = attic_outdoor_walls;
-
-    // Path B: No Attic Garage Wall, has garage, 3 gable walls → compound formula.
-    if has_garage && gable_areas.len() == 3 {
-        // OCHRE uses `attic_wall_areas[1]` -- the second exterior gable wall in
-        // parse order (outdoor walls first, then adjacent attic walls). Our
-        // `gable_areas` preserves this ordering, so index 1 matches OCHRE.
-        let attic_gable_area = gable_areas[1];
-
-        let mut sorted = gable_areas.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let (low, med, high) = (sorted[0], sorted[1], sorted[2]);
-        // Third gable: whichever of low/high is "more different" from the median.
-        let third_gable_area = if med - low > high - med { low } else { high };
-
-        let attic_height = (attic_gable_area * roof_tilt_rad.tan()).sqrt();
-
-        if third_gable_area > 0.0 {
-            if let Some(gg) = garage_geometry {
-                let garage_height = (third_gable_area * garage_tilt_rad.tan()).sqrt();
-                let garage_width = 2.0 * third_gable_area / garage_height;
-                let garage_depth_in_house = garage_height * roof_tilt_rad.tan();
-                let square_area = floor_area - gg.protruded_area_m2;
-
-                let volume = 0.5 * square_area * attic_height
-                    + 0.5 * gg.protruded_area_m2 * garage_height
-                    + (1.0 / 6.0) * garage_width * garage_depth_in_house * garage_height;
-                return Some(volume);
-            }
-        }
-
-        return Some(0.5 * floor_area * attic_height);
-    }
-
-    // Standard 2-gable or fallback.
-    let gable_area = match gable_areas.len() {
-        0 => return None,
-        1 => gable_areas[0],
-        2 => {
-            let abs_diff = (gable_areas[1] - gable_areas[0]).abs();
-            if abs_diff > 0.5 {
-                tracing::warn!(
-                    area_0_m2 = gable_areas[0],
-                    area_1_m2 = gable_areas[1],
-                    diff_m2 = abs_diff,
-                    "attic gable walls differ by {diff:.2} m² (> 0.5 m²); \
-                     cannot derive reliable attic height",
-                    diff = abs_diff,
-                );
-                return None;
-            }
-            gable_areas[0]
-        }
-        _ => {
-            let mut sorted = gable_areas;
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            sorted[1]
-        }
+    let denominator = match zone.hpxml_location.as_deref() {
+        Some("crawlspace - vented") => 150.0,
+        Some("attic - vented") => 300.0,
+        _ => return,
     };
-    if gable_area <= 0.0 {
-        return None;
-    }
-
-    let attic_height = (gable_area * roof_tilt_rad.tan()).sqrt();
-    Some(0.5 * floor_area * attic_height)
+    let sla = ((1.0 / denominator) * 1e6_f64).round() / 1e6;
+    let location = zone.hpxml_location.as_deref().unwrap_or_default();
+    warnings.push(Warning::new(
+        "hpxml",
+        format!(
+            "'{location}' has no VentilationRate; its specific leakage area defaults to \
+             {sla} as OS-HPXML does"
+        ),
+    ));
+    zone.ventilation_sla = Some(sla);
 }
 
 fn zone_sort_key(zone_type: &ZoneType) -> u8 {
@@ -3680,22 +3709,27 @@ fn normalize_name(name: &str) -> String {
 /// foundation type is set means foundation thermal mass is absent from the RC
 /// network.
 ///
-/// This guard only runs in debug or when `feature = "check_invariants"`.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+/// Runs in every build profile as a warning diagnostic.
 pub fn check_foundation_zone_invariant(building: &Building) {
     let has_foundation_zone = building
         .zones
         .iter()
         .any(|z| z.zone_type == ZoneType::Foundation);
 
-    if !has_foundation_zone {
-        if let Some(ref fnd_name) = building.foundation_name {
-            tracing::warn!(
-                foundation_name = %fnd_name,
-                "Foundation zone missing despite foundation type being set. \
+    // A conditioned foundation merged into the conditioned space has no
+    // Foundation zone by design: its mass and surfaces are the conditioned
+    // zone's (OS-HPXML geometry.rb `create_or_get_space`, 1704-1716).
+    let merged = building.conditioned_foundation_merged;
+
+    if !has_foundation_zone
+        && !merged
+        && let Some(ref fnd_name) = building.foundation_name
+    {
+        tracing::warn!(
+            foundation_name = %fnd_name,
+            "Foundation zone missing despite foundation type being set. \
                  Foundation thermal mass is absent from the RC network."
-            );
-        }
+        );
     }
 }
 
@@ -3705,6 +3739,74 @@ mod tests {
         BoundaryType, DuctType, HpxmlError, ZoneType, assembly_framing_factor, parse_building,
         parse_xml_document,
     };
+    use crate::hpxml::xml_helpers::assert_reads_xs_boolean;
+
+    /// Attribute values and text normalize per XML 1.0, as the parser's
+    /// quick-xml 0.42 dependency implements: a literal tab or line break in an
+    /// attribute value becomes a space (a CR LF is one line end, so one
+    /// space), a character reference keeps its character, and CR LF in text
+    /// becomes LF. No checked-in fixture carries such input, so the goldens
+    /// stay bitwise; this pins the behaviour the parser now has.
+    #[test]
+    fn xml_attribute_and_line_end_normalization_follow_xml_1_0() {
+        let xml = "<root a=\"x\ty\r\nz&#9;w&amp;v\"><text>a\r\nb</text></root>";
+        let node = parse_xml_document(xml).expect("the document must parse");
+        assert_eq!(node.attrs["a"], "x y z\tw&v");
+        let text = node
+            .child("text")
+            .expect("the text element must be in the tree");
+        assert_eq!(text.text, "a\nb");
+    }
+
+    /// An attribute the reader rejects (a duplicated name) or a value it
+    /// cannot unescape (an undefined entity) fails the parse naming the
+    /// element and the attribute, instead of the attribute being dropped or
+    /// emptied.
+    #[test]
+    fn malformed_hpxml_attribute_is_a_parse_error() {
+        let base = include_str!("../../../../tests/fixtures/hpxml/ochre_samples/base.xml");
+
+        let duplicated = base.replace(
+            "schemaVersion='4.0'",
+            "schemaVersion='4.0' schemaVersion='4.0'",
+        );
+        let err = crate::hpxml::parse_hpxml_str(&duplicated)
+            .expect_err("a duplicated attribute must fail the parse");
+        let shown = format!("{err}");
+        assert!(
+            matches!(err, HpxmlError::Parse(_)),
+            "a duplicated attribute must be a parse error: {shown}"
+        );
+        assert!(
+            shown.contains("<HPXML>") && shown.contains("`schemaVersion`"),
+            "the error must name the element and the attribute: {shown}"
+        );
+
+        let undefined_entity = base.replace("schemaVersion='4.0'", "schemaVersion='&bogus;'");
+        let err = crate::hpxml::parse_hpxml_str(&undefined_entity)
+            .expect_err("an undefined entity must fail the parse");
+        let shown = format!("{err}");
+        assert!(
+            matches!(err, HpxmlError::Parse(_)),
+            "an unescapable value must be a parse error: {shown}"
+        );
+        assert!(
+            shown.contains("<HPXML>") && shown.contains("`schemaVersion`"),
+            "the error must name the element and the attribute: {shown}"
+        );
+    }
+
+    /// HPXML's site types parse whatever their case and spacing; any other
+    /// value is an error that keeps the file's own text.
+    #[test]
+    fn site_types_parse_case_insensitively_and_keep_unknown_text() {
+        use super::{SiteType, parse_site_type};
+        assert_eq!(parse_site_type("Rural").unwrap(), SiteType::Rural);
+        assert_eq!(parse_site_type(" SUBURBAN ").unwrap(), SiteType::Suburban);
+        assert_eq!(parse_site_type("urban").unwrap(), SiteType::Urban);
+        let err = parse_site_type("Coastal").expect_err("an unknown site type must fail");
+        assert!(format!("{err}").contains("'Coastal'"), "{err}");
+    }
 
     const SAMPLE_XML: &str = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
@@ -3714,11 +3816,12 @@ mod tests {
         <Site>
           <Elevation units="ft">5280</Elevation>
           <SiteType>suburban</SiteType>
-          <ShieldingOfHome>normal</ShieldingOfHome>
+          <ShieldingofHome>normal</ShieldingofHome>
         </Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">2152</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">17216</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -3927,16 +4030,16 @@ mod tests {
         // Volume: 17216 ft³ × 0.028316846592 ≈ 487.49 m³
         let expected_volume_m3 = 17_216.0 * 0.028_316_846_592;
         assert!(
-            (building.conditioned_volume_m3.unwrap() - expected_volume_m3).abs() < 0.01,
+            (building.conditioned_volume_m3 - expected_volume_m3).abs() < 0.01,
             "conditioned_volume_m3: got {}, expected {}",
-            building.conditioned_volume_m3.unwrap(),
+            building.conditioned_volume_m3,
             expected_volume_m3,
         );
 
         // Ceiling height: volume / floor_area
         let expected_floor_area_m2 = 2152.0 * 0.092_903_04;
         let expected_ceiling_height = expected_volume_m3 / expected_floor_area_m2;
-        assert!((building.ceiling_height_m.unwrap() - expected_ceiling_height).abs() < 1e-6,);
+        assert!((building.ceiling_height_m - expected_ceiling_height).abs() < 1e-6,);
 
         // Conditioned zone should have volume derived from ceiling height × floor area
         let conditioned = building
@@ -3977,6 +4080,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">2000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">16000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -4012,11 +4116,22 @@ mod tests {
     /// coordinate lookup rather than assuming a wrong offset.
     #[test]
     fn site_without_timezone_yields_none_utc_offset() {
-        // SAMPLE_XML's Site has Elevation/SiteType/ShieldingOfHome only.
+        // SAMPLE_XML's Site has Elevation/SiteType/ShieldingofHome only.
         let building = parse_building(SAMPLE_XML).expect("parser success");
         assert_eq!(building.site.utc_offset_h, None);
         assert_eq!(building.site.latitude_deg, None);
         assert_eq!(building.site.longitude_deg, None);
+    }
+
+    /// The site's shielding is read from HPXML's `ShieldingofHome` (lower-case
+    /// "of", as the schema spells it, HPXML.xsd:4479).
+    #[test]
+    fn shielding_is_read_from_the_schema_element() {
+        let building = parse_building(SAMPLE_XML).expect("parser success");
+        assert_eq!(
+            building.site.shielding_of_home,
+            Some(super::ShieldingOfHome::Normal)
+        );
     }
 
     #[test]
@@ -4178,19 +4293,16 @@ mod tests {
         assert!(msg.contains("foundation wall 'FoundationWall1' has non-positive area"));
     }
 
+    /// A foundation slab sizes its space's floor and volume, so a slab with
+    /// no Area is an error naming its location (OS-HPXML requires it).
     #[test]
-    fn slab_missing_area_defaults_to_zero() {
+    fn slab_missing_area_is_an_error() {
         let xml = SAMPLE_XML.replace("<Area units=\"ft2\">80</Area>", "");
-        let building = parse_building(&xml).expect("slab without Area should parse");
-        let slab_boundary = building
-            .boundaries
-            .iter()
-            .find(|b| matches!(b.boundary_type, BoundaryType::Slab));
-        assert!(slab_boundary.is_some(), "slab boundary should be present");
-        assert_eq!(
-            slab_boundary.unwrap().area_m2,
-            0.0,
-            "Slab with missing Area should default to 0.0"
+        let err = parse_building(&xml).expect_err("a slab without Area must fail");
+        assert!(
+            err.to_string()
+                .contains("slab in 'basement - conditioned' has no Area"),
+            "got: {err}"
         );
     }
 
@@ -4228,6 +4340,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -4262,24 +4375,29 @@ mod tests {
         let err = parse_building(&xml).expect_err("expected missing field failure");
         assert!(matches!(err, HpxmlError::Parse(_)));
         let msg = err.to_string();
-        assert!(
-            msg.contains("missing both ConditionedBuildingVolume and ConditionedFloorArea"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("missing ConditionedFloorArea"), "got: {msg}");
     }
 
+    /// No ConditionedBuildingVolume: OS-HPXML's default, the conditioned
+    /// floor area times an 8 ft ceiling, recorded as a warning.
     #[test]
-    fn missing_volume_only_returns_error() {
+    fn missing_volume_only_takes_the_os_hpxml_default() {
         let xml = SAMPLE_XML.replace(
             "<ConditionedBuildingVolume units=\"ft3\">17216</ConditionedBuildingVolume>",
             "",
         );
-        let err = parse_building(&xml).expect_err("expected missing volume failure");
-        assert!(matches!(err, HpxmlError::Parse(_)));
-        let msg = err.to_string();
+        let building = parse_building(&xml).expect("a missing volume takes the default");
+        assert_eq!(
+            building.conditioned_volume_m3,
+            hares_physics::units::volume_ft3_to_m3(2152.0 * 8.0)
+        );
         assert!(
-            msg.contains("missing ConditionedBuildingVolume"),
-            "got: {msg}"
+            building
+                .parse_warnings
+                .iter()
+                .any(|w| w.message.contains("ConditionedBuildingVolume")),
+            "got {:?}",
+            building.parse_warnings
         );
     }
 
@@ -4380,6 +4498,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -4406,6 +4525,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -4576,16 +4696,25 @@ mod tests {
         );
     }
 
+    /// The foundation is as tall as its tallest foundation wall, not its
+    /// first, and its volume is the slab area times that height
+    /// (OS-HPXML geometry.rb `calculate_zone_volume`); the declared
+    /// Foundation FloorArea does not size it.
     #[test]
-    fn foundation_zone_volume_uses_foundation_wall_height() {
+    fn foundation_zone_volume_is_the_slab_area_times_the_tallest_wall() {
+        let wall = |id: &str, height_ft: f64| {
+            format!(
+                "<FoundationWall>\n            <SystemIdentifier id=\"{id}\"/>\n            <InteriorAdjacentTo>basement - unconditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n            <Height units=\"ft\">{height_ft}</Height>\n          </FoundationWall>"
+            )
+        };
         let xml = SAMPLE_XML
             .replace(
-                "<FloorArea units=\"ft2\">800</FloorArea>",
-                "<FloorArea units=\"ft2\">100</FloorArea>",
+                "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n          </FoundationWall>",
+                &format!("{}{}", wall("FoundationWall1", 3.0), wall("FoundationWall2", 7.0)),
             )
             .replace(
-                "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n          </FoundationWall>",
-                "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n            <Height units=\"ft\">3</Height>\n          </FoundationWall>",
+                "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>",
+                "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - unconditioned</InteriorAdjacentTo>",
             );
 
         let building = parse_building(&xml).expect("parse should succeed");
@@ -4595,17 +4724,80 @@ mod tests {
             .find(|z| matches!(z.zone_type, ZoneType::Foundation))
             .expect("foundation zone expected");
 
-        let floor_area_m2 = foundation
-            .floor_area_m2
-            .expect("foundation floor area expected");
-        let expected_volume_m3 = floor_area_m2 * 3.0 * 0.3048;
+        let height_m = hares_physics::units::length_ft_to_m(7.0);
+        let expected_volume_m3 = hares_physics::units::area_ft2_to_m2(80.0) * height_m;
         let actual_volume_m3 = foundation.volume_m3.expect("foundation volume expected");
-
         assert!(
-            (actual_volume_m3 - expected_volume_m3).abs() < 1e-6,
-            "foundation volume: got {}, expected {}",
-            actual_volume_m3,
-            expected_volume_m3
+            (actual_volume_m3 - expected_volume_m3).abs() < 1e-9,
+            "foundation volume: got {actual_volume_m3}, expected {expected_volume_m3}"
+        );
+        assert_eq!(foundation.height_m, Some(height_m));
+    }
+
+    #[test]
+    fn foundation_floor_area_is_derived_from_the_foundation_slabs() {
+        // The document declares no <Foundation><FloorArea>: the foundation's
+        // floor area is its slabs' area sum (OS-HPXML v1.12.0 geometry.rb
+        // 1315-1324, calculate_zone_volume; the conditioned floor area's
+        // split is the floors and slabs adjacent to conditioned space,
+        // geometry.rb 750-771, apply_conditioned_floor_area), not the
+        // floor-count ratio.
+        let xml = SAMPLE_XML
+            .replace(
+                "</BuildingConstruction>",
+                "<NumberofConditionedFloors>2</NumberofConditionedFloors>\n          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>\n        </BuildingConstruction>",
+            )
+            .replace(
+                "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+                "<Foundation>\n            <FoundationType><Basement><Conditioned>false</Conditioned></Basement></FoundationType>\n          </Foundation>",
+            )
+            .replace(
+                "<InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>",
+                "<InteriorAdjacentTo>basement - unconditioned</InteriorAdjacentTo>",
+            );
+
+        let building = parse_building(&xml).expect("parse should succeed");
+        let conditioned = building
+            .zones
+            .iter()
+            .find(|zone| matches!(zone.zone_type, ZoneType::Conditioned))
+            .expect("conditioned zone expected");
+        let foundation = building
+            .zones
+            .iter()
+            .find(|zone| matches!(zone.zone_type, ZoneType::Foundation))
+            .expect("foundation zone expected");
+
+        // The slab adjacent to the basement is 80 ft2: the split takes the
+        // foundation's slab area, not half the CFA (the floor-count ratio).
+        let conditioned_area_m2 = conditioned
+            .floor_area_m2
+            .expect("conditioned area expected");
+        let expected_conditioned_area_m2 = (2152.0 - 80.0) * 0.092_903_04;
+        assert!(
+            (conditioned_area_m2 - expected_conditioned_area_m2).abs() < 1e-6,
+            "conditioned area from the slab-derived split: got {}, expected {}",
+            conditioned_area_m2,
+            expected_conditioned_area_m2
+        );
+        let foundation_area_m2 = foundation.floor_area_m2.expect("foundation area expected");
+        let expected_foundation_area_m2 = 80.0 * 0.092_903_04;
+        assert!(
+            (foundation_area_m2 - expected_foundation_area_m2).abs() < 1e-6,
+            "foundation area from its slabs: got {}, expected {}",
+            foundation_area_m2,
+            expected_foundation_area_m2
+        );
+        // The derivation is recorded, citing the reference's rule.
+        let derivation = building
+            .parse_warnings
+            .iter()
+            .find(|w| w.message.contains("slab"))
+            .expect("the slab derivation is recorded as a parse warning");
+        assert!(
+            derivation.message.contains("geometry.rb"),
+            "the warning cites the reference: {}",
+            derivation.message
         );
     }
 
@@ -4649,7 +4841,7 @@ mod tests {
             expected_foundation_area_m2
         );
 
-        let ceiling_height_m = building.ceiling_height_m.expect("ceiling height expected");
+        let ceiling_height_m = building.ceiling_height_m;
         let conditioned_volume_m3 = conditioned.volume_m3.expect("conditioned volume expected");
         assert!(
             (conditioned_volume_m3 - conditioned_area_m2 * ceiling_height_m).abs() < 1e-6,
@@ -5736,6 +5928,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -5895,679 +6088,6 @@ mod tests {
         );
     }
 
-    // ── Garage geometry tests ─────────────────────────────────────────
-
-    #[test]
-    fn garage_protruded_area_two_attached_walls() {
-        // Two perpendicular exterior walls (N/S at 6m², E/W at 8m²) on a 12m² garage.
-        // garage_wall_height = sqrt(6 * 8 / 12) = 2.0 m
-        // Two attached walls (3m² and 4m²): garage_area_in_main = 3*4/4 = 3.0 m²
-        // protruded = 12 - 3 = 9 m²
-        use super::{Boundary, BoundaryType, ZoneType, compute_garage_geometry};
-        fn wall(interior: ZoneType, exterior: ZoneType, area: f64, az: f64) -> Boundary {
-            Boundary {
-                id: String::new(),
-                boundary_type: BoundaryType::Wall,
-                area_m2: area,
-                azimuth_deg: Some(az),
-                assembly_r_value_m2_k_w: None,
-                r_value_layers_m2_k_w: Vec::new(),
-                interior_zone: Some(interior),
-                exterior_zone: Some(exterior),
-                material_layers: Vec::new(),
-                framing_factor: None,
-                construction_type: None,
-                finish_type: None,
-                insulation_details: None,
-                has_radiant_barrier: false,
-                solar_absorptance: None,
-                emittance: None,
-                tilt_deg: Some(90.0),
-                lut_boundary_name: None,
-                floor_or_ceiling: None,
-                perimeter_m: None,
-                perimeter_insulation_r_m2_k_w: None,
-                foundation_depth_m: None,
-            }
-        }
-        let boundaries = vec![
-            // Exterior garage walls: two perpendicular pairs
-            wall(ZoneType::Garage, ZoneType::Outdoor, 6.0, 0.0), // N
-            wall(ZoneType::Garage, ZoneType::Outdoor, 8.0, 90.0), // E
-            // Attached walls (Conditioned→Garage)
-            wall(ZoneType::Conditioned, ZoneType::Garage, 3.0, 180.0), // S
-            wall(ZoneType::Conditioned, ZoneType::Garage, 4.0, 270.0), // W
-        ];
-        let gg = compute_garage_geometry(&boundaries, 12.0).expect("geometry should compute");
-        let wall_height = (6.0 * 8.0 / 12.0_f64).sqrt();
-        assert!((gg.wall_height_m - wall_height).abs() < 1e-6, "wall_height");
-        let area_in_main = 3.0 * 4.0 / (wall_height * wall_height);
-        let expected_protruded = 12.0 - area_in_main;
-        assert!(
-            (gg.protruded_area_m2 - expected_protruded).abs() < 1e-6,
-            "protruded: got {}, expected {expected_protruded}",
-            gg.protruded_area_m2
-        );
-    }
-
-    #[test]
-    fn garage_protruded_area_single_attached_wall() {
-        // Single attached wall → garage_area_in_main = 0, protruded = floor_area.
-        use super::{Boundary, BoundaryType, ZoneType, compute_garage_geometry};
-        fn wall(interior: ZoneType, exterior: ZoneType, area: f64, az: f64) -> Boundary {
-            Boundary {
-                id: String::new(),
-                boundary_type: BoundaryType::Wall,
-                area_m2: area,
-                azimuth_deg: Some(az),
-                assembly_r_value_m2_k_w: None,
-                r_value_layers_m2_k_w: Vec::new(),
-                interior_zone: Some(interior),
-                exterior_zone: Some(exterior),
-                material_layers: Vec::new(),
-                framing_factor: None,
-                construction_type: None,
-                finish_type: None,
-                insulation_details: None,
-                has_radiant_barrier: false,
-                solar_absorptance: None,
-                emittance: None,
-                tilt_deg: Some(90.0),
-                lut_boundary_name: None,
-                floor_or_ceiling: None,
-                perimeter_m: None,
-                perimeter_insulation_r_m2_k_w: None,
-                foundation_depth_m: None,
-            }
-        }
-        let boundaries = vec![
-            wall(ZoneType::Garage, ZoneType::Outdoor, 6.0, 0.0),
-            wall(ZoneType::Garage, ZoneType::Outdoor, 8.0, 90.0),
-            wall(ZoneType::Conditioned, ZoneType::Garage, 5.0, 180.0),
-        ];
-        let gg = compute_garage_geometry(&boundaries, 12.0).expect("geometry should compute");
-        assert!(
-            (gg.protruded_area_m2 - 12.0).abs() < 1e-6,
-            "single attached wall → protruded = floor_area, got {}",
-            gg.protruded_area_m2
-        );
-    }
-
-    #[test]
-    fn garage_protruded_area_three_attached_walls() {
-        // 3 attached walls (2 regular + 1 gable), typical 2-story with protruding garage.
-        use super::{Boundary, BoundaryType, ZoneType, compute_garage_geometry};
-        fn wall(interior: ZoneType, exterior: ZoneType, area: f64, az: f64) -> Boundary {
-            Boundary {
-                id: String::new(),
-                boundary_type: BoundaryType::Wall,
-                area_m2: area,
-                azimuth_deg: Some(az),
-                assembly_r_value_m2_k_w: None,
-                r_value_layers_m2_k_w: Vec::new(),
-                interior_zone: Some(interior),
-                exterior_zone: Some(exterior),
-                material_layers: Vec::new(),
-                framing_factor: None,
-                construction_type: None,
-                finish_type: None,
-                insulation_details: None,
-                has_radiant_barrier: false,
-                solar_absorptance: None,
-                emittance: None,
-                tilt_deg: Some(90.0),
-                lut_boundary_name: None,
-                floor_or_ceiling: None,
-                perimeter_m: None,
-                perimeter_insulation_r_m2_k_w: None,
-                foundation_depth_m: None,
-            }
-        }
-        let garage_area = 30.0;
-        // Exterior: 10m² at 0°, 15m² at 90°
-        // wall_height = sqrt(10*15/30) = sqrt(5) ≈ 2.236
-        let wh = (10.0_f64 * 15.0 / garage_area).sqrt();
-        let boundaries = vec![
-            wall(ZoneType::Garage, ZoneType::Outdoor, 10.0, 0.0),
-            wall(ZoneType::Garage, ZoneType::Outdoor, 15.0, 90.0),
-            // 3 attached walls: two at 0° (7m²), one at 90° (5m²)
-            wall(ZoneType::Conditioned, ZoneType::Garage, 7.0, 0.0),
-            wall(ZoneType::Conditioned, ZoneType::Garage, 3.0, 0.0),
-            wall(ZoneType::Conditioned, ZoneType::Garage, 5.0, 90.0),
-        ];
-        let gg =
-            compute_garage_geometry(&boundaries, garage_area).expect("geometry should compute");
-        // max per-azimuth: 0° → max(7,3) = 7, 90° → 5
-        let area_in_main = 7.0 * 5.0 / (wh * wh);
-        let expected_protruded = garage_area - area_in_main;
-        assert!(
-            (gg.protruded_area_m2 - expected_protruded).abs() < 1e-6,
-            "protruded: got {}, expected {expected_protruded}",
-            gg.protruded_area_m2
-        );
-    }
-
-    // ── Attic volume tests ──────────────────────────────────────────────
-
-    #[test]
-    fn attic_volume_simple_2_gable() {
-        use super::{Boundary, BoundaryType, ZoneType, compute_attic_volume};
-        fn boundary(
-            bt: BoundaryType,
-            interior: ZoneType,
-            exterior: ZoneType,
-            area: f64,
-            tilt: Option<f64>,
-        ) -> Boundary {
-            Boundary {
-                id: String::new(),
-                boundary_type: bt,
-                area_m2: area,
-                azimuth_deg: None,
-                assembly_r_value_m2_k_w: None,
-                r_value_layers_m2_k_w: Vec::new(),
-                interior_zone: Some(interior),
-                exterior_zone: Some(exterior),
-                material_layers: Vec::new(),
-                framing_factor: None,
-                construction_type: None,
-                finish_type: None,
-                insulation_details: None,
-                has_radiant_barrier: false,
-                solar_absorptance: None,
-                emittance: None,
-                tilt_deg: tilt,
-                lut_boundary_name: None,
-                floor_or_ceiling: None,
-                perimeter_m: None,
-                perimeter_insulation_r_m2_k_w: None,
-                foundation_depth_m: None,
-            }
-        }
-        // 6:12 pitch → tilt = atan(0.5) ≈ 26.565°
-        let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
-        let gable_area = 10.0; // m²
-        let floor_area = 100.0; // m²
-        let boundaries = vec![
-            boundary(
-                BoundaryType::Roof,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                50.0,
-                Some(tilt_deg),
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                gable_area,
-                None,
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                gable_area,
-                None,
-            ),
-        ];
-        let vol = compute_attic_volume(&boundaries, Some(floor_area), None)
-            .expect("volume should compute");
-        let attic_height = (gable_area * tilt_deg.to_radians().tan()).sqrt();
-        let expected = 0.5 * floor_area * attic_height;
-        assert!(
-            (vol - expected).abs() < 1e-6,
-            "simple 2-gable: got {vol}, expected {expected}"
-        );
-    }
-
-    #[test]
-    fn attic_volume_3_gable_compound() {
-        use super::{Boundary, BoundaryType, GarageGeometry, ZoneType, compute_attic_volume};
-        fn boundary(
-            bt: BoundaryType,
-            interior: ZoneType,
-            exterior: ZoneType,
-            area: f64,
-            tilt: Option<f64>,
-        ) -> Boundary {
-            Boundary {
-                id: String::new(),
-                boundary_type: bt,
-                area_m2: area,
-                azimuth_deg: None,
-                assembly_r_value_m2_k_w: None,
-                r_value_layers_m2_k_w: Vec::new(),
-                interior_zone: Some(interior),
-                exterior_zone: Some(exterior),
-                material_layers: Vec::new(),
-                framing_factor: None,
-                construction_type: None,
-                finish_type: None,
-                insulation_details: None,
-                has_radiant_barrier: false,
-                solar_absorptance: None,
-                emittance: None,
-                tilt_deg: tilt,
-                lut_boundary_name: None,
-                floor_or_ceiling: None,
-                perimeter_m: None,
-                perimeter_insulation_r_m2_k_w: None,
-                foundation_depth_m: None,
-            }
-        }
-        // Regression guard: verifies compound attic volume formula against
-        // hand-calculated expected values; not a physics oracle.
-        //
-        // 6:12 pitch for both attic and garage roofs
-        let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
-        let tilt_rad = tilt_deg.to_radians();
-
-        // 3 gable walls in parse order: [10.0, 12.0, 5.0]
-        // OCHRE picks index 1 = 12.0 as attic_gable_area.
-        // sorted → [5.0, 10.0, 12.0]; med=10, low=5, high=12
-        // med-low=5 > high-med=2 → third_gable = low = 5.0
-        let boundaries = vec![
-            boundary(
-                BoundaryType::Roof,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                80.0,
-                Some(tilt_deg),
-            ),
-            boundary(
-                BoundaryType::Roof,
-                ZoneType::Garage,
-                ZoneType::Outdoor,
-                20.0,
-                Some(tilt_deg),
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                10.0,
-                None,
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                12.0,
-                None,
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                5.0,
-                None,
-            ),
-        ];
-        let garage_geom = GarageGeometry {
-            floor_area_m2: 30.0,
-            wall_height_m: 2.5,
-            protruded_area_m2: 15.0,
-        };
-        let floor_area = 120.0;
-        let vol = compute_attic_volume(&boundaries, Some(floor_area), Some(&garage_geom))
-            .expect("volume should compute");
-
-        // Expected compound formula using index-1 gable (12.0 m²):
-        let attic_gable_area = 12.0; // gable_areas[1] per OCHRE convention
-        let attic_height = (attic_gable_area * tilt_rad.tan()).sqrt();
-        let third_gable_area = 5.0;
-        let garage_height = (third_gable_area * tilt_rad.tan()).sqrt();
-        let garage_width = 2.0 * third_gable_area / garage_height;
-        let garage_depth_in_house = garage_height * tilt_rad.tan();
-        let square_area = floor_area - garage_geom.protruded_area_m2;
-        let expected = 0.5 * square_area * attic_height
-            + 0.5 * garage_geom.protruded_area_m2 * garage_height
-            + (1.0 / 6.0) * garage_width * garage_depth_in_house * garage_height;
-        assert!(
-            (vol - expected).abs() < 1e-4,
-            "3-gable compound: got {vol}, expected {expected}"
-        );
-
-        // Hand-calculated concrete value:
-        // tan(26.565°) = 0.5, attic_gable=12 → h_a = sqrt(12*0.5) = sqrt(6) ≈ 2.449
-        // third_gable=5 → h_g = sqrt(5*0.5) = sqrt(2.5) ≈ 1.581
-        // garage_width = 2*5/1.581 ≈ 6.325
-        // garage_depth = 1.581*0.5 ≈ 0.791
-        // square_area = 120 - 15 = 105
-        // vol = 0.5*105*2.449 + 0.5*15*1.581 + (1/6)*6.325*0.791*1.581
-        //     ≈ 128.603 + 11.859 + 1.319 ≈ 141.781
-        assert!(
-            (vol - 141.781).abs() < 0.1,
-            "3-gable compound hand-calc: got {vol}, expected ~141.781"
-        );
-    }
-
-    #[test]
-    fn attic_volume_3_gable_index1_differs_from_median() {
-        // Verifies that index-1 (OCHRE convention) is used, not the sorted median.
-        // gable_areas in parse order: [15.0, 7.0, 10.0]
-        //   index-1 = 7.0
-        //   sorted = [7, 10, 15], median = 10.0 (differs from index-1)
-        use super::{Boundary, BoundaryType, GarageGeometry, ZoneType, compute_attic_volume};
-        fn boundary(
-            bt: BoundaryType,
-            interior: ZoneType,
-            exterior: ZoneType,
-            area: f64,
-            tilt: Option<f64>,
-        ) -> Boundary {
-            Boundary {
-                id: String::new(),
-                boundary_type: bt,
-                area_m2: area,
-                azimuth_deg: None,
-                assembly_r_value_m2_k_w: None,
-                r_value_layers_m2_k_w: Vec::new(),
-                interior_zone: Some(interior),
-                exterior_zone: Some(exterior),
-                material_layers: Vec::new(),
-                framing_factor: None,
-                construction_type: None,
-                finish_type: None,
-                insulation_details: None,
-                has_radiant_barrier: false,
-                solar_absorptance: None,
-                emittance: None,
-                tilt_deg: tilt,
-                lut_boundary_name: None,
-                floor_or_ceiling: None,
-                perimeter_m: None,
-                perimeter_insulation_r_m2_k_w: None,
-                foundation_depth_m: None,
-            }
-        }
-        let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
-        let tilt_rad = tilt_deg.to_radians();
-        let boundaries = vec![
-            boundary(
-                BoundaryType::Roof,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                80.0,
-                Some(tilt_deg),
-            ),
-            boundary(
-                BoundaryType::Roof,
-                ZoneType::Garage,
-                ZoneType::Outdoor,
-                20.0,
-                Some(tilt_deg),
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                15.0,
-                None,
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                7.0,
-                None,
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                10.0,
-                None,
-            ),
-        ];
-        let garage_geom = GarageGeometry {
-            floor_area_m2: 30.0,
-            wall_height_m: 2.5,
-            protruded_area_m2: 15.0,
-        };
-        let floor_area = 120.0;
-        let vol = compute_attic_volume(&boundaries, Some(floor_area), Some(&garage_geom))
-            .expect("volume should compute");
-
-        // attic_gable_area = gable_areas[1] = 7.0 (NOT sorted median 10.0)
-        // sorted = [7, 10, 15]; med=10, low=7, high=15
-        // med-low=3, high-med=5 → third_gable = high = 15.0
-        let attic_gable_area = 7.0;
-        let third_gable_area = 15.0;
-        let attic_height = (attic_gable_area * tilt_rad.tan()).sqrt();
-        let garage_height = (third_gable_area * tilt_rad.tan()).sqrt();
-        let garage_width = 2.0 * third_gable_area / garage_height;
-        let garage_depth_in_house = garage_height * tilt_rad.tan();
-        let square_area = floor_area - garage_geom.protruded_area_m2;
-        let expected = 0.5 * square_area * attic_height
-            + 0.5 * garage_geom.protruded_area_m2 * garage_height
-            + (1.0 / 6.0) * garage_width * garage_depth_in_house * garage_height;
-        assert!(
-            (vol - expected).abs() < 1e-4,
-            "index-1 vs median: got {vol}, expected {expected}"
-        );
-    }
-
-    #[test]
-    fn attic_volume_path_a_attic_garage_wall() {
-        use super::{Boundary, BoundaryType, ZoneType, compute_attic_volume};
-        fn boundary(
-            bt: BoundaryType,
-            interior: ZoneType,
-            exterior: ZoneType,
-            area: f64,
-            tilt: Option<f64>,
-        ) -> Boundary {
-            Boundary {
-                id: String::new(),
-                boundary_type: bt,
-                area_m2: area,
-                azimuth_deg: None,
-                assembly_r_value_m2_k_w: None,
-                r_value_layers_m2_k_w: Vec::new(),
-                interior_zone: Some(interior),
-                exterior_zone: Some(exterior),
-                material_layers: Vec::new(),
-                framing_factor: None,
-                construction_type: None,
-                finish_type: None,
-                insulation_details: None,
-                has_radiant_barrier: false,
-                solar_absorptance: None,
-                emittance: None,
-                tilt_deg: tilt,
-                lut_boundary_name: None,
-                floor_or_ceiling: None,
-                perimeter_m: None,
-                perimeter_insulation_r_m2_k_w: None,
-                foundation_depth_m: None,
-            }
-        }
-        let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
-        let tilt_rad = tilt_deg.to_radians();
-        // Path A: Attic Garage Wall exists → merge all, use max(area[0], area[1])
-        let boundaries = vec![
-            boundary(
-                BoundaryType::Roof,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                80.0,
-                Some(tilt_deg),
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                10.0,
-                None,
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                8.0,
-                None,
-            ),
-            // Attic Garage Wall (Garage→Attic)
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Garage,
-                ZoneType::Attic,
-                4.0,
-                None,
-            ),
-        ];
-        let floor_area = 100.0;
-        let vol = compute_attic_volume(&boundaries, Some(floor_area), None)
-            .expect("volume should compute");
-        // Merged areas: [10.0, 8.0, 4.0]; max(first two of merged) = max(10, 8) = 10
-        let gable_area = 10.0_f64.max(8.0);
-        let h = (gable_area * tilt_rad.tan()).sqrt();
-        let expected = 0.5 * floor_area * h;
-        assert!(
-            (vol - expected).abs() < 1e-6,
-            "path A: got {vol}, expected {expected}"
-        );
-    }
-
-    #[test]
-    fn attic_volume_asymmetric_gables_returns_none() {
-        use super::{Boundary, BoundaryType, ZoneType, compute_attic_volume};
-        fn boundary(
-            bt: BoundaryType,
-            interior: ZoneType,
-            exterior: ZoneType,
-            area: f64,
-            tilt: Option<f64>,
-        ) -> Boundary {
-            Boundary {
-                id: String::new(),
-                boundary_type: bt,
-                area_m2: area,
-                azimuth_deg: None,
-                assembly_r_value_m2_k_w: None,
-                r_value_layers_m2_k_w: Vec::new(),
-                interior_zone: Some(interior),
-                exterior_zone: Some(exterior),
-                material_layers: Vec::new(),
-                framing_factor: None,
-                construction_type: None,
-                finish_type: None,
-                insulation_details: None,
-                has_radiant_barrier: false,
-                solar_absorptance: None,
-                emittance: None,
-                tilt_deg: tilt,
-                lut_boundary_name: None,
-                floor_or_ceiling: None,
-                perimeter_m: None,
-                perimeter_insulation_r_m2_k_w: None,
-                foundation_depth_m: None,
-            }
-        }
-        let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
-        // diff = 5.0 m² > 0.5 m² threshold → None
-        let boundaries = vec![
-            boundary(
-                BoundaryType::Roof,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                50.0,
-                Some(tilt_deg),
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                10.0,
-                None,
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                15.0,
-                None,
-            ),
-        ];
-        assert!(
-            compute_attic_volume(&boundaries, Some(100.0), None).is_none(),
-            "asymmetric gables (diff=5.0 m²) should return None"
-        );
-    }
-
-    #[test]
-    fn attic_volume_nearly_equal_gables_succeeds() {
-        use super::{Boundary, BoundaryType, ZoneType, compute_attic_volume};
-        fn boundary(
-            bt: BoundaryType,
-            interior: ZoneType,
-            exterior: ZoneType,
-            area: f64,
-            tilt: Option<f64>,
-        ) -> Boundary {
-            Boundary {
-                id: String::new(),
-                boundary_type: bt,
-                area_m2: area,
-                azimuth_deg: None,
-                assembly_r_value_m2_k_w: None,
-                r_value_layers_m2_k_w: Vec::new(),
-                interior_zone: Some(interior),
-                exterior_zone: Some(exterior),
-                material_layers: Vec::new(),
-                framing_factor: None,
-                construction_type: None,
-                finish_type: None,
-                insulation_details: None,
-                has_radiant_barrier: false,
-                solar_absorptance: None,
-                emittance: None,
-                tilt_deg: tilt,
-                lut_boundary_name: None,
-                floor_or_ceiling: None,
-                perimeter_m: None,
-                perimeter_insulation_r_m2_k_w: None,
-                foundation_depth_m: None,
-            }
-        }
-        let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
-        let floor_area = 100.0;
-        // diff = 0.3 m² < 0.5 m² threshold → Some(volume)
-        let boundaries = vec![
-            boundary(
-                BoundaryType::Roof,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                50.0,
-                Some(tilt_deg),
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                10.0,
-                None,
-            ),
-            boundary(
-                BoundaryType::Wall,
-                ZoneType::Attic,
-                ZoneType::Outdoor,
-                10.3,
-                None,
-            ),
-        ];
-        let vol = compute_attic_volume(&boundaries, Some(floor_area), None)
-            .expect("nearly-equal gables (diff=0.3 m²) should return Some");
-        let attic_height = (10.0_f64 * tilt_deg.to_radians().tan()).sqrt();
-        let expected = 0.5 * floor_area * attic_height;
-        assert!(
-            (vol - expected).abs() < 1e-6,
-            "nearly-equal gables: got {vol}, expected {expected}"
-        );
-    }
-
     #[test]
     fn attic_floor_area_includes_garage_ceiling() {
         // When there's a Garage→Attic floor boundary, the attic floor area should
@@ -6584,6 +6104,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -6655,10 +6176,7 @@ mod tests {
     }
 
     #[test]
-    fn attic_garage_walls_removed_after_path_a_volume_computation() {
-        // Regression: after Path A attic volume computation, Attic↔Garage
-        // wall boundaries must be removed. Matches OCHRE's
-        // del boundaries["Attic Garage Wall"] (hpxml.py:596).
+    fn attic_garage_walls_are_kept_as_heat_transfer_surfaces() {
         use super::parse_building;
         let xml = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
@@ -6671,6 +6189,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -6730,7 +6249,6 @@ mod tests {
 </HPXML>"#;
         let building = parse_building(xml).expect("parse should succeed");
 
-        // Verify no Wall boundaries remain between Garage and Attic.
         let garage_attic_walls: Vec<_> = building
             .boundaries
             .iter()
@@ -6742,51 +6260,8 @@ mod tests {
                             && b.exterior_zone.as_ref() == Some(&ZoneType::Garage)))
             })
             .collect();
-        assert!(
-            garage_attic_walls.is_empty(),
-            "expected no Attic↔Garage wall boundaries after Path A removal, found {}",
-            garage_attic_walls.len()
-        );
-
-        // The Attic and Garage zones should still exist.
-        assert!(
-            building
-                .zones
-                .iter()
-                .any(|z| z.zone_type == ZoneType::Attic),
-            "attic zone must still exist after wall removal"
-        );
-        assert!(
-            building
-                .zones
-                .iter()
-                .any(|z| z.zone_type == ZoneType::Garage),
-            "garage zone must still exist after wall removal"
-        );
-
-        // Floor boundaries between Garage and Attic (ceiling) must NOT be removed.
-        // Only Wall boundaries are filtered.
-    }
-
-    // ── Mass multiplier test (via ZoneInput) ────────────────────────────
-
-    #[test]
-    fn max_areas_by_azimuth_two_groups() {
-        use super::max_areas_by_azimuth;
-        let areas = vec![6.0, 8.0, 4.0];
-        let azimuths = vec![0.0, 90.0, 0.0];
-        let (a, b) = max_areas_by_azimuth(&areas, &azimuths).unwrap();
-        // Group 0°: max(6,4)=6; Group 90°: 8
-        assert!((a - 6.0).abs() < 1e-6);
-        assert!((b - 8.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn max_areas_by_azimuth_returns_none_for_one_group() {
-        use super::max_areas_by_azimuth;
-        let areas = vec![6.0, 4.0];
-        let azimuths = vec![0.0, 0.0];
-        assert!(max_areas_by_azimuth(&areas, &azimuths).is_none());
+        assert_eq!(garage_attic_walls.len(), 1);
+        assert!((garage_attic_walls[0].area_m2 - 40.0 * 0.092_903_04).abs() < 1e-9);
     }
 
     #[test]
@@ -6910,6 +6385,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea>1000</ConditionedFloorArea>
           <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure/>
@@ -7240,6 +6716,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7302,6 +6779,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7361,6 +6839,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7403,12 +6882,15 @@ mod tests {
 
     #[test]
     fn parse_malformed_xml_includes_position_info() {
-        // Illegal bare `<` in text content.
+        // Illegal bare `<` in text content. The tokenizer reads `< broken</child>`
+        // as a start tag and the reader rejects its malformed attribute, which
+        // the parse now names at line 3 instead of reaching the later end-tag
+        // mismatch on line 4.
         let xml = "<?xml version=\"1.0\"?>\n<root>\n  <child>value < broken</child>\n</root>";
         let err = parse_xml_document(xml).expect_err("malformed XML should fail to parse");
         let msg = err.to_string();
         assert!(
-            msg.contains("line 4"),
+            msg.contains("line 3"),
             "error should include position context, got: {msg}"
         );
     }
@@ -7453,6 +6935,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7509,111 +6992,14 @@ mod tests {
         );
     }
 
-    // ── garage volume (roof-space augmentation) ──
-
+    /// A garage with a declared floor area, no slab and no foundation walls
+    /// takes OS-HPXML's 8 ft garage height (geometry.rb
+    /// `calculate_zone_height`); there is no roof augmentation (OS-HPXML
+    /// sizes the garage by its slab and walls only).
     #[test]
-    fn garage_volume_with_pitched_roof() {
-        use super::{GarageGeometry, compute_garage_volume};
-        // 6:12 pitch → tilt = atan(0.5) ≈ 26.565°, tan ≈ 0.5
-        let tilt_rad = (6.0_f64 / 12.0).atan();
-        let floor_area = 30.0; // m²
-        let wall_height = 2.5; // m
-        let protruded = 15.0; // m²
-        let geom = GarageGeometry {
-            floor_area_m2: floor_area,
-            wall_height_m: wall_height,
-            protruded_area_m2: protruded,
-        };
-        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));
-        // Expected: floor_area * wall_height + 0.5 * tan(tilt) * protruded
-        //    = 30 * 2.5 + 0.5 * 0.5 * 15 = 75 + 3.75 = 78.75
-        let expected = floor_area * wall_height + 0.5 * tilt_rad.tan() * protruded;
-        assert!(
-            (vol - expected).abs() < 1e-10,
-            "pitched garage: got {vol}, expected {expected}"
-        );
-    }
-
-    #[test]
-    fn garage_volume_flat_roof_no_augmentation() {
-        use super::{GarageGeometry, compute_garage_volume};
-        let tilt_rad = 0.0;
-        let floor_area = 30.0;
-        let wall_height = 2.5;
-        let geom = GarageGeometry {
-            floor_area_m2: floor_area,
-            wall_height_m: wall_height,
-            protruded_area_m2: 15.0,
-        };
-        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));
-        // Zero tilt → tan(0) = 0 → augmentation = 0
-        assert!(
-            (vol - floor_area * wall_height).abs() < 1e-10,
-            "flat roof: augmentation should be zero, got {vol}"
-        );
-    }
-
-    #[test]
-    fn garage_volume_no_geometry_falls_back_to_rectangular() {
-        use super::compute_garage_volume;
-        let floor_area = 30.0;
-        let wall_height = 2.5;
-        let tilt_rad = (6.0_f64 / 12.0).atan();
-        // No GarageGeometry provided → falls back to floor_area * wall_height
-        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), None);
-        assert!(
-            (vol - floor_area * wall_height).abs() < 1e-10,
-            "missing geometry: should be rectangular, got {vol}"
-        );
-    }
-
-    #[test]
-    fn garage_volume_no_roof_tilt_falls_back_to_rectangular() {
-        use super::{GarageGeometry, compute_garage_volume};
-        let floor_area = 30.0;
-        let wall_height = 2.5;
-        let geom = GarageGeometry {
-            floor_area_m2: floor_area,
-            wall_height_m: wall_height,
-            protruded_area_m2: 15.0,
-        };
-        // No roof tilt → falls back to floor_area * wall_height
-        let vol = compute_garage_volume(floor_area, wall_height, None, Some(&geom));
-        assert!(
-            (vol - floor_area * wall_height).abs() < 1e-10,
-            "missing tilt: should be rectangular, got {vol}"
-        );
-    }
-
-    #[test]
-    fn garage_volume_zero_protruded_no_augmentation() {
-        use super::{GarageGeometry, compute_garage_volume};
-        let tilt_rad = (6.0_f64 / 12.0).atan();
-        let floor_area = 30.0;
-        let wall_height = 2.5;
-        let geom = GarageGeometry {
-            floor_area_m2: floor_area,
-            wall_height_m: wall_height,
-            protruded_area_m2: 0.0,
-        };
-        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));
-        assert!(
-            (vol - floor_area * wall_height).abs() < 1e-10,
-            "zero protruded: augmentation should be zero, got {vol}"
-        );
-    }
-
-    #[test]
-    fn garage_volume_inline_hpxml_with_roof_augmentation() {
-        // Integration test: parse a minimal HPXML with explicit garage floor
-        // area and pitched roof; verify the volume includes augmentation.
-        //
-        // Walls are arranged for compute_garage_geometry to produce
-        // protruded_area > 0:
-        //   - 2 perpendicular exterior garage walls → wall height derivable
-        //   - 1 attached wall (Conditioned↔Garage) → garage_area_in_main=0
-        //   → protruded = floor_area.
+    fn garage_without_slab_or_walls_takes_the_assumed_height() {
         use super::parse_building;
+        use hares_physics::units as conv;
         let xml = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
   <Building>
@@ -7623,6 +7009,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7684,15 +7071,20 @@ mod tests {
         let volume = garage_zone
             .volume_m3
             .expect("garage zone must have a computed volume");
-
-        let ceiling_height_m = building.ceiling_height_m.expect("must have ceiling height");
-        let floor_area_m2 = garage_zone.floor_area_m2.expect("must have floor area");
-        let rectangular = floor_area_m2 * ceiling_height_m;
-
-        // 1 attached wall → protruded = floor_area → augmentation > 0
+        let expected = conv::area_ft2_to_m2(600.0) * conv::length_ft_to_m(8.0);
         assert!(
-            volume > rectangular,
-            "garage volume {volume} must exceed rectangular {rectangular} with pitched roof and 1 attached wall (protruded > 0)"
+            (volume - expected).abs() < 1e-9,
+            "garage volume {volume}, expected {expected}"
+        );
+        assert_eq!(garage_zone.height_m, Some(conv::length_ft_to_m(8.0)));
+        assert!(
+            !building
+                .parse_warnings
+                .iter()
+                .any(|w| w.message.contains("'garage'")),
+            "a garage's height has no HPXML input, so 8 ft is the model, not a \
+             substitution to warn about; got {:?}",
+            building.parse_warnings
         );
     }
 
@@ -7715,6 +7107,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">100</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">800</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7758,6 +7151,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">100</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">800</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7803,6 +7197,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7893,6 +7288,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -7939,6 +7335,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -8003,5 +7400,222 @@ mod tests {
             (tilt - expected_approx).abs() < 2.0,
             "geometric inference should produce tilt ~{expected_approx}°, got {tilt}"
         );
+    }
+
+    #[test]
+    fn missing_floors_above_grade_is_a_parse_error() {
+        let xml = SAMPLE_XML.replace(
+            "<NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>",
+            "",
+        );
+        let err = parse_building(&xml).expect_err("expected missing-field failure");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NumberofConditionedFloorsAboveGrade"),
+            "error must name the element, got: {msg}"
+        );
+        assert!(
+            msg.contains("no silent default permitted"),
+            "error must state the strictness rule, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_shielding_or_site_type_is_a_parse_error() {
+        let shielding = SAMPLE_XML.replace(
+            "<ShieldingofHome>normal</ShieldingofHome>",
+            "<ShieldingofHome>windy</ShieldingofHome>",
+        );
+        let err = parse_building(&shielding).expect_err("expected parse failure");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ShieldingofHome") && msg.contains("windy"),
+            "error must name the element and the value, got: {msg}"
+        );
+        assert!(
+            msg.contains("normal") && msg.contains("exposed") && msg.contains("well-shielded"),
+            "error must name the allowed values, got: {msg}"
+        );
+
+        let site_type = SAMPLE_XML.replace(
+            "<SiteType>suburban</SiteType>",
+            "<SiteType>coastal</SiteType>",
+        );
+        let err = parse_building(&site_type).expect_err("expected parse failure");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SiteType") && msg.contains("coastal"),
+            "error must name the element and the value, got: {msg}"
+        );
+        assert!(
+            msg.contains("rural") && msg.contains("suburban") && msg.contains("urban"),
+            "error must name the allowed values, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn xsd_boolean_accepts_one_and_zero() {
+        let with_flue = |v: &str| {
+            SAMPLE_XML.replacen(
+                "        </AirInfiltrationMeasurement>",
+                &format!(
+                    "          <extension><HasFlueOrChimneyInConditionedSpace>{v}</HasFlueOrChimneyInConditionedSpace></extension>\n        </AirInfiltrationMeasurement>"
+                ),
+                1,
+            )
+        };
+
+        let building = parse_building(&with_flue("1")).expect("parse should succeed");
+        assert_eq!(
+            building.has_flue_or_chimney,
+            Some(true),
+            "xsd:boolean 1 is true"
+        );
+        let building = parse_building(&with_flue("0")).expect("parse should succeed");
+        assert_eq!(
+            building.has_flue_or_chimney,
+            Some(false),
+            "xsd:boolean 0 is false"
+        );
+
+        let err = parse_building(&with_flue("yes")).expect_err("yes is outside the lexical space");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("HasFlueOrChimneyInConditionedSpace") && msg.contains("yes"),
+            "error must name the element and the value, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn legacy_flue_element_names_its_replacement() {
+        let xml = SAMPLE_XML.replacen(
+            "        </AirInfiltrationMeasurement>",
+            "          <extension><HasFlueOrChimney>false</HasFlueOrChimney></extension>\n        </AirInfiltrationMeasurement>",
+            1,
+        );
+        let err = parse_building(&xml).expect_err("the deprecated element must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("HasFlueOrChimneyInConditionedSpace"),
+            "error must name the current element, got: {msg}"
+        );
+    }
+
+    fn parse_sample_with(from: &str, to: &str) -> Result<super::Building, HpxmlError> {
+        assert!(SAMPLE_XML.contains(from), "SAMPLE_XML lacks {from}");
+        parse_building(&SAMPLE_XML.replace(from, to))
+    }
+
+    fn zone_vented(building: &super::Building, zone_type: ZoneType) -> bool {
+        building
+            .zones
+            .iter()
+            .find(|z| z.zone_type == zone_type)
+            .expect("zone")
+            .vented
+    }
+
+    const EMPTY_FOUNDATION: &str = "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>";
+    const EMPTY_ATTIC: &str =
+        "<Attic>\n            <FloorArea units=\"ft2\">500</FloorArea>\n          </Attic>";
+    const BARE_SLAB: &str = "<Area units=\"ft2\">80</Area>\n          </Slab>";
+    const BARE_ROOF: &str = "<Area units=\"ft2\">120</Area>\n          </Roof>";
+
+    #[test]
+    fn flue_or_chimney_is_an_xs_boolean() {
+        assert_reads_xs_boolean("extension/HasFlueOrChimneyInConditionedSpace", |v| {
+            parse_sample_with(
+                "<Enclosure>",
+                &format!(
+                    "<extension><HasFlueOrChimneyInConditionedSpace>{v}\
+                     </HasFlueOrChimneyInConditionedSpace></extension><Enclosure>"
+                ),
+            )
+            .map(|b| b.has_flue_or_chimney)
+        });
+    }
+
+    #[test]
+    fn basement_conditioned_is_an_xs_boolean() {
+        assert_reads_xs_boolean("Basement/Conditioned", |v| {
+            parse_sample_with(
+                EMPTY_FOUNDATION,
+                &format!(
+                    "<Foundation><FoundationType><Basement><Conditioned>{v}</Conditioned>\
+                     </Basement></FoundationType><FloorArea units=\"ft2\">800</FloorArea></Foundation>"
+                ),
+            )
+            .map(|b| b.foundation_name)
+        });
+    }
+
+    #[test]
+    fn radiant_barrier_is_an_xs_boolean() {
+        assert_reads_xs_boolean("RadiantBarrier", |v| {
+            parse_sample_with(
+                BARE_ROOF,
+                &format!(
+                    "<Area units=\"ft2\">120</Area><RadiantBarrier>{v}</RadiantBarrier></Roof>"
+                ),
+            )
+            .map(|b| {
+                b.boundaries
+                    .iter()
+                    .find(|r| r.boundary_type == BoundaryType::Roof)
+                    .expect("roof")
+                    .has_radiant_barrier
+            })
+        });
+    }
+
+    #[test]
+    fn slab_spans_entire_slab_is_an_xs_boolean() {
+        assert_reads_xs_boolean("UnderSlabInsulation/Layer/InsulationSpansEntireSlab", |v| {
+            parse_sample_with(
+                BARE_SLAB,
+                &format!(
+                    "<Area units=\"ft2\">80</Area><UnderSlabInsulation><Layer>\
+                     <NominalRValue>10</NominalRValue>\
+                     <InsulationSpansEntireSlab>{v}</InsulationSpansEntireSlab>\
+                     </Layer></UnderSlabInsulation></Slab>"
+                ),
+            )
+            .map(|b| {
+                b.boundaries
+                    .iter()
+                    .find(|s| s.boundary_type == BoundaryType::Slab)
+                    .expect("slab")
+                    .insulation_details
+                    .clone()
+            })
+        });
+    }
+
+    #[test]
+    fn attic_vented_is_an_xs_boolean() {
+        assert_reads_xs_boolean("Attic/AtticType/Attic/Vented", |v| {
+            parse_sample_with(
+                EMPTY_ATTIC,
+                &format!(
+                    "<Attic><AtticType><Attic><Vented>{v}</Vented></Attic></AtticType>\
+                     <FloorArea units=\"ft2\">500</FloorArea></Attic>"
+                ),
+            )
+            .map(|b| zone_vented(&b, ZoneType::Attic))
+        });
+    }
+
+    #[test]
+    fn foundation_vented_is_an_xs_boolean() {
+        assert_reads_xs_boolean("Foundation/FoundationType/Vented", |v| {
+            parse_sample_with(
+                EMPTY_FOUNDATION,
+                &format!(
+                    "<Foundation><FoundationType><Crawlspace><Vented>{v}</Vented></Crawlspace>\
+                     </FoundationType><FloorArea units=\"ft2\">800</FloorArea></Foundation>"
+                ),
+            )
+            .map(|b| zone_vented(&b, ZoneType::Foundation))
+        });
     }
 }

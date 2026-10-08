@@ -29,17 +29,18 @@ use hares_equipment::{
     EquipmentConfig, EquipmentRegistry, EquipmentTypedConfig, EvConfig, GasBoilerConfig,
     GasFurnaceConfig, GeneratorConfig, HeatPumpCommonConfig, HeatPumpCoolerConfig,
     HeatPumpHeaterConfig, HvacSetpointConfig, IdealHvacConfig, IndirectTankConfig,
-    ProtocolBridgeConfig, PvConfig, RoomAcConfig, VentilationConfig,
+    ProtocolBridgeConfig, PvConfig, RejectUnknownKeys, RoomAcConfig, VentilationConfig,
     config::ConfigValue,
     water_heater::wh_config::{
         ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
         TanklessWaterHeaterConfig,
     },
 };
+use hares_types::rng::{RngStream, dwelling_seed};
 use hares_types::{
     ControlSignal, CoreCapabilities, CoreOutput, EnvironmentState, EquipmentDescriptor, FuelType,
-    OperatingMode, PortSlots, SurfaceIrradiance, ZoneId, telemetry_keys as tk,
-    validate_core_contract,
+    OperatingMode, PortSlots, SurfaceIrradiance, ThermostatAxes, ThermostatAxis,
+    ThermostatBandClass, ZoneId, telemetry_keys as tk, validate_core_contract,
 };
 
 use common::{default_env, env_with_zone_temp};
@@ -355,7 +356,7 @@ fn lifecycle_battery() {
         "Battery",
         BatteryConfig {
             equipment_id: None,
-            zone_id: Some(1),
+            zone_id: None,
             capacity_kwh: 13.5,
             max_charge_kw: 5.0,
             max_discharge_kw: 5.0,
@@ -599,13 +600,24 @@ fn env_with_pv_surface() -> EnvironmentState {
     env
 }
 
+/// The class's config as the dwelling hands it to `init`: carrying the zone
+/// map whose indoor (conditioned) role is zone 1, the zone every unit that
+/// conditions the dwelling's air serves.
 fn config_for_class(class: &str) -> EquipmentConfig {
+    let mut cfg = typed_config_for_class(class);
+    let mut zone_map = hares_types::ZoneMap::new();
+    zone_map.insert(hares_types::ZoneRole::Indoor, hares_types::ZoneId(1));
+    cfg.zone_map = Some(zone_map);
+    cfg
+}
+
+fn typed_config_for_class(class: &str) -> EquipmentConfig {
     match class {
         "Gas Furnace" => typed_alias_config(
             class,
             GasFurnaceConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 afue: 0.8,
                 capacity_w: 8_000.0,
                 number_of_speeds: 1,
@@ -620,7 +632,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             ElectricFurnaceConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 eir: 1.0,
                 capacity_w: 6_000.0,
                 number_of_speeds: 1,
@@ -633,7 +645,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             ElectricBaseboardConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 capacity_w: 2_000.0,
                 eir: 1.0,
                 setpoint: HvacSetpointConfig::default(),
@@ -643,8 +655,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             GasBoilerConfig {
                 equipment_id: None,
-                zone_id: Some(1),
-                loop_id: None,
+                zone_id: None,
+                loop_id: Some(1),
                 afue: 0.82,
                 capacity_w: 7_000.0,
                 number_of_speeds: 1,
@@ -660,8 +672,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             ElectricBoilerConfig {
                 equipment_id: None,
-                zone_id: Some(1),
-                loop_id: None,
+                zone_id: None,
+                loop_id: Some(1),
                 eir: 1.0,
                 capacity_w: 7_000.0,
                 number_of_speeds: 1,
@@ -676,7 +688,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             CentralAirConditionerConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 capacity_w: 8_000.0,
                 eir: 3.412_141_633 / 14.0,
                 shr: Some(0.75),
@@ -712,7 +724,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             RoomAcConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 capacity_w: 4_000.0,
                 eir: 3.412_141_633 / 10.0,
                 setpoint: HvacSetpointConfig::default(),
@@ -755,9 +767,10 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             typed_alias_config(
                 class,
                 HeatPumpHeaterConfig {
+                    reject_unknown_keys: RejectUnknownKeys,
                     common: HeatPumpCommonConfig {
                         equipment_id: None,
-                        zone_id: Some(1),
+                        zone_id: None,
                         heating_capacity_w: Some(8_000.0),
                         heating_eir: Some(3.412_141_633 / 9.0),
                         stage_heating_capacities_w: None,
@@ -808,9 +821,10 @@ fn config_for_class(class: &str) -> EquipmentConfig {
         "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler" | "WSHP Cooler" => typed_alias_config(
             class,
             HeatPumpCoolerConfig {
+                reject_unknown_keys: RejectUnknownKeys,
                 common: HeatPumpCommonConfig {
                     equipment_id: None,
-                    zone_id: Some(1),
+                    zone_id: None,
                     heating_capacity_w: Some(8_000.0),
                     heating_eir: Some(3.412_141_633 / 9.0),
                     stage_heating_capacities_w: None,
@@ -857,7 +871,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             IdealHvacConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 heating_capacity_w: Some(8_000.0),
                 cooling_capacity_w: Some(8_000.0),
                 ..IdealHvacConfig::default()
@@ -1056,7 +1070,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             BatteryConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 capacity_kwh: 13.5,
                 max_charge_kw: 5.0,
                 max_discharge_kw: 5.0,
@@ -1097,7 +1111,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             class,
             PvConfig {
                 equipment_id: None,
-                zone_id: Some(1),
+                zone_id: None,
                 capacity_kw: 5.0,
                 tilt_deg: Some(0.0),
                 azimuth_deg: Some(0.0),
@@ -1172,14 +1186,34 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             GeneratorConfig {
                 equipment_id: None,
                 zone_id: None,
-                fuel_type: None,
+                fuel_type: Some(FuelType::Gas),
                 rated_power_kw: 6.0,
                 eta_electric: Some(0.3),
                 eta_thermal: Some(0.0),
                 eta_jacket_water: None,
                 eta_lube_oil: None,
                 eta_exhaust: None,
-                efficiency_curve_points: None,
+                // The hardcoded fallback curve is gone: a curve config
+                // without points is a typed error, so the alias fixture
+                // carries the shipped defaults curve's points.
+                efficiency_curve_points: Some(vec![
+                    hares_equipment::GeneratorEfficiencyCurvePoint {
+                        capacity_ratio: 0.0,
+                        efficiency_ratio: 0.0,
+                    },
+                    hares_equipment::GeneratorEfficiencyCurvePoint {
+                        capacity_ratio: 0.1,
+                        efficiency_ratio: 0.47,
+                    },
+                    hares_equipment::GeneratorEfficiencyCurvePoint {
+                        capacity_ratio: 0.333,
+                        efficiency_ratio: 0.78,
+                    },
+                    hares_equipment::GeneratorEfficiencyCurvePoint {
+                        capacity_ratio: 1.0,
+                        efficiency_ratio: 1.0,
+                    },
+                ]),
                 efficiency_type: None,
                 delta_kw_per_s: Some(1.0),
                 capacity_min_kw: Some(0.0),
@@ -1284,7 +1318,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 ("sensible_gain_fraction", 0.0),
             ],
             &[("event_window_source", "constant")],
-        ),
+        )
+        .with_rng_stream(RngStream::event_load(dwelling_seed(0, 0), class)),
         _ => config_mixed(
             class,
             class,
@@ -1418,7 +1453,7 @@ fn lifecycle_tankless_water_heater() {
         ControlSignal::ThermalSetpoint {
             heating_setpoint_c: Some(50.0),
             cooling_setpoint_c: None,
-            deadband_c: Some(2.0),
+            deadband_c: None,
         },
         ControlSignal::PowerSetpoint {
             active_power_kw: 1.0,
@@ -1444,7 +1479,7 @@ fn lifecycle_gas_tankless_water_heater() {
         ControlSignal::ThermalSetpoint {
             heating_setpoint_c: Some(50.0),
             cooling_setpoint_c: None,
-            deadband_c: Some(2.0),
+            deadband_c: None,
         },
         ControlSignal::PowerSetpoint {
             active_power_kw: 1.0,
@@ -1515,6 +1550,47 @@ fn all_registered_equipment_core_output_matches_capabilities_and_ports() {
             );
         }
     }
+}
+
+/// Every registered type's thermostat band class and setpoint axes agree:
+/// an HVAC thermostat (a cycling or ideal band) declares the setpoints it
+/// serves, a single-purpose unit the one its end use names and only the
+/// ideal unit both; a tank (moved by an absolute setpoint, not a delta)
+/// and a type without a band declare none.
+#[test]
+fn every_registered_thermostat_declares_the_setpoints_it_serves() {
+    let registry = EquipmentRegistry::new();
+    let mut with_axes = Vec::new();
+    for class in registry.known_names() {
+        let cfg = config_for_class(class);
+        let env = env_for_class(class);
+        let mut eq = registry
+            .create(class, cfg.clone())
+            .unwrap_or_else(|e| panic!("create failed for '{class}': {e}"));
+        eq.init(&cfg, &env)
+            .unwrap_or_else(|e| panic!("init failed for '{class}': {e}"));
+        let band = eq.thermostat_band_class();
+        let axes = eq.thermostat_axes();
+        assert_eq!(
+            band.is_some_and(|c| c != ThermostatBandClass::Tank),
+            axes.is_some(),
+            "'{class}': band {band:?}, axes {axes:?}"
+        );
+        match axes {
+            Some(ThermostatAxes::One(axis)) => assert_eq!(
+                ThermostatAxis::of_end_use(&eq.descriptor().end_use),
+                Some(axis),
+                "'{class}' serves the axis its end use names"
+            ),
+            Some(ThermostatAxes::Both) => assert_eq!(band, Some(ThermostatBandClass::Ideal)),
+            None => continue,
+        }
+        with_axes.push(class.to_string());
+    }
+    assert!(
+        with_axes.len() >= 10,
+        "the registry must build its HVAC thermostats: {with_axes:?}"
+    );
 }
 
 #[test]
@@ -1594,6 +1670,7 @@ fn pv_capacitive_reactive_output_is_negative_in_core_output() {
 fn gshp_heater_pump_power_in_telemetry_and_ports() {
     let registry = EquipmentRegistry::new();
     let typed = HeatPumpHeaterConfig {
+        reject_unknown_keys: RejectUnknownKeys,
         common: HeatPumpCommonConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(8_000.0),
@@ -1670,6 +1747,7 @@ fn gshp_heater_pump_power_in_telemetry_and_ports() {
 fn gshp_cooler_pump_power_in_telemetry_and_ports() {
     let registry = EquipmentRegistry::new();
     let typed = HeatPumpCoolerConfig {
+        reject_unknown_keys: RejectUnknownKeys,
         common: HeatPumpCommonConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(8_000.0),

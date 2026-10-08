@@ -7,22 +7,36 @@ from dataclasses import dataclass
 from datetime import timedelta
 import math
 import secrets
-from typing import Any, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 import warnings
 
 import numpy as np
 
-from ochre_next._hares import Dwelling as PyDwelling, SimulationConfig, ControlSignal as PyControlSignal
+from ochre_next._hares import (
+    ControlSignal as PyControlSignal,
+    Dwelling as PyDwelling,
+    SimulationConfig,
+)
 
-try:
+if TYPE_CHECKING:
     import gymnasium as gym
     from gymnasium import spaces
 
+    # The extension's step() returns a plain dict at runtime; its declared
+    # shape lives in ochre_next._hares_types.
+    from ochre_next._hares_types import StepResult
+
     _GYM_BASE = gym.Env
-except ImportError:  # pragma: no cover - optional dependency
-    gym = None
-    spaces = None
-    _GYM_BASE = object
+else:
+    try:
+        import gymnasium as gym
+        from gymnasium import spaces
+
+        _GYM_BASE = gym.Env
+    except ImportError:  # pragma: no cover - optional dependency
+        gym = None
+        spaces = None
+        _GYM_BASE = object
 
 _BROAD_LOW = -1.0e6
 _BROAD_HIGH = 1.0e6
@@ -55,38 +69,8 @@ class GymDwellingConfig:
 # ---------------------------------------------------------------------------
 
 
-class StepInfo(TypedDict):
-    """Per-step ``info`` payload for :class:`DwellingGymEnv`.
-
-    ``warning_count`` and ``warnings`` follow the same contract as the Rust
-    ``batch_step`` fast path: ``warning_count`` (float) is always present and
-    counts the warnings drained from the dwelling during the step (e.g.
-    control signals rejected at dispatch time); ``warnings`` (list[str]) is
-    present only when the count is non-zero and holds the drained messages.
-    Warnings are drained exactly once per step, so a subsequent
-    ``Dwelling.take_warnings()`` will not return them again.
-    """
-
-    seed: int
-    timestep_index: int
-    step: dict[str, Any]
-    observation_bounds: dict[str, tuple[float, float]]
-    initial_observation_mask: np.ndarray | None
-    warning_count: float
-    warnings: NotRequired[list[str]]
-
-
-class StepResult(TypedDict):
-    obs: np.ndarray
-    reward: float
-    terminated: bool
-    truncated: bool
-    info: StepInfo
-    initial_observation_mask: np.ndarray | None
-
-
 class RewardContext(TypedDict):
-    step: dict[str, Any]
+    step: StepResult
     telemetry_zone: dict[str, Any]
     telemetry_equipment: dict[str, Any]
     total_power_kw: float
@@ -143,7 +127,7 @@ def _sim_config_to_kwargs(sim_config: SimulationConfig) -> dict[str, Any]:
         out["duration_s"] = sim_config.duration_s
     if sim_config.time_res_s:
         out["time_res_s"] = sim_config.time_res_s
-    if sim_config.output_verbosity is not None:
+    if sim_config.output_verbosity:
         out["output_verbosity"] = sim_config.output_verbosity
     if sim_config.output_path is not None:
         out["output_path"] = sim_config.output_path
@@ -158,7 +142,7 @@ def _sim_config_to_kwargs(sim_config: SimulationConfig) -> dict[str, Any]:
     return out
 
 
-def _sorted_action_layout(
+def sorted_action_layout(
     action_space_config: Mapping[str, Sequence[str]],
 ) -> tuple[list[tuple[str, str]], dict[str, str]]:
     layout: list[tuple[str, str]] = []
@@ -168,15 +152,23 @@ def _sorted_action_layout(
         if not fields:
             raise ValueError(f"action_space_config[{equipment!r}] must not be empty")
         sig_type = _infer_signal_type(fields)
+        if sig_type == "ThermalSetpoint" and not {field.lower() for field in fields} & _SETPOINT_FIELDS:
+            raise ValueError(
+                f"action_space_config[{equipment!r}] has deadband_c but no setpoint field: "
+                "a ThermalSetpoint deadband applies only with a named setpoint"
+            )
         type_by_equipment[equipment] = sig_type
         for field in fields:
             layout.append((equipment, field))
     return layout, type_by_equipment
 
 
+_SETPOINT_FIELDS = {"heating_setpoint_c", "cooling_setpoint_c", "heat_c", "cool_c", "setpoint_c"}
+
+
 def _infer_signal_type(fields: Sequence[str]) -> str:
     normalized = {field.lower() for field in fields}
-    if normalized & {"heating_setpoint_c", "cooling_setpoint_c", "deadband_c", "heat_c", "cool_c", "setpoint_c"}:
+    if normalized & (_SETPOINT_FIELDS | {"deadband_c"}):
         return "ThermalSetpoint"
     if normalized & {"active_power_kw", "reactive_power_kvar", "p_setpoint_kw", "kw"}:
         return "PowerSetpoint"
@@ -197,7 +189,7 @@ def _infer_signal_type(fields: Sequence[str]) -> str:
     raise ValueError(f"unsupported action field set: {sorted(fields)}")
 
 
-def _field_bounds(field: str) -> tuple[float, float]:
+def field_bounds(field: str) -> tuple[float, float]:
     name = field.lower()
     if name in {"soc", "target_soc", "min_soc", "max_soc", "fraction", "load_fraction", "on_fraction", "duty_cycle", "target_rh", "min_rh", "max_rh"}:
         return (0.0, 1.0)
@@ -205,12 +197,22 @@ def _field_bounds(field: str) -> tuple[float, float]:
         return (0.0, 1.0)
     if name in {"setpoint_c", "heat_c", "cool_c", "heating_setpoint_c", "cooling_setpoint_c"}:
         return (-50.0, 80.0)
-    if name in {"deadband_c"}:
-        return (0.0, 30.0)
     return (_BROAD_LOW, _BROAD_HIGH)
 
 
-def _observation_field_bounds(field: str) -> tuple[float, float]:
+def action_bounds(dwelling: PyDwelling, equipment: str, field: str) -> tuple[float, float]:
+    """A deadband is held to the range of the target's thermostat class."""
+    if field.lower() == "deadband_c":
+        band = dwelling.thermostat_band_range(equipment)
+        if band is None:
+            raise ValueError(
+                f"equipment {equipment!r} has no thermostat band for a deadband_c action"
+            )
+        return band
+    return field_bounds(field)
+
+
+def observation_field_bounds(field: str) -> tuple[float, float]:
     key = field.strip().lower()
     if key in {"outdoor_temp", "outdoor_temp_c"}:
         return (-50.0, 55.0)
@@ -353,7 +355,7 @@ def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) 
     return np.ascontiguousarray(obs)
 
 
-def _build_control_signal(signal_type: str, values: Mapping[str, float]) -> Any:
+def build_control_signal(signal_type: str, values: Mapping[str, float]) -> Any:
     """Build a typed ``PyControlSignal`` from a signal type name and field values.
 
     All branches call the typed static constructors on ``PyControlSignal``
@@ -409,7 +411,7 @@ def _build_control_signal(signal_type: str, values: Mapping[str, float]) -> Any:
     raise ValueError(f"unsupported signal type: {signal_type!r}")
 
 
-def _drain_step_warnings(dwelling: Any) -> tuple[float, list[str]]:
+def drain_step_warnings(dwelling: Any) -> tuple[float, list[str]]:
     """Drain warnings accumulated on ``dwelling`` during the step just taken.
 
     Returns ``(warning_count, messages)`` matching the Rust ``batch_step``
@@ -445,7 +447,7 @@ class DwellingGymEnv(_GYM_BASE):
         self._observation_fields = [str(field) for field in observation_fields]
         self._reward_fn = reward_fn
         self._episode_length = episode_length
-        self._action_layout, self._signal_type_by_equipment = _sorted_action_layout(
+        self._action_layout, self._signal_type_by_equipment = sorted_action_layout(
             action_space_config
         )
 
@@ -465,7 +467,7 @@ class DwellingGymEnv(_GYM_BASE):
         self._initial_snapshot = bytes(self._dwelling.save_state())
 
         bounds = [
-            _observation_field_bounds(f) for f in self._observation_fields
+            observation_field_bounds(f) for f in self._observation_fields
         ]
         if field_bounds_overrides:
             for idx, field in enumerate(self._observation_fields):
@@ -496,13 +498,17 @@ class DwellingGymEnv(_GYM_BASE):
 
         action_low: list[float] = []
         action_high: list[float] = []
-        for _, field in self._action_layout:
-            low, high = _field_bounds(field)
+        for equipment, field in self._action_layout:
+            low, high = action_bounds(self._dwelling, equipment, field)
             action_low.append(low)
             action_high.append(high)
+        # Kept on the instance so _apply_action() does not reach through the
+        # optional Gymnasium space object.
+        self._action_low_arr = np.asarray(action_low, dtype=np.float64)
+        self._action_high_arr = np.asarray(action_high, dtype=np.float64)
         self.action_space = spaces.Box(
-            low=np.asarray(action_low, dtype=np.float64),
-            high=np.asarray(action_high, dtype=np.float64),
+            low=self._action_low_arr,
+            high=self._action_high_arr,
             shape=(len(self._action_layout),),
             dtype=np.float64,
         )
@@ -519,15 +525,13 @@ class DwellingGymEnv(_GYM_BASE):
         return np.ascontiguousarray(obs, dtype=np.float64)
 
     def _apply_action(self, action: np.ndarray) -> None:
-        low = self.action_space.low
-        high = self.action_space.high
-        action = np.clip(action, low, high)
+        action = np.clip(action, self._action_low_arr, self._action_high_arr)
         action_values: dict[str, dict[str, float]] = {}
         for idx, (equipment, field) in enumerate(self._action_layout):
             action_values.setdefault(equipment, {})[field] = float(action[idx])
 
         for equipment in sorted(action_values):
-            signal = _build_control_signal(
+            signal = build_control_signal(
                 self._signal_type_by_equipment[equipment],
                 action_values[equipment],
             )
@@ -569,13 +573,18 @@ class DwellingGymEnv(_GYM_BASE):
 
     def step(
         self, action: np.ndarray
-    ) -> tuple[np.ndarray, float, bool, bool, StepInfo]:
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         """Apply ``action``, advance one timestep, and return
         ``(obs, reward, terminated, truncated, info)``.
 
-        ``info`` is a :class:`StepInfo`; see its docstring for the
-        ``warning_count`` / ``warnings`` surfacing contract shared with the
-        Rust ``batch_step`` path.
+        ``info`` carries the same contract as the Rust ``batch_step`` fast
+        path: ``"step"`` is the dwelling's ``StepResult`` for the step,
+        ``"warning_count"`` (float) is always present and counts the warnings
+        drained from the dwelling during the step (e.g. control signals
+        rejected at dispatch time); ``"warnings"`` (list[str]) is present only
+        when the count is non-zero and holds the drained messages. Warnings
+        are drained exactly once per step, so a subsequent
+        ``Dwelling.take_warnings()`` will not return them again.
         """
         arr = np.asarray(action, dtype=np.float64)
         arr = np.ascontiguousarray(arr.reshape(-1))
@@ -585,7 +594,7 @@ class DwellingGymEnv(_GYM_BASE):
             )
 
         self._apply_action(arr)
-        step_data: dict[str, Any] = self._dwelling.step()
+        step_data: StepResult = self._dwelling.step()
         telemetry = self._dwelling.telemetry()
         obs = telemetry_to_observation(telemetry, self._observation_fields)
         self._steps_elapsed += 1
@@ -598,15 +607,15 @@ class DwellingGymEnv(_GYM_BASE):
             total_power_kw=float(telemetry.total_power_kw),
         )
         reward = float(self._reward_fn(reward_context))
-        warning_count, warning_messages = _drain_step_warnings(self._dwelling)
-        info = StepInfo(
-            step=step_data,
-            seed=self._active_seed if self._active_seed is not None else 0,
-            timestep_index=self._steps_elapsed,
-            observation_bounds=self._observation_bounds,
-            initial_observation_mask=None,
-            warning_count=warning_count,
-        )
+        warning_count, warning_messages = drain_step_warnings(self._dwelling)
+        info: dict[str, Any] = {
+            "step": step_data,
+            "seed": self._active_seed if self._active_seed is not None else 0,
+            "timestep_index": self._steps_elapsed,
+            "observation_bounds": self._observation_bounds,
+            "initial_observation_mask": None,
+            "warning_count": warning_count,
+        }
         if warning_messages:
             info["warnings"] = warning_messages
         return obs, reward, False, truncated, info

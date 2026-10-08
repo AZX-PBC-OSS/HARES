@@ -320,6 +320,7 @@ impl PyBattery {
         ocv_table=None,
         uneg_table=None,
     ))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -708,8 +709,9 @@ pub struct PyEv {
 #[pymethods]
 impl PyEv {
     #[new]
-    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (name, capacity_kwh=None, max_charging_kw=None, initial_soc=None, initial_connection_state=None, power_factor=None, charger_capacity_kva=None, battery_temp_c=None, min_charge_temp_c=None, full_power_temp_c=None, heater_power_w=None, heater_threshold_c=None, thermal_mass_j_per_k=None, ua_w_per_k=None, n_series=None, n_parallel=None, cell_resistance_ohm=None, charging_curve_lut=None))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         name: String,
@@ -764,18 +766,15 @@ impl PyEv {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (vehicle_id, archetype_id, seed=0))]
-    fn from_vehicle_with_archetype(
-        vehicle_id: PyVehicleId,
-        archetype_id: PyEvArchetypeId,
-        #[allow(unused_variables)] seed: u64,
-    ) -> Self {
+    fn from_vehicle_with_archetype(vehicle_id: PyVehicleId, archetype_id: PyEvArchetypeId) -> Self {
         let rust_vid: VehicleId = vehicle_id.into();
         let rust_aid: EvArchetypeId = archetype_id.into();
         let spec = rust_vid.spec();
         let preset = rust_aid.preset();
         let max_power = match preset.charging_level {
-            hares_types::ChargingLevel::L1 => spec.max_l2_power_kw.min(1.8),
+            hares_types::ChargingLevel::L1 => spec
+                .max_l2_power_kw
+                .min(hares_equipment::ev::catalog::L1_CAP_KW),
             hares_types::ChargingLevel::L2 => spec.max_l2_power_kw,
         };
         Self {
@@ -1269,12 +1268,11 @@ pub fn extract_u_neg_table(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<U
 }
 
 fn is_polars_dataframe(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
-    if let Ok(cls) = obj.getattr("__class__") {
-        if let Ok(name) = cls.getattr("__name__") {
-            if let Ok(s) = name.extract::<String>() {
-                return Ok(s == "DataFrame");
-            }
-        }
+    if let Ok(cls) = obj.getattr("__class__")
+        && let Ok(name) = cls.getattr("__name__")
+        && let Ok(s) = name.extract::<String>()
+    {
+        return Ok(s == "DataFrame");
     }
     Ok(false)
 }

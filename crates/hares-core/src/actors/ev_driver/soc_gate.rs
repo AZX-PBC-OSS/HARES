@@ -75,12 +75,16 @@ impl ChargingPreference for SocGate {
         Some(self.charging_allowed)
     }
 
+    fn restore_charging_allowed(&mut self, allowed: bool) {
+        self.charging_allowed = allowed;
+    }
+
     /// Time to charge from the current SOC to the gate's target, reported
     /// regardless of the hysteresis state: the estimate is a property of the
     /// battery gap (what the channel name promises), not the strategy's
     /// intent — a resting `QuickThenWait`/`LowSoc` vehicle still needs those
     /// hours to close the gap.
-    fn needed_charge_hours(&self, ctx: &DecisionContext) -> f64 {
+    fn needed_charge_hours(&self, ctx: &DecisionContext) -> Result<f64, hares_types::HaresError> {
         needed_charge_hours_to_target(self.target_soc, self.charging_efficiency, ctx)
     }
 }
@@ -315,7 +319,7 @@ mod tests {
         let raw: f64 = 3.0 / (7.2 * 0.9);
         let step_hours: f64 = 1.0 / 60.0;
         let expected = (raw / step_hours).ceil() * step_hours;
-        let hours = pref.needed_charge_hours(&ctx);
+        let hours = pref.needed_charge_hours(&ctx).unwrap();
         assert!(
             (hours - expected).abs() < 1e-9,
             "needed_charge_hours while resting ({hours}) should equal the constant-efficiency expected ({expected}) at 22C"
@@ -335,7 +339,7 @@ mod tests {
 
         let ctx = make_ctx(&env, 0.8);
         assert!(
-            pref.needed_charge_hours(&ctx).abs() < 1e-9,
+            pref.needed_charge_hours(&ctx).unwrap().abs() < 1e-9,
             "needed_charge_hours must be 0.0 when the SOC gap is zero"
         );
     }

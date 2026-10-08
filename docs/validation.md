@@ -30,7 +30,7 @@ laws are enforced at runtime via invariant checks.
 OCHRE ([Blonsky et al. 2021](https://doi.org/10.1016/j.apenergy.2021.116732),
 repo at https://github.com/NREL/OCHRE) is the primary reference oracle,
 vendored as a git submodule at `vendors/OCHRE/`. The pinned commit is
-`ffc8b56e99c61eb4e42af625bbbc310e198ec58d`. HARES runs side-by-side
+`58f39d8746520786c26c02ce4c08618d3053c422`. HARES runs side-by-side
 simulations on identical inputs (same HPXML building description, weather
 file, and schedules) and compares output columns.
 
@@ -211,8 +211,7 @@ See [Runtime Invariants](#runtime-invariants) below.
 ## Runtime Invariants
 
 HARES checks conservation laws every timestep during simulation. These
-are enabled automatically in debug builds and can be enabled in release
-with `-F check_invariants`.
+run in every build profile, debug and release alike.
 
 The full list of checks, tolerances, ordering contract, and error
 reporting is documented in
@@ -268,7 +267,7 @@ Different validation layers use different tolerance strategies:
 ### OCHRE Reference
 
 - **Repository:** https://github.com/NREL/OCHRE
-- **Vendored commit:** `ffc8b56e99c61eb4e42af625bbbc310e198ec58d`
+- **Vendored commit:** `58f39d8746520786c26c02ce4c08618d3053c422`
 - **Publication:** Blonsky, M., Maguire, J., McKenna, K., Cutler, D., Balamurugan, S. P., & Jin, X. (2021). OCHRE: The Object-oriented, Controllable, High-resolution Residential Energy Model for Dynamic Integration Studies. *Applied Energy*, *290*, 116732. https://doi.org/10.1016/j.apenergy.2021.116732
 - **Status:** Published in Applied Energy (peer-reviewed journal). The NREL technical report NREL/TP-5500-84658 (Maguire et al. 2024) is an example of a study using OCHRE.
 

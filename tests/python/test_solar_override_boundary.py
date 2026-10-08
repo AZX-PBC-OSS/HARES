@@ -8,10 +8,10 @@ guard, and `EnvironmentState::set_solar_override`
 This is the documented PySAM/pvlib injection channel
 (tests/python/generate_pvlib_solar_override.py) — exactly the kind of
 pipeline where a NaN rides in from missing satellite data. The dwelling's
-finiteness screens downstream are `#[cfg(any(debug_assertions,
-feature = "check_invariants"))]` gated, so a NaN irradiance that crosses
-here surfaces mid-simulation at best (a loud panic far from the cause in
-debug builds) and silently poisons solar gains in release builds — the
+finiteness screens downstream run unconditionally in every build
+profile, so a NaN irradiance that crosses
+here surfaces mid-simulation at best (a loud step failure far from the
+cause) instead of at the boundary that received it. This is the
 same failure shape the actor-param boundary was fixed for, on the
 boundary whose entire purpose is accepting external pipeline data.
 

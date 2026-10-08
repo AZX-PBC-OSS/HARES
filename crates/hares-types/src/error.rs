@@ -33,6 +33,42 @@ pub enum HaresError {
     Tariff(String),
     #[error("invalid state: {0}")]
     InvalidState(String),
+    /// A thermostat switching band (an HVAC hysteresis or a water-heater
+    /// tank deadband, configured, signalled or restored) outside the range
+    /// of its thermostat class; see [`crate::thermostat_band`].
+    #[error(
+        "{field} = {value_c} °C is not a {class:?} thermostat band: {reason}",
+        reason = class.violation(*value_c)
+    )]
+    ThermostatBand {
+        field: String,
+        value_c: f64,
+        class: crate::ThermostatBandClass,
+    },
+    /// A demand-response pre-conditioning event the dwelling cannot serve,
+    /// refused when the actor is registered or supplied, or when a
+    /// replacement under the target's name would leave it so: a unit
+    /// serving both setpoints with no direction named, a direction the unit
+    /// does not serve, a target without a thermostat, a named target not in
+    /// the dwelling, or a direction on a delta that relaxes or is not
+    /// finite.
+    #[error("DR actor '{actor}' cannot pre-condition '{target}': {reason}")]
+    PreconditioningAxis {
+        actor: String,
+        target: String,
+        reason: String,
+    },
+    /// A required input that has no default, missing from `owner`'s
+    /// configuration.
+    #[error("{owner}: required input '{field}' is missing and has no default")]
+    MissingInput { owner: String, field: String },
+    /// A solar override timestep without an entry for a PV array's
+    /// orientation surface, which the PV needs to step.
+    #[error(
+        "solar override timestep {timestep} has no entry for PV surface {surface_id}: \
+         an override must carry every PV array's orientation surface"
+    )]
+    SolarOverrideMissingSurface { timestep: usize, surface_id: u32 },
     #[error("invariant violation in '{check_name}': value={value:.6e}, tolerance={tolerance:.6e}")]
     InvariantViolation {
         check_name: String,
@@ -54,6 +90,34 @@ pub enum HaresError {
         value: f64,
         step_index: u64,
     },
+    /// Equipment was rejected before joining a dwelling: every rejected
+    /// add or replace returns this variant, with the rejection in `reason`.
+    /// `warnings` are the warnings the equipment raised during its own
+    /// initialisation (possibly none), in the run warning log's format: the
+    /// equipment never joined, so they belong to the caller rather than to
+    /// the run.
+    #[error("{reason}{}", rejected_equipment_warnings(warnings))]
+    RejectedEquipment {
+        reason: Box<HaresError>,
+        warnings: Vec<String>,
+    },
+    /// An equipment parameter, from the input or an override, that the
+    /// equipment cannot take: a key it does not read, or a value of the
+    /// wrong type for the key.
+    #[error("equipment '{equipment}': parameter '{key}' {reason}")]
+    InvalidEquipmentParameter {
+        equipment: String,
+        key: String,
+        reason: String,
+    },
+}
+
+fn rejected_equipment_warnings(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        String::new()
+    } else {
+        format!(" (the rejected equipment warned: {})", warnings.join("; "))
+    }
 }
 
 /// Per-dwelling error wrapper for fleet-level error isolation.
@@ -107,6 +171,24 @@ mod tests {
                 step_index: 10,
             },
             HaresError::InvalidState("equipment already initialized".to_string()),
+            HaresError::RejectedEquipment {
+                reason: Box::new(HaresError::Equipment("duplicate name".to_string())),
+                warnings: vec!["Battery: init warning".to_string()],
+            },
+            HaresError::RejectedEquipment {
+                reason: Box::new(HaresError::Dwelling("not found".to_string())),
+                warnings: Vec::new(),
+            },
+            HaresError::InvalidEquipmentParameter {
+                equipment: "Cooking Range".to_string(),
+                key: "sensibel_gain_fraction".to_string(),
+                reason: "is not a parameter this equipment reads".to_string(),
+            },
+            HaresError::ThermostatBand {
+                field: "hysteresis_c".to_string(),
+                value_c: 0.0,
+                class: crate::ThermostatBandClass::Cycling,
+            },
         ];
         for err in errors {
             let json = serde_json::to_string(&err).expect("serialize error");
@@ -127,6 +209,24 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize deprecated physics");
         assert_eq!(decoded, err);
         assert!(json.contains("physically impossible temperature"));
+    }
+
+    #[test]
+    fn rejected_equipment_displays_its_reason_and_any_warnings() {
+        let reason = HaresError::Equipment("duplicate name".to_string());
+        let bare = HaresError::RejectedEquipment {
+            reason: Box::new(reason.clone()),
+            warnings: Vec::new(),
+        };
+        let warned = HaresError::RejectedEquipment {
+            reason: Box::new(reason.clone()),
+            warnings: vec!["a: w1".to_string(), "a: w2".to_string()],
+        };
+        assert_eq!(bare.to_string(), reason.to_string());
+        assert_eq!(
+            warned.to_string(),
+            format!("{reason} (the rejected equipment warned: a: w1; a: w2)")
+        );
     }
 
     #[test]

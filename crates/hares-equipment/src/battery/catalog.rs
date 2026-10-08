@@ -4,7 +4,7 @@ use std::fmt;
 
 use hares_types::BatteryChemistry;
 use serde::{Deserialize, Serialize};
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+#[cfg(debug_assertions)]
 use tracing;
 
 use crate::EquipmentConfig;
@@ -180,28 +180,6 @@ impl BatterySpec {
                     "Battery round_trip_efficiency outside expected range for chemistry"
                 );
             }
-        }
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            use std::sync::Once;
-            static CHECK_CATALOG_THERMAL: Once = Once::new();
-            CHECK_CATALOG_THERMAL.call_once(|| {
-                let masses: Vec<f64> = CATALOG.iter().map(|s| s.thermal_mass_j_per_k).collect();
-                let uas: Vec<f64> = CATALOG.iter().map(|s| s.ua_w_per_k).collect();
-                let all_same_mass = masses
-                    .windows(2)
-                    .all(|w| (w[0] - w[1]).abs() < f64::EPSILON);
-                let all_same_ua = uas.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON);
-                if all_same_mass && all_same_ua {
-                    tracing::warn!(
-                        n = CATALOG.len(),
-                        thermal_mass = CATALOG[0].thermal_mass_j_per_k,
-                        ua = CATALOG[0].ua_w_per_k,
-                        "Battery catalog: all products have identical thermal_mass_j_per_k \
-                         and ua_w_per_k. Catalog thermal properties are not differentiated.",
-                    );
-                }
-            });
         }
         let eta = self.round_trip_efficiency.sqrt();
         EquipmentConfig::from_typed(
@@ -615,6 +593,24 @@ static CATALOG: &[BatterySpec] = &[
 mod tests {
     use super::*;
 
+    /// The catalog's thermal properties must be differentiated (not one
+    /// shared constant across every product). Replaced the gated runtime
+    /// warn: the catalog is static, so the property is a unit test.
+    #[test]
+    fn catalog_thermal_properties_are_differentiated() {
+        let all_same_mass = CATALOG
+            .iter()
+            .all(|s| s.thermal_mass_j_per_k == CATALOG[0].thermal_mass_j_per_k);
+        let all_same_ua = CATALOG
+            .iter()
+            .all(|s| s.ua_w_per_k == CATALOG[0].ua_w_per_k);
+        assert!(
+            !(all_same_mass && all_same_ua),
+            "Battery catalog: all products have identical thermal_mass_j_per_k \
+             and ua_w_per_k; catalog thermal properties are not differentiated"
+        );
+    }
+
     #[test]
     fn all_catalog_specs_valid() {
         assert_eq!(CATALOG.len(), 12);
@@ -763,6 +759,7 @@ mod tests {
                 .unwrap();
         let mut batt = crate::battery::Battery::new(ec.clone());
         let env = hares_types::EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![],
             weather: hares_types::WeatherState {
                 outdoor_temp_c: 25.0,
@@ -793,7 +790,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: chrono::FixedOffset::east_opt(0)
@@ -1225,6 +1223,7 @@ mod tests {
         let config = spec.to_config().unwrap();
 
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![],
             weather: WeatherState {
                 outdoor_temp_c: -5.0,
@@ -1235,7 +1234,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1351,6 +1351,7 @@ mod tests {
         use crate::battery::{Battery, BatteryConfig};
 
         let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![],
             weather: WeatherState {
                 outdoor_temp_c: -5.0,
@@ -1361,7 +1362,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)

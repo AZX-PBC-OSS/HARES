@@ -1,6 +1,7 @@
 """Tests for SimulationConfig and DwellingConfig Python bindings."""
 
 import pytest
+from typing import Any, cast
 
 from ochre_next import SimulationConfig, DwellingConfig
 
@@ -21,6 +22,13 @@ class TestSimulationConfig:
         assert cfg.master_seed == 0
         assert cfg.civil_timezone is None
         assert cfg.setpoint_deadband_c is None
+        assert cfg.max_consecutive_step_failures == 1
+
+    def test_step_failure_budget_is_configurable(self):
+        cfg = SimulationConfig(max_consecutive_step_failures=0)
+        assert cfg.max_consecutive_step_failures == 0
+        cfg.max_consecutive_step_failures = 5
+        assert cfg.max_consecutive_step_failures == 5
 
     def test_construction_with_kwargs(self):
         """Verify SimulationConfig accepts kwargs in constructor."""
@@ -280,7 +288,7 @@ class TestDwellingConfig:
                 hpxml="path/to/building.xml",
                 schedule="path/to/schedules.csv",
                 weather="path/to/weather.epw",
-                overrides={1: 1.0},
+                overrides=cast(dict[str, Any], {1: 1.0}),
             )
 
     def test_with_simulation_config_round_trips(self):
@@ -300,8 +308,9 @@ class TestDwellingConfig:
 
     def test_missing_required_fields_raises_type_error(self):
         """Verify DwellingConfig with missing required fields raises TypeError."""
+        kwargs: dict[str, Any] = {"hpxml": "path/to/building.xml"}
         with pytest.raises(TypeError):
-            DwellingConfig(hpxml="path/to/building.xml")
+            DwellingConfig(**kwargs)
 
     def test_overrides_round_trips_as_dict(self):
         """Verify DwellingConfig with overrides round-trips through getter as dict."""

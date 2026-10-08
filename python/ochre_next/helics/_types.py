@@ -1,8 +1,14 @@
-"""Shared structural protocols for HELICS Python bindings."""
+"""Shared structural protocols and type guards for HELICS Python bindings."""
 
-from __future__ import annotations
+from typing import Any, Protocol
+import weakref
 
-from typing import Protocol
+from typing_extensions import TypeIs  # typing.TypeIs is Python 3.13+
+
+
+def is_json_object(value: object) -> TypeIs[dict[str, Any]]:
+    """Narrow a decoded control payload to a JSON-object mapping."""
+    return isinstance(value, dict)
 
 
 class HelicsFederateInfoLike(Protocol):
@@ -13,7 +19,8 @@ class HelicsFederateInfoLike(Protocol):
 
 
 class HelicsPublicationLike(Protocol):
-    def publish(self, value: float) -> None: ...
+    def publish(self, value: float | str) -> None: ...
+    def set_info(self, info: str) -> None: ...
 
 
 class HelicsSubscriptionLike(Protocol):
@@ -21,3 +28,25 @@ class HelicsSubscriptionLike(Protocol):
     string: str
 
     def is_updated(self) -> bool: ...
+
+
+class HelicsFederateLike(Protocol):
+    def register_publication(self, key: str, type_: str) -> HelicsPublicationLike: ...
+    def register_global_publication(self, key: str, type_: str) -> HelicsPublicationLike: ...
+    def register_subscription(self, key: str, type_: str) -> HelicsSubscriptionLike: ...
+    def set_flag_option(self, flag: int, enabled: bool) -> None: ...
+    def disconnect(self) -> None: ...
+
+
+class HelicsCoreLike(Protocol):
+    # The wrapper's weakref.finalize that frees the core's handle; calling it
+    # frees the core now and leaves nothing to free on collection.
+    _finalizer: "weakref.finalize[..., object]"
+
+    def is_connected(self) -> bool: ...
+
+
+class HelicsBrokerLike(Protocol):
+    def disconnect(self) -> None: ...
+    def is_connected(self) -> bool: ...
+    def get_address(self) -> str: ...

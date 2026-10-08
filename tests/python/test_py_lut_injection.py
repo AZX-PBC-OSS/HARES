@@ -34,6 +34,7 @@ def _make_dwelling() -> Dwelling:
         duration_s=3600,
         time_res_s=60,
         defaults_path=str(HARES_DEFAULTS),
+        write_output=False,
     )
     dw.initialize()
     return dw

@@ -31,6 +31,7 @@
 //!    50 gal tank, 4500 W element capacity.
 
 use hares_envelope::ThermalSolver;
+use hares_envelope::thermal_solver::SiteLocation;
 use hares_io::{
     Building, DesignConditions, EquipmentSpec,
     hpxml::{
@@ -42,8 +43,7 @@ use hares_physics::ashrae152::design_temperatures_f;
 use hares_physics::constants::{OCCUPANT_LATENT_GAIN_W, OCCUPANT_SENSIBLE_GAIN_W};
 use hares_physics::units::{temperature_c_to_f, temperature_f_to_c};
 use hares_types::ZoneId;
-#[cfg_attr(not(test), allow(unused_imports))]
-use serde_json::{Value, json};
+use serde_json::json;
 use tracing::{error, warn};
 
 /// ASHRAE 90.1 default indoor design setpoints [°C].
@@ -179,15 +179,23 @@ pub struct AutosizeContext {
 /// Floor area is derived from `building.conditioned_volume_m3 / building.ceiling_height_m`,
 /// falling back to the first conditioned zone's `floor_area_m2`.
 ///
-/// If floor area cannot be determined (both sources are absent or zero), a `warn!` is
-/// emitted and gains are returned based on occupancy only (zero lighting/plug component).
+/// If floor area cannot be determined (both sources are absent or zero), an
+/// error naming the missing input is returned: sizing on occupancy-only
+/// gains undersizes the home.
 ///
 /// Override: when `ctx.internal_gains_w > 0.0`, the context-supplied values
 /// take precedence (HPXML override path).
-pub fn compute_default_internal_gains(ctx: &AutosizeContext, building: &Building) -> (f64, f64) {
+///
+/// # Errors
+///
+/// No conditioned floor area is determinable from the building.
+pub fn compute_default_internal_gains(
+    ctx: &AutosizeContext,
+    building: &Building,
+) -> hares_types::Result<(f64, f64)> {
     // Override via AutosizeContext (HPXML-supplied values).
     if ctx.internal_gains_w > 0.0 {
-        return (ctx.internal_gains_w, ctx.internal_gains_latent_w);
+        return Ok((ctx.internal_gains_w, ctx.internal_gains_latent_w));
     }
 
     // Occupancy: DEFAULT_OCCUPANTS × per-capita gains.
@@ -197,11 +205,8 @@ pub fn compute_default_internal_gains(ctx: &AutosizeContext, building: &Building
     let occ_latent = DEFAULT_OCCUPANTS * OCCUPANT_LATENT_GAIN_W;
 
     // Floor area from building geometry.
-    let floor_area_m2 = building
-        .conditioned_volume_m3
-        .zip(building.ceiling_height_m)
-        .filter(|&(_v, h)| h > 0.0)
-        .map(|(v, h)| v / h)
+    let floor_area_m2 = (building.ceiling_height_m > 0.0)
+        .then(|| building.conditioned_volume_m3 / building.ceiling_height_m)
         .or_else(|| {
             building
                 .zones
@@ -219,16 +224,18 @@ pub fn compute_default_internal_gains(ctx: &AutosizeContext, building: &Building
         Some(area) if area > 0.0 => {
             let lights_and_plug = area * DEFAULT_LIGHTING_PLUG_DENSITY_W_M2;
             let sensible = occ_sensible + lights_and_plug;
-            (sensible, occ_latent)
+            Ok((sensible, occ_latent))
         }
         _ => {
-            tracing::warn!(
-                occupancy_sensible_w = occ_sensible,
-                occupancy_latent_w = occ_latent,
-                "cooling autosizing: conditioned floor area is zero or missing — \
-                 internal gains limited to occupancy only; sizing may be conservative"
-            );
-            (occ_sensible, occ_latent)
+            // A home with no determinable conditioned floor area is an input
+            // defect: sizing the cooling load on occupancy-only gains
+            // undersizes every unit the home has.
+            Err(hares_types::HaresError::Dwelling(
+                "cooling autosizing: no conditioned floor area is determinable \
+                 (no ceiling height and volume, and no conditioned zone floor \
+                 area); lighting and plug gains cannot be sized"
+                    .to_string(),
+            ))
         }
     }
 }
@@ -283,7 +290,7 @@ pub fn autosize_equipment_capacities(
     ctx: &AutosizeContext,
     building: &Building,
     indoor_zone_id: ZoneId,
-) {
+) -> hares_types::Result<()> {
     // Resolve outdoor design temperatures.
     // Prefer EPW design conditions; fall back to ASHRAE 152 station lookup.
     let (heating_design_c, cooling_design_c) = resolve_design_temperatures(
@@ -297,7 +304,8 @@ pub fn autosize_equipment_capacities(
     // Compute internal gains for cooling autosizing.
     // ACCA Manual J-2016 §7: cooling design loads must include sensible
     // internal gains from occupancy, lighting, and appliances.
-    let (internal_gains_w, internal_gains_latent_w) = compute_default_internal_gains(ctx, building);
+    let (internal_gains_w, internal_gains_latent_w) =
+        compute_default_internal_gains(ctx, building)?;
 
     for spec in specs.iter_mut() {
         let needs_heating = spec
@@ -325,6 +333,14 @@ pub fn autosize_equipment_capacities(
             continue;
         }
 
+        // The rebuild contract at the end of the loop: a spec whose typed
+        // config existed (placeholders to replace) or which carried autosize
+        // flags (a pending typed config) leaves the loop with a typed config.
+        let had_typed_config = spec.typed_config.is_some();
+        let had_autosize_flags = spec.parameters.contains_key("autosize_heating")
+            || spec.parameters.contains_key("autosize_cooling")
+            || spec.parameters.contains_key("autosize_backup");
+
         // Determine indoor design setpoints.
         // Prefer the equipment's own setpoint; fall back to building setpoints;
         // fall back to ASHRAE 90.1 defaults.
@@ -334,6 +350,9 @@ pub fn autosize_equipment_capacities(
         if needs_heating {
             let raw_capacity = thermal
                 .autosize_design_day_heating(indoor_zone_id, heating_setpoint_c, heating_design_c)
+                .map_err(|err| {
+                    hares_types::HaresError::Envelope(format!("heating autosizing failed: {err}"))
+                })?
                 .abs();
 
             // Oversizing factor: prefer HPXML <HeatingAutosizingFactor>;
@@ -349,7 +368,8 @@ pub fn autosize_equipment_capacities(
             // ACCA Manual S-2017 §4-5: oversized heat pumps cycle excessively
             // during mild weather, degrading COP and increasing auxiliary heat
             // runtime. The HPXML <HeatingAutosizingFactor> override takes
-            // precedence when present.
+            // precedence when present. The default-path clamp below is the
+            // behavior; the former gated re-check of it is deleted.
             if is_heat_pump_equipment(spec) {
                 if !has_factor_override {
                     // Default factor path: cap at 1.25×.
@@ -372,20 +392,6 @@ pub fn autosize_equipment_capacities(
                         "HPXML <HeatingAutosizingFactor> exceeds ACCA Manual S-2017 §4-5 \
                          heat pump heating limit of 1.25×; override is respected but may \
                          cause excessive cycling"
-                    );
-                }
-            }
-
-            // Invariant: heat pump heating factor with default path must not
-            // exceed Manual S §4-5 limit.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                if is_heat_pump_equipment(spec) && !has_factor_override {
-                    assert!(
-                        factor <= HEATING_OVERSIZE_FACTOR_HEAT_PUMP + f64::EPSILON,
-                        "invariant: heat pump heating factor {factor} exceeds Manual S §4-5 \
-                         limit of {HEATING_OVERSIZE_FACTOR_HEAT_PUMP} for equipment {}",
-                        spec.name
                     );
                 }
             }
@@ -464,11 +470,16 @@ pub fn autosize_equipment_capacities(
                     indoor_zone_id,
                     cooling_setpoint_c,
                     cooling_design_c,
-                    ctx.weather_lat,
-                    ctx.weather_lon,
-                    ctx.weather_elevation_m,
+                    SiteLocation {
+                        latitude_deg: ctx.weather_lat,
+                        longitude_deg: ctx.weather_lon,
+                        elevation_m: ctx.weather_elevation_m,
+                    },
                     internal_gains_w,
                 )
+                .map_err(|err| {
+                    hares_types::HaresError::Envelope(format!("cooling autosizing failed: {err}"))
+                })?
                 .abs();
 
             // Oversizing factor: prefer HPXML <CoolingAutosizingFactor>;
@@ -549,6 +560,9 @@ pub fn autosize_equipment_capacities(
             // capacity applies. Otherwise recompute it.
             let raw_capacity = thermal
                 .autosize_design_day_heating(indoor_zone_id, heating_setpoint_c, heating_design_c)
+                .map_err(|err| {
+                    hares_types::HaresError::Envelope(format!("heating autosizing failed: {err}"))
+                })?
                 .abs();
 
             // Backup factor: prefer HPXML <BackupHeatingAutosizingFactor>;
@@ -589,10 +603,25 @@ pub fn autosize_equipment_capacities(
             }
         }
 
-        // Rebuild typed config with updated capacities.
-        spec.typed_config =
-            rebuild_hvac_typed_config(&spec.name, &spec.parameters, &ctx.duct_params);
+        // Rebuild typed config with updated capacities. The rebuild owns
+        // two cases: a spec that carried a typed config (the autosized
+        // placeholders are replaced), and a spec pending autosize (the
+        // resolver left its typed config unset when the capacity was
+        // absent; the config builds here from the autosized parameters).
+        // A raw spec without autosize flags keeps the raw channel. A
+        // rebuild that fails is an error: silently leaving the raw
+        // spec in place would run autosized parameters through
+        // placeholder-capacity equipment.
+        if had_typed_config || had_autosize_flags {
+            spec.typed_config = Some(
+                rebuild_hvac_typed_config(&spec.name, &spec.parameters, &ctx.duct_params).map_err(
+                    |e| hares_types::HaresError::Dwelling(format!("autosize rebuild: {e}")),
+                )?,
+            );
+        }
     }
+
+    Ok(())
 }
 
 // ── Water heater autosizing ────────────────────────────────────────────
@@ -630,7 +659,7 @@ pub fn autosize_water_heater_capacities(
     specs: &mut [EquipmentSpec],
     n_bedrooms: Option<f64>,
     mains_temp_c: f64,
-) {
+) -> hares_types::Result<()> {
     // Validate mains temperature — clamp or use default if unreasonable.
     // Upper bound allows tropical cold-water temperatures up to 50 °C.
     let mains_temp_c = if mains_temp_c.is_finite() && mains_temp_c > 0.0 && mains_temp_c < 50.0 {
@@ -676,17 +705,14 @@ pub fn autosize_water_heater_capacities(
             0.0
         });
 
-        // Invariant: check bedroom count in debug/check_invariants builds.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            if n_bedrooms <= 0.0 {
-                tracing::warn!(
-                    equipment = %spec.name,
-                    n_bedrooms,
-                    "water heater autosizing: bedroom count is zero or negative; \
-                     sizing based on defaults"
-                );
-            }
+        // A negative bedroom count is invalid input (a studio's zero is
+        // valid and sizes from defaults; the unavailable case already warns
+        // above).
+        if n_bedrooms < 0.0 {
+            return Err(hares_types::HaresError::Dwelling(format!(
+                "water heater autosizing for '{}': n_bedrooms must be >= 0, got {n_bedrooms}",
+                spec.name
+            )));
         }
 
         // Size tank volume from bedrooms (or default).
@@ -787,27 +813,29 @@ pub fn autosize_water_heater_capacities(
                 );
             }
 
-            // Invariant: computed values must be positive and non-NaN.
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                assert!(
-                    fhr_gph > 0.0 && fhr_gph.is_finite(),
+            // Invariant: computed values must be positive and finite. The
+            // autosized values are construction inputs to the water-heater
+            // model; a non-finite or non-positive value is a typed error.
+            if !fhr_gph.is_finite() || fhr_gph <= 0.0 {
+                return Err(hares_types::HaresError::Dwelling(format!(
                     "water heater autosizing invariant: FHR must be positive and finite, \
                      got {fhr_gph} for {}",
                     spec.name
-                );
-                assert!(
-                    tank_volume_gal > 0.0 && tank_volume_gal.is_finite(),
+                )));
+            }
+            if !tank_volume_gal.is_finite() || tank_volume_gal <= 0.0 {
+                return Err(hares_types::HaresError::Dwelling(format!(
                     "water heater autosizing invariant: tank volume must be positive \
                      and finite, got {tank_volume_gal} for {}",
                     spec.name
-                );
-                assert!(
-                    sized_capacity_w > 0.0 && sized_capacity_w.is_finite(),
+                )));
+            }
+            if !sized_capacity_w.is_finite() || sized_capacity_w <= 0.0 {
+                return Err(hares_types::HaresError::Dwelling(format!(
                     "water heater autosizing invariant: capacity must be positive and \
                      finite, got {sized_capacity_w} for {}",
                     spec.name
-                );
+                )));
             }
         } else {
             // Autosizing computed zero or negative capacity — fall back to a
@@ -847,6 +875,7 @@ pub fn autosize_water_heater_capacities(
         // downstream consumers see the autosized capacity and volume.
         spec.typed_config = rebuild_wh_typed_config(&spec.name, &spec.parameters);
     }
+    Ok(())
 }
 
 /// Required First-Hour Rating [GPH] from bedroom count.
@@ -918,10 +947,11 @@ fn resolve_design_temperatures(
     site_lon: Option<f64>,
 ) -> (f64, f64) {
     // Try EPW design conditions first.
-    if let Some(dc) = design_conditions {
-        if dc.heating_design_db_c.is_finite() && dc.cooling_design_db_c.is_finite() {
-            return (dc.heating_design_db_c, dc.cooling_design_db_c);
-        }
+    if let Some(dc) = design_conditions
+        && dc.heating_design_db_c.is_finite()
+        && dc.cooling_design_db_c.is_finite()
+    {
+        return (dc.heating_design_db_c, dc.cooling_design_db_c);
     }
 
     // Fall back to ASHRAE 152 climate station lookup.
@@ -956,10 +986,10 @@ fn resolve_heating_setpoint_c(spec: &EquipmentSpec, building: &Building) -> f64 
     }
 
     // Try the building's heating setpoint profile (use midnight value).
-    if let Some(ref profile) = building.heating_weekday_setpoints_c {
-        if !profile.is_empty() {
-            return profile[0];
-        }
+    if let Some(ref profile) = building.heating_weekday_setpoints_c
+        && !profile.is_empty()
+    {
+        return profile[0];
     }
 
     // ASHRAE 90.1 default.
@@ -979,10 +1009,10 @@ fn resolve_cooling_setpoint_c(spec: &EquipmentSpec, building: &Building) -> f64 
     }
 
     // Try the building's cooling setpoint profile (use midnight value).
-    if let Some(ref profile) = building.cooling_weekday_setpoints_c {
-        if !profile.is_empty() {
-            return profile[0];
-        }
+    if let Some(ref profile) = building.cooling_weekday_setpoints_c
+        && !profile.is_empty()
+    {
+        return profile[0];
     }
 
     // ASHRAE 90.1 default.
@@ -993,11 +1023,21 @@ fn resolve_cooling_setpoint_c(spec: &EquipmentSpec, building: &Building) -> f64 
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use hares_envelope::thermal_solver::SiteLocation;
     use hares_envelope::{OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolverConfig};
     use hares_types::{EnvironmentState, FuelType, GridState, WeatherState, ZoneId, ZoneState};
     use nalgebra::DMatrix;
-    use serde_json::Map;
+    use serde_json::{Map, Value};
     use std::collections::HashMap;
+
+    /// Denver site with zero elevation; the common solar autosize test input.
+    fn denver_site() -> SiteLocation {
+        SiteLocation {
+            latitude_deg: 39.74,
+            longitude_deg: -104.87,
+            elevation_m: 0.0,
+        }
+    }
 
     const ZONE: ZoneId = ZoneId(1);
     const UA: f64 = 20.0; // W/K
@@ -1006,6 +1046,7 @@ mod tests {
 
     fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZONE,
                 temperature_c: zone_temp_c,
@@ -1041,7 +1082,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: HashMap::new(),
             current_time: chrono::FixedOffset::east_opt(0)
                 .unwrap()
@@ -1078,10 +1120,7 @@ mod tests {
             node_capacitances: HashMap::new(),
             node_index: HashMap::new(),
         };
-        let config = ThermalSolverConfig {
-            indoor_zone_id: ZONE,
-            ..ThermalSolverConfig::default()
-        };
+        let config = ThermalSolverConfig::new(ZONE);
         ThermalSolver::new(model, wiring, config, DT_S, env, indoor_temp_c)
             .expect("1R1C ThermalSolver construction must succeed")
     }
@@ -1105,7 +1144,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -1116,21 +1155,24 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
-            conditioned_volume_m3: None,
-            ceiling_height_m: None,
+            conditioned_volume_m3: 400.0,
+            ceiling_height_m: 2.5,
             infiltration_height_m: None,
-            floors_above_grade: None,
+            floors_above_grade: 1.0,
             has_flue_or_chimney: None,
             foundation_name: None,
+            conditioned_foundation_merged: false,
             residential_facility_type: None,
-            mass_multiplier_override: None,
+            temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
+            climate_zone_iecc: None,
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: "root".into(),
                 attrs: Default::default(),
                 text: String::new(),
                 children: vec![],
             },
+            parse_warnings: Vec::new(),
         }
     }
 
@@ -1179,12 +1221,16 @@ mod tests {
 
         let mut params = Map::new();
         params.insert("autosize_heating".to_string(), json!(true));
+        // The typed config builds after autosizing, so the spec states
+        // every field a furnace's config needs.
+        params.insert("efficiency_afue".to_string(), json!(0.80));
         let spec = EquipmentSpec {
             name: "Gas Furnace".to_string(),
             instance_name: None,
             fuel_type: hares_types::FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1206,7 +1252,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1242,6 +1288,7 @@ mod tests {
             fuel_type: hares_types::FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1263,7 +1310,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1298,12 +1345,16 @@ mod tests {
 
         let mut params = Map::new();
         params.insert("autosize_heating".to_string(), json!(true));
+        // The typed config builds after autosizing, so the spec states
+        // every field a furnace's config needs.
+        params.insert("efficiency_afue".to_string(), json!(0.80));
         let spec = EquipmentSpec {
             name: "Gas Furnace".to_string(),
             instance_name: None,
             fuel_type: hares_types::FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1325,7 +1376,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1363,6 +1414,7 @@ mod tests {
             fuel_type: hares_types::FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1384,7 +1436,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1419,12 +1471,16 @@ mod tests {
         let mut params = Map::new();
         params.insert("autosize_heating".to_string(), json!(true));
         params.insert("autosize_heating_factor".to_string(), json!(1.2));
+        // The typed config builds after autosizing, so the spec states
+        // every field a furnace's config needs.
+        params.insert("efficiency_afue".to_string(), json!(0.80));
         let spec = EquipmentSpec {
             name: "Gas Furnace".to_string(),
             instance_name: None,
             fuel_type: hares_types::FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1446,7 +1502,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1478,12 +1534,18 @@ mod tests {
         let mut params = Map::new();
         params.insert("autosize_cooling".to_string(), json!(true));
         params.insert("autosize_cooling_factor".to_string(), json!(1.0));
+        // The typed config builds after autosizing, so the spec states
+        // every field a furnace's config needs; the heating capacity is
+        // stated (only the cooling is autosized here).
+        params.insert("efficiency_afue".to_string(), json!(0.80));
+        params.insert("heating_capacity_w".to_string(), json!(10_000.0));
         let spec = EquipmentSpec {
             name: "Gas Furnace".to_string(),
             instance_name: None,
             fuel_type: hares_types::FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1505,7 +1567,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1516,17 +1578,16 @@ mod tests {
 
         // minimal_building() has no floor area → occupancy-only gains: 2 × 75 = 150 W.
         let (internal_gains_w, _internal_gains_latent_w) =
-            compute_default_internal_gains(&ctx, &building);
+            compute_default_internal_gains(&ctx, &building).unwrap();
         let raw_capacity = thermal
             .autosize_design_day_cooling(
                 ZONE,
                 DEFAULT_COOLING_SETPOINT_C,
                 35.0,
-                0.0,
-                0.0,
-                0.0,
+                SiteLocation::default(),
                 internal_gains_w,
             )
+            .unwrap()
             .abs();
         // internal_gains_w = 132.0 (occupancy-only, no floor area in
         // minimal_building).  This matches what autosize_equipment_capacities
@@ -1552,12 +1613,16 @@ mod tests {
         params.insert("autosize_heating".to_string(), json!(true));
         params.insert("autosize_heating_min_w".to_string(), json!(5000.0));
         params.insert("autosize_heating_max_w".to_string(), json!(600.0));
+        // The typed config builds after autosizing, so the spec states
+        // every field a furnace's config needs.
+        params.insert("efficiency_afue".to_string(), json!(0.80));
         let spec = EquipmentSpec {
             name: "Gas Furnace".to_string(),
             instance_name: None,
             fuel_type: hares_types::FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1579,7 +1644,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -1638,7 +1703,6 @@ mod tests {
             node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
-            indoor_zone_id: ZONE,
             window_zone_ids: HashMap::from([(window_surface_id, ZONE)]),
             window_properties: HashMap::from([(
                 window_surface_id,
@@ -1655,7 +1719,7 @@ mod tests {
                     azimuth_deg,
                 },
             )]),
-            ..ThermalSolverConfig::default()
+            ..ThermalSolverConfig::new(ZONE)
         };
         let thermal = ThermalSolver::new(model, wiring, config, DT_S, env, indoor_temp_c)
             .expect("1R1C ThermalSolver with window must construct");
@@ -1679,11 +1743,14 @@ mod tests {
                 ZONE,
                 DEFAULT_COOLING_SETPOINT_C,
                 35.0,
-                39.74, // Denver
-                -104.87,
-                1609.0,
+                SiteLocation {
+                    latitude_deg: 39.74, // Denver
+                    longitude_deg: -104.87,
+                    elevation_m: 1609.0,
+                },
                 0.0, // zero internal gains for baseline
             )
+            .unwrap()
             .abs();
 
         // Cooling with solar should be meaningfully larger than zero-solar.
@@ -1714,8 +1781,9 @@ mod tests {
         let env = one_zone_env(18.0, -10.0);
         let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 18.0, 180.0);
 
-        let heating_design_day =
-            thermal.autosize_design_day_heating(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0);
+        let heating_design_day = thermal
+            .autosize_design_day_heating(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0)
+            .unwrap();
         let dc_gain = thermal
             .autosize_capacity(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0)
             .abs();
@@ -1750,6 +1818,7 @@ mod tests {
             fuel_type: hares_types::FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1771,7 +1840,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let backup_w = result
@@ -1810,6 +1879,7 @@ mod tests {
             fuel_type: hares_types::FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1831,7 +1901,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let backup_w = result
@@ -1874,6 +1944,7 @@ mod tests {
             fuel_type: hares_types::FuelType::Electric,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -1895,7 +1966,7 @@ mod tests {
         };
         let building = minimal_building();
 
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         // Cooler specs should NOT receive backup_capacity_w.
@@ -1921,7 +1992,14 @@ mod tests {
             .autosize_capacity(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0)
             .abs();
         let solar = thermal
-            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0, 0.0)
+            .autosize_capacity_cooling(
+                ZONE,
+                DEFAULT_COOLING_SETPOINT_C,
+                35.0,
+                SiteLocation::default(),
+                0.0,
+            )
+            .unwrap()
             .abs();
 
         assert!(
@@ -1998,10 +2076,7 @@ mod tests {
             node_index: HashMap::new(),
         };
 
-        let config = ThermalSolverConfig {
-            indoor_zone_id: ZONE,
-            ..ThermalSolverConfig::default()
-        };
+        let config = ThermalSolverConfig::new(ZONE);
 
         let thermal = ThermalSolver::new(model, wiring, config, DT_S, env, indoor_temp_c)
             .expect("2-node ThermalSolver must construct");
@@ -2110,6 +2185,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">2000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">16000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -2147,6 +2223,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">2000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">16000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -2173,7 +2250,7 @@ mod tests {
     /// (the first HVAC spec in the resolved list).
     fn resolve_furnace_spec(xml: &str) -> EquipmentSpec {
         let building = parse_building(xml).expect("HPXML must parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
             .expect("equipment must resolve");
         specs
             .into_iter()
@@ -2221,7 +2298,7 @@ mod tests {
         };
 
         let mut specs = vec![spec];
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -2301,7 +2378,7 @@ mod tests {
         };
 
         let mut specs = vec![spec];
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -2384,7 +2461,7 @@ mod tests {
         };
 
         let mut specs = vec![spec];
-        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE).unwrap();
 
         let result = &specs[0];
         assert!(
@@ -2415,7 +2492,9 @@ mod tests {
         let env = one_zone_env(target, design_outdoor);
         let thermal = build_1r1c_solver(&env, target);
 
-        let peak = thermal.autosize_design_day_heating(ZONE, target, design_outdoor);
+        let peak = thermal
+            .autosize_design_day_heating(ZONE, target, design_outdoor)
+            .unwrap();
         assert!(
             peak.abs() < 1.0,
             "zero ΔT: peak load {peak} W should be near zero (< 1 W)"
@@ -2434,8 +2513,9 @@ mod tests {
         let env = one_zone_env(target + 2.0, design_outdoor);
         let thermal = build_1r1c_solver(&env, target + 2.0);
 
-        let peak =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0);
+        let peak = thermal
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, SiteLocation::default(), 0.0)
+            .unwrap();
         assert!(peak.is_finite(), "cooling peak load must be finite");
         assert!(peak >= 0.0, "cooling capacity must be non-negative");
         assert!(
@@ -2459,7 +2539,9 @@ mod tests {
         let dc_gain_capacity = thermal
             .autosize_capacity(ZONE, target, design_outdoor)
             .abs();
-        let design_day_capacity = thermal.autosize_design_day_heating(ZONE, target, design_outdoor);
+        let design_day_capacity = thermal
+            .autosize_design_day_heating(ZONE, target, design_outdoor)
+            .unwrap();
 
         let rel_error = (design_day_capacity - dc_gain_capacity).abs() / dc_gain_capacity;
         assert!(
@@ -2485,8 +2567,9 @@ mod tests {
         let dc_gain_capacity = thermal
             .autosize_capacity(ZONE, target, design_outdoor)
             .abs();
-        let design_day_capacity =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0);
+        let design_day_capacity = thermal
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, SiteLocation::default(), 0.0)
+            .unwrap();
 
         // The design-day method uses a diurnal range of 11.7 °C, so the
         // outdoor temperature cycles between 23.3 and 35.0 °C. The peak
@@ -2546,10 +2629,7 @@ mod tests {
             node_capacitances: HashMap::new(),
             node_index: HashMap::new(),
         };
-        let config = ThermalSolverConfig {
-            indoor_zone_id: ZONE,
-            ..ThermalSolverConfig::default()
-        };
+        let config = ThermalSolverConfig::new(ZONE);
 
         let env = one_zone_env(20.0, 10.0);
         let thermal = match ThermalSolver::new(model, wiring, config, dt, &env, 20.0) {
@@ -2558,12 +2638,16 @@ mod tests {
         };
 
         // Heating
-        let h = thermal.autosize_design_day_heating(ZONE, 21.0, -10.0);
+        let h = thermal
+            .autosize_design_day_heating(ZONE, 21.0, -10.0)
+            .unwrap();
         assert!(h.is_finite(), "heating design-day must return finite value");
         assert!(h >= 0.0, "heating capacity must be non-negative");
 
         // Cooling
-        let c = thermal.autosize_design_day_cooling(ZONE, 24.0, 35.0, 0.0, 0.0, 0.0, 0.0);
+        let c = thermal
+            .autosize_design_day_cooling(ZONE, 24.0, 35.0, SiteLocation::default(), 0.0)
+            .unwrap();
         assert!(c.is_finite(), "cooling design-day must return finite value");
         assert!(c >= 0.0, "cooling capacity must be non-negative");
     }
@@ -2589,27 +2673,13 @@ mod tests {
         let (thermal, _win_id) = build_1r1c_solver_with_window(&env_west, target + 2.0, 270.0);
 
         let noon_only = thermal
-            .autosize_capacity_cooling(
-                ZONE,
-                target,
-                design_outdoor,
-                39.74, // Denver
-                -104.87,
-                0.0,
-                0.0,
-            )
+            .autosize_capacity_cooling(ZONE, target, design_outdoor, denver_site(), 0.0)
+            .unwrap()
             .abs();
 
         let diurnal = thermal
-            .autosize_design_day_cooling(
-                ZONE,
-                target,
-                design_outdoor,
-                39.74, // Denver
-                -104.87,
-                0.0,
-                0.0,
-            )
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, denver_site(), 0.0)
+            .unwrap()
             .abs();
 
         // Both should produce positive cooling capacity.
@@ -2652,27 +2722,13 @@ mod tests {
         let (thermal, _win_id) = build_1r1c_solver_with_window(&env_south, target + 2.0, 180.0);
 
         let noon_only = thermal
-            .autosize_capacity_cooling(
-                ZONE,
-                target,
-                design_outdoor,
-                39.74, // Denver
-                -104.87,
-                0.0,
-                0.0,
-            )
+            .autosize_capacity_cooling(ZONE, target, design_outdoor, denver_site(), 0.0)
+            .unwrap()
             .abs();
 
         let diurnal = thermal
-            .autosize_design_day_cooling(
-                ZONE,
-                target,
-                design_outdoor,
-                39.74, // Denver
-                -104.87,
-                0.0,
-                0.0,
-            )
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, denver_site(), 0.0)
+            .unwrap()
             .abs();
 
         // Both should produce positive cooling capacity.
@@ -2709,15 +2765,8 @@ mod tests {
         let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 26.0, 180.0);
 
         let zero_gains_capacity = thermal
-            .autosize_capacity_cooling(
-                ZONE,
-                DEFAULT_COOLING_SETPOINT_C,
-                35.0,
-                39.74, // Denver
-                -104.87,
-                0.0,
-                0.0,
-            )
+            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, denver_site(), 0.0)
+            .unwrap()
             .abs();
 
         let with_gains_capacity = thermal
@@ -2725,11 +2774,10 @@ mod tests {
                 ZONE,
                 DEFAULT_COOLING_SETPOINT_C,
                 35.0,
-                39.74, // Denver
-                -104.87,
-                0.0,
+                denver_site(),
                 500.0, // 500 W internal gains
             )
+            .unwrap()
             .abs();
 
         // Cooling with internal gains should be larger than without by
@@ -2763,7 +2811,14 @@ mod tests {
         // Cooling-specific method with zero internal gains and zero solar
         // should match the DC-gain baseline.
         let cooling_zero_gains = thermal
-            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0, 0.0)
+            .autosize_capacity_cooling(
+                ZONE,
+                DEFAULT_COOLING_SETPOINT_C,
+                35.0,
+                SiteLocation::default(),
+                0.0,
+            )
+            .unwrap()
             .abs();
 
         assert!(
@@ -2771,6 +2826,32 @@ mod tests {
             "with zero internal gains and zero solar, \
              autosize_capacity_cooling ({cooling_zero_gains}) \
              must match autosize_capacity ({dc_gain})"
+        );
+    }
+
+    #[test]
+    fn compute_default_internal_gains_errors_when_no_floor_area_is_determinable() {
+        // A zero conditioned volume and no zone floor area leave no floor
+        // area: an input defect, an error naming the missing input (the silent-default rule;
+        // the pre-fix code warned and sized on occupancy-only gains).
+        let mut building = minimal_building();
+        building.conditioned_volume_m3 = 0.0;
+        let ctx = AutosizeContext {
+            design_conditions: None,
+            weather_lat: 39.74,
+            weather_lon: -104.87,
+            weather_elevation_m: 0.0,
+            duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
+        };
+
+        let err = compute_default_internal_gains(&ctx, &building)
+            .expect_err("no floor area is an error, not occupancy-only gains");
+        let message = err.to_string();
+        assert!(
+            message.contains("floor area"),
+            "the error must name the missing floor area, got: {message}"
         );
     }
 
@@ -2792,12 +2873,12 @@ mod tests {
             internal_gains_latent_w: 0.0,
         };
 
-        // minimal_building() has no conditioned volume or floor area, so
-        // the function should return occupancy-only gains with a warning.
-        let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
+        // minimal_building's volume 400 m³ over 2.5 m gives 160 m² of floor
+        // area: occupancy plus the lighting/plug density.
+        let (sensible, latent) = compute_default_internal_gains(&ctx, &building).unwrap();
 
-        // Sensible from occupancy only (no floor area → no lights/plug component).
-        let expected_occ_sensible = 2.0 * OCCUPANT_SENSIBLE_GAIN_W; // 150 W
+        // Sensible: occupancy (150 W) + 160 m² × 5 W/m² = 950 W.
+        let expected_occ_sensible = 2.0 * OCCUPANT_SENSIBLE_GAIN_W + 160.0 * 5.0;
         let expected_occ_latent = 2.0 * OCCUPANT_LATENT_GAIN_W; // 110 W
 
         assert!(
@@ -2819,8 +2900,8 @@ mod tests {
         use hares_io::hpxml::building::{Zone, ZoneType};
 
         let mut building = minimal_building();
-        building.conditioned_volume_m3 = Some(180.0); // 150 m² × 2.4 m ceiling
-        building.ceiling_height_m = Some(2.4);
+        building.conditioned_volume_m3 = 180.0; // 150 m² × 2.4 m ceiling
+        building.ceiling_height_m = 2.4;
         building.zones = vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(75.0),
@@ -2830,6 +2911,8 @@ mod tests {
             vented: false,
             ventilation_ach: None,
             ventilation_sla: None,
+            height_m: None,
+            hpxml_location: None,
         }];
 
         let ctx = AutosizeContext {
@@ -2842,7 +2925,7 @@ mod tests {
             internal_gains_latent_w: 0.0,
         };
 
-        let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
+        let (sensible, latent) = compute_default_internal_gains(&ctx, &building).unwrap();
 
         // conditioned_volume / ceiling_height = 180 / 2.4 = 75 m²
         // Occupancy: 2 × 75 = 150 W
@@ -2875,7 +2958,7 @@ mod tests {
             internal_gains_latent_w: 200.0,
         };
 
-        let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
+        let (sensible, latent) = compute_default_internal_gains(&ctx, &building).unwrap();
 
         assert!(
             (sensible - 800.0).abs() < 1e-6,
@@ -2896,10 +2979,18 @@ mod tests {
         let env = one_zone_env(target + 2.0, design_outdoor);
         let thermal = build_1r1c_solver(&env, target + 2.0);
 
-        let zero_gains =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 0.0);
-        let with_gains =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0, 500.0);
+        let zero_gains = thermal
+            .autosize_design_day_cooling(ZONE, target, design_outdoor, SiteLocation::default(), 0.0)
+            .unwrap();
+        let with_gains = thermal
+            .autosize_design_day_cooling(
+                ZONE,
+                target,
+                design_outdoor,
+                SiteLocation::default(),
+                500.0,
+            )
+            .unwrap();
 
         assert!(
             with_gains > zero_gains + 400.0,
@@ -2923,6 +3014,7 @@ mod tests {
             fuel_type: fuel,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -2942,7 +3034,7 @@ mod tests {
             FuelType::Electric,
             &[("setpoint_c", json!(setpoint_c))],
         )];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3010,6 +3102,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3017,7 +3110,7 @@ mod tests {
         };
         let mut specs = vec![spec];
 
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3051,7 +3144,7 @@ mod tests {
             FuelType::Electric,
             &[],
         )];
-        autosize_water_heater_capacities(&mut specs, Some(0.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(0.0), 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3083,7 +3176,7 @@ mod tests {
         // autosizer should fall back to the default (25 °C) and produce a
         // reasonable capacity.
         let mut specs = vec![wh_spec("Gas Water Heater", FuelType::Gas, &[])];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 60.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 60.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3116,7 +3209,7 @@ mod tests {
             FuelType::Electric,
             &[],
         )];
-        autosize_water_heater_capacities(&mut specs, None, 10.0);
+        autosize_water_heater_capacities(&mut specs, None, 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3149,7 +3242,7 @@ mod tests {
             FuelType::Electric,
             &[("autosize_water_heater_factor", json!(1.5))],
         )];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3186,7 +3279,7 @@ mod tests {
         )];
         // 1 BR → tank = 40 gal, FHR = 36 GPH, usable = 28 gal, deficit = 8 gal
         // capacity = 8 × 4.395 × 41.67 ≈ 1465 W, below 10kW min
-        autosize_water_heater_capacities(&mut specs, Some(1.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(1.0), 10.0).unwrap();
 
         let result = &specs[0];
         let capacity_w = result
@@ -3236,7 +3329,7 @@ mod tests {
         // Heat Pump Water Heater uses `backup_element_power_w` as the
         // capacity field name, not `heating_capacity_w`.
         let mut specs = vec![wh_spec("Heat Pump Water Heater", FuelType::Electric, &[])];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         // The autosizer writes `heating_capacity_w` to params (generic key)
@@ -3265,7 +3358,7 @@ mod tests {
         // because the config struct uses a different field name for capacity.
         // This test verifies: tank volume is set, flag is consumed.
         let mut specs = vec![wh_spec("Indirect Tank", FuelType::Gas, &[])];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         let volume_m3 = result
@@ -3298,6 +3391,7 @@ mod tests {
             fuel_type: FuelType::Gas,
             parameters: params,
             zip_params: None,
+            typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
@@ -3305,7 +3399,7 @@ mod tests {
         };
         let mut specs = vec![spec];
 
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0).unwrap();
 
         let result = &specs[0];
         let volume_m3 = result

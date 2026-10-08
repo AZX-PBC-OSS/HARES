@@ -47,11 +47,11 @@ pub struct DrawResult {
     /// temperatures.  For draws fully contained within the top node, this
     /// collapses to the top-node temperature.
     pub outlet_temp_c: f64,
-    /// Thermal energy removed from the tank by the draw [J].
+    /// Thermal energy removed from the tank by the draw (J).
     pub energy_out_j: f64,
-    /// Thermal energy added to the tank by incoming mains water [J].
+    /// Thermal energy added to the tank by incoming mains water (J).
     pub energy_in_j: f64,
-    /// Unmet load power [W]: heat that could not be delivered because outlet
+    /// Unmet load power (W): heat that could not be delivered because outlet
     /// temperature was below the fixture setpoint. Zero when outlet >= setpoint.
     ///
     /// OCHRE Water.py:363: `h_unmet_load = max(draw_tempered / 60 * water_c *
@@ -75,6 +75,20 @@ pub struct TemperedDrawConfig {
     pub hot_draw_temp_c: f64,
     /// Tank setpoint [°C]; used to decide whether TMV logic applies at all.
     pub setpoint_temp_c: f64,
+}
+
+/// Flows and ambient temperatures for [`StratifiedTank::step_tempered`], grouped so
+/// the call site reads as one coherent draw state.
+#[derive(Debug, Clone, Copy)]
+pub struct TemperedDrawInputs {
+    /// Air temperature around the tank [°C].
+    pub ambient_temp_c: f64,
+    /// Requested tempered delivery flow [m³/s].
+    pub tempered_flow_m3_s: f64,
+    /// Hot-water component of the draw [m³/s].
+    pub hot_flow_m3_s: f64,
+    /// Mains (cold) water temperature [°C].
+    pub mains_temp_c: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -223,7 +237,7 @@ impl StratifiedTank {
         &self.ua_per_node
     }
 
-    /// Total skin (jacket) heat loss from the most recent conduction step [W].
+    /// Total skin (jacket) heat loss from the most recent conduction step (W).
     /// Positive means heat flowing OUT of the tank into the ambient zone.
     pub fn skin_loss_w(&self) -> f64 {
         self.last_skin_loss_w
@@ -263,7 +277,7 @@ impl StratifiedTank {
         &self.node_volumes_m3
     }
 
-    /// Compute the ideal heating power [W] for a specific element node.
+    /// Compute the ideal heating power (W) for a specific element node.
     ///
     /// Predicts what the node temperature would be after one timestep with
     /// heater OFF (standby loss only), then returns the power needed to bring
@@ -306,7 +320,7 @@ impl StratifiedTank {
     /// **pre-heating** node temperatures over the drawn volume
     /// (OCHRE Water.py:335-347).
     ///
-    /// Use [`step_tempered`] when the draw comes from a mixing-valve schedule
+    /// Use [`Self::step_tempered`] when the draw comes from a mixing-valve schedule
     /// that specifies a fixture delivery temperature.
     pub fn step(
         &mut self,
@@ -332,7 +346,7 @@ impl StratifiedTank {
         self.apply_heat_injections(heat_injections, dt)?;
         let draw = self.apply_draw(draw_volume_m3, mains_temp_c)?;
         self.mix_inversions();
-        self.recompute_skin_loss_w(ambient_temp_c);
+        self.recompute_skin_loss_w(ambient_temp_c)?;
 
         #[cfg(feature = "observe")]
         {
@@ -348,7 +362,7 @@ impl StratifiedTank {
             );
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             let has_heat = heat_injections.iter().any(|&(_, pw)| pw > 0.0);
             if has_heat {
@@ -372,23 +386,26 @@ impl StratifiedTank {
 
     /// Advance the tank by one time step using a TMV-style tempered draw.
     ///
-    /// `tempered_volume_m3_s` is the requested delivery flow rate [m³/s] at
+    /// The flows and temperatures are the fields of [`TemperedDrawInputs`];
+    /// `tempered_flow_m3_s` is the requested delivery flow rate [m³/s] at
     /// `tmv.tempered_draw_temp_c`.  The method computes the actual hot-water
     /// withdrawal from the tank after mixing-valve adjustment, and also reports
     /// the unmet-load power when the tank cannot meet the fixture temperature.
     ///
     /// OCHRE Water.py:305-363 -- "tempered draw" logic.
-    #[allow(clippy::too_many_arguments)]
     pub fn step_tempered(
         &mut self,
-        ambient_temp_c: f64,
-        tempered_flow_m3_s: f64,
-        hot_flow_m3_s: f64,
-        mains_temp_c: f64,
+        inputs: TemperedDrawInputs,
         heat_injections: &[(usize, f64)],
         tmv: TemperedDrawConfig,
         dt: Duration,
     ) -> Result<DrawResult> {
+        let TemperedDrawInputs {
+            ambient_temp_c,
+            tempered_flow_m3_s,
+            hot_flow_m3_s,
+            mains_temp_c,
+        } = inputs;
         validate_finite("ambient_temp_c", ambient_temp_c)?;
         validate_finite("mains_temp_c", mains_temp_c)?;
         validate_nonnegative("tempered_flow_m3_s", tempered_flow_m3_s)?;
@@ -418,7 +435,7 @@ impl StratifiedTank {
             raw_hot_draw_m3
         };
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             // OCHRE Water.py:305 -- when TMV is active and the tank is hotter
             // than the hot delivery target, the draw volume must be strictly
@@ -457,7 +474,7 @@ impl StratifiedTank {
         self.apply_heat_injections(heat_injections, dt)?;
         let mut draw = self.apply_draw(clamped_draw, mains_temp_c)?;
         self.mix_inversions();
-        self.recompute_skin_loss_w(ambient_temp_c);
+        self.recompute_skin_loss_w(ambient_temp_c)?;
 
         // F5: warn when outlet falls below mains (physically impossible for a
         // passive tank; indicates numerical artefact or bad input).
@@ -485,7 +502,7 @@ impl StratifiedTank {
             0.0
         };
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             let has_heat = heat_injections.iter().any(|&(_, pw)| pw > 0.0);
             if has_heat {
@@ -658,7 +675,7 @@ impl StratifiedTank {
     /// EnergyPlus WaterThermalTanks.cc:8466-8519 adjusts Tavg during inversion
     /// mixing so that Qloss bookkeeping uses the post-mixing profile; HARES
     /// corrects the loss post-mixing instead.
-    fn recompute_skin_loss_w(&mut self, ambient_temp_c: f64) {
+    fn recompute_skin_loss_w(&mut self, ambient_temp_c: f64) -> Result<()> {
         let _pre_mix_loss = self.last_skin_loss_w;
         self.last_skin_loss_w = self.compute_skin_loss_w(&self.node_temps_c, ambient_temp_c);
 
@@ -669,14 +686,14 @@ impl StratifiedTank {
             "post-mixing skin loss correction"
         );
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            debug_assert!(
-                self.last_skin_loss_w.is_finite(),
-                "post-mixing skin loss must be finite, got {}",
-                self.last_skin_loss_w
-            );
+        if !self.last_skin_loss_w.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "tank_post_mixing_skin_loss_finite".to_string(),
+                value: self.last_skin_loss_w,
+                tolerance: 0.0,
+            });
         }
+        Ok(())
     }
 
     pub fn save_state(&self) -> Result<Vec<u8>> {
@@ -950,7 +967,7 @@ mod tests {
     use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
     use hares_physics::water_density_kg_m3;
 
-    use super::{StratifiedTank, StratifiedTankConfig};
+    use super::{StratifiedTank, StratifiedTankConfig, TemperedDrawInputs};
 
     const EPSILON: f64 = 1.0e-9;
 
@@ -1483,7 +1500,17 @@ mod tests {
         let flow_m3_s = 1e-4; // 0.1 L/s
         let dt = Duration::from_secs(60);
         let draw = tank
-            .step_tempered(20.0, flow_m3_s, 0.0, 15.0, &[], tmv, dt)
+            .step_tempered(
+                TemperedDrawInputs {
+                    ambient_temp_c: 20.0,
+                    tempered_flow_m3_s: flow_m3_s,
+                    hot_flow_m3_s: 0.0,
+                    mains_temp_c: 15.0,
+                },
+                &[],
+                tmv,
+                dt,
+            )
             .expect("step_tempered");
 
         assert_eq!(draw.unmet_load_w, 0.0);
@@ -1504,7 +1531,17 @@ mod tests {
         let mains_temp_c = 15.0;
         let dt = Duration::from_secs(60);
         let draw = tank
-            .step_tempered(20.0, flow_m3_s, 0.0, mains_temp_c, &[], tmv, dt)
+            .step_tempered(
+                TemperedDrawInputs {
+                    ambient_temp_c: 20.0,
+                    tempered_flow_m3_s: flow_m3_s,
+                    hot_flow_m3_s: 0.0,
+                    mains_temp_c,
+                },
+                &[],
+                tmv,
+                dt,
+            )
             .expect("step_tempered");
 
         // outlet_temp < fixture setpoint → unmet load > 0
@@ -1542,7 +1579,17 @@ mod tests {
         };
 
         let draw = tank
-            .step_tempered(20.0, flow_m3_s, 0.0, mains_temp_c, &[], tmv, dt)
+            .step_tempered(
+                TemperedDrawInputs {
+                    ambient_temp_c: 20.0,
+                    tempered_flow_m3_s: flow_m3_s,
+                    hot_flow_m3_s: 0.0,
+                    mains_temp_c,
+                },
+                &[],
+                tmv,
+                dt,
+            )
             .expect("step_tempered");
 
         // energy removed should be less than if raw draw (65°C) was used
@@ -1600,7 +1647,17 @@ mod tests {
         let flow_m3_s = 1e-4;
         let dt = Duration::from_secs(60);
         let draw = tank
-            .step_tempered(20.0, flow_m3_s, 0.0, 15.0, &[(0, 4500.0)], tmv, dt)
+            .step_tempered(
+                TemperedDrawInputs {
+                    ambient_temp_c: 20.0,
+                    tempered_flow_m3_s: flow_m3_s,
+                    hot_flow_m3_s: 0.0,
+                    mains_temp_c: 15.0,
+                },
+                &[(0, 4500.0)],
+                tmv,
+                dt,
+            )
             .expect("step_tempered with heat");
 
         // Pre-heating deficit: outlet_est_c = 30°C, deficit = 40.6 - 30.0 = 10.6°C.
@@ -1645,12 +1702,32 @@ mod tests {
 
         let mut tank_no_heat = test_tank(6, 30.0);
         let draw_no_heat = tank_no_heat
-            .step_tempered(20.0, flow_m3_s, 0.0, 15.0, &[], tmv, dt)
+            .step_tempered(
+                TemperedDrawInputs {
+                    ambient_temp_c: 20.0,
+                    tempered_flow_m3_s: flow_m3_s,
+                    hot_flow_m3_s: 0.0,
+                    mains_temp_c: 15.0,
+                },
+                &[],
+                tmv,
+                dt,
+            )
             .expect("step_tempered without heat");
 
         let mut tank_with_heat = test_tank(6, 30.0);
         let draw_with_heat = tank_with_heat
-            .step_tempered(20.0, flow_m3_s, 0.0, 15.0, &[(0, 4500.0)], tmv, dt)
+            .step_tempered(
+                TemperedDrawInputs {
+                    ambient_temp_c: 20.0,
+                    tempered_flow_m3_s: flow_m3_s,
+                    hot_flow_m3_s: 0.0,
+                    mains_temp_c: 15.0,
+                },
+                &[(0, 4500.0)],
+                tmv,
+                dt,
+            )
             .expect("step_tempered with heat");
 
         assert!(
@@ -2417,7 +2494,17 @@ mod tests {
         };
 
         let draw = tank
-            .step_tempered(20.0, 0.0, hot_flow_m3_s, mains_temp_c, &[], tmv, dt)
+            .step_tempered(
+                TemperedDrawInputs {
+                    ambient_temp_c: 20.0,
+                    tempered_flow_m3_s: 0.0,
+                    hot_flow_m3_s,
+                    mains_temp_c,
+                },
+                &[],
+                tmv,
+                dt,
+            )
             .expect("step_tempered hot draw");
 
         // Full-energy draw if no TMV blending occurred:
@@ -2455,7 +2542,17 @@ mod tests {
         };
 
         let draw = tank
-            .step_tempered(20.0, 0.0, hot_flow_m3_s, mains_temp_c, &[], tmv, dt)
+            .step_tempered(
+                TemperedDrawInputs {
+                    ambient_temp_c: 20.0,
+                    tempered_flow_m3_s: 0.0,
+                    hot_flow_m3_s,
+                    mains_temp_c,
+                },
+                &[],
+                tmv,
+                dt,
+            )
             .expect("step_tempered hot draw at boundary");
 
         // With UA=0 and no conduction, the draw outlet is a segment-average

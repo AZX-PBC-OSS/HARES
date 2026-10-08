@@ -9,26 +9,24 @@ introspection for debugging simulation state.
 
 ### Compilation Model
 
-All invariant checks live in `hares-core/src/invariants.rs` behind a
-compile-time gate:
-
-```rust
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-```
+All invariant checks live in `hares-core/src/invariants.rs`. The physics,
+conservation, non-finite and wiring checks are unconditional: they are
+compiled into every build profile and fail the step with a typed
+`HaresError` when a check fails.
 
 | Build                                        | Checks active? |
 |----------------------------------------------|----------------|
 | `cargo build` / `cargo test`                 | Yes            |
-| `cargo build --release`                      | No (zero cost) |
-| `cargo build --release -F check_invariants`  | Yes            |
+| `cargo build --release`                      | Yes            |
 
-When inactive, every `check_*` method compiles to `Ok(())` — the compiler
-eliminates the body entirely.
+`debug_assert!`-style checks on internally-produced values stay gated to
+debug builds; every physics, conservation, non-finite and wiring check
+runs everywhere.
 
 ### Available Checks (InvariantChecker)
 
 These are the conservation-law checks defined in `InvariantChecker`. All are
-currently wired into `Dwelling::check_invariants`.
+currently wired into `Dwelling::check_step_invariants`.
 
 | Check                     | Equation                                            | Tolerance                          | Fatal? | Wired? |
 |---------------------------|-----------------------------------------------------|------------------------------------|--------|--------|
@@ -49,7 +47,7 @@ floor prevents division-by-zero when gains are near zero.
 
 **Moisture** uses h_fg = 2,501,000 J/kg (latent heat of vaporisation at 0 °C).
 
-### Active Checks in Dwelling::check_invariants
+### Active Checks in Dwelling::check_step_invariants
 
 These fire every timestep after solver resolution but before port zeroing:
 
@@ -69,7 +67,7 @@ These fire every timestep after solver resolution but before port zeroing:
 | `fuel_observer_coverage`            | `InvariantViolation`      | All non-zero fuel accumulator slots have observer coverage     |
 | `hvac_power_non_negative`           | `NegativeDeliveredEnergy` | HVAC heating ≥ 0 W, cooling ≤ 0 W (signed convention)         |
 | `hvac_accumulator`                  | `NegativeDeliveredEnergy` | Per-zone cumulative heating/cooling sign-consistency           |
-| `port_core_electrical_consistency`  | `Equipment`               | Per-equipment port reactive delta == CoreOutput flows.reactive_power_kvar.unwrap_or(0.0) (debug-build, gates #[cfg(any(debug_assertions, feature = "check_invariants"))]); catches sign errors, missing REACTIVE cap, and port-vs-CoreOutput drifts |
+| `port_core_electrical_consistency`  | `Equipment`               | Per-equipment port reactive delta == CoreOutput flows.reactive_power_kvar.unwrap_or(0.0) (unconditional); catches sign errors, missing REACTIVE cap, and port-vs-CoreOutput drifts |
 | `nan_screen`                        | `NanDetected`             | Key float values screened for NaN before residual computation |
 
 ### Error Reporting
@@ -124,16 +122,52 @@ silently miss violations from `Equipment` (port/core consistency), `nan_screen`,
 `hvac_power_non_negative`, and `hvac_accumulator`. All four variants halt the
 dwelling simulation — no silent corruption.
 
+### Equipment Step Failures
+
+An equipment whose `step()` returns an error is rolled back rather than
+ending the run at once: its port contributions are removed, the failure is
+logged as a run warning naming the equipment and counted in
+`RunHealth::port_rollbacks` (every build profile), and the step continues
+without it. For that step the equipment delivered nothing: the consistency
+checks skip it, and the recorded flows (per-equipment and end-use power,
+the frame's flow and telemetry columns, `DwellingTelemetry` power, the next
+step's electrical summary, `Dwelling::reported_core_output` and Python's
+`Dwelling.equipment()`) report zero for it, while its state columns
+(mode, setpoint, SOC, speed, defrost state, and the verbosity-8 temperature,
+timer and EV connection columns) keep its committed state. A PV's
+irradiance column is the absorbed irradiance its step computes, so a failed
+step reports zero there too. Two readers keep the last known values instead:
+the actors' `equipment_core` snapshot (the previous successful step's core
+output) and the equipment telemetry, including Python's
+`Equipment.telemetry()`.
+
+A failure that repeats on the next step comes from the equipment's state or
+configuration, not from one step's inputs, so the run errors
+(`HaresError::Simulation`, naming the equipment and its last failure) once
+one equipment fails more than `SimulationConfig::max_consecutive_step_failures`
+consecutive steps. The default, 1, tolerates an isolated failure; 0
+tolerates none. The streak is reset by a successful step and is part of the
+checkpoint. The error arrives part way through a step, after earlier
+equipment has already stepped, so the run is over: every later step,
+`save_checkpoint` and `restore_building_state` return it again without
+stepping, snapshotting or restoring anything. `load_checkpoint` (Python
+`load_state`) replaces all of the half-stepped state, so a successful load
+resumes the run from the checkpoint.
+
+`ExecutionStage::EnvelopeResolution` is reserved for the domain solvers:
+equipment declaring it is rejected at registration, since no step loop runs
+it.
+
 ### Ordering Contract
 
 ```
 Equipment::step()          ← accumulates into PortSlots
 ThermalSolver::resolve()   ← reads ports, produces DomainUpdate
-check_invariants()         ← reads solver net + port accumulators
+check_step_invariants()    ← reads solver net + port accumulators
 ports.zero()               ← resets accumulators for next step
 ```
 
-`check_invariants()` reads both `self.electrical_solver.net_active_kw()` and
+`check_step_invariants()` reads both `self.electrical_solver.net_active_kw()` and
 `self.ports.electrical.net_active_kw()` to compare them. It must run before
 `ports.zero()` clears the accumulator side of that comparison.
 
@@ -223,9 +257,11 @@ envelope solver:
 | `ventilation_w`          | W    | Forced mechanical ventilation sensible       |
 | `natural_ventilation_w`  | W    | Natural ventilation sensible                 |
 | `port_convective_w`      | W    | Total equipment port convective (HVAC + loads) |
+| `port_radiant_w`         | W    | Total equipment port long-wave radiant, distributed to the interior surfaces |
+| `port_shortwave_w`       | W    | Total equipment port short-wave (visible light), absorbed by the interior surfaces as transmitted diffuse solar |
 | `hvac_heating_w`         | W    | HVAC heating contribution                    |
 | `hvac_cooling_w`         | W    | HVAC cooling contribution                    |
-| `internal_gain_w`        | W    | Appliances, lighting, occupancy              |
+| `internal_gain_w`        | W    | Appliances, lighting, occupancy: convective, radiant and short-wave |
 | `jacket_loss_w`          | W    | Equipment shell losses (water heater, etc.)  |
 | `duct_loss_w`            | W    | Duct distribution losses                     |
 | `infiltration_by_zone`   | W    | Per-zone infiltration breakdown              |
@@ -388,6 +424,6 @@ For per-equipment columns in recorder output (`Dwelling::record_step`):
 | `hares-core/src/observer.rs` | Observer types and ObserverBuffer |
 | `hares-core/src/observer_capture.rs` | Capture functions and port diffing (per-equipment reactive delta) |
 | `hares-core/src/diagnostics.rs` | Diagnostic CSV output (incl. `electrical_net_kvar`, per-equipment `reactive_kvar`) |
-| `hares-core/src/dwelling/mod.rs` | Integration: run_timestep observation sites, check_invariants, validate_port_core_electrical_consistency calls |
+| `hares-core/src/dwelling/mod.rs` | Integration: run_timestep observation sites, check_step_invariants, validate_port_core_electrical_consistency calls |
 | `hares-envelope/src/thermal_solver/config.rs` | EnvelopeComponentGains |
 | `crates/hares-types/src/equipment.rs` | `validate_port_core_electrical_consistency` — port/CoreOutput reactive consistency validator |

@@ -186,11 +186,16 @@ class TestPremiseVoltageResponse:
         assert premise["real_power_zip_applies"] is True, (
             "the aggregate describes the ZIP-governed mix by construction"
         )
-        weighted = [
-            (dw.equipment_zip(e["name"]), e["mean_power_kw"])
-            for e in premise["governing_equipment"]
-            if e["mean_power_kw"] is not None and e["mean_power_kw"] > 0
-        ]
+        weighted: list[tuple[dict[str, float | bool], float]] = []
+        for entry in premise["governing_equipment"]:
+            mean_power = entry["mean_power_kw"]
+            if mean_power is None or mean_power <= 0:
+                continue
+            equipment_zip = dw.equipment_zip(entry["name"])
+            assert equipment_zip is not None, (
+                f"{entry['name']}: governing equipment must publish its ZIP dict"
+            )
+            weighted.append((equipment_zip, float(mean_power)))
         assert weighted, "fixture must have positively weighted governing loads"
         total = sum(w for _, w in weighted)
         for key in ("zp", "ip", "pp", "zq", "iq", "pq", "v0"):
@@ -249,6 +254,7 @@ class TestScheduleDataIntegrity:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
         message = str(excinfo.value)
         assert "non-finite" in message, (
@@ -305,6 +311,7 @@ class TestZipDataIntegrity:
                 defaults_path=str(defaults),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
         message = str(excinfo.value).lower()
         assert "non-finite" in message, (
@@ -342,6 +349,7 @@ class TestZipDataIntegrity:
                 bldg_id=42,
                 master_seed=0,
                 overrides={"Indoor Lighting": {"zip": {"v0": 1e-320}}},
+                write_output=False,
             )
         message = str(excinfo.value).lower()
         assert "v0" in message, (

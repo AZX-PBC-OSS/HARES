@@ -37,8 +37,9 @@ use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, Sched
 
 use crate::Actor;
 use crate::actors::{
-    AlwaysComply, BatteryManagementActor, DrAction, DrCompliance, EquipmentBehavior, EvDriverActor,
-    IdealThermostat, Occupant, Presence, Probabilistic, SafetyMonitor,
+    AlwaysComply, BatteryManagementActor, BmsParams, DrAction, DrCompliance, EquipmentBehavior,
+    EvDriverActor, EvDriverParams, IdealThermostat, Occupant, Presence, Probabilistic,
+    SafetyMonitor,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -133,22 +134,42 @@ fn parse_dr_action(raw: &str) -> Result<DrAction, HaresError> {
             };
             let duration_s = match dur_str {
                 Some("inf") | Some("Inf") | Some("none") | Some("None") => None,
-                Some(s) => Some(s.parse::<f64>().map_err(|_| {
-                    HaresError::Control(format!("invalid duration_s for DemandResponse in '{raw}'"))
-                })?),
+                Some(s) => {
+                    let d = s.parse::<f64>().map_err(|_| {
+                        HaresError::Control(format!(
+                            "invalid duration_s for DemandResponse in '{raw}'"
+                        ))
+                    })?;
+                    // A non-positive duration is invalid input: the DR event
+                    // can never run.
+                    if d <= 0.0 {
+                        return Err(HaresError::Control(format!(
+                            "DemandResponse duration_s must be positive, got {d} in '{raw}'"
+                        )));
+                    }
+                    Some(d)
+                }
                 None => None,
             };
             Ok(DrAction::demand_response(level, duration_s))
         }
         s if s.starts_with("SetpointAdjust:") => {
-            let val: f64 = s
-                .strip_prefix("SetpointAdjust:")
-                .unwrap()
-                .parse()
-                .map_err(|_| {
-                    HaresError::Control(format!("invalid delta_c for SetpointAdjust in '{raw}'"))
-                })?;
-            Ok(DrAction::setpoint_delta(val))
+            let rest = s.strip_prefix("SetpointAdjust:").unwrap();
+            let (delta, direction) = match rest.split_once(':') {
+                Some((delta, direction)) => (delta, Some(direction)),
+                None => (rest, None),
+            };
+            let val: f64 = delta.parse().map_err(|_| {
+                HaresError::Control(format!("invalid delta_c for SetpointAdjust in '{raw}'"))
+            })?;
+            match direction {
+                None => Ok(DrAction::setpoint_delta(val)),
+                Some("PreHeat") => Ok(DrAction::preheat(val)),
+                Some("PreCool") => Ok(DrAction::precool(val)),
+                Some(other) => Err(HaresError::Control(format!(
+                    "unknown SetpointAdjust direction '{other}' in '{raw}': expected PreHeat or PreCool"
+                ))),
+            }
         }
         s if s.starts_with("LoadCurtailment:") => {
             let val: f64 = s
@@ -187,7 +208,8 @@ fn parse_dr_action(raw: &str) -> Result<DrAction, HaresError> {
             Ok(DrAction::absolute_setpoint(heat, cool))
         }
         _ => Err(HaresError::Control(format!(
-            "unknown DrAction '{raw}': valid actions are TurnOff, SetpointAdjust:<delta_c>, \
+            "unknown DrAction '{raw}': valid actions are TurnOff, \
+             SetpointAdjust:<delta_c>[:PreHeat|:PreCool], \
              LoadCurtailment:<fraction>, PowerLimit:<max_kw>, \
              AbsoluteSetpoint:<heating_c>:<cooling_c>, \
              DemandResponse:<level>[:<duration_s>], None"
@@ -265,7 +287,9 @@ impl ActorRegistry {
         registry.register(
             "IdealThermostat",
             Box::new(|config: ActorConfig| {
-                let target = config.get_str("target").unwrap_or("HVAC");
+                let target = config.get_str("target").ok_or_else(|| {
+                    HaresError::Control("IdealThermostat requires 'target' parameter".into())
+                })?;
                 let mut actor = IdealThermostat::new(target).with_name(&config.name);
                 if let (Some(heat), Some(cool)) =
                     (config.get_f64("heating_c"), config.get_f64("cooling_c"))
@@ -397,20 +421,22 @@ impl ActorRegistry {
                 let actor = EvDriverActor::new(
                     &config.name,
                     &target,
-                    strategy,
-                    policy,
-                    miles_schedule,
-                    departure_schedule,
-                    duration_schedule,
-                    arrival_schedule,
-                    event_day_ratio,
-                    fuel_economy,
-                    capacity_kwh,
-                    max_charge_kw,
-                    avg_speed,
-                    config.get_f64("range_anxiety_miles").unwrap_or(20.0),
-                    config.get_f64("away_charge_fraction").unwrap_or(0.0),
-                    config.get_f64("away_charge_power_kw").unwrap_or(6.6),
+                    EvDriverParams {
+                        strategy,
+                        plug_in_policy: policy,
+                        daily_drive_miles: miles_schedule,
+                        departure_time: departure_schedule,
+                        trip_duration: duration_schedule,
+                        arrival_time: arrival_schedule,
+                        event_day_ratio,
+                        fuel_economy_kwh_per_mi: fuel_economy,
+                        capacity_kwh,
+                        max_charge_kw,
+                        average_speed_mph: avg_speed,
+                        range_anxiety_miles: config.get_f64("range_anxiety_miles").unwrap_or(20.0),
+                        away_charge_fraction: config.get_f64("away_charge_fraction").unwrap_or(0.0),
+                        away_charge_power_kw: config.get_f64("away_charge_power_kw").unwrap_or(6.6),
+                    },
                     ChaCha8Rng::from_seed(seed_bytes),
                 );
                 Ok(Box::new(actor))
@@ -443,23 +469,24 @@ impl ActorRegistry {
                         actor = actor.with_load_target(target, action);
                     }
                 }
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
                 {
+                    // A half-configured pair can never dispatch: the
+                    // unmatched half silently emits nothing.
                     let has_hvac_target = config.get_str("hvac_target").is_some();
                     let has_hvac_action = config.get_str("hvac_action").is_some();
                     if has_hvac_target && !has_hvac_action {
-                        tracing::debug!(
-                            name = %config.name,
-                            "DrCompliance actor has hvac_target but no hvac_action; \
-                             dispatch will use DrAction::None (no signal emitted)"
-                        );
+                        return Err(HaresError::Dwelling(format!(
+                            "DrCompliance actor '{}': hvac_target set without \
+                             hvac_action; the pair must be fully configured",
+                            config.name
+                        )));
                     }
                     if has_hvac_action && !has_hvac_target {
-                        tracing::debug!(
-                            name = %config.name,
-                            "DrCompliance actor has hvac_action but no hvac_target; \
-                             hvac_action will not dispatch"
-                        );
+                        return Err(HaresError::Dwelling(format!(
+                            "DrCompliance actor '{}': hvac_action set without \
+                             hvac_target; the pair must be fully configured",
+                            config.name
+                        )));
                     }
                 }
                 Ok(Box::new(actor))
@@ -559,13 +586,15 @@ impl ActorRegistry {
                 let actor = BatteryManagementActor::with_name(
                     &config.name,
                     &target,
-                    bms_mode,
-                    grid_export_rule,
-                    max_charge_kw,
-                    max_discharge_kw,
-                    None,
-                    steps_per_day,
-                    min_dwell_steps,
+                    BmsParams {
+                        bms_mode,
+                        grid_export_rule,
+                        max_charge_kw,
+                        max_discharge_kw,
+                        price_schedule: None,
+                        steps_per_day,
+                        min_dwell_steps,
+                    },
                 );
                 Ok(Box::new(actor))
             }),
@@ -627,6 +656,23 @@ impl ActorRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_setpoint_adjust_names_its_direction() {
+        assert_eq!(
+            parse_dr_action("SetpointAdjust:2.0").unwrap(),
+            DrAction::setpoint_delta(2.0)
+        );
+        assert_eq!(
+            parse_dr_action("SetpointAdjust:2.0:PreHeat").unwrap(),
+            DrAction::preheat(2.0)
+        );
+        assert_eq!(
+            parse_dr_action("SetpointAdjust:2.0:PreCool").unwrap(),
+            DrAction::precool(2.0)
+        );
+        assert!(parse_dr_action("SetpointAdjust:2.0:Sideways").is_err());
+    }
 
     #[test]
     fn actor_config_new_creates_empty_params() {
@@ -776,6 +822,18 @@ mod tests {
 
         let actor = registry.create(config).expect("create actor");
         assert_eq!(actor.name(), "Thermostat");
+    }
+
+    #[test]
+    fn actor_registry_ideal_thermostat_requires_target() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("Thermostat", "IdealThermostat")
+            .with_param("heating_c", ConfigValue::Float(20.0));
+        let err = registry
+            .create(config)
+            .err()
+            .expect("a thermostat with no target must be rejected");
+        assert!(err.to_string().contains("'target'"), "{err}");
     }
 
     #[test]

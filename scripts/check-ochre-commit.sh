@@ -6,7 +6,7 @@ set -euo pipefail
 # reference version is kept in sync with the vendored submodule.
 #
 # The documented hash lives in docs/validation.md under the "OCHRE Reference"
-# section as: `ffc8b56e99c61eb4e42af625bbbc310e198ec58d`
+# section as: `58f39d8746520786c26c02ce4c08618d3053c422`
 
 FAILED=0
 
@@ -16,7 +16,7 @@ DOCUMENTED_HASH=$(grep -oE '`([0-9a-f]{40})`' docs/validation.md | head -1 | tr 
 
 if [ -z "$DOCUMENTED_HASH" ]; then
     echo "FAIL: Could not find a 40-character commit hash in docs/validation.md"
-    echo "Expected a line like: **Vendored commit:** \`ffc8b56e99c61eb4e42af625bbbc310e198ec58d\`"
+    echo "Expected a line like: **Vendored commit:** \`58f39d8746520786c26c02ce4c08618d3053c422\`"
     FAILED=1
     exit $FAILED
 fi

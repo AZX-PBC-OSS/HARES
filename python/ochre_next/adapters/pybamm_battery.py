@@ -19,12 +19,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 try:
-    import pybamm as _pybamm  # type: ignore[import-untyped]
-
-    _HAS_PYBAMM = True
+    import pybamm as _pybamm
 except ImportError:
     _pybamm = None
-    _HAS_PYBAMM = False
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +56,9 @@ class ChargingCurveLutData(TypedDict):
     lut: npt.NDArray[np.float32]
     lut_coverage: dict[str, int]
     fallback_mask: npt.NDArray[np.uint8]
+
+type _Key = tuple[int, int, int]
+type _TrajPair = tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]
 
 
 _DEFAULT_DEGRADATION: DegradationConfig = {
@@ -136,15 +136,21 @@ def _format_toml_value(value: Any) -> str:
     if isinstance(value, str):
         return f'"{value}"'
     if isinstance(value, list):
-        items = ", ".join(_format_toml_value(v) for v in value)
+        item_values = cast("list[object]", value)
+        items = ", ".join(_format_toml_value(v) for v in item_values)
         return f"[{items}]"
     return repr(value)
 
 
 def _dict_to_toml(data: dict[str, Any]) -> str:
     lines: list[str] = []
-    scalars = {k: v for k, v in data.items() if not isinstance(v, dict)}
-    tables = {k: v for k, v in data.items() if isinstance(v, dict)}
+    scalars: dict[str, Any] = {}
+    tables: dict[str, dict[str, Any]] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            tables[key] = value
+        else:
+            scalars[key] = value
 
     for k in sorted(scalars):
         lines.append(f"{k} = {_format_toml_value(scalars[k])}")
@@ -162,7 +168,7 @@ class EfficiencyLut:
     """Battery efficiency look-up table backed by an Arrow table."""
 
     table: pa.Table
-    metadata: dict[str, Any] = dataclass_field(default_factory=dict)
+    metadata: dict[str, Any] = dataclass_field(default_factory=dict[str, Any])
 
     def save(self, path: Path) -> None:
         """Write the LUT to a Parquet file on disk."""
@@ -177,8 +183,8 @@ class EfficiencyLut:
 class DegradationParams:
     """Battery degradation parameter set."""
 
-    params: dict[str, Any] = dataclass_field(default_factory=dict)
-    metadata: dict[str, Any] = dataclass_field(default_factory=dict)
+    params: dict[str, Any] = dataclass_field(default_factory=dict[str, Any])
+    metadata: dict[str, Any] = dataclass_field(default_factory=dict[str, Any])
 
     def save(self, path: Path) -> None:
         """Write the parameters to a TOML file on disk."""
@@ -247,6 +253,11 @@ def _run_pybamm_efficiency(
     age_cycles: int,
 ) -> pa.Table:
     """Run PyBaMM SPM to generate an efficiency LUT."""
+    if _pybamm is None:
+        raise ImportError(
+            "PyBaMM is required for efficiency LUT generation. "
+            "Install with: uv pip install -e '.[pybamm]'"
+        )
     assert v_nominal > 0 and 2.0 <= v_nominal <= 4.5, f"Invalid nominal voltage: {v_nominal}"
     model = _pybamm.lithium_ion.SPM()
 
@@ -377,7 +388,7 @@ def generate_efficiency_lut(
             table = pq.read_table(cached_path)
             return EfficiencyLut(table=table, metadata={"content_hash": content_hash, "cached": True, "v_nominal": v_nominal})
 
-    if _HAS_PYBAMM:
+    if _pybamm is not None:
         LOGGER.info("Running PyBaMM SPM to generate efficiency LUT for %s", chemistry)
         table = _run_pybamm_efficiency(
             chemistry,
@@ -496,8 +507,8 @@ def _normalized_distance(
 
 
 def _find_nearest_neighbor(
-    target: tuple[int, int, int],
-    solved: dict[tuple[int, int, int], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]],
+    target: _Key,
+    solved: dict[_Key, _TrajPair],
     temp_arr: npt.NDArray[np.float64],
     crate_arr: npt.NDArray[np.float64],
     soh_arr: npt.NDArray[np.float64],
@@ -626,7 +637,7 @@ def generate_charging_curve_lut(
     """
     import itertools
 
-    if not _HAS_PYBAMM:
+    if _pybamm is None:
         raise ImportError(
             "PyBaMM is required for LUT generation. "
             "Install with: uv pip install -e '.[pybamm]'"
@@ -675,8 +686,6 @@ def generate_charging_curve_lut(
     # Stored (SOC trajectory, power_fraction) for each successfully solved
     # grid point, used for nearest-neighbor fallback.
     # Map key: (j, k, h) -> (soc_trajectory, power_fraction)
-    _Key = tuple[int, int, int]
-    _TrajPair = tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]
     solved: dict[_Key, _TrajPair] = {}
 
     for (j, t), (k, cr), (h, soh_val) in itertools.product(
@@ -684,7 +693,7 @@ def generate_charging_curve_lut(
         enumerate(crate_arr),
         enumerate(soh_arr),
     ):
-        result = _simulate_cc_cv_single(
+        point_result = _simulate_cc_cv_single(
             param_set=param_set,
             v_upper=v_upper,
             v_lower=v_lower,
@@ -698,7 +707,7 @@ def generate_charging_curve_lut(
             parameter_overrides=parameter_overrides,
         )
 
-        if result is None:
+        if point_result is None:
             neighbor = _find_nearest_neighbor(
                 (j, k, h), solved, temp_arr, crate_arr, soh_arr,
             )
@@ -734,14 +743,11 @@ def generate_charging_curve_lut(
                 "no neighbor (first point failed), using linear derating",
                 t, cr, soh_val * 100,
             )
-        else:
-            soc_traj, pfrac = result
-            solved[(j, k, h)] = (soc_traj, pfrac)
-
-        if result is not None:
-            lut[:, j, k, h] = _interp_lut_column(soc_arr, soc_traj, pfrac)
-        else:
             lut[:, j, k, h] = _interp_lut_column(soc_arr, soc_arr, pfrac_unique)
+        else:
+            soc_traj, pfrac = point_result
+            solved[(j, k, h)] = (soc_traj, pfrac)
+            lut[:, j, k, h] = _interp_lut_column(soc_arr, soc_traj, pfrac)
 
         done += 1
         LOGGER.info(
@@ -799,6 +805,11 @@ def _simulate_cc_cv_single(
     parameter_overrides: dict[str, Any] | None,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] | None:
     """Run one CC-CV simulation and return (soc_trajectory, power_fraction)."""
+    if _pybamm is None:
+        raise ImportError(
+            "PyBaMM is required for CC-CV simulation. "
+            "Install with: uv pip install -e '.[pybamm]'"
+        )
     param = _pybamm.ParameterValues(param_set)
     param["Upper voltage cut-off [V]"] = v_upper
     param["Lower voltage cut-off [V]"] = v_lower
@@ -897,7 +908,7 @@ def generate_ocv_curve(
     v_lower:
         Clamp floor for per-cell voltage (V).
     """
-    if not _HAS_PYBAMM:
+    if _pybamm is None:
         raise ImportError(
             "PyBaMM is required for OCV curve generation. "
             "Install with: uv pip install -e '.[pybamm]'"

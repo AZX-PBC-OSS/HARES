@@ -211,7 +211,9 @@ pub fn parse_shading_config(config: &crate::EquipmentConfig) -> Result<ShadingMo
                 );
             }
             let mut points: Vec<(f64, f64)> = raw
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .filter(|c| c[0].is_finite() && c[1].is_finite())
                 .map(|c| (c[0].rem_euclid(360.0), c[1].clamp(0.0, 90.0)))
                 .collect();

@@ -92,11 +92,11 @@ const DEFAULT_PIPE_CONDUCTIVITY_W_PER_M_K: f64 = 0.40;
 /// diffusivity in m²/day.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoreholeConfig {
-    /// Vertical borehole depth below ground surface [m].
+    /// Vertical borehole depth below ground surface (m).
     pub borehole_depth_m: f64,
-    /// Borehole radius (half the drilled diameter) [m].
+    /// Borehole radius (half the drilled diameter) (m).
     pub borehole_radius_m: f64,
-    /// Center-to-center spacing of the U-tube shanks [m].
+    /// Center-to-center spacing of the U-tube shanks (m).
     pub shank_spacing_m: f64,
     /// Number of boreholes in the field.
     pub number_of_boreholes: u32,
@@ -106,9 +106,9 @@ pub struct BoreholeConfig {
     pub soil_diffusivity_m2_per_day: f64,
     /// Grout (backfill) thermal conductivity [W/(m·K)].
     pub grout_conductivity_w_per_m_k: f64,
-    /// HDPE U-tube pipe outer radius [m].
+    /// HDPE U-tube pipe outer radius (m).
     pub pipe_outer_radius_m: f64,
-    /// HDPE U-tube pipe inner radius [m].
+    /// HDPE U-tube pipe inner radius (m).
     pub pipe_inner_radius_m: f64,
     /// HDPE pipe thermal conductivity [W/(m·K)].
     pub pipe_conductivity_w_per_m_k: f64,
@@ -343,12 +343,11 @@ fn borehole_resistance_per_unit_length(config: &BoreholeConfig) -> f64 {
 /// of the U-tube provide parallel heat transfer paths.
 ///
 /// Reference: Javed, S. & Spitler, J.D. (2016). Equation 3.
-// Why: dead_code — grout_resistance_per_unit_length is a validation helper
-// used only in test assertions. Production code uses borehole_resistance_per_unit_length
-// which calls the first-order multipole method directly. The grout-only split is
-// kept because it provides a verifiable intermediate value for test coverage of
-// Javed & Spitler (2016) Eq. 3.
-#[allow(dead_code)]
+// Validation helper used only by the tests below; production code uses
+// borehole_resistance_per_unit_length, which calls the first-order multipole
+// method directly. The grout-only split provides a verifiable intermediate
+// value for test coverage of Javed & Spitler (2016) Eq. 3.
+#[cfg(test)]
 fn grout_resistance_per_unit_length(config: &BoreholeConfig) -> f64 {
     let r_b_avg = borehole_resistance_first_order_multipole(config);
     let r_pipe = pipe_conduction_resistance_per_unit_length(
@@ -470,8 +469,8 @@ fn g_function(tau: f64, rb_over_h: f64) -> f64 {
 /// # Interior mutability
 ///
 /// The thermal history is stored behind a [`RwLock`] so that
-/// [`compute_entering_water_temp`] can read the history via `&self` while
-/// [`record_heat_rate`] can update it. This is a legitimate use of interior
+/// [`Self::compute_entering_water_temp`] can read the history via `&self` while
+/// [`Self::record_heat_rate`] can update it. This is a legitimate use of interior
 /// mutability: the model presents an immutable façade to equipment code
 /// that calls `SourceTemperature::compute(&self, …)`, while accumulating
 /// state internally.
@@ -630,9 +629,9 @@ impl BoreholeGFunctionModel {
     ///
     /// # Parameters
     ///
-    /// * `heat_rate_w` — Net thermal power exchanged with the ground [W],
+    /// * `heat_rate_w` -- Net thermal power exchanged with the ground (W),
     ///   positive for injection (cooling), negative for extraction (heating).
-    /// * `dt_s` — Duration of the timestep [s].
+    /// * `dt_s` -- Duration of the timestep (s).
     pub fn record_heat_rate(&self, heat_rate_w: f64, dt_s: f64) {
         if dt_s <= 0.0 {
             return;
@@ -1023,6 +1022,7 @@ mod tests {
                 humidity_ratio: 0.008,
                 volume_m3: 200.0,
             }],
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             weather: hares_types::WeatherState {
                 outdoor_temp_c: 15.0,
                 ground_temp_c: ground_t_mean_c,
@@ -1037,7 +1037,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)

@@ -25,6 +25,7 @@ use hares_types::{
 
 fn make_env(zone_temp_c: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: zone_temp_c,
@@ -52,7 +53,8 @@ fn make_env(zone_temp_c: f64) -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
@@ -81,7 +83,7 @@ fn resistance_config(
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -125,7 +127,7 @@ fn gas_config(
         GasWaterHeaterConfig {
             fan_power_w: None,
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             fuel_type: FuelType::Gas,
             tank_volume_m3: None,
@@ -173,7 +175,7 @@ fn tankless_config(
         "Tankless Water Heater".to_string(),
         TanklessWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             fuel_type,
             energy_factor: Some(1.0),
@@ -379,11 +381,11 @@ fn gas_wh_consumes_gas_not_electricity() {
 #[test]
 fn resistance_wh_uses_schedule_draw_source() {
     let mut env = make_env(21.0);
-    env.custom_domains = vec![DomainUpdate {
+    env.domains.schedule.set_from(&DomainUpdate {
         domain_id: SCHEDULE_DOMAIN_ID,
         zone_temperatures_c: vec![],
         custom_payload: Some(vec![99.0, 0.05]),
-    }];
+    });
 
     let mut typed: ElectricResistanceWaterHeaterConfig = resistance_config(52.0, 2.0, 40.0, 0.0)
         .typed()
@@ -415,11 +417,11 @@ fn resistance_wh_uses_schedule_draw_source() {
 #[test]
 fn gas_wh_uses_schedule_draw_source() {
     let mut env = make_env(21.0);
-    env.custom_domains = vec![DomainUpdate {
+    env.domains.schedule.set_from(&DomainUpdate {
         domain_id: SCHEDULE_DOMAIN_ID,
         zone_temperatures_c: vec![],
         custom_payload: Some(vec![99.0, 0.05]),
-    }];
+    });
 
     let mut typed: GasWaterHeaterConfig = gas_config(52.0, 2.0, 40.0, 0.0)
         .typed()
@@ -450,11 +452,11 @@ fn gas_wh_uses_schedule_draw_source() {
 fn tankless_wh_uses_schedule_draw_and_mains_inputs() {
     let mut env = make_env(21.0);
     env.weather.mains_temp_c = f64::NAN;
-    env.custom_domains = vec![DomainUpdate {
+    env.domains.schedule.set_from(&DomainUpdate {
         domain_id: SCHEDULE_DOMAIN_ID,
         zone_temperatures_c: vec![],
         custom_payload: Some(vec![10.0, 0.05]),
-    }];
+    });
 
     let cfg = tankless_config(
         FuelType::Electric,
@@ -528,7 +530,7 @@ fn energy_conservation_over_draw_cycle() {
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -689,7 +691,7 @@ fn max_tank_temp_safety_limit() {
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -912,7 +914,7 @@ fn resistance_config_with_ramp(
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1174,7 +1176,7 @@ fn tmv_reduces_draw_volume_for_hot_tank() {
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -1239,7 +1241,7 @@ fn tmv_unmet_load_when_tank_cold() {
         "Resistance Water Heater".to_string(),
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id: Some(1),
             loop_id: None,
             tank_volume_m3: None,
             tank_height_m: None,

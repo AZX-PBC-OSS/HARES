@@ -22,24 +22,20 @@
 //! net sensible balance with it (~13.5 kW mean gross vs ~100 W net on this
 //! fixture's summer day).
 
+#[path = "support/denver_offset.rs"]
+mod denver_offset;
+
 #[cfg(test)]
 mod tests {
+    use super::denver_offset::denver_offset;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::OnceLock;
 
-    use chrono::{Duration, FixedOffset, TimeZone};
+    use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
     use hares_io::{EnvelopeComponentLoadsKwh, OutputFormat};
-
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        format!("{base}_{nanos}.{ext}")
-    }
 
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
@@ -66,10 +62,10 @@ mod tests {
             }
             let fields: Vec<&str> = line.split(',').collect();
             for (i, field) in fields.iter().enumerate() {
-                if i < columns.len() {
-                    if let Ok(v) = field.trim().parse::<f64>() {
-                        data.get_mut(&columns[i]).unwrap().push(v);
-                    }
+                if i < columns.len()
+                    && let Ok(v) = field.trim().parse::<f64>()
+                {
+                    data.get_mut(&columns[i]).unwrap().push(v);
                 }
             }
         }
@@ -102,12 +98,14 @@ mod tests {
         static RUN: OnceLock<(BTreeMap<String, Vec<f64>>, EnvelopeComponentLoadsKwh)> =
             OnceLock::new();
         RUN.get_or_init(|| {
-            let output_path =
-                std::env::temp_dir().join(unique_temp_name("hares_opaque_loads_summer_24h", "csv"));
-            let denver = FixedOffset::west_opt(7 * 3600).expect("Denver UTC-7 offset");
+            // The run's output and its `_diagnostics.csv` sibling go in a
+            // directory removed once the columns are parsed.
+            let output_dir = tempfile::tempdir().expect("temp dir");
+            let output_path = output_dir.path().join("hares_opaque_loads_summer_24h.csv");
+            let denver = denver_offset();
             let config = DwellingConfig {
                 hpxml_path: examples_dir().join("BEopt_example.xml"),
-                schedule_path: examples_dir().join("BEopt_example_schedule.csv"),
+                schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
                 weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
                 defaults_path: Some(project_root().join("defaults")),
                 sim_config: SimulationConfig {
@@ -125,6 +123,7 @@ mod tests {
                     site_location: hares_io::SiteLocationOverride::default(),
                     retain_batches: false,
                     rotation: hares_io::RotationPolicy::None,
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 },
                 overrides: None,
                 bldg_id: 1,
@@ -140,9 +139,7 @@ mod tests {
                 .envelope_loads_kwh
                 .expect("verbosity 6 must produce envelope-load metrics");
 
-            let data = parse_csv_columns(&output_path);
-            let _ = fs::remove_file(&output_path);
-            (data, envelope_loads)
+            (parse_csv_columns(&output_path), envelope_loads)
         })
     }
 

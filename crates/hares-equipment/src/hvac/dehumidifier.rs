@@ -23,7 +23,7 @@ use super::ac_config::DehumidifierConfig;
 use super::dehumidifier_defaults::{
     DEFAULT_ENERGY_FACTOR_CURVE, DEFAULT_WATER_REMOVAL_CURVE, RATED_DB_C, RATED_RH,
 };
-use super::helpers::{zone_id_from_config, zone_id_from_config_or_default};
+use super::helpers::{resolve_served_zone, served_zone_ports, zone_id_from_config};
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 
 // Water density assumed as 1.0 kg/L (constant approximation).
@@ -117,7 +117,10 @@ pub struct Dehumidifier {
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
     core_output: CoreOutput,
-    zone_id: ZoneId,
+    /// Zone the unit runs in. `None` between construction and `init` when the
+    /// config carries no `zone_id`; `init` always runs before the first step
+    /// and rejects that state, so every step sees a resolved zone.
+    zone_id: Option<ZoneId>,
     operating_mode: OperatingMode,
     is_on: bool,
     mode_override: Option<OperatingMode>,
@@ -136,8 +139,6 @@ pub struct Dehumidifier {
     part_load_curve_coeffs: [f64; 4],
     /// Lower clamp for PLF (part-load factor).
     plf_min: f64,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// Off-cycle parasitic electric load [W].
     ///
     /// When the unit is off, this constant load (standby electronics, controls,
@@ -169,14 +170,14 @@ pub struct Dehumidifier {
 impl Dehumidifier {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone = zone_id_from_config(&config);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(constructor_equipment_id(&config)),
                 name: config.name,
                 end_use: EndUse::DEHUMIDIFIER,
                 equipment_type: Cow::Borrowed("Dehumidifier"),
-                zone: Some(zone),
+                zone,
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::HUMIDITY_SETPOINT
@@ -187,11 +188,7 @@ impl Dehumidifier {
                 telemetry_fields: telemetry_fields(),
                 zone_type: None,
             },
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-                PortDeclaration::humidity(zone),
-            ],
+            ports: served_zone_ports(&[PortDeclaration::electrical()], zone, true),
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
             zone_id: zone,
@@ -225,7 +222,6 @@ impl Dehumidifier {
             accumulated_water_removal_l: 0.0,
             part_load_curve_coeffs: DEFAULT_PLF_CURVE_COEFFS,
             plf_min: DEFAULT_PLF_MIN,
-            zone_id_explicit,
             off_cycle_parasitic_load_w: None,
             min_operating_temp_c: Some(DEFAULT_MIN_OPERATING_TEMP_C),
             max_operating_temp_c: Some(DEFAULT_MAX_OPERATING_TEMP_C),
@@ -485,14 +481,13 @@ impl Dehumidifier {
         Ok(())
     }
 
-    /// Check PLF/RTF invariant bounds.
+    /// Check PLF/RTF part-load bounds.
     ///
     /// EnergyPlus CalcZoneDehumidifier lines 769–808 require
-    /// `0.7 ≤ PLF ≤ 1.0` and `0 ≤ RTF ≤ 1`.  Gated behind
-    /// `debug_assertions` or `feature = "check_invariants"` so the
-    /// check compiles to nothing in production release builds.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn check_invariants(&self, plf: f64, rtf: f64) -> crate::Result<()> {
+    /// `0.7 ≤ PLF ≤ 1.0` and `0 ≤ RTF ≤ 1`. Runs in every build profile:
+    /// a part-load factor outside the bounds is a physics violation, not a
+    /// debug-only concern.
+    fn check_part_load_bounds(&self, plf: f64, rtf: f64) -> crate::Result<()> {
         use hares_types::HaresError;
         if plf < self.plf_min || plf > 1.0 {
             return Err(HaresError::InvariantViolation {
@@ -510,12 +505,6 @@ impl Dehumidifier {
         }
         Ok(())
     }
-
-    /// Stub for unchecked builds — the body is eliminated by the compiler.
-    #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-    fn check_invariants(&self, _plf: f64, _rtf: f64) -> crate::Result<()> {
-        Ok(())
-    }
 }
 
 impl Equipment for Dehumidifier {
@@ -531,10 +520,6 @@ impl Equipment for Dehumidifier {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
@@ -547,24 +532,13 @@ impl Equipment for Dehumidifier {
         if let Some(id) = equipment_id_from_config(config)? {
             self.descriptor.id = EquipmentId(id);
         }
-        let new_zone = zone_id_from_config(config);
-        let explicit = new_zone.is_some();
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        if !explicit {
-            tracing::warn!(
-                equipment = %self.descriptor.name,
-                key = crate::config::KEY_ZONE_ID,
-                "zone_id not present in equipment config during init; preserving existing zone_id"
-            );
-        }
-        self.zone_id_explicit = explicit;
-        self.zone_id = new_zone.unwrap_or(self.zone_id);
-        self.descriptor.zone = Some(self.zone_id);
-        self.ports = vec![
-            PortDeclaration::electrical(),
-            PortDeclaration::thermal(self.zone_id),
-            PortDeclaration::humidity(self.zone_id),
-        ];
+        // A dehumidifier conditions the dwelling's conditioned zone; one
+        // with no zone has no air to dehumidify. `init` always runs before
+        // the first step, so this gates every step.
+        let zone = resolve_served_zone(config, self.zone_id)?;
+        self.zone_id = Some(zone);
+        self.descriptor.zone = Some(zone);
+        self.ports = served_zone_ports(&[PortDeclaration::electrical()], Some(zone), true);
 
         self.init_from_typed(config)?;
 
@@ -599,7 +573,9 @@ impl Equipment for Dehumidifier {
             return OperatingMode::Off;
         }
         let pressure_pa = env.weather.pressure_pa();
-        let zone = env.zones.iter().find(|z| z.id == self.zone_id);
+        let zone = self
+            .zone_id
+            .and_then(|id| env.zones.iter().find(|z| z.id == id));
         if let Some(zone_state) = zone {
             // Inlet air temperature operating limits per EnergyPlus
             // ZoneDehumidifier.cc:687–688: lock out the compressor when
@@ -653,11 +629,17 @@ impl Equipment for Dehumidifier {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        let zone_id = self.zone_id.ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{}: zone_id not resolved; HPXML parsing did not inject the conditioned zone",
+                self.descriptor.name
+            ))
+        })?;
         let zone = env
             .zones
             .iter()
-            .find(|z| z.id == self.zone_id)
-            .ok_or_else(|| HaresError::Equipment(format!("zone {} not found", self.zone_id.0)))?;
+            .find(|z| z.id == zone_id)
+            .ok_or_else(|| HaresError::Equipment(format!("zone {} not found", zone_id.0)))?;
 
         let pressure_pa = env.weather.pressure_pa();
         let rh = hares_physics::psychrometrics::zone_relative_humidity(zone, pressure_pa);
@@ -682,7 +664,7 @@ impl Equipment for Dehumidifier {
         } else {
             raw
         };
-        self.check_invariants(snapshot.plf, snapshot.rtf)?;
+        self.check_part_load_bounds(snapshot.plf, snapshot.rtf)?;
         #[cfg(feature = "observe")]
         {
             tracing::debug!(
@@ -701,16 +683,16 @@ impl Equipment for Dehumidifier {
                     "rtf > plr: cycling losses applied"
                 );
             }
-            if let Some(parasitic) = self.off_cycle_parasitic_load_w {
-                if !self.is_on {
-                    let parasitic_energy_j = parasitic * dt.as_secs_f64();
-                    tracing::debug!(
-                        dehumidifier = %self.descriptor.name,
-                        off_cycle_parasitic_w = parasitic,
-                        parasitic_energy_j,
-                        "dehumidifier off-cycle parasitic load active: {parasitic} W, accumulated {parasitic_energy_j} J this step"
-                    );
-                }
+            if let Some(parasitic) = self.off_cycle_parasitic_load_w
+                && !self.is_on
+            {
+                let parasitic_energy_j = parasitic * dt.as_secs_f64();
+                tracing::debug!(
+                    dehumidifier = %self.descriptor.name,
+                    off_cycle_parasitic_w = parasitic,
+                    parasitic_energy_j,
+                    "dehumidifier off-cycle parasitic load active: {parasitic} W, accumulated {parasitic_energy_j} J this step"
+                );
             }
         }
         // Rule R1: Q from the already-computed real power (whole-unit pf
@@ -730,7 +712,7 @@ impl Equipment for Dehumidifier {
         }
         if snapshot.sensible_gain_w != 0.0 || snapshot.latent_removal_w != 0.0 {
             ports.accumulate(&PortContribution::Thermal {
-                zone: self.zone_id,
+                zone: zone_id,
                 sensible_gain_w: snapshot.sensible_gain_w,
                 radiant_gain_w: 0.0,
                 latent_gain_w: -snapshot.latent_removal_w,
@@ -742,7 +724,7 @@ impl Equipment for Dehumidifier {
             snapshot.water_removal_l_day * KG_PER_LITER_WATER / SECONDS_PER_DAY;
         if water_removal_kg_s.abs() > 0.0 {
             ports.accumulate(&PortContribution::Humidity {
-                zone: self.zone_id,
+                zone: zone_id,
                 moisture_mass_flow_kg_s: -water_removal_kg_s,
             })?;
         }
@@ -1133,6 +1115,7 @@ mod tests {
             0.0
         };
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c,
@@ -1158,7 +1141,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -1869,11 +1853,6 @@ mod tests {
     ///    applied to moisture and NOT the electric scalar (RTF).
     #[test]
     fn energyplus_regression_independent_plr_rtf_scalars() {
-        // Why: Clippy fires `items_after_test_module` on inner function definitions
-        // inside test functions because rustc treats them as module-level items even
-        // when nested inside a function body. There is no way to move this helper
-        // without duplicating the test or pulling it out of the test module.
-        #[allow(clippy::items_after_test_module)]
         fn custom_eplus_dehumidifier_config(coeffs: Option<[f64; 4]>) -> EquipmentConfig {
             EquipmentConfig::from_typed(
                 "E+ Regression".to_string(),
@@ -1973,13 +1952,10 @@ mod tests {
     }
 
     #[test]
-    fn init_updates_zone_id_explicit_when_config_lacks_zone_id() {
+    fn new_carries_the_config_zone_and_declares_no_zone_port_without_one() {
         let cfg_with_zone = config();
-        let mut dehu = Dehumidifier::new(cfg_with_zone);
-        assert!(
-            dehu.zone_id_explicit(),
-            "new() with explicit zone_id must set zone_id_explicit = true"
-        );
+        let dehu = Dehumidifier::new(cfg_with_zone);
+        assert_eq!(dehu.descriptor().zone, Some(ZoneId(1)));
 
         let cfg_without_zone = EquipmentConfig::from_typed(
             "Test Dehumidifier".to_string(),
@@ -2000,11 +1976,54 @@ mod tests {
             },
         )
         .unwrap();
-        dehu.init(&cfg_without_zone, &env(50.0))
-            .expect("init must succeed");
+        let dehu = Dehumidifier::new(cfg_without_zone);
+        assert_eq!(
+            dehu.descriptor().zone,
+            None,
+            "new() must not fall back to a guessed zone; init() enforces the real check"
+        );
         assert!(
-            !dehu.zone_id_explicit(),
-            "init() with absent zone_id must set zone_id_explicit = false"
+            dehu.ports().iter().all(|p| p.zone.is_none()),
+            "an unresolved dehumidifier declares no zone port"
+        );
+    }
+
+    /// `init` with a config carrying no `zone_id` must fail with a typed
+    /// equipment error naming the equipment, not silently keep running on a
+    /// guessed zone.
+    #[test]
+    fn dehumidifier_init_errors_on_unresolved_zone() {
+        let cfg_without_zone = EquipmentConfig::from_typed(
+            "Unresolved Dehumidifier".to_string(),
+            "Dehumidifier".to_string(),
+            crate::DehumidifierConfig {
+                equipment_id: Some(9),
+                zone_id: None,
+                capacity_liters_per_day: Some(70.0 * 0.473_176_5),
+                energy_factor: Some(2.0),
+                integrated_energy_factor: None,
+                fraction_served: None,
+                target_rh: Some(50.0),
+                part_load_curve_coeffs: None,
+                plf_min: None,
+                off_cycle_parasitic_load_w: None,
+                min_operating_temp_c: None,
+                max_operating_temp_c: None,
+            },
+        )
+        .unwrap();
+        let mut dehu = Dehumidifier::new(cfg_without_zone.clone());
+        let err = dehu
+            .init(&cfg_without_zone, &env(50.0))
+            .expect_err("init must fail when the config carries no zone_id");
+        let message = err.to_string();
+        assert!(
+            message.contains("Unresolved Dehumidifier"),
+            "the error must name the equipment, got: {message}"
+        );
+        assert!(
+            message.contains("zone_id"),
+            "the error must name the unresolved zone_id, got: {message}"
         );
     }
 

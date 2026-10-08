@@ -9,7 +9,8 @@ use hares_core::SimulationEngine;
 
 use super::helpers;
 
-type BuildingBuilder = Box<dyn Fn(i64, Duration, u64) -> hares_core::DwellingConfig>;
+type BuildingBuilder =
+    Box<dyn Fn(&std::path::Path, i64, Duration, u64) -> hares_core::DwellingConfig>;
 const THREAD_COUNTS: [usize; 3] = [1, 4, 8];
 const SIM_DURATION_HOURS: i64 = 24;
 const SEED: u64 = 42;
@@ -20,6 +21,7 @@ pub fn run_determinism_checks() -> Result<(), Vec<String>> {
     let engine = SimulationEngine::new();
     let mut failures = Vec::new();
     let duration = Duration::hours(SIM_DURATION_HOURS);
+    let output_dir = tempfile::tempdir().expect("create output directory");
 
     let buildings: Vec<(&str, BuildingBuilder)> = vec![
         ("beopt_1", Box::new(helpers::build_beopt_dwelling_config)),
@@ -34,7 +36,7 @@ pub fn run_determinism_checks() -> Result<(), Vec<String>> {
         let mut trajectories: Vec<(usize, Vec<f64>)> = Vec::new();
 
         for &n_threads in &THREAD_COUNTS {
-            let config = builder(1, duration, SEED);
+            let config = builder(output_dir.path(), 1, duration, SEED);
 
             unsafe {
                 std::env::set_var("RAYON_NUM_THREADS", n_threads.to_string());

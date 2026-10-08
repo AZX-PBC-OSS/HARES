@@ -22,10 +22,10 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
-        apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
-        compute_and_write_ebm_telemetry, lookup_zone, outage_forces_off,
-        register_ebm_telemetry_keys, update_heating_control, zone_id_from_config_or_default,
+        apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
+        apply_simple_mode_override_in_control, outage_forces_off, register_ebm_telemetry_keys,
+        served_zone_ports, step_equivalent_battery, update_heating_control, write_ebm_telemetry,
+        zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -43,8 +43,6 @@ pub struct ElectricBaseboard {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
-    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
-    zone_id_explicit: bool,
     /// External ModeOverride control (sticky).
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
@@ -54,12 +52,17 @@ pub struct ElectricBaseboard {
     zip: hares_types::zip::ResolvedZip,
 }
 
+/// Version 2: the thermostat hysteresis is persisted.
+const BASEBOARD_CHECKPOINT_VERSION: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BaseboardState {
     mode: ThermostatMode,
     duty_cycle: f64,
     last_mode_switch_at: Option<DateTime<FixedOffset>>,
     runtime_setpoints: Option<RuntimeSetpointOverride>,
+    /// The hysteresis in force, which a named `ThermalSetpoint` may have set.
+    thermostat_hysteresis_c: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
     electric_kw: f64,
@@ -71,20 +74,21 @@ struct BaseboardState {
 impl ElectricBaseboard {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
+        let zone = zone_id_from_config(&config);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(constructor_equipment_id(&config)),
             name: config.name,
             end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Electric Baseboard"),
-            zone: Some(zone),
+            zone,
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY
                 | ControlCapabilities::MODE_OVERRIDE
-                | ControlCapabilities::DEMAND_RESPONSE,
+                | ControlCapabilities::DEMAND_RESPONSE
+                | ControlCapabilities::NON_HVAC_ZONE_INPUT,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_MODE
@@ -96,10 +100,7 @@ impl ElectricBaseboard {
 
         Self {
             descriptor,
-            ports: vec![
-                PortDeclaration::electrical(),
-                PortDeclaration::thermal(zone),
-            ],
+            ports: served_zone_ports(&[PortDeclaration::electrical()], zone, false),
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::Baseboard, zone),
@@ -108,7 +109,6 @@ impl ElectricBaseboard {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
-            zone_id_explicit,
             mode_override: None,
             dr_level: DRLevel::Normal,
             zip: hares_types::zip::ResolvedZip::reactive_only(
@@ -119,6 +119,10 @@ impl ElectricBaseboard {
 }
 
 impl Equipment for ElectricBaseboard {
+    fn checkpoint_version() -> u32 {
+        BASEBOARD_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -131,23 +135,21 @@ impl Equipment for ElectricBaseboard {
         crate::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
     }
 
-    fn zone_id_explicit(&self) -> bool {
-        self.zone_id_explicit
-    }
-
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed = config.require_typed::<ElectricBaseboardConfig>("Electric Baseboard")?;
         self.hvac.init(config, env)?;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         self.hvac.config.duct_dse = 1.0;
         self.hvac.config.duct_zone_id = None;
         self.hvac.config.basement_heat_frac = 0.0;
         self.hvac.config.basement_zone_id = None;
-        self.hvac.update_zone_heat_fractions();
-        let typed = config.require_typed::<ElectricBaseboardConfig>("Electric Baseboard")?;
+        self.hvac.update_zone_heat_fractions()?;
+        self.hvac.rebuild_thermal_ports(&mut self.ports, false);
+        self.descriptor.zone = self.hvac.config.zone_id;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
         if self.eir <= 0.0 || !self.eir.is_finite() {
@@ -187,7 +189,14 @@ impl Equipment for ElectricBaseboard {
             self.operating_mode = mode;
             return mode;
         }
-        self.operating_mode = update_heating_control(&mut self.hvac, env);
+        self.operating_mode =
+            match update_heating_control(&mut self.hvac, env, &self.descriptor.name) {
+                Ok(mode) => mode,
+                Err(err) => {
+                    self.hvac.record_control_error(err);
+                    OperatingMode::Off
+                }
+            };
         self.operating_mode
     }
 
@@ -197,6 +206,9 @@ impl Equipment for ElectricBaseboard {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        if let Some(err) = self.hvac.take_control_error() {
+            return Err(err);
+        }
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty * sf;
@@ -204,6 +216,7 @@ impl Equipment for ElectricBaseboard {
         let reactive_power_kvar = self
             .zip
             .reactive_kvar(electric_kw, env.grid.bus_voltage_pu());
+        let ebm_window = step_equivalent_battery(&self.hvac, env)?;
 
         if thermal_output_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -228,19 +241,17 @@ impl Equipment for ElectricBaseboard {
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
+        // The runtime fraction and the part-load ratio coincide for a
+        // resistance element: it delivers `duty` of rated for the whole step
+        // and draws for that same fraction (EnergyPlus HeatingCoils.cc:1873:
+        // `ElecUseLoad *= PartLoadRatio`).
+        self.telemetry.set(tk::RUNTIME_FRACTION, duty);
+        self.telemetry.set(tk::PART_LOAD_RATIO, duty);
         self.telemetry
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
-        let zone_temp_c = lookup_zone(env, self.hvac.config.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(20.0);
-        compute_and_write_ebm_telemetry(
-            &self.hvac,
-            zone_temp_c,
-            thermal_output_w,
-            &mut self.telemetry,
-        );
+        write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -270,6 +281,16 @@ impl Equipment for ElectricBaseboard {
         &self.core_output
     }
 
+    fn thermostat_band_class(&self) -> Option<hares_types::ThermostatBandClass> {
+        Some(self.hvac.thermostat_fsm.thermostat.band_class)
+    }
+
+    fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
+        Some(hares_types::ThermostatAxes::One(
+            hares_types::ThermostatAxis::Heating,
+        ))
+    }
+
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
     }
@@ -281,6 +302,7 @@ impl Equipment for ElectricBaseboard {
                 duty_cycle: self.hvac.runtime.duty_cycle,
                 last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
                 runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -304,6 +326,9 @@ impl Equipment for ElectricBaseboard {
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac
+            .thermostat_fsm
+            .restore_hysteresis(decoded.thermostat_hysteresis_c)?;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
@@ -354,7 +379,7 @@ impl Equipment for ElectricBaseboard {
         )? {
             return Ok(());
         }
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Baseboard")?;
+        self.hvac.apply_control_signal(signal)?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
     }
@@ -364,7 +389,7 @@ impl Equipment for ElectricBaseboard {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
-        Some((self.hvac.config.zone_id, setpoint))
+        self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
 }
 
@@ -380,6 +405,8 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
+    telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
     telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
@@ -402,6 +429,17 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Delivered sensible zone heat (baseboard bypasses ducts)".to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "Fraction of the step the element runs (equals the part-load ratio)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Delivered capacity as a fraction of rated".to_string(),
         },
         TelemetryField {
             name: tk::OPERATING_MODE.to_string(),
@@ -469,6 +507,7 @@ mod tests {
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
@@ -495,7 +534,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -522,6 +562,56 @@ mod tests {
         .unwrap()
     }
 
+    fn config_without_zone() -> EquipmentConfig {
+        EquipmentConfig::from_typed(
+            "Baseboard".to_string(),
+            "Electric Baseboard".to_string(),
+            ElectricBaseboardConfig {
+                zone_id: None,
+                capacity_w: 3_000.0,
+                ..ElectricBaseboardConfig::default()
+            },
+        )
+        .unwrap()
+    }
+
+    /// HVAC conditions the dwelling's conditioned zone: with no zone_id the
+    /// unit resolves the zone map's indoor role, wherever that zone sits in
+    /// the zone list.
+    #[test]
+    fn baseboard_without_zone_id_serves_the_zone_map_indoor_zone() {
+        let mut cfg = config_without_zone();
+        let mut zone_map = hares_types::ZoneMap::new();
+        zone_map.insert(hares_types::ZoneRole::Indoor, ZoneId(3));
+        cfg.zone_map = Some(zone_map);
+        let mut e = env(18.0);
+        e.zones[0].id = ZoneId(3);
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+        assert_eq!(eq.descriptor().zone, Some(ZoneId(3)));
+        assert!(
+            eq.ports()
+                .iter()
+                .filter(|p| p.port_type == hares_types::PortType::Thermal)
+                .all(|p| p.zone == Some(ZoneId(3))),
+            "the thermal port must target the resolved indoor zone"
+        );
+    }
+
+    /// With neither a zone_id nor a zone map there is no zone to condition.
+    #[test]
+    fn baseboard_init_errors_without_a_zone() {
+        let cfg = config_without_zone();
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env(18.0))
+            .expect_err("no zone_id and no zone map must fail init");
+        assert!(
+            err.to_string().contains("Baseboard"),
+            "the error must name the unit, got: {err}"
+        );
+    }
+
     #[test]
     fn baseboard_forces_dse_to_one_and_writes_direct_zone_heat() {
         let cfg = config(3_000.0);
@@ -535,6 +625,13 @@ mod tests {
             ..PortSlots::default()
         };
         eq.update_control(&env);
+        eprintln!(
+            "SCRATCH duty={} mode={:?} edges={:?} sp={:?}",
+            eq.hvac.runtime.duty_cycle,
+            eq.hvac.thermostat_fsm.mode,
+            eq.hvac.thermostat_fsm.band_edges(),
+            eq.hvac.thermostat_fsm.effective_setpoints()
+        );
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         assert!((ports.electrical.net_active_w() - 3000.0).abs() < 1.0);
         assert!((ports.thermal[0].sensible_gain_w - 3_000.0).abs() < 1e-9);

@@ -817,8 +817,8 @@ fn aim2_flow_varies_with_climate_unlike_fixed_n20() {
 /// ELA flow varies with both ΔT and wind speed — proving the static ACH model
 /// is informationally inferior.
 ///
-/// Also verifies the ASHRAE 152 fallback SLA=3.0e-4 produces non-zero ELA,
-/// which is the default the ticket requires to replace `unwrap_or(0.5)`.
+/// The garage's leakage is OS-HPXML's: the SLA a 5 ACH50 unit gives at the
+/// garage's height (airflow.rb:1596-1608).
 ///
 /// Reference: Sherman & Grimsrud (1980) ELA model; Walker & Wilson (1998) Table 2
 /// (hor_lk_frac = 0.4 for garage).
@@ -827,9 +827,11 @@ fn ela_model_varies_with_conditions_unlike_constant_ach() {
     let garage_height_m = 2.4_f64;
     let (stack_coeff, wind_coeff) = garage_ela_coefficients(
         garage_height_m,
+        0.0,
         ShieldingClass::Normal,
         TerrainClass::Suburban,
-    );
+    )
+    .unwrap();
 
     // Coefficients must be positive (non-degenerate)
     assert!(
@@ -841,16 +843,14 @@ fn ela_model_varies_with_conditions_unlike_constant_ach() {
         "garage wind_coeff must be positive: {wind_coeff}"
     );
 
-    // ELA = SLA × floor_area. Use ASHRAE 152 fallback SLA = 3.0e-4,
-    // garage floor area 28 m² (typical 2-car garage).
-    // This is the exact default the ticket says must replace unwrap_or(0.5).
-    let sla = 3.0e-4_f64;
+    // ELA = SLA × floor_area for a 28 m² (two-car) garage.
+    let sla = hares_physics::infiltration::sla_from_ach50(5.0, garage_height_m, N_I_DEFAULT);
     let garage_floor_area_m2 = 28.0_f64;
     let ela_m2 = sla * garage_floor_area_m2;
 
     assert!(
         ela_m2 > 0.0,
-        "ELA from ASHRAE 152 default SLA must be non-zero: {ela_m2}"
+        "ELA from the unit's ACH50 must be non-zero: {ela_m2}"
     );
 
     // Calm conditions: small ΔT, zero wind

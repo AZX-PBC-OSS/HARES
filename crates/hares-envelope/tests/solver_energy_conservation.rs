@@ -37,6 +37,7 @@ const STEPS_24H: usize = 288; // 24h / 300s
 
 fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZONE,
             temperature_c: zone_temp_c,
@@ -72,7 +73,8 @@ fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()
@@ -177,7 +179,7 @@ fn test_energy_balance_closure_hvac_solar_100_steps() {
     let mut env = one_zone_env(t_initial, t_outdoor);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver(&env, t_initial, config);
@@ -195,7 +197,9 @@ fn test_energy_balance_closure_hvac_solar_100_steps() {
         // resolve_new re-reads ports, so set the gain before each call.
         ports.thermal[0].sensible_gain_w = Q_NET_W;
 
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(DT_S as u64))
+            .unwrap();
         t_zone = zone_temp(&update);
         env.zones[0].temperature_c = t_zone;
 
@@ -253,7 +257,7 @@ fn test_energy_conservation_1r1c_no_hvac() {
     let mut env = one_zone_env(t_initial, t_outdoor);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver(&env, t_initial, config);
@@ -264,7 +268,9 @@ fn test_energy_conservation_1r1c_no_hvac() {
 
     for _ in 0..STEPS_24H {
         let t_before = t_zone;
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(DT_S as u64))
+            .unwrap();
         t_zone = zone_temp(&update);
         env.zones[0].temperature_c = t_zone;
 
@@ -349,13 +355,11 @@ fn build_1r1c_solver_with_balance_terms(
 ///
 /// Injects known sensible gains, runs the solver, then reads the three-term
 /// affine balance decomposition and checks `Σ q_gains − ΔE_storage − q_loss ≈ 0`.
-/// This test ensures the invariant-visible balance terms are computed correctly
-/// and the guard in `Dwelling::check_invariants` (which skips the thermal
-/// check when `q_gains` is empty) will not silently suppress the check in
-/// real dwellings with RC envelope models.
-///
-/// Gated to match the cfg gating the balance-terms computation itself.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+/// This test ensures the balance terms are computed correctly and the guard in
+/// the dwelling's step-end thermal check (which skips the thermal check when
+/// `q_gains` is empty) will not silently suppress the check in real dwellings
+/// with RC envelope models. The balance terms are computed in every profile,
+/// so the test runs ungated.
 #[test]
 fn thermal_balance_terms_close_with_populated_node_capacitances() {
     const Q_GAIN_W: f64 = 1700.0;
@@ -365,7 +369,7 @@ fn thermal_balance_terms_close_with_populated_node_capacitances() {
     let env = one_zone_env(t_zone, t_outdoor);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver_with_balance_terms(&env, t_zone, config);
@@ -373,7 +377,9 @@ fn thermal_balance_terms_close_with_populated_node_capacitances() {
     let mut ports = one_zone_ports();
     ports.thermal[0].sensible_gain_w = Q_GAIN_W;
 
-    let _update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+    let _update = solver
+        .resolve_new(&ports, &env, Duration::from_secs(DT_S as u64))
+        .unwrap();
 
     let (q_gains, delta_e, q_loss) = solver.thermal_balance_terms();
 

@@ -29,7 +29,7 @@
 //!    when the outdoor temp differs from the initial indoor temp.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hares_core::Dwelling;
@@ -58,13 +58,13 @@ fn unique_temp_toml(tag: &str) -> PathBuf {
     path
 }
 
-/// Write a minimal synthetic-TOML dwelling config to a temp file and return its path.
+/// Write a minimal synthetic-TOML dwelling config to `path`.
 ///
 /// `outdoor_temp_c` controls whether the furnace fires (below heating setpoint → heats).
 /// `fuel` is `"electricity"` or `"natural gas"`.
 /// `heating_capacity_kbtu_h` controls furnace output power.
 fn write_synthetic_toml(
-    path: &PathBuf,
+    path: &Path,
     outdoor_temp_c: f64,
     fuel: &str,
     heating_capacity_kbtu_h: f64,
@@ -81,7 +81,6 @@ duration_s = {duration_s}
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -96,6 +95,9 @@ outdoor_temp_c = {outdoor_temp_c}
 dew_point_c = -5.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.0
 
 [schedule]
 occupancy = 1.0
@@ -122,14 +124,14 @@ master_seed = 0
 
 #[test]
 fn zone_temperatures_evolve_across_multiple_steps() {
-    let path = unique_temp_toml("zt-evolve");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("zt-evolve.toml");
     // Cold outdoor (-10 C): furnace will try to heat; conduction to outdoors
     // acts as a sink. Either way zone temp must change within 10 steps.
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
     let mut dwelling = Dwelling::from_toml_config(&path)
         .expect("Dwelling::from_toml_config must succeed for valid synthetic TOML");
-    let _ = fs::remove_file(&path);
 
     let first_step = dwelling.step().expect("step 1 must succeed");
     let (_, first_temp) = first_step
@@ -180,14 +182,14 @@ fn zone_temperatures_evolve_across_multiple_steps() {
 
 #[test]
 fn net_electric_power_is_positive_with_active_electric_furnace() {
-    let path = unique_temp_toml("elec-agg");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("elec-agg.toml");
     // -10 C outdoor with 3600s (60 steps): furnace fires after ~32 steps as
     // the zone cools from 21°C to below the 19.2°C heating threshold.
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 3600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     let mut ever_positive = false;
     for _ in 0..60 {
@@ -219,15 +221,16 @@ fn net_electric_power_is_positive_with_active_electric_furnace() {
 
 #[test]
 fn gas_furnace_reports_nonzero_gas_consumption_in_telemetry() {
-    let path = unique_temp_toml("gas-agg");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("gas-agg.toml");
     // Cold day: natural gas furnace will heat. Use 3600s (60 steps) because
-    // with 7× interior mass multiplier and τ ≈ 31,000s the zone takes ~32
-    // steps to cool from 21°C to below the 19.2°C heating threshold.
+    // with the 7× temperature capacitance multiplier and τ ≈ 31,000s the
+    // zone takes ~32 steps to cool from 21°C to below the 19.2°C heating
+    // threshold.
     write_synthetic_toml(&path, -10.0, "natural gas", 30.0, 3600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     // GasFurnace telemetry exposes "fuel_input_w" (watts of fuel consumed).
     let mut ever_nonzero_gas = false;
@@ -235,10 +238,10 @@ fn gas_furnace_reports_nonzero_gas_consumption_in_telemetry() {
         dwelling.step().expect("step must succeed");
         for eq in dwelling.equipment() {
             let telem = eq.telemetry();
-            if let Some(fuel_w) = telem.get("fuel_input_w") {
-                if fuel_w > 0.0 {
-                    ever_nonzero_gas = true;
-                }
+            if let Some(fuel_w) = telem.get("fuel_input_w")
+                && fuel_w > 0.0
+            {
+                ever_nonzero_gas = true;
             }
         }
     }
@@ -265,12 +268,12 @@ fn zone_temperatures_stay_within_physical_bounds_over_10_steps() {
     const SANITY_LOW_C: f64 = -50.0;
     const SANITY_HIGH_C: f64 = 80.0;
 
-    let path = unique_temp_toml("phys-bounds");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("phys-bounds.toml");
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     for step_idx in 1..=10u32 {
         let result = dwelling.step().expect("step must succeed");
@@ -303,12 +306,12 @@ fn zone_temperatures_stay_within_physical_bounds_over_10_steps() {
 
 #[test]
 fn port_slots_are_zeroed_between_steps() {
-    let path = unique_temp_toml("port-zero");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("port-zero.toml");
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     for step_idx in 1..=5u32 {
         dwelling.step().expect("step must succeed");
@@ -367,8 +370,9 @@ fn port_slots_are_zeroed_between_steps() {
 
 #[test]
 fn stale_zone_temp_regression_occupancy_gain_raises_mean_zone_temperature() {
-    let path_a = unique_temp_toml("stale-a");
-    let path_b = unique_temp_toml("stale-b");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path_a = dir.path().join("stale-a.toml");
+    let path_b = dir.path().join("stale-b.toml");
 
     // Dwelling A: occupancy = 1.0 → apply_occupancy_gains deposits 75 W sensible
     // (plus latent) into the zone thermal port every step.
@@ -384,7 +388,6 @@ duration_s = 21600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -399,6 +402,9 @@ outdoor_temp_c = -30.0
 dew_point_c = -35.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.0
 
 [schedule]
 occupancy = 1.0
@@ -427,7 +433,6 @@ duration_s = 21600
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -442,6 +447,9 @@ outdoor_temp_c = -30.0
 dew_point_c = -35.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.0
 
 [schedule]
 occupancy = 0.0
@@ -460,8 +468,6 @@ master_seed = 0
         Dwelling::from_toml_config(&path_a).expect("Dwelling A from_toml_config must succeed");
     let mut dwelling_b =
         Dwelling::from_toml_config(&path_b).expect("Dwelling B from_toml_config must succeed");
-    let _ = fs::remove_file(&path_a);
-    let _ = fs::remove_file(&path_b);
 
     const STEPS: usize = 360;
     const SANITY_LOW_C: f64 = -50.0;
@@ -578,8 +584,9 @@ master_seed = 0
 
 #[test]
 fn ideal_hvac_occupancy_gain_reduces_cumulative_heating_energy() {
-    let path_a = unique_temp_toml("ideal-occ-a");
-    let path_b = unique_temp_toml("ideal-occ-b");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path_a = dir.path().join("ideal-occ-a.toml");
+    let path_b = dir.path().join("ideal-occ-b.toml");
 
     // time_res_s = 300 is the threshold at which IdealHvac auto-mode switches
     // from bang-bang to ideal (back-solved) capacity.  duration_s = 18000
@@ -596,7 +603,6 @@ duration_s = 18000
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -615,6 +621,9 @@ outdoor_temp_c = -10.0
 dew_point_c = -15.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.0
 
 [schedule]
 occupancy = 1.0
@@ -641,7 +650,6 @@ duration_s = 18000
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
 
 [materials]
 wall_r_value_m2_k_w = 2.8
@@ -661,6 +669,9 @@ dew_point_c = -15.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
 
+[infiltration]
+ach = 0.0
+
 [schedule]
 occupancy = 0.0
 
@@ -678,8 +689,6 @@ master_seed = 0
         Dwelling::from_toml_config(&path_a).expect("Dwelling A from_toml_config must succeed");
     let mut dwelling_b =
         Dwelling::from_toml_config(&path_b).expect("Dwelling B from_toml_config must succeed");
-    let _ = fs::remove_file(&path_a);
-    let _ = fs::remove_file(&path_b);
 
     const STEPS: usize = 60;
     const TIMESTEP_H: f64 = 300.0 / 3600.0; // 300-second steps → 1/12 h
@@ -748,12 +757,12 @@ master_seed = 0
 
 #[test]
 fn step_result_zone_temperatures_are_sorted_by_zone_id() {
-    let path = unique_temp_toml("zone-sort");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("zone-sort.toml");
     write_synthetic_toml(&path, 5.0, "electricity", 20.0, 600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     for step_idx in 1..=5u32 {
         let result = dwelling.step().expect("step must succeed");
@@ -780,12 +789,12 @@ fn step_result_zone_temperatures_are_sorted_by_zone_id() {
 
 #[test]
 fn step_result_timestamps_advance_monotonically() {
-    let path = unique_temp_toml("ts-mono");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("ts-mono.toml");
     write_synthetic_toml(&path, 5.0, "electricity", 20.0, 600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     let mut prev_ts = dwelling.step().expect("step 1").timestamp;
     for step_idx in 2..=10u32 {
@@ -812,8 +821,9 @@ fn step_result_timestamps_advance_monotonically() {
 
 #[test]
 fn hvac_heating_energy_reaches_thermal_solver() {
-    let path_heated = unique_temp_toml("hvac-reach-heated");
-    let path_unheated = unique_temp_toml("hvac-reach-unheated");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path_heated = dir.path().join("hvac-reach-heated.toml");
+    let path_unheated = dir.path().join("hvac-reach-unheated.toml");
 
     // 3600s (60 steps): furnace fires after ~32 steps once zone cools below threshold.
     write_synthetic_toml(&path_heated, -10.0, "electricity", 30.0, 3600);
@@ -823,11 +833,11 @@ fn hvac_heating_energy_reaches_thermal_solver() {
         Dwelling::from_toml_config(&path_heated).expect("heated dwelling must load");
     let mut dwelling_unheated =
         Dwelling::from_toml_config(&path_unheated).expect("unheated dwelling must load");
-    let _ = fs::remove_file(&path_heated);
-    let _ = fs::remove_file(&path_unheated);
 
     // Remove all equipment from unheated dwelling to isolate the envelope
-    dwelling_unheated.clear_equipment();
+    dwelling_unheated
+        .clear_equipment()
+        .expect("clear must refresh caches");
 
     const STEPS: usize = 60;
     let mut heated_final_temp = f64::NAN;
@@ -862,12 +872,12 @@ fn hvac_heating_energy_reaches_thermal_solver() {
 
 #[test]
 fn step_result_hvac_heating_w_positive_when_furnace_fires() {
-    let path = unique_temp_toml("hvac-heat-w");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("hvac-heat-w.toml");
     // 3600s (60 steps): furnace fires after ~32 steps once zone cools below threshold.
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 3600);
 
     let mut dwelling = Dwelling::from_toml_config(&path).expect("must load");
-    let _ = fs::remove_file(&path);
 
     let mut ever_heating = false;
     for _ in 0..60 {
@@ -893,11 +903,11 @@ fn step_result_hvac_heating_w_positive_when_furnace_fires() {
 
 #[test]
 fn normal_operation_produces_no_dispatch_warnings() {
-    let path = unique_temp_toml("no-warnings");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("no-warnings.toml");
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
     let mut dwelling = Dwelling::from_toml_config(&path).expect("must load");
-    let _ = fs::remove_file(&path);
 
     for _ in 0..10 {
         dwelling.step().expect("step");
@@ -919,20 +929,18 @@ fn normal_operation_produces_no_dispatch_warnings() {
 // Test: IdealThermostat deadband validation prevents FSM oscillation
 //
 // The thermostat pushes setpoints with a gap that violates the equipment's
-// hysteresis deadband. The actor must reject the signal, preventing the
+// hysteresis deadband. The actor must reject the signal and mark itself
+// unhealthy, so the step fails with a typed error, protecting the
 // equipment FSM from receiving invalid setpoints that would cause it to
 // oscillate between Heating and Cooling.
-//
-// In debug/check_invariants builds, decide() panics on the violation
-// (correct — loud failure). In release, the signal is gracefully rejected
-// and recorded in telemetry. Either path proves the FSM is protected.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
     use std::collections::HashMap;
 
-    let path = unique_temp_toml("deadband-osc");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("deadband-osc.toml");
     // Outdoor at 20 C — warm enough that equipment would normally be in
     // Deadband. The thermostat pushes heat=21, cool=22 with default
     // hysteresis_c=1.0: gap = 1.0 < required 2.0 — deadband violation.
@@ -940,7 +948,6 @@ fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
-    let _ = fs::remove_file(&path);
 
     // Discover the HVAC equipment name so the thermostat targets it.
     let hvac_names: Vec<String> = dwelling
@@ -988,8 +995,8 @@ fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
                 equipment_modes_history.push(mode_map);
             }
             Err(_) => {
-                // Debug/check_invariants panic in decide() — correct behavior.
-                // The simulation stops, preventing any oscillation.
+                // The unhealthy-actor step failure (typed error): correct
+                // behavior. The simulation stops, preventing any oscillation.
                 break;
             }
         }
@@ -998,7 +1005,7 @@ fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
     if steps_survived == 10 {
         // Release path: all 10 steps completed. Verify the thermostat
         // telemetry records the rejection.
-        let tel = dwelling.telemetry();
+        let tel = dwelling.telemetry().unwrap();
         let actor_name = format!("IdealThermostat({hvac_name})");
         let actor_tel = tel.actor_telemetry.get(&actor_name).unwrap_or_else(|| {
             panic!(
@@ -1028,4 +1035,87 @@ fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
     }
     // If steps_survived < 10, the debug panic stopped the simulation —
     // which is also correct behavior (loud failure on invariant violation).
+}
+
+// ---------------------------------------------------------------------------
+// Test: an IdealThermostat bound to equipment the dwelling lacks fails loudly
+//
+// The override is a user's deliberate setpoint; dropping it because the
+// target name matches nothing leaves the equipment on its schedule while the
+// caller believes the override holds. The step must fail with an error that
+// names the missing target.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn thermostat_targeting_absent_equipment_fails_the_step() {
+    let path = unique_temp_toml("absent-target");
+    write_synthetic_toml(&path, 0.0, "electricity", 30.0, 600);
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
+    let _ = fs::remove_file(&path);
+
+    let thermostat = IdealThermostat::new("No Such Equipment").with_heating_setpoint(21.0);
+    dwelling.add_actor(Box::new(thermostat)).unwrap();
+
+    let err = dwelling
+        .step()
+        .expect_err("an override bound to absent equipment must fail the step");
+    assert!(
+        err.to_string().contains("No Such Equipment"),
+        "the error must name the missing target, got: {err}"
+    );
+}
+
+// Removing the thermostat's equipment evicts the thermostat with it, as it
+// does every actor bound to one equipment instance, so the dwelling keeps
+// stepping, and the dwelling's warning log reports the lost override; a
+// thermostat added again for the removed name fails the step.
+#[test]
+fn thermostat_is_evicted_with_its_equipment() {
+    let path = unique_temp_toml("removed-target");
+    write_synthetic_toml(&path, 0.0, "electricity", 30.0, 600);
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
+    let _ = fs::remove_file(&path);
+
+    let heating_name = dwelling
+        .equipment()
+        .iter()
+        .find(|eq| eq.descriptor().end_use == hares_types::EndUse::HVAC_HEATING)
+        .map(|eq| eq.descriptor().name.clone())
+        .expect("the synthetic dwelling holds heating equipment");
+    let actors_before = dwelling.actor_count();
+    let thermostat = IdealThermostat::new(&heating_name).with_heating_setpoint(21.0);
+    dwelling.add_actor(Box::new(thermostat)).unwrap();
+    dwelling
+        .step()
+        .expect("a thermostat bound to present equipment steps");
+
+    dwelling.take_warnings();
+    dwelling.remove_equipment(&heating_name).unwrap();
+    assert_eq!(
+        dwelling.actor_count(),
+        actors_before,
+        "the thermostat left with its equipment"
+    );
+    let warnings = dwelling.take_warnings();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("IdealThermostat") && w.contains(&heating_name)),
+        "the removed override is reported, got {warnings:?}"
+    );
+    dwelling
+        .step()
+        .expect("the dwelling steps without the evicted thermostat");
+
+    dwelling
+        .add_actor(Box::new(
+            IdealThermostat::new(&heating_name).with_heating_setpoint(21.0),
+        ))
+        .unwrap();
+    let err = dwelling
+        .step()
+        .expect_err("a thermostat for the removed equipment must fail the step");
+    assert!(err.to_string().contains(&heating_name), "{err}");
 }

@@ -176,6 +176,7 @@ def run_one_review(review: dict) -> tuple[str, bool, str, float]:
         # Poll until output file appears and has content, or timeout, or process dies
         deadline = t0 + REVIEW_TIMEOUT
         file_ready = False
+        grace: float = float("inf")
         while time.time() < deadline:
             ret = proc.poll()
             if ret is not None:

@@ -70,7 +70,6 @@ impl ValidationReport {
 /// Returns true when `value` looks like a namespace URI (starts with `http://` or
 /// `https://`) and does *not* belong to HPXML (`hpxmlonline.com`) or well-known
 /// XML infrastructure namespaces (`w3.org`).
-#[cfg(any(debug_assertions, feature = "check_invariants", feature = "observe"))]
 fn looks_like_namespace_uri(value: &str) -> bool {
     let lower = value.to_lowercase();
     (lower.starts_with("http://") || lower.starts_with("https://"))
@@ -89,13 +88,22 @@ pub fn validate_hpxml_schema(xml: &str) -> Result<Vec<ValidationWarning>, Valida
             format!("could not parse XML before schema checks: {err}"),
         )
     })?;
-    let warnings = validate_hpxml_schema_node(&root)?;
+    let mut warnings = validate_hpxml_schema_node(&root)?;
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        let is_v3 = warnings.iter().any(|w| w.field == "schemaVersion");
-        if is_v3 {
-            emit_deprecated_path_counts(xml);
+    // HPXML 3.x: deprecated <EnergyFactor> usage is reported as a validation
+    // warning, once per parse.
+    let is_v3 = warnings.iter().any(|w| w.field == "schemaVersion");
+    if is_v3 {
+        let energy_factor = xml.match_indices("<EnergyFactor").count();
+        let uniform_ef = xml.match_indices("<UniformEnergyFactor").count();
+        if energy_factor > 0 || uniform_ef > 0 {
+            warnings.push(ValidationWarning::new(
+                "deprecated",
+                format!(
+                    "HPXML 3.x document: deprecated <EnergyFactor> count={energy_factor} \
+                     vs 4.x <UniformEnergyFactor> count={uniform_ef}"
+                ),
+            ));
         }
     }
 
@@ -178,7 +186,6 @@ pub fn validate_hpxml_schema_node(
     // reliably, we scan all attribute *values* for URI-looking values that do not
     // belong to HPXML, XML Schema, or XSI — the canonical small set of root-level
     // namespace attributes.
-    #[cfg(any(debug_assertions, feature = "check_invariants", feature = "observe"))]
     let non_hpxml_namespaces: Vec<String> = root
         .attrs
         .iter()
@@ -204,37 +211,34 @@ pub fn validate_hpxml_schema_node(
         }
     }
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        if !non_hpxml_namespaces.is_empty() {
-            // HPXML §2.4 / BuildingSync audit data: a document that declares
-            // non-HPXML namespaces MUST still carry the core HPXML structure.
-            let has_building = root.path(&["Building"]).is_some()
-                || root.path(&["Building", "BuildingDetails"]).is_some();
-            let has_systems = root
-                .path(&["Building", "BuildingDetails", "Systems"])
-                .is_some()
-                || root.path(&["Building", "Systems"]).is_some();
-            if !has_building || !has_systems {
-                let missing: Vec<&str> = {
-                    let mut parts = Vec::new();
-                    if !has_building {
-                        parts.push("Building/BuildingDetails");
-                    }
-                    if !has_systems {
-                        parts.push("Building/BuildingDetails/Systems");
-                    }
-                    parts
-                };
-                return Err(ValidationError::new(
-                    "schema",
-                    format!(
-                        "non-HPXML namespaces {} present but HPXML core structure missing: {}",
-                        non_hpxml_namespaces.join(", "),
-                        missing.join(", "),
-                    ),
-                ));
-            }
+    // HPXML §2.4 / BuildingSync audit data: a document that declares
+    // non-HPXML namespaces MUST still carry the core HPXML structure.
+    if !non_hpxml_namespaces.is_empty() {
+        let has_building = root.path(&["Building"]).is_some()
+            || root.path(&["Building", "BuildingDetails"]).is_some();
+        let has_systems = root
+            .path(&["Building", "BuildingDetails", "Systems"])
+            .is_some()
+            || root.path(&["Building", "Systems"]).is_some();
+        if !has_building || !has_systems {
+            let missing: Vec<&str> = {
+                let mut parts = Vec::new();
+                if !has_building {
+                    parts.push("Building/BuildingDetails");
+                }
+                if !has_systems {
+                    parts.push("Building/BuildingDetails/Systems");
+                }
+                parts
+            };
+            return Err(ValidationError::new(
+                "schema",
+                format!(
+                    "non-HPXML namespaces {} present but HPXML core structure missing: {}",
+                    non_hpxml_namespaces.join(", "),
+                    missing.join(", "),
+                ),
+            ));
         }
     }
 
@@ -632,25 +636,6 @@ fn haversine_km(lat1_deg: f64, lon1_deg: f64, lat2_deg: f64, lon2_deg: f64) -> f
     6_371.0 * c
 }
 
-/// When `check_invariants` is enabled (or debug_assertions), scan a 3.x HPXML
-/// document for deprecated element paths and emit a diagnostic warning quantifying
-/// the risk of relying on deprecated or untested paths.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn emit_deprecated_path_counts(xml: &str) {
-    let energy_factor = xml.match_indices("<EnergyFactor").count();
-    let uniform_ef = xml.match_indices("<UniformEnergyFactor").count();
-
-    if energy_factor > 0 || uniform_ef > 0 {
-        tracing::warn!(
-            deprecated_energy_factor = energy_factor,
-            uniform_energy_factor = uniform_ef,
-            "HPXML 3.x document: deprecated <EnergyFactor> count={} vs 4.x <UniformEnergyFactor> count={}",
-            energy_factor,
-            uniform_ef,
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{ValidationWarning, validate_building_ranges, validate_hpxml_schema};
@@ -664,11 +649,12 @@ mod tests {
         <Site>
           <Elevation units="ft">100</Elevation>
           <SiteType>suburban</SiteType>
-          <ShieldingOfHome>0.7</ShieldingOfHome>
+          <ShieldingofHome>normal</ShieldingofHome>
         </Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -724,6 +710,33 @@ mod tests {
         assert!(
             warnings.iter().any(|w| w.field == "schemaVersion"),
             "3.x should produce a schemaVersion warning"
+        );
+    }
+
+    /// The schema warnings a parse raises reach `Building.parse_warnings`
+    /// instead of living only as tracing lines.
+    #[test]
+    fn hpxml_schema_warnings_reach_building() {
+        let xml = BASE_XML
+            .replace(r#"schemaVersion="4.0""#, r#"schemaVersion="3.0""#)
+            .replace(
+                "<HeatingCapacity>250</HeatingCapacity>",
+                "<HeatingCapacity>40000</HeatingCapacity>",
+            )
+            .replace("<SEER2>9</SEER2>", "<SEER2>15</SEER2>")
+            .replace("<HSPF2>5</HSPF2>", "<HSPF2>8</HSPF2>")
+            .replace(
+                "<RoundTripEfficiency>0.65</RoundTripEfficiency>",
+                "<RoundTripEfficiency>0.85</RoundTripEfficiency>",
+            );
+        let building = crate::hpxml::parse_hpxml_str(&xml).expect("3.x should parse");
+        assert!(
+            building
+                .parse_warnings
+                .iter()
+                .any(|w| w.message.contains("schemaVersion")),
+            "Building.parse_warnings must hold the schemaVersion warning, got {:?}",
+            building.parse_warnings
         );
     }
 
@@ -828,6 +841,7 @@ mod tests {
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>

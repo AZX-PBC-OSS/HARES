@@ -1,10 +1,9 @@
 """Generate HARES-vs-OCHRE parity diagnostics with metrics and charts.
 
 Usage:
-    UV_CACHE_DIR=/tmp/uvcache MPLCONFIGDIR=/tmp/mplconfig \
     uv run --no-sync --group ochre python tests/python/parity_diagnostics.py \
       --fixture tests/fixtures/parity/cz4a_ashp_hpwh \
-      --out-dir /tmp/parity_diag_ashp \
+      --out-dir <report directory> \
       --use-live-ochre
 """
 
@@ -17,10 +16,12 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import matplotlib.pyplot as plt
 import pandas as pd
+
+from ochre_units import register_removed_units
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,7 @@ ENVELOPE_GAIN_KEYS: tuple[str, ...] = (
     "natural_ventilation_w",
     "port_convective_w",
     "port_radiant_w",
+    "port_shortwave_w",
     "internal_gain_w",
 )
 
@@ -150,8 +152,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("/tmp/parity_diagnostics"),
-        help="Output directory for report artifacts.",
+        required=True,
+        help="Output directory for report artifacts and the HARES runs behind them.",
     )
     parser.add_argument(
         "--actual-parquet",
@@ -232,8 +234,14 @@ def run_ochre(
         parquet = reference_parquet or (fixture_dir / "reference_output.parquet")
         return load_reference_parquet(parquet, sim_cfg)
 
+    # OCHRE's infiltration model converts with a unit name pint 0.25 removed
+    # from the default registry; re-register it before any dwelling is built.
+    import ochre.utils.units  # noqa: E402
+
+    register_removed_units(ochre.utils.units.ureg)
+
     start_local = sim_cfg["start_time"].replace(tzinfo=None)
-    df, _metrics, _hourly = OchreDwelling(
+    sim_result = OchreDwelling(
         name="parity_diag_ochre",
         start_time=start_local,
         time_res=dt.timedelta(seconds=sim_cfg["time_res_s"]),
@@ -244,6 +252,11 @@ def run_ochre(
         verbosity=sim_cfg["output_verbosity"],
         save_results=False,
     ).simulate()
+    assert isinstance(sim_result, tuple) and len(sim_result) == 3, (
+        "OCHRE simulate must return (df, metrics_by_end_use, ...)"
+    )
+    df = sim_result[0]
+    assert isinstance(df, pd.DataFrame), "OCHRE simulate must return a results DataFrame"
 
     return _normalize_time_index(df, sim_cfg["start_time"])
 
@@ -286,6 +299,7 @@ def run_hares(
     fixture_dir: Path,
     sim_cfg: dict,
     actual_parquet: Path | None,
+    out_dir: Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if actual_parquet is not None:
         pdf = pd.read_parquet(actual_parquet)
@@ -303,6 +317,8 @@ def run_hares(
         output_verbosity=sim_cfg["output_verbosity"],
         defaults_path=str(Path("defaults").resolve()),
         master_seed=sim_cfg["master_seed"],
+        write_output=True,
+        output_path=str(out_dir / "hares_parity_diagnostics.csv"),
     )
     pdf = dwelling_sim.simulate().to_pandas()
     pdf = _normalize_time_index(pdf, sim_cfg["start_time"])
@@ -317,6 +333,8 @@ def run_hares(
         output_verbosity=sim_cfg["output_verbosity"],
         defaults_path=str(Path("defaults").resolve()),
         master_seed=sim_cfg["master_seed"],
+        write_output=True,
+        output_path=str(out_dir / "hares_parity_diagnostics_obs.csv"),
     )
 
     obs_rows: list[dict[str, Any]] = []
@@ -331,7 +349,7 @@ def run_hares(
             snapshots = dwelling_obs.drain_observations()
             if snapshots:
                 snap = snapshots[-1]
-                obs = {"Time": pd.to_datetime(step_row["timestamp"])}
+                obs: dict[str, object] = {"Time": pd.to_datetime(step_row["timestamp"])}
                 obs.update(_extract_solver_gain_map(snap))
                 obs.update(_extract_equipment_thermal(snap))
                 obs_rows.append(obs)
@@ -420,12 +438,11 @@ def equipment_power_frame(hares_df: pd.DataFrame) -> pd.DataFrame:
 
 def write_top_contributors(series: pd.DataFrame, equip_df: pd.DataFrame, out_dir: Path) -> None:
     total_diff = series["total_electric_kw_diff"]
-    peak_ts = total_diff.abs().idxmax()
+    peak_ts = cast(pd.Timestamp, total_diff.abs().idxmax())
     rows: list[dict[str, float | str]] = []
     if not equip_df.empty and peak_ts in equip_df.index:
-        row = equip_df.loc[peak_ts]
-        for col, value in row.items():
-            rows.append({"timestamp": str(peak_ts), "column": col, "value_kw": float(value)})
+        for col, value in equip_df.loc[peak_ts].to_dict().items():
+            rows.append({"timestamp": str(peak_ts), "column": str(col), "value_kw": float(value)})
     if rows:
         pd.DataFrame(rows).sort_values("value_kw", ascending=False).to_csv(
             out_dir / "hares_equipment_at_peak_diff.csv", index=False
@@ -625,16 +642,21 @@ def write_hvac_control_diagnostics(ochre_df: pd.DataFrame, hares_df: pd.DataFram
         summary[f"{label}_heat_peak_kw"] = float(heat.max())
         summary[f"{label}_heat_peak_timestamp"] = str(heat.idxmax())
         if active.any():
-            first_on = active.idxmax()
+            first_on = cast(pd.Timestamp, active.idxmax())
             summary[f"{label}_first_heat_on_timestamp"] = str(first_on)
+            indoor_at_on: float | None = None
             if indoor_col is not None:
-                summary[f"{label}_first_heat_on_indoor_c"] = float(frame.loc[first_on, indoor_col])
+                indoor_value = frame.loc[first_on, indoor_col]
+                assert isinstance(indoor_value, (int, float)), "indoor temperature must be numeric"
+                indoor_at_on = float(indoor_value)
+                summary[f"{label}_first_heat_on_indoor_c"] = indoor_at_on
             if setpoint_col is not None:
-                summary[f"{label}_first_heat_on_setpoint_c"] = float(frame.loc[first_on, setpoint_col])
-                if indoor_col is not None:
-                    summary[f"{label}_first_heat_on_delta_sp_c"] = float(
-                        frame.loc[first_on, setpoint_col] - frame.loc[first_on, indoor_col]
-                    )
+                setpoint_value = frame.loc[first_on, setpoint_col]
+                assert isinstance(setpoint_value, (int, float)), "setpoint must be numeric"
+                setpoint_at_on = float(setpoint_value)
+                summary[f"{label}_first_heat_on_setpoint_c"] = setpoint_at_on
+                if indoor_at_on is not None:
+                    summary[f"{label}_first_heat_on_delta_sp_c"] = setpoint_at_on - indoor_at_on
 
     (out_dir / "hvac_control_summary.json").write_text(json.dumps(summary, indent=2))
 
@@ -650,7 +672,7 @@ def main() -> None:
     actual_parquet = args.actual_parquet.resolve() if args.actual_parquet else None
 
     ochre_df = run_ochre(fixture_dir, sim_cfg, reference_parquet, args.use_live_ochre)
-    hares_df, obs_df = run_hares(fixture_dir, sim_cfg, actual_parquet)
+    hares_df, obs_df = run_hares(fixture_dir, sim_cfg, actual_parquet, out_dir)
 
     metrics, series = align_channels(ochre_df, hares_df)
     metrics.to_csv(out_dir / "channel_metrics.csv", index=False)

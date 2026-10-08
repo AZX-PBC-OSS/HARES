@@ -190,11 +190,11 @@ def print_ref_cell_params(
 
 def compute_dcir_pulse(
     param: pybamm.ParameterValues, name: str, i_1c: float
-) -> tuple[float, float, float] | tuple[None, None, None]:
+) -> tuple[float, float, float]:
     """
     Compute DC-IR via 10s 1C discharge pulse at 50% SOC, 25°C using SPMe.
 
-    Returns (R_dc_ohm, V_start, V_end) or (None, None, None) on failure.
+    Failures propagate as exceptions; the caller records them per chemistry.
     """
     model = pybamm.lithium_ion.SPMe(name=f"{name}_pulse")
 

@@ -7,13 +7,11 @@
 //! (`InvariantViolation { check_name: "thermal_balance" }`) when balance terms
 //! are deliberately broken.
 //!
-//! Tests are gated on `debug_assertions` because the invariant check is
-//! compiled only when `cfg(any(debug_assertions, feature = "check_invariants"))`
-//! is active. In release-mode test builds the invariant is not compiled and
-//! these tests would provide no signal.
+//! Tests are gated on `debug_assertions` because the test seam itself is
+//! `cfg(any(test, debug_assertions))`: the invariant check it arms runs
+//! unconditionally in every build profile.
 #![cfg(debug_assertions)]
 
-use std::env;
 use std::fs;
 
 use hares_core::Dwelling;
@@ -24,7 +22,7 @@ use hares_types::HaresError;
 /// A single boundary with one material layer produces RC nodes which populate
 /// `node_capacitances`, enabling the full-system stored energy computation and
 /// three-term affine balance terms consumed by the thermal invariant in
-/// `Dwelling::check_invariants`.
+/// `Dwelling::check_step_invariants`.
 const SYNTHETIC_RC_DWELLING_TOML: &str = r#"building_id = 999
 
 [simulation]
@@ -69,6 +67,17 @@ conductivity_w_m_k = 0.5
 density_kg_m3 = 1000.0
 specific_heat_j_kg_k = 1000.0
 
+[[boundaries]]
+id = "test-floor"
+boundary_type = "Floor"
+area_m2 = 48.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.1
+conductivity_w_m_k = 0.5
+density_kg_m3 = 1000.0
+specific_heat_j_kg_k = 1000.0
+
 [schedule]
 occupancy = 0.0
 occupants_present = false
@@ -81,15 +90,11 @@ master_seed = 0
 "#;
 
 /// Builds a synthetic dwelling with RC envelope from the shared TOML fixture.
-fn rc_dwelling() -> (std::path::PathBuf, Dwelling) {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock before epoch")
-        .as_nanos();
-    let tmp = env::temp_dir().join(format!("hares_thermal_invariant_rc_test_{nanos}.toml"));
-    fs::write(&tmp, SYNTHETIC_RC_DWELLING_TOML).expect("write toml");
-    let dwelling = Dwelling::from_toml_config(&tmp).expect("create dwelling");
-    (tmp, dwelling)
+fn rc_dwelling() -> Dwelling {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("dwelling.toml");
+    fs::write(&path, SYNTHETIC_RC_DWELLING_TOML).expect("write toml");
+    Dwelling::from_toml_config(&path).expect("create dwelling")
 }
 
 /// Verifies that a correctly-functioning RC dwelling steps cleanly through
@@ -100,10 +105,9 @@ fn rc_dwelling() -> (std::path::PathBuf, Dwelling) {
 /// returns non-empty, correct results when `node_capacitances` is populated.
 #[test]
 fn dwelling_step_thermal_invariant_wired() {
-    let (tmp, mut dwelling) = rc_dwelling();
+    let mut dwelling = rc_dwelling();
 
     let result = dwelling.step();
-    let _ = fs::remove_file(&tmp);
 
     assert!(
         result.is_ok(),
@@ -111,7 +115,8 @@ fn dwelling_step_thermal_invariant_wired() {
     );
 }
 
-/// Verifies that the thermal invariant wiring inside `Dwelling::check_invariants`
+/// Verifies that the thermal invariant wiring inside
+/// `Dwelling::check_step_invariants`
 /// catches deliberately broken balance terms.
 ///
 /// Steps the dwelling once to confirm the invariant passes for correct models,
@@ -121,24 +126,23 @@ fn dwelling_step_thermal_invariant_wired() {
 /// "thermal_balance", .. })`.
 ///
 /// If the `check_thermal` call were accidentally removed from
-/// `check_invariants`, or if the balance terms were cleared before the check,
+/// `check_step_invariants`, or if the balance terms were cleared before the check,
 /// this test would fail — the seam would have no effect and `step()` would
 /// return `Ok`.
 #[test]
 fn thermal_invariant_catches_broken_gain() {
-    let (tmp, mut dwelling) = rc_dwelling();
+    let mut dwelling = rc_dwelling();
 
     // Step once: confirm the invariant passes for the correct solver.
     dwelling
         .step()
         .expect("first step must pass invariant check on correct model");
 
-    // Enable test seam: poisons balance terms inside check_invariants.
+    // Enable test seam: poisons balance terms inside check_step_invariants.
     dwelling.set_thermal_invariant_failure_for_test();
 
     // This step must fail with thermal_balance invariant violation.
     let result = dwelling.step();
-    let _ = fs::remove_file(&tmp);
 
     match result {
         Err(HaresError::InvariantViolation { ref check_name, .. })

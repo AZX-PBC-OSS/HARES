@@ -392,10 +392,11 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: false,
         rotation: hares_io::RotationPolicy::None,
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     };
     let config = DwellingConfig {
         hpxml_path,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather,
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim,
@@ -466,7 +467,7 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
         time_res: Duration::seconds(900),
         output_verbosity: 5,
         write_output: false,
-        output_path: None,
+        output_path: Some(tmp.path().join("ev_regr_diag.csv")),
         output_format: OutputFormat::Csv,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
@@ -475,10 +476,11 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: false,
         rotation: hares_io::RotationPolicy::None,
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     };
     let config = DwellingConfig {
         hpxml_path,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather,
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim,
@@ -596,7 +598,7 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
         time_res: Duration::seconds(900),
         output_verbosity: 5,
         write_output: false,
-        output_path: None,
+        output_path: Some(tmp.path().join("ev_regr_diag.csv")),
         output_format: OutputFormat::Csv,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
@@ -605,10 +607,11 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: false,
         rotation: hares_io::RotationPolicy::None,
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     };
     let config = DwellingConfig {
         hpxml_path,
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather,
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim,
@@ -663,7 +666,7 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
         time_res: Duration::seconds(900),
         output_verbosity: 5,
         write_output: false,
-        output_path: None,
+        output_path: Some(tmp.path().join("ev_regr_diag.csv")),
         output_format: OutputFormat::Csv,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
@@ -672,10 +675,11 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: false,
         rotation: hares_io::RotationPolicy::None,
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     };
     let base = DwellingConfig {
         hpxml_path: hpxml_path.clone(),
-        schedule_path: fixture_dir().join("in.schedules.csv"),
+        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather,
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim,

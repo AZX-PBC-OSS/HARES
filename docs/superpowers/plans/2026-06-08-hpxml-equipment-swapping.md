@@ -265,7 +265,7 @@ impl DwellingBlueprint {
         // 2. Load weather, schedule from paths in config
         // 3. resolve_site_location, compute_weather_averages, extract design_conditions
         // 4. Build EnvironmentManager from weather, schedule, building, sim_config
-        // 5. resolve_equipment(&building, &defaults, &overrides, patches) -> Vec<EquipmentSpec>
+        // 5. resolve_equipment(&building, &defaults, patches) -> Vec<EquipmentSpec>
         // 6. Return Self — environment, specs, no solvers, no equipment instances, no ports
         todo!("extract from from_preparsed lines 1675-1793")
     }
@@ -1476,7 +1476,7 @@ def test_swap_gas_wh_to_hpwh():
     bp.remove_equipment_by_end_use(EndUse.WATER_HEATING)
     assert all("Water Heater" not in n for n in bp.equipment_names())
 
-    hpwh = HeatPumpWH("HPWH", tank_volume_m3=0.19, cop=3.5,
+    hpwh = HeatPumpWH("HPWH", tank_volume_m3=0.19, cop=3.5, zone_id=1,
                        avg_water_draw_l_per_day=200.0)
     bp.add_equipment(hpwh)
 
@@ -1494,7 +1494,7 @@ def test_swap_gas_wh_to_electric_resistance():
     bp.remove_equipment_by_end_use(EndUse.WATER_HEATING)
 
     erwh = ElectricResistanceWH("ERWH", tank_volume_m3=0.19,
-                                uniform_energy_factor=0.95,
+                                uniform_energy_factor=0.95, zone_id=1,
                                 avg_water_draw_l_per_day=200.0)
     bp.add_equipment(erwh)
 

@@ -21,6 +21,8 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ochre_units import register_removed_units
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -37,11 +39,16 @@ def _ensure_ochre_importable() -> None:
         sys.path.insert(0, vendor_str)
     try:
         import ochre  # noqa: F401
+        import ochre.utils.units
     except ImportError as exc:
         raise SystemExit(
             f"OCHRE is not importable from {VENDOR_OCHRE}. "
             "Run: uv run --group ochre python tests/python/generate_parity_reference.py"
         ) from exc
+
+    # OCHRE's infiltration model converts with a unit name pint 0.25 removed
+    # from the default registry; re-register it before any dwelling is built.
+    register_removed_units(ochre.utils.units.ureg)
 
 
 def _load_sim_config(config_path: Path) -> dict:
@@ -54,11 +61,13 @@ def _load_sim_config(config_path: Path) -> dict:
     duration_s = int(sim["duration"])
     time_res_s = int(sim["time_res"])
     verbosity = int(sim.get("output_verbosity", 3))
+    master_seed = int(sim.get("master_seed", 0))
     return {
         "start_local": start_local,
         "duration": dt.timedelta(seconds=duration_s),
         "time_res": dt.timedelta(seconds=time_res_s),
         "verbosity": verbosity,
+        "master_seed": master_seed,
     }
 
 
@@ -85,17 +94,35 @@ def _load_ev_config(config_path: Path) -> dict:
 
 def _run_ochre_for_fixture(fixture_dir: Path) -> pd.DataFrame:
     """Run OCHRE on a fixture and return the minute-resolution output DataFrame."""
+    import numpy as np
+
     from ochre import Dwelling as OchreDwelling
 
-    sim_cfg = _load_sim_config(fixture_dir / "config.toml")
-    ev_cfg = _load_ev_config(fixture_dir / "config.toml")
+    config_path = fixture_dir / "config.toml"
+    sim_cfg = _load_sim_config(config_path)
+    ev_cfg = _load_ev_config(config_path)
+    ochre_cfg = tomllib.loads(config_path.read_text()).get("ochre", {})
 
+    # OCHRE draws random inputs (its starting indoor temperature,
+    # Envelope.py:997-1008) through numpy's global generator, unseeded; a
+    # seeded run makes the reference reproducible, which the two-pass check
+    # in the fixture's record relies on. The fixture's own master_seed, the
+    # one HARES's draw uses, seeds it.
+    np.random.seed(sim_cfg["master_seed"])
+
+    extra: dict = {}
+    # OCHRE draws the starting indoor temperature at random within half the
+    # deadband, unseeded (Envelope.py:997-1008), and HARES draws its own,
+    # seeded; a window that starts cold then measures the two draws. A
+    # fixture's [ochre] initial_temp_setpoint_c pins OCHRE to the
+    # temperature HARES starts from, which the Rust harness checks.
+    if "initial_temp_setpoint_c" in ochre_cfg:
+        extra["initial_temp_setpoint"] = float(ochre_cfg["initial_temp_setpoint_c"])
     # A charging-EV fixture pins OCHRE's event-driven EV with a fixed
     # event list (see the fixture's config.toml [ev] section). The kwarg
     # propagates to every EventBasedLoad, but only event loads WITHOUT a
     # schedule column consume it — exactly the EV (the fixture's other
     # event loads are schedule-driven).
-    extra: dict = {}
     if ev_cfg.get("ochre_event_file"):
         extra["equipment_event_file"] = str(
             (fixture_dir / ev_cfg["ochre_event_file"]).resolve()
@@ -113,7 +140,14 @@ def _run_ochre_for_fixture(fixture_dir: Path) -> pd.DataFrame:
         save_results=False,
         **extra,
     )
-    df, _metrics, _hourly = dwelling.simulate()
+    import pandas as pd
+
+    sim_result = dwelling.simulate()
+    assert isinstance(sim_result, tuple) and len(sim_result) == 3, (
+        "OCHRE simulate must return (df, metrics_by_end_use, ...)"
+    )
+    df = sim_result[0]
+    assert isinstance(df, pd.DataFrame), "OCHRE simulate must return a results DataFrame"
     return df
 
 
@@ -141,6 +175,13 @@ def _df_to_parquet(df: pd.DataFrame, out_path: Path) -> None:
             pass  # drop columns that cannot be cast to float
 
     out = out[float_cols]
+
+    # Deterministic column order: Time first, the rest sorted. OCHRE's
+    # results DataFrame orders its columns through hashed collections, so
+    # two runs of one fixture write the same values in different orders
+    # otherwise, and no two regenerations are byte-identical.
+    ordered = ["Time"] + sorted(c for c in out.columns if c != "Time")
+    out = out[ordered]
 
     table = pa.Table.from_pandas(out, preserve_index=False)
     pq.write_table(table, out_path, compression="snappy")

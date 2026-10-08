@@ -74,14 +74,19 @@ pub enum HeatTransferDirection {
 pub enum PortContribution {
     Thermal {
         zone: ZoneId,
-        /// Convective sensible gain [W]: goes directly to zone air.
+        /// Convective sensible gain (W): goes directly to zone air.
         sensible_gain_w: f64,
-        /// Radiant sensible gain [W]: distributed to surface nodes via TMULT.
+        /// Radiant sensible gain (W): distributed to surface nodes via TMULT.
         /// sensible_gain_w + radiant_gain_w = total sensible gain.
         radiant_gain_w: f64,
         latent_gain_w: f64,
         category: ThermalCategory,
     },
+    /// Short-wave (visible) radiation into a zone, absorbed by its interior
+    /// surfaces as transmitted diffuse solar is (EnergyPlus adds the lights'
+    /// visible gain to the zone's diffuse short-wave before distributing it).
+    /// An internal gain.
+    ShortWave { zone: ZoneId, shortwave_gain_w: f64 },
     Electrical {
         active_power_w: f64,
         reactive_power_kvar: f64,
@@ -96,7 +101,7 @@ pub enum PortContribution {
         supply_temp_c: f64,
         return_temp_c: f64,
         fluid_type: FluidType,
-        /// Declared thermal power delivered to this loop [W].
+        /// Declared thermal power delivered to this loop (W).
         /// None when the contributor does not quantify thermal energy
         /// (e.g. static temperature/flow, or no thermal recovery active).
         thermal_power_w: Option<f64>,
@@ -144,7 +149,7 @@ pub struct PortDeclaration {
 }
 
 impl PortDeclaration {
-    pub fn electrical() -> Self {
+    pub const fn electrical() -> Self {
         Self {
             port_type: PortType::Electrical,
             zone: None,
@@ -155,7 +160,7 @@ impl PortDeclaration {
         }
     }
 
-    pub fn thermal(zone: ZoneId) -> Self {
+    pub const fn thermal(zone: ZoneId) -> Self {
         Self {
             port_type: PortType::Thermal,
             zone: Some(zone),
@@ -166,7 +171,7 @@ impl PortDeclaration {
         }
     }
 
-    pub fn fuel() -> Self {
+    pub const fn fuel() -> Self {
         Self {
             port_type: PortType::Fuel,
             zone: None,
@@ -213,7 +218,7 @@ impl PortDeclaration {
         }
     }
 
-    pub fn humidity(zone: ZoneId) -> Self {
+    pub const fn humidity(zone: ZoneId) -> Self {
         Self {
             port_type: PortType::Humidity,
             zone: Some(zone),
@@ -245,9 +250,58 @@ pub struct ThermalAccumulator {
     pub sensible_gain_w: f64,
     pub radiant_gain_w: f64,
     pub latent_gain_w: f64,
+    /// Short-wave (visible) internal gain (W), distributed to the zone's
+    /// interior surfaces like transmitted diffuse solar.
+    pub shortwave_gain_w: f64,
     pub sensible_by_category: [f64; THERMAL_CATEGORY_COUNT],
     pub radiant_by_category: [f64; THERMAL_CATEGORY_COUNT],
     pub latent_by_category: [f64; THERMAL_CATEGORY_COUNT],
+}
+
+/// A zone's heat from equipment, by the path it takes into the zone:
+/// convective to the air, long-wave radiant and short-wave (visible) to the
+/// surfaces, and latent to the air's moisture. Every consumer of zone gains
+/// reads them through this one view so none of the heat is left out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ZoneHeat {
+    pub convective_w: f64,
+    pub radiant_w: f64,
+    pub shortwave_w: f64,
+    pub latent_w: f64,
+}
+
+impl ZoneHeat {
+    /// The sensible part: convective, radiant and short-wave.
+    pub fn sensible_w(&self) -> f64 {
+        self.convective_w + self.radiant_w + self.shortwave_w
+    }
+
+    /// Sensible and latent together.
+    pub fn total_w(&self) -> f64 {
+        self.sensible_w() + self.latent_w
+    }
+
+    /// The heat added between `before` and `self`, path by path.
+    pub fn since(&self, before: &Self) -> Self {
+        Self {
+            convective_w: self.convective_w - before.convective_w,
+            radiant_w: self.radiant_w - before.radiant_w,
+            shortwave_w: self.shortwave_w - before.shortwave_w,
+            latent_w: self.latent_w - before.latent_w,
+        }
+    }
+
+    /// Whether any path carries more than `threshold_w` in magnitude.
+    pub fn exceeds(&self, threshold_w: f64) -> bool {
+        [
+            self.convective_w,
+            self.radiant_w,
+            self.shortwave_w,
+            self.latent_w,
+        ]
+        .iter()
+        .any(|w| w.abs() > threshold_w)
+    }
 }
 
 impl ThermalAccumulator {
@@ -257,10 +311,27 @@ impl ThermalAccumulator {
             sensible_gain_w: 0.0,
             radiant_gain_w: 0.0,
             latent_gain_w: 0.0,
+            shortwave_gain_w: 0.0,
             sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             radiant_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
         }
+    }
+
+    /// The zone's heat from equipment this step, by path.
+    pub fn heat(&self) -> ZoneHeat {
+        ZoneHeat {
+            convective_w: self.sensible_gain_w,
+            radiant_w: self.radiant_gain_w,
+            shortwave_w: self.shortwave_gain_w,
+            latent_w: self.latent_gain_w,
+        }
+    }
+
+    /// Every watt this step put into the zone: convective, long-wave
+    /// radiant, short-wave and latent.
+    pub fn total_gain_w(&self) -> f64 {
+        self.heat().total_w()
     }
 
     pub fn add(
@@ -282,6 +353,7 @@ impl ThermalAccumulator {
         self.sensible_gain_w = 0.0;
         self.radiant_gain_w = 0.0;
         self.latent_gain_w = 0.0;
+        self.shortwave_gain_w = 0.0;
         self.sensible_by_category = [0.0; THERMAL_CATEGORY_COUNT];
         self.radiant_by_category = [0.0; THERMAL_CATEGORY_COUNT];
         self.latent_by_category = [0.0; THERMAL_CATEGORY_COUNT];
@@ -319,7 +391,7 @@ pub struct ElectricalAccumulator {
 }
 
 impl ElectricalAccumulator {
-    /// Net active power [W]: load (positive) + generation (negative).
+    /// Net active power (W): load (positive) + generation (negative).
     pub fn net_active_w(&self) -> f64 {
         self.load_power_w + self.generation_power_w
     }
@@ -474,17 +546,14 @@ impl FluidAccumulator {
         // When the accumulator was created from a declaration without direction
         // info, the first contribution sets the direction. Subsequent
         // contributions must match (same node = same equipment = same role).
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if let Some(existing) = self.direction
+            && existing != direction
         {
-            if let Some(existing) = self.direction {
-                if existing != direction {
-                    return Err(HaresError::Equipment(format!(
-                        "direction mismatch on fluid accumulator {:?}/{:?}/{:?}: \
-                         got {direction:?}, expected {existing:?}",
-                        self.loop_id, self.fluid_type, self.node_id
-                    )));
-                }
-            }
+            return Err(HaresError::Equipment(format!(
+                "direction mismatch on fluid accumulator {:?}/{:?}/{:?}: \
+                     got {direction:?}, expected {existing:?}",
+                self.loop_id, self.fluid_type, self.node_id
+            )));
         }
         if self.direction.is_none() {
             self.direction = Some(direction);
@@ -578,9 +647,6 @@ pub struct PortSlots {
     pub fluid: Vec<FluidAccumulator>,
     pub custom: Vec<CustomAccumulator>,
     pub humidity: Vec<HumidityAccumulator>,
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    #[serde(skip)]
-    pub write_log: std::collections::HashSet<String>,
 }
 
 impl PortSlots {
@@ -596,10 +662,10 @@ impl PortSlots {
         for decl in decls {
             match decl.port_type {
                 PortType::Thermal => {
-                    if let Some(zone) = decl.zone {
-                        if !thermal.iter().any(|t: &ThermalAccumulator| t.zone == zone) {
-                            thermal.push(ThermalAccumulator::new(zone));
-                        }
+                    if let Some(zone) = decl.zone
+                        && !thermal.iter().any(|t: &ThermalAccumulator| t.zone == zone)
+                    {
+                        thermal.push(ThermalAccumulator::new(zone));
                     }
                 }
                 PortType::Fluid => {
@@ -615,23 +681,21 @@ impl PortSlots {
                     }
                 }
                 PortType::Custom => {
-                    if let Some(domain_id) = decl.domain_id {
-                        if !custom
+                    if let Some(domain_id) = decl.domain_id
+                        && !custom
                             .iter()
                             .any(|c: &CustomAccumulator| c.domain_id == domain_id)
-                        {
-                            custom.push(CustomAccumulator::new(domain_id));
-                        }
+                    {
+                        custom.push(CustomAccumulator::new(domain_id));
                     }
                 }
                 PortType::Humidity => {
-                    if let Some(zone) = decl.zone {
-                        if !humidity
+                    if let Some(zone) = decl.zone
+                        && !humidity
                             .iter()
                             .any(|h: &HumidityAccumulator| h.zone == zone)
-                        {
-                            humidity.push(HumidityAccumulator::new(zone));
-                        }
+                    {
+                        humidity.push(HumidityAccumulator::new(zone));
                     }
                 }
                 // Electrical and Fuel are singletons; pre-initialized via Default.
@@ -646,8 +710,6 @@ impl PortSlots {
             fluid,
             custom,
             humidity,
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            write_log: std::collections::HashSet::new(),
         }
     }
 
@@ -667,16 +729,9 @@ impl PortSlots {
         self.fluid.clone_from(&source.fluid);
         self.custom.clone_from(&source.custom);
         self.humidity.clone_from(&source.humidity);
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            self.write_log.clone_from(&source.write_log);
-        }
     }
 
     pub fn zero(&mut self) {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        self.warn_unwritten();
-
         for thermal in &mut self.thermal {
             thermal.zero();
         }
@@ -693,46 +748,6 @@ impl PortSlots {
         }
     }
 
-    /// Check whether every declared port slot received at least one write
-    /// during the preceding timestep. Logs a warning for each declared port
-    /// that received zero contributions.
-    ///
-    /// Gated behind `debug_assertions` or the `check_invariants` feature so
-    /// it imposes zero overhead in release builds.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    fn warn_unwritten(&mut self) {
-        use tracing::warn;
-
-        // Derive expected keys from accumulator vectors built by
-        // from_declarations. Only vector-based accumulators are checked;
-        // Electrical and Fuel are singletons always present regardless of
-        // declarations, so we cannot distinguish "declared" from "default".
-        let mut expected: Vec<String> = Vec::new();
-        for acc in &self.thermal {
-            expected.push(format!("Thermal:{:?}", acc.zone));
-        }
-        for acc in &self.fluid {
-            expected.push(format!("Fluid:{:?}:{:?}", acc.loop_id, acc.fluid_type));
-        }
-        for acc in &self.custom {
-            expected.push(format!("Custom:{:?}", acc.domain_id));
-        }
-        for acc in &self.humidity {
-            expected.push(format!("Humidity:{:?}", acc.zone));
-        }
-
-        for key in &expected {
-            if !self.write_log.contains(key.as_str()) {
-                warn!(
-                    port = key.as_str(),
-                    "declared port received zero contributions during preceding timestep"
-                );
-            }
-        }
-
-        self.write_log.clear();
-    }
-
     pub fn accumulate(&mut self, contribution: &PortContribution) -> Result<(), HaresError> {
         match contribution {
             PortContribution::Thermal {
@@ -744,15 +759,22 @@ impl PortSlots {
             } => {
                 if let Some(total) = self.thermal.iter_mut().find(|entry| entry.zone == *zone) {
                     total.add(*sensible_gain_w, *radiant_gain_w, *latent_gain_w, *category);
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        self.write_log.insert(format!("Thermal:{zone:?}"));
-                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared thermal zone: {zone:?}"
                     )));
                 }
+            }
+            PortContribution::ShortWave {
+                zone,
+                shortwave_gain_w,
+            } => {
+                let Some(total) = self.thermal.iter_mut().find(|entry| entry.zone == *zone) else {
+                    return Err(HaresError::Equipment(format!(
+                        "undeclared thermal zone: {zone:?}"
+                    )));
+                };
+                total.shortwave_gain_w += *shortwave_gain_w;
             }
             PortContribution::Electrical {
                 active_power_w,
@@ -760,15 +782,15 @@ impl PortSlots {
             } => {
                 // Defensive sign-convention validation: electrical power values
                 // must be finite. Non-finite (NaN, ±∞) values indicate an
-                // equipment bug upstream of the port boundary.
-                debug_assert!(
-                    active_power_w.is_finite(),
-                    "PortContribution::Electrical received non-finite active_power_w: {active_power_w}"
-                );
-                debug_assert!(
-                    reactive_power_kvar.is_finite(),
-                    "PortContribution::Electrical received non-finite reactive_power_kvar: {reactive_power_kvar}"
-                );
+                // equipment bug upstream of the port boundary, so the write is
+                // a typed error in every build profile.
+                if !active_power_w.is_finite() || !reactive_power_kvar.is_finite() {
+                    return Err(HaresError::Equipment(format!(
+                        "non-finite electrical contribution: \
+                         active_power_w={active_power_w}, \
+                         reactive_power_kvar={reactive_power_kvar}"
+                    )));
+                }
 
                 self.electrical.reactive_power_kvar += reactive_power_kvar;
                 if *active_power_w >= 0.0 {
@@ -777,49 +799,31 @@ impl PortSlots {
                     self.electrical.generation_power_w += active_power_w;
                 }
 
-                // Defense against unit regression: if a callee re-introduces
-                // kW-scaled values into the W port (e.g. writes 15 W from a
-                // 15 kW piece of equipment) the accumulator will surge to
-                // factor-1000 the true value.
-
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    // Invariant: accumulated load power must be non-negative, and
-                    // generation must be non-positive. A sign violation indicates a
-                    // contributor mis-classified its contribution (e.g. a generator
-                    // writing a positive value to the electrical port).
-                    //
-                    // Absolute magnitude is not clamped — a single unrealistic
-                    // accumulation (e.g. a pathological COP→0 heat-pump test drawing
-                    // GW-scale electric power in one step) would be a false positive.
-                    // The guard exists to catch sign errors, NaN/Inf propagation,
-                    // and the factor-1000 unit regression pattern where a kW value
-                    // silently enters the W port.
-                    //
-                    // `assert!`, not `debug_assert!`: a `debug_assert!` compiles
-                    // out in release builds even when `check_invariants` is
-                    // enabled, which would silently void the feature-gated half
-                    // of the cfg on this block.
-                    assert!(
-                        self.electrical.load_power_w >= 0.0,
+                // Invariant: accumulated load power must be non-negative, and
+                // generation must be non-positive. A sign violation indicates a
+                // contributor mis-classified its contribution (e.g. a generator
+                // writing a positive value to the electrical port). Absolute
+                // magnitude is not clamped: a single unrealistic accumulation
+                // (e.g. a pathological COP→0 heat-pump test drawing GW-scale
+                // electric power in one step) would be a false positive. The
+                // guard exists to catch sign errors and the factor-1000 unit
+                // regression pattern where a kW value silently enters the W port.
+                if self.electrical.load_power_w < 0.0 {
+                    return Err(HaresError::Equipment(format!(
                         "electrical load_power_w must be non-negative, got {}",
                         self.electrical.load_power_w
-                    );
-                    assert!(
-                        self.electrical.generation_power_w <= 0.0,
+                    )));
+                }
+                if self.electrical.generation_power_w > 0.0 {
+                    return Err(HaresError::Equipment(format!(
                         "electrical generation_power_w must be non-positive, got {}",
                         self.electrical.generation_power_w
-                    );
+                    )));
                 }
 
                 #[cfg(feature = "observe")]
                 {
                     self.electrical.electrical_contribution_count += 1;
-                }
-
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    self.write_log.insert("Electrical".to_string());
                 }
             }
             PortContribution::Fuel {
@@ -827,10 +831,6 @@ impl PortSlots {
                 consumption_w,
             } => {
                 self.fuel.add(*fuel_type, *consumption_w)?;
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                {
-                    self.write_log.insert(format!("Fuel:{fuel_type:?}"));
-                }
             }
             PortContribution::Fluid {
                 loop_id,
@@ -854,11 +854,6 @@ impl PortSlots {
                         *thermal_power_w,
                         *direction,
                     )?;
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        self.write_log
-                            .insert(format!("Fluid:{loop_id:?}:{fluid_type:?}:{node_id:?}"));
-                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared fluid loop: {loop_id:?} with fluid type {fluid_type:?} and node {node_id:?}"
@@ -872,10 +867,6 @@ impl PortSlots {
                     .find(|entry| entry.domain_id == *domain_id)
                 {
                     total.add(*payload);
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        self.write_log.insert(format!("Custom:{domain_id:?}"));
-                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared custom domain: {domain_id:?}"
@@ -888,10 +879,6 @@ impl PortSlots {
             } => {
                 if let Some(total) = self.humidity.iter_mut().find(|entry| entry.zone == *zone) {
                     total.add(*moisture_mass_flow_kg_s);
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        self.write_log.insert(format!("Humidity:{zone:?}"));
-                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared humidity zone: {zone:?}"
@@ -903,37 +890,27 @@ impl PortSlots {
     }
 }
 
-/// Validate that all `PortDeclaration`s with the same `loop_id` agree on
-/// `fluid_type`. A mismatch means two pieces of equipment are wired to the same
-/// fluid loop but disagree about the fluid — a configuration error that produces
-/// silently incorrect simulation results if not caught.
+/// Collect the distinct `(loop_id, fluid_type)` pairs declared by fluid
+/// ports, in first-declaration order.
 ///
-/// Returns `Err` on the first detected mismatch, naming the conflicting loop_id
-/// and fluid types.
-pub fn validate_fluid_type_consistency(decls: &[PortDeclaration]) -> Result<(), HaresError> {
-    use std::collections::HashMap;
-
-    let mut loop_fluid: HashMap<LoopId, FluidType> = HashMap::new();
+/// This is the fluid loop map's source of truth: every loop a fluid port
+/// declares exists, with the type its declaring ports agree on. Declarations
+/// without a loop id or fluid type are inert and skipped. Two pairs naming
+/// one loop with different fluid types are both returned, for the fluid
+/// solver's loop-type planning to reject.
+pub fn fluid_loop_declarations(decls: &[PortDeclaration]) -> Vec<(LoopId, FluidType)> {
+    let mut loops: Vec<(LoopId, FluidType)> = Vec::new();
     for decl in decls {
         if decl.port_type != PortType::Fluid {
             continue;
         }
-        let Some(loop_id) = decl.loop_id else {
-            continue;
-        };
-        let Some(fluid_type) = decl.fluid_type else {
-            continue;
-        };
-        if let Some(existing) = loop_fluid.insert(loop_id, fluid_type) {
-            if existing != fluid_type {
-                return Err(HaresError::Equipment(format!(
-                    "loop {loop_id:?} declared with conflicting fluid types: \
-                     {existing:?} and {fluid_type:?}"
-                )));
-            }
+        if let (Some(loop_id), Some(fluid_type)) = (decl.loop_id, decl.fluid_type)
+            && !loops.contains(&(loop_id, fluid_type))
+        {
+            loops.push((loop_id, fluid_type));
         }
     }
-    Ok(())
+    loops
 }
 
 #[cfg(test)]
@@ -1073,6 +1050,7 @@ mod tests {
                 sensible_gain_w: 10.0,
                 radiant_gain_w: 3.0,
                 latent_gain_w: 5.0,
+                shortwave_gain_w: 2.0,
                 sensible_by_category: [1.0, 2.0, 3.0, 4.0, 0.0, 0.0],
                 radiant_by_category: [0.0, 0.0, 3.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0, 0.0, 5.0, 0.0, 0.0, 0.0],
@@ -1108,13 +1086,12 @@ mod tests {
                 zone: ZoneId(1),
                 moisture_mass_flow_kg_s: 0.001,
             }],
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            write_log: std::collections::HashSet::new(),
         };
 
         slots.zero();
 
         approx_eq(slots.thermal[0].sensible_gain_w, 0.0);
+        approx_eq(slots.thermal[0].shortwave_gain_w, 0.0);
         approx_eq(slots.thermal[0].radiant_gain_w, 0.0);
         approx_eq(slots.thermal[0].latent_gain_w, 0.0);
         assert_eq!(
@@ -1135,6 +1112,51 @@ mod tests {
         approx_eq(slots.fluid[0].mean_return_temp_c, 0.0);
         assert_eq!(slots.custom[0].payload, [0.0; 16]);
         approx_eq(slots.humidity[0].moisture_mass_flow_kg_s, 0.0);
+    }
+
+    #[test]
+    fn ports_non_finite_write_is_an_error_in_release() {
+        let mut slots = PortSlots::default();
+        let result = slots.accumulate(&PortContribution::Electrical {
+            active_power_w: f64::NAN,
+            reactive_power_kvar: 0.0,
+        });
+        assert!(
+            result.is_err(),
+            "a non-finite electrical write must be a typed error in every build profile"
+        );
+        let mut slots = PortSlots::default();
+        let result = slots.accumulate(&PortContribution::Electrical {
+            active_power_w: 1500.0,
+            reactive_power_kvar: f64::NAN,
+        });
+        assert!(
+            result.is_err(),
+            "a non-finite electrical write must be a typed error in every build profile"
+        );
+    }
+
+    #[test]
+    fn electrical_sign_violation_is_an_error_in_every_profile() {
+        let mut slots = PortSlots::default();
+        slots
+            .accumulate(&PortContribution::Electrical {
+                active_power_w: -500.0,
+                reactive_power_kvar: 0.0,
+            })
+            .expect("a negative write seeds the generation side");
+        // A positive write onto the generation side is impossible via the sign
+        // split; force the accumulator past the bound the way a mis-classified
+        // contribution would and confirm the check fires.
+        slots.electrical.generation_power_w = 10.0;
+        let result = slots.accumulate(&PortContribution::Electrical {
+            active_power_w: 1.0,
+            reactive_power_kvar: 0.0,
+        });
+        assert!(
+            result.is_err(),
+            "a sign-violating accumulation must be a typed error in every build profile"
+        );
     }
 
     #[test]
@@ -1347,6 +1369,34 @@ mod tests {
         approx_eq(slots.fluid[1].total_flow_kg_s, 2.0);
     }
 
+    /// Only fluid declarations name loops; identical pairs collapse, and a
+    /// loop declared with two fluids yields both pairs for the loop-type
+    /// planning to reject.
+    #[test]
+    fn fluid_loop_declarations_collect_distinct_fluid_pairs_in_order() {
+        let thermal_carrying_a_loop = PortDeclaration {
+            loop_id: Some(LoopId(3)),
+            fluid_type: Some(FluidType::Water),
+            ..PortDeclaration::thermal(ZoneId(1))
+        };
+        let decls = [
+            thermal_carrying_a_loop,
+            PortDeclaration::fluid(LoopId(1), FluidType::Water),
+            PortDeclaration::electrical(),
+            PortDeclaration::fluid(LoopId(1), FluidType::Water),
+            PortDeclaration::fluid(LoopId(2), FluidType::Glycol),
+            PortDeclaration::fluid(LoopId(1), FluidType::Glycol),
+        ];
+        assert_eq!(
+            fluid_loop_declarations(&decls),
+            vec![
+                (LoopId(1), FluidType::Water),
+                (LoopId(2), FluidType::Glycol),
+                (LoopId(1), FluidType::Glycol),
+            ]
+        );
+    }
+
     #[test]
     fn from_declarations_builds_correct_slots() {
         let decls = &[
@@ -1505,25 +1555,29 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "non-finite active_power_w")]
-    fn non_finite_active_power_triggers_debug_assert() {
+    fn non_finite_active_power_is_a_typed_error() {
         let mut slots = PortSlots::default();
-        let _ = slots.accumulate(&PortContribution::Electrical {
+        let result = slots.accumulate(&PortContribution::Electrical {
             active_power_w: f64::NAN,
             reactive_power_kvar: 0.0,
         });
+        assert!(
+            result.is_err(),
+            "a non-finite active_power_w must be a typed error in every build profile"
+        );
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "non-finite reactive_power_kvar")]
-    fn non_finite_reactive_power_triggers_debug_assert() {
+    fn non_finite_reactive_power_is_a_typed_error() {
         let mut slots = PortSlots::default();
-        let _ = slots.accumulate(&PortContribution::Electrical {
+        let result = slots.accumulate(&PortContribution::Electrical {
             active_power_w: 0.0,
             reactive_power_kvar: f64::INFINITY,
         });
+        assert!(
+            result.is_err(),
+            "a non-finite reactive_power_kvar must be a typed error in every build profile"
+        );
     }
 
     #[test]
@@ -1710,45 +1764,6 @@ mod tests {
             })
             .unwrap();
         approx_eq(slots.fluid[0].total_thermal_power_w, 4186.0);
-    }
-
-    #[test]
-    fn validate_fluid_type_consistency_passes_for_single_loop_id() {
-        let decls = [PortDeclaration::fluid(LoopId(1), FluidType::Water)];
-        assert!(validate_fluid_type_consistency(&decls).is_ok());
-    }
-
-    #[test]
-    fn validate_fluid_type_consistency_rejects_mixed_fluid_types() {
-        let decls = [
-            PortDeclaration::fluid(LoopId(1), FluidType::Water),
-            PortDeclaration::fluid(LoopId(1), FluidType::Glycol),
-        ];
-        let err = validate_fluid_type_consistency(&decls).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("LoopId(1)"));
-        assert!(msg.contains("Water"));
-        assert!(msg.contains("Glycol"));
-    }
-
-    #[test]
-    fn validate_fluid_type_consistency_passes_for_different_loops() {
-        let decls = [
-            PortDeclaration::fluid(LoopId(1), FluidType::Water),
-            PortDeclaration::fluid(LoopId(2), FluidType::Glycol),
-        ];
-        assert!(validate_fluid_type_consistency(&decls).is_ok());
-    }
-
-    #[test]
-    fn validate_fluid_type_consistency_ignores_non_fluid_ports() {
-        let decls = [
-            PortDeclaration::thermal(ZoneId(1)),
-            PortDeclaration::fluid(LoopId(1), FluidType::Water),
-            PortDeclaration::fluid(LoopId(1), FluidType::Water),
-            PortDeclaration::electrical(),
-        ];
-        assert!(validate_fluid_type_consistency(&decls).is_ok());
     }
 
     // =======================================================================

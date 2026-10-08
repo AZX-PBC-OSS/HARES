@@ -138,20 +138,23 @@ pub fn water_mains_temperature_c(
 
     let result = temperature_f_to_c(t_mains_f);
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        debug_assert!(
-            result.is_finite(),
+    // Unconditional in every build profile: the function already returns
+    // `Result`, and extreme input values are the only path to a violation.
+    // The lower bound is tautological after the 32 °F clamp above, so
+    // finiteness and the upper bound remain.
+    if !result.is_finite() {
+        return Err(HaresError::Physics(format!(
             "water mains temperature is non-finite: {result:.6e}"
-        );
-        // Mains water above 100 °C is steam at atmospheric pressure; municipal
-        // water supply cannot deliver steam. The Burch-Christensen model
-        // produces well-defined output for any input, so extreme input values
-        // are the only path to this violation.
-        debug_assert!(
-            (-50.0..=100.0).contains(&result),
+        )));
+    }
+    // Mains water above 100 °C is steam at atmospheric pressure; municipal
+    // water supply cannot deliver steam. The Burch-Christensen model
+    // produces well-defined output for any input, so extreme input values
+    // are the only path to this violation.
+    if result > 100.0 {
+        return Err(HaresError::Physics(format!(
             "water mains temperature {result:.2} °C outside liquid water range [-50, 100]"
-        );
+        )));
     }
 
     Ok(result)

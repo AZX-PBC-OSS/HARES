@@ -226,13 +226,15 @@ fn init_reassignment_preserves_id_when_config_key_absent() {
         .expect("create Dehumidifier");
     assert_eq!(eq.descriptor().id, EquipmentId(5));
     // ...then init with a config whose key is absent: the id must survive.
+    // The payload carries the zone_id init requires (the dehumidifier has no
+    // air to dehumidify without one) and nothing else.
     let absent_cfg = EquipmentConfig::with_payload(
         "Dehumidifier".to_string(),
         "Dehumidifier".to_string(),
         ConfigPayload::Typed {
             type_name: "Dehumidifier".to_string(),
             version: 1,
-            data: serde_json::json!({}),
+            data: serde_json::json!({"zone_id": 1}),
         },
     );
     eq.init(&absent_cfg, &env)
@@ -248,7 +250,16 @@ fn init_reassignment_preserves_id_when_config_key_absent() {
     let mut eq = registry
         .create("Dehumidifier", typed_id_config("Dehumidifier", 5))
         .expect("create Dehumidifier");
-    eq.init(&typed_id_config("Dehumidifier", 6), &env)
+    let present_id_cfg = EquipmentConfig::with_payload(
+        "Dehumidifier".to_string(),
+        "Dehumidifier".to_string(),
+        ConfigPayload::Typed {
+            type_name: "Dehumidifier".to_string(),
+            version: 1,
+            data: serde_json::json!({"equipment_id": 6, "zone_id": 1}),
+        },
+    );
+    eq.init(&present_id_cfg, &env)
         .unwrap_or_else(|e| panic!("Dehumidifier init: {e}"));
     assert_eq!(
         eq.descriptor().id,

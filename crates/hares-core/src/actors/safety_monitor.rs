@@ -20,9 +20,11 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_types::{ControlSignal, EndUse, EnvironmentState, OperatingMode, Telemetry};
+use hares_types::{
+    ControlCapabilities, ControlSignal, EndUse, EnvironmentState, OperatingMode, Telemetry,
+};
 
-use crate::actor::Actor;
+use crate::actor::{Actor, ActorTarget};
 
 use super::constants::DEFAULT_FREEZE_THRESHOLD_C;
 
@@ -47,7 +49,7 @@ pub const DEFAULT_OVER_TEMP_THRESHOLD_C: f64 = 50.0;
 /// ```
 pub struct SafetyMonitor {
     name: Arc<str>,
-    target: DispatchTarget,
+    target: ActorTarget,
     freeze_protection_threshold_c: f64,
     over_temperature_threshold_c: f64,
     telemetry: Telemetry,
@@ -67,7 +69,10 @@ impl SafetyMonitor {
         telemetry.insert("min_zone_temp_c", 0.0);
         Self {
             name: Arc::from(name),
-            target: DispatchTarget::ByEndUse(EndUse::HVAC_HEATING),
+            target: ActorTarget {
+                target: DispatchTarget::ByEndUse(EndUse::HVAC_HEATING),
+                required: ControlCapabilities::MODE_OVERRIDE,
+            },
             freeze_protection_threshold_c: DEFAULT_FREEZE_THRESHOLD_C,
             over_temperature_threshold_c: DEFAULT_OVER_TEMP_THRESHOLD_C,
             telemetry,
@@ -76,7 +81,7 @@ impl SafetyMonitor {
 
     /// Sets the dispatch target for safety signals.
     pub fn with_target(mut self, target: DispatchTarget) -> Self {
-        self.target = target;
+        self.target.target = target;
         self
     }
 
@@ -140,6 +145,10 @@ impl Actor for SafetyMonitor {
         Some(&self.telemetry)
     }
 
+    fn dispatch_targets(&self) -> &[ActorTarget] {
+        std::slice::from_ref(&self.target)
+    }
+
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         let mut freeze_breach = false;
         let mut over_temp_breach = false;
@@ -175,7 +184,7 @@ impl Actor for SafetyMonitor {
                 "freeze protection: dispatching Safety-tier Heating override"
             );
             out.push(DispatchRequest {
-                target: self.target.clone(),
+                target: self.target.target.clone(),
                 signal: ControlSignal::ModeOverride {
                     mode: OperatingMode::Heating,
                 },
@@ -191,7 +200,7 @@ impl Actor for SafetyMonitor {
                 "over-temperature lockout: dispatching Safety-tier Off override"
             );
             out.push(DispatchRequest {
-                target: self.target.clone(),
+                target: self.target.target.clone(),
                 signal: ControlSignal::ModeOverride {
                     mode: OperatingMode::Off,
                 },
@@ -209,7 +218,7 @@ impl Actor for SafetyMonitor {
             self.telemetry.set("min_zone_temp_c", min_temp);
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(debug_assertions)]
         {
             // Invariant: no Safety-tier signal is emitted without an actual
             // threshold breach detected during this step.

@@ -18,33 +18,59 @@
 
 use super::hvac_core::{DEFAULT_BIQUADRATIC_COEFFS, HvacEquipmentType};
 
-/// ASHP single-speed heating capacity curve (OCHRE `ASHP Heater.csv` column `Single_1`, row `a_cap_t`–`f_cap_t`).
+/// ASHP single-speed heating capacity curve: the OS-HPXML v1.12.0 RESNET
+/// Addendum 82 anchor model as a biquadratic.
+///
+/// The reference anchors capacity at the 47 °F rating point (1.0) and at
+/// 17 °F with `qm17full = 0.626` (OpenStudio-HPXML v1.12.0,
+/// `HPXMLtoOpenStudio/resources/defaults.rb:8254`, per RESNET HERS
+/// Addendum 82), linear in outdoor temperature and flat in indoor
+/// temperature (the defaulted model's datapoints all sit at the rated
+/// indoor temperature, `defaults.rb:2960-2968`; the E+ coil reads them
+/// through a `Table:Lookup` with linear extrapolation,
+/// `hvac.rb:3240-3252`). The line in °C is
+/// `cap(To) = 0.813 + 0.02244·To`; the biquadratic reproduces it exactly.
+///
+/// The previous default was OCHRE `Biquadratic ASHP Heater.csv`'s `Single_1`
+/// DOE-2 fit, whose quadratic extrapolation below the 17 °F fit anchor is
+/// unphysical: evaluated at -17 °C it delivered too much capacity (0.485 vs
+/// the reference's 0.432). OCHRE's CSV bounds (±100 °C, rows
+/// `min_Tdb`/`max_Tdb`) clamp nothing; EnergyPlus resets a negative curve
+/// output to 0 (`DXCoils.cc:11272-11290`), as HARES's `.max(0.0)` does.
 ///
 /// Verification at AHRI 210/240-2023 conditions:
-///   - H1 (21.1°C indoor, 8.3°C outdoor): cap_ratio = 0.9951 ≈ 1.0 ✓
-///   - H3 (21.1°C indoor, −8.3°C outdoor): cap_ratio = 0.6311 ✓
-const ASHP_SINGLE_HEATING_CAPACITY: [f64; 6] = [
-    0.878143655,
-    -0.002914855,
-    -0.00003337,
-    0.022386661,
-    0.000163944,
-    -0.00002187,
-];
+///   - H1 (21.1°C indoor, 8.3°C outdoor): cap_ratio = 0.9993 ≈ 1.0 ✓
+///   - H3 (21.1°C indoor, −8.3°C outdoor): cap_ratio = 0.6262 = qm17full ✓
+const ASHP_SINGLE_HEATING_CAPACITY: [f64; 6] = [0.813, 0.0, 0.0, 0.02244, 0.0, 0.0];
 
-/// ASHP single-speed heating EIR curve (OCHRE `ASHP Heater.csv` column `Single_1`, row `a_eir_t`–`f_eir_t`).
+/// ASHP single-speed heating EIR curve: the OS-HPXML v1.12.0 RESNET
+/// Addendum 82 anchor model as a biquadratic.
+///
+/// The reference anchors the EIR at 1.0 (47 °F rating) and
+/// `eirm17full = 1.356` at 17 °F (OpenStudio-HPXML v1.12.0,
+/// `HPXMLtoOpenStudio/resources/defaults.rb:8287`); below 17 °F its power
+/// and capacity are both linear in outdoor temperature
+/// (`power(C) = 0.924428 + 0.00906864·C`,
+/// `capacity(C) = 0.813 + 0.02244·C`), so the EIR is the ratio of the two
+/// extrapolated lines: 1.785449 at -17 °C. The biquadratic is the quadratic
+/// through those three points
+/// (`eir(To) = 1.1007334853 - 0.02136·To + 0.001112637825·To²`), exact at the
+/// anchors and at -17 °C to 5e-5, and within ~3% of the rational form
+/// between them.
+///
+/// The previous default was OCHRE `Biquadratic ASHP Heater.csv`'s `Single_1`
+/// DOE-2 fit, which at -17 °C understated the efficiency loss (1.545 vs the
+/// reference's 1.785): the full-load compressor COP for the ledger's HSPF
+/// 9.5 unit read 1.80 where the reference-normalized value is 1.56. The
+/// quadratic's vertex sits at +9.6 °C, so above the rating point the curve
+/// turns EIR back up where the reference's linear power model keeps
+/// improving COP; heating there is rare and modulated down, and the
+/// divergence is stated in `docs/alignment/DIVERGENCES.md`.
 ///
 /// Verification at AHRI 210/240-2023 conditions:
-///   - H1: eir_ratio = 0.9939
-///   - H3: eir_ratio = 1.3459 (worse efficiency at low OAT ✓)
-const ASHP_SINGLE_HEATING_EIR: [f64; 6] = [
-    0.716518071,
-    0.010275901,
-    0.000460734,
-    -0.006480365,
-    0.000456354,
-    -0.00069764,
-];
+///   - H1: eir_ratio = 1.0
+///   - H3: eir_ratio = 1.356 (worse efficiency at low OAT ✓)
+const ASHP_SINGLE_HEATING_EIR: [f64; 6] = [1.1007334853, 0.0, 0.0, -0.02136, 0.001112637825, 0.0];
 
 /// ASHP two-speed heating capacity curves (OCHRE `ASHP Heater.csv` columns `Double_1`, `Double_2`,
 /// rows `a_cap_t`–`f_cap_t`).
@@ -501,6 +527,140 @@ mod tests {
         assert!(
             eir_h3 > 1.0,
             "ASHP EIR at H3 must exceed 1.0; got {eir_h3:.4}"
+        );
+    }
+
+    /// Reference pin: the default single-speed ASHP heating capacity curve
+    /// matches OS-HPXML v1.12.0's RESNET Addendum 82 anchor model at its
+    /// anchor points and at -17 °C.
+    ///
+    /// Reference (OpenStudio-HPXML v1.12.0,
+    /// `HPXMLtoOpenStudio/resources/defaults.rb`): the default capacity
+    /// maintenance anchors `qm17full = 0.626` at 17 °F (`defaults.rb:8254`,
+    /// per RESNET HERS Addendum 82) against the 47 °F rating point
+    /// (`AirSourceHeatRatedODB`), linear in outdoor temperature; the
+    /// defaulted model's detailed-performance data is flat in indoor
+    /// temperature (the datapoints all sit at the rated indoor temperature,
+    /// `defaults.rb:2960-2968`). HARES's biquadratic reproduces the line
+    /// exactly, so the tests below re-derive the reference values from the
+    /// anchors instead of restating the coefficients.
+    #[test]
+    fn ashp_single_capacity_matches_resnet_anchor_model() {
+        let [c0, c1, c2, c3, c4, c5] = ASHP_SINGLE_HEATING_CAPACITY;
+        let cap =
+            |x1: f64, x2: f64| c0 + c1 * x1 + c2 * x1 * x1 + c3 * x2 + c4 * x2 * x2 + c5 * x1 * x2;
+
+        // Reference anchors in °C: rating 47 °F = 8.333 °C, low-temp
+        // 17 °F = -8.333 °C.
+        let rated_outdoor = 8.333_333;
+        let low_temp_outdoor = -8.333_333;
+        let qm17_full = 0.626;
+        let cap_at = |outdoor_c: f64| {
+            1.0 + (outdoor_c - rated_outdoor) * (qm17_full - 1.0)
+                / (low_temp_outdoor - rated_outdoor)
+        };
+
+        assert!(
+            (cap(21.1, rated_outdoor) - 1.0).abs() < 1e-6,
+            "capacity ratio at the rating point must be 1.0, got {}",
+            cap(21.1, rated_outdoor)
+        );
+        assert!(
+            (cap(21.1, low_temp_outdoor) - qm17_full).abs() < 1e-6,
+            "capacity ratio at 17 °F must equal qm17full (0.626), got {}",
+            cap(21.1, low_temp_outdoor)
+        );
+        // The reference extrapolates the same line to -17 °C; the replaced
+        // DOE-2 quadratics collapsed below it instead.
+        let minus_17 = cap(21.1, -17.0);
+        assert!(
+            (minus_17 - cap_at(-17.0)).abs() < 1e-6,
+            "capacity ratio at -17 °C must equal the reference's linear \
+             extrapolation ({:.6}), got {minus_17:.6}",
+            cap_at(-17.0)
+        );
+        // The defaulted model carries no indoor-temperature dependence.
+        assert!(
+            (cap(15.0, -17.0) - cap(25.0, -17.0)).abs() < 1e-12,
+            "the default capacity curve must be flat in indoor temperature \
+             (the reference's defaulted model is OAT-only)"
+        );
+    }
+
+    /// Reference pin: the default single-speed ASHP heating EIR curve matches
+    /// OS-HPXML v1.12.0's RESNET Addendum 82 anchor model at the anchors and
+    /// at -17 °C, where the replaced DOE-2 curve understated the efficiency
+    /// loss (EIR 1.55 vs the reference's 1.79) and so reported too-optimistic
+    /// cold-weather COPs.
+    ///
+    /// Reference: `eirm17full = 1.356` at 17 °F (OS-HPXML v1.12.0
+    /// `defaults.rb:8287`), and below 17 °F the model's power and capacity
+    /// are both linear in outdoor temperature, so the EIR at -17 °C is the
+    /// ratio of the two lines' extrapolations:
+    /// power(C) = 0.924428 + 0.00906864·C, capacity(C) = 0.813 + 0.02244·C.
+    #[test]
+    fn ashp_single_eir_matches_resnet_anchor_model() {
+        let [c0, c1, c2, c3, c4, c5] = ASHP_SINGLE_HEATING_EIR;
+        let eir =
+            |x1: f64, x2: f64| c0 + c1 * x1 + c2 * x1 * x1 + c3 * x2 + c4 * x2 * x2 + c5 * x1 * x2;
+
+        let rated_outdoor = 8.333_333;
+        let low_temp_outdoor = -8.333_333;
+        // The reference's EIR values, re-derived from the anchors.
+        let eir_at = |outdoor_c: f64| {
+            let power = 0.924_428 + 0.009_068_64 * outdoor_c;
+            let capacity = 0.813 + 0.022_44 * outdoor_c;
+            power / capacity
+        };
+
+        assert!(
+            (eir(21.1, rated_outdoor) - 1.0).abs() < 1e-6,
+            "EIR ratio at the rating point must be 1.0, got {}",
+            eir(21.1, rated_outdoor)
+        );
+        assert!(
+            (eir(21.1, low_temp_outdoor) - 1.356).abs() < 1e-3,
+            "EIR ratio at 17 °F must equal eirm17full (1.356), got {}",
+            eir(21.1, low_temp_outdoor)
+        );
+        assert!(
+            (eir(21.1, -17.0) - eir_at(-17.0)).abs() < 1e-3,
+            "EIR ratio at -17 °C must match the reference's extrapolation \
+             ({:.6}), got {}",
+            eir_at(-17.0),
+            eir(21.1, -17.0)
+        );
+    }
+
+    /// Reference pin: the full-load compressor COP at -17 °C for the ledger's
+    /// 12 kW, HSPF 9.5 class of unit stays above 1 and matches the
+    /// reference's normalized COP.
+    ///
+    /// COP = COP_rated / eir_ratio(-17 °C); COP_rated = HSPF / 3.412141633
+    /// (the HSPF-to-rated-EIR conversion both HARES and OCHRE use,
+    /// `vendors/OCHRE/ochre/utils/hpxml.py:855-856`). The reference's
+    /// normalized COP at -17 °C is capacity/power on its extrapolated lines.
+    #[test]
+    fn ashp_single_compressor_cop_at_minus_17c_stays_above_one() {
+        // The curve is flat in indoor temperature: c0 + c3·To + c4·To².
+        let [c0, _, _, c3, c4, _] = ASHP_SINGLE_HEATING_EIR;
+        let eir_minus_17 = c0 + c3 * -17.0 + c4 * (-17.0) * (-17.0);
+
+        let hspf = 9.5;
+        let cop_rated = hspf / 3.412_141_633;
+        let cop_minus_17 = cop_rated / eir_minus_17;
+
+        let reference_cop_ratio = (0.813 + 0.022_44 * -17.0) / (0.924_428 + 0.009_068_64 * -17.0);
+        assert!(
+            (cop_minus_17 / cop_rated - reference_cop_ratio).abs() < 1e-3,
+            "the normalized COP at -17 °C must match the reference \
+             ({reference_cop_ratio:.6}), got {}",
+            cop_minus_17 / cop_rated
+        );
+        assert!(
+            cop_minus_17 >= 1.0,
+            "the full-load compressor COP at -17 °C must stay at or above 1.0 \
+             for an HSPF 9.5 unit; got {cop_minus_17:.4}"
         );
     }
 

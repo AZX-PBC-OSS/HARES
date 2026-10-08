@@ -13,13 +13,39 @@
 
 use hares_physics::film_coefficients::tarp_h_natural;
 use hares_physics::solar::{clear_sky_irradiance, perez_tilted_irradiance, solar_position};
-use hares_types::{DEFAULT_GROUND_ALBEDO, DomainUpdate, EnvironmentState, PortSlots, ZoneId};
+use hares_types::{
+    DEFAULT_GROUND_ALBEDO, DomainUpdate, EnvironmentState, HaresError, PortSlots, ZoneId,
+};
 use nalgebra::DVector;
 
-use super::CoupledState;
 use super::ThermalSolver;
-use super::config::{FilmCoefficientModel, StateSpaceWiring};
+use super::config::{FilmCoefficientModel, StateSpaceWiring, ThermalSolverError};
 use crate::boundary_rc::depth_mm_key;
+use crate::state_space::{ScalarSolveTarget, SolveScratch};
+
+/// Site coordinates and elevation for the solar-geometry and film-model
+/// inputs of the autosizing entry points.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SiteLocation {
+    /// Site latitude in decimal degrees.
+    pub latitude_deg: f64,
+    /// Site longitude in decimal degrees.
+    pub longitude_deg: f64,
+    /// Site elevation in meters above sea level.
+    pub elevation_m: f64,
+}
+
+/// The outdoor profile of one design day: the diurnal dry-bulb range and the
+/// optional pre-computed hourly solar series.
+#[derive(Clone, Copy, Debug)]
+struct DesignDayProfile<'a> {
+    /// Diurnal dry-bulb range [K] for the ASHRAE design-day profile
+    /// (0 for constant, heating; ∼12 °C for cooling).
+    daily_range_c: f64,
+    /// Pre-computed hourly solar data for the design day, or `None` for
+    /// zero solar (heating design day).
+    solar_data: Option<&'a [Option<HourlySolar>]>,
+}
 
 impl ThermalSolver {
     /// Compute the HVAC capacity (W) required to maintain `target_c` at
@@ -46,7 +72,7 @@ impl ThermalSolver {
     /// or 0.0 if the zone is unknown or solving fails.
     ///
     /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
-    /// or `last_coupled_state`).
+    /// or `last_coupling`).
     pub fn autosize_capacity(&self, zone: ZoneId, target_c: f64, design_outdoor_c: f64) -> f64 {
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return 0.0;
@@ -165,7 +191,7 @@ impl ThermalSolver {
     /// Compute the cooling HVAC capacity (W) required to maintain `target_c` at
     /// design outdoor conditions with peak solar gains and internal gains.
     ///
-    /// Unlike [`autosize_capacity`] which zeros all solar inputs, this method
+    /// Unlike [`Self::autosize_capacity`] which zeros all solar inputs, this method
     /// computes clear-sky solar irradiance for July 21 solar noon at the given
     /// latitude/longitude and applies per-surface solar gains to the input vector
     /// before solving. This produces a higher (more realistic) cooling capacity
@@ -178,7 +204,7 @@ impl ThermalSolver {
     /// are also included per ACCA Manual J-2016 §7 (cooling load includes
     /// internal gains).
     ///
-    /// As with [`autosize_capacity`], the steady-state capacity is computed
+    /// As with [`Self::autosize_capacity`], the steady-state capacity is computed
     /// from the DC gain of the state-space model rather than a one-step back-
     /// solve from the cold-start state. This avoids inflating the apparent
     /// capacity due to transient wall-mass warm-up.
@@ -187,27 +213,33 @@ impl ThermalSolver {
     /// or 0.0 if the zone is unknown or solving fails.
     ///
     /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
-    /// or `last_coupled_state`).
+    /// or `last_coupling`).
     ///
     /// * `site_elevation_m` — site elevation in meters
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// The input screen is unconditional: `internal_gains_w` must be
+    /// non-negative and plausible for a single-family residence (< 5 kW
+    /// sensible); a violation is a typed error in every build profile.
     pub fn autosize_capacity_cooling(
         &self,
         zone: ZoneId,
         target_c: f64,
         design_outdoor_c: f64,
-        site_lat_deg: f64,
-        site_lon_deg: f64,
-        site_elevation_m: f64,
+        site: SiteLocation,
         internal_gains_w: f64,
-    ) -> f64 {
+    ) -> Result<f64, ThermalSolverError> {
         use chrono::{Datelike, FixedOffset, TimeZone};
 
+        let SiteLocation {
+            latitude_deg: site_lat_deg,
+            longitude_deg: site_lon_deg,
+            elevation_m: site_elevation_m,
+        } = site;
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
-            return 0.0;
+            return Ok(0.0);
         };
         let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
-            return 0.0;
+            return Ok(0.0);
         };
 
         // ── Build design-condition input vector ────────────────────────────
@@ -259,14 +291,20 @@ impl ThermalSolver {
 
             let irr = perez_tilted_irradiance(
                 *surface_id,
-                ghi_clear,
-                dni_clear,
-                dhi_clear,
-                solar_zenith_deg,
-                pos.azimuth_deg,
-                win_props.tilt_deg,
-                win_props.azimuth_deg,
-                doy,
+                hares_physics::solar::SkyIrradiance {
+                    ghi: ghi_clear,
+                    dni: dni_clear,
+                    dhi: dhi_clear,
+                },
+                hares_physics::solar::SunPosition {
+                    zenith_deg: solar_zenith_deg,
+                    azimuth_deg: pos.azimuth_deg,
+                    day_of_year: doy,
+                },
+                hares_physics::solar::SurfaceOrientation {
+                    tilt_deg: win_props.tilt_deg,
+                    azimuth_deg: win_props.azimuth_deg,
+                },
                 DEFAULT_GROUND_ALBEDO,
                 site_elevation_m,
             );
@@ -291,14 +329,20 @@ impl ThermalSolver {
 
             let irr = perez_tilted_irradiance(
                 info.surface_id,
-                ghi_clear,
-                dni_clear,
-                dhi_clear,
-                solar_zenith_deg,
-                pos.azimuth_deg,
-                info.tilt_deg,
-                info.azimuth_deg,
-                doy,
+                hares_physics::solar::SkyIrradiance {
+                    ghi: ghi_clear,
+                    dni: dni_clear,
+                    dhi: dhi_clear,
+                },
+                hares_physics::solar::SunPosition {
+                    zenith_deg: solar_zenith_deg,
+                    azimuth_deg: pos.azimuth_deg,
+                    day_of_year: doy,
+                },
+                hares_physics::solar::SurfaceOrientation {
+                    tilt_deg: info.tilt_deg,
+                    azimuth_deg: info.azimuth_deg,
+                },
                 DEFAULT_GROUND_ALBEDO,
                 site_elevation_m,
             );
@@ -320,43 +364,69 @@ impl ThermalSolver {
 
         // ── Invariant: cooling internal gains must be non-negative and
         //    plausible for a single-family residence (< 5 kW sensible) ──
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            assert!(
-                internal_gains_w >= 0.0,
-                "autosize_capacity_cooling: internal_gains_w ({}) must be non-negative",
-                internal_gains_w
-            );
-            assert!(
-                internal_gains_w < 5_000.0,
-                "autosize_capacity_cooling: internal_gains_w ({}) implausibly large \
-                 for a single-family residence (≥ 5 kW)",
-                internal_gains_w
-            );
+        // Unconditional in every build profile: the gains are caller input.
+        if internal_gains_w < 0.0 {
+            return Err(ThermalSolverError::Configuration(format!(
+                "autosize_capacity_cooling: internal_gains_w ({internal_gains_w}) must be non-negative"
+            )));
+        }
+        if internal_gains_w >= 5_000.0 {
+            return Err(ThermalSolverError::Configuration(format!(
+                "autosize_capacity_cooling: internal_gains_w ({internal_gains_w}) implausibly large \
+                 for a single-family residence (>= 5 kW)"
+            )));
         }
 
         // ── Steady-state capacity via DC gain ─────────────────────────────
         // Compute the zone temperature at steady state with zero HVAC input
         // but all other design inputs (outdoor temp, solar gains) present.
-        self.dc_gain_autosize(
+        Ok(self.dc_gain_autosize(
             &mut u_design,
             target_c,
             zone,
             input_idx,
             output_idx,
             "autosize_capacity_cooling",
-        )
+        ))
     }
 
     /// Estimate the ideal HVAC capacity needed to reach an explicit target temperature.
     ///
-    /// Uses `last_u`, `last_coupling`, and `last_coupled_state` as background.
+    /// Uses `last_u` and `last_coupling` as background; a non-empty
+    /// `last_coupling` selects the identity-coupled solve.
     /// When `prepare_inputs()` has been called first (two-phase path), these
-    /// contain current-step weather/solar/infiltration data. Zero allocation —
-    /// the coupled LU is cached by `prepare_inputs` or the previous `integrate`.
+    /// contain current-step weather/solar/infiltration data.
+    ///
+    /// Allocation behaviour: every intermediate of the scalar solve
+    /// (`N·x`, `B_eff·u`, the RHS, the gain column, the aggregated damping)
+    /// lives in the solver-owned [`SolveScratch`], sized at construction, so
+    /// a steady-state call performs no heap allocation. The zero-allocation
+    /// test `thermal_solver_step_allocation_free_after_first_step` proves it:
+    /// its allocation bracket wraps prepare → three ideal-capacity solves
+    /// per zone → integrate and reads zero over 100 steps after the first, with
+    /// couplings active and without. Every factorization in
+    /// `hares-envelope` factors a dynamically sized nalgebra matrix and
+    /// allocates its result, so those zero allocations also prove the step
+    /// performs zero factorizations.
+    ///
+    /// Shared-prefix reuse: the solve's prefix (`N·x`, `B_eff·u` and their
+    /// elementwise sum) depends only on the step's `x` and `last_u`, so the
+    /// first call of a step fills it and later calls in the same step (the
+    /// remaining equipment of `collect_and_solve`) skip the recomputation
+    /// and run only the target-dependent tail into `SolveScratch`'s per-call
+    /// region. `prepare_inputs`, `integrate` and `restore_state` invalidate
+    /// the prefix, so the validity window is exactly "same x and u as when
+    /// the prefix was filled"; reuse of unchanged values is bitwise
+    /// identical to recomputation, and the test
+    /// `shared_terms_computed_once_per_step` proves the counts and the
+    /// bitwise equality.
     ///
     /// Returns the required capacity in watts (positive = heating, negative = cooling),
-    /// or 0.0 if the zone is unknown or solving fails.
+    /// or 0.0 if the zone is unknown or solving fails. The returned value is the
+    /// zone sensible input the step needs as an absolute quantity: the dispatcher
+    /// hands it to equipment that delivers exactly it (OCHRE's contract,
+    /// HVAC.py:424 "h_desired should be equal to self.delivered_heat"), so
+    /// delivering the return and stepping must land the zone on the target.
     ///
     /// Logging behaviour: failure emits `tracing::warn!` with structured context
     /// (zone, target, zone temp, outdoor temp, error) on the first failure in a
@@ -371,36 +441,45 @@ impl ThermalSolver {
             return 0.0;
         };
 
-        let total = match &self.last_coupled_state {
-            CoupledState::LU(lu) => {
-                let coupling = crate::CouplingData {
-                    lu,
-                    couplings: &self.last_coupling,
-                };
-                self.model.solve_for_scalar_input_coupled(
-                    &self.x,
-                    &self.last_u,
-                    target_c,
-                    output_idx,
-                    input_idx,
-                    &coupling,
-                )
+        // Shared per-step prefix: filled by the first solve call of the step
+        // (or after any invalidation); later calls with unchanged x/last_u
+        // reuse it. The prefix depends on x and last_u only, not on whether
+        // couplings are active.
+        if !self.shared_prefix_valid {
+            self.model
+                .fill_shared_prefix(&self.x, &self.last_u, &mut self.solve_scratch);
+            self.shared_prefix_valid = true;
+            #[cfg(test)]
+            {
+                self.shared_prefix_fills += 1;
             }
-            CoupledState::Identity => self.model.solve_for_scalar_input_identity_coupled(
+        }
+        #[cfg(test)]
+        {
+            self.solve_tail_calls += 1;
+        }
+
+        let total = if self.last_coupling.is_empty() {
+            self.model.solve_uncoupled_tail(
                 &self.x,
                 &self.last_u,
                 target_c,
                 output_idx,
                 input_idx,
+                &mut self.solve_scratch,
+            )
+        } else {
+            self.model.solve_identity_coupled_tail(
+                &self.x,
+                &self.last_u,
+                ScalarSolveTarget {
+                    y_target: target_c,
+                    output_index: output_idx,
+                    input_index: input_idx,
+                },
                 &self.last_coupling,
-            ),
-            CoupledState::Uncoupled => self.model.solve_for_output_input(
-                &self.x,
-                &self.last_u,
-                target_c,
-                output_idx,
-                input_idx,
-            ),
+                &mut self.solve_scratch,
+            )
         };
 
         let t_zone = self
@@ -415,11 +494,22 @@ impl ThermalSolver {
             .first()
             .map(|&idx| self.last_u[idx])
             .unwrap_or(f64::NAN);
-        let capacity_value = self.last_u[input_idx];
 
-        match total.map(|raw| raw - capacity_value) {
+        match total {
             Ok(capacity) => {
-                self.last_good_capacity_w.insert(zone, capacity);
+                // The solve returns the zone sensible column's absolute value;
+                // the HVAC equipment must deliver only its own share of that
+                // column. The non-HVAC share (appliances, plug loads, jacket
+                // losses) is the last integrate's recorded split: this step's
+                // value is estimated by the last step's (schedule-driven
+                // gains move slowly between steps).
+                let hvac_share = capacity
+                    - self
+                        .non_hvac_zone_input_w
+                        .get(&zone)
+                        .copied()
+                        .unwrap_or(0.0);
+                self.last_good_capacity_w.insert(zone, hvac_share);
                 let prethreshold = self.ideal_capacity_warned_zones.remove(&zone);
                 let degraded = self.ideal_capacity_degraded_warned_zones.remove(&zone);
                 if prethreshold || degraded {
@@ -427,10 +517,6 @@ impl ThermalSolver {
                         .ideal_capacity_failure_counts
                         .remove(&zone)
                         .unwrap_or(0);
-                    #[cfg(feature = "observe")]
-                    {
-                        self.consecutive_nonconvergence_count.remove(&zone);
-                    }
                     tracing::info!(
                         zone_id = zone.0,
                         consecutive_failures = count,
@@ -440,12 +526,8 @@ impl ThermalSolver {
                     );
                 } else {
                     self.ideal_capacity_failure_counts.remove(&zone);
-                    #[cfg(feature = "observe")]
-                    {
-                        self.consecutive_nonconvergence_count.remove(&zone);
-                    }
                 }
-                capacity
+                hvac_share
             }
             Err(e) => {
                 let count = self
@@ -454,42 +536,34 @@ impl ThermalSolver {
                     .and_modify(|c| *c += 1)
                     .or_insert(1);
 
-                #[cfg(feature = "observe")]
-                {
-                    self.consecutive_nonconvergence_count
-                        .entry(zone)
-                        .and_modify(|c| *c += 1)
-                        .or_insert(1);
-                }
-
                 let threshold = self.config.ideal_capacity_degraded_threshold;
-                if *count >= threshold {
-                    if let Some(&last_good) = self.last_good_capacity_w.get(&zone) {
-                        self.ideal_capacity_degraded_zones.insert(zone);
-                        if self.ideal_capacity_degraded_warned_zones.insert(zone) {
-                            tracing::error!(
-                                zone_id = zone.0,
-                                target_c,
-                                t_zone_c = t_zone,
-                                oat_c = t_out,
-                                consecutive_failures = count,
-                                last_good_capacity_w = last_good,
-                                error = %e,
-                                "solve_ideal_capacity_for_target: threshold {threshold} exceeded, \
+                if *count >= threshold
+                    && let Some(&last_good) = self.last_good_capacity_w.get(&zone)
+                {
+                    self.ideal_capacity_degraded_zones.insert(zone);
+                    if self.ideal_capacity_degraded_warned_zones.insert(zone) {
+                        tracing::error!(
+                            zone_id = zone.0,
+                            target_c,
+                            t_zone_c = t_zone,
+                            oat_c = t_out,
+                            consecutive_failures = count,
+                            last_good_capacity_w = last_good,
+                            error = %e,
+                            "solve_ideal_capacity_for_target: threshold {threshold} exceeded, \
                                  falling back to last-good capacity {last_good:.0} W"
-                            );
-                        } else {
-                            tracing::debug!(
-                                zone_id = zone.0,
-                                target_c,
-                                consecutive_failures = count,
-                                last_good_capacity_w = last_good,
-                                "solve_ideal_capacity_for_target: degraded fallback \
+                        );
+                    } else {
+                        tracing::debug!(
+                            zone_id = zone.0,
+                            target_c,
+                            consecutive_failures = count,
+                            last_good_capacity_w = last_good,
+                            "solve_ideal_capacity_for_target: degraded fallback \
                                  (suppressed), using last-good {last_good:.0} W"
-                            );
-                        }
-                        return last_good;
+                        );
                     }
+                    return last_good;
                 }
 
                 if self.ideal_capacity_warned_zones.insert(zone) {
@@ -498,7 +572,6 @@ impl ThermalSolver {
                         target_c,
                         t_zone_c = t_zone,
                         oat_c = t_out,
-                        capacity_w = capacity_value,
                         consecutive_failures = count,
                         threshold,
                         error = %e,
@@ -605,18 +678,6 @@ impl ThermalSolver {
             let above_hotter = t_surface > t_zone;
             let h_tarp = tarp_h_natural(inj.tilt_deg, delta_t_k, above_hotter);
 
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            {
-                if !(0.5..=10.0).contains(&h_tarp) {
-                    tracing::warn!(
-                        h_tarp,
-                        delta_t_k,
-                        tilt_deg = inj.tilt_deg,
-                        "interior h_conv outside physically plausible range [0.5, 10.0] W/(m²·K)"
-                    );
-                }
-            }
-
             let static_r_film = self.per_boundary_static_r_film[i];
             let h_static = if static_r_film > 1e-12 {
                 1.0 / static_r_film
@@ -661,36 +722,43 @@ impl ThermalSolver {
     }
 
     /// Phase 1: build input vector and coupling from current weather/solar/infiltration.
-    /// Stores results in `last_u`, `last_coupling`, `last_coupled_state` so that
+    /// Stores results in `last_u` and `last_coupling` so that
     /// `solve_ideal_capacity_for_target` sees current-step data.
     /// Does NOT cache u for the integration step -- `integrate` rebuilds it from
     /// post-dispatch ports.
-    pub(super) fn prepare_inputs_inner(&mut self, ports: &PortSlots, env: &EnvironmentState) {
-        // Clear per-step degradation tracking — a new step starts fresh.
+    ///
+    /// Zero allocation: the exterior surface temperatures are saved into and
+    /// restored from `ext_temps_save_buf` with `copy_from_slice` (no per-step
+    /// clone), and the latent map returned by `build_input_vector` goes back
+    /// into `latent_buf` so its table is reused, not reallocated, next step.
+    pub(super) fn prepare_inputs_inner(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+    ) -> Result<(), HaresError> {
+        // Clear per-step degradation tracking: a new step starts fresh.
         self.ideal_capacity_degraded_zones.clear();
 
-        let saved_ext_temps = self.exterior_surface_temps.clone();
-        let (u, _latent) = self.build_input_vector(ports, env);
-        self.exterior_surface_temps = saved_ext_temps;
+        // The step's inputs (last_u, last_coupling) are
+        // rebuilt below: any shared ideal-capacity prefix is stale.
+        self.invalidate_shared_prefix();
+
+        self.ext_temps_save_buf
+            .copy_from_slice(&self.exterior_surface_temps);
+        let (u, latent) = self.build_input_vector(ports, env)?;
+        self.exterior_surface_temps
+            .copy_from_slice(&self.ext_temps_save_buf);
 
         self.build_coupling();
 
-        if !self.coupling_buf.is_empty() {
-            if self.model.m_is_identity() {
-                self.last_coupled_state = CoupledState::Identity;
-            } else {
-                let coupled_lu = self
-                    .model
-                    .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
-                self.last_coupled_state = CoupledState::LU(coupled_lu);
-            }
-        } else {
-            self.last_coupled_state = CoupledState::Uncoupled;
-        }
-
-        self.last_u.clone_from(&u);
+        self.last_u.copy_from(&u);
         self.last_coupling.clone_from(&self.coupling_buf);
         self.u_buf = u;
+        // Return the latent map's table to `latent_buf`: the next
+        // `build_input_vector` call reuses it instead of allocating a fresh
+        // map every step.
+        self.latent_buf = latent;
+        Ok(())
     }
 
     /// Phase 2: rebuild u from post-dispatch ports, rebuild coupling, run ZOH integration.
@@ -699,49 +767,54 @@ impl ThermalSolver {
         ports: &PortSlots,
         env: &EnvironmentState,
         out: &mut DomainUpdate,
-    ) {
-        let (u, latent_by_zone) = self.build_input_vector(ports, env);
+    ) -> Result<(), HaresError> {
+        // x (swapped below) and last_u (rebuilt here) change on this path:
+        // any shared ideal-capacity prefix is stale.
+        self.invalidate_shared_prefix();
+
+        let (u, latent_by_zone) = self.build_input_vector(ports, env)?;
 
         self.build_coupling();
 
         // Per-step interior convection correction appends entries to coupling_buf
-        // (semi-implicit: diagonal added to M, off-diagonal as explicit forcing).
+        // (semi-implicit: the diagonal coupling is added to the identity,
+        // forming I + D; off-diagonal terms act as explicit forcing).
         self.apply_convection_forcing();
 
+        // Record each zone's non-HVAC share of the sensible input column for
+        // the next ideal-capacity solve: the full port accumulation (this
+        // step's equipment has stepped) minus the HVAC categories. The
+        // prepare phase's partial accumulation does not write this estimate.
+        self.non_hvac_zone_input_w.clear();
+        for acc in &ports.thermal {
+            let non_hvac_w = acc.sensible_gain_w
+                - acc.sensible_for_category(hares_types::ThermalCategory::HvacHeating)
+                - acc.sensible_for_category(hares_types::ThermalCategory::HvacCooling)
+                - acc.sensible_for_category(hares_types::ThermalCategory::HvacDehumidification);
+            self.non_hvac_zone_input_w.insert(acc.zone, non_hvac_w);
+        }
+
         if !self.coupling_buf.is_empty() {
-            if self.model.m_is_identity() {
-                self.model.step_with_identity_coupling_into_scratch(
-                    &self.x,
-                    &u,
-                    &mut self.rhs_buf,
-                    &self.coupling_buf,
-                    &mut self.d_agg_buf,
-                );
-
-                self.last_coupled_state = CoupledState::Identity;
-            } else {
-                let coupled_lu = self
-                    .model
-                    .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
-
-                self.model.step_with_coupled_lu_into(
-                    &self.x,
-                    &u,
-                    &mut self.rhs_buf,
-                    &coupled_lu,
-                    &self.coupling_buf,
-                );
-
-                self.last_coupled_state = CoupledState::LU(coupled_lu);
-            }
+            self.model.step_with_identity_coupling_into_scratch(
+                &self.x,
+                &u,
+                &mut self.rhs_buf,
+                &self.coupling_buf,
+                &mut self.d_agg_buf,
+            );
         } else {
             self.model.step_into(&self.x, &u, &mut self.rhs_buf);
-            self.last_coupled_state = CoupledState::Uncoupled;
         }
 
         std::mem::swap(&mut self.x, &mut self.rhs_buf);
 
-        let y_next = self.model.output(&self.x, &u);
+        // Zero-allocation output: y_next = C·x + D·u into the persistent
+        // `y_buf`, with `du_buf` holding the D·u half. The buffer is swapped
+        // out (`u_buf`-style) so it can be handed back after
+        // `format_domain_update` reads it.
+        let mut y_next = std::mem::replace(&mut self.y_buf, DVector::zeros(0));
+        self.model
+            .output_into(&self.x, &u, &mut y_next, &mut self.du_buf);
 
         // Net interior-face convection per boundary category. This feeds the
         // "Wall/Floor/Roof/Window/Internal Mass Heat Gain - Indoor (W)"
@@ -875,35 +948,33 @@ impl ThermalSolver {
             self.wiring
                 .zone_sensible_input_indices
                 .get(&self.config.indoor_zone_id),
-        ) {
-            if !self.zone_exchange_row_w.is_empty()
-                && zone_state_idx < self.x.len()
-                && zone_state_idx < self.rhs_buf.len()
-                && zone_input_idx < u.len()
-            {
-                // After the swap, self.x is T_next and self.rhs_buf is T_prev.
-                let stored_w =
-                    c_zone * (self.x[zone_state_idx] - self.rhs_buf[zone_state_idx]) / self.dt_s;
-                // Exact RC exchange into zone air (all matrix paths).
-                let mut exchange_w: f64 = self
-                    .zone_exchange_row_w
-                    .iter()
-                    .zip(self.rhs_buf.iter())
-                    .map(|(c, t)| c * t)
-                    .sum();
-                for &(col, coeff) in &self.zone_env_col_coeffs {
-                    if col < u.len() {
-                        exchange_w += coeff * u[col];
-                    }
+        ) && !self.zone_exchange_row_w.is_empty()
+            && zone_state_idx < self.x.len()
+            && zone_state_idx < self.rhs_buf.len()
+            && zone_input_idx < u.len()
+        {
+            // After the swap, self.x is T_next and self.rhs_buf is T_prev.
+            let stored_w =
+                c_zone * (self.x[zone_state_idx] - self.rhs_buf[zone_state_idx]) / self.dt_s;
+            // Exact RC exchange into zone air (all matrix paths).
+            let mut exchange_w: f64 = self
+                .zone_exchange_row_w
+                .iter()
+                .zip(self.rhs_buf.iter())
+                .map(|(c, t)| c * t)
+                .sum();
+            for &(col, coeff) in &self.zone_env_col_coeffs {
+                if col < u.len() {
+                    exchange_w += coeff * u[col];
                 }
-                let g = &self.component_gains;
-                let terms_w = u[zone_input_idx]
-                    + exchange_w
-                    + g.infiltration_w
-                    + g.ventilation_w
-                    + g.natural_ventilation_w;
-                self.component_gains.zone_air_balance_residual_w = stored_w - terms_w;
             }
+            let g = &self.component_gains;
+            let terms_w = u[zone_input_idx]
+                + exchange_w
+                + g.infiltration_w
+                + g.ventilation_w
+                + g.natural_ventilation_w;
+            self.component_gains.zone_air_balance_residual_w = stored_w - terms_w;
         }
 
         // ── Zone energy balance closure check ────────────────────────────────────
@@ -987,11 +1058,12 @@ impl ThermalSolver {
         if !self.wiring.node_capacitances.is_empty() {
             let mut stored_energy_w: f64 = 0.0;
             for (node_id, c_j_k) in &self.wiring.node_capacitances {
-                if let Some(&idx) = self.wiring.node_index.get(node_id) {
-                    if idx < self.x.len() && idx < self.rhs_buf.len() {
-                        // After the swap, self.x is T_next and self.rhs_buf is T_prev.
-                        stored_energy_w += c_j_k * (self.x[idx] - self.rhs_buf[idx]) / self.dt_s;
-                    }
+                if let Some(&idx) = self.wiring.node_index.get(node_id)
+                    && idx < self.x.len()
+                    && idx < self.rhs_buf.len()
+                {
+                    // After the swap, self.x is T_next and self.rhs_buf is T_prev.
+                    stored_energy_w += c_j_k * (self.x[idx] - self.rhs_buf[idx]) / self.dt_s;
                 }
             }
             self.full_system_stored_energy_w = stored_energy_w;
@@ -1006,7 +1078,7 @@ impl ThermalSolver {
         // balance closes to machine precision.
         //
         // Uncoupled:  x_next = A_d·x + B_d·u
-        // Coupled:    x_next = F·x + G·u + h   where h = (M+D)⁻¹·f
+        // Coupled:    x_next = F·x + G·u + h   where h = (I+D)⁻¹·f
         //
         // Partition stored (Σ C_i·ΔT_i/dt) into external (G·u), internal
         // ((F−I)·x), and affine coupling (h) contributions.  Without coupling
@@ -1014,10 +1086,8 @@ impl ThermalSolver {
         // solver.  With coupling, including h in the gain terms makes the
         // balance exact.
         //
-        // Reference: EnergyPlus ERM 26.1 — Basis for the Zone and
-        // Air System Integration — heat balance method must conserve energy.
-        // ASHRAE HoF 2021 Ch.18 — first-law requirement for zone heat balance.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // Computed in every build profile: the dwelling's
+        // check_step_invariants consumes the terms unconditionally.
         {
             self.thermal_balance_q_gains.clear();
             self.thermal_balance_q_loss = 0.0;
@@ -1033,10 +1103,10 @@ impl ThermalSolver {
 
                 let mut external_w = 0.0_f64;
                 for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
-                        if idx < n_states {
-                            external_w += c_j_k * b_d_u[idx] / dt_s;
-                        }
+                    if let Some(&idx) = self.wiring.node_index.get(node_id)
+                        && idx < n_states
+                    {
+                        external_w += c_j_k * b_d_u[idx] / dt_s;
                     }
                 }
                 self.thermal_balance_q_gains.push(external_w);
@@ -1046,15 +1116,15 @@ impl ThermalSolver {
                 self.model.step_into(&self.rhs_buf, u_zero, a_d_x);
                 let mut internal_w = 0.0_f64;
                 for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
-                        if idx < n_states {
-                            internal_w += c_j_k * (a_d_x[idx] - self.rhs_buf[idx]) / dt_s;
-                        }
+                    if let Some(&idx) = self.wiring.node_index.get(node_id)
+                        && idx < n_states
+                    {
+                        internal_w += c_j_k * (a_d_x[idx] - self.rhs_buf[idx]) / dt_s;
                     }
                 }
                 self.thermal_balance_q_loss = -internal_w;
-            } else if self.model.m_is_identity() {
-                // Identity-M coupled step: O(n) diagonal solve.
+            } else {
+                // Coupled step: O(n) diagonal solve.
                 // RHS = (N−D)·x + B_eff·u + f
                 // Solve: x_next[i] = RHS[i] / (1 + d_i)  for coupled rows,
                 //        x_next[i] = RHS[i]              for uncoupled rows.
@@ -1130,76 +1200,12 @@ impl ThermalSolver {
                 let mut internal_w = 0.0_f64;
                 let mut affine_w = 0.0_f64;
                 for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
-                        if idx < n_states {
-                            external_w += c_j_k * g_u[idx] / dt_s;
-                            internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
-                            affine_w += c_j_k * h[idx] / dt_s;
-                        }
-                    }
-                }
-                self.thermal_balance_q_gains.push(external_w);
-                self.thermal_balance_q_gains.push(affine_w);
-                self.thermal_balance_q_loss = -internal_w;
-            } else {
-                // Coupled step with non-identity M: rebuild the coupled LU
-                // factorization and decompose via three separate solves.
-                let coupled_lu = self
-                    .model
-                    .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
-
-                let balance_bufs = (
-                    &mut self.balance_buf_a,
-                    &mut self.balance_buf_b,
-                    &mut self.balance_buf_c,
-                );
-                let h = balance_bufs.0;
-                let g_u = balance_bufs.1;
-                let f_minus_i_x = balance_bufs.2;
-
-                // h = coupled_step(0, 0)
-                self.model.step_with_coupled_lu_into(
-                    x_zero,
-                    u_zero,
-                    h,
-                    &coupled_lu,
-                    &self.coupling_buf,
-                );
-
-                // g_u = coupled_step(0, u) − h
-                self.model.step_with_coupled_lu_into(
-                    x_zero,
-                    &u,
-                    g_u,
-                    &coupled_lu,
-                    &self.coupling_buf,
-                );
-                for i in 0..n_states {
-                    g_u[i] -= h[i];
-                }
-
-                // f_minus_i_x = coupled_step(x_prev, 0) − h − x_prev
-                self.model.step_with_coupled_lu_into(
-                    &self.rhs_buf,
-                    u_zero,
-                    f_minus_i_x,
-                    &coupled_lu,
-                    &self.coupling_buf,
-                );
-                for i in 0..n_states {
-                    f_minus_i_x[i] = f_minus_i_x[i] - h[i] - self.rhs_buf[i];
-                }
-
-                let mut external_w = 0.0_f64;
-                let mut internal_w = 0.0_f64;
-                let mut affine_w = 0.0_f64;
-                for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
-                        if idx < n_states {
-                            external_w += c_j_k * g_u[idx] / dt_s;
-                            internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
-                            affine_w += c_j_k * h[idx] / dt_s;
-                        }
+                    if let Some(&idx) = self.wiring.node_index.get(node_id)
+                        && idx < n_states
+                    {
+                        external_w += c_j_k * g_u[idx] / dt_s;
+                        internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
+                        affine_w += c_j_k * h[idx] / dt_s;
                     }
                 }
                 self.thermal_balance_q_gains.push(external_w);
@@ -1208,17 +1214,13 @@ impl ThermalSolver {
             }
         }
 
-        #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-        {
-            // Release builds: clear gains so check_invariants skips the check.
-            self.thermal_balance_q_gains.clear();
-        }
-
-        self.last_u.clone_from(&u);
+        self.last_u.copy_from(&u);
         self.last_coupling.clone_from(&self.coupling_buf);
         self.u_buf = u;
 
         self.format_domain_update(&y_next, latent_by_zone, out);
+        self.y_buf = y_next;
+        Ok(())
     }
 
     /// Convenience: calls both phases with the same ports/env.
@@ -1228,9 +1230,9 @@ impl ThermalSolver {
         ports: &PortSlots,
         env: &EnvironmentState,
         out: &mut DomainUpdate,
-    ) {
-        self.prepare_inputs_inner(ports, env);
-        self.integrate_inner(ports, env, out);
+    ) -> Result<(), HaresError> {
+        self.prepare_inputs_inner(ports, env)?;
+        self.integrate_inner(ports, env, out)
     }
 
     // ── Design-day autosizing (T-0192) ──────────────────────────────────────────
@@ -1245,7 +1247,7 @@ impl ThermalSolver {
     ///
     /// At each timestep the ideal HVAC input that drives zone temperature to
     /// `target_c` in one step is computed via
-    /// [`StateSpaceModel::solve_for_output_input`], applied to the input
+    /// [`crate::state_space::StateSpaceModel::solve_for_output_input`], applied to the input
     /// vector, and the solver is stepped. The peak HVAC input across the
     /// recording day timesteps is the sizing capacity.
     ///
@@ -1262,8 +1264,18 @@ impl ThermalSolver {
         zone: ZoneId,
         target_c: f64,
         design_outdoor_c: f64,
-    ) -> f64 {
-        self.run_design_day(zone, target_c, design_outdoor_c, 0.0, None, 0.0, 0.0)
+    ) -> Result<f64, ThermalSolverError> {
+        self.run_design_day(
+            zone,
+            target_c,
+            design_outdoor_c,
+            DesignDayProfile {
+                daily_range_c: 0.0,
+                solar_data: None,
+            },
+            0.0,
+            SiteLocation::default(),
+        )
     }
 
     /// Run a design-day simulation for cooling equipment sizing.
@@ -1272,7 +1284,7 @@ impl ThermalSolver {
     /// ASHRAE cooling design-day diurnal dry-bulb profile and clear-sky solar.
     ///
     /// Outdoor temperature follows the ASHRAE 2017 HoF Ch.14 Table 1 profile
-    /// with a diurnal range of [`COOLING_DESIGN_DAY_RANGE_C`]. Clear-sky
+    /// with a diurnal range of `COOLING_DESIGN_DAY_RANGE_C`. Clear-sky
     /// solar irradiance is computed at hourly intervals using the ASHRAE
     /// clear-sky model and Perez (1990) anisotropic tilted irradiance model
     /// for each window and opaque surface.
@@ -1285,56 +1297,71 @@ impl ThermalSolver {
     /// Returns the peak HVAC input (positive) across the recording day
     /// timesteps as the sizing capacity, or 0.0 if the zone is unknown or
     /// solving fails.
-    #[allow(clippy::too_many_arguments)]
     pub fn autosize_design_day_cooling(
         &self,
         zone: ZoneId,
         target_c: f64,
         design_outdoor_c: f64,
-        site_lat_deg: f64,
-        site_lon_deg: f64,
-        site_elevation_m: f64,
+        site: SiteLocation,
         internal_gains_w: f64,
-    ) -> f64 {
+    ) -> Result<f64, ThermalSolverError> {
+        let SiteLocation {
+            latitude_deg: site_lat_deg,
+            longitude_deg: site_lon_deg,
+            elevation_m: site_elevation_m,
+        } = site;
         let solar = precompute_hourly_solar_july21(site_lat_deg, site_lon_deg);
         self.run_design_day(
             zone,
             target_c,
             design_outdoor_c,
-            COOLING_DESIGN_DAY_RANGE_C,
-            Some(&solar),
+            DesignDayProfile {
+                daily_range_c: COOLING_DESIGN_DAY_RANGE_C,
+                solar_data: Some(&solar),
+            },
             internal_gains_w,
-            site_elevation_m,
+            SiteLocation {
+                latitude_deg: site_lat_deg,
+                longitude_deg: site_lon_deg,
+                elevation_m: site_elevation_m,
+            },
         )
     }
 
     /// Shared design-day simulation loop.
     ///
     /// Parameters:
-    /// - `daily_range_c`: diurnal range for the outdoor temperature profile
-    ///   (0 for constant — heating; ∼12 °C for cooling)
-    /// - `solar_data`: pre-computed hourly solar data for the design day,
-    ///   or `None` for zero solar (heating design day)
+    /// - `profile`: the design-day outdoor profile: the diurnal range for the
+    ///   dry-bulb profile (0 for constant, heating; ∼12 °C for cooling) and
+    ///   pre-computed hourly solar data, or `None` for zero solar (heating
+    ///   design day)
     /// - `internal_gains_w`: sensible internal gains [W]; added to the
-    ///   HVAC load for cooling design days (solar_data is `Some`).
+    ///   HVAC load for cooling design days (solar is `Some`).
     ///   Zero for heating design days (conservative per Manual J).
-    /// - `site_elevation_m`: site elevation in meters
-    #[allow(clippy::too_many_arguments)]
+    /// - `site`: site coordinates; only the elevation is read here.
     fn run_design_day(
         &self,
         zone: ZoneId,
         target_c: f64,
         design_outdoor_c: f64,
-        daily_range_c: f64,
-        solar_data: Option<&[Option<HourlySolar>]>,
+        profile: DesignDayProfile<'_>,
         internal_gains_w: f64,
-        site_elevation_m: f64,
-    ) -> f64 {
+        site: SiteLocation,
+    ) -> Result<f64, ThermalSolverError> {
+        let DesignDayProfile {
+            daily_range_c,
+            solar_data,
+        } = profile;
+        let SiteLocation {
+            latitude_deg: _,
+            longitude_deg: _,
+            elevation_m: site_elevation_m,
+        } = site;
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
-            return 0.0;
+            return Ok(0.0);
         };
         let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
-            return 0.0;
+            return Ok(0.0);
         };
 
         let dt_s = self.dt_s;
@@ -1347,6 +1374,9 @@ impl ThermalSolver {
         let mut x = self.x.clone();
         let mut u = DVector::zeros(n_inputs);
         let mut x_next = DVector::zeros(n_states);
+        // Local scratch for the per-timestep ideal-input solves: this
+        // autosizing loop runs on `&self` and is not the hot loop.
+        let mut solve_scratch = SolveScratch::new(n_states);
 
         let mut peak_load: f64 = 0.0;
         #[cfg(feature = "observe")]
@@ -1406,14 +1436,16 @@ impl ThermalSolver {
                             }
                             let irr = perez_tilted_irradiance(
                                 *surface_id,
-                                ghi,
-                                dni,
-                                dhi,
-                                zenith_deg,
-                                azimuth_deg,
-                                win_props.tilt_deg,
-                                win_props.azimuth_deg,
-                                doy,
+                                hares_physics::solar::SkyIrradiance { ghi, dni, dhi },
+                                hares_physics::solar::SunPosition {
+                                    zenith_deg,
+                                    azimuth_deg,
+                                    day_of_year: doy,
+                                },
+                                hares_physics::solar::SurfaceOrientation {
+                                    tilt_deg: win_props.tilt_deg,
+                                    azimuth_deg: win_props.azimuth_deg,
+                                },
                                 DEFAULT_GROUND_ALBEDO,
                                 site_elevation_m,
                             );
@@ -1430,14 +1462,16 @@ impl ThermalSolver {
                             }
                             let irr = perez_tilted_irradiance(
                                 info.surface_id,
-                                ghi,
-                                dni,
-                                dhi,
-                                zenith_deg,
-                                azimuth_deg,
-                                info.tilt_deg,
-                                info.azimuth_deg,
-                                doy,
+                                hares_physics::solar::SkyIrradiance { ghi, dni, dhi },
+                                hares_physics::solar::SunPosition {
+                                    zenith_deg,
+                                    azimuth_deg,
+                                    day_of_year: doy,
+                                },
+                                hares_physics::solar::SurfaceOrientation {
+                                    tilt_deg: info.tilt_deg,
+                                    azimuth_deg: info.azimuth_deg,
+                                },
                                 DEFAULT_GROUND_ALBEDO,
                                 site_elevation_m,
                             );
@@ -1449,10 +1483,14 @@ impl ThermalSolver {
             }
 
             // ── Solve for ideal HVAC input ─────────────────────────────
-            let hvac_input = match self
-                .model
-                .solve_for_output_input(&x, &u, target_c, output_idx, input_idx)
-            {
+            let hvac_input = match self.model.solve_for_output_input(
+                &x,
+                &u,
+                target_c,
+                output_idx,
+                input_idx,
+                &mut solve_scratch,
+            ) {
                 Ok(val) if val.is_finite() => val,
                 _other => {
                     tracing::debug!(
@@ -1503,25 +1541,24 @@ impl ThermalSolver {
             }
         }
 
-        // ── Invariant: peak load must be non-negative and finite ───────────
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            assert!(
-                peak_load.is_finite() && peak_load >= 0.0,
-                "design-day autosizing: peak_load ({}) must be non-negative and finite",
-                peak_load
-            );
-            assert!(
-                internal_gains_w >= 0.0,
-                "design-day autosizing: internal_gains_w ({}) must be non-negative",
-                internal_gains_w
-            );
-            assert!(
-                internal_gains_w < 5_000.0,
-                "design-day autosizing: internal_gains_w ({}) implausibly large \
-                 for a single-family residence (≥ 5 kW)",
-                internal_gains_w
-            );
+        // ── Invariant: peak load must be non-negative and finite; the gains
+        //    input must be in range. Unconditional in every build profile:
+        //    the peak is a solver product and the gains are caller input. ──
+        if !peak_load.is_finite() || peak_load < 0.0 {
+            return Err(ThermalSolverError::Configuration(format!(
+                "design-day autosizing: peak_load ({peak_load}) must be non-negative and finite"
+            )));
+        }
+        if internal_gains_w < 0.0 {
+            return Err(ThermalSolverError::Configuration(format!(
+                "design-day autosizing: internal_gains_w ({internal_gains_w}) must be non-negative"
+            )));
+        }
+        if internal_gains_w >= 5_000.0 {
+            return Err(ThermalSolverError::Configuration(format!(
+                "design-day autosizing: internal_gains_w ({internal_gains_w}) implausibly large \
+                 for a single-family residence (>= 5 kW)"
+            )));
         }
 
         // ── Telemetry ──────────────────────────────────────────────────────
@@ -1550,7 +1587,7 @@ impl ThermalSolver {
             );
         }
 
-        peak_load
+        Ok(peak_load)
     }
 }
 

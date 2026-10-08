@@ -281,19 +281,8 @@ impl Equipment for ProtocolBridge {
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ProtocolNative { protocol, payload } => {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                if !self
-                    .descriptor
-                    .control_capabilities
-                    .contains(ControlCapabilities::PROTOCOL_NATIVE)
-                {
-                    return Err(HaresError::InvariantViolation {
-                        check_name: "protocol_bridge_capability_check".to_string(),
-                        value: 0.0,
-                        tolerance: 0.0,
-                    });
-                }
-
+                // Capability gating ran in `apply_control` via
+                // `ensure_signal_supported` before this arm.
                 if payload.is_empty() {
                     return Err(HaresError::Control(
                         "ProtocolNative payload must be non-empty".to_string(),
@@ -445,6 +434,7 @@ mod tests {
 
     fn empty_env() -> EnvironmentState {
         EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![],
             weather: Default::default(),
             grid: hares_types::GridState {
@@ -452,7 +442,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: chrono::FixedOffset::east_opt(0)

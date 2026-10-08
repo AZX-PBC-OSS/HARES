@@ -7,7 +7,9 @@ use hares_envelope::ThermalSolver;
 use hares_equipment::Equipment;
 #[cfg(test)]
 use hares_types::FluidNodeId;
-use hares_types::{DomainSolver, DomainUpdate, EnvironmentState, FuelType, PortSlots, ZoneId};
+use hares_types::{
+    DomainSolver, DomainUpdate, EnvironmentState, FuelType, PortSlots, ZoneHeat, ZoneId,
+};
 
 use crate::observer::{
     CustomSolverCapture, CustomSolverObservation, EnvironmentCapture, EquipmentContribution,
@@ -81,21 +83,19 @@ pub(crate) fn capture_single_equipment(
         port_declarations: eq.ports().to_vec(),
         contribution,
         pre_step_ports,
-        zone_id_explicit: eq.zone_id_explicit(),
     }
 }
 
 /// Computes the per-equipment contribution by diffing port accumulators before and after a step.
 pub(crate) fn diff_ports(before: &PortSlots, after: &PortSlots) -> EquipmentContribution {
     // Match by ZoneId rather than positional index for robustness.
-    let thermal: Vec<(ZoneId, f64, f64)> = after
+    let thermal: Vec<(ZoneId, ZoneHeat)> = after
         .thermal
         .iter()
         .filter_map(|a| {
             let b = before.thermal.iter().find(|b| b.zone == a.zone)?;
-            let ds = a.sensible_gain_w - b.sensible_gain_w;
-            let dl = a.latent_gain_w - b.latent_gain_w;
-            (ds.abs() > f64::EPSILON || dl.abs() > f64::EPSILON).then_some((a.zone, ds, dl))
+            let added = a.heat().since(&b.heat());
+            added.exceeds(f64::EPSILON).then_some((a.zone, added))
         })
         .collect();
 
@@ -156,18 +156,14 @@ pub(crate) fn diff_ports(before: &PortSlots, after: &PortSlots) -> EquipmentCont
 
 /// Captures a snapshot of all port accumulators.
 pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
-    let thermal: Vec<(ZoneId, f64, f64)> = ports
-        .thermal
-        .iter()
-        .map(|t| (t.zone, t.sensible_gain_w, t.latent_gain_w))
-        .collect();
+    let thermal: Vec<(ZoneId, ZoneHeat)> =
+        ports.thermal.iter().map(|t| (t.zone, t.heat())).collect();
 
     let fuel_types = hares_types::ports::ALL_FUEL_TYPES;
 
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    debug_assert_eq!(
-        fuel_types.len(),
-        hares_types::ports::FUEL_TYPE_COUNT,
+    // Compile-time: ALL_FUEL_TYPES must carry every real fuel type.
+    const _: () = assert!(
+        hares_types::ports::ALL_FUEL_TYPES.len() == hares_types::ports::FUEL_TYPE_COUNT,
         "ALL_FUEL_TYPES length must match FUEL_TYPE_COUNT; ensure new FuelType variants are added to ALL_FUEL_TYPES"
     );
 
@@ -200,20 +196,31 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
     }
 }
 
+/// Electrical port balance observability scalars for [`capture_solvers`],
+/// grouped because they describe one ZIP/port balance state.
+pub(crate) struct PortBalance {
+    pub zip_load_scale: f64,
+    pub port_load_raw_kw: f64,
+    pub port_load_adjusted_kw: f64,
+    pub residual_kw: f64,
+}
+
 /// Captures all four domain solver outputs + envelope component gains,
 /// plus electrical balance observability for ZIP-adjusted invariant checking.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn capture_solvers(
     thermal_update: &DomainUpdate,
     humidity_update: &DomainUpdate,
     electrical_update: &DomainUpdate,
     fluid_update: &DomainUpdate,
     thermal_solver: &ThermalSolver,
-    zip_load_scale: f64,
-    port_load_raw_kw: f64,
-    port_load_adjusted_kw: f64,
-    residual_kw: f64,
+    balance: PortBalance,
 ) -> SolverCapture {
+    let PortBalance {
+        zip_load_scale,
+        port_load_raw_kw,
+        port_load_adjusted_kw,
+        residual_kw,
+    } = balance;
     SolverCapture {
         thermal_update: thermal_update.clone(),
         humidity_update: humidity_update.clone(),
@@ -253,7 +260,7 @@ pub(crate) fn capture_custom_solvers(solvers: &[Box<dyn DomainSolver>]) -> Custo
 mod tests {
     use super::*;
     use hares_types::{
-        ElectricalAccumulator, FluidAccumulator, FluidType, FuelAccumulator, FuelType,
+        ElectricalAccumulator, FluidAccumulator, FluidType, FuelAccumulator, FuelType, HaresError,
         HeatTransferDirection, LoopId, PortSlots, ThermalAccumulator, ZoneId,
     };
 
@@ -305,10 +312,41 @@ mod tests {
         // zone_b: -50 sensible, +5 latent
         assert_eq!(contrib.thermal.len(), 2);
         assert_eq!(contrib.thermal[0].0, zone_a);
-        approx_eq(contrib.thermal[0].1, 250.0);
+        approx_eq(contrib.thermal[0].1.convective_w, 250.0);
         assert_eq!(contrib.thermal[1].0, zone_b);
-        approx_eq(contrib.thermal[1].1, -50.0);
-        approx_eq(contrib.thermal[1].2, 5.0);
+        approx_eq(contrib.thermal[1].1.convective_w, -50.0);
+        approx_eq(contrib.thermal[1].1.latent_w, 5.0);
+    }
+
+    /// A contribution that is only radiant or only short-wave is captured,
+    /// and the captured heat of every zone equals its port total.
+    #[test]
+    fn observer_sees_radiant_and_shortwave_heat() {
+        let zone = ZoneId(1);
+        let before = PortSlots {
+            thermal: vec![ThermalAccumulator::new(zone)],
+            ..Default::default()
+        };
+        let after = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                radiant_gain_w: 300.0,
+                shortwave_gain_w: 100.0,
+                ..ThermalAccumulator::new(zone)
+            }],
+            ..Default::default()
+        };
+
+        let contrib = diff_ports(&before, &after);
+        assert_eq!(contrib.thermal.len(), 1, "a radiant-only gain is captured");
+        let added = contrib.thermal[0].1;
+        approx_eq(added.radiant_w, 300.0);
+        approx_eq(added.shortwave_w, 100.0);
+
+        let captured = capture_ports(&after);
+        for ((zone, heat), port) in captured.thermal.iter().zip(&after.thermal) {
+            assert_eq!(*zone, port.zone);
+            approx_eq(heat.total_w(), port.total_gain_w());
+        }
     }
 
     #[test]
@@ -330,22 +368,20 @@ mod tests {
     #[test]
     fn diff_ports_electrical() {
         let before = PortSlots {
-            electrical: {
-                let mut e = ElectricalAccumulator::default();
-                e.load_power_w = 1.0;
-                e.generation_power_w = -2.0;
-                e.reactive_power_kvar = 0.5;
-                e
+            electrical: ElectricalAccumulator {
+                load_power_w: 1.0,
+                generation_power_w: -2.0,
+                reactive_power_kvar: 0.5,
+                ..Default::default()
             },
             ..Default::default()
         };
         let after = PortSlots {
-            electrical: {
-                let mut e = ElectricalAccumulator::default();
-                e.load_power_w = 4.0;
-                e.generation_power_w = -2.0;
-                e.reactive_power_kvar = 1.0;
-                e
+            electrical: ElectricalAccumulator {
+                load_power_w: 4.0,
+                generation_power_w: -2.0,
+                reactive_power_kvar: 1.0,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -577,7 +613,8 @@ mod tests {
                 _env: &EnvironmentState,
                 _dt: Duration,
                 _out: &mut DomainUpdate,
-            ) {
+            ) -> std::result::Result<(), HaresError> {
+                Ok(())
             }
             fn observation_state(&self) -> Vec<f64> {
                 self.state.clone()

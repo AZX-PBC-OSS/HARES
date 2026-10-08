@@ -9,13 +9,17 @@
 //! - Zone temperature stability
 #![cfg(feature = "observe")]
 
+#[path = "../../../tests/support/denver_offset.rs"]
+mod denver_offset;
+
 #[cfg(test)]
 mod tests {
+    use super::denver_offset::denver_offset;
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
-    use chrono::{Duration, FixedOffset, TimeZone};
+    use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
 
@@ -27,7 +31,7 @@ mod tests {
         project_root().join("tests/fixtures/resstock")
     }
 
-    fn weather_for(bldg_dir: &PathBuf, version: &str) -> PathBuf {
+    fn weather_for(bldg_dir: &Path, version: &str) -> PathBuf {
         let hpxml = fs::read_to_string(bldg_dir.join("home.xml")).unwrap();
         let fips = parse_fips(&hpxml);
         let wdir = fixtures_dir().join(version).join("weather");
@@ -61,30 +65,21 @@ mod tests {
         "UNKNOWN".into()
     }
 
-    fn utn(base: &str) -> String {
-        format!(
-            "{base}_{}_{:?}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            std::thread::current().id()
-        )
-    }
-
     #[test]
     fn observer_diagnostic_2024_2_winter_24h() {
         let bldg_dir = fixtures_dir().join("2024.2").join("bldg0000002");
-        let output = std::env::temp_dir().join(utn("obs_diag"));
+        // The output and its `_diagnostics.csv` sibling go in a directory
+        // removed when the test ends.
+        let output_dir = tempfile::tempdir().expect("temp dir");
+        let output = output_dir.path().join("obs_diag");
 
         let config = DwellingConfig {
             hpxml_path: bldg_dir.join("home.xml"),
-            schedule_path: bldg_dir.join("in.schedules.csv"),
+            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
             weather_path: weather_for(&bldg_dir, "2024.2"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .unwrap()
+                start_time: denver_offset()
                     .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
                     .unwrap(),
                 duration: Duration::hours(24),
@@ -100,6 +95,7 @@ mod tests {
                 site_location: hares_io::SiteLocationOverride::default(),
                 retain_batches: false,
                 rotation: hares_io::RotationPolicy::None,
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,
             bldg_id: 300,
@@ -142,10 +138,10 @@ mod tests {
             for line in lines.filter(|l| !l.trim().is_empty()) {
                 let fields: Vec<&str> = line.split(',').collect();
                 for (i, vals) in zone_temps.iter_mut() {
-                    if let Some(f) = fields.get(*i) {
-                        if let Ok(v) = f.trim().parse::<f64>() {
-                            vals.push(v);
-                        }
+                    if let Some(f) = fields.get(*i)
+                        && let Ok(v) = f.trim().parse::<f64>()
+                    {
+                        vals.push(v);
                     }
                 }
             }

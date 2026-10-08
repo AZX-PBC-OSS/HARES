@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 observe = ["hares-core/observe"]
-check_invariants = ["hares-core/check_invariants"]
+profiling = ["hares-core/profiling"]
 
 [lib]
 name = "_hares"
@@ -15,8 +15,11 @@ crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]
 # Version-locked to the pyo3 in use; provides the resolved interpreter's
-# lib dir for the test/dev rpath (see build.rs).
-pyo3-build-config = "0.28"
+# lib dir for the test/dev rpath (see build.rs). Since pyo3-build-config 0.29
+# no longer inlines build configuration into itself, it resolves the config
+# through a direct pyo3 dependency in this build graph.
+pyo3-build-config = "0.29"
+pyo3 = "0.29"
 
 [dependencies]
 hares-core = { workspace = true }
@@ -38,3 +41,6 @@ rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -24,7 +24,6 @@ import hashlib
 import logging
 import math
 from dataclasses import dataclass, field as dataclass_field
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -32,12 +31,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 try:
-    import PySAM.Pvwattsv8 as _pvwatts  # type: ignore[import-untyped]
-
-    _HAS_PYSAM = True
+    import PySAM.Pvwattsv8 as _pvwatts
 except ImportError:
     _pvwatts = None
-    _HAS_PYSAM = False
+
+_HAS_PYSAM = _pvwatts is not None
 
 LOGGER = logging.getLogger(__name__)
 
@@ -257,7 +255,7 @@ class PvLut:
     """PV power look-up table backed by an Arrow table."""
 
     table: pa.Table
-    metadata: dict[str, Any] = dataclass_field(default_factory=dict)
+    metadata: dict[str, Any] = dataclass_field(default_factory=dict[str, Any])
     latitude_deg: float = 0.0
     longitude_deg: float = 0.0
     elevation_m: float = 0.0
@@ -349,16 +347,22 @@ def _validate_pvwatts_output(raw: PvWattsOutput) -> None:
             f"expected hourly series {list(series_keys)} and scalars "
             f"{list(scalar_keys)}. Got keys: {sorted(raw)}"
         )
-    lengths = {k: len(raw[k]) for k in series_keys}  # type: ignore[literal-required]
+    lengths = {
+        "ac": len(raw["ac"]),
+        "gh": len(raw["gh"]),
+        "dn": len(raw["dn"]),
+        "df": len(raw["df"]),
+        "tamb": len(raw["tamb"]),
+    }
     if len(set(lengths.values())) != 1:
         raise ValueError(
             f"PVWatts hourly series have inconsistent lengths: {lengths}"
         )
-    for k in scalar_keys:
-        v = raw[k]  # type: ignore[literal-required]
+    scalars: dict[str, object] = {"inv_eff": raw["inv_eff"], "losses": raw["losses"]}
+    for key, v in scalars.items():
         if not isinstance(v, (int, float)) or not math.isfinite(v):
             raise ValueError(
-                f"PVWatts output scalar '{k}' must be a finite number, got {v!r}"
+                f"PVWatts output scalar '{key}' must be a finite number, got {v!r}"
             )
 
 
@@ -436,7 +440,7 @@ def _build_lut_table(
 
     # Pre-compute axis normalization factors for normalized nearest-neighbor
     # distance (matches the Rust PvLut nearest-neighbor metric).
-    _axis_norm = {}
+    _axis_norm: dict[str, tuple[float, float]] = {}
     axes: dict[str, list[float]] = {
         "zenith": zenith_axis,
         "azimuth": azimuth_axis,

@@ -59,14 +59,14 @@ use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
-    ChargingStrategy, ControlSignal, EnvironmentState, EquipmentId, EvConnectionState, HaresError,
-    PlugInPolicy, ScheduleSource, Telemetry,
+    ChargingStrategy, ControlCapabilities, ControlSignal, EnvironmentState, EquipmentId,
+    EvConnectionState, HaresError, PlugInPolicy, ScheduleSource, Telemetry,
 };
 use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-use crate::Actor;
+use crate::{Actor, ActorTarget};
 
 use self::composer::ChargingComposer;
 use self::departure::DepartureDeadline;
@@ -270,6 +270,30 @@ fn build_preferences(
     }
 }
 
+/// Behavioral inputs for [`EvDriverActor::new`], grouped so the constructor
+/// reads as identity + behavior + RNG.
+pub struct EvDriverParams {
+    pub strategy: ChargingStrategy,
+    pub plug_in_policy: PlugInPolicy,
+    /// Distribution of miles driven per day.
+    pub daily_drive_miles: ScheduleSource,
+    /// Distribution of daily departure time.
+    pub departure_time: ScheduleSource,
+    /// Distribution of trip duration.
+    pub trip_duration: ScheduleSource,
+    /// Distribution of arrival time, when driven explicitly.
+    pub arrival_time: Option<ScheduleSource>,
+    /// Fraction of days with a driving event.
+    pub event_day_ratio: f64,
+    pub fuel_economy_kwh_per_mi: f64,
+    pub capacity_kwh: f64,
+    pub max_charge_kw: f64,
+    pub average_speed_mph: f64,
+    pub range_anxiety_miles: f64,
+    pub away_charge_fraction: f64,
+    pub away_charge_power_kw: f64,
+}
+
 /// Actor that models a human EV driver's daily behavior.
 ///
 /// Rolls a stochastic daily event (departure time, arrival time, miles driven)
@@ -277,7 +301,7 @@ fn build_preferences(
 /// to the target EV equipment.
 pub struct EvDriverActor {
     name: Arc<str>,
-    dispatch_target: DispatchTarget,
+    vehicle: ActorTarget,
     equipment_id: Option<EquipmentId>,
 
     // Behavioral config
@@ -322,39 +346,51 @@ pub struct EvDriverActor {
     drive_cancelled: u32,
     /// Actor telemetry: observable decision state for diagnostics.
     telemetry: Telemetry,
+    /// First estimate-contract error (a non-finite or negative
+    /// needed-charge-hours result): the actor reports unhealthy and the step
+    /// fails at the post-decide health check.
+    estimate_error: Option<String>,
 }
 
 use efficiency::temp_efficiency_multiplier;
 
 impl EvDriverActor {
+    /// Takes over the decision state (its RNG stream and position, the
+    /// strategy's gate latches and the sticky estimate failure included)
+    /// and telemetry of the driver this one is rebuilt to replace with new
+    /// prices.
+    pub(crate) fn take_over(&mut self, predecessor: &dyn Actor) -> Result<(), HaresError> {
+        self.load_state(&predecessor.save_state()?)?;
+        if let Some(telemetry) = predecessor.telemetry() {
+            self.telemetry.clone_from(telemetry);
+        }
+        Ok(())
+    }
+
     /// Creates a new EV driver actor.
     ///
     /// `rng` is required for deterministic behavior. All stochastic draws
     /// derive from this RNG. Callers using the dwelling RNG hierarchy should
     /// pass a pre-configured `ChaCha8Rng` from `derive_sub_rng` so the stream
-    /// nonce is preserved.
-    // Why: all parameters are independent behavioral inputs with no sensible defaults —
-    // the actor's stochastic behavior depends on each being explicitly set by the caller.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        name: &str,
-        target: &str,
-        strategy: ChargingStrategy,
-        plug_in_policy: PlugInPolicy,
-        daily_drive_miles: ScheduleSource,
-        departure_time: ScheduleSource,
-        trip_duration: ScheduleSource,
-        arrival_time: Option<ScheduleSource>,
-        event_day_ratio: f64,
-        fuel_economy_kwh_per_mi: f64,
-        capacity_kwh: f64,
-        max_charge_kw: f64,
-        average_speed_mph: f64,
-        range_anxiety_miles: f64,
-        away_charge_fraction: f64,
-        away_charge_power_kw: f64,
-        rng: ChaCha8Rng,
-    ) -> Self {
+    /// nonce is preserved. `params` carries the behavioral inputs, none of
+    /// which has a default.
+    pub fn new(name: &str, target: &str, params: EvDriverParams, rng: ChaCha8Rng) -> Self {
+        let EvDriverParams {
+            strategy,
+            plug_in_policy,
+            daily_drive_miles,
+            departure_time,
+            trip_duration,
+            arrival_time,
+            event_day_ratio,
+            fuel_economy_kwh_per_mi,
+            capacity_kwh,
+            max_charge_kw,
+            average_speed_mph,
+            range_anxiety_miles,
+            away_charge_fraction,
+            away_charge_power_kw,
+        } = params;
         let prefs = build_preferences(&strategy, max_charge_kw, CHARGING_EFFICIENCY, None, 24);
         let composer = ChargingComposer::new(prefs, target);
         let expected_daily_miles = daily_drive_miles.mean();
@@ -393,7 +429,15 @@ impl EvDriverActor {
 
         Self {
             name: Arc::from(name),
-            dispatch_target: DispatchTarget::ByName(target.into()),
+            vehicle: ActorTarget {
+                target: DispatchTarget::ByName(target.into()),
+                required: ControlCapabilities::POWER_SETPOINT
+                    | ControlCapabilities::SOC_TARGET
+                    | ControlCapabilities::EV_PLUG_IN
+                    | ControlCapabilities::EV_DRIVE
+                    | ControlCapabilities::EV_AWAY_CHARGE
+                    | ControlCapabilities::EV_SET_READY_BY,
+            },
             equipment_id: None,
             strategy,
             plug_in_policy,
@@ -420,6 +464,7 @@ impl EvDriverActor {
             needs_away_charge: false,
             drive_cancelled: 0,
             telemetry,
+            estimate_error: None,
         }
     }
 
@@ -482,6 +527,12 @@ impl EvDriverActor {
         before_out: usize,
         out: &[DispatchRequest],
     ) {
+        // Every decision ends here; see `check_declared_signals`.
+        debug_assert!(
+            crate::actor::check_declared_signals(self, &out[before_out..]).is_ok(),
+            "the EV driver sent a signal its declared control capabilities omit: {:?}",
+            &out[before_out..]
+        );
         // SOC channel: report the equipment's ground-truth SOC whenever the
         // equipment core is observable. `estimated_soc` is the driver's
         // behavioral belief — reconciled only at observation events
@@ -562,7 +613,7 @@ impl EvDriverActor {
 
     /// Returns the target equipment name.
     pub fn target_name(&self) -> &str {
-        match &self.dispatch_target {
+        match &self.vehicle.target {
             DispatchTarget::ByName(n) => n,
             DispatchTarget::ByEndUse(_) => unreachable!("EvDriverActor always targets by name"),
         }
@@ -942,7 +993,7 @@ impl EvDriverActor {
     /// `Schedule` tier — the EV driver is a schedule-level actor; this override is
     /// a pre-defined operational rule, not a user or grid action.
     fn range_anxiety_override_request(
-        &self,
+        &mut self,
         env: &EnvironmentState,
         current_minute: u16,
     ) -> Option<DispatchRequest> {
@@ -983,13 +1034,21 @@ impl EvDriverActor {
             let hours_left =
                 minutes_until(current_minute, u32::from(event.departure_minute)) / 60.0;
             let ctx = self.decision_context(env, current_minute);
-            let needed = needed_charge_hours_to_target(anxiety_soc, CHARGING_EFFICIENCY, &ctx);
+            // The estimate's typed error (NaN or negative result) marks the
+            // actor unhealthy; the step fails at the post-decide health
+            // check, and the override stays inactive for that step.
+            let Ok(needed) = needed_charge_hours_to_target(anxiety_soc, CHARGING_EFFICIENCY, &ctx)
+            else {
+                self.estimate_error =
+                    Some("needed_charge_hours estimate is not a valid number".to_string());
+                return None;
+            };
             if hours_left >= needed * 1.2 {
                 return None;
             }
         }
         Some(DispatchRequest {
-            target: self.dispatch_target.clone(),
+            target: self.vehicle.target.clone(),
             signal: ControlSignal::SOCTarget {
                 target_soc: anxiety_soc.clamp(0.0, 1.0),
                 min_soc: None,
@@ -1066,8 +1125,16 @@ impl EvDriverActor {
     fn record_anxiety_plan_hours(&mut self, env: &EnvironmentState, current_minute: u16) {
         let ctx = self.telemetry_estimate_context(env, current_minute);
         let (anxiety_soc, _) = self.anxiety_band(env);
-        let hours =
-            needed_charge_hours_to_target(anxiety_soc.clamp(0.0, 1.0), CHARGING_EFFICIENCY, &ctx);
+        // The estimate's typed error marks the actor unhealthy (the step
+        // fails at the post-decide health check); the telemetry publish is
+        // skipped for that step.
+        let Ok(hours) =
+            needed_charge_hours_to_target(anxiety_soc.clamp(0.0, 1.0), CHARGING_EFFICIENCY, &ctx)
+        else {
+            self.estimate_error =
+                Some("needed_charge_hours estimate is not a valid number".to_string());
+            return;
+        };
         // +∞ (charging physically impossible right now — observed derate 0,
         // preconditioning in progress) cannot cross the telemetry channel's
         // finiteness contract; publish the ambient-curve fallback for the
@@ -1077,14 +1144,19 @@ impl EvDriverActor {
         let hours = if hours.is_finite() {
             hours
         } else {
-            needed_charge_hours_to_target(
+            let Ok(fallback) = needed_charge_hours_to_target(
                 anxiety_soc.clamp(0.0, 1.0),
                 CHARGING_EFFICIENCY,
                 &DecisionContext {
                     observed_charge_derate: None,
                     ..ctx.clone()
                 },
-            )
+            ) else {
+                self.estimate_error =
+                    Some("needed_charge_hours estimate is not a valid number".to_string());
+                return;
+            };
+            fallback
         };
         self.composer.set_needed_charge_hours(hours);
     }
@@ -1142,6 +1214,10 @@ struct EvDriverSnapshot {
     needs_away_charge: bool,
     /// Cumulative cancelled-trip count; see `EvDriverActor::drive_cancelled`.
     drive_cancelled: u32,
+    /// The charging strategy's gate hysteresis latches, in stack order.
+    gate_latches: Vec<bool>,
+    /// The sticky health failure; see `EvDriverActor::estimate_error`.
+    estimate_error: Option<String>,
 }
 
 impl Actor for EvDriverActor {
@@ -1149,12 +1225,20 @@ impl Actor for EvDriverActor {
         &self.name
     }
 
+    fn healthy(&self) -> bool {
+        self.estimate_error.is_none()
+    }
+
+    fn health_detail(&self) -> Option<&str> {
+        self.estimate_error.as_deref()
+    }
+
     fn telemetry(&self) -> Option<&Telemetry> {
         Some(&self.telemetry)
     }
 
-    fn dispatch_target_name(&self) -> Option<&str> {
-        Some(self.target_name())
+    fn dispatch_targets(&self) -> &[ActorTarget] {
+        std::slice::from_ref(&self.vehicle)
     }
 
     fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
@@ -1198,7 +1282,12 @@ impl Actor for EvDriverActor {
         // replace this value with the override's own (anxiety-band)
         // estimate.
         let ctx = self.telemetry_estimate_context(env, current_minute);
-        self.composer.refresh_needed_charge_hours(&ctx);
+        // The estimate's typed error marks the actor unhealthy (the step
+        // fails at the post-decide health check); the channel keeps its
+        // previous value for that step.
+        if let Err(err) = self.composer.refresh_needed_charge_hours(&ctx) {
+            self.estimate_error = Some(err.to_string());
+        }
 
         // A non-driving day changes only *future* departures. An in-flight
         // trip — mid-route, or parked away awaiting its own arrival minute —
@@ -1262,7 +1351,7 @@ impl Actor for EvDriverActor {
 
                     // Departure: disconnect
                     out.push(DispatchRequest {
-                        target: self.dispatch_target.clone(),
+                        target: self.vehicle.target.clone(),
                         signal: ControlSignal::EvPlugIn {
                             state: EvConnectionState::Disconnected,
                         },
@@ -1315,7 +1404,7 @@ impl Actor for EvDriverActor {
                 let kwh_this_step = remaining_kwh / steps_left as f64;
 
                 out.push(DispatchRequest {
-                    target: self.dispatch_target.clone(),
+                    target: self.vehicle.target.clone(),
                     signal: ControlSignal::EvDrive { kwh: kwh_this_step },
                     priority: PriorityTier::Schedule,
                 });
@@ -1363,7 +1452,7 @@ impl Actor for EvDriverActor {
                 if self.needs_away_charge {
                     self.needs_away_charge = false;
                     out.push(DispatchRequest {
-                        target: self.dispatch_target.clone(),
+                        target: self.vehicle.target.clone(),
                         signal: ControlSignal::EvPlugIn {
                             state: EvConnectionState::AwayPluggedIn,
                         },
@@ -1375,7 +1464,7 @@ impl Actor for EvDriverActor {
                     // cleared again on the away disconnect, so it never
                     // leaks into the next home session.
                     out.push(DispatchRequest {
-                        target: self.dispatch_target.clone(),
+                        target: self.vehicle.target.clone(),
                         signal: ControlSignal::SOCTarget {
                             target_soc: self.usual_target_soc(),
                             min_soc: None,
@@ -1384,7 +1473,7 @@ impl Actor for EvDriverActor {
                         priority: PriorityTier::Schedule,
                     });
                     out.push(DispatchRequest {
-                        target: self.dispatch_target.clone(),
+                        target: self.vehicle.target.clone(),
                         signal: ControlSignal::EvAwayCharge {
                             power_kw: self.away_charge_power_kw,
                         },
@@ -1397,7 +1486,7 @@ impl Actor for EvDriverActor {
                     // Disconnected before HomePluggedIn per EV transition rules)
                     if self.away_charge_fraction > 0.0 {
                         out.push(DispatchRequest {
-                            target: self.dispatch_target.clone(),
+                            target: self.vehicle.target.clone(),
                             signal: ControlSignal::EvPlugIn {
                                 state: EvConnectionState::Disconnected,
                             },
@@ -1408,7 +1497,7 @@ impl Actor for EvDriverActor {
                     let doing_plugin = self.should_plug_in();
                     if doing_plugin {
                         out.push(DispatchRequest {
-                            target: self.dispatch_target.clone(),
+                            target: self.vehicle.target.clone(),
                             signal: ControlSignal::EvPlugIn {
                                 state: EvConnectionState::HomePluggedIn,
                             },
@@ -1502,6 +1591,8 @@ impl Actor for EvDriverActor {
             rng_word_pos: self.rng.get_word_pos(),
             needs_away_charge: self.needs_away_charge,
             drive_cancelled: self.drive_cancelled,
+            gate_latches: self.composer.gate_latches(),
+            estimate_error: self.estimate_error.clone(),
         };
         postcard::to_allocvec(&snap)
             .map_err(|e| HaresError::Io(format!("EvDriverActor save_state: {e}")))
@@ -1523,6 +1614,8 @@ impl Actor for EvDriverActor {
         self.rng = rng;
         self.needs_away_charge = snap.needs_away_charge;
         self.drive_cancelled = snap.drive_cancelled;
+        self.composer.restore_gate_latches(&snap.gate_latches)?;
+        self.estimate_error = snap.estimate_error;
         Ok(())
     }
 
@@ -1532,8 +1625,11 @@ impl Actor for EvDriverActor {
     /// Blobs written by v1 builds (payload-less phases) cannot decode into
     /// the new shape — the version gate rejects them here, at the checkpoint
     /// boundary, instead of postcard failing inside `load_state`.
+    ///
+    /// v3: the snapshot carries the charging strategy's gate hysteresis
+    /// latches and the sticky estimate failure.
     fn checkpoint_version(&self) -> u32 {
-        2
+        3
     }
 
     fn rng_pair(&self) -> Option<([u8; 32], u64)> {
@@ -1568,20 +1664,22 @@ mod tests {
         EvDriverActor::new(
             "TestDriver",
             "EV1",
-            strategy,
-            policy,
-            ScheduleSource::Constant(30.0),  // 30 miles/day
-            ScheduleSource::Constant(480.0), // depart 08:00
-            ScheduleSource::Constant(600.0), // 10h away → arrive 18:00
-            None,                            // no direct arrival sampling
-            1.0,                             // event every day
-            0.3,                             // 0.3 kWh/mi
-            60.0,                            // 60 kWh battery
-            7.2,                             // L2 charge rate
-            30.0,                            // 30 mph average
-            20.0,                            // 20 miles range anxiety buffer
-            0.0,                             // no away charging
-            6.6,                             // workplace L2 default
+            EvDriverParams {
+                strategy,
+                plug_in_policy: policy,
+                daily_drive_miles: ScheduleSource::Constant(30.0), // 30 miles/day
+                departure_time: ScheduleSource::Constant(480.0),   // depart 08:00
+                trip_duration: ScheduleSource::Constant(600.0),    // 10h away → arrive 18:00
+                arrival_time: None,                                // no direct arrival sampling
+                event_day_ratio: 1.0,                              // event every day
+                fuel_economy_kwh_per_mi: 0.3,                      // 0.3 kWh/mi
+                capacity_kwh: 60.0,                                // 60 kWh battery
+                max_charge_kw: 7.2,                                // L2 charge rate
+                average_speed_mph: 30.0,                           // 30 mph average
+                range_anxiety_miles: 20.0,                         // 20 miles range anxiety buffer
+                away_charge_fraction: 0.0,                         // no away charging
+                away_charge_power_kw: 6.6,                         // workplace L2 default
+            },
             seed_from_u64(seed),
         )
     }
@@ -2655,20 +2753,22 @@ mod tests {
         EvDriverActor::new(
             "TestDriver",
             "EV1",
-            strategy,
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            None,
-            event_day_ratio,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.0,
-            6.6,
+            EvDriverParams {
+                strategy,
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: None,
+                event_day_ratio,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 6.6,
+            },
             seed_from_u64(seed),
         )
     }
@@ -2959,7 +3059,7 @@ mod tests {
             time_res_minutes: 1.0,
             observed_charge_derate: Some(0.0),
         };
-        let estimate = needed_charge_hours_to_target(0.9, 0.9, &ctx);
+        let estimate = needed_charge_hours_to_target(0.9, 0.9, &ctx).unwrap();
         assert!(
             estimate.is_infinite() && estimate.is_sign_positive(),
             "a zero published derate means charging is impossible right now — the \
@@ -3285,6 +3385,70 @@ mod tests {
             actor_b.todays_event.map(|e| e.drive_kwh),
             "daily events should match with same seed"
         );
+    }
+
+    /// One decision at 01:00 (home, before the day's departure) with the
+    /// equipment reporting `soc`; returns the signals as text for
+    /// comparison.
+    fn gate_decision(actor: &mut EvDriverActor, soc: f64) -> Vec<String> {
+        let mut env = env_at_minute(60);
+        set_core_soc(actor, &mut env, "EV1", EquipmentId(1), soc);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        out.iter().map(|r| format!("{:?}", r.signal)).collect()
+    }
+
+    /// The SOC gate's hysteresis latch is decision state: a driver rebuilt
+    /// with `take_over`, or restored from the driver's checkpoint state,
+    /// holds the gate closed inside the band exactly as the driver it
+    /// replaces does, and reports the gate's real state.
+    #[test]
+    fn take_over_and_restore_carry_the_soc_gate_latch() {
+        let strategy = ChargingStrategy::QuickThenWait { partial_soc: 0.8 };
+        let mut continuous = make_actor(strategy.clone(), PlugInPolicy::Always, 42);
+        gate_decision(&mut continuous, 0.85);
+        assert!(!continuous.composer.soc_gate_charging_allowed());
+
+        let mut rebuilt = make_actor(strategy.clone(), PlugInPolicy::Always, 42);
+        rebuilt.take_over(&continuous).expect("take over");
+        let mut restored = make_actor(strategy, PlugInPolicy::Always, 42);
+        restored
+            .load_state(&continuous.save_state().expect("save"))
+            .expect("restore");
+        assert!(!rebuilt.composer.soc_gate_charging_allowed());
+        assert!(!restored.composer.soc_gate_charging_allowed());
+
+        let held = gate_decision(&mut continuous, 0.77);
+        assert!(
+            held.iter().any(|s| s.contains("PowerSetpoint")),
+            "inside the band the closed gate holds: {held:?}"
+        );
+        assert_eq!(gate_decision(&mut rebuilt, 0.77), held);
+        assert_eq!(gate_decision(&mut restored, 0.77), held);
+        assert_eq!(
+            rebuilt.telemetry.get("soc_gate_charging_allowed"),
+            Some(0.0)
+        );
+    }
+
+    /// A driver whose estimate failed stays unhealthy when it is rebuilt:
+    /// the health latch is decision state too.
+    #[test]
+    fn take_over_keeps_the_estimate_failure_latch() {
+        let strategy = ChargingStrategy::Immediate { target_soc: 1.0 };
+        let mut failed = make_actor(strategy.clone(), PlugInPolicy::Always, 42);
+        failed.estimate_error = Some("needed-hours estimate failed".to_string());
+        assert!(!failed.healthy());
+        assert_eq!(
+            failed.health_detail(),
+            Some("needed-hours estimate failed"),
+            "the step error carries the estimate's cause"
+        );
+
+        let mut rebuilt = make_actor(strategy, PlugInPolicy::Always, 42);
+        rebuilt.take_over(&failed).expect("take over");
+
+        assert!(!rebuilt.healthy());
     }
 
     #[test]
@@ -4239,20 +4403,22 @@ mod tests {
         EvDriverActor::new(
             "AwayDriver",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            None,
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.5, // 50% away charge
-            6.6,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: None,
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.5, // 50% away charge
+                away_charge_power_kw: 6.6,
+            },
             seed_from_u64(seed),
         )
     }
@@ -5856,20 +6022,22 @@ mod tests {
         let mut actor = EvDriverActor::new(
             "TestDriver",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            Some(ScheduleSource::Constant(900.0)),
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.0,
-            0.0,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: Some(ScheduleSource::Constant(900.0)),
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             seed_from_u64(42),
         );
 
@@ -5933,20 +6101,22 @@ mod tests {
         let mut actor = EvDriverActor::new(
             "TestDriver",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(420.0),
-            None,
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.0,
-            0.0,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(420.0),
+                arrival_time: None,
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             seed_from_u64(42),
         );
 
@@ -6008,40 +6178,44 @@ mod tests {
         let mut actor_direct = EvDriverActor::new(
             "DriverDirect",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(420.0),
-            Some(ScheduleSource::Constant(1020.0)),
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.0,
-            0.0,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(420.0),
+                arrival_time: Some(ScheduleSource::Constant(1020.0)),
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             seed_from_u64(42),
         );
 
         let mut actor_derived = EvDriverActor::new(
             "DriverDerived",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(30.0),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(420.0),
-            None,
-            1.0,
-            0.3,
-            60.0,
-            7.2,
-            30.0,
-            20.0,
-            0.0,
-            0.0,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(30.0),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(420.0),
+                arrival_time: None,
+                event_day_ratio: 1.0,
+                fuel_economy_kwh_per_mi: 0.3,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles: 20.0,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             seed_from_u64(43),
         );
 
@@ -6563,20 +6737,22 @@ mod tests {
         let mut actor = EvDriverActor::new(
             "AnxietyDriver",
             "EV1",
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            PlugInPolicy::Always,
-            ScheduleSource::Constant(expected_daily_miles),
-            ScheduleSource::Constant(480.0),
-            ScheduleSource::Constant(600.0),
-            None,
-            if todays_drive_kwh.is_some() { 1.0 } else { 0.0 },
-            fuel_economy_kwh_per_mi,
-            capacity_kwh,
-            7.2,
-            30.0,
-            range_anxiety_miles,
-            0.0,
-            0.0,
+            EvDriverParams {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: PlugInPolicy::Always,
+                daily_drive_miles: ScheduleSource::Constant(expected_daily_miles),
+                departure_time: ScheduleSource::Constant(480.0),
+                trip_duration: ScheduleSource::Constant(600.0),
+                arrival_time: None,
+                event_day_ratio: if todays_drive_kwh.is_some() { 1.0 } else { 0.0 },
+                fuel_economy_kwh_per_mi,
+                capacity_kwh,
+                max_charge_kw: 7.2,
+                average_speed_mph: 30.0,
+                range_anxiety_miles,
+                away_charge_fraction: 0.0,
+                away_charge_power_kw: 0.0,
+            },
             seed_from_u64(42),
         );
         actor.estimated_soc = estimated_soc;
@@ -6749,19 +6925,20 @@ mod tests {
 
                 // At the arrival minute, reconciliation has just fired.
                 // Verify estimated_soc matches this day's actual equipment SOC.
-                if matches!(actor.phase, DriverPhase::HomePluggedIn) && minute == 1080 {
-                    if let Some(actual) = actor.actual_soc(&env) {
-                        arrival_reconciliation_count += 1;
-                        observed_actuals.push(actual);
-                        let drift = (actor.estimated_soc - actual).abs();
-                        // Ticket tolerance is <1% drift; reconciliation is exact,
-                        // so 1e-6 is the meaningful bound.
-                        assert!(
-                            drift < 1e-6,
-                            "day {day}: after arrival reconciliation, estimated_soc ({}) should equal this day's actual SOC ({actual})",
-                            actor.estimated_soc
-                        );
-                    }
+                if matches!(actor.phase, DriverPhase::HomePluggedIn)
+                    && minute == 1080
+                    && let Some(actual) = actor.actual_soc(&env)
+                {
+                    arrival_reconciliation_count += 1;
+                    observed_actuals.push(actual);
+                    let drift = (actor.estimated_soc - actual).abs();
+                    // Ticket tolerance is <1% drift; reconciliation is exact,
+                    // so 1e-6 is the meaningful bound.
+                    assert!(
+                        drift < 1e-6,
+                        "day {day}: after arrival reconciliation, estimated_soc ({}) should equal this day's actual SOC ({actual})",
+                        actor.estimated_soc
+                    );
                 }
             }
         }
@@ -7114,12 +7291,20 @@ mod tests {
         let mut actors = crate::dwelling::build_actors_from_seeds(
             std::slice::from_ref(&equipment),
             &[],
-            false, // no tariff — none of the strategies under test needs one
-            None,
-            96,
+            // No tariff: none of the strategies under test needs one.
+            crate::dwelling::ActorPricing {
+                has_tariff: false,
+                price_schedule: None,
+                steps_per_day: 96,
+            },
             &id_by_name,
-            &rng,
-        );
+            &mut crate::dwelling::ActorSeedState {
+                rng: &rng,
+                next_stream: 0,
+                rebuilt: &[],
+            },
+        )
+        .expect("build the driver");
         assert_eq!(
             actors.len(),
             1,

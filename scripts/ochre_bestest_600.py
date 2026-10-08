@@ -44,6 +44,7 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
+from typing import Any, cast
 
 import pandas as pd
 
@@ -52,10 +53,19 @@ _ROOT = Path(__file__).resolve().parents[1]
 _VENDOR_OCHRE = _ROOT / "vendors" / "OCHRE"
 if str(_VENDOR_OCHRE) not in sys.path:
     sys.path.insert(0, str(_VENDOR_OCHRE))
+_TESTS_PYTHON = _ROOT / "tests" / "python"
+if str(_TESTS_PYTHON) not in sys.path:
+    sys.path.insert(0, str(_TESTS_PYTHON))
 
 from ochre.Models.Envelope import Envelope  # noqa: E402
 from ochre.utils import envelope as env_utils  # noqa: E402
 from ochre.utils.schedule import import_weather, resample_and_reindex  # noqa: E402
+import ochre.utils.units  # noqa: E402
+from ochre_units import register_removed_units  # noqa: E402
+
+# OCHRE's infiltration model converts with a unit name pint 0.25 removed from
+# the default registry; re-register it before any dwelling is built.
+register_removed_units(ochre.utils.units.ureg)
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +299,7 @@ def _build_schedule(
     re-localizes using the saved timezone for solar position calculations.
     """
     # Save weather timezone before resampling strips it
-    weather_tz = weather_df.index.tzinfo
+    weather_tz = cast(pd.DatetimeIndex, weather_df.index).tzinfo
 
     # Resample weather to simulation timestep.
     # resample_and_reindex strips the timezone when start_time is naive,
@@ -437,7 +447,11 @@ def _run_simulation(
             heating_w = 0.0
             cooling_w = 0.0
 
-        zone.hvac_sens_gain = hvac_gain
+        # The vendored Zone's own HVAC equipment writes float sensible gains
+        # into this attribute at runtime (HVAC.py:565), so bridge past the
+        # int-typed initializer with a dynamic write.
+        zone_any = cast(Any, zone)
+        zone_any.hvac_sens_gain = hvac_gain
         envelope.update_model()
         envelope.update_results()
 
@@ -542,7 +556,7 @@ def run_bestest_600(output_dir: str | Path | None = None) -> dict:
 
         # Adopt the weather timezone for the simulation start time,
         # matching OCHRE's Dwelling.__init__ pattern (Dwelling.py:87).
-        weather_tz = weather_df.index.tzinfo
+        weather_tz = cast(pd.DatetimeIndex, weather_df.index).tzinfo
         sim_start = start_time.replace(tzinfo=weather_tz)
 
         # Build boundaries dict

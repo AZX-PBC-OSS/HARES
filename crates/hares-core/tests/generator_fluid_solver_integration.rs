@@ -20,6 +20,7 @@ use hares_types::{
 
 fn env() -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
             temperature_c: 21.0,
@@ -55,7 +56,8 @@ fn env() -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
@@ -77,7 +79,7 @@ fn generator_fluid_solver_invariant_passes() {
     let gen_cfg = GeneratorConfig {
         equipment_id: None,
         zone_id: Some(1),
-        fuel_type: None,
+        fuel_type: Some(hares_types::FuelType::Gas),
         rated_power_kw: 10.0,
         eta_electric: Some(0.30),
         eta_thermal: Some(0.35),
@@ -85,7 +87,27 @@ fn generator_fluid_solver_invariant_passes() {
         eta_lube_oil: None,
         eta_exhaust: None,
         efficiency_type: None,
-        efficiency_curve_points: None,
+        // The hardcoded fallback curve is gone: a curve config without
+        // points is a typed error, so the test carries the shipped defaults
+        // curve's points.
+        efficiency_curve_points: Some(vec![
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.0,
+                efficiency_ratio: 0.0,
+            },
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.1,
+                efficiency_ratio: 0.47,
+            },
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.333,
+                efficiency_ratio: 0.78,
+            },
+            hares_equipment::GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 1.0,
+                efficiency_ratio: 1.0,
+            },
+        ]),
         delta_kw_per_s: Some(100.0),
         capacity_min_kw: None,
         grid_import_limit_kw: None,
@@ -158,7 +180,9 @@ fn generator_fluid_solver_invariant_passes() {
     let mut solver =
         FluidSolver::new(FluidSolverConfig::default(), &[(loop_id, FluidType::Water)]).unwrap();
 
-    let update = solver.resolve_new(&slots, &env(), Duration::from_secs(60));
+    let update = solver
+        .resolve_new(&slots, &env(), Duration::from_secs(60))
+        .unwrap();
     let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
     assert_eq!(states.len(), 1);
 

@@ -34,6 +34,7 @@ const STEPS_24H: usize = 1440; // 24h / 60s
 
 fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64, volume_m3: f64) -> EnvironmentState {
     EnvironmentState {
+        ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZONE,
             temperature_c: zone_temp_c,
@@ -69,7 +70,8 @@ fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64, volume_m3: f64) -> Enviro
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()
@@ -151,7 +153,7 @@ fn test_1r1c_exponential_decay() {
     let mut env = one_zone_env(t_initial, t_outdoor, 200.0);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver(&env, t_initial, config, UA, C);
@@ -160,7 +162,9 @@ fn test_1r1c_exponential_decay() {
     let mut t_zone = t_initial;
 
     for step in 1..=STEPS_24H {
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(DT_S as u64))
+            .unwrap();
         t_zone = zone_temp(&update);
         env.zones[0].temperature_c = t_zone;
 
@@ -199,7 +203,7 @@ fn test_1r1c_solar_step_response() {
     let mut env = one_zone_env(t_initial, t_outdoor, 200.0);
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver(&env, t_initial, config, UA, C);
@@ -213,7 +217,9 @@ fn test_1r1c_solar_step_response() {
         ports.thermal[0] = ThermalAccumulator::new(ZONE);
         ports.thermal[0].sensible_gain_w += q_solar;
 
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(DT_S as u64))
+            .unwrap();
         t_zone = zone_temp(&update);
         env.zones[0].temperature_c = t_zone;
     }
@@ -245,7 +251,7 @@ fn test_1r1c_with_moderate_infiltration() {
     let config_inf = ThermalSolverConfig {
         indoor_zone_id: ZONE,
         infiltration: vec![(ZONE, InfiltrationMethod::Ach { ach })],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
     let mut solver_inf = build_1r1c_solver(&env_inf, t_initial, config_inf, UA, C);
 
@@ -253,7 +259,7 @@ fn test_1r1c_with_moderate_infiltration() {
     let mut env_no = one_zone_env(t_initial, t_outdoor, volume_m3);
     let config_no = ThermalSolverConfig {
         indoor_zone_id: ZONE,
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
     let mut solver_no = build_1r1c_solver(&env_no, t_initial, config_no, UA, C);
 
@@ -264,11 +270,15 @@ fn test_1r1c_with_moderate_infiltration() {
     let mut t_without_inf = t_initial;
 
     for _ in 0..check_step {
-        let u1 = solver_inf.resolve_new(&ports, &env_inf, Duration::from_secs(DT_S as u64));
+        let u1 = solver_inf
+            .resolve_new(&ports, &env_inf, Duration::from_secs(DT_S as u64))
+            .unwrap();
         t_with_inf = zone_temp(&u1);
         env_inf.zones[0].temperature_c = t_with_inf;
 
-        let u2 = solver_no.resolve_new(&ports, &env_no, Duration::from_secs(DT_S as u64));
+        let u2 = solver_no
+            .resolve_new(&ports, &env_no, Duration::from_secs(DT_S as u64))
+            .unwrap();
         t_without_inf = zone_temp(&u2);
         env_no.zones[0].temperature_c = t_without_inf;
     }
@@ -307,14 +317,16 @@ fn test_implicit_stability_extreme_ach() {
     let config = ThermalSolverConfig {
         indoor_zone_id: ZONE,
         infiltration: vec![(ZONE, InfiltrationMethod::Ach { ach })],
-        ..ThermalSolverConfig::default()
+        ..ThermalSolverConfig::new(ZoneId(1))
     };
 
     let mut solver = build_1r1c_solver(&env, t_initial, config, UA, c_low);
     let ports = one_zone_ports();
 
     // Step 1: assert zone stays in [-10, 20]°C
-    let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+    let update = solver
+        .resolve_new(&ports, &env, Duration::from_secs(DT_S as u64))
+        .unwrap();
     let t_step1 = zone_temp(&update);
     env.zones[0].temperature_c = t_step1;
     assert!(t_step1.is_finite(), "step 1: temperature is NaN/Inf");
@@ -326,7 +338,9 @@ fn test_implicit_stability_extreme_ach() {
     // Steps 2-20: assert monotonic convergence toward outdoor (no oscillation)
     let mut temps = vec![t_step1];
     for _ in 1..20 {
-        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver
+            .resolve_new(&ports, &env, Duration::from_secs(DT_S as u64))
+            .unwrap();
         let t = zone_temp(&update);
         env.zones[0].temperature_c = t;
         temps.push(t);

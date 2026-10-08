@@ -9,9 +9,9 @@
 
 use chrono::{FixedOffset, TimeZone};
 use hares_types::{
-    ControlCapabilities, ControlSignal, EnvironmentState, GridState, PortContribution,
-    PortDeclaration, PortSlots, ThermalAccumulator, ThermalCategory, WeatherState, ZoneId,
-    ZoneState,
+    AmbientOtherSpaceTemps, ControlCapabilities, ControlSignal, EnvironmentState, GridState,
+    PortContribution, PortDeclaration, PortSlots, ThermalAccumulator, ThermalCategory,
+    WeatherState, ZoneId, ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -34,6 +34,7 @@ fn base_env() -> EnvironmentState {
             humidity_ratio: 0.008,
             volume_m3: 200.0,
         }],
+        ambient_other_space_c: AmbientOtherSpaceTemps::default(),
         weather: WeatherState {
             outdoor_temp_c: 10.0,
             outdoor_humidity_ratio: 0.005,
@@ -63,7 +64,8 @@ fn base_env() -> EnvironmentState {
             frequency_hz: 60.0,
             island_bus_voltage_pu: None,
         },
-        custom_domains: vec![],
+        schedule_row: None,
+        domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
@@ -258,9 +260,9 @@ fn zero_resets_all_slots_while_preserving_structure() {
 }
 
 /// EnvironmentState constructed with all required fields must expose them
-/// through the public type and custom_domains must be empty by default.
+/// through the public type and the schedule slot must be unwritten by default.
 #[test]
-fn environment_state_fields_accessible_and_custom_domains_empty() {
+fn environment_state_fields_accessible_and_schedule_slot_unwritten() {
     let env = base_env();
 
     assert_eq!(env.zones.len(), 1, "expected one zone");
@@ -278,8 +280,8 @@ fn environment_state_fields_accessible_and_custom_domains_empty() {
         "grid voltage must be 1.0 pu"
     );
     assert!(
-        env.custom_domains.is_empty(),
-        "custom_domains must be empty by default"
+        env.domains.schedule.get().is_none(),
+        "the schedule slot must be unwritten by default"
     );
 }
 

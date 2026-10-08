@@ -1,15 +1,14 @@
-//! Generate a ScheduleTimeSeries from HPXML building data when no schedule CSV is
+//! Generate a ScheduleTimeSeries for an HPXML home when no schedule CSV is
 //! available. Uses default schedule fraction profiles to produce time-varying
-//! occupancy, power, water, and setpoint columns.
+//! occupancy, power and water columns.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use chrono::{DateTime, Datelike, Duration, FixedOffset, Timelike};
+use hares_types::HaresError;
 
-use crate::hpxml::building::Building;
 use crate::schedule::{ColumnAggregation, ScheduleTimeSeries};
-use crate::schedule_resolve::load_default_profiles;
+use crate::schedule_resolve::{DefaultProfiles, DefaultScheduleProfile};
 
 /// Mapping from generated schedule column names to the OCHRE profile names used
 /// in the Default Schedule Parameters.csv.
@@ -27,60 +26,45 @@ const COLUMN_TO_PROFILE: &[(&str, &str)] = &[
     ("hot_water_fixtures", "Water Heating"),
 ];
 
-/// Generate a complete schedule from HPXML building data and default profiles.
+/// Generate a complete schedule from the default profiles.
 ///
 /// Columns are generated in the same order and with the same names as a standard
-/// ResStock `in.schedules.csv`. Power and water columns use the weekday/weekend
-/// fraction profiles from the defaults CSV; setpoints use HPXML values falling
-/// back to HERS reference-home defaults; occupancy is constant 1.0.
-pub fn generate_schedule_from_hpxml(
-    building: &Building,
+/// ResStock `in.schedules.csv`. Power, water, and occupancy columns use the
+/// weekday/weekend fraction profiles from the defaults CSV (occupancy follows
+/// the `Occupancy` profile). A missing profile is an error naming the profile
+/// and the file, so a column is never a silent constant. No setpoint column
+/// is generated: a schedule column would override the HVAC's own setpoints,
+/// which come from the HPXML's hourly weekday and weekend profiles, or
+/// OS-HPXML's default when the HPXML has none
+/// (`schedule_resolve::inject_setpoint_schedules`).
+pub fn generate_default_schedule(
     start: DateTime<FixedOffset>,
     duration: Duration,
     interval: Duration,
-    defaults_dir: Option<&Path>,
-) -> ScheduleTimeSeries {
-    let profiles = defaults_dir.map(load_default_profiles).unwrap_or_default();
+    profiles: &DefaultProfiles,
+) -> Result<ScheduleTimeSeries, HaresError> {
     let n_steps = (duration.num_seconds() / interval.num_seconds()).max(1) as usize;
     let timestamps: Vec<DateTime<FixedOffset>> = (0..n_steps)
         .map(|i| start + Duration::seconds(i as i64 * interval.num_seconds()))
         .collect();
 
-    let mut column_names: Vec<String> = Vec::new();
-    let mut columns: Vec<Vec<f64>> = Vec::new();
+    // Columns, names, and aggregations are pushed together, one per column,
+    // so their lengths cannot differ.
+    let mut generated: Vec<(&str, Vec<f64>, ColumnAggregation)> = Vec::new();
 
-    // Occupancy — constant 1.0
-    column_names.push("occupants".to_string());
-    columns.push(vec![1.0; n_steps]);
-
-    // Power and water schedule columns — use default fraction profiles when available
     for (col_name, profile_name) in COLUMN_TO_PROFILE {
-        let values = if let Some(profile) = profiles.get(*profile_name) {
-            generate_profile_column(n_steps, &timestamps, profile)
-        } else {
-            vec![1.0; n_steps]
-        };
-        column_names.push(col_name.to_string());
-        columns.push(values);
+        let profile = profiles.get(profile_name)?;
+        let values = generate_profile_column(n_steps, &timestamps, profile);
+        generated.push((col_name, values, ColumnAggregation::Mean));
     }
 
-    // Heating setpoint from HPXML building data
-    let heating_sp = building
-        .heating_weekday_setpoints_c
-        .as_ref()
-        .map(|v| v[0])
-        .unwrap_or(20.0);
-    column_names.push("heating_setpoint".to_string());
-    columns.push(vec![heating_sp; n_steps]);
-
-    // Cooling setpoint from HPXML building data
-    let cooling_sp = building
-        .cooling_weekday_setpoints_c
-        .as_ref()
-        .map(|v| v[0])
-        .unwrap_or(24.0);
-    column_names.push("cooling_setpoint".to_string());
-    columns.push(vec![cooling_sp; n_steps]);
+    let column_names: Vec<String> = generated
+        .iter()
+        .map(|(name, _, _)| (*name).to_string())
+        .collect();
+    let column_aggregations: Vec<ColumnAggregation> =
+        generated.iter().map(|(_, _, agg)| *agg).collect();
+    let columns: Vec<Vec<f64>> = generated.into_iter().map(|(_, values, _)| values).collect();
 
     let column_index: HashMap<String, usize> = column_names
         .iter()
@@ -88,21 +72,20 @@ pub fn generate_schedule_from_hpxml(
         .map(|(i, name)| (name.clone(), i))
         .collect();
 
-    let n_cols = column_index.len();
-    ScheduleTimeSeries {
+    Ok(ScheduleTimeSeries {
         timestamps,
         column_names,
         columns,
         column_index,
         source_step_secs: interval.num_seconds() as u32,
-        column_aggregations: vec![ColumnAggregation::Mean; n_cols],
-    }
+        column_aggregations,
+    })
 }
 
 fn generate_profile_column(
     n_steps: usize,
     timestamps: &[DateTime<FixedOffset>],
-    profile: &crate::schedule_resolve::DefaultScheduleProfile,
+    profile: &DefaultScheduleProfile,
 ) -> Vec<f64> {
     let mut values = Vec::with_capacity(n_steps);
     for ts in timestamps {

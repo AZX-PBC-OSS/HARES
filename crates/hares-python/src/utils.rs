@@ -122,6 +122,7 @@ pub fn make_spec(
         instance_name: Some(instance_name.to_string()),
         fuel_type,
         parameters: params,
+        typed_overrides: Map::new(),
         zip_params: None,
         typed_config,
         system_id: None,
@@ -265,13 +266,6 @@ pub fn ok_f64_seconds(v: f64) -> PyResult<i64> {
         )));
     }
     let result = rounded as i64;
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    {
-        assert!(
-            (result as f64 - v).abs() < 1.0,
-            "extract_seconds: round-trip error f64 {v} -> i64 {result} exceeds 1-second tolerance"
-        );
-    }
     Ok(result)
 }
 
@@ -283,13 +277,25 @@ pub fn ok_f64_seconds(v: f64) -> PyResult<i64> {
 // rejected **here** — at the boundary that received the user's value —
 // never downstream: a NaN's comparisons are always false, so a crossed
 // NaN silently stops every consuming conditional (a NaN price never arms
-// the price actors; a NaN heating setpoint never heats), and the
-// dwelling's downstream finiteness screens are cfg-gated to
-// debug/`check_invariants` builds — silent in release. One shared home
+// the price actors; a NaN heating setpoint never heats), and a NaN
+// crossing into the dwelling's physics is caught only several layers
+// later. One shared home
 // (this file), not per-module copies: the two former `dict_optional`
 // copies (py_dwelling.rs, py_control.rs) and py_control.rs's local
 // validators are unified here so a future extraction site grabs a
 // finite-checking or dict helper from one reviewed place.
+
+/// The `ThermalSetpoint` deadband contract at construction: a deadband only
+/// with a named setpoint, and within the range of some thermostat class
+/// (the receiving device holds it to its own class).
+pub(crate) fn validate_thermal_setpoint_band(
+    heating_c: Option<f64>,
+    cooling_c: Option<f64>,
+    deadband_c: Option<f64>,
+) -> PyResult<()> {
+    hares_types::validate_thermal_setpoint_deadband(heating_c, cooling_c, deadband_c)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+}
 
 /// Reject non-finite f64 values at the boundary, naming the field.
 pub(crate) fn validate_finite(value: f64, name: &str) -> PyResult<()> {

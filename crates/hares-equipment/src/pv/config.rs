@@ -72,7 +72,9 @@ pub struct PvConfig {
     /// The top-level `capacity_kw` must equal the sum of per-array
     /// capacities; other top-level singular fields (`tilt_deg`,
     /// `azimuth_deg`, `module_type`, `noct_c`, `sam_lut_path`) are
-    /// ignored in favour of the per-array specs.
+    /// ignored in favour of the per-array specs. A multi-array PV is not
+    /// attached to a roof automatically: each array's
+    /// `attached_boundary_id` attaches it.
     #[serde(default)]
     pub arrays: Option<Vec<PvArraySpec>>,
 }
@@ -83,7 +85,58 @@ impl EquipmentTypedConfig for PvConfig {
     }
 }
 
+/// One PV array's orientation and the irradiance surface it reads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PvOrientation {
+    pub tilt_deg: f64,
+    /// Normalized to [0, 360).
+    pub azimuth_deg: f64,
+    pub surface_id: u32,
+}
+
 impl PvConfig {
+    pub fn surface_resolution_deg(&self) -> f64 {
+        self.surface_resolution_deg
+            .unwrap_or(super::DEFAULT_SURFACE_RESOLUTION_DEG)
+    }
+
+    /// Each array's orientation, in array order. A PV has no default tilt or
+    /// azimuth: OS-HPXML requires `ArrayTilt` and one of `ArrayAzimuth` or
+    /// `ArrayOrientation` (EPvalidator.sch), so a missing one is a
+    /// [`HaresError::MissingInput`](hares_types::HaresError::MissingInput)
+    /// naming `owner` and the field.
+    pub fn array_orientations(&self, owner: &str) -> crate::Result<Vec<PvOrientation>> {
+        let resolution_deg = self.surface_resolution_deg();
+        let orientation = |prefix: &str, tilt: Option<f64>, azimuth: Option<f64>| {
+            let require = |value: Option<f64>, field: &str| {
+                value.ok_or_else(|| hares_types::HaresError::MissingInput {
+                    owner: owner.to_string(),
+                    field: format!("{prefix}{field}"),
+                })
+            };
+            let tilt_deg = require(tilt, "tilt_deg")?;
+            let azimuth_deg =
+                super::array_config::normalize_azimuth(require(azimuth, "azimuth_deg")?);
+            Ok(PvOrientation {
+                tilt_deg,
+                azimuth_deg,
+                surface_id: super::array_config::surface_id_for_orientation(
+                    tilt_deg,
+                    azimuth_deg,
+                    resolution_deg,
+                )?,
+            })
+        };
+        match &self.arrays {
+            Some(arrays) => arrays
+                .iter()
+                .enumerate()
+                .map(|(i, a)| orientation(&format!("arrays[{i}]."), a.tilt_deg, a.azimuth_deg))
+                .collect(),
+            None => Ok(vec![orientation("", self.tilt_deg, self.azimuth_deg)?]),
+        }
+    }
+
     /// Validate fields for physical plausibility.
     pub fn validate(&self) -> crate::Result<()> {
         use hares_types::HaresError;
@@ -124,12 +177,12 @@ impl PvConfig {
                     ));
                 }
             }
-            if let Some(az) = self.azimuth_deg {
-                if !az.is_finite() || !(0.0..360.0).contains(&az) {
-                    return Err(HaresError::Equipment(
-                        "PV azimuth_deg must be finite and within [0, 360)".to_string(),
-                    ));
-                }
+            if let Some(az) = self.azimuth_deg
+                && (!az.is_finite() || !(0.0..360.0).contains(&az))
+            {
+                return Err(HaresError::Equipment(
+                    "PV azimuth_deg must be finite and within [0, 360)".to_string(),
+                ));
             }
             self.capacity_kw
         };
@@ -138,27 +191,27 @@ impl PvConfig {
             ("inverter_efficiency", self.inverter_efficiency),
             ("power_factor", self.power_factor),
         ] {
-            if let Some(v) = val {
-                if !v.is_finite() || v <= 0.0 || v > 1.0 {
-                    return Err(HaresError::Equipment(format!(
-                        "PV {name} must be finite and within (0, 1]"
-                    )));
-                }
+            if let Some(v) = val
+                && (!v.is_finite() || v <= 0.0 || v > 1.0)
+            {
+                return Err(HaresError::Equipment(format!(
+                    "PV {name} must be finite and within (0, 1]"
+                )));
             }
         }
-        if let Some(losses) = self.system_losses_fraction {
-            if !losses.is_finite() || !(0.0..1.0).contains(&losses) {
-                return Err(HaresError::Equipment(
-                    "PV system_losses_fraction must be finite and within [0, 1)".to_string(),
-                ));
-            }
+        if let Some(losses) = self.system_losses_fraction
+            && (!losses.is_finite() || !(0.0..1.0).contains(&losses))
+        {
+            return Err(HaresError::Equipment(
+                "PV system_losses_fraction must be finite and within [0, 1)".to_string(),
+            ));
         }
-        if let Some(cap) = self.inverter_capacity_kw {
-            if !cap.is_finite() || cap <= 0.0 {
-                return Err(HaresError::Equipment(
-                    "PV inverter_capacity_kw must be finite and > 0".to_string(),
-                ));
-            }
+        if let Some(cap) = self.inverter_capacity_kw
+            && (!cap.is_finite() || cap <= 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "PV inverter_capacity_kw must be finite and > 0".to_string(),
+            ));
         }
         if let Some(inv_cap) = self.inverter_capacity_kw {
             // Typical residential DC-to-AC ratios: 1.0–1.5 (NREL SAM documentation;
@@ -179,6 +232,7 @@ impl PvConfig {
 mod tests {
     use super::*;
     use crate::config::{ConfigPayload, EquipmentConfig};
+    use crate::pv::array_config::surface_id_for_orientation;
 
     fn minimal_pv_config() -> PvConfig {
         PvConfig {
@@ -199,6 +253,84 @@ mod tests {
             soiling: None,
             arrays: None,
         }
+    }
+
+    fn array(capacity_kw: f64, tilt_deg: Option<f64>, azimuth_deg: Option<f64>) -> PvArraySpec {
+        PvArraySpec {
+            capacity_kw,
+            tilt_deg,
+            azimuth_deg,
+            module_type: None,
+            noct_c: None,
+            array_type: None,
+            sam_lut_path: None,
+            attached_boundary_id: None,
+        }
+    }
+
+    fn missing(owner: &str, field: &str) -> hares_types::HaresError {
+        hares_types::HaresError::MissingInput {
+            owner: owner.to_string(),
+            field: field.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_pv_orientation_comes_from_its_input_or_is_a_missing_input() {
+        let mut cfg = minimal_pv_config();
+        cfg.azimuth_deg = Some(180.0);
+        assert_eq!(
+            cfg.array_orientations("Roof PV").unwrap_err(),
+            missing("Roof PV", "tilt_deg")
+        );
+        cfg.tilt_deg = Some(27.0);
+        cfg.azimuth_deg = None;
+        assert_eq!(
+            cfg.array_orientations("Roof PV").unwrap_err(),
+            missing("Roof PV", "azimuth_deg")
+        );
+        cfg.azimuth_deg = Some(200.0);
+        assert_eq!(
+            cfg.array_orientations("Roof PV").unwrap(),
+            vec![PvOrientation {
+                tilt_deg: 27.0,
+                azimuth_deg: 200.0,
+                surface_id: surface_id_for_orientation(27.0, 200.0, 5.0).unwrap(),
+            }]
+        );
+    }
+
+    #[test]
+    fn every_array_carries_its_own_orientation_at_the_configured_resolution() {
+        let mut cfg = minimal_pv_config();
+        cfg.tilt_deg = Some(30.0);
+        cfg.azimuth_deg = Some(180.0);
+        cfg.surface_resolution_deg = Some(1.0);
+        cfg.arrays = Some(vec![
+            array(3.0, Some(27.0), Some(90.0)),
+            array(2.0, Some(18.0), None),
+        ]);
+        assert_eq!(
+            cfg.array_orientations("Roof PV").unwrap_err(),
+            missing("Roof PV", "arrays[1].azimuth_deg")
+        );
+        cfg.arrays = Some(vec![
+            array(3.0, Some(27.0), Some(90.0)),
+            array(2.0, Some(18.0), Some(270.0)),
+        ]);
+        let surfaces: Vec<u32> = cfg
+            .array_orientations("Roof PV")
+            .unwrap()
+            .iter()
+            .map(|o| o.surface_id)
+            .collect();
+        assert_eq!(
+            surfaces,
+            vec![
+                surface_id_for_orientation(27.0, 90.0, 1.0).unwrap(),
+                surface_id_for_orientation(18.0, 270.0, 1.0).unwrap(),
+            ]
+        );
     }
 
     #[test]

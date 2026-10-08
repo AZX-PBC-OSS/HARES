@@ -20,20 +20,40 @@ via the core init-string ``--timeout`` option; see
 
 from __future__ import annotations
 
+from collections.abc import Callable
+import itertools
 import logging
 import math
+import socket
 import threading
 import time
 from typing import Any
+import weakref
 
 try:
-    import helics  # noqa: F401  (imported for API parity with sibling modules)
+    import helics
 except ImportError as exc:  # pragma: no cover - exercised via import test
     raise ImportError(
         "HELICS not installed. Install with: pip install 'ochre_next[helics]'"
     ) from exc
 
+from ._types import HelicsCoreLike, HelicsFederateInfoLike, HelicsFederateLike
+from .broker import allocate_ephemeral_port
+
 _LOG = logging.getLogger(__name__)
+
+# Core types whose broker lives in the same process and is addressed by name.
+_IN_PROCESS_CORE_TYPES = frozenset({"inproc", "test"})
+
+# Ports a network federate's core tries before the bind failure is raised:
+# each failure costs up to the connect timeout, and a fresh draw from the
+# port range collides with a racing process only rarely.
+_CORE_PORT_ATTEMPTS = 4
+
+# How long a failed core may take to leave the broker and release its ports.
+_CORE_RELEASE_TIMEOUT_MS = 5000
+
+_core_ids = itertools.count()
 
 # Default wall-clock budget for broker registration plus entering executing
 # mode.  Large enough for a slow federation to assemble, small enough that a
@@ -54,7 +74,9 @@ _ABORT_JOIN_TIMEOUT_S = 2.0
 __all__ = [
     "DEFAULT_CONNECT_TIMEOUT_S",
     "DEFAULT_GRANT_TIMEOUT_S",
+    "core_init_string",
     "core_init_timeout_option",
+    "create_value_federate",
     "enter_executing_mode_with_timeout",
     "request_time_with_timeout",
     "validate_timeout",
@@ -112,6 +134,170 @@ def core_init_timeout_option(timeout_s: float) -> str:
     """
     timeout_s = validate_timeout(timeout_s, "timeout_s")
     return f"--timeout={max(1, round(timeout_s * 1000.0))}ms"
+
+
+def core_init_string(core_type: str, broker_address: str, connect_timeout_s: float) -> str:
+    """Render a federate core's init string for ``broker_address``.
+
+    An in-process core (``inproc``/``test``) names its broker; ``broker_address``
+    is the broker's name and no socket is opened. A network core gets the
+    broker's URL (``tcp://`` is added to a bare ``host[:port]``) and its own
+    local listen port: without an explicit ``--port`` several auto-named cores
+    in one process can collide on the auto-assigned port and deadlock at
+    ``enterExecutingMode`` instead of raising a bind error (macOS/arm64,
+    HELICS 3.6.1).
+    """
+    port = None if core_type in _IN_PROCESS_CORE_TYPES else allocate_ephemeral_port()
+    return _core_init(core_type, broker_address, connect_timeout_s, port)
+
+
+def _core_init(core_type: str, broker_address: str, connect_timeout_s: float, port: int | None) -> str:
+    timeout = core_init_timeout_option(connect_timeout_s)
+    if core_type in _IN_PROCESS_CORE_TYPES:
+        return f"--broker={broker_address} {timeout}"
+    address = broker_address if "://" in broker_address else f"tcp://{broker_address}"
+    return f"--broker_address={address} --port={port} {timeout}"
+
+
+def create_value_federate(
+    fed_name: str,
+    core_type: str,
+    broker_address: str,
+    connect_timeout_s: float,
+    federate_info: Callable[[str, str], HelicsFederateInfoLike],
+) -> HelicsFederateLike:
+    """Create a value federate on a core of its own for ``broker_address``.
+
+    ``federate_info(core_name, core_init)`` builds the federate info that
+    registers the federate on the named core. The core is created and
+    connected first, so that a failure is told apart by where it happens:
+
+    - The core cannot connect. A network core listens on a port drawn from a
+      range and probed free, but another process can bind the port first,
+      and HELICS then fails the core's connection. If, once the failed core
+      has released its port, the port is still taken, that bind failure is
+      proven, and the core is created again on a fresh port, up to
+      ``_CORE_PORT_ATTEMPTS`` times. HELICS reports a failed connection by
+      returning false or, for a core whose comms it has already torn down,
+      by raising; both are the same failure. Any other connection failure is
+      raised at once.
+    - The federate cannot register on its connected core: a duplicate name,
+      or a broker that does not answer within the connect timeout. HELICS's
+      own error is raised at once.
+
+    Every failed core is disconnected and freed before the next attempt or
+    the raise: a failed core left connected keeps the broker waiting for it,
+    and the rest of the federation never enters executing mode. An error
+    releasing it never replaces the failure being raised: it is added to a
+    registration failure as a note, and to a connection failure's message.
+
+    Raises:
+        ConnectionError: The core could not connect, its port taken on every
+            attempt or for a reason other than a taken port, or it could not
+            connect and then could not be released. HELICS's error, when it
+            raised one, is the cause.
+        HelicsException: The federate could not register on its core.
+    """
+    port_attempts = 1 if core_type in _IN_PROCESS_CORE_TYPES else _CORE_PORT_ATTEMPTS
+    taken: list[int] = []
+    for _ in range(port_attempts):
+        # Unique in the process: HELICS keeps cores by name, so reusing one
+        # would attach to, and on failure free, another federate's core.
+        core_name = f"core_{fed_name}_{next(_core_ids)}"
+        port = None if core_type in _IN_PROCESS_CORE_TYPES else allocate_ephemeral_port()
+        core_init = _core_init(core_type, broker_address, connect_timeout_s, port)
+        core = helics.helicsCreateCore(core_type, core_name, core_init)
+        connect_error: helics.HelicsException | None = None
+        try:
+            try:
+                connected = helics.helicsCoreConnect(core)
+            except helics.HelicsException as exc:
+                # A core whose comms failed to bind can be invalidated before
+                # its connect returns, which then raises instead of failing.
+                connected, connect_error = False, exc
+            if connected:
+                return helics.helicsCreateValueFederate(fed_name, federate_info(core_name, core_init))
+        except BaseException as failure:
+            cleanup = _release(core)
+            if cleanup is not None:
+                failure.add_note(f"releasing the failed core {core_name} also failed: {cleanup}")
+            raise
+        not_connected = f"HELICS core '{core_name}' could not connect to the broker at {broker_address} ({core_init})"
+        cleanup = _release(core)
+        if cleanup is not None:
+            # A core that may still hold its port proves no bind failure.
+            raise ConnectionError(f"{not_connected}, and releasing it failed: {cleanup}") from (
+                connect_error or cleanup
+            )
+        if port is None or not _port_pair_taken(port):
+            raise ConnectionError(not_connected) from connect_error
+        taken.append(port)
+        _LOG.warning(
+            "HELICS core %s could not bind port %d, which another process holds; retrying on a fresh port",
+            core_name,
+            port,
+        )
+    raise ConnectionError(
+        f"HELICS federate '{fed_name}' could not bind a core port: each of ports {taken} was taken "
+        f"by another process"
+    )
+
+
+def _release(core: HelicsCoreLike) -> helics.HelicsException | None:
+    """Disconnect a failed core from the broker and free it, releasing its ports.
+
+    Every step runs whatever an earlier one raised, so the core is freed even
+    when its disconnect fails. A core HELICS has already invalidated has
+    nothing left to release, so that error is tolerated; the first other
+    error is returned for the caller to report beside the failure it is
+    cleaning up after.
+    """
+    failures = (
+        _release_step(helics.helicsCoreDisconnect, core),
+        _release_step(helics.helicsCoreWaitForDisconnect, core, _CORE_RELEASE_TIMEOUT_MS),
+    )
+    # The helics wrapper frees a core's handle again when its Python object is
+    # collected. After an explicit helicsCoreFree, that second free would land
+    # on whichever core HELICS had since allocated at the same address and
+    # invalidate it, so the core is freed by running the wrapper's own
+    # finalizer now, which frees it once and never again. The wrapper frees
+    # nothing there when PYHELICS_FREE_ON_DESTRUCTION is set empty. The
+    # finalizer is the wrapper's private attribute, so the dependency is
+    # pinned to helics 3.x, and a wrapper without it leaves the handle to the
+    # wrapper to free rather than failing the cleanup of a core that is
+    # already failing.
+    finalizer: weakref.finalize[..., object] | None = getattr(core, "_finalizer", None)
+    if finalizer is None:
+        _LOG.warning(
+            "The helics wrapper exposed no _finalizer for a failed core; leaving its handle to the wrapper to free"
+        )
+    else:
+        finalizer()
+    return next((failure for failure in failures if failure is not None), None)
+
+
+def _release_step[**P](step: Callable[P, object], *args: P.args, **kwargs: P.kwargs) -> helics.HelicsException | None:
+    try:
+        step(*args, **kwargs)
+    except helics.HelicsException as exc:
+        # The helics bindings carry an error's code only as its message's prefix.
+        if not str(exc).startswith(f"[{int(helics.HELICS_ERROR_INVALID_OBJECT)}] "):
+            return exc
+    return None
+
+
+def _port_pair_taken(port: int) -> bool:
+    """Whether ``port`` or ``port + 1``, the pair a zmq core binds, is held on localhost."""
+    with (
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as first,
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as second,
+    ):
+        try:
+            first.bind(("127.0.0.1", port))
+            second.bind(("127.0.0.1", port + 1))
+        except OSError:
+            return True
+    return False
 
 
 def enter_executing_mode_with_timeout(

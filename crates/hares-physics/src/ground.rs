@@ -54,7 +54,7 @@ pub const DEFAULT_PHASE_DAY_NORTHERN: f64 = 35.0;
 /// 182.5-day offset from northern = average half-year (365/2).
 pub const DEFAULT_PHASE_DAY_SOUTHERN: f64 = 35.0 + 182.5;
 
-/// Minimum representative depth for slab-on-grade ground temperature [m].
+/// Minimum representative depth for slab-on-grade ground temperature (m).
 ///
 /// EPW Data Dictionary v9.6 specifies 0.5 m as the standard reference depth
 /// for GroundTemperatures:BuildingSurface. Slabs at grade have zero
@@ -78,7 +78,7 @@ const TAU_DAYS: f64 = 365.0;
 ///
 /// # Arguments
 ///
-/// * `depth_m` -- Depth below ground surface [m]. 0 = surface.
+/// * `depth_m` -- Depth below ground surface (m). 0 = surface.
 /// * `day_of_year` -- Day of year [1–366]. 1 = January 1.
 /// * `t_mean_annual_c` -- Average annual soil surface temperature [°C].
 ///   Approximated by annual average outdoor dry-bulb temperature.
@@ -112,7 +112,7 @@ pub fn kusuda_achenbach_temp(
     t_mean_annual_c - t_amplitude_c * attenuation * phase.cos()
 }
 
-/// ASHRAE slab perimeter heat loss [W].
+/// ASHRAE slab perimeter heat loss (W).
 ///
 /// Simple perimeter-loss method from ASHRAE Handbook of Fundamentals Ch. 27:
 /// `Q = F2 × P × (T_indoor - T_ground_surface)`
@@ -122,7 +122,7 @@ pub fn kusuda_achenbach_temp(
 ///
 /// # Arguments
 ///
-/// * `perimeter_m` -- Exposed perimeter length [m].
+/// * `perimeter_m` -- Exposed perimeter length (m).
 /// * `f2_w_per_m_k` -- Perimeter heat loss coefficient [W/(m·K)].
 ///   See [`f2_coefficient`] for ASHRAE 90.1-2022 Table A6.3.1 values.
 /// * `t_indoor_c` -- Indoor zone temperature [°C].
@@ -137,7 +137,7 @@ pub fn slab_perimeter_loss_w(
     f2_w_per_m_k * perimeter_m * (t_indoor_c - t_ground_surface_c)
 }
 
-/// Foundation wall heat loss [W].
+/// Foundation wall heat loss (W).
 ///
 /// Simplified below-grade wall loss:
 /// `Q = A × (T_indoor - T_ground) / R_wall`
@@ -147,7 +147,7 @@ pub fn slab_perimeter_loss_w(
 ///
 /// # Arguments
 ///
-/// * `below_grade_area_m2` -- Below-grade wall area [m²].
+/// * `below_grade_area_m2` -- Below-grade wall area (m²).
 /// * `r_wall_m2_k_w` -- Total wall R-value including insulation [m²·K/W].
 /// * `t_indoor_c` -- Indoor zone temperature [°C].
 /// * `t_ground_c` -- Ground temperature at average below-grade depth [°C].
@@ -218,7 +218,7 @@ pub enum SourceTemperature {
     /// - EnergyPlus ERM 26.1 — Undisturbed Ground Temperature Model: Kusuda-Achenbach
     /// - Kusuda & Achenbach (1965), ASHRAE Trans. 71(1):61-74
     KusudaAchenbach {
-        /// Borehole depth below ground surface [m].
+        /// Borehole depth below ground surface (m).
         borehole_depth_m: f64,
         /// Soil thermal diffusivity [m²/day]. Use
         /// [`DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY`] if unknown.
@@ -278,14 +278,14 @@ impl SourceTemperature {
     /// step, so that this heat rate feeds into the convolution for *future*
     /// timesteps. The current step's `compute` result is unaffected.
     ///
-    /// This is a no-op for [`OutdoorAir`], [`Constant`], and
-    /// [`KusudaAchenbach`] variants.
+    /// This is a no-op for [`SourceTemperature::OutdoorAir`], [`SourceTemperature::Constant`],
+    /// and [`SourceTemperature::KusudaAchenbach`] variants.
     ///
     /// # Parameters
     ///
-    /// * `heat_rate_w` — Net thermal power exchanged with the ground [W],
+    /// * `heat_rate_w` -- Net thermal power exchanged with the ground (W),
     ///   positive for injection (cooling), negative for extraction (heating).
-    /// * `dt_s` — Duration of the timestep [s].
+    /// * `dt_s` -- Duration of the timestep (s).
     pub fn record_source_heat_rate(&self, heat_rate_w: f64, dt_s: f64) {
         if let Self::BoreholeGFunction { model } = self {
             model.record_heat_rate(heat_rate_w, dt_s);

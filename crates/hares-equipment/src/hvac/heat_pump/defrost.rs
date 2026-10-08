@@ -1,7 +1,6 @@
 //! Defrost control for heat-pump heating: OnDemand (humidity-based) and Timed modes.
 
 use hares_physics::psychrometrics::humidity_ratio_from_twb;
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -64,7 +63,7 @@ pub struct DefrostConfig {
         rename = "defrost_capacity_reduction_factor"
     )]
     pub capacity_reduction_factor: f64,
-    /// Additional fixed defrost power draw [W] (legacy/OCHRE field).
+    /// Additional fixed defrost power draw (W) (legacy/OCHRE field).
     #[serde(default)]
     pub defrost_power_w: f64,
     /// Control mode: OnDemand (humidity-based) or Timed.
@@ -96,7 +95,7 @@ pub struct DefrostConfig {
     /// Temperature Curve Name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defrost_eir_coeffs: Option<[f64; 6]>,
-    /// For Resistive strategy: rated defrost heater capacity [W].
+    /// For Resistive strategy: rated defrost heater capacity (W).
     /// Must be > 0 when `strategy == Resistive`; zero is valid for ReverseCycle
     /// (the default) since reverse-cycle defrost uses the compressor, not a
     /// dedicated heater.
@@ -239,11 +238,11 @@ pub struct DefrostCycleTracker {
     /// Accumulated frost proxy: incremented by `dt * time_fraction` each step when
     /// the compressor is running and conditions favor frost. Reset on Defrosting entry.
     pub accumulated_frost_s: f64,
-    /// Elapsed time in the current defrost cycle [s]. Reset on Accumulating entry.
+    /// Elapsed time in the current defrost cycle (s). Reset on Accumulating entry.
     pub defrost_elapsed_s: f64,
-    /// Target defrost cycle duration [s] (default 210 s = 3.5 min).
+    /// Target defrost cycle duration (s) (default 210 s = 3.5 min).
     pub cycle_duration_s: f64,
-    /// Hard cap on defrost cycle duration [s] (default 600 s = 10 min).
+    /// Hard cap on defrost cycle duration (s) (default 600 s = 10 min).
     pub max_defrost_duration_s: f64,
     /// EWMA of defrost `time_fraction` used for inter-defrost interval calculation.
     /// Smooths step-to-step fluctuations when OAT oscillates around the defrost
@@ -268,7 +267,7 @@ impl DefrostCycleTracker {
 
     /// Advance the FSM by one timestep.
     ///
-    /// - `dt_s` — timestep duration [s]
+    /// - `dt_s` -- timestep duration (s)
     /// - `time_fraction` — continuous defrost time fraction from `evaluate_defrost`
     ///   (only meaningful when `conditions_favor_frost` is true)
     /// - `conditions_favor_frost` — true when OAT < max_oat_defrost_c and the
@@ -283,10 +282,6 @@ impl DefrostCycleTracker {
         conditions_favor_frost: bool,
         outdoor_db_c: f64,
     ) -> crate::Result<()> {
-        #[cfg_attr(
-            not(any(debug_assertions, feature = "check_invariants", feature = "observe")),
-            allow(unused_variables)
-        )]
         let frost_before = self.accumulated_frost_s;
         let old_state = self.state;
         match self.state {
@@ -334,7 +329,9 @@ impl DefrostCycleTracker {
             }
         }
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        // State bounds (frost non-negative, EWMA fraction in [0, 1]) and the
+        // warm-period frost decay guard run in every build profile: state
+        // corruption here silently corrupts the defrost model.
         {
             if self.accumulated_frost_s < 0.0 {
                 return Err(HaresError::InvariantViolation {
@@ -428,35 +425,43 @@ impl DefrostResult {
     }
 }
 
+/// Per-step weather and capacity inputs to [`evaluate_defrost`], grouped so
+/// the stateless defrost model's signature stays readable.
+#[derive(Clone, Copy, Debug)]
+pub struct DefrostInputs {
+    /// Outdoor dry-bulb temperature [°C].
+    pub outdoor_db_c: f64,
+    /// Outdoor humidity ratio [kg/kg].
+    pub outdoor_humidity_ratio: f64,
+    /// Outdoor air pressure (Pa).
+    pub pressure_pa: f64,
+    /// Indoor inlet wet-bulb temperature [°C]; used for the optional
+    /// biquadratic EIR curve in Timed + ReverseCycle mode.
+    pub inlet_wb_c: f64,
+    /// Heat pump rated (maximum) heating capacity (W).
+    pub rated_capacity_w: f64,
+    /// Current operating heating capacity (W).
+    pub current_capacity_w: f64,
+    /// Compressor runtime fraction [0..1]; scales timed defrost power
+    /// proportionally with compressor operation.
+    pub runtime_fraction: f64,
+}
+
 /// Evaluate defrost adjustments for the current timestep.
 ///
-/// # Parameters
-/// - `config` -- defrost configuration (control mode, strategy, etc.)
-/// - `outdoor_db_c` -- outdoor dry-bulb temperature [°C]
-/// - `outdoor_humidity_ratio` -- outdoor humidity ratio [kg/kg]
-/// - `pressure_pa` -- outdoor air pressure [Pa]
-/// - `inlet_wb_c` -- indoor inlet wet-bulb temperature [°C]; used for the
-///   optional biquadratic EIR curve in Timed + ReverseCycle mode
-/// - `rated_capacity_w` -- heat pump rated (maximum) heating capacity [W]
-/// - `current_capacity_w` -- current operating heating capacity [W]
-/// - `runtime_fraction` -- compressor runtime fraction [0..1]; scales timed
-///   defrost power proportionally with compressor operation
+/// The per-step inputs are the fields of [`DefrostInputs`]; see that type
+/// for units and semantics.
 #[must_use]
-// Why: the 8 parameters are all distinct physical inputs to a stateless
-// defrost model (config, four weather/zone scalars, two capacity scalars, runtime
-// fraction). Merging them into an intermediate struct would require a throw-away
-// type used in exactly one call site and obscure the function's dependencies.
-#[allow(clippy::too_many_arguments)]
-pub fn evaluate_defrost(
-    config: &DefrostConfig,
-    outdoor_db_c: f64,
-    outdoor_humidity_ratio: f64,
-    pressure_pa: f64,
-    inlet_wb_c: f64,
-    rated_capacity_w: f64,
-    current_capacity_w: f64,
-    runtime_fraction: f64,
-) -> DefrostResult {
+pub fn evaluate_defrost(config: &DefrostConfig, inputs: DefrostInputs) -> DefrostResult {
+    let DefrostInputs {
+        outdoor_db_c,
+        outdoor_humidity_ratio,
+        pressure_pa,
+        inlet_wb_c,
+        rated_capacity_w,
+        current_capacity_w,
+        runtime_fraction,
+    } = inputs;
     if outdoor_db_c >= config.max_oat_defrost_c
         || current_capacity_w <= 0.0
         || rated_capacity_w <= 0.0
@@ -600,7 +605,18 @@ mod defrost_tests {
     fn on_demand_regression() {
         let cfg = on_demand_config();
         // Conditions that previously produced an active defrost result.
-        let result = evaluate_defrost(&cfg, 0.0, 0.005, P_PA, 10.0, 8_000.0, 6_000.0, 1.0);
+        let result = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: 0.0,
+                outdoor_humidity_ratio: 0.005,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
         assert!(result.active, "OnDemand must be active below threshold");
         assert!(
             result.time_fraction > 0.0 && result.time_fraction < 1.0,
@@ -630,7 +646,18 @@ mod defrost_tests {
         let cfg = timed_config();
         // At OAT = 0°C with a specific humidity ratio, verify the multiplier formula.
         let outdoor_hr = 0.005_f64;
-        let result = evaluate_defrost(&cfg, 0.0, outdoor_hr, P_PA, 10.0, 8_000.0, 6_000.0, 1.0);
+        let result = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: 0.0,
+                outdoor_humidity_ratio: outdoor_hr,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
         assert!(result.active);
 
         // Recompute expected value.
@@ -650,7 +677,18 @@ mod defrost_tests {
     fn timed_power_multiplier_correct() {
         let cfg = timed_config();
         let outdoor_hr = 0.005_f64;
-        let result = evaluate_defrost(&cfg, 0.0, outdoor_hr, P_PA, 10.0, 8_000.0, 6_000.0, 1.0);
+        let result = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: 0.0,
+                outdoor_humidity_ratio: outdoor_hr,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
         assert!(result.active);
 
         let coil_t = DEFROST_COIL_TEMP_SLOPE * 0.0 + DEFROST_COIL_TEMP_OFFSET_C;
@@ -669,8 +707,30 @@ mod defrost_tests {
     fn timed_vs_on_demand_differ() {
         let od = on_demand_config();
         let td = timed_config();
-        let r_od = evaluate_defrost(&od, 0.0, 0.005, P_PA, 10.0, 8_000.0, 6_000.0, 1.0);
-        let r_td = evaluate_defrost(&td, 0.0, 0.005, P_PA, 10.0, 8_000.0, 6_000.0, 1.0);
+        let r_od = evaluate_defrost(
+            &od,
+            DefrostInputs {
+                outdoor_db_c: 0.0,
+                outdoor_humidity_ratio: 0.005,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
+        let r_td = evaluate_defrost(
+            &td,
+            DefrostInputs {
+                outdoor_db_c: 0.0,
+                outdoor_humidity_ratio: 0.005,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
         // The formulas differ -- at minimum the capacity multiplier must differ.
         assert!(
             (r_od.capacity_multiplier - r_td.capacity_multiplier).abs() > 1e-6,
@@ -684,13 +744,15 @@ mod defrost_tests {
         for cfg in [on_demand_config(), timed_config()] {
             let result = evaluate_defrost(
                 &cfg,
-                cfg.max_oat_defrost_c + 1.0,
-                0.005,
-                P_PA,
-                10.0,
-                8_000.0,
-                6_000.0,
-                1.0,
+                DefrostInputs {
+                    outdoor_db_c: cfg.max_oat_defrost_c + 1.0,
+                    outdoor_humidity_ratio: 0.005,
+                    pressure_pa: P_PA,
+                    inlet_wb_c: 10.0,
+                    rated_capacity_w: 8_000.0,
+                    current_capacity_w: 6_000.0,
+                    runtime_fraction: 1.0,
+                },
             );
             assert!(
                 !result.active,
@@ -706,7 +768,18 @@ mod defrost_tests {
     #[test]
     fn reverse_cycle_q_defrost_and_power() {
         let cfg = timed_config(); // ReverseCycle by default
-        let result = evaluate_defrost(&cfg, -5.0, 0.005, P_PA, 10.0, 8_000.0, 6_000.0, 1.0);
+        let result = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: -5.0,
+                outdoor_humidity_ratio: 0.005,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
         assert!(result.active);
         assert!(
             result.q_defrost_w > 0.0,
@@ -726,7 +799,18 @@ mod defrost_tests {
             resistive_defrost_capacity_w: 1_000.0,
             ..timed_config()
         };
-        let result = evaluate_defrost(&cfg, -5.0, 0.005, P_PA, 10.0, 8_000.0, 6_000.0, 1.0);
+        let result = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: -5.0,
+                outdoor_humidity_ratio: 0.005,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
         assert!(result.active);
         assert_eq!(
             result.q_defrost_w, 0.0,
@@ -757,8 +841,30 @@ mod defrost_tests {
         };
 
         // With inlet_wb = 5°C < 15.555 → clamped to 15.555.
-        let r_flat = evaluate_defrost(&cfg_flat, -5.0, 0.005, P_PA, 5.0, 8_000.0, 6_000.0, 1.0);
-        let r_linear = evaluate_defrost(&cfg_linear, -5.0, 0.005, P_PA, 5.0, 8_000.0, 6_000.0, 1.0);
+        let r_flat = evaluate_defrost(
+            &cfg_flat,
+            DefrostInputs {
+                outdoor_db_c: -5.0,
+                outdoor_humidity_ratio: 0.005,
+                pressure_pa: P_PA,
+                inlet_wb_c: 5.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
+        let r_linear = evaluate_defrost(
+            &cfg_linear,
+            DefrostInputs {
+                outdoor_db_c: -5.0,
+                outdoor_humidity_ratio: 0.005,
+                pressure_pa: P_PA,
+                inlet_wb_c: 5.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
 
         assert!(r_flat.active && r_linear.active);
         // linear curve EIR = floored wb = 15.555; flat EIR = 1.0
@@ -774,8 +880,30 @@ mod defrost_tests {
     #[test]
     fn runtime_fraction_scales_defrost_power() {
         let cfg = timed_config();
-        let r_full = evaluate_defrost(&cfg, -5.0, 0.005, P_PA, 10.0, 8_000.0, 6_000.0, 1.0);
-        let r_half = evaluate_defrost(&cfg, -5.0, 0.005, P_PA, 10.0, 8_000.0, 6_000.0, 0.5);
+        let r_full = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: -5.0,
+                outdoor_humidity_ratio: 0.005,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
+        let r_half = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: -5.0,
+                outdoor_humidity_ratio: 0.005,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 0.5,
+            },
+        );
         assert!(r_full.active && r_half.active);
         let ratio = r_half.extra_power_w / r_full.extra_power_w;
         assert!(
@@ -791,7 +919,18 @@ mod defrost_tests {
             defrost_time_fraction: 0.0,
             ..timed_config()
         };
-        let result = evaluate_defrost(&cfg, -5.0, 0.005, P_PA, 10.0, 8_000.0, 6_000.0, 1.0);
+        let result = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: -5.0,
+                outdoor_humidity_ratio: 0.005,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 8_000.0,
+                current_capacity_w: 6_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
         assert!(!result.active, "time_fraction=0 must yield inactive result");
     }
 
@@ -799,7 +938,18 @@ mod defrost_tests {
     #[test]
     fn very_cold_oat_produces_finite_values() {
         for cfg in [on_demand_config(), timed_config()] {
-            let result = evaluate_defrost(&cfg, -20.0, 0.0005, P_PA, 10.0, 10_000.0, 8_000.0, 1.0);
+            let result = evaluate_defrost(
+                &cfg,
+                DefrostInputs {
+                    outdoor_db_c: -20.0,
+                    outdoor_humidity_ratio: 0.0005,
+                    pressure_pa: P_PA,
+                    inlet_wb_c: 10.0,
+                    rated_capacity_w: 10_000.0,
+                    current_capacity_w: 8_000.0,
+                    runtime_fraction: 1.0,
+                },
+            );
             assert!(result.active, "{:?} must be active at -20°C", cfg.control);
             assert!(
                 result.capacity_multiplier.is_finite(),
@@ -830,7 +980,18 @@ mod defrost_tests {
     fn timed_multipliers_plausible_energyplus_reference() {
         let cfg = timed_config();
         // Use a moderate humidity ratio (0.003) at OAT=0°C.
-        let result = evaluate_defrost(&cfg, 0.0, 0.003, P_PA, 10.0, 10_000.0, 8_000.0, 1.0);
+        let result = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: 0.0,
+                outdoor_humidity_ratio: 0.003,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 10_000.0,
+                current_capacity_w: 8_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
         assert!(result.active);
         // EnergyPlus reference: at typical winter conditions, cap_mult < 1.0 and
         // pwr_mult < 1.0 indicate reduced capacity / power during defrost.
@@ -862,7 +1023,18 @@ mod defrost_tests {
     fn timed_multipliers_clamped_at_high_humidity() {
         let cfg = timed_config();
         // delta_omega ≈ 0.01 > 0.00847 -- drives cap_mult negative without the clamp.
-        let result = evaluate_defrost(&cfg, 0.0, 0.011, P_PA, 10.0, 10_000.0, 8_000.0, 1.0);
+        let result = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: 0.0,
+                outdoor_humidity_ratio: 0.011,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 10_000.0,
+                current_capacity_w: 8_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
         assert!(result.active);
         assert!(
             result.capacity_multiplier >= 0.0,
@@ -894,7 +1066,18 @@ mod defrost_tests {
         // delta_omega ≈ 0.05 -- well above both thresholds.
         // Without the clamp: cap_mult = 0.909 - 107.33*0.05 ≈ -4.46
         //                    pwr_mult = 0.90  -  36.45*0.05 ≈ -0.92
-        let result = evaluate_defrost(&cfg, 0.0, 0.051, P_PA, 10.0, 10_000.0, 8_000.0, 1.0);
+        let result = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: 0.0,
+                outdoor_humidity_ratio: 0.051,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 10_000.0,
+                current_capacity_w: 8_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
         assert!(result.active);
         assert_eq!(
             result.capacity_multiplier, 0.0,
@@ -920,7 +1103,18 @@ mod defrost_tests {
     fn on_demand_multipliers_clamped_when_time_fraction_approaches_one() {
         let cfg = on_demand_config();
         // Very high humidity ratio forces time_fraction very close to 1.0.
-        let result = evaluate_defrost(&cfg, 0.0, 0.5, P_PA, 10.0, 10_000.0, 8_000.0, 1.0);
+        let result = evaluate_defrost(
+            &cfg,
+            DefrostInputs {
+                outdoor_db_c: 0.0,
+                outdoor_humidity_ratio: 0.5,
+                pressure_pa: P_PA,
+                inlet_wb_c: 10.0,
+                rated_capacity_w: 10_000.0,
+                current_capacity_w: 8_000.0,
+                runtime_fraction: 1.0,
+            },
+        );
         assert!(result.active);
         assert!(
             result.capacity_multiplier >= 0.0,

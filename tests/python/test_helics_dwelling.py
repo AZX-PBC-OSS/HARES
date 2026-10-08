@@ -15,7 +15,7 @@ import pytest
 
 # These tests use in-process fakes (no HELICS networking), so any hang is a
 # logic bug; the thread method also catches blocking inside C extensions.
-pytestmark = pytest.mark.timeout(60, method="thread")
+pytestmark = [pytest.mark.timeout(60, method="thread"), pytest.mark.usefixtures("restore_helics_modules")]
 
 
 class _FakePublication:
@@ -122,6 +122,13 @@ class _FakeHelicsModule:
         self.last_fedinfo: _FakeHelicsModule.HelicsFederateInfo | None = None
         self.last_fed: _FakeFederate | None = None
         self.raise_on_max_time = False
+
+    def helicsCreateCore(self, core_type: str, name: str, init_string: str) -> str:
+        self.log.append(("create_core", core_type, name, init_string))
+        return name
+
+    def helicsCoreConnect(self, core: str) -> bool:
+        return True
 
     def helicsCreateValueFederate(self, fed_name: str, fedinfo: Any) -> _FakeFederate:
         self.last_fedinfo = fedinfo
@@ -302,7 +309,7 @@ def test_helics_dwelling_config_and_registration(monkeypatch: pytest.MonkeyPatch
     # Each federate's core needs a unique name and local port: without them,
     # multiple auto-named/ported cores in the same process can silently
     # deadlock at enterExecutingMode instead of raising a bind error.
-    assert fedinfo.core_name == "core_house_1"
+    assert fedinfo.core_name.startswith("core_house_1_")
     assert fedinfo.core_init.startswith("--broker_address=tcp://10.0.0.7:23404")
     assert "--port=" in fedinfo.core_init
     # --timeout bounds broker registration so a stale/unreachable broker
@@ -580,7 +587,7 @@ def test_helics_dwelling_handle_time_grant_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module, fake_helics = _import_dwelling_module(monkeypatch)
-    fn = module._handle_time_grant
+    fn = module.handle_time_grant
 
     assert fn(60.0, 60.0) is True
     assert fn(60.0, 10.0) is False
@@ -985,6 +992,32 @@ def test_control_signal_thermal_setpoint_heat_out_of_range_warns(
     assert orchestrator.helics_control_clamped >= 1
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"type": "ThermalSetpoint", "heating_setpoint_c": 21.0, "deadband_c": -1.0},
+        {"type": "ThermalSetpoint", "heating_setpoint_c": 21.0, "deadband_c": 50.0},
+        {"type": "ThermalSetpoint", "deadband_c": 1.0},
+    ],
+)
+def test_control_signal_thermal_setpoint_band_violation_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    body: dict[str, object],
+):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(control_topic="grid/control")
+
+    assert orchestrator._sub_control is not None
+    orchestrator._sub_control.push_string(json.dumps({"HVAC": body}))
+
+    orchestrator._read_subscriptions()
+    assert orchestrator.helics_control_clamped == 1
+
+
 def test_control_signal_thermal_setpoint_cool_out_of_range_warns(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1055,7 +1088,7 @@ def test_validate_control_signal_rejects_nan_power_setpoint(
     module, fake_helics = _import_dwelling_module(monkeypatch)
 
     with caplog.at_level("WARNING"):
-        clamped = module._validate_control_signal(
+        clamped = module.validate_control_signal(
             {"type": "PowerSetpoint", "active_power_kw": float("nan")},
             "Battery",
             module.logging.getLogger("test"),

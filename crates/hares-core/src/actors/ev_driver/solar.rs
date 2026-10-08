@@ -10,11 +10,8 @@ impl ChargingPreference for SolarTracking {
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote {
         let pv = ctx.env.electrical.actual_pv_kw_or_fallback();
 
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        debug_assert!(
-            pv.is_finite() && pv >= 0.0,
-            "pv must be non-negative and finite"
-        );
+        // The observation's own build site checks finiteness, and a negative
+        // PV observation fails the step there; no per-decide re-check.
 
         let load = ctx.env.electrical.base_load_kw;
         let surplus = (pv - load).max(0.0);

@@ -7,8 +7,6 @@
 //! (must resolve cleanly), so both the negative and positive code paths are
 //! exercised.
 
-use serde_json::json;
-
 use hares_equipment::HeatPumpWaterHeaterConfig;
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::HpxmlError;
@@ -29,6 +27,7 @@ fn wrap_systems(systems_xml: &str) -> String {
         <BuildingConstruction>
           <ConditionedFloorArea>1500</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">12000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -41,7 +40,7 @@ fn wrap_systems(systems_xml: &str) -> String {
 
 fn resolve(xml: &str) -> Result<Vec<hares_io::hpxml::EquipmentSpec>, HpxmlError> {
     let building = parse_building(xml).expect("HPXML must parse");
-    resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+    resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
 }
 
 fn expect_missing(
@@ -578,6 +577,7 @@ fn wrap_systems_no_lat(systems_xml: &str) -> String {
         <BuildingConstruction>
           <ConditionedFloorArea>1500</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">12000</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>

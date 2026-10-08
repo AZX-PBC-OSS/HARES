@@ -1041,12 +1041,12 @@ fn validate_finite_non_negative(name: &str, v: f64) -> Result<(), crate::HaresEr
 }
 
 fn validate_positive_if_present(name: &str, v: Option<usize>) -> Result<(), crate::HaresError> {
-    if let Some(n) = v {
-        if n == 0 {
-            return Err(crate::HaresError::Equipment(format!(
-                "{name} must be > 0 when set, got 0; use None to disable"
-            )));
-        }
+    if let Some(n) = v
+        && n == 0
+    {
+        return Err(crate::HaresError::Equipment(format!(
+            "{name} must be > 0 when set, got 0; use None to disable"
+        )));
     }
     Ok(())
 }
@@ -1182,6 +1182,30 @@ pub struct CoreFlows {
     /// Delivered latent cooling in watts (negative or zero). Post-DSE.
     /// None for non-cooling equipment.
     pub latent_cooling_w: Option<f64>,
+}
+
+impl CoreFlows {
+    /// The flows of a step that delivered nothing: each flow these report,
+    /// at zero, in the same sign convention.
+    #[must_use]
+    pub fn none_delivered(&self) -> Self {
+        let zero = |v: Option<f64>| v.map(|_| 0.0);
+        Self {
+            electric_kw: self.electric_kw.map(|e| match e {
+                ElectricPower::Consumption(_) => ElectricPower::Consumption(0.0),
+                ElectricPower::Generation(_) => ElectricPower::Generation(0.0),
+                ElectricPower::Bidirectional(_) => ElectricPower::Bidirectional(0.0),
+            }),
+            reactive_power_kvar: zero(self.reactive_power_kvar),
+            fuel_w: self.fuel_w.map(|f| FuelPower {
+                fuel_type: f.fuel_type,
+                consumption_w: 0.0,
+            }),
+            thermal_output_w: zero(self.thermal_output_w),
+            sensible_cooling_w: zero(self.sensible_cooling_w),
+            latent_cooling_w: zero(self.latent_cooling_w),
+        }
+    }
 }
 
 /// Discrete/continuous state outputs from one equipment step.
@@ -1447,13 +1471,13 @@ pub fn validate_core_contract(
         // non-finite values (NaN, ±∞) that would silently corrupt
         // downstream telemetry, ports, and checkpoint serialization.
         for (name, value) in &checks {
-            if let Some(v) = value {
-                if !v.is_finite() {
-                    return Err(HaresError::Equipment(format!(
-                        "core_output contract violation for '{}' ({:?}): non-finite value in {}={}",
-                        desc.name, caps, name, v,
-                    )));
-                }
+            if let Some(v) = value
+                && !v.is_finite()
+            {
+                return Err(HaresError::Equipment(format!(
+                    "core_output contract violation for '{}' ({:?}): non-finite value in {}={}",
+                    desc.name, caps, name, v,
+                )));
             }
         }
 
@@ -1510,44 +1534,44 @@ pub fn validate_core_contract(
         }
 
         // Main power consumed cannot be negative.
-        if let Some(p) = co.performance.main_power_kw {
-            if p < 0.0 {
-                record_range_rejection("performance.main_power_kw", p, desc.id.0);
-                return Err(HaresError::Equipment(format!(
-                    "core_output contract violation for '{}' ({:?}): \
+        if let Some(p) = co.performance.main_power_kw
+            && p < 0.0
+        {
+            record_range_rejection("performance.main_power_kw", p, desc.id.0);
+            return Err(HaresError::Equipment(format!(
+                "core_output contract violation for '{}' ({:?}): \
                      performance.main_power_kw={p} must be >= 0.0; \
                      negative main power is physically impossible",
-                    desc.name, caps
-                )));
-            }
+                desc.name, caps
+            )));
         }
 
         // Sensible cooling by documented convention is ≤ 0 (heat removed from zone).
-        if let Some(sc) = co.flows.sensible_cooling_w {
-            if sc > 0.0 {
-                record_range_rejection("flows.sensible_cooling_w", sc, desc.id.0);
-                return Err(HaresError::Equipment(format!(
-                    "core_output contract violation for '{}' ({:?}): \
+        if let Some(sc) = co.flows.sensible_cooling_w
+            && sc > 0.0
+        {
+            record_range_rejection("flows.sensible_cooling_w", sc, desc.id.0);
+            return Err(HaresError::Equipment(format!(
+                "core_output contract violation for '{}' ({:?}): \
                      flows.sensible_cooling_w={sc} must be <= 0.0; \
                      positive sensible cooling violates the sign convention \
                      (negative = heat removed from zone)",
-                    desc.name, caps
-                )));
-            }
+                desc.name, caps
+            )));
         }
 
         // Latent cooling by documented convention is ≤ 0 (moisture condensed from zone air).
-        if let Some(lc) = co.flows.latent_cooling_w {
-            if lc > 0.0 {
-                record_range_rejection("flows.latent_cooling_w", lc, desc.id.0);
-                return Err(HaresError::Equipment(format!(
-                    "core_output contract violation for '{}' ({:?}): \
+        if let Some(lc) = co.flows.latent_cooling_w
+            && lc > 0.0
+        {
+            record_range_rejection("flows.latent_cooling_w", lc, desc.id.0);
+            return Err(HaresError::Equipment(format!(
+                "core_output contract violation for '{}' ({:?}): \
                      flows.latent_cooling_w={lc} must be <= 0.0; \
                      positive latent cooling violates the sign convention \
                      (negative = moisture condensed from zone)",
-                    desc.name, caps
-                )));
-            }
+                desc.name, caps
+            )));
         }
 
         // setpoint_c: [-50, 80] °C is the plausible residential HVAC range.
@@ -1555,25 +1579,25 @@ pub fn validate_core_contract(
         // industrial process heat) but rare — warn rather than reject.
         // ASHRAE HoF 2021 Ch. 17: residential heating setpoints rarely below 15°C;
         // ASHRAE 55-2020 §5.3: typical occupied range 20-30°C.
-        if let Some(sp) = co.state.setpoint_c {
-            if !(-50.0..=80.0).contains(&sp) {
-                record_range_warning("state.setpoint_c", sp, desc.id.0);
-                if sp > 100.0 {
-                    tracing::warn!(
-                        equipment = %desc.name,
-                        equipment_id = desc.id.0,
-                        setpoint_c = sp,
-                        "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80] \
+        if let Some(sp) = co.state.setpoint_c
+            && !(-50.0..=80.0).contains(&sp)
+        {
+            record_range_warning("state.setpoint_c", sp, desc.id.0);
+            if sp > 100.0 {
+                tracing::warn!(
+                    equipment = %desc.name,
+                    equipment_id = desc.id.0,
+                    setpoint_c = sp,
+                    "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80] \
                          and may indicate a Fahrenheit-to-Celsius conversion bug"
-                    );
-                } else {
-                    tracing::warn!(
-                        equipment = %desc.name,
-                        equipment_id = desc.id.0,
-                        setpoint_c = sp,
-                        "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80]"
-                    );
-                }
+                );
+            } else {
+                tracing::warn!(
+                    equipment = %desc.name,
+                    equipment_id = desc.id.0,
+                    setpoint_c = sp,
+                    "setpoint_c={sp} °C outside plausible residential HVAC range [-50, 80]"
+                );
             }
         }
 
@@ -1587,25 +1611,23 @@ pub fn validate_core_contract(
         // residential load profile simulation"), so no per-equipment-class
         // allowlist is needed; any value past the bound is a diagnostic
         // signal, never a block.
-        if let Some(t) = co.flows.thermal_output_w {
-            if !(-100_000.0..=100_000.0).contains(&t) {
-                record_range_warning("flows.thermal_output_w", t, desc.id.0);
-                tracing::warn!(
-                    equipment = %desc.name,
-                    equipment_id = desc.id.0,
-                    thermal_output_w = t,
-                    "thermal_output_w={t} W outside residential plausibility range \
+        if let Some(t) = co.flows.thermal_output_w
+            && !(-100_000.0..=100_000.0).contains(&t)
+        {
+            record_range_warning("flows.thermal_output_w", t, desc.id.0);
+            tracing::warn!(
+                equipment = %desc.name,
+                equipment_id = desc.id.0,
+                thermal_output_w = t,
+                "thermal_output_w={t} W outside residential plausibility range \
                      [-100, 100] kW; may indicate a W-vs-kW unit bug or a \
                      performance-curve blow-up"
-                );
-            }
+            );
         }
 
         // --- mode-vs-flows consistency checks ---
         crate::mode_flow_guard::check_mode_flow_consistency(desc, co)
             .map_err(|v| HaresError::Equipment(v.message))?;
-        crate::mode_flow_guard::invariant_recheck_mode_flow_consistency(desc, co);
-        invariant_recheck_range_consistency(desc, co);
 
         return Ok(());
     }
@@ -1649,56 +1671,6 @@ pub fn validate_core_contract(
         details.join("; "),
     )))
 }
-
-/// Invariant re-check for physical-range validation.
-///
-/// Re-runs the same range constraints independently and logs a warning if a
-/// violation is found. Called after the production check has passed — a
-/// warning here means the production path has a logic bug.
-///
-/// Present only in debug or `check_invariants` builds.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn invariant_recheck_range_consistency(desc: &EquipmentDescriptor, co: &CoreOutput) {
-    if let Some(c) = co.performance.cop {
-        if c < 0.0 {
-            tracing::warn!(
-                equipment = %desc.name,
-                cop = c,
-                "invariant violation: negative COP ({c}) passed production check"
-            );
-        }
-    }
-    if let Some(p) = co.performance.main_power_kw {
-        if p < 0.0 {
-            tracing::warn!(
-                equipment = %desc.name,
-                main_power_kw = p,
-                "invariant violation: negative main_power_kw ({p}) passed production check"
-            );
-        }
-    }
-    if let Some(sc) = co.flows.sensible_cooling_w {
-        if sc > 0.0 {
-            tracing::warn!(
-                equipment = %desc.name,
-                sensible_cooling_w = sc,
-                "invariant violation: positive sensible_cooling_w ({sc}) passed production check"
-            );
-        }
-    }
-    if let Some(lc) = co.flows.latent_cooling_w {
-        if lc > 0.0 {
-            tracing::warn!(
-                equipment = %desc.name,
-                latent_cooling_w = lc,
-                "invariant violation: positive latent_cooling_w ({lc}) passed production check"
-            );
-        }
-    }
-}
-
-#[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-fn invariant_recheck_range_consistency(_desc: &EquipmentDescriptor, _co: &CoreOutput) {}
 
 /// Returns the total number of physical-range rejections in this process.
 #[cfg(feature = "observe")]
@@ -4000,15 +3972,25 @@ mod tests {
         }
     }
 
-    // The struct update is only "needless" without the `observe` feature,
-    // which adds a contribution-count field to ElectricalAccumulator.
-    #[allow(clippy::needless_update)]
     fn accumulator(load_w: f64, generation_w: f64, reactive_kvar: f64) -> ElectricalAccumulator {
-        ElectricalAccumulator {
-            load_power_w: load_w,
-            generation_power_w: generation_w,
-            reactive_power_kvar: reactive_kvar,
-            ..Default::default()
+        // The `observe` feature adds electrical_contribution_count to
+        // ElectricalAccumulator, so the two builds need different literals.
+        #[cfg(feature = "observe")]
+        {
+            ElectricalAccumulator {
+                load_power_w: load_w,
+                generation_power_w: generation_w,
+                reactive_power_kvar: reactive_kvar,
+                electrical_contribution_count: 0,
+            }
+        }
+        #[cfg(not(feature = "observe"))]
+        {
+            ElectricalAccumulator {
+                load_power_w: load_w,
+                generation_power_w: generation_w,
+                reactive_power_kvar: reactive_kvar,
+            }
         }
     }
 

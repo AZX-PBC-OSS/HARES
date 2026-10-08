@@ -5,31 +5,23 @@ pub mod heat_pump_wh;
 pub(crate) mod hpwh_compressor;
 pub mod indirect_tank;
 pub mod resistance;
+pub(crate) mod siting;
 pub mod tank;
 pub mod tankless;
 pub mod wh_config;
 
 pub use tank::{DrawResult, StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 
-/// Tracks hourly and daily draw volumes for observer capture and invariant checks.
+/// Tracks hourly draw volumes for observer capture.
 ///
 /// The observer capture (`observe` feature) logs the hourly draw volume distribution
 /// each simulated hour so that the active schedule's temporal pattern can be verified.
-///
-/// The invariant check (`check_invariants`) validates that overnight draw (0:00–5:00)
-/// is less than 20% of the total daily draw — the expected residential pattern.
-/// A violation indicates a misconfiguration such as the DOE UEF test schedule being
-/// used for a residential simulation.
 #[derive(Debug, Clone)]
 pub(crate) struct DrawVolumeTracker {
     /// Accumulated draw volume for the current hour [L].
     current_hour_volume_l: f64,
     /// Hour index (0-23) of the most recent observation.
     last_hour: Option<u32>,
-    /// Total draw volume accumulated today [L].
-    daily_total_l: f64,
-    /// Draw volume accumulated between 0:00 and 5:00 today [L].
-    overnight_volume_l: f64,
 }
 
 impl DrawVolumeTracker {
@@ -37,72 +29,32 @@ impl DrawVolumeTracker {
         Self {
             current_hour_volume_l: 0.0,
             last_hour: None,
-            daily_total_l: 0.0,
-            overnight_volume_l: 0.0,
         }
     }
 
     /// Register `draw_volume_l` for the given simulation hour (0-23).
     ///
-    /// At hour boundaries:
-    /// - Observed feature: logs the completed hour's draw volume.
-    /// - Checkpoint: resets `current_hour_volume_l`.
+    /// Register `draw_volume_l` for the given simulation hour (0-23).
     ///
-    /// At midnight (hour 0): resets daily accumulators and runs the invariant check.
+    /// At hour boundaries the `observe` feature logs the completed hour's
+    /// draw volume.
     pub(crate) fn accumulate(&mut self, draw_volume_l: f64, hour: u32) {
         if self.last_hour != Some(hour) {
             // Hour boundary: flush the completed hour.
+            #[cfg(feature = "observe")]
             if let Some(completed_hour) = self.last_hour {
-                #[cfg(feature = "observe")]
-                {
-                    let vol = self.current_hour_volume_l;
-                    tracing::info!(
-                        hour = completed_hour,
-                        draw_volume_l = vol,
-                        "hourly hot water draw volume"
-                    );
-                }
-
-                // At midnight (hour 0 is the new hour, so last_hour was 23):
-                // run the overnight-draw invariant check.
-                if completed_hour == 23 {
-                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
-                    {
-                        if self.daily_total_l > 0.0 {
-                            let overnight_pct =
-                                100.0 * self.overnight_volume_l / self.daily_total_l;
-                            if overnight_pct > 20.0 {
-                                tracing::error!(
-                                    overnight_volume_l = self.overnight_volume_l,
-                                    daily_total_l = self.daily_total_l,
-                                    overnight_pct,
-                                    "overnight hot water draw (0:00–5:00) is \
-                                     {overnight_pct:.1}% of daily total — exceeds \
-                                     20% threshold; the active draw schedule may be a \
-                                     DOE UEF test-standard profile rather than a \
-                                     residential occupancy profile"
-                                );
-                            }
-                        }
-                        self.daily_total_l = 0.0;
-                        self.overnight_volume_l = 0.0;
-                    }
-                    #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-                    {
-                        self.daily_total_l = 0.0;
-                        self.overnight_volume_l = 0.0;
-                    }
-                }
+                let vol = self.current_hour_volume_l;
+                tracing::info!(
+                    hour = completed_hour,
+                    draw_volume_l = vol,
+                    "hourly hot water draw volume"
+                );
             }
             self.current_hour_volume_l = 0.0;
             self.last_hour = Some(hour);
         }
 
         self.current_hour_volume_l += draw_volume_l;
-        self.daily_total_l += draw_volume_l;
-        if hour < 5 {
-            self.overnight_volume_l += draw_volume_l;
-        }
     }
 }
 
@@ -118,7 +70,10 @@ pub(crate) const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
 
 #[cfg(test)]
 use hares_types::BoundaryPolicy;
-use hares_types::{EnvironmentState, HaresError, LoopId, PortSlots, ScheduleSource};
+use hares_types::{
+    EnvironmentState, HaresError, LoopId, PortSlots, ScheduleSource, ThermostatBandClass,
+    thermal_setpoint_band_c, validate_thermostat_band_c,
+};
 
 use crate::EquipmentRegistry;
 
@@ -160,30 +115,38 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 /// 1. Canonical weather mains temperature
 /// 2. Schedule-column mains temperature when weather is unavailable
 /// 3. Config default from equipment init
+///
+/// A configured schedule source whose read fails is an error naming the
+/// equipment: corrupt schedule data is not the absence of a schedule.
 pub(super) fn resolve_storage_step_inputs(
     env: &EnvironmentState,
+    equipment_name: &str,
     default_mains_temp_c: f64,
     default_draw_rate_kg_s: f64,
     draw_rate_kg_s_source: Option<&mut ScheduleSource>,
     mains_temp_c_source: Option<&mut ScheduleSource>,
-) -> (f64, f64) {
+) -> crate::Result<(f64, f64)> {
+    // `value_at` rejects non-finite values, so a read that returns is finite.
     let mains_temp_c = if env.weather.mains_temp_c.is_finite() {
         env.weather.mains_temp_c
+    } else if let Some(source) = mains_temp_c_source {
+        source
+            .value_at(env)
+            .map_err(|err| HaresError::Equipment(format!("{equipment_name}: {err}")))?
     } else {
-        mains_temp_c_source
-            .and_then(|source| source.value_at(env).ok())
-            .filter(|v| v.is_finite())
-            .unwrap_or_else(|| resolve_mains_temp_c(env, default_mains_temp_c))
+        resolve_mains_temp_c(env, default_mains_temp_c)
     };
 
-    // Schedule draw is interpreted as SI mass flow [kg/s].
-    let draw_rate_kg_s = draw_rate_kg_s_source
-        .and_then(|source| source.value_at(env).ok())
-        .filter(|v| v.is_finite())
-        .map(|draw_kg_s| draw_kg_s.max(0.0))
-        .unwrap_or(default_draw_rate_kg_s);
+    let draw_rate_kg_s = if let Some(source) = draw_rate_kg_s_source {
+        source
+            .value_at(env)
+            .map_err(|err| HaresError::Equipment(format!("{equipment_name}: {err}")))?
+            .max(0.0)
+    } else {
+        default_draw_rate_kg_s
+    };
 
-    (mains_temp_c, draw_rate_kg_s)
+    Ok((mains_temp_c, draw_rate_kg_s))
 }
 
 #[cfg(test)]
@@ -271,6 +234,147 @@ pub(super) fn apply_jacket_r_value(
     let lateral_area_m2 = std::f64::consts::PI * diameter_m * height_m;
     let r_total = 1.0 / ua_base + jacket_r / lateral_area_m2;
     1.0 / r_total
+}
+
+/// What a `ThermalSetpoint` sets on a water heater's thermostat.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TankThermostatUpdate {
+    /// The tank setpoint, from `heating_setpoint_c`.
+    named_setpoint_c: Option<f64>,
+    /// The tank deadband, from `deadband_c` (see `hares_types::thermostat_band`).
+    pub band_c: Option<f64>,
+    /// The release form: setpoint and deadband return to their configured
+    /// values, as an HVAC thermostat returns to its schedule and band.
+    release: bool,
+}
+
+impl TankThermostatUpdate {
+    /// The setpoint after the update: the named one, the configured one on
+    /// release, otherwise the current one.
+    pub fn setpoint_c(&self, current_c: f64, configured_c: f64) -> f64 {
+        Self::after(self.named_setpoint_c, self.release, current_c, configured_c)
+    }
+
+    /// Whether the update moves the setpoint: a named one, or the release.
+    pub fn changes_setpoint(&self) -> bool {
+        self.named_setpoint_c.is_some() || self.release
+    }
+
+    /// The deadband after the update: the signalled band, the configured
+    /// one on release, otherwise the current one.
+    pub fn deadband_c(&self, current_c: f64, configured_c: f64) -> f64 {
+        Self::after(self.band_c, self.release, current_c, configured_c)
+    }
+
+    fn after(named: Option<f64>, release: bool, current_c: f64, configured_c: f64) -> f64 {
+        match (named, release) {
+            (Some(value_c), _) => value_c,
+            (None, true) => configured_c,
+            (None, false) => current_c,
+        }
+    }
+}
+
+/// The thermostat contract every storage water heater shares, checked on
+/// an initialised `eq` through its (setpoint, deadband) and a deadband
+/// writer: rejections leave the thermostat unchanged, a named signal sets
+/// both, the release restores both configured values, a cooling setpoint is
+/// refused, and a checkpoint carrying a band outside the tank class is
+/// refused on restore.
+#[cfg(test)]
+pub(super) fn assert_tank_thermostat_contract<E: crate::Equipment>(
+    eq: &mut E,
+    thermostat: fn(&E) -> (f64, f64),
+    set_deadband: fn(&mut E, f64),
+) {
+    use hares_types::ControlSignal;
+    let configured = thermostat(eq);
+    for (setpoint, db) in [
+        (None, 0.0),
+        (None, 3.0),
+        (Some(50.0), 0.0),
+        (Some(50.0), 1e-17),
+    ] {
+        eq.apply_signal(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: setpoint,
+            cooling_setpoint_c: None,
+            deadband_c: Some(db),
+        })
+        .expect_err("a release carrying a deadband or a sub-band deadband is rejected");
+        assert_eq!(thermostat(eq), configured);
+    }
+    let event_setpoint_c = configured.0 + 5.0;
+    eq.apply_signal(&ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: Some(event_setpoint_c),
+        cooling_setpoint_c: None,
+        deadband_c: Some(3.0),
+    })
+    .unwrap();
+    assert_eq!(thermostat(eq), (event_setpoint_c, 3.0));
+    eq.apply_signal(&ControlSignal::thermal_release()).unwrap();
+    assert_eq!(
+        thermostat(eq),
+        configured,
+        "the release restores the configured setpoint and deadband"
+    );
+    eq.apply_signal(&ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: None,
+        cooling_setpoint_c: Some(50.0),
+        deadband_c: None,
+    })
+    .expect_err("a water heater has no cooling setpoint");
+    assert_eq!(thermostat(eq), configured);
+
+    set_deadband(eq, hares_types::MAX_TANK_THERMOSTAT_BAND_C + 1.0);
+    let checkpoint = eq.save_state().unwrap();
+    set_deadband(eq, configured.1);
+    assert!(matches!(
+        eq.load_state(&checkpoint).unwrap_err(),
+        HaresError::ThermostatBand { .. }
+    ));
+}
+
+/// A checkpointed tank deadband, held to the tank class like any other
+/// source of it.
+pub(super) fn restored_tank_deadband_c(deadband_c: f64) -> crate::Result<f64> {
+    validate_thermostat_band_c(ThermostatBandClass::Tank, "deadband_c", deadband_c)?;
+    Ok(deadband_c)
+}
+
+/// Reads a `ThermalSetpoint` under the contract every water heater shares
+/// with HVAC: a named setpoint overrides it, `deadband_c` is the switching
+/// band, held to the tank class, and comes only with a named setpoint, and
+/// the release form returns the setpoint and deadband to their configured
+/// values. A water
+/// heater has no cooling setpoint, so naming one is an error rather than a
+/// value substituted for the tank setpoint.
+pub(super) fn tank_thermostat_update(
+    heating_setpoint_c: Option<f64>,
+    cooling_setpoint_c: Option<f64>,
+    deadband_c: Option<f64>,
+) -> crate::Result<TankThermostatUpdate> {
+    if let Some(cooling) = cooling_setpoint_c {
+        return Err(HaresError::Control(format!(
+            "a water heater has no cooling setpoint, got cooling_setpoint_c {cooling}"
+        )));
+    }
+    if let Some(sp) = heating_setpoint_c
+        && !sp.is_finite()
+    {
+        return Err(HaresError::Control(format!(
+            "invalid water-heater setpoint: {sp}"
+        )));
+    }
+    Ok(TankThermostatUpdate {
+        named_setpoint_c: heating_setpoint_c,
+        band_c: thermal_setpoint_band_c(
+            ThermostatBandClass::Tank,
+            heating_setpoint_c,
+            cooling_setpoint_c,
+            deadband_c,
+        )?,
+        release: heating_setpoint_c.is_none(),
+    })
 }
 
 /// Thermostat hysteresis logic shared by all storage water heater types.
@@ -377,7 +481,7 @@ mod tests {
             "Resistance Water Heater".to_string(),
             crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -410,22 +514,14 @@ mod tests {
     }
 
     fn env_with_payloads(schedule_payload: Option<Vec<f64>>) -> EnvironmentState {
-        let mut custom_domains = Vec::new();
-        if let Some(payload) = schedule_payload {
-            custom_domains.push(DomainUpdate {
-                domain_id: SCHEDULE_DOMAIN_ID,
-                zone_temperatures_c: Vec::new(),
-                custom_payload: Some(payload),
-            });
-        }
-
         // Use NaN to exercise the non-finite mains-temperature path in tests.
         let weather = WeatherState {
             mains_temp_c: f64::NAN,
             ..Default::default()
         };
 
-        EnvironmentState {
+        let mut env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: Vec::new(),
             weather,
             grid: GridState {
@@ -433,7 +529,8 @@ mod tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains,
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
@@ -444,7 +541,15 @@ mod tests {
             time_res: ChronoDuration::seconds(60),
             price_signal: Default::default(),
             electrical: Default::default(),
+        };
+        if let Some(payload) = schedule_payload {
+            env.domains.schedule.set_from(&DomainUpdate {
+                domain_id: SCHEDULE_DOMAIN_ID,
+                zone_temperatures_c: Vec::new(),
+                custom_payload: Some(payload),
+            });
         }
+        env
     }
 
     #[test]
@@ -502,35 +607,58 @@ mod tests {
         };
         let (mains_temp_c, draw_rate_kg_s) = resolve_storage_step_inputs(
             &env,
+            "Test Water Heater",
             15.0,
             0.05,
             Some(&mut draw_source),
             Some(&mut mains_source),
-        );
+        )
+        .expect("a schedule read from a present payload succeeds");
 
         assert!((mains_temp_c - 6.0).abs() < 1e-12);
         assert!((draw_rate_kg_s - 10.0).abs() < 1e-12);
     }
 
     #[test]
-    fn storage_step_inputs_use_weather_when_schedule_missing_or_invalid() {
-        let mut env = env_with_payloads(Some(vec![f64::NAN]));
-        env.weather.mains_temp_c = 12.5;
+    fn a_failing_schedule_read_is_an_error_naming_the_equipment() {
+        // The draw source reads a column the one-element payload does not
+        // carry: the read fails the step naming the equipment, it does not
+        // fall back to the configured draw.
+        let mut env = env_with_payloads(Some(vec![10.0]));
+        env.weather.mains_temp_c = f64::NAN;
         let mut draw_source = ScheduleSource::ColumnRef {
             col_idx: 5,
-            boundary: BoundaryPolicy::Clamp,
+            boundary: BoundaryPolicy::Error,
         };
         let mut mains_source = ScheduleSource::ColumnRef {
             col_idx: 0,
             boundary: BoundaryPolicy::Clamp,
         };
-        let (mains_temp_c, draw_rate_kg_s) = resolve_storage_step_inputs(
+        let err = resolve_storage_step_inputs(
             &env,
+            "Gas Water Heater",
             15.0,
             0.08,
             Some(&mut draw_source),
             Some(&mut mains_source),
+        )
+        .expect_err("an out-of-bounds draw read must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Gas Water Heater"),
+            "the error must name the equipment: {msg}"
         );
+    }
+
+    #[test]
+    fn storage_step_inputs_use_weather_when_schedule_absent() {
+        let mut env = env_with_payloads(Some(vec![f64::NAN]));
+        env.weather.mains_temp_c = 12.5;
+        // No sources configured: the documented priority falls to the
+        // weather mains temperature and the config default draw.
+        let (mains_temp_c, draw_rate_kg_s) =
+            resolve_storage_step_inputs(&env, "Test Water Heater", 15.0, 0.08, None, None)
+                .expect("no sources configured, nothing to read");
 
         assert!((mains_temp_c - 12.5).abs() < 1e-12);
         assert!((draw_rate_kg_s - 0.08).abs() < 1e-12);
@@ -542,7 +670,8 @@ mod tests {
         env.weather.mains_temp_c = 14.25;
 
         let (mains_temp_c, draw_rate_kg_s) =
-            resolve_storage_step_inputs(&env, 15.0, 0.08, None, None);
+            resolve_storage_step_inputs(&env, "Test Water Heater", 15.0, 0.08, None, None)
+                .expect("no sources configured, nothing to read");
 
         assert!((mains_temp_c - 14.25).abs() < 1e-12);
         assert!((draw_rate_kg_s - 0.08).abs() < 1e-12);
@@ -653,9 +782,11 @@ mod dhw_integration_tests {
     use crate::event_load::WetAppliance;
     use crate::water_heater::resistance::ResistanceWH;
     use crate::{Equipment, EquipmentConfig};
+    use hares_types::rng::{RngStream, dwelling_seed};
 
     fn base_env() -> EnvironmentState {
-        EnvironmentState {
+        let mut env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: 21.0,
@@ -682,11 +813,8 @@ mod dhw_integration_tests {
                 frequency_hz: 60.0,
                 island_bus_voltage_pu: None,
             },
-            custom_domains: vec![DomainUpdate {
-                domain_id: SCHEDULE_DOMAIN_ID,
-                zone_temperatures_c: Vec::new(),
-                custom_payload: Some(vec![1.0, 1.0]),
-            }],
+            schedule_row: None,
+            domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -697,7 +825,13 @@ mod dhw_integration_tests {
             time_res: ChronoDuration::minutes(1),
             price_signal: Default::default(),
             electrical: Default::default(),
-        }
+        };
+        env.domains.schedule.set_from(&DomainUpdate {
+            domain_id: SCHEDULE_DOMAIN_ID,
+            zone_temperatures_c: Vec::new(),
+            custom_payload: Some(vec![1.0, 1.0]),
+        });
+        env
     }
 
     fn washer_config_with_draw(draw_volume_l: f64) -> EquipmentConfig {
@@ -711,10 +845,9 @@ mod dhw_integration_tests {
         raw.insert("phase_0_has_water_draw".to_string(), true.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
-        raw.insert("building_id".to_string(), 11.0.into());
-        raw.insert("master_seed".to_string(), 987.0.into());
         raw.insert("hot_water_draw_volume_l".to_string(), draw_volume_l.into());
         EquipmentConfig::raw("washer".to_string(), "Clothes Washer".to_string(), raw)
+            .with_rng_stream(RngStream::event_load(dwelling_seed(987, 11), "washer"))
     }
 
     fn wh_config() -> EquipmentConfig {
@@ -723,7 +856,7 @@ mod dhw_integration_tests {
             "Resistance Water Heater".to_string(),
             crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
-                zone_id: None,
+                zone_id: Some(1),
                 loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,

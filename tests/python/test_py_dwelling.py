@@ -91,6 +91,7 @@ class TestStep:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -129,6 +130,7 @@ class TestTelemetry:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
         dw.step()
@@ -159,6 +161,7 @@ class TestTelemetry:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
         for _ in range(3):
@@ -180,6 +183,7 @@ class TestStepError:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
 
         with pytest.raises(RuntimeError, match=r"step\(\) called before initialize"):
@@ -198,6 +202,7 @@ class TestStepError:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
 
         with pytest.raises(RuntimeError, match=r"simulate\(\) called before initialize"):
@@ -216,6 +221,7 @@ class TestStepError:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
         result = dw.step()
@@ -234,6 +240,7 @@ class TestStepError:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
 
@@ -268,6 +275,7 @@ class TestStepError:
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
+            write_output=False,
         )
         dw.initialize()
         dw.step()
@@ -297,6 +305,7 @@ class TestDurationValidation:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
 
     def test_duration_s_neg_inf_raises_value_error(self):
@@ -313,6 +322,7 @@ class TestDurationValidation:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
 
     def test_time_res_s_inf_raises_value_error(self):
@@ -329,6 +339,7 @@ class TestDurationValidation:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
 
     def test_duration_s_zero_raises_value_error(self):
@@ -345,6 +356,7 @@ class TestDurationValidation:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
 
     def test_time_res_s_zero_raises_value_error(self):
@@ -361,6 +373,7 @@ class TestDurationValidation:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
 
     def test_duration_s_above_chrono_bound_raises_value_error(self):
@@ -378,6 +391,7 @@ class TestDurationValidation:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
 
     def test_time_res_s_above_chrono_bound_raises_value_error(self):
@@ -394,6 +408,7 @@ class TestDurationValidation:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
 
     def test_duration_s_int_above_chrono_bound_raises_value_error(self):
@@ -412,6 +427,7 @@ class TestDurationValidation:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
 
     def test_time_res_s_int_above_chrono_bound_raises_value_error(self):
@@ -430,5 +446,6 @@ class TestDurationValidation:
                 defaults_path=str(HARES_DEFAULTS),
                 bldg_id=42,
                 master_seed=0,
+                write_output=False,
             )
 
