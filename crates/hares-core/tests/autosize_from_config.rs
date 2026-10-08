@@ -104,6 +104,12 @@ fn furnace_without_heating_capacity_hpxml() -> &'static str {
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
+        <AirInfiltrationMeasurement>
+          <BuildingAirLeakage>
+            <UnitofMeasure>ACH</UnitofMeasure>
+            <AirLeakage>0</AirLeakage>
+          </BuildingAirLeakage>
+        </AirInfiltrationMeasurement>
         <Walls>
           <Wall>
             <SystemIdentifier id="Wall1"/>

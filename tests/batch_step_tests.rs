@@ -47,6 +47,9 @@ dew_point_c = 4.0
 rel_humidity_pct = 55.0
 pressure_kpa = 101.325
 
+[infiltration]
+ach = 0.0
+
 [schedule]
 occupancy = 1.0
 

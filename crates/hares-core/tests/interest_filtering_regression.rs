@@ -83,6 +83,9 @@ dew_point_c = {dew_point_c}
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
 
+[infiltration]
+ach = 0.0
+
 [schedule]
 occupancy = 0.0
 
@@ -421,6 +424,8 @@ outdoor_temp_c = -20.0
 dew_point_c = -5.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
+[infiltration]
+ach = 0.0
 [schedule]
 occupancy = 1.0
 [event_load]

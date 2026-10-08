@@ -2489,6 +2489,8 @@ equipment_name = "None"
 [setpoints]
 heating_c = 20.0
 cooling_c = 27.0
+[infiltration]
+ach = 0.0
 [schedule]
 occupancy = 0.0
 occupants_present = false

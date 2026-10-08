@@ -96,6 +96,9 @@ dew_point_c = -5.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
 
+[infiltration]
+ach = 0.0
+
 [schedule]
 occupancy = 1.0
 
@@ -400,6 +403,9 @@ dew_point_c = -35.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
 
+[infiltration]
+ach = 0.0
+
 [schedule]
 occupancy = 1.0
 
@@ -441,6 +447,9 @@ outdoor_temp_c = -30.0
 dew_point_c = -35.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.0
 
 [schedule]
 occupancy = 0.0
@@ -613,6 +622,9 @@ dew_point_c = -15.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
 
+[infiltration]
+ach = 0.0
+
 [schedule]
 occupancy = 1.0
 
@@ -656,6 +668,9 @@ outdoor_temp_c = -10.0
 dew_point_c = -15.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.0
 
 [schedule]
 occupancy = 0.0

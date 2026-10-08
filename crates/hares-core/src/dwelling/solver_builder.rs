@@ -1428,7 +1428,14 @@ pub(crate) fn build_default_solvers(
                             n_i: coeffs.n_i,
                         }
                     } else {
-                        InfiltrationMethod::Ach { ach: 0.0 }
+                        return Err(HaresError::Dwelling(
+                            "the building declares no air infiltration measurement and no \
+                             constant air changes rate: OS-HPXML errors on the missing \
+                             measurement (airflow.rb:124, 'Could not find air infiltration \
+                             measurement.'); declare an infiltration measurement (ACH, CFM, \
+                             ELA or SLA) or a constant ACH"
+                                .into(),
+                        ));
                     }
                 }
                 ZoneType::Attic => attic_infiltration_method(
@@ -1896,7 +1903,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -2032,6 +2039,72 @@ mod tests {
         assert!(
             msg.contains("no matching environment zone"),
             "error must state the cause, got: {msg}"
+        );
+    }
+
+    /// A conditioned zone with no infiltration measurement and no constant
+    /// air changes rate fails the build: OS-HPXML errors on the missing
+    /// measurement (airflow.rb:124, "Could not find air infiltration
+    /// measurement."), it does not run the zone airtight.
+    #[test]
+    fn infiltration_with_no_measurement_and_no_constant_ach_is_a_build_error() {
+        use chrono::TimeZone;
+
+        let mut building = building_with_zones(vec![zone_of_type(ZoneType::Conditioned)]);
+        // The helper declares its own 0 ACH; the strict site needs the
+        // un-declared building.
+        building.infiltration_constant_ach = None;
+        let env = env_with_zone_temps(&[21.0]);
+
+        let sim_config = hares_io::SimulationConfig {
+            start_time: chrono::FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)
+                .single()
+                .expect("timestamp"),
+            duration: chrono::Duration::hours(1),
+            time_res: chrono::Duration::minutes(1),
+            output_verbosity: 0,
+            output_path: None,
+            write_output: false,
+            output_format: hares_io::OutputFormat::Csv,
+            output_chunk_size: 128,
+            setpoint_deadband_c: None,
+            master_seed: 0,
+            civil_timezone: None,
+            site_location: hares_io::SiteLocationOverride::default(),
+            retain_batches: false,
+            rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        };
+        let weather_avgs = super::WeatherAverages {
+            avg_wind_m_s: 2.0,
+            avg_ambient_c: 10.0,
+            avg_ground_c: 12.0,
+            wsf: None,
+        };
+
+        let err = match super::build_default_solvers(
+            &env,
+            &sim_config,
+            &building,
+            &hares_io::DefaultsStore::empty(),
+            &weather_avgs,
+            &[],
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!(
+                "a conditioned zone with no infiltration measurement and no constant ACH must fail the build"
+            ),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("infiltration"),
+            "error must name infiltration, got: {msg}"
+        );
+        assert!(
+            msg.contains("airflow.rb:124"),
+            "error must cite the reference, got: {msg}"
         );
     }
 
@@ -3250,7 +3323,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -3463,7 +3536,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -3704,7 +3777,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -3946,7 +4019,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -4240,7 +4313,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -4512,7 +4585,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -4774,7 +4847,7 @@ mod tests {
             infiltration_ach_natural: None,
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
-            infiltration_constant_ach: None,
+            infiltration_constant_ach: Some(0.0),
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
