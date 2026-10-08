@@ -1302,7 +1302,7 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   face, floors over garages and crawlspaces, a slab's conditioned face):
   which convection model the frozen values come from.
 - **Reference behavior:** OS-HPXML v1.12.0 sets its EnergyPlus models'
-  inside convection algorithm to TARP (`simcontrols.rb:23-24`) and
+  inside convection algorithm to TARP (`simcontrols.rb:24-25`) and
   EnergyPlus evaluates the TARP model (Walton 1983, Eqs. 90-92) each step
   at the actual surface-air difference and direction. OCHRE freezes the
   same TARP model at init time at the clamped operating point
@@ -1328,7 +1328,7 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   A-matrix's linearization baseline, and the ASHRAE Simple table is a
   defensible baseline: it is EnergyPlus's own default inside convection
   algorithm when none is set (`DataHeatBalance.hh:613`,
-  `ConvectionCoefficients.cc:1842`), and with it the per-step correction
+  `DataHeatBalance.hh:1842`), and with it the per-step correction
   stays live on the horizontal surfaces (it fires above ΔT ≈ 1.6 K in the
   reduced direction), where OCHRE's larger frozen value would suppress it
   entirely at typical surface-air differences. Re-aligning the baseline to

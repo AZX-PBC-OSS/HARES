@@ -703,7 +703,7 @@ mod tests {
     /// OCHRE's frozen film instead freezes the TARP model at the clamped
     /// ΔT of 12.9 K (h = 1.782, R ≈ 0.561, its committed winter oracle
     /// output's "Attic Floor ... Film Coefficient" columns), and
-    /// OS-HPXML v1.12.0 runs the TARP model per step (simcontrols.rb:23-24).
+    /// OS-HPXML v1.12.0 runs the TARP model per step (simcontrols.rb:24-25).
     /// This test fails if the frozen films silently take OCHRE's values;
     /// the divergence of record is docs/alignment/DIVERGENCES.md's.
     #[test]
