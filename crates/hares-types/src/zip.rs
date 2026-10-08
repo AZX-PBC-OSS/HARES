@@ -660,6 +660,48 @@ mod tests {
         assert_eq!(zip.apply(0.0, 0.0), (0.0, 0.0));
     }
 
+    /// The real coefficients drive real power and the reactive coefficients
+    /// drive reactive power at off-nominal voltage, with distinct arrays on
+    /// each side so the wiring is discriminated (DIVERGENCES D-022): the
+    /// cross-wired form (real coefficients scaling Q, reactive scaling P)
+    /// produces different numbers here.
+    #[test]
+    fn real_power_follows_the_real_coefficients_and_reactive_the_reactive_off_nominal() {
+        let zip = ZipLoad {
+            zp: 0.5,
+            ip: 0.0,
+            pp: 0.5,
+            zq: 0.0,
+            iq: 1.0,
+            pq: 0.0,
+            pf: 0.9,
+            v0: 1.0,
+        };
+        let p_kw = 2.0;
+        let v = 0.5;
+        let (real, reactive) = zip.apply(p_kw, v);
+
+        // P through (zp, ip, pp): 0.5·0.25 + 0.5 = 0.625 of the draw.
+        let expected_real = p_kw * (0.5 * v * v + 0.5);
+        // Q through (zq, iq, pq) and tan(acos(pf)): 1.0·v of the real base.
+        let expected_reactive = expected_real * zip.pf.clamp(-1.0, 1.0).acos().tan() * v;
+        assert!(
+            (real - expected_real).abs() < 1e-12,
+            "{real} vs {expected_real}"
+        );
+        assert!(
+            (reactive - expected_reactive).abs() < 1e-12,
+            "{reactive} vs {expected_reactive}"
+        );
+
+        // The cross-wired numbers differ: P through (zq, iq, pq) would be
+        // p_kw·v, Q through (zp, ip, pp) would be p_kw·v²·tan(acos(pf))·0.625.
+        let cross_real = p_kw * v;
+        let cross_reactive = p_kw * (v * v) * zip.pf.clamp(-1.0, 1.0).acos().tan() * 0.625;
+        assert!((real - cross_real).abs() > 1e-9);
+        assert!((reactive - cross_reactive).abs() > 1e-9);
+    }
+
     #[test]
     fn reactive_kvar_equals_p_times_tan_acos_pf_at_nominal() {
         // With a unity reactive base (0, 0, 1) at nominal voltage the Q-only

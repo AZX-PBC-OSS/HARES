@@ -69,7 +69,8 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_HVAC_ENERGY) => Some(23.1),
         ("cz6b_resistance_res_wh", METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY) => Some(21.9),
         // resstock_bldg0112631_24h: a lock on a 24 h window that predates
-        // this triage, measured 25.4 %; its cause is not yet established.
+        // this triage, measured 25.4 %; its cause is not yet established;
+        // the defect ledger carries the open question.
         ("resstock_bldg0112631_24h", METRIC_PEAK_HVAC_POWER) => Some(25.7),
         // resstock_bldg0112631_24h: the zone temperature band is re-sized to
         // the observed residual plus margin. The fixture's

@@ -7,12 +7,16 @@ Reference, ASHRAE) demands it. Anyone re-aligning with the reference
 implementation will "fix" these back — this ledger is what stops that.
 
 Entry format: quantity → reference behavior → HARES behavior →
-justification → measured impact → pinning tests.
+justification → class → measured impact → pinning tests. The class is
+the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
+(c) architecture, (d) comparison.
 
 ---
 
 ## D-001: Exterior radiative-split resistance (`rad_res_k_w`)
 
+- **Quantity:** the outside skin's radiative coupling: the film's parallel
+  split against OCHRE's bare-film divider.
 - **Reference behavior:** OCHRE `BoundarySurface.radiation_res =
   res_film / area` (Envelope.py:257). The exact parallel form
   `res_film * res_material / (res_film + res_material) / area` is present in
@@ -31,6 +35,9 @@ justification → measured impact → pinning tests.
   stucco, metal skins; the ASHRAE 140 case-600 wall). EnergyPlus
   `CalcOutsideSurfTemp` solves the outside face with every path carrying its
   own parallel conductance — no film-split approximation at all.
+- **Class:** (a). OCHRE's bare-film divider is its own approximation (its
+  comment's assumption `res_material >> res_film`); the exact parallel form is
+  the reference physics.
 - **Measured impact:** steady-state free-float error 0.392 K on an assembled
   siding wall pre-fix, exact post-fix; freefloat-oracle opaque exterior gap
   vs OCHRE 30.9 % → 7.3 % once this fix and the absorbed-flux diagnostic
@@ -43,6 +50,8 @@ justification → measured impact → pinning tests.
 
 ## D-002: Exterior skin diagnostics report absorbed flux, not the injected share
 
+- **Quantity:** what the exterior-skin diagnostics report: the skin-level
+  absorbed flux against the rad_frac-scaled injection.
 - **Reference behavior:** OCHRE reports `surface.solar_gain` (absorbed at the
   skin, W — `Irradiance (W) × absorptivity`, Envelope.py:1133) and
   `surface.lwr_gain` (net skin LWR); the rad_frac-scaled injection into the
@@ -56,6 +65,8 @@ justification → measured impact → pinning tests.
 - **Justification:** like-for-like parity with OCHRE's
   "{boundary} Ext. Solar/LWR Gain (W)"; a diagnostic that is a view of the
   mechanism cannot silently disagree with it.
+- **Class:** (b) in HARES (the mixed semantics were HARES's own error),
+  recorded as the contract of record.
 - **Measured impact:** the freefloat oracle's opaque comparison became
   like-for-like (see D-001); the I-02 gross/net confusion becomes
   unprovable: the gross is the absorbed skin flux, the zone load is the
@@ -66,6 +77,8 @@ justification → measured impact → pinning tests.
 
 ## D-003: Per-step TARP interior convection (diagnostic and injection)
 
+- **Quantity:** the interior convection the reported zone loads carry:
+  the per-step ΔT-dependent film against the frozen one.
 - **Reference behavior:** OCHRE's interior film conductance is frozen at
   init-time in the A-matrix.
 - **HARES behavior:** the per-boundary net-convection accumulation uses the
@@ -75,11 +88,20 @@ justification → measured impact → pinning tests.
 - **Justification:** EnergyPlus ERM 26.1 — "Inside Heat Balance": Interior
   Convection; the reported zone loads are the physically correct convective
   flux, not the discretization's artifact.
+- **Class:** (a). The per-step TARP model is the EnergyPlus default interior
+  convection algorithm; OCHRE's frozen film is its simplification. The frozen
+  A-matrix discretization is a tracked limitation, not the divergence of
+  record.
+- **Measured impact:** none recorded separately: the per-boundary columns'
+  like-for-like reading is exercised by the pinning tests and the BESTEST and
+  parity bounds hold.
 - **Pinning tests:** `bestest_900ff_root_cause.rs`,
   `tests/envelope_opaque_loads.rs` (net conduction vs. per-boundary columns).
 
 ## D-004: Gross consumption = load behind the meter
 
+- **Quantity:** the gross-consumption metric's definition: the load behind
+  the meter against the net column's positive part.
 - **Reference behavior:** none (OCHRE reports net-column positive parts);
   this was HARES's own semantic error, recorded here because the fix is a
   deliberate contract.
@@ -92,12 +114,23 @@ justification → measured impact → pinning tests.
   reporting 0.0 consumption (the positive part of the net meter) is false at
   the moment it matters most. Battery-discharge-to-grid breaks the identity
   by design (documented on the field).
-- **Pinning tests:** `engine.rs` metric identity assertions,
+- **Class:** (b) in HARES (the positive-part reading was HARES's own
+  semantic error), recorded as the contract of record.
+- **Measured impact:** the identity holds exactly on the corpus's PV
+  exporters (the resstock_smoke invariants, 5/5); the failure the fix removed
+  is a home reporting 0.0 consumption while serving real load.
+- **Pinning tests:** `crates/hares-io/src/output/metrics.rs`
+  (`finish_separates_net_consumption_and_pv_generation`,
+  `renewable_fraction_uses_abs_for_negative_pv`,
+  `zero_net_with_high_gross_consumption_and_pv_is_correct`,
+  `all_negative_power_gives_negative_net_positive_gross_pv`),
   `tests/resstock_smoke.rs` energy invariants (5/5, includes the PV
   exporters).
 
 ## D-005: Appliance and plug-load heat has a radiant part
 
+- **Quantity:** the split of appliance, plug-load and fuel-load heat into a
+  convective part on the air and a long-wave radiant part on the surfaces.
 - **Reference behavior:** OCHRE adds an equipment's radiative gain fraction
   to its convective fraction and puts the sum on the zone air node
   (`ochre/Equipment/Equipment.py:80-85`, injected at line 197). Its source
@@ -118,6 +151,8 @@ justification → measured impact → pinning tests.
   distributes the radiant part to the zone's surfaces, not the air. Radiant
   heat warms the room's mass first, so air-only injection overstates how
   fast the air temperature responds.
+- **Class:** (a). OCHRE's air-only injection is its own simplification (its
+  source's FUTURE note says the same); the radiant split is the reference's.
 - **Measured impact:** conditioned-zone temperature MAE against the OCHRE
   1-hour fixtures, all-convective then with this split:
   cz2a_gas_furnace_ac_res_wh 0.690 to 0.677 °C, cz2a_pv_ev 0.908 to 0.899,
@@ -141,6 +176,8 @@ justification → measured impact → pinning tests.
 
 ## D-006: Lighting heat is 0.2 convective, 0.6 radiant and 0.2 visible
 
+- **Quantity:** lighting heat's split: 0.6 long-wave radiant, 0.2 visible
+  short-wave, 0.2 convective, against OCHRE's all-convective.
 - **Reference behavior:** OCHRE gives every lighting load
   `Convective Gain Fraction (-)` 1 and `Radiative Gain Fraction (-)` 0
   (`ochre/utils/hpxml.py:1522-1527`, under "TODO: get default
@@ -156,6 +193,8 @@ justification → measured impact → pinning tests.
   takes the convected part as the remainder of those fractions
   (`InternalHeatGains.cc:1393`) and the radiant part as
   `Q * FractionRadiant` (line 7639).
+- **Class:** (a). OCHRE's fractions are its own placeholder (its source's
+  TODO note says the same); the split is the reference's.
 - **Measured impact:** conditioned-zone temperature MAE, appliance split only
   then with this lighting split: cz5a_minisplit_gas_wh 1.622 to 1.743 °C,
   cz6b_resistance_res_wh 0.696 to 0.708, resstock_bldg0112631_24h 0.421 to
@@ -178,6 +217,8 @@ justification → measured impact → pinning tests.
 
 ## D-007: Visible light is absorbed like transmitted diffuse solar
 
+- **Quantity:** where the lights' visible part is deposited: the zone's
+  short-wave distribution against the zone air.
 - **Reference behavior:** OCHRE has no short-wave internal gain; the visible
   part of lighting is zone-air heat (D-006).
 - **HARES behavior:** the visible part travels on its own short-wave port
@@ -217,34 +258,10 @@ justification → measured impact → pinning tests.
   `production_step_injects_shortwave_gain` fails when the production step
   leaves the short-wave gain out.
 
-## D-013: A load's month multipliers scale its schedule
-
-- **Reference behavior:** OCHRE reads a scheduled load's
-  `month_multipliers` only to zero the schedule in the months whose
-  multiplier is exactly 0 (`ochre/Equipment/ScheduledLoad.py:36-40`, "for
-  ceiling fans"); any other value is ignored. An HPXML load's monthly shape
-  is already in the schedule OCHRE builds for it.
-- **HARES behavior:** `month_multiplier_0` to `month_multiplier_11` scale
-  the electric and gas draw of a scheduled load, and the event power of an
-  event load or wet appliance, in their month, whatever the schedule's
-  source; a daily profile's own month factors stay its shape and the
-  multipliers apply on top. A multiplier of 0 turns the month off, as in
-  OCHRE. A negative or non-finite multiplier is a parameter error.
-- **Justification:** the parameter names a scale factor, and an input of
-  0.5 that changes nothing is a silent substitution. Zeroing is the special
-  case of scaling, so every input OCHRE gives meaning to means the same in
-  HARES.
-- **Measured impact:** none on the committed inputs: no resolver writes the
-  keys, so they come only from an equipment's own parameters or an
-  override, and no fixture or golden sets them.
-- **Pinning tests:** `scheduled_load::tests::month_multipliers_scale_a_daily_profile`,
-  `scheduled_load::tests::month_multiplier_zeroes_schedule_in_target_month`,
-  `event_load::tests::month_multiplier_scales_event_output`,
-  `event_load::tests::month_multiplier_zero_suppresses_event_output`,
-  `schedule_helpers::tests::negative_and_non_finite_month_multipliers_are_parameter_errors`.
-
 ## D-008: Wind terrain from the site, not an assumed rural one
 
+- **Quantity:** the wind terrain (the Sherman-Grimsrud multiplier and
+  exponent) driving the attic and garage leakage.
 - **Reference behavior:** OCHRE drives attic and garage leakage with
   rural terrain, multiplier 0.85 and exponent 0.20, whatever the site
   ("assumed rural for now", `ochre/utils/envelope.py:648-649`). OS-HPXML
@@ -261,6 +278,8 @@ justification → measured impact → pinning tests.
   This follows OS-HPXML and departs from OCHRE.
 - **Justification:** the input states the terrain. A suburban house does
   not see open-country wind.
+- **Class:** (a). OCHRE's rural assumption is its own placeholder ("assumed
+  rural for now"); OS-HPXML reads the site's type, and so does HARES.
 - **Measured impact:** `data/examples/BEopt_example.xml` is suburban. At
   its attic (2.36 m of hip above a 2.44 m walls top), f_t falls from 0.610
   (the ASHRAE power law HARES used before) to 0.558, against OCHRE's 0.741,
@@ -274,6 +293,7 @@ justification → measured impact → pinning tests.
 
 ## D-009: A gable attic's volume from its span and pitch
 
+- **Quantity:** a gable attic's zone volume and its leakage height.
 - **Reference behavior:** OS-HPXML v1.12.0 has one attic rule, a square
   hip under the roofs whatever their shape: volume one third of the roof
   footprint times a height of 0.5 sin(atan(slope)) sqrt(footprint)
@@ -327,6 +347,9 @@ justification → measured impact → pinning tests.
   from 7.5 to 8.5 ft and the volume by 13 %. The stack effect is driven by
   the height of the air column the attic actually holds, which is the
   ridge rise of the geometry whose volume it takes.
+- **Class:** (a) against both references' rules: the hip undercounts the
+  volume and OCHRE's gable-wall rise inherits the eaves; HARES reads the
+  input's geometry.
 - **Measured impact:** on `data/examples/BEopt_example.xml` the attic is
   127.4 m³ at a 2.29 m rise. OS-HPXML's hip gives 87.7 m³ and OCHRE 144.4
   m³. Attic MAE against the OCHRE conditioned oracle, from the hip to this
@@ -355,6 +378,9 @@ justification → measured impact → pinning tests.
 
 ## D-010: Outside convective roughness from the surface's material
 
+- **Quantity:** the outside convective film's roughness class of each
+  surface: the material's EnergyPlus record against one `Rough` for
+  everything.
 - **Reference behavior:** OS-HPXML v1.12.0 gives every surface the
   roughness `Rough` (multiplier 1.67): `model.rb:49` and `:95` default
   `roughness: 'Rough'` and no caller passes another. OCHRE hardcodes 1.67
@@ -436,6 +462,8 @@ justification → measured impact → pinning tests.
   has, so a shingle roof and a vinyl wall convect alike. The dataset
   record for the same material is the evidence for each class; every row
   departs from OS-HPXML's one `Rough`.
+- **Class:** (a). EnergyPlus's roughness-by-material is the physics;
+  OS-HPXML's single `Rough` is its simplification.
 - **Measured impact:** on `data/examples/BEopt_example.xml` (asphalt
   shingle roof, vinyl siding), attic MAE against the OCHRE conditioned
   oracle in the dynamic runs:
@@ -461,6 +489,8 @@ justification → measured impact → pinning tests.
 
 ## D-011: The equivalent battery holds the multiplied zone capacitance
 
+- **Quantity:** the equivalent battery's capacitance basis: the multiplied
+  zone capacitance against the air alone.
 - **Reference behavior:** OS-HPXML v1.12.0 multiplies every zone's air
   capacitance by one temperature capacitance multiplier, 7 by default
   (`simcontrols.rb:27-28`, `defaults.rb:219-221`); it has no equivalent
@@ -481,6 +511,8 @@ justification → measured impact → pinning tests.
   multiplier on the zone, the same capacitance is in the battery, as in
   OCHRE's. A battery defined on the air alone would report a seventh of
   the storage the simulated zone shows.
+- **Class:** none (a consequence of the capacitance multiplier, not a
+  departure from either reference).
 - **Measured impact:** the conditioned zone's capacitance on the golden
   `consumer_shape_900s` home (`bldg0176227`, 749.8 m³) is 1.7644 kWh/K
   against 0.2521 kWh/K before, and on `BEopt_example.xml` (271.8 m³)
@@ -540,6 +572,40 @@ justification → measured impact → pinning tests.
   and the structural envelope oracles pin the capacitance and the
   constructions the bound stands on.
 
+## D-013: A load's month multipliers scale its schedule
+
+- **Quantity:** a scheduled load's month multipliers: a scale on the
+  month's draw against OCHRE's zero-only reading.
+- **Reference behavior:** OCHRE reads a scheduled load's
+  `month_multipliers` only to zero the schedule in the months whose
+  multiplier is exactly 0 (`ochre/Equipment/ScheduledLoad.py:36-40`, "for
+  ceiling fans"); any other value is ignored. An HPXML load's monthly shape
+  is already in the schedule OCHRE builds for it.
+- **HARES behavior:** `month_multiplier_0` to `month_multiplier_11` scale
+  the electric and gas draw of a scheduled load, and the event power of an
+  event load or wet appliance, in their month, whatever the schedule's
+  source; a daily profile's own month factors stay its shape and the
+  multipliers apply on top. A multiplier of 0 turns the month off, as in
+  OCHRE. A negative or non-finite multiplier is a parameter error.
+- **Justification:** the parameter names a scale factor, and an input of
+  0.5 that changes nothing is a silent substitution. Zeroing is the special
+  case of scaling, so every input OCHRE gives meaning to means the same in
+  HARES.
+- **Class:** (a) on the parameter's meaning: OCHRE's zero-only reading is
+  its own limitation (its source names it "for ceiling fans"); zeroing is
+  the special case of scaling.
+- **Measured impact:** none on the committed inputs: no resolver writes
+  the per-month keys (an HPXML extension's `MonthlyScheduleMultipliers`
+  feeds the schedule profile's own monthly shape, which OCHRE bakes into
+  its generated schedule the same way), so they come only from an
+  equipment's own parameters or an override, and no fixture or golden
+  sets them.
+- **Pinning tests:** `scheduled_load::tests::month_multipliers_scale_a_daily_profile`,
+  `scheduled_load::tests::month_multiplier_zeroes_schedule_in_target_month`,
+  `event_load::tests::month_multiplier_scales_event_output`,
+  `event_load::tests::month_multiplier_zero_suppresses_event_output`,
+  `schedule_helpers::tests::negative_and_non_finite_month_multipliers_are_parameter_errors`.
+
 ## D-014: ASHP single-speed heating defaults from the RESNET anchor model, not the OCHRE CSV
 
 - **Quantity:** the default heating capacity and EIR temperature curves of
@@ -551,17 +617,19 @@ justification → measured impact → pinning tests.
   (`HPXMLtoOpenStudio/resources/defaults.rb:8254`), EIR
   `eirm17full = 1.356` at 17 °F (`defaults.rb:8287`), both linear in
   outdoor temperature between and below the anchors (the defaulted
-  datapoints all sit at the rated indoor temperature,
-  `defaults.rb:2960-2968`; the E+ coil reads them through a
+  datapoints all sit at the rated indoor temperature: `correct_ft_cap_eir`
+  sets each heating datapoint's indoor temperature to the 70 °F
+  `AirSourceHeatRatedIDB`, `hvac.rb:2956-2968`; the E+ coil reads them
+  through a
   `Table:Lookup` with linear extrapolation and `output_min: 0.0`,
   `hvac.rb:3240-3252`; the no-detailed-data biquadratic fallback carries
   ±100 °C curve limits, `hvac.rb:3254-3266`). EnergyPlus evaluates the
   curve inputs clamped to the curve's limits (the CurveManager),
-  resets a negative capacity ratio to 0 with a warning
-  (`DXCoils.cc:11272-11290`), runs the compressor only above
-  `MinOATCompressor` (`DXCoils.cc:11192`), and applies the on-demand
+  resets a negative capacity modifier to 0 with a warning
+  (`DXCoils.cc:10950-10965`), runs the compressor only above
+  `MinOATCompressor` (`DXCoils.cc:10874-10876`), and applies the on-demand
   reverse-cycle defrost model
-  (`DXCoils.cc:11324-11355`: `1/(1 + 0.01446/dw)`, capacity
+  (`DXCoils.cc:10995-10999`: `1/(1 + 0.01446/dw)`, capacity
   `0.875·(1-FDT)`, power `0.954·(1-FDT)`).
 - **HARES behavior (since this fix):** the single-speed ASHP default
   capacity curve is the reference's capacity line in °C
@@ -618,7 +686,7 @@ justification → measured impact → pinning tests.
   capacity its air receives.
 - **Reference behavior:** OS-HPXML v1.12.0 maps every conditioned
   location into the one conditioned space: `geometry.rb`
-  `create_or_get_space` (1704-1716) rewrites
+  `get_space_from_location` (1704-1716) rewrites
   `HPXML::conditioned_locations` (hpxml.rb:12311-12316: conditioned
   space, basement - conditioned, crawlspace - conditioned, other housing
   unit) to `LocationConditionedSpace`, and the HVAC serves that zone
@@ -714,11 +782,11 @@ justification → measured impact → pinning tests.
   expected directions: cooling fell where cooling runs
   (consumer_shape hvac_cooling 1115.28 → 1114.72 kWh), heating rose
   slightly (95.12 → 95.18 kWh), and the free-float BESTEST peaks fell
-  (900FF peak 46.61 → 45.96 °C, min 3.44 → 3.18 °C); case 600's annual
+  (  900FF peak 46.61 → 45.96 °C, min 3.44 → 3.18 °C); case 600's annual
   cooling fell 6134.0 → 5905.8 kWh. The committed goldens are the
   re-captured values; the pinning test closes the balance exactly
   (pool == opaque + out + inward).
- - **Pinning tests:** `crates/hares-envelope/src/thermal_solver/solar.rs`
+- **Pinning tests:** `crates/hares-envelope/src/thermal_solver/solar.rs`
    (`diffuse_pool_leaves_back_out_through_the_windows`: the closed-form
    EnergyPlus shares and the energy closure;
    `solar_distribution_conserves_energy_randomized`: the conservation
@@ -830,3 +898,341 @@ justification → measured impact → pinning tests.
   means; the weather state's ground temperature binding is pinned by
   the EPW weather parity tests (`crates/hares-io/tests/
   weather_parity.rs`).
+
+---
+
+## D-019: A BEopt/OCHRE-format input's declared microwave is modelled once
+
+- **Quantity:** the microwave oven's energy and gains on an input whose
+  schedule is a BEopt/OCHRE event file (the `Occupancy (Persons)` family).
+- **Placement note:** this row is placed and numbered by the register
+  audit. The count-once fix and the pinning tests below land with their
+  own in-flight block; at the audit's base a `microwave` schedule column
+  still auto-creates the 100 kWh/yr Microwave load on an OS-HPXML-derived
+  building. The in-flight block's own copy of this entry sits under
+  D-015, a number the folded conditioned-basement merge already holds:
+  that copy is dropped at the fold and this D-019 is the entry of
+  record.
+- **Reference behavior:** OS-HPXML v1.12.0 models no microwave appliance:
+  its bundled HPXML v3 schema has no `Microwave` element, its appliance
+  set (`hotwater_appliances.rb`) has no microwave, its schedule files
+  carry no microwave column (`schedules.rb`), and the microwave's energy
+  sits inside the residual "other" plug loads that `defaults.rb`
+  `get_residual_mels_values` sizes from RECS 2020 (the residual is
+  applied to `PlugLoadTypeOther`, `defaults.rb:4766`, values from
+  `defaults.rb:7505-7530`). The vendored OCHRE agrees on the accounting
+  and goes further: it has no Microwave equipment at all (the appliance
+  set `ochre/utils/hpxml.py:1663-1683` reads ClothesWasher, ClothesDryer,
+  Dishwasher, Refrigerator, Freezer and CookingRange only; `MEL_NAMES`
+  maps only `TV other` and `other`, `ochre/utils/hpxml.py:38-40`), and a
+  schedule CSV column it does not know raises
+  (`ochre/utils/schedule.py:448` indexes `ALL_SCHEDULE_NAMES`, which has
+  no microwave row, `ochre/utils/schedule.py:15-105`).
+- **HARES behavior (since the count-once fix):** the microwave is modelled
+  exactly once, and only when the input's own accounting separates it. On
+  an OS-HPXML-derived building (the `occupants` schedule family) the
+  microwave energy stays in the residual plug loads and a `microwave`
+  schedule column shapes nothing additional: it is reported unread, like
+  any other column no mapping applies to. On a BEopt/OCHRE-format input
+  (the `Occupancy (Persons)` event family) a `microwave` column or an
+  explicit `<Microwave>` element models the microwave once, with
+  OS-HPXML's plug-load radiant split (`rad_frac = 0.6 * sens_frac`,
+  `misc_loads.rb:89`) over the electric range's sensible split HARES
+  already carries (0.72 sensible, 0.08 latent).
+- **Justification:** class (b) at the root and class (a) on top. The
+  double count was HARES's own bug: a `microwave` column auto-created a
+  100 kWh/yr Microwave load on top of a residual already containing the
+  microwave energy, which neither reference does; fixed at the root. The
+  BEopt branch is the deliberate divergence: BEopt's own accounting
+  models the microwave as an appliance, so an input of that family that
+  declares one is honoured once instead of dropped the way OCHRE drops
+  it; its gains take the reference's plug-load radiant split rather than
+  OCHRE's radiative-gain-fraction-zero MEL form
+  (`ochre/utils/hpxml.py:1553-1559`).
+- **Measured impact:** no checked-in HPXML fixture or schedule file
+  carries a microwave column or a `<Microwave>` element, so every golden
+  compares bitwise, both profiles. The modelled change is on new inputs:
+  an OS-HPXML building with a microwave column loses the 100 kWh/yr
+  double count (its plug-load total is the residual alone), and a
+  BEopt/OCHRE-format input's declared microwave moves 43.2% of its input
+  power radiant (0.6 of the 0.72 sensible) instead of none of it.
+- **Pinning tests:**
+  `crates/hares-io/src/schedule_resolve.rs`
+  (`an_os_hpxml_schedules_microwave_column_counts_only_the_residual_mels`,
+  `the_microwave_column_is_unknown_only_outside_the_beopt_family`,
+  `microwave_csv_column_creates_spec_with_event_schedule_and_nonzero_energy`
+  for its radiant-split assertion),
+  `crates/hares-core/tests/schedule_columns.rs`
+  (`a_microwave_column_on_an_os_hpxml_building_counts_only_the_residual_mels`).
+
+---
+
+## D-020: The MSHP's default speed stages are evenly spaced at a flat EIR
+
+- **Quantity:** the speed stages (per-stage capacity and EIR) a
+  mini-split heat pump heater gets when its input declares no stage list.
+- **Reference behavior:** OCHRE sizes an MSHP's stages from its
+  multispeed equipment database (`ochre/defaults/HVAC Multispeed
+  Parameters.csv`, the `MSHP Heater` rows): capacity ratios 0.40, 0.60,
+  0.80 and 1.20 of rated with a per-stage COP declining with speed
+  (5.14, 3.96, 3.77 and 3.42 at 9.5 HSPF). The rows are per-product
+  calibrations (their "Received From" column names the calibrated
+  building or BEopt), and the top stage exceeds rated.
+- **HARES behavior:** with no explicit `stage_heating_capacities_w`, an
+  MSHP generates four evenly spaced stages from
+  `min_compressor_fraction` (default 0.25) to 1.0 of rated:
+  0.25, 0.50, 0.75 and 1.00. The stage EIRs are flat at the rated EIR
+  (`eir_part_load_benefit` defaults to 0) unless the input provides
+  `stage_heating_eirs`, which are never overwritten.
+- **Justification:** the class is not established. EnergyPlus's
+  `Coil:Heating:DX:MultiSpeed` takes explicit stage capacities and has
+  no default spacing rule, so neither reference is an authority for the
+  no-input case: OCHRE's rows are product calibrations (one tops above
+  rated), HARES's even spacing is its own disclosed default. The
+  biquadratic temperature curves are a different mechanism and keep the
+  OCHRE CSV columns (D-014). The gap is a candidate cause beside the
+  mini-split fixture's open peak-power question in `tests/parity/mod.rs`
+  (the reference's peak draw sits near its 0.40-rated first stage);
+  the cause there is not yet established either.
+- **Measured impact:** the mini-split parity fixture
+  (`cz5a_minisplit_gas_wh`, a 36 kW MSHP with no stage list) runs with
+  HARES's 9/18/27/36 kW stages against OCHRE's 14.4/21.6/28.8/43.2 kW
+  ones, inside its parity bands; no golden fixture carries a mini-split
+  at all.
+- **Pinning tests:** `crates/hares-equipment/src/hvac/heat_pump/heater.rs`
+  (`mshp_speed_stages_hardcoded_at_25_50_75_100pct`,
+  `mshp_eir_identical_across_all_stages`,
+  `mshp_stage_heating_eirs_preserved_when_is_mini_split`). The first two
+  fail when the default stages revert to the OCHRE CSV's ratios or its
+  per-stage COPs.
+
+## D-021: The HPWH's low-power compressor class is a continuous UEF transition
+
+- **Quantity:** the trigger and curve treatment of a heat pump water
+  heater's low-power compressor class (the 120 V product family's
+  distinct COP and capacity curves and widened ambient lockout).
+- **Reference behavior:** OCHRE's HPXML import triggers the low-power
+  coefficients by an exact-equality sentinel, `UEF == 4.9`
+  (`ochre/utils/hpxml.py:1174-1181`), documented there as "a temporary
+  flag for designating 120V HPWHs in [the] panels branch of ResStock",
+  and applies its preset values (cop, setpoint, hp-only mode, tank
+  temperature) as a hard switch for that one product class.
+- **HARES behavior:** the parser never substitutes the product presets:
+  the COP always derives from the UEF
+  (`low_power_hpwh_auto_detected_from_uef_without_hardcoded_presets`),
+  and the low-power transition is continuous, a linear cross-fade of the
+  COP and capacity curve outputs over UEF in [4.8, 5.0]
+  (`low_power_blend_factor`, `heat_pump_wh.rs`), with the widened
+  ambient lockout bounds applied with the blend.
+- **Justification:** class (a). OCHRE's sentinel is its own temporary
+  flag for one SKU family, an exact-equality step discontinuity on a
+  continuous parameter; HARES keeps the coefficients (verified against
+  `WaterHeater.py:469-470`) and generalizes the trigger to the UEF band
+  the flag intended.
+- **Measured impact:** no committed fixture or golden carries a UEF in
+  [4.8, 5.0] or a low-power HPWH, so no golden moves; the divergence is
+  on new inputs, where a UEF of 4.95 gets 75% of the low-power curves
+  instead of OCHRE's standard-coefficient hard no at 4.9 exactly.
+- **Pinning tests:** `crates/hares-io/tests/hpxml_parity.rs`
+  (`low_power_hpwh_auto_detected_from_uef_without_hardcoded_presets`),
+  which fails when the parser reverts to the sentinel's preset
+  substitution and COP.
+
+## D-022: The ZIP model wires the real coefficients to P and the reactive to Q
+
+- **Quantity:** which ZIP coefficient array drives real power and which
+  drives reactive power at off-nominal bus voltage.
+- **Reference behavior:** OCHRE cross-wires them:
+  `ochre/Equipment/Equipment.py:200-218` (`run_zip`) computes
+  `reactive_kvar = electric_kw * pf_mult * zip_p.dot(v_quadratic)` and
+  `electric_kw = electric_kw * zip_q.dot(v_quadratic)`, so the real
+  coefficients scale the vars and the reactive coefficients scale the
+  watts.
+- **HARES behavior:** `ZipLoad::apply` (`hares-types/src/zip.rs`) scales
+  real power by the real coefficients `(zp, ip, pp)` and reactive power
+  by the reactive coefficients `(zq, iq, pq)`, the physically correct
+  wiring (the Z/I/P decomposition of each quantity's own voltage
+  response).
+- **Justification:** class (a). OCHRE's cross-wiring is a bug (its own
+  arrays are documented per-quantity); no reference derives Q's voltage
+  response from P's coefficients.
+- **Measured impact:** none on the committed frames: at nominal voltage
+  the two wirings coincide (both coefficient arrays sum to about one),
+  and no committed frame carries a voltage event, so the cross-wiring's
+  tens-of-percent error at off-nominal voltage touches no committed
+  frame. The class table's rows (OCHRE's ZIP Parameters.csv values)
+  carry strongly non-flat reactive coefficients, so the error is real
+  on any input that drives the bus off 1.0 pu.
+- **Pinning tests:** `crates/hares-types/src/zip.rs`
+  (`real_power_follows_the_real_coefficients_and_reactive_the_reactive_off_nominal`,
+  `apply_is_bit_identical_to_legacy_arithmetic_for_all_class_rows`).
+  The first fails when the wiring reverts to OCHRE's cross-wired form.
+
+## D-023: The window's U-factor decomposes into glass and both films
+
+- **Quantity:** the resistance split of a window's U-factor into the
+  glass-only resistance and the interior and exterior film resistances.
+- **Reference behavior:** OCHRE sets the window's exterior film
+  resistance to zero and lumps it into the glass:
+  `create_rc_data` (`ochre/Models/Envelope.py:302`, used at :294-304)
+  sets `res_ext_w = 0` and `r_window = 1/U - res_int_w`.
+- **HARES behavior:** `window_u_factor_decomposition`
+  (`hares-physics/src/solar.rs`) recovers the EnergyPlus Window
+  Calculation Module's Step-1 decomposition: the interior film from the
+  U-factor's embedded assumption, the exterior film from the standard
+  winter coefficient, and the glass as the remainder, so solar
+  parameters are computed against the true glass-only resistance.
+- **Justification:** class (a). The EnergyPlus Window Calculation
+  Module's Step 1 defines all three resistances; absorbing the exterior
+  film into the glass overstates the glass resistance the absorbed
+  solar acts on.
+- **Measured impact:** the assembled resistance is exact to 1e-10 across
+  the pinned U-factor range, so the decomposition changes no input that
+  carried the same U-factor; the solar parameters the glass-only
+  resistance feeds are the outputs the solar parity tests pin.
+- **Pinning tests:** `crates/hares-physics/tests/solar_parity.rs`
+  (`window_decomposition_low_e_double_pane` and the sibling
+  decomposition tests at U 5.5, 6.5 and 1.0, plus the error cases).
+  Each fails if the exterior film is absorbed into the glass again.
+
+## D-024: A leap-year EPW keeps its February 29
+
+- **Quantity:** the rows of an 8784-row (leap-year) EPW weather file
+  that reach the simulation.
+- **Reference behavior:** OCHRE strips February 29 from a leap-year
+  EPW at import (`ochre/utils/schedule.py:172-175`, "leap year, remove
+  Feb 29 data"), keeping 8760 rows.
+- **HARES behavior:** the EPW parser keeps the full 8784 rows
+  (`crates/hares-io/src/epw.rs`, the leap-year handling); annual
+  simulations run 366 days and the schedule and weather indexing wrap
+  modularly across the year boundary.
+- **Justification:** class (a). Dropping a real day's measurements is a
+  data loss the reference toolchain does not make (EnergyPlus runs
+  leap-year weather natively); the modular wrap makes the extra day a
+  handled case, not an index error.
+- **Measured impact:** the leap-year golden
+  (`tests/fixtures/golden/leap_year_february_900s`, a February window
+  crossing the 29th) holds the preserved-day behaviour bitwise; no
+  other committed input is a leap-year EPW.
+- **Pinning tests:** the leap-year golden frame (bitwise, both
+  profiles, via `frame_golden compare-all`) and
+  `crates/hares-io/tests/weather_parity.rs`'s leap-year series-length
+  checks.
+
+## D-025: Zone capacitance density from the site's pressure, not a constant
+
+- **Quantity:** the air density in a zone's air-node capacitance.
+- **Reference behavior:** OCHRE uses the constant rho_air = 1.2041
+  kg/m³ for every zone's capacitance
+  (`ochre/Models/Envelope.py:11`, read at :442-446).
+- **HARES behavior:** the capacitance's density comes from the ideal
+  gas law at the site's standard atmospheric pressure for its
+  elevation, at the RC network's 20 °C linearization temperature
+  (`derive_zone_capacitances`, `hares-envelope/src/boundary_rc.rs`;
+  sea-level pressure when the elevation is unknown).
+- **Justification:** class (a). The capacitance scales the zone's
+  thermal mass; a Denver site's air is about 17 percent thinner than
+  the constant assumes. OCHRE's own infiltration code carries a TODO
+  against the same constant (docs/findings/air_density.md records the
+  investigation).
+- **Measured impact:** a Denver site's capacitance is about 18 percent
+  below the constant's (the standard pressure at 1.6 km elevation
+  carries a density near 0.99 kg/m³ against 1.2041), so the golden
+  homes' zones integrate correspondingly lighter air nodes; the goldens
+  are the re-captured values. The infiltration module keeps the same
+  constant OCHRE uses (its ELA-based form does not read the density).
+- **Pinning tests:** `boundary_rc::tests::zone_capacitance_follows_the_zone_volume`
+  (asserts the ideal-gas density, so reverting to the 1.2041 constant
+  fails it) and the boundary capacitance test at the non-sea-level
+  site (`boundary_rc.rs` tests, the ideal-gas assertion repeated).
+
+## D-026: Windows take part in the exterior long-wave exchange
+
+- **Quantity:** the exterior long-wave (sky, ground, air) exchange of
+  window surfaces.
+- **Reference behavior:** OCHRE computes no window exterior LWR at all:
+  windows carry no thermal node (`t_idx=None`) and are skipped in its
+  exterior radiation solve (`_solve_exterior_radiation`), their LWR
+  implicit in the U-factor.
+- **HARES behavior:** window exterior LWR is injected as
+  `(U / h_out) · q_lwr_per_m2 · area` with the effective sky-air
+  temperature form (`thermal_solver/longwave.rs`), reported as
+  `window_exterior_lwr_w`, below the 1.0 W/(m²·K) natural-convection
+  floor falling back to the ASHRAE conventional exterior coefficient
+  (34 W/(m²·K)) with a warning.
+- **Justification:** class (a). EnergyPlus computes the full exterior
+  long-wave balance for windows by iterating on the window's exterior
+  surface temperature inside the surface heat balance loop; the
+  T_eff form is the same exchange on the RC network's terms
+  (docs/findings/bestest_rca.md, Root Cause #3, records the
+  investigation and its residual under-correction).
+- **Measured impact:** clear-night attic and window cooling the
+  free-float BESTEST cases see that OCHRE's windows cannot; the
+  case-600/900 bands hold either way and the committed goldens are the
+  re-captured values.
+- **Pinning tests:** `thermal_solver/longwave.rs` tests
+  (`window_exterior_lwr_clear_night_is_cooling`,
+  `window_exterior_lwr_zero_when_sky_equals_air`,
+  `window_exterior_lwr_teff_scaling_reduces_raw_delta`,
+  `window_exterior_lwr_uses_actual_h_out_when_available`,
+  `window_exterior_lwr_horizontal_sees_more_sky_than_vertical`). Each
+  fails when windows are dropped from the exterior LWR solve again.
+
+## D-027: A scheduled space's moisture blends by humidity ratio
+
+- **Quantity:** the moisture (and wet-bulb) of the air an HPXML
+  equipment sees in a location with no modelled thermal zone ("other
+  heated space" and friends).
+- **Reference behavior:** OS-HPXML v1.12.0 runs such equipment against
+  a dry-bulb blend of the indoor and outdoor series
+  (`geometry.rb` `get_temperature_scheduled_space_values`) and averages
+  the two sources' RELATIVE HUMIDITIES for the ambient RH
+  (`waterheater.rb` `apply_hpwh_loc_temp_rh_sensors`, :1124).
+- **HARES behavior:** the dry-bulb follows the same blend and floors;
+  the moisture blends the two sources' HUMIDITY RATIOS at the same
+  weights (ASHRAE Handbook Fundamentals 2021 ch. 1, adiabatic mixing
+  of two moist-air streams), holds the ratio through the location
+  floor, and the wet-bulb is the thermodynamic wet-bulb of the blended
+  state (`hares-core/src/ambient_air.rs`).
+- **Justification:** class (a) against OS-HPXML. Averaging relative
+  humidities does not conserve water vapour and applies at a dry-bulb
+  neither source had; the ratio blend is the physically consistent
+  mixing rule.
+- **Measured impact:** no committed fixture places an HPWH or other
+  equipment in a scheduled space, so no golden moves; on new inputs the
+  blended placement's RH differs from OS-HPXML's average by the mix's
+  nonlinearity (largest when the sources' temperatures differ most).
+- **Pinning tests:** `hares-core/src/ambient_air.rs` tests
+  (`dry_bulb_follows_the_scheduled_space_table`,
+  `wet_bulb_comes_from_the_blended_humidity_ratio`,
+  `single_source_placements_carry_their_source_moisture`). The second
+  fails when the moisture reverts to an RH average.
+
+## D-028: The ASHP compressor lockout default is 0 °F, EnergyPlus's coil default is -8 °C
+
+- **Quantity:** the default minimum outdoor dry-bulb temperature for
+  compressor operation of a single-speed air-source heat pump whose
+  input declares no lockout.
+- **Reference behavior:** EnergyPlus's `Coil:Heating:DX:SingleSpeed`
+  defaults "Minimum Outdoor Dry-Bulb Temperature for Compressor
+  Operation" to -8 °C. OCHRE defaults to 0 °F (-17.78 °C) with an
+  explicit "0F default" annotation (`ochre/Equipment/HVAC.py:1208`,
+  its HPXML parser at `hpxml.py:947-951`), and OS-HPXML defaults
+  `CompressorLockoutTemperature` to 0 °F for single-speed air-to-air
+  heat pumps.
+- **HARES behavior:** the default lockout is -17.78 °C
+  (`DEFAULT_HP_LOCKOUT_TEMP_C`, `heat_pump/constants.rs`), following
+  OCHRE and OS-HPXML against EnergyPlus's coil default, with a 0.5 °C
+  hysteresis band.
+- **Justification:** the residential references' default reflects the
+  practical minimum operating temperature for typical residential
+  non-cold-climate ASHPs as manufactured and installed; the E+ object
+  default serves a wider equipment class. HARES keeps the residential
+  default. Deliberate on both sides; recorded because D-014's curve
+  work anchors this unit's -17 °C analysis on the same lockout.
+- **Measured impact:** none on the committed frames (no committed
+  fixture relies on the default's edge; the lockout's behavioural
+  effect is pinned at -20 °C outdoor in the defaults test).
+- **Pinning tests:** `crates/hares-equipment/tests/hvac_tests.rs`
+  (`ashp_defaults_match_reference`: the compressor delivers nothing at
+  -20 °C outdoor with no declared lockout).
