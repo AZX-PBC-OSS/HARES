@@ -1236,3 +1236,61 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
 - **Pinning tests:** `crates/hares-equipment/tests/hvac_tests.rs`
   (`ashp_defaults_match_reference`: the compressor delivers nothing at
   -20 °C outdoor with no declared lockout).
+
+## D-029: A generating PV's power-factor setpoint uses an unsigned pf
+
+- **Quantity:** the sign convention of a PV inverter's reactive power
+  under a `PowerFactorSetpoint` control signal.
+- **Reference behavior:** OCHRE encodes the generating-vars case in the
+  pf's own sign: a negative signed power factor commands gen-P/consume-Q
+  (`ochre/Equipment/PV.py:194-196`).
+- **HARES behavior:** the power factor keeps its (0, 1] magnitude
+  semantics and a generating PV at pf < 1 supplies vars, so bus
+  Q = -|P|·tan(acos(pf)); var absorption is commanded by the separate
+  `ReactiveSetpoint` signal, positive = absorbing
+  (`hares-equipment/src/pv/mod.rs`, the setpoint handling).
+- **Justification:** one convention across the control surface: the pf
+  setpoint names a magnitude, the reactive setpoint names a signed var
+  target; OCHRE's negative-pf encoding overloads a magnitude field with
+  a sign. The same operating intent produces the same bus vars on both
+  sides.
+- **Class:** none (a control-interface convention, not a physics
+  disagreement); recorded because re-aligning the control surface to
+  OCHRE's encoding would flip the sign of every commanded-var case.
+- **Measured impact:** none on the committed frames (no committed
+  fixture drives a PV pf setpoint); the convention is pinned at the
+  equipment level.
+- **Pinning tests:** `crates/hares-equipment/src/pv/mod.rs`
+  (`power_factor_setpoint_signal_computes_q`,
+  `pv_baseline_pf_supplies_vars_and_passes_port_core_validator`,
+  `pv_power_factor_setpoint_zeros_q_setpoint`),
+  `crates/hares-equipment/tests/lifecycle.rs` (the `ReactiveSetpoint`
+  absorption case).
+
+## D-030: Defrost recovery leaves a small latent gain on the zone
+
+- **Quantity:** the latent gain a reverse-cycle-defrost heat pump leaves
+  on the zone while it recovers from the defrost.
+- **Reference behavior:** EnergyPlus's DX heating coils produce no latent
+  output in any mode (its upstream issue #7440 records the gap); OCHRE
+  treats every heating step as all-sensible, SHR 1.0
+  (`ochre/Equipment/HVAC.py:458-462`).
+- **HARES behavior:** during an active reverse-cycle defrost of a unit
+  whose declared heating SHR is below 1.0, the step carries a small
+  positive latent gain, `capacity × (1 − SHR) × defrost_time_fraction`,
+  from the indoor coil's surface moisture evaporating into the supply
+  air; every non-defrost step and every SHR = 1.0 unit stays exactly
+  all-sensible (`heat_pump/heater.rs`).
+- **Justification:** HARES goes beyond both references: the E+ gap is
+  recorded upstream, and the mechanism (condensate re-evaporating on the
+  coil the defrost just warmed) is real where the declared SHR says the
+  unit's heating is not all-sensible.
+- **Class:** beyond the references (a deliberate extension, not a
+  disagreement with a reference's physics).
+- **Measured impact:** none on the committed frames (no committed
+  fixture declares a sub-1.0 heating SHR, so the gain is zero everywhere
+  committed); the gain appears only on inputs that declare the split.
+- **Pinning tests:** `crates/hares-equipment/tests/hvac_tests.rs`
+  (`heating_latent_nonzero_during_defrost_with_sub1_shr`,
+  `heating_latent_zero_with_default_shr_during_defrost`, and the
+  normal-heating zero above them).
