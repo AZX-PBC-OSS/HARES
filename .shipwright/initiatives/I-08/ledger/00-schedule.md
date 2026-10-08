@@ -1,0 +1,368 @@
+# Global schedule
+
+The single execution order for every entry in this ledger: engine and
+consumer, initiative work, numeric fixes, defect fixes and slop cleanup.
+Every ledger entry appears exactly once, except the entries whose commits
+have rows of their own: `11-other-defects.md` OD-2 (rows 31 and 94e) and
+OD-10 (rows 24a and 94f), and `09-numeric-fixes.md` B-14 (rows 94c, 94g
+and 94h). Rows run top to bottom; a row starts only when the row above is
+committed, reviewed, red-teamed and green.
+
+Rows 0 to 20 are committed, in table order; rows 0e, 8a, 9a and 10a are
+the found defects fixed in their own commits while the opening rows ran
+(`01-baseline-repair.md` BR-16 to BR-19), listed where they ran. Row 20
+(SL-7) ran before rows 16a to 16h, against `decision-log.md`
+`dl-i08-process.readiness`, and is listed where it ran. Implementation
+proceeds in the implementer's order (operator ruling), which currently
+runs: rows 21 (RT-3), 21a (RT-3a) and 21b (OR-18), committed
+(`44da330c`, `69950a98`, `1c18543a`; OR-18 landed as one commit and is
+under independent audit and red team); row 21c (OR-19), committed on branch
+`i08-fixes` and in review (`decision-log.md` `dl-i08-process.readiness`
+`next`); then row 16a (CN-17), row 16a1 (BR-20), and rows 16b to 16h;
+then row 22 onward. The ledger follows the code: each commit is
+recorded here in the State column as it lands, in the row where it ran.
+Every committed row gets an independent audit and a red team in
+`verification/`; that audit's and red team's findings become ledger
+entries or follow-up commits the implementer picks up. A row keeps its
+number when it moves, so references to it stay valid. Column "State"
+records each row that has run: `committed` with every commit hash the
+row landed as, `recorded` for a measurement in the `02-measurement.md`
+log, `done` for an operator step, `in progress` while its commit is
+pending in the working tree.
+
+Rules the order follows:
+
+- The opening sequence is `plan.md` §3's: Task 0, M-0, CN-0, CN-16, B0,
+  BR-1, BR-3, BR-2, BR-9, OR-5, BR-4, BR-7, BR-8, M-1, M-2, BR-6a, BR-6b,
+  BR-6c, BR-6d, BR-11, M-3, PR-1, PR-2, PR-3, PR-5, PR-6 (rows 0 to 18,
+  committed), then OR-11 (row 19) and SL-7 (row 20), committed. Then, in
+  the implementer's order (`decision-log.md`
+  `dl-i08-process.readiness` `next`): RT-3 (row 21) and RT-3a (row
+  21a), committed; OR-18 (row 21b), committed; OR-19 (row 21c),
+  committed on branch `i08-fixes`; then rows 16a to 16h: CN-17 (row 16a), BR-20 (row 16a1),
+  BR-10, BR-12, BR-13, BR-14, BR-15, the B0 re-check of row 16g and
+  OD-15 (row 16h); then row 22 onward. Verification rounds keep running
+  over rows not yet executed, correcting their entries ahead of the
+  implementer, rather than gating the start of a row; row 94c's own
+  verification round over `09-numeric-fixes.md` B-14 runs the same way.
+  Every committed row, with no exception for rows 0 to 18, gets an
+  independent audit and a red team; `plan.md` §3 states this same scope.
+- B0 (`08-consumer.md`) is captured before any engine change that can move
+  numbers: on the Task 0 head, after the consumer commits that change none
+  (rows 0b, 0c and 0e). Every B0 check and consumer gate runs through the
+  engine-under-test mechanism (`08-consumer.md`), never against an editable
+  install of the main engine tree. No committed engine row has a check run
+  that way: the log holds a check for rows 1 to 3 only, the recorded
+  commands of every opening row ran the consumer against an editable
+  install, as did BR-6d's gate and BR-11's B0 check, and PR-1 to PR-6 have
+  none recorded; the B0 results logged for OR-11 and SL-7 name no
+  engine-under-test worktree. CN-17's gate (row 16a) runs on the gate
+  engine, the latest commit on `feat/output-results` when it runs, and is
+  that row's check. Row 16g is the check of every other committed engine
+  row: on the CN-17 consumer, worktrees of `8b09ac4a`, `d7f0e381`,
+  `21d90588`, `26626710`, `1d471677`, `afa9a071`, `b8195c83`, `7b7a6a7d`,
+  `44da330c` and every later engine commit before the gate engine, in row
+  order, then the gate engine, whose capture is CN-17's gate capture
+  (`08-consumer.md`, B0 re-check). BR-11 changed only
+  `tools/frame_golden`, so the engine at `8b09ac4a` is row 12's and its
+  capture is the cumulative check of rows 1 to 12; a difference there is
+  bisected over the engine rows' commits `1d60f478`..`75a182a0`
+  (worktrees, in row order) before any row is named. A difference first
+  seen at a later commit names that commit's row.
+- CN-17 gates on the gate engine, and its contract-drift census
+  (`08-consumer.md` preamble) covers every engine row committed up to and
+  including it. CN-13's census covers every engine row committed after
+  the gate engine, up to row 26 (BR-20, the toolchain, among them if it
+  has not run by then).
+- The mechanical consumer migration (CN-13, then CN-1, CN-5, CN-9, CN-7,
+  CN-6, CN-10, CN-11 and the CN-8 checkpoint) lands before the first
+  numeric fix, gated bitwise against B0 (`dl-i08-architecture.consumer`).
+  CN-14, CN-3, CN-2, CN-4 and CN-12 follow the numeric fixes they depend
+  on (`08-consumer.md` order step 5).
+- Each numeric fix (`09-numeric-fixes.md`, including each of B-14's three
+  numeric commits; `04-fleet.md` FL-5; `11-other-defects.md` OD-9, OD-2's
+  site 6, OD-10's numeric commit and OD-20; `12-inputs.md` IN-8 and IN-9)
+  has its own row and its own commit, after the consumer migration of the
+  row before it, with its delta recorded; all of them follow the consumer
+  block.
+- Every other row is bitwise-neutral (`plan.md` §3, "No regressions"):
+  `[golden]` unchanged and its consumer check equal to B0. The golden
+  changes outside the numeric block are these, each with every other
+  product and column bitwise and its change recorded in the
+  `02-measurement.md` log: a fixture correction, BR-11 (row 13a,
+  `consumer_shape_900s` re-captured without the warm-up the consumer never
+  runs); new fixtures, BR-14 (row 16e) and FL-1's first commit (row 50);
+  a product schema change under M-1's schema change rule, OR-7 (row 45,
+  `Time` becomes a timestamp, every other column bitwise); and FL-2
+  (row 51), whose `fleet_mixed_offset` `aggregate` and `covered_weight`
+  products stop being empty and whose `homes` status values change
+  spelling. No consumer capture and no consumer-shaped golden reads a fleet
+  product, so FL-2's change is invisible to the consumer check. B-14's
+  first commit (row 94c) adds fixtures inside the numeric block.
+- The consumer re-baselines once (CN-4, B1), after every numeric fix, and
+  the pin advances once (CN-15), after the operator-approved push.
+- Every row with a commit ends with the verification block green
+  (`plan.md` §3), run on the staged change before the commit and again on
+  the commit. At the Task 0 head the block cannot be green (it fails on
+  `[clippy]`, `[test-observe]`, `[test-observe-profiling]`,
+  `[test-release]`, `[advisories]`, `[stray]`, and `[golden]` has no
+  fixtures), so inside the opening sequence "green" means every line green
+  so far, never fewer: rows 1 to 11 (rows 3a, 8a, 9a and 10a included) each
+  keep every line that was green before them green and turn their own
+  lines green, in this order: BR-1 `[test-observe]` and
+  `[test-observe-profiling]`, BR-2 `[clippy]`, OR-5 `[test-release]`, BR-7
+  `[stray]`, M-2 `[golden]`, BR-6b `[advisories]`. From row 11 (BR-6b) on,
+  every row ends with the whole block green. Consumer rows end with the
+  consumer gate green (`08-consumer.md`) and the engine block unchanged.
+
+Standing rules applied by every row, not rows of their own:
+`10-slop-cleanup.md` SL-2 (the census) and SL-3 (planning references and em
+dashes are removed in the items a row touches).
+
+Entries closed inside another row, which is their place in this order:
+`01-baseline-repair.md` BR-5 (row 4, OR-5); `10-slop-cleanup.md` SL-1
+(row 22, RT-1), SL-5 (row 73, CN-5), SL-6 (row 74, CN-9), SL-4 (row 76,
+CN-6), SL-9 (rows 3 and 14, BR-2's `fd23dd80` and PR-1's `d7f0e381`),
+SL-10 (row 52, FL-3) and SL-11 (row 25, SL-8).
+
+Column "Consumer check" states what proves the row neutral for the
+consumer (`08-consumer.md` preamble): **B0 (CN-17)** or **B0 (CN-13)**,
+the DE-trace capture of the consumer equals B0 bitwise, the label naming
+the consumer entry from which the consumer under test is taken, and "at
+row 16g" where that capture runs in the re-check step ("cumulative" where
+the `8b09ac4a` capture is the check); **golden**, `consumer_shape_900s`
+compares bitwise (inside `[golden]`); **gate+B0**, the consumer gate and
+the DE-trace gate against B0; **gate**, the consumer gate only (the row is
+absorbed by B1); **delta**, the row moves numbers and records its delta,
+including on `consumer_shape_900s`.
+
+| # | Entry | Title | File | Commit | Consumer check | State |
+|---|---|---|---|---|---|---|
+| 0 | Task 0 | operator: merge PR #27, fast-forward `feat/output-results`, create `i08-consumer`, list and quarantine the stray files | `plan.md` §3 | none | | done: local merge `1d60f478` |
+| 0a | M-0 | record the reference state | 02 | none | | recorded |
+| 0b | CN-0 | bitwise DE-trace capture tool and registry baseline | 08 | `feat: add a bitwise DE-trace capture and compare tool` | gate | committed `824805e` |
+| 0c | CN-16 | the three recorded gate failures | 08 | `fix: name the measured EV symptom and stop the AMI case at a missed detection` | gate | committed `a6d1345` |
+| 0e | BR-19 | a capture refuses an installed engine from outside the tree its header names (consumer repository) | 01 | `fix: a capture requires HARES_REPO so its header names the engine under test`, then `fix: a capture refuses an installed engine from outside the recorded tree` | gate | committed `f7131d7`, `aec2e3f` |
+| 0d | B0 | capture the consumer baseline on the Task 0 head | 08 | none | | recorded (consumer `aec2e3f`, engine `1d60f478`) |
+| 1 | BR-1 | `hares-equipment` compiles under `observe` | 01 | `fix: capture sum_sq_dod for the observe-build degradation log`, then `style: rustfmt the degradation-boundary observe tuple` | B0 (CN-17), at row 16g, cumulative | committed `aa22be6c`, `c88225df` |
+| 2 | BR-3 | un-nest the `dst` spring-forward test | 01 | `fix: un-nest the DST spring-forward hourly boundary test` | B0 (CN-17), at row 16g, cumulative | committed `c4ecc7d3` |
+| 3 | BR-2 (fixes SL-9) | clippy clean under `observe` | 01 | `fix: clear clippy lints in observe-only test helpers and observer capture` | B0 (CN-17), at row 16g, cumulative | committed `fd23dd80` |
+| 3a | BR-9 | nextest profile bounds test parallelism | 01 | `fix: bound test parallelism with a committed nextest profile` | B0 (CN-17), at row 16g, cumulative | committed `21d64b7b` |
+| 4 | OR-5 (closes BR-5) | health recorded and physics invariants enforced in every build | 03 (01) | `fix: record health and enforce physics invariants in every build profile`, then `fix: gate the stage snapshot to the builds that write it and finish the doc sweep` | B0 (CN-17), at row 16g, cumulative | committed `dc033cee`, `469ea955` |
+| 5 | BR-4 | CI runs clippy on all targets and features and the default, `dst`, `profiling` and plain-release test builds | 01 | `ci: run clippy on all targets and features, and test default, dst, profiling and plain release builds` | B0 (CN-17), at row 16g, cumulative | committed `363b4607` |
+| 6 | BR-7 | tests stop writing `dwelling_*.csv` into the tree | 01 | `fix: stop tests from writing dwelling output files into the working tree` | B0 (CN-17), at row 16g, cumulative | committed `81cc6d85` |
+| 7 | BR-8 | remove the eleven ignored print-only tests | 01 | `test: remove print-only investigation helpers that were ignored tests` | B0 (CN-17), at row 16g, cumulative | committed `b674a767` |
+| 8 | M-1 | golden capture and compare tool | 02 | `feat: add a golden capture and bitwise compare tool` | B0 (CN-17), at row 16g, cumulative | committed `979b8773` |
+| 8a | BR-16 | the EV daily `soh` binding carries the cfg of the check that reads it | 01 | `fix: gate the EV daily soh binding to the builds that read it` | B0 (CN-17), at row 16g, cumulative | committed `4a450949` |
+| 9 | M-2 | golden fixtures | 02 | `test: capture golden fixtures for DST, leap day, weather wrap, month boundaries and the consumer run shape` | B0 (CN-17), at row 16g, cumulative | committed `7643b4e7` |
+| 9a | BR-17 | the golden round-trip tests name the running feature set | 01 | `test: the golden round-trip tests name the running feature set` | B0 (CN-17), at row 16g, cumulative | committed `59b060d6` |
+| 10 | BR-6a | `rust-version` 1.89 and let chains | 01 | `refactor: raise rust-version to 1.89 and collapse nested ifs into let chains` | B0 (CN-17), at row 16g, cumulative | committed `39488581` |
+| 10a | BR-18 | a zero-row golden product reads back as a schema-only batch | 01 | `fix: read zero-row golden products as a schema-only batch` | B0 (CN-17), at row 16g, cumulative | committed `f880a6d7` |
+| 11 | BR-6b | every Rust dependency to its latest release | 01 | `build: upgrade every Rust dependency to its latest release` | B0 (CN-17), at row 16g, cumulative | committed `872cf289` |
+| 12 | BR-6c | HARES Python dependencies and maturin | 01 | `build: upgrade Python dependencies and maturin to their latest releases` | B0 (CN-17), at row 16g, cumulative | committed `75a182a0` |
+| 13 | BR-6d | consumer Python dependencies (consumer repository) | 01 | `build: upgrade Python dependencies to their latest releases` | gate+B0, established by CN-17 at row 16a | committed `5c651bc` |
+| 13a | BR-11 | golden tool: `initialization_duration_s = 0` means no warm-up; `consumer_shape_900s` re-captured | 01 | `fix: a golden manifest with no initialization duration runs no warm-up` | B0 (CN-17), at row 16g | committed `8b09ac4a` |
+| 13b | M-3 | the baseline | 02 | none | | recorded (valid record at `8b09ac4a`) |
+| 14 | PR-1 (fixes SL-9) | profiled phases partition the step; the profiling example deleted | 07 | `fix: partition the profiled step into phases that sum to the step time` | B0 (CN-17), at row 16g | committed `d7f0e381` |
+| 15 | PR-2 | memory high-water mark read once per summary | 07 | `perf: read the memory high-water mark once per summary, not four times per step` | B0 (CN-17), at row 16g | committed `21d90588` |
+| 16 | PR-3 | one per-thread counting allocator | 07 | `fix: count hot-path allocations per thread with one shared counting allocator` | B0 (CN-17), at row 16g | committed `26626710` |
+| 17 | PR-5 | the binding raises when profiling is compiled out | 07 | `fix: raise instead of returning zero timings when profiling is not compiled in` | B0 (CN-17), at row 16g | committed `1d471677` |
+| 18 | PR-6 | per-actor timings over the run, in the Python summary | 07 | `fix: accumulate per-actor timings over the run and report them in the profiling summary` | B0 (CN-17), at row 16g | committed `afa9a071` |
+| 19 | OR-11 | every remaining `check_invariants` gate classified; feature deleted | 03 | `fix: enforce every physics, conservation, non-finite and wiring check in every build profile` | B0 (CN-17), at row 16g; independent audit `verification/audit-OR-11-b8195c83.md` | committed `b8195c83` |
+| 20 | SL-7 | remove the dead coupled-LU path and identity solves | 10 | `refactor: remove the unreachable coupled-LU path and identity solves from the state-space model` | B0 (CN-17): CN-17's gate at row 16a runs on this commit; independent audit `verification/audit-SL-7-7b7a6a7d.md` | committed `7b7a6a7d` |
+| 16a | CN-17 | consumer gate follow-ups: compare-ignores-header test, gate output under `scratch/i08/<sha>/`, engine schema regenerated before every gate; BR-6d's acceptance established; drift census of every engine row up to the gate engine | 08 | `fix: the contract check reads the engine tree every gate resolves, and the bundle is written where the gate names` | gate+B0, on the gate engine (latest `feat/output-results` commit when it runs) | landed `18a8ec3` (consumer) on gate engine `1c18543a`: schema regenerated (sha 566057b68e528e90), base skip set 7, all 8 coverage cases green, the 28-row contract census zero-drift, B0 identical; the gate's 4 ami2 failures were OD-16 (fixed `fe804b59`, the four cases green, full gate 336/0/7); review pass done, red team owed with the next gate run |
+| 16a2 | OD-16 | controlled runs keep the HVAC equivalent battery well formed and the telemetry power sum reconciles after tolerated failures | 11 | `fix: the actuate release signal no longer zeroes the thermostat hysteresis and tolerated step failures reconcile the consistency sums` | goldens identical; consumer ami2 cases green | landed `fe804b59` (engine), found by CN-17's gate (the rule at the foot of this table placed it before row 95; it landed here because CN-17's gate needed it); audit `verification/audit-OD-16-fe804b59.md` 0 blockers, 2 majors (the FSM deadband auto-correct still reads the release form's deadband; water heaters apply or reject it), 5 minors; red team `verification/redteam-OD-16-fe804b59.md` ATTACK-SUCCEEDED, 1 blocker (a tiny positive deadband collapses the EBM window and the run continues silently with the HVAC dead: a regression of this commit), 4 majors, 5 minors; fixes on branch `fix-od16` (cut from `50a5c261`): `cae2ab0a` (one thermostat band rule, [0.1, 10] °C, one error; the release form `(None, None, None)` a pure pass-through; named axes never moved; hysteresis checkpointed), `10951bed` (failure budget `max_consecutive_step_failures`, default 1, every failure surfaced; failed steps deliver nothing to every reader), `d960b82b` (HVAC checks its EBM before committing; no 20 °C default; negative EBM energies below 10 °C allowed), `b6b4caa1`, `9713fe20`; goldens identical, BESTEST moves toward its bands, 7203 debug, 7160 release, pytest 1390; consumer impact: its DR release `(None, None, 0.0)` and its GEB pre-event two-axis delta are now rejected; four review rounds since (state in `plan-critique.md` fold register), round 4 tip `160ddb61` CHANGES-REQUIRED (1 major: end-use widening applies to every signal type; 4 minors); folded: the fix-od16 chain (39 commits, tip `585aece4`) rebased onto the head + the review's findings fixed + the failure budget in the checkpoint at version 13 (the version gate proven RED then GREEN: the second rebase had lost the bump under an unchanged version: caught by the independent review); a removal evicts orphaned actors with a warning counted in RunHealth::evicted_actors; batch_step atomic + the budget terminal-and-pinned; the DR TurnOff question DECIDED by instrumentation: the ModeOverride holds only the delivery step, the thermostat re-derives every step, the 225 kWh BESTEST heating reduction is the curtailment's own thermal carry-over, and the references agree (OCHRE's per-end-use equipment and per-timestep signals; EnergyPlus's separate availability schedules): correct behaviour, pinned by `55fb7d12`; review + red team SHIP after B1 (their mid-run removal attack: the eviction once, the telemetry reconciling to 1e-9 every step); goldens bitwise; every sha builds |
+| 16a1 | BR-20 | Rust toolchain pinned at the latest stable; nextest, deny, llvm-cov, uv and maturin at their latest releases; new lints fixed; goldens compared on the new compiler | 01 | `build: pin the Rust toolchain at its latest release and upgrade the development tools` | B0 (CN-17); golden delta recorded if any | |
+| 16b | BR-10 | CI triggers on `initial-implementation` pushes and pull requests; every cargo line of the block in CI, the golden lines pinned to the capture platform and toolchain; bench baseline per event; one JUnit report per run | 01 | `ci: run on initial-implementation and its pull requests, and add the observe-profiling and golden lines` | B0 (CN-17) | committed `4a1f2c19`; combined review + red team done (all seven nextest + golden commands run locally green, 7 distinct junit reports, the stray exclusion live-tested, the bench baseline resolves per event, the no-fixed-main check clean); the Codecov upload removed at the operator's direction (2026-10-05, `f3abc65d`): the coverage lcov uploads as a workflow artifact, no third-party service, no secret |
+| 16c | BR-12 | never-compiled test files removed; seasonal tests moved into the compiled target; the ignored tests of `b674a767^` run and recorded | 01 | `test: compile the seasonal ResStock tests and delete test files no target builds` | B0 (CN-17) | committed `6646c801` + `aab05da0`; review + red team done; the archaeology ran (12 then-ignored tests: 9 pass, 3 fail = the pre-BR-7 defect b674a767 fixed, helpers gone); the seasonal tests' first-ever run passes; the first commit's masked-failure mistake (a pipeline into tail) and the wrong net-power bound are recorded in the measurement log with the fix-forward |
+| 16d | BR-13 | golden `compare` and `materialize` check the recorded defaults digest; the zero-row read of row 10a pinned | 01 | `fix: golden comparison fails when the defaults tree differs from the capture` | B0 (CN-17) | committed `32044ab5`; review + red team done (red team reproduced the negative probe end to end and caught the missing zero-row pin test, landed with the row) |
+| 16e | BR-14 | tariff files read strictly; golden manifests carry a tariff; `month_boundary_billing_3600s` fixture | 01 | `fix: read tariff files strictly and give golden manifests a tariff and a month-boundary billing fixture` | B0 (CN-17) | committed `c6889589`; review caught a stale golden (re-captured) and the empty-sum -0.0 bit is pinned to +0.0 (the reduction's init sign is compiler latitude; the probe proves it); the Monthly cycle is anniversary-based (one billing row) and B-4's entry carries the note; red team owed with the next batch |
+| 16f | BR-15 | fleet manifests state each home's weight and the aggregation resolution | 01 | `fix: fleet golden manifests state each home's weight and the aggregation resolution` | B0 (CN-17) | committed `50a5c261`; review + red team done (bitwise proven: explicit weight 1.0 ≡ the default path; the resolution passes through faithfully, no hidden re-derivation) |
+| 16g | B0 re-check | the committed engine rows captured against B0 through the engine-under-test mechanism on the CN-17 consumer: worktrees of `8b09ac4a` (cumulative for rows 1 to 12; a difference is bisected over `1d60f478`..`75a182a0`), `d7f0e381`, `21d90588`, `26626710`, `1d471677`, `afa9a071`, `b8195c83` (OR-11), `7b7a6a7d` (SL-7), `44da330c` (RT-3) and every later engine commit before the gate engine, then the gate engine (CN-17's gate capture); each result recorded | 08 | none | the step is the check | the per-SHA sweep ran (`.shipwright/runs/v2-implement-7dd5a2a0-6727-4d5a-b578-2fc917150b9a/row16g-b0-sweep.md`, rows 1 to 29 through the tip: all identical); the head check re-run at `d9133308`: identical |
+| 16h | OD-15 | triage of the cooling energy a January run books | 11 | `test: pin where a January run's cooling energy comes from` | B0 (CN-17) | committed `3ff4583a`: investigated, NO defect (the 3.45 kWh is the crankcase heater to the last Wh; the run condition and the cooling booking match EnergyPlus and OCHRE; the entry's state/station prose corrected: Idaho G1600270); the pin test binds the composition |
+| 21 | RT-3 | thermal solver steps without heap allocation | 06 | `perf: step the thermal solver without heap allocation` | B0 (CN-17); independent audit `verification/audit-RT-3-RT-3a-69950a98.md` | committed `44da330c` |
+| 21a | RT-3a | one shared-term resolve per step for the ideal-capacity solves (RT-3's stop-rule entry, added 2026-10-02) | 06 | `perf: compute the ideal-capacity solve's shared terms once per step` | B0 (CN-17); independent audit `verification/audit-RT-3-RT-3a-69950a98.md` | committed `69950a98` |
+| 21b | OR-18 | the three census rows OR-11 left as logs: dehumidifier zone, water heaters in unmodelled locations (OpenStudio-HPXML ambient rule), synthetic envelope closure, IdealHvac end use from delivered capacity; four commits | 03 | the four commit messages in OR-18 | B0 (CN-17); commit 2 records its delta (none expected on current goldens) | committed `1c18543a` as ONE commit (the four logical changes; the split was collapsed at the operator's reboot deadline); commit 2's premise was false (fleet home 1, bldg0000004, carries "other heated space"; the other two fleet homes carry no "other" location) and the fleet golden was re-captured with the delta recorded; red team `verification/redteam-OR-18-1c18543a.md` ATTACK-SUCCEEDED (3 majors: heat pump ambient wet-bulb, silent `ZoneId(1)` constructor fallback, ambient water heaters rejected after the first step; 5 minors); audit `verification/audit-OR-18-1c18543a.md` (4 majors: the `ZoneId(1)` fallback inlined at 18 sites, the heat pump wall-heat default moved unrecorded, one commit for four, a public doc linking gitignored bookkeeping; 9 minors; delta and golden claims proven, the three structural changes bitwise neutral by isolation); fixes on branch `fix-or18` (cut from `1c18543a`): `9d599117` (every red-team and audit finding), `f1caa8da` (fleet golden provenance), goldens identical; follow-up `7aaaf53e` (the remaining invented zones and the OS-HPXML water heater location default) FOLDED as `f719895b` + `b7ea5d0a` + `b3807202` (review SHIP with a clean conflict forecast, red team ATTACK-FAILED in the branch worktree, cherry-picked, 7214 debug green, goldens bitwise + B0 identical; the measurement log carries the wet-bulb and wall-share corrections) |
+| 21c | OR-19 | equipment and actor roster changes are all-or-nothing (plan, then install) | 03 | `fix: reject equipment and actor changes without leaving the dwelling half changed` | B0 (CN-17); review `verification/review-OR-19-9ef347e0.md`, red team `verification/redteam-OR-19-9ef347e0.md` | FOLDED (`e5b9ee42` .. `2f85338d`, 9 commits on `13881b48`, 2026-10-05; `CHECKPOINT_VERSION` 11; block green except `[stray]` TMPDIR, fixed by BR-24; fold-integrity audit and the mutation proof owed; see `plan-critique.md` Fold register). History: committed `9ef347e0`, follow-up `ffa9051f` (review and red-team fixes), on branch `i08-fixes`; `ffa9051f` review CHANGES-REQUIRED and red team ATTACK-SUCCEEDED (recorder creation failure swallowed at assembly and on a pre-step add; `set_tariff` not all-or-nothing; three pre-existing actor and core-state defects; see `plan-critique.md` Fix-branch reviews); ported to branch `fix-or19` (cut from `1c18543a`) as `12f753be` and `a3a21a92` (both cherry-picks merged without conflict) plus `1bb045c6` fixing every finding (recorder created in the plan, `set_tariff` all-or-nothing, rejected changes return the candidate's warnings in `HaresError::RejectedEquipment`, one derivation path through `RosterCaches`, a non-generic planner, built-in actors re-seeded on add, `add_equipment_with_actors`, per-dwelling EV driver RNG stream cursor, actors bound to a replaced name evicted, removed equipment's core state dropped at install; roster code moved to `dwelling/roster.rs`); 7162 debug and 7119 release tests (6 `hpxml_parsing_tests` failures from the uninitialised OCHRE submodule in that worktree), goldens identical in three builds, Python 1217 passed; review and red team of `1bb045c6` both found issues, all fixed in `f77054df` (cursor checkpointed and bounded, panic-safe planning, `RejectedEquipment` everywhere, capability-based actor eviction); full block green; final review and red team running; then fold |
+| 21d | BR-21 | every profile and feature set the tests build is linted; the ASHRAE reference check syncs its own dependency | 01 | `build: lint every profile and feature set the tests build, and let the reference check sync its own dependency` | golden unchanged | FOLDED (operator fast-forward to `398d21a6`, 2026-10-04): `fold-br21c` on `38398bd4`: `91815306`, `19ca1069`, `0c0bece9`, `ede151da`, `398d21a6` (goldens' defaults digest re-captured from clean per-fixture worktrees: digest and provenance only, every product identical); full block green; final check APPROVED-FOR-FOLD. History: committed `d41646e9` on branch `i08-head-fixes` (cut from `1c18543a`): release clippy's one failure fixed, `--release -F observe` made to compile (three cfg mismatches), CI clippy job runs seven configurations, the reference check runs `uv run --extra ochre`; 7151 debug and 7108 release tests, goldens identical; block lines added to `plan.md` §3; review and red team running; the remaining `#[cfg_attr(not(test), allow(unused_imports))]` at `dwelling/mod.rs:~100` is fixed in its follow-up |
+| 21e | RT-9 | thermal solver restore covers coupling state; geometry fixed after construction; multi-solve allocation test | 06 | `fix: restore the thermal solver's coupling state with the rest of its state and keep its geometry fixed after construction` | golden unchanged; resumed equals continuous | committed `3c734c44` on branch `fix-rt9` (cut from `1c18543a`): the snapshot carries the coupling state, validated before any mutation; the checkpoint embeds one `ThermalSnapshot` (version 9); `ventilation_mut()`; three solves per zone in the allocation test; `restore_state_restores_coupling_state` failed at `1c18543a` and passes; `resumed_run_equals_continuous_run` passes at both (the step rebuilds couplings first, `stepping.rs:713,722`); goldens identical, physics 67/67; review `verification/review-RT-9-3c734c44.md` CHANGES-REQUIRED (the free-float oracle still calls `config_mut()` and no longer builds under `observe`; the coupled-state flag is redundant; the snapshot is an unguarded checkpoint schema; the resume test's doc); follow-up `d7fe5684` fixes all four (goldens identical; 7156 debug, 7215 observe, 7113 release, 7172 release observe; oracles under `observe` 80/80); red team `verification/redteam-RT-9-d7fe5684.md` ATTACK-SUCCEEDED (HRV recovery effectiveness lost on resume; fallback state not restored; tripwire blind spots; non-atomic `load_checkpoint`); fixes in implementation; overlaps BR-21 on the release-clippy import, resolved at the fold | FOLDED as `89eae0ba` + `d09a3b64`: the four red-team fixes (the dead session's near-complete work audited, completed, mutation-verified), the CHECKPOINT_VERSION fold bump to 10 (both v9 schema changes reconciled, the fingerprint pin re-verified green), the two conflict resolutions hand-verified; 7236 debug + resume tests green, goldens bitwise, B0 identical; the blob-rollback regression test is a noted follow-up for the next checkpoint row |
+| 21f | OD-29 | each event load draws from its own random stream | 11 | `fix: give each event load its own random stream` | moved stochastic goldens re-captured with deltas; resumed equals continuous | FOLDED (`3005ee1c`, `a4b29269`, `59465557`; integrity NOTHING-LOST). History: committed `c0c00fea` on branch `fix-od29` (cut from `1c18543a`): defect confirmed (the sub-stream was set on a clone and only the key passed on, so every event load and the dwelling drew stream 0; two probes produced identical patterns); each load now draws from `RngStream::event_load(seed, name)`, positions restored on their own stream, event-load checkpoint version 2 and dwelling `CHECKPOINT_VERSION` 9 (RT-9 also bumps to 9: the fold reconciles to one bump); no golden moved (golden event loads replay extracted events and never draw); 7156 debug and 7113 release tests, physics 38/38 and 29/29; follow-up `4e5bc5fa`: no seed fallback (a load without a stream is a typed error at init, start draw and save); stream identity is the HPXML `SystemIdentifier`, else the caller's instance name, else the class, captured before renaming; same-type HPXML appliances need unique ids; equal identities rejected; 7158 debug, 7115 release, goldens identical, physics 38/38 and 29/29; review + red team in the branch worktree SHIP (streams partition by seed+bldg_id, the replay path never draws, no committed consumer checkpoint breaks); FOLDED as `3005ee1c` + `a4b29269` + `59465557` (cherry-picked: the first resolution briefly duplicated the registration block - caught by the fleet golden's construction failing, fixed forward; the conflict resolution kept the order-free identity map and the dwelling's or_else zone clause); 7221 debug green, goldens bitwise, B0 identical; the CHECKPOINT_VERSION collision with RT-9's fold reconciles to one bump at that fold |
+| 21g | BR-22 | no lint is suppressed where the code can satisfy it | 01 | `refactor: remove lint suppressions by fixing what they hid` | golden unchanged | committed `8082592e` (64 of 95 sites fixed, 31 kept with reasons, the orphaned TOML keys removed); review + red team SHIP (the red team ran the four profiles the implementer skipped, all green; zero value drift across ~120 call sites); goldens bitwise both profiles |
+| 21h | OD-30 | HPXML appliance event loads reach their zone and its gains | 11 | `fix: give HPXML appliance loads their zone so their heat reaches it` | goldens with HPXML appliances re-captured with deltas; OCHRE parity MAE before and after | folded: the fix-od30 chain (30 commits) squash-folded as part of the rebase onto the head; the radiant/convective split per OS-HPXML v1.12.0 (hotwater_appliances.rb, misc_loads.rb, model.rb:249-251 cited and verified against upstream), the lighting visible part absorbed like diffuse solar (EnergyPlus HeatBalanceSurfaceManager.cc:3687-3693), the event replay reading the run's own schedule rows, the last-wins zone rule, the override reach for load parameters, the strict xs:boolean parsing; the goldens re-captured with per-golden causes (the replay's leaf-level reproductions in 02-measurement.md); the parity bands tightened only where agreement improved; review + red team SHIP (the citations verified against upstream fetches; one mutation reproduced); every sha builds |
+| 21i | OD-31 | every zone volume from the input or a cited derivation | 11 | `fix: derive every zone volume from the input instead of a fallback constant` | goldens that took the fallback re-captured with deltas | folded: the fix-or18c chain (50 commits, tip `e2a1024c`) cherry-picked + rebased and the combined physics re-captured (`e2a1024c`, every delta's cause family named): the 7x temperature capacitance multiplier (OS-HPXML defaults.rb:219-221, simcontrols.rb:27-28, verified against the upstream fetch; D-011's battery consequence matches OCHRE's own), the zone geometry and leakage per OS-HPXML, the gable-volume rule (the ends count + the triangle agreement), the terrain factor term-for-term (airflow.rb), the material roughness from the EnergyPlus dataset records (D-010), the gable guard (B), the orphan ducts (D), the OCHRE fork's hp_cop fix + the cz4a pin (the residual 22.6% → 5.26/4.89%), the cz6b residual class (a) as D-012 (the fitted RC network against the as-built constructions: no HARES change), the cz5a peak band 21.5 with the measured cause and the open question; review + red team SHIP (the citations fetched and verified; the fork minimal: one line); every sha builds or carries an immediate follow-up |
+| 21j | OD-32 | the HELICS integration test synchronises on federation events, not time | 11 | `fix: synchronise the HELICS completion test on federation events instead of time` | 50 consecutive runs under load | folded: the fix-testhyg chain (23 commits) squash-folded as `ed9ce671`; the federation-event sync + the port/core determinism work; the 50/50 HELICS run clean; two branch lows fixed at the tip; every sha builds after the squash (six broken commits folded into the helper commit); review + red team green at the tip |
+| 21k | BR-23 | the Python package type-checks clean; the block gains `[pyright]` | 01 | `build: type-check the Python package and fix what it finds` | pyright 0 errors; pytest unchanged | committed `787487df` (617 first-run errors fixed at sites, zero suppressions; the typing surface's six lies found by review + red team and fixed runtime-verified); pyright 0/0 with typings self-checked; pytest 1396/4xfail/0skip; CI runs the gate on PRs |
+| 21l | BR-24 | tests leave nothing in the system temp directory; `[stray]` checks it | 01 | `test: write every test output under a per-test temporary directory` | a block run leaves the temp directory as it found it | folded: the fix-testhyg chain: the per-test temp helpers (tests/support/temp_file.rs, the pytest tmp_path patterns), the [stray]-class TMPDIR checks in the block, the failed-test directory retention bounded to three sessions, the offline guard (no test reaches the network unmarked: the sitecustomize + the plugin + 277 lines of gate tests); the stray TMPDIR check clean at the fold |
+| 21m | OD-34 | a mid-run tariff bills from its attach period; the evaluator is checkpointed | 11 | `fix: bill a mid-run tariff from its attach period and carry the evaluator through the checkpoint` | from-start equality after the attach; resumed equals continuous with a tariff | branch `row/od34-tariff` (`7b33858a` + the follow-ups `eeebc450`: finalize prorates a joined period's active span; the demand-window/ratchet/TOU resume pinned bitwise with the mutation battery's two masked mutations stated; the post-restore attach and the replacement-across-resume pinned; the boundary-attach convention documented + pinned; the rejected set_tariff's fingerprint carries the billing summaries); review + red team SHIP conditional, conditions met; goldens bitwise; WAITS for fix-headbreaks to fold first (both branches base `db5efe80`) |
+| 21n | OD-35 | an EV's capacity never exceeds its rating | 11 | `fix: keep the EV battery's capacity at or below its rating` | a year of driving bounded; goldens with EVs identical or delta stated | branch `row/od35-ev-capacity` (`2e8fb0f4`): the root cause is the Smith 2017 BOL fitted levels above nameplate (raw fade −0.009) with HARES's port missing SSC's only-decreases guard (verified verbatim against NREL/ssc `2527d557`); the fix floors the fade at the previous state (the source's math) + the every-build invariant belt; the reference curve pinned bitwise by an independent port; 3650-day extreme sweeps bounded; goldens bitwise both profiles; review + red team SHIP; WAITS for fix-headbreaks to fold first |
+| 21o | OD-36 | the remaining silent geometry, location, schedule and humidity defaults | 11 | `fix: replace the remaining silent geometry, location, schedule and humidity defaults` | moved goldens re-captured with deltas | queued: after `fix-or18c` folds |
+| 21p | OD-37 | gas boiler EBM zero while the room AC cools at night (bldg0000002, January) | 11 | named by the finding | pinned | queued: after `fix-or18c` folds |
+| 21q | OD-38 | cycling HVAC runs the fraction of the step the zone needs (EnergyPlus runtime fraction and part-load degradation) | 11 | `fix: run cycling HVAC for the fraction of the step the zone needs` | moved goldens with deltas; BESTEST, parity and per-step cost before and after | queued: after OD-16's fixes fold (OD-30's strict test passes without it now; the whole-step cycling remains and is this row's) |
+| 21r | OD-39 | a conditioned basement is conditioned space | 11 | `fix: treat a conditioned basement as conditioned space` | inputs with a conditioned basement move; goldens, BESTEST, parity before and after | queued: after `fix-or18c` folds |
+| 21s | OD-40 | an autosized heating-only heat pump keeps the core-output contract | 11 | `fix: an autosized heating-only heat pump keeps the core-output contract` | the sweep without contract violations | committed `a7a9253d` (two root causes: the cooler's electric-only flow rule vs the fraction-zeroed delivery; the heater's undeclared FUEL capability); the 425-sample sweep 13 violations to 0; red-green at the HEAD worktree; the red team's follow-up filed as OD-45; goldens bitwise; 7243 default tests |
+| 21t | OD-41 | water heating in the OCHRE parity week (7x OCHRE) investigated and fixed to EnergyPlus-grade | 11 | named by the cause | parity week within tolerance of the reference; goldens with deltas | queued: after OD-30 folds |
+| 21u | OD-42 | equipment parameter overrides reach the typed configs, or error | 11 | `fix: apply equipment parameter overrides to the typed configs they name` | every class overridable; unknown or invalid overrides | committed `ee7bee85` (with OD-45: one config generation spec to equipment, per-field landing with schema-gated normalization, heat-pump unknown keys rejected); the first round's regression on three Python builders caught by review + red team and fixed; OD-46 filed (the bag channel's residual); goldens bitwise; 7051+7109 tests; pytest 1412/4xfail/0skip | error | committed `ee7bee85` (operator); independent audit owed |
+| 21v | OD-43 | microwave energy counted once | 11 | `fix: count microwave energy once` | goldens with a microwave column with deltas | queued: after OD-30 folds |
+| 21w | OD-44 | diffuse short-wave leaves back out through the windows (EnergyPlus) | 11 | `fix: let diffuse short-wave leave back out through the windows` | every windowed golden with deltas; BESTEST solar cases and parity before and after | queued: after OD-30 folds |
+| 21x | OD-48 | the HPXML resolvers error, or apply the cited OS-HPXML default with a warning, instead of skipping inputs | 11 | `fix: reject incomplete or unsupported HPXML systems instead of skipping them` | every site with a failing-before test; fleet resolution | queued |
+| 21z | OD-50 | the seeded thermal trace matches the reference from step 1 (infiltration, window solar, heating) | 11 | named by the cause | xfail records tightened or removed; goldens with deltas | queued |
+| 21za | OD-51 | a 24 h OCHRE parity window; cooling, heating and Other gaps fixed to the reference | 11 | named by the cause | 24 h parity passes or cited strict xfails | queued: after OD-41 |
+| 21zb | OD-52 | the vector env has no pure-Python batch-step fallback | 11 | `refactor: drop the vector env's pure-Python batch step` | vec-env tests on the Rust path | queued: after OD-16 folds |
+| 21zc | BR-25 | the API docs build without warnings; the block gains `[doc]` | 01 | `docs: fix broken API doc links and check the docs build in the block` | `[doc]` exits 0 | queued |
+| 21zd | OD-53 | exterior roughness from the input's material; no silent default | 11 | with the attic work on `fix-or18c` | attic and indoor MAE before and after | in implementation on `fix-or18c` |
+| 21ze | OD-54 | an ASHP's COP stays physical at low outdoor temperature (curves, limits, defrost per the reference) | 11 | named by the cause | -17 °C pinned; heat-pump goldens with deltas | queued |
+| 21zf | OD-55 | every deviation from OCHRE or OS-HPXML has a register entry and a pinning test | 11 | `docs: record every reference deviation with its evidence and pinning test` | each pin fails when reverted | queued: after the in-flight folds |
+| 21zg | OD-56 | the remaining attic and free-float gaps triaged and fixed to the reference | 11 | named by the cause | oracle within unchanged bounds; goldens with deltas | queued: after `fix-or18c` folds |
+| 21zh | OD-57 | dwelling assembly and stepping error or apply a cited default, never substitute, skip or discard silently | 11 | `fix: fail loudly where dwelling assembly and stepping substituted or discarded input` | every site with a failing-before test; fleet resolution | queued: after OD-30 folds; with OD-48 |
+| 21y | OD-49 | a missing defaults file is an error; tests load the shipped defaults | 11 | `fix: a missing defaults file is an error` | the 306 dependent tests pass on the shipped defaults | queued |
+| 22 | RT-1 (fixes SL-1) | equipment and domain snapshots without reallocation | 06 (10) | `perf: copy equipment and domain snapshots in place instead of reallocating them every step` | B0 (CN-17) | |
+| 23 | OD-3 | an autosized boiler keeps its indirect tank's loop; wiring fails loudly | 11 | `fix: keep an autosized boiler on its indirect tank's loop and fail when wiring cannot apply` | B0 (CN-17) | committed `249912f9`; two premise corrections (the cooling-autosize flag wiped even wired non-autosized boilers; the tank's own autosize wiped its id) fixed with the full water-heater mirror; the wiring pass's silent paths are resolve errors; sweep 112 to 112; red-green at base head; goldens bitwise |
+| 24 | OD-6 | a missing schedule path is an error | 11 | `fix: a schedule path that does not exist is an error, not a generated schedule` | B0 (CN-17) | committed `13881b48`; every caller migrated (30 test files, the Python bindings + stub, the fleet, the golden adapter); the red team proved the old silent generation ran a DIFFERENT schedule (the hazard was real) and the None arm is bitwise the old behavior; goldens bitwise |
+| 24a | OD-10 (structural commit) | infiltration set-up fails on missing or unknown inputs; OD-10's numeric commit is row 94f | 11 | `fix: infiltration set-up fails on missing or unknown inputs instead of assuming defaults` | B0 (CN-17) | folded as `18fbf72e` (branch `row/od10-structural`, reviewed + red-teamed SHIP): the 400 m3 volume, the floors substitution, the 2.5 m height and the zone fallback are errors; Shielding/SiteType enums with named parse errors; one xsd-boolean helper over the twelve sites; the thirteen legacy flue elements migrated; a missing SiteType resolves to suburban cited in PHYSICS_DECISIONS.md; the 67-fixture corpus green; the goldens bitwise |
+| 24b | OD-11 | thermal-trace parity tests expect only their divergence assertion | 11 | `test: the thermal-trace parity tests expect only their divergence assertion` | B0 (CN-17) | committed `5d66dafc`, the marks' fresh reasons carried by OD-33's fix (`38398bd4`); the three tests xfail strictly on measured divergences; the census's OCHRE rows gone since OD-13 |
+| 24c | OD-12 | pvlib solar-override generator writes only to a named directory | 11 | `test: the pvlib solar-override generator writes only to a named directory` | B0 (CN-17) | committed `901354e0`; the blind except that wrote all-zero overrides deleted (the found defect: the committed fixture's night rows carry its marker; the archaeology and the byte-identity of every dhi>0 row recorded in 11-other-defects.md); both acceptance tests discriminate; review SHIP |
+| 24d | OD-13 | the OCHRE comparison and fleet conversion tests run; the skip census is empty | 11 | `test: run the OCHRE comparison and fleet conversion tests instead of skipping them` | B0 (CN-17) | committed `d9133308`; review + red team over two rounds (round 1 BLOCK, every finding fixed); census empty under both selector shapes (1396 passed, 4 xfailed, 0 skipped); twelve parity cases, eleven pass, Lighting a strict xfail citing OD-34; goldens bitwise + B0 identical at the commit |
+| 24e | OD-14 | pint at its latest release; the pressure unit the OCHRE reference needs registered on the HARES side | 11 | `build: lift the pint cap and register the pressure unit the OCHRE reference needs` | B0 (CN-17) | committed `699cfad2` (pint 0.26.1); the ULP archaeology and the extract_ochre_rc.py environment reconciliation recorded in 11-other-defects.md; parity bitwise across all twelve end uses; census 1400/4xfail/0skip; B0 identical; goldens identical |
+| 24f | OD-17 | missing or malformed default schedule profiles are errors | 11 | `fix: missing or malformed default schedule profiles are errors, not full load` | B0 (CN-17) | folded as `952e5486` (branch `row/od17-schedule-defaults`, reviewed + red-teamed SHIP in the worktree): every silent path an error naming file+line+profile+element; one occupants column; the 13-column zip cannot drop cooling_setpoint; the Ceiling Fan monthly row added (the defaults digest moves; the goldens re-captured provenance-only at `dc4a456d`); products bitwise per name |
+| 24g | OD-19 | malformed HPXML setpoint profiles and declared setbacks are rejected | 11 | `fix: reject malformed HPXML setpoint profiles and setbacks HARES does not model` | B0 (CN-17) | |
+| 24h | OD-21 | a malformed HPXML attribute fails the parse; XML attribute and line-end normalization and the site offset from the time-zone database pinned | 11 | `fix: fail the HPXML parse on a malformed attribute and pin attribute normalization and the time-zone lookup` | B0 (CN-17) | |
+| 24i | OD-22 | an equipment whose initialisation fails stops construction | 11 | `fix: an equipment whose initialisation fails stops construction instead of being dropped` | B0 (CN-17) | folded as `8c034e4f` (branch `row/od22-od23`, reviewed + red-teamed SHIP): any init failure stops construction naming equipment + cause; the two zero-power phantom loads (a schedule-injected Clothes Dryer in bldg0000003/bldg0000095, Garage Lighting in bldg0000002) corrected at the resolver with the OCHRE-derived fractions and the garage-modeled gate; corpus green |
+| 24j | OD-23 | the dead battery defaults CSV is deleted | 11 | `fix: delete the dead battery defaults CSV that no loader reads` | B0 (CN-17) | folded as `6c33e689` (branch `row/od22-od23`): both unread CSVs deleted (the entry's acceptance makes degradation_curves.csv's deletion mandatory); the loader comment derives from the TOML tree; a test pins the directory's TOML-only shape; the goldens' provenance re-captured (products bitwise) |
+| 24k | OD-24 | a missing EV vehicle mapping file or a malformed row is an error | 11 | `fix: a missing EV vehicle mapping file or a malformed row is an error` | B0 (CN-17) | folded as `1eba7760` (branch `row/od24-od25`, reviewed + red-teamed SHIP): every silent class an error naming path+row+field through one DRY helper; the store-level bridge variant; the mapping required for every defaults load (the granularity consequence: a bad mapping degrades the whole store to empty under the blueprint's documented policy, not just the mapping: recorded in 11-other-defects.md); 35 test fixtures gained the complete mapping helper; the shipped CSV loads its 50 entries |
+| 24l | OD-25 | an equipment whose schedule power cannot be determined is a resolve error | 11 | `fix: an equipment whose schedule power cannot be determined is a resolve error` | B0 (CN-17) | folded as `7ac4d4d9` (branch `row/od24-od25`, reviewed + red-teamed SHIP): the three silent zero-fill sites go through one resolve_max_kw naming equipment, source and missing fields; the determined-zero distinction (all-zero fractions / declared-zero energy resolve to 0 kW) mirrors OCHRE's convert_power_column and its raise; the auto-created energy-less TV specs (13 homes) no longer exist (OCHRE-faithful: a column alone creates no equipment); goldens bitwise |
+| 24m | OD-26 | the Python EV builder matches the catalogue and the seed path | 11 | `fix: the Python EV builder matches the catalogue's fuel economy and the seed path's away-charge power` | B0 (CN-17) | folded as `f4e4ff9a` (branch `row/od26-od27`, reviewed + red-teamed SHIP): the driver's fuel economy reads the catalogue's VehicleSpec figure (not capacity/range), the away-charge power reads the new ArchetypePreset field (6.6, the seed path's value), and the L1 cap is one constant; inert on the default surface (away_charge_fraction stays 0.0), exercised by the raised-fraction test; goldens bitwise |
+| 24n | OD-27 | `add_actor_by_name`'s stub default matches its binding | 11 | `fix: add_actor_by_name's params argument carries the default its stub claims` | B0 (CN-17) | folded as `db5efe80` (branch `row/od26-od27`, reviewed + red-teamed SHIP): the binding gains the pyo3 signature the stub claimed; the two-argument call works and the test pins it |
+| 24o | checkpoint | commit back to `initial-implementation`: every row above, including rows 21b to 21zh, done with nothing known broken; gates in `plan-critique.md` "Pause point" | n/a | fast-forward of local `initial-implementation`; a push only on the operator's word | full block, roll-up report against `1d60f478`, consumer gate | operator agreed 2026-10-05; DONE: squashed into initial-implementation as c561eb69 via PR 34, reforked with the doc cleanup at 5ece4060, the consumer merged to main at 78568b5 with the submodule pinned at 5ece4060, all gates green (346/0/7, ruff, B0 identical twice) |
+| 25 | SL-8 (fixes SL-11) | planning and review records leave the public tree | 10 | `chore: move planning and review records out of the public tree` | B0 (CN-17) | |
+| 26 | PY-7 | package rename to `hares-py` / `hares` | 05 | `refactor: rename the Python package to hares (distribution hares-py)` | golden; B0 through row 27 | |
+| 27 | CN-13 | consumer follows the rename (consumer repository, gated on row 26's engine) | 08 | `fix: follow the engine rename to hares-py` | gate+B0 | |
+| 28 | OD-1 | engine exceptions survive pickling | 11 | `fix: register engine exceptions under their importable module path` | B0 (CN-13) | |
+| 29 | OD-7 | the gym wrapper rejects bad configuration | 11 | `fix: the gym wrapper rejects bad configuration instead of coercing it` | B0 (CN-13) | |
+| 30 | PY-5 | one reward contract on the Rust and Python paths | 05 | `fix: batch_step and the Python path call the same reward_fn` | B0 (CN-13) | |
+| 30a | PY-12 | ResStock sample-weight lookups name the missing column or building | 05 | `fix: ResStock sample-weight lookups name the missing column or building` | B0 (CN-13) | |
+| 30b | OD-18 | clamped RL actions counted in each run's health in every build | 11 | `fix: count clamped RL actions in each run's health in every build` | B0 (CN-13) | |
+| 31 | OD-2 | strict configuration and override handling, sites 1 to 5 and 7 to 9 (site 6 is row 94e) | 11 | `fix: reject unknown keys and inapplicable overrides instead of dropping them` | B0 (CN-13) | |
+| 32 | OD-8 | an HPXML battery with no declared control is a construction error | 11 | `fix: a battery with no declared control is a construction error` | B0 (CN-13) | |
+| 33 | IN-6 | OCHRE resampling overrides leave the Rust core | 12 | `refactor: move OCHRE weather resampling out of the engine into the Python adapter` | B0 (CN-13) | |
+| 34 | PY-8 | one config type across TOML, synthetic TOML and Python | 05 | `refactor: one SimulationConfig type for TOML, synthetic TOML and Python` | golden | |
+| 35 | PY-2 | `from_hpxml` takes one typed config | 05 | `fix: from_hpxml takes one typed SimulationConfig` | golden | |
+| 36 | OR-1 | variable catalogue from typed declarations | 03 | `feat: build the variable catalogue from typed declarations` | golden | |
+| 37 | OR-2 | frozen row plan replaces per-step lookup | 03 | `perf: replace per-step column lookup with a frozen row plan` | golden | |
+| 38 | OR-3 | destinations replace the output booleans (HARES#28) | 03 | `feat: replace output booleans with a report and destination list (HARES#28)` | golden | |
+| 39 | OR-13 | reporting frequency (minutes to run period) with per-variable aggregation | 03 | `feat: report at minute, hourly, daily, monthly, annual or run-period frequency` | golden | |
+| 40 | OR-14 | the batch callback destination | 03 | `feat: stream report batches to an attached callback` | golden | |
+| 41 | OR-4 | diagnostics become a catalogue report | 03 | `fix: diagnostics are a catalogue report, created only when requested` | golden | |
+| 42 | OR-12 | `HealthPolicy` escalation | 03 | `feat: escalate chosen health events through an explicit policy` | golden | |
+| 43 | OR-6 | one `RunResult`, `finish()` for every run | 03 | `feat: unify simulate() and stepped-run finalisation behind Dwelling::finish()` | golden | |
+| 43a | PY-9 | `RunResult`, `finish()`, `health()` and reports in Python | 05 | `feat: expose RunResult, finish() and health() in Python` | golden | |
+| 44 | PR-4 | run finalisation is timed | 07 | `feat: time run finalisation in the profiling summary` | golden | |
+| 45 | OR-7 | `Time` becomes an Arrow `Timestamp` | 03 | `feat: Time is an Arrow Timestamp, not three string formats` | golden | |
+| 46 | OR-8 | metrics only when requested, one path (structural) | 03 | `refactor: compute run metrics only when requested, per step from a catalogue input plan` | golden | |
+| 47 | OR-9 | `initialize()` stops serialising an unread checkpoint | 03 | `perf: stop serialising an unread checkpoint in initialize()` | golden | |
+| 47a | OR-17 | JSON floats parse exactly in every build | 03 | `build: parse JSON floats exactly in every build` | golden; consumer gate and B0 DE-trace on a `1d60f478` worktree with only the manifest change | |
+| 48 | OR-10 | checkpoints resume billing, metrics, reports, health and warnings | 03 | `feat: checkpoints carry billing, metrics, reports, health and warnings` | golden | |
+| 49 | OR-15 | `metrics_from_table` | 03 | `feat: compute run metrics from any results table` | golden | |
+| 50 | FL-1 | streaming ordered fleet fold with a memory bound (two commits: the `fleet_same_offset_300s` golden captured on today's code, then the fold) | 04 | `test: capture a golden same-offset fleet at 15-minute aggregation`, then `perf: fold fleet homes into a bounded, deterministic streaming aggregate` | golden; `fleet_same_offset_300s` added | |
+| 51 | FL-2 | a flagged or degraded home is never a success | 04 | `fix: never count a flagged or degraded home as a fleet success` | golden, `fleet_mixed_offset` re-captured | |
+| 52 | FL-3 (fixes SL-10) | stepping a finished `SteppableFleet` is one error; its per-home accessors return errors | 04 (10) | `fix: stepping a finished SteppableFleet is one fleet error, not a failure per home` | golden | |
+| 53 | FL-4 | declared fleet time alignment (structural) | 04 | `feat: fleets spanning UTC offsets declare their time alignment` | golden | |
+| 55 | PY-1 | zero-copy export through `pyo3-arrow` | 05 | `feat: export result tables through the Arrow PyCapsule interface` | golden | |
+| 56 | PY-3 | construction releases the GIL | 05 | `perf: release the GIL while constructing dwellings` | golden | |
+| 57 | PY-4 | the catalogue and `metrics_from_table` in Python | 05 | `feat: expose the variable catalogue and metrics_from_table in Python` | golden | |
+| 58 | PY-6 | build and provenance identity | 05 | `feat: record build identity and a catalogue digest in every result` | golden | |
+| 59 | PY-10 | the batch callback in Python | 05 | `feat: attach Python callables to report batches` | golden | |
+| 60 | PY-11 | Python actors declare their output variables | 05 | `feat: Python actors declare and publish output variables` | golden | |
+| 61 | RT-4 | parsed inputs shared immutably, as paths or content | 06 | `perf: share parsed inputs immutably and build many dwellings from one blueprint` | golden | |
+| 62 | RT-2 | forcing computed once per weather and time grid | 06 | `perf: compute weather-derived forcing once per weather and time grid` | golden | |
+| 63 | IN-1 | input records and digests | 12 | `feat: record a digest of every input a run reads` | golden | |
+| 64 | IN-5 | setpoint source by the OpenStudio-HPXML rule | 12 | `fix: resolve thermostat setpoints by the OpenStudio-HPXML rule and record the active source` | golden | |
+| 65 | RT-6 | resolved-parameter read-back | 06 | `feat: read back the resolved parameters the physics uses` | golden | |
+| 66 | IN-2 | `DwellingBlueprint::validate()` | 12 | `feat: validate a blueprint and read its resolved model without running it` | golden | |
+| 66a | IN-7 | envelope resistance and thermal-mass scales after LUT row selection | 12 | `feat: envelope resistance and thermal-mass scales applied after LUT row selection` | golden | |
+| 67 | IN-3 | machine-readable input schema, including the HPXML elements read | 12 | `feat: publish a machine-readable input schema` | golden | |
+| 68 | IN-4 | `resample_weather` | 12 | `feat: expose the engine's per-step weather channels` | golden | |
+| 69 | OR-16 | replay export | 03 | `feat: export a run's resolved configuration and inputs for exact replay` | golden | |
+| 70 | RT-5 | per-run state, thread safety, reproducibility | 06 | `fix: keep health counts and warn-once state per run and prove dwellings thread-safe` | golden | |
+| 71 | RT-7 | per-step RL observation without allocation | 06 | `perf: build RL observations into reused buffers from a frozen observation plan` | golden | |
+| 71a | RT-8 | RL reset restores the warmed-up state and reseeds without rebuilding | 06 | `perf: reset RL environments from the warmed-up state and reseed them without rebuilding` | golden | |
+| 72 | CN-1 | consumer drives the report API and reads `RunHealth` | 08 | `fix: drive the engine through the report API and read health from RunHealth` | gate+B0 | |
+| 73 | CN-5 (fixes SL-5) | worker pools sized to the work | 08 (10) | `fix: size worker pools to the work instead of the core count` | gate+B0 | |
+| 74 | CN-9 (fixes SL-6) | `check_losses.py` fails when a loss moves | 08 (10) | `fix: make check_losses.py fail when a calibration loss moves` | gate+B0 | |
+| 75 | CN-7 | the fit path requests no metrics | 08 | `perf: request no metrics and skip equipment metadata on the fit path` | gate+B0 | |
+| 76 | CN-6 (fixes SL-4) | no duplicate parent-side evaluations | 08 (10) | `perf: stop re-simulating the nominal, warm-start and optimum candidates` | gate+B0 (rule `n-eval-without-parent-probes`) | |
+| 77 | CN-10 | threads instead of processes in the evaluation pool | 08 | `perf: run fit evaluations on threads sharing the parsed weather` | gate+B0 | |
+| 78 | CN-11 | per-evaluation provenance and replay | 08 | `feat: record per-evaluation provenance and replay any fit evaluation` | gate+B0 | |
+| 78a | CN-8 | operator: delete `scratch/fitrun` | 08 | none | | |
+| 79 | B-1a | weather point values: EnergyPlus last-hour interpolation, sub-hourly files | 09 | `fix: weather point values follow EnergyPlus last-hour interpolation at step end` | delta | |
+| 80 | B-1b | weather solar values: EnergyPlus midpoint interpolation | 09 | `fix: solar irradiance follows EnergyPlus midpoint interpolation` | delta | |
+| 81 | B-1c | typical and actual years, wrap, Feb 29; calendar day types after a skipped Feb 29 | 09 | `fix: address weather by calendar date with EnergyPlus typical and actual year rules` | delta | |
+| 82 | CN-14 | consumer weather alignment follows the engine | 08 | `fix: align consumer weather with the engine's EnergyPlus convention` | gate | |
+| 83 | B-2 | warm-up converges by the EnergyPlus criteria | 09 | `fix: warm-up converges by the EnergyPlus temperature and load criteria` | delta | |
+| 84 | B-3 | Python warm-up default equals Rust's | 09 | `fix: Python dwellings warm up by default, as Rust ones do` | delta (recorded as B-3 states) | |
+| 85 | B-4 | billing month boundary | 09 | `fix: pass the step end time to the tariff evaluator` | delta | |
+| 86 | B-5 | end-use rollup by typed kind | 09 | `fix: classify equipment by its typed end use, not its name` | delta | |
+| 87 | B-6 | null for not-applicable values | 09 | `fix: undefined output values are null, not 0.0` | delta | |
+| 87a | FL-5 | fleet variables fold by their declared kind | 04 | `fix: fold fleet variables by their declared kind, not by unit string` | delta | |
+| 88 | B-11 | fleet Mode aggregation in both stages | 09 | `fix: fold fleet operating modes by weighted Mode, not by mean` | delta | |
+| 89 | B-7 | metrics independent of verbosity | 09 | `fix: compute every run metric whatever the selected reports` | delta | |
+| 90 | B-8 | remove the unreachable hash-order fluid-flow fallback | 09 | `refactor: carry the pump's resolved flow out of the fluid-loop flow resolution` | golden (zero delta) | |
+| 90a | B-9a | `Fleet::from_resstock` builds runnable fleets; `resstock_2025_fleet` golden | 09 | `fix: build ResStock fleets from extracted buildings and their weather stations` | golden; `resstock_2025_fleet` added, every other golden unchanged | |
+| 91 | B-9 | ResStock weather year and offset | 09 | `fix: ResStock fleets run the weather file's year at the site's offset` | delta | |
+| 92 | B-10 | missing defaults directory is an error; Python uses the packaged defaults | 09 | `fix: require an explicit defaults directory and fail when it cannot be read` | delta | |
+| 93 | B-12 | fleet local time labels | 09 | `fix: label fleet output in local site time` | delta | |
+| 94 | B-13 | opaque-R precedence | 09 | `fix: a declared AssemblyEffectiveRValue sets the resistance of LUT layers` | delta | |
+| 94a | OD-9 | a generated schedule keeps the HPXML thermostat profile | 11 | `fix: a generated schedule keeps the HPXML thermostat profile instead of one constant` | delta | |
+| 94b | IN-8 | schedule-file setpoint columns read in degrees Fahrenheit | 12 | `fix: read schedule-file thermostat setpoint columns in degrees Fahrenheit` | delta | |
+| 94c | B-14 (commits 1 and 2) | equipment config fields stored in SI units (two commits: the DER goldens and every golden's resolved model captured on the unfixed engine, then the fix); its own verification round over B-14 runs ahead of this row, correcting the entry rather than gating it | 09 | `test: capture golden PV, battery and EV dwellings and the resolved models of every golden`, then `fix: store equipment power, energy and apparent-power config fields in SI units` | delta | |
+| 94d | IN-9 | HPXML vehicles and their chargers are simulated | 12 | `fix: simulate HPXML vehicles and their chargers` | delta | |
+| 94e | OD-2 (site 6) | a constant setpoint override replaces the schedule and HPXML setpoint sources | 11 | `fix: a constant setpoint override replaces the schedule and HPXML setpoint sources` | delta | |
+| 94f | OD-10 (numeric commit) | infiltration height, flue and shielding defaults by the OpenStudio-HPXML rules | 11 | `fix: default infiltration height, flue and shielding by the OpenStudio-HPXML rules` | delta | |
+| 94g | B-14 (commit 3) | billing, metrics, equipment state, ports and per-step results in SI units; `CHECKPOINT_VERSION` 10 | 09 | `fix: hold billing, metrics, equipment state and per-step results in SI units` | delta | |
+| 94h | B-14 (commit 4) | actor parameters, control signals and actor telemetry in SI units | 09 | `fix: carry actor parameters, control signals and actor telemetry in SI units` | delta | |
+| 94i | OD-20 | PV roof coverage from the typed PV config, without substituted defaults | 11 | `fix: shade a roof by the PV arrays attached to it, read from their typed config` | delta | |
+| 94j | B-15 | OpenStudio-HPXML unavailable periods applied | 09 | `fix: apply OpenStudio-HPXML unavailable periods to the end uses they name` | delta | |
+| 94k | B-16 | wet-appliance hot-water volume measured against OpenStudio-HPXML and OCHRE (triage) | 09 | none (recorded in `02-measurement.md`) | recorded | recorded: CONFIRMED, B-17 runs; the entry `B-16, 2026-10-08` in `02-measurement.md` |
+| 94l | B-17 | wet-appliance hot water by the OpenStudio-HPXML daily volume; runs only when B-16 confirms the defect | 09 | `fix: draw wet-appliance hot water by the OpenStudio-HPXML daily volume` | delta (contingent) | |
+| 95 | CN-3 | envelope factors through the engine's envelope scales; the capacitance row held; the SI renames followed | 08 | `fix: route the envelope factors through the engine's envelope scales` | gate | |
+| 96 | CN-2 | the calibration system arms a strict health policy | 08 | `feat: reject evaluations whose engine health is not clean` | gate | |
+| 97 | CN-4 | the one consumer re-baseline (B1) | 08 | `fix: re-pin the calibration loss regression to the corrected engine` | gate; B1 captured | |
+| 98 | CN-12 | surrogate search trial (report only; operator checkpoints) | 08 | `docs: report the surrogate-search trial` | gate | |
+| 99 | M-4a | cross-platform workflow | 02 | `ci: measure golden agreement between Linux x86_64 and macOS arm64` | golden | |
+| 99a | push | operator: merge PR #27 on GitHub, push `feat/output-results`, open the pull request into `initial-implementation`; CI and the reproducibility workflow run, and the CI run is recorded | `plan.md` §3 | none | | PR #34 opened (2026-10-08, AZX-PBC-OSS/HARES#34: feat/output-results into initial-implementation, squash-merge then refork); the branch pushed; the helics wheel defect filed upstream (GMLC-TDC/HELICS#2840); the OCHRE fork push command delivered to the operator: `git -C vendors/OCHRE push origin 58f39d8746520786c26c02ce4c08618d3053c422:refs/heads/i08/hpwh-cop-fix` |
+| 100 | M-4b | publish cross-platform agreement | 02 | `docs: publish cross-platform agreement of the golden fixtures` | golden | |
+| 100a | push | operator: push `feat/output-results` | `plan.md` §3 | none | | |
+| 101 | CN-15 | the one pin advance, to the pushed commit | 08 | `chore: pin the engine to <sha>` | gate against the pinned engine; DE trace equals B1 | |
+| 101a | push | operator: push `i08-consumer` | `plan.md` §3 | none | | |
+
+Contingent rows:
+- If OR-17's proof (row 47a) finds a difference on any golden or consumer
+  input, it moves into the numeric block as its own entry with its delta
+  recorded, and row 48 (OR-10) moves after it.
+- If a dependency-upgrade row (11 to 13) fails its B0 check (for rows 11
+  and 12, the cumulative `8b09ac4a` capture at row 16g and its bisection;
+  for BR-6d, the check CN-17 establishes at row 16a), the package whose
+  upgrade moves the numbers is split out as `09-numeric-fixes.md` `B-0`
+  (the split-entry form of the package-upgrade contingency) and inserted
+  directly before row 79, under the rule in `08-consumer.md`'s preamble.
+- If a committed engine row fails the row 16g re-check (the row the
+  bisection names, for a difference in the `8b09ac4a` capture), or row 19
+  fails CN-17's gate, the cause is a number that row moved: it becomes a
+  new `09-numeric-fixes.md` entry with its own row in the numeric block
+  and its delta recorded (a committed row is never rewritten, `plan.md`
+  §1).
+- A defect that `01-baseline-repair.md` BR-12 or `11-other-defects.md`
+  OD-13 finds and whose fix moves numbers becomes a new
+  `09-numeric-fixes.md` entry with its own row after row 78a (BR-12's
+  rule).
+- If `11-other-defects.md` OD-15 finds a defect, its fix OD-16 gets a row
+  in the numeric block directly before row 95 (CN-3), with its delta
+  recorded.
+- If any other row fails its consumer check, it stops; its cause is fixed
+  in the row, or the row moves after row 78 as its own numeric commit.
+
+Rows without a commit (0, 0a, 0d, 13b, 16g, 78a and the push rows) are
+measurements or operator checkpoints, recorded in `02-measurement.md`'s log.
+Row 99a's record holds the first CI run of the closing sequence's pull
+request (`01-baseline-repair.md` BR-10); a job that fails there becomes a
+fix entry committed before M-4b, and the operator pushes again.
+There is no row 54.
