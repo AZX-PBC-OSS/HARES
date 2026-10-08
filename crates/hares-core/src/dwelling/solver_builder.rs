@@ -498,8 +498,10 @@ fn build_solver_boundaries(
                     // the models disagree by 40–50%; at high wind (15 m/s),
                     // the gap widens further.  This telemetry column makes
                     // that divergence observable.
-                    let interior_label = zone_type_to_label(boundary.interior_zone.as_ref());
-                    let exterior_label = zone_type_to_label(boundary.exterior_zone.as_ref());
+                    let interior_label =
+                        zone_type_to_label(&boundary.id, boundary.interior_zone.as_ref())?;
+                    let exterior_label =
+                        zone_type_to_label(&boundary.id, boundary.exterior_zone.as_ref())?;
                     let (r_film_int_tarp, r_film_ext_tarp) = film_resistances(
                         tilt_deg,
                         interior_label,

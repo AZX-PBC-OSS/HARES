@@ -68,8 +68,8 @@ pub fn building_to_boundary_inputs(
 
             // Film resistances first -- needed to strip from assembly R-value.
             let tilt_deg = bd.tilt_deg.unwrap_or(90.0);
-            let interior_label = zone_type_to_label(bd.interior_zone.as_ref());
-            let exterior_label = zone_type_to_label(bd.exterior_zone.as_ref());
+            let interior_label = zone_type_to_label(&bd.id, bd.interior_zone.as_ref())?;
+            let exterior_label = zone_type_to_label(&bd.id, bd.exterior_zone.as_ref())?;
             let (r_film_int, r_film_ext) = film_resistances(
                 tilt_deg,
                 interior_label,
@@ -372,12 +372,19 @@ pub fn building_to_boundary_inputs(
 }
 
 /// Map HPXML ZoneType to film-coefficient ZoneLabel.
+///
+/// An unrecognised zone type is an error naming the boundary and the input's
+/// text: no label may be substituted for a location the input does not name,
+/// the same rule `resolve_exterior` applies to the exterior side. An absent
+/// zone type is the outdoors (a boundary the input gives no adjacency for,
+/// which no attached wall derives one from).
 pub(crate) fn zone_type_to_label(
+    boundary_id: &str,
     zt: Option<&hares_io::hpxml::ZoneType>,
-) -> hares_physics::film_coefficients::ZoneLabel {
+) -> Result<hares_physics::film_coefficients::ZoneLabel> {
     use hares_io::hpxml::ZoneType;
     use hares_physics::film_coefficients::ZoneLabel;
-    match zt {
+    Ok(match zt {
         Some(ZoneType::Conditioned) => ZoneLabel::Conditioned,
         Some(ZoneType::Attic) => ZoneLabel::Attic,
         Some(ZoneType::Garage) => ZoneLabel::Garage,
@@ -386,13 +393,12 @@ pub(crate) fn zone_type_to_label(
         Some(ZoneType::Adjacent) => ZoneLabel::Conditioned,
         Some(ZoneType::Outdoor) | None => ZoneLabel::Outdoor,
         Some(ZoneType::Other(raw)) => {
-            tracing::warn!(
-                zone_type = %raw,
-                "Unrecognised zone type; mapping to ZoneLabel::Outdoor"
-            );
-            ZoneLabel::Outdoor
+            return Err(HaresError::Dwelling(format!(
+                "boundary '{boundary_id}': unrecognised zone type '{raw}'; no zone label \
+                 may be substituted for a location the input does not name"
+            )));
         }
-    }
+    })
 }
 
 /// Find zone index by zone identity.
@@ -1499,7 +1505,7 @@ fn boundary_outside_roughness(
 pub(crate) fn envelope_input_warnings(building: &Building) -> Result<Vec<hares_types::Warning>> {
     let mut warnings = Vec::new();
     for bd in &building.boundaries {
-        let exterior = zone_type_to_label(bd.exterior_zone.as_ref());
+        let exterior = zone_type_to_label(&bd.id, bd.exterior_zone.as_ref())?;
         if let (_, Some(message)) = boundary_outside_roughness(bd, exterior)? {
             warnings.push(hares_types::Warning::new("envelope", message));
         }
@@ -4219,12 +4225,17 @@ mod tests {
     // ── zone_type_to_label tests ──────────────────────────────────────
 
     #[test]
-    fn zone_type_to_label_other_maps_to_outdoor() {
-        let result = zone_type_to_label(Some(&ZoneType::Other("Bogus".to_string())));
-        assert_eq!(
-            result,
-            hares_physics::film_coefficients::ZoneLabel::Outdoor,
-            "unrecognised zone type must map to Outdoor label"
+    fn zone_type_to_label_other_is_an_error() {
+        let err = zone_type_to_label("wall_1", Some(&ZoneType::Other("Bogus".to_string())))
+            .expect_err("an unrecognised zone type must be an error, not a substituted label");
+        let message = err.to_string();
+        assert!(
+            message.contains("Bogus"),
+            "the error must name the unrecognised text, got: {message}"
+        );
+        assert!(
+            message.contains("wall_1"),
+            "the error must name the boundary, got: {message}"
         );
     }
 

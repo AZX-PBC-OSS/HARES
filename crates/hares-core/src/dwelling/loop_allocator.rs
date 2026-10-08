@@ -815,29 +815,13 @@ mod tests {
         );
 
         // No two equipment share the same loop ID unless they're on the
-        // same hydronic loop (the combi pair shares ID 1 by design).
-        let ids: Vec<u16> = specs
-            .iter()
-            .filter_map(|s| match s.name.as_str() {
-                "Gas Boiler" => {
-                    s.typed_config
-                        .as_ref()?
-                        .typed::<GasBoilerConfig>()
-                        .ok()?
-                        .loop_id
-                }
-                "Indirect Tank" => {
-                    s.typed_config
-                        .as_ref()?
-                        .typed::<IndirectTankConfig>()
-                        .ok()?
-                        .boiler_loop_id
-                }
-                _ => None,
-            })
-            .collect();
+        // same hydronic loop (the combi pair shares ID 1 by design). The
+        // ids are read through the allocator's own collector: a typed
+        // config that does not read as its spec's type is an error naming
+        // the spec, never a silently dropped id.
+        let ids = allocated_loop_ids(&specs).expect("the allocated ids read");
         // IDs: [2, 1, 1] — standalone at 2, combi pair at 1
-        let mut unique: Vec<u16> = ids.clone();
+        let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
         // Combi pair (1) appears twice by design; standalone (2) is unique
