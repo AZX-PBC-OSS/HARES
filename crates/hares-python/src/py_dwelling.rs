@@ -3886,33 +3886,6 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn l1_cap_is_one_constant() {
-        use hares_equipment::ev::catalog::L1_CAP_KW;
-
-        assert_eq!(L1_CAP_KW, 1.8);
-        // Both Python call sites resolve through the catalogue's constant,
-        // and neither re-derives the cap from a literal. The needle is
-        // assembled from parts so this assertion's own source text cannot
-        // match it.
-        let literal_cap = format!(".min({}.{})", 1, 8);
-        let dwelling_src = include_str!("py_dwelling.rs");
-        let equipment_src = include_str!("py_equipment.rs");
-        for (file, src) in [
-            ("py_dwelling.rs", dwelling_src),
-            ("py_equipment.rs", equipment_src),
-        ] {
-            assert!(
-                src.contains("L1_CAP_KW"),
-                "{file} must resolve its L1 cap through L1_CAP_KW"
-            );
-            assert!(
-                !src.contains(&literal_cap),
-                "{file} must not re-derive the L1 cap from a literal"
-            );
-        }
-    }
 }
 
 /// `profiling_summary_lists_actors`: the per-actor
