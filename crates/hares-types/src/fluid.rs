@@ -313,7 +313,7 @@ impl FluidDomainPayload {
             )));
         }
         let mut states = Vec::with_capacity(payload.len() / 7);
-        for chunk in payload.chunks_exact(7) {
+        for chunk in payload.as_chunks::<7>().0 {
             let loop_id = f64_to_loop_id(chunk[0])?;
             let fluid_type = f64_to_fluid_type(chunk[1])?;
             states.push(FluidLoopState {

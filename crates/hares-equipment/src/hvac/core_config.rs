@@ -304,10 +304,7 @@ pub(super) fn load_plr_coefficients(
         )));
     }
 
-    let curves = numbers
-        .chunks_exact(3)
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
+    let curves = numbers.as_chunks::<3>().0.to_vec();
     Ok(Some(curves))
 }
 
@@ -344,8 +341,8 @@ pub(super) fn parse_biquadratic_list(raw: &str) -> crate::Result<Vec<[f64; 6]>> 
             numbers.len()
         )));
     }
-    for chunk in numbers.chunks_exact(6) {
-        parsed.push([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5]]);
+    for chunk in numbers.as_chunks::<6>().0 {
+        parsed.push(*chunk);
     }
     Ok(parsed)
 }

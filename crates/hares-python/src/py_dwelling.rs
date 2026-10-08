@@ -2683,7 +2683,7 @@ pub(crate) fn build_config(
         // rejects as a misconfigured non-object payload. A JSON `null`
         // nested INSIDE a provided dict keeps its meaning (a null override
         // field, rejected per-key downstream).
-        .and_then(|v| if v.is_null() { None } else { Some(v) });
+        .filter(|v| !v.is_null());
 
     Ok(DwellingConfig {
         hpxml_path: PathBuf::from(hpxml),

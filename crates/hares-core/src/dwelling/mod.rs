@@ -3798,7 +3798,9 @@ impl Dwelling {
             && let Some(payload) = &thermal_update.custom_payload
         {
             let residual_map: HashMap<ZoneId, f64> = payload
-                .chunks_exact(5)
+                .as_chunks::<5>()
+                .0
+                .iter()
                 .filter_map(|quint| {
                     let zone_raw = quint[0];
                     if zone_raw.is_finite() && zone_raw >= 0.0 {
@@ -6911,7 +6913,7 @@ impl Dwelling {
             // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor,
             // energy_balance_residual_w] per zone. The 5-float format carries moisture
             // coupling data and the per-step energy balance residual for observability.
-            for quint in payload.chunks_exact(5) {
+            for quint in payload.as_chunks::<5>().0 {
                 let zone_raw = quint[0];
                 let latent = quint[1];
                 let m_dot_inf = quint[2];
@@ -7466,7 +7468,8 @@ mod tests {
 
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config(&base_path).expect("build dwelling");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
 
         let slot = dwelling
             .install_domain_solver(Box::new(StubSolver {

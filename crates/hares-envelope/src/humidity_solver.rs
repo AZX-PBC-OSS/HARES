@@ -158,7 +158,7 @@ impl DomainSolver for HumiditySolver {
                 // coupling data for semi-implicit humidity treatment and the per-step energy
                 // balance residual for observability. Zones without infiltration have
                 // m_dot_inf_kg_s = 0.0 and w_outdoor = 0.0.
-                for quint in payload.chunks_exact(5) {
+                for quint in payload.as_chunks::<5>().0 {
                     let zone_raw = quint[0];
                     let latent = quint[1];
                     let m_dot_inf = quint[2];

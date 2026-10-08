@@ -572,7 +572,7 @@ pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update:
         .equipment_telemetry
         .remove(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY)
         .unwrap_or_default();
-    for chunk in payload.chunks_exact(7) {
+    for chunk in payload.as_chunks::<7>().0 {
         let zone_raw = chunk[0];
         let humidity_ratio = chunk[1];
         // chunk[2] and chunk[3] are relative_humidity and wet_bulb_c — no longer

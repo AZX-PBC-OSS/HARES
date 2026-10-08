@@ -248,7 +248,7 @@ impl FluidSolver {
                 payload.len()
             )));
         }
-        for chunk in payload.chunks_exact(3) {
+        for chunk in payload.as_chunks::<3>().0 {
             let loop_id_raw = chunk[0];
             if !(0.0..=f64::from(u16::MAX)).contains(&loop_id_raw) || loop_id_raw.fract() != 0.0 {
                 return Err(HaresError::Envelope(format!(
@@ -264,7 +264,7 @@ impl FluidSolver {
     pub fn restore_from_payload(&mut self, payload: &[f64]) -> Result<(), HaresError> {
         Self::validate_payload(payload)?;
         self.last_known_temps.clear();
-        for chunk in payload.chunks_exact(3) {
+        for chunk in payload.as_chunks::<3>().0 {
             self.last_known_temps
                 .insert(LoopId(chunk[0] as u16), (chunk[1], chunk[2]));
         }
