@@ -149,7 +149,10 @@ impl Fleet {
     /// dataset's zip archives, so the fleet does not unpack either; a
     /// building whose directory or files are missing (as when the dataset
     /// root with its zip archives is passed) is a typed error naming the
-    /// building, the missing element and the fix. Each building's weather
+    /// building, the missing element and the fix. The layout resolution
+    /// covers every metadata row: a `filter` narrows the fleet, not the
+    /// parse, so a filtered fleet still requires every metadata building
+    /// to be unpacked. Each building's weather
     /// file is resolved from the FIPS code in its own HPXML
     /// (`WeatherStation/Name`) against `weather_dir`.
     ///

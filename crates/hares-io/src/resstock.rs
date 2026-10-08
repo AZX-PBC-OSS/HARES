@@ -267,6 +267,10 @@ fn extracted_building_dir(buildings_dir: &Path, bldg_id: i64) -> PathBuf {
 /// `in.state` is a required characteristic: the fleet's zone validation
 /// and the weather lookup key on it, and every released metadata schema
 /// carries it.
+///
+/// The layout resolution covers EVERY metadata row: a fleet filter narrows
+/// the returned fleet, not this parse, so a filtered fleet still requires
+/// every metadata building to be unpacked under `buildings_dir`.
 pub fn parse_resstock_metadata(
     path: &Path,
     version: ResStockVersion,
@@ -736,6 +740,67 @@ mod tests {
                 assert_eq!(path, tmp.path().join("bldg0012345"));
             }
             other => panic!("expected MissingLayout, got {other}"),
+        }
+    }
+
+    #[test]
+    fn resstock_a_missing_row_fails_the_parse_naming_that_row() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("test.parquet");
+        // Two rows: the first building is unpacked, the second is not.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bldg_id", DataType::Int64, false),
+            Field::new("upgrade", DataType::Int64, false),
+            Field::new("sample_weight", DataType::Float64, false),
+            Field::new("in.state", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![12_345, 67_890])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![0, 0])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![1.0, 2.0])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["CO", "WA"])) as ArrayRef,
+            ],
+        )
+        .expect("batch");
+        write_parquet(&pq, &batch);
+        write_extracted_building(tmp.path(), 12_345, "G0800130");
+
+        let err = parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path())
+            .expect_err("the second building is not unpacked");
+        match err {
+            ResStockError::MissingLayout { bldg_id, .. } => assert_eq!(bldg_id, 67_890),
+            other => panic!("expected MissingLayout for the unpacked row, got {other}"),
+        }
+    }
+
+    #[test]
+    fn v2025_1_metadata_without_state_is_an_error() {
+        let tmp = tempdir().expect("tmp");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("building_id", DataType::Int64, false),
+            Field::new("upgrade_id", DataType::Int64, false),
+            Field::new("weight", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![12_345])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![0])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+            ],
+        )
+        .expect("batch");
+        let pq = tmp.path().join("no_state_v2025.parquet");
+        write_parquet(&pq, &batch);
+        write_extracted_building(tmp.path(), 12_345, "G0800130");
+
+        let err = parse_resstock_metadata(&pq, ResStockVersion::V2025_1, tmp.path())
+            .expect_err("no in.state column");
+        match err {
+            ResStockError::MissingCharacteristic(col) => assert_eq!(col, "in.state"),
+            other => panic!("expected MissingCharacteristic for in.state, got {other}"),
         }
     }
 
