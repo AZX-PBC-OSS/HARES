@@ -30,7 +30,7 @@ laws are enforced at runtime via invariant checks.
 OCHRE ([Blonsky et al. 2021](https://doi.org/10.1016/j.apenergy.2021.116732),
 repo at https://github.com/NREL/OCHRE) is the primary reference oracle,
 vendored as a git submodule at `vendors/OCHRE/`. The pinned commit is
-`58f39d8746520786c26c02ce4c08618d3053c422`. HARES runs side-by-side
+recorded in the "OCHRE Reference" section above. HARES runs side-by-side
 simulations on identical inputs (same HPXML building description, weather
 file, and schedules) and compares output columns.
 
