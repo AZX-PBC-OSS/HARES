@@ -1915,9 +1915,9 @@ OpenStudio-HPXML does. Both references' daily volumes in gal/d and L/d:
 | cz4a_ashp_hpwh (and cz2a) | dishwasher | 2.5629 gal/d = 9.702 L/d | 3.0307 gal/d = 11.473 L/d |
 | bldg0176227 | washer | 7.4477 gal/d = 28.192 L/d | 8.5017 gal/d = 32.182 L/d |
 | bldg0176227 | dishwasher | 3.7114 gal/d = 14.049 L/d | 5.1129 gal/d = 19.354 L/d |
-| bldg0000002 | washer | 0.9741 gal/d = 3.687 L/d | 1.0052 gal/d = 3.805 L/d |
+| bldg0000002 | washer | 0.9741 gal/d = 3.687 L/d | 0.9295 gal/d = 3.518 L/d |
 | bldg0000004 | washer | 3.2018 gal/d = 12.120 L/d | 3.0318 gal/d = 11.477 L/d |
-| bldg0000004 | dishwasher | 1.8634 gal/d = 7.054 L/d | 1.4796 gal/d = 5.601 L/d |
+| bldg0000004 | dishwasher | 1.8634 gal/d = 7.054 L/d | 1.5820 gal/d = 5.988 L/d |
 
 (The OS-HPXML values equal the values B-17's acceptance test states for
 the parity cz4a building, 2.584 and 2.563 gal/d, and for
@@ -1950,7 +1950,15 @@ Deltas. Against OpenStudio-HPXML at each home's 900 s step: cz4a washer
 +180.4 %, dishwasher +117.6 %; bldg0176227 washer -39.3 %, dishwasher
 +121.9 %; bldg0000002 washer +15.7 %; bldg0000004 washer -53.4 %,
 dishwasher -63.4 %. Against OCHRE: +158.9 %, +84.0 %, -46.8 %, +61.0 %,
-+12.1 %, -50.8 %, -54.0 % in the same order. The 900 s to 3600 s leg:
++12.1 %, -50.8 %, -54.0 % in the same order. An independent check of the
+reference arithmetic corrected the two apartment cells: for the apartment
+buildings OCHRE's occupancy adjustment is max(-0.68 + 1.09 n_occ, 0)
+(vendors/OCHRE/ochre/utils/hpxml.py:795-797), not the detached form the
+probe first used, so the OCHRE column for bldg0000002 washer is 3.518 L/d
+(delta +21.3 %, was +12.1 %) and for bldg0000004 dishwasher 5.988 L/d
+(delta -56.9 %, was -54.0 %). Every cell stays two orders of magnitude
+beyond the 1 % bound; the verdict keys on the OS-HPXML leg and the step
+leg, both untouched. The 900 s to 3600 s leg:
 cz4a 0.00 % on both appliances (an hourly schedule upsampled by
 zero-order hold keeps its non-zero runs at every step, so the draw is
 step-independent there); bldg0176227 washer +130.0 % (17.112 to 39.353
