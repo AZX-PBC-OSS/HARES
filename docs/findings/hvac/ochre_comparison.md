@@ -2,7 +2,7 @@ OCHRE HVAC Implementation: Detailed Architecture & Physics Analysis
 
 **OCHRE Reference:**
 - Repository: https://github.com/NREL/OCHRE
-- Vendored commit (in `vendors/OCHRE/`): `ffc8b56e99c61eb4e42af625bbbc310e198ec58d`
+- Vendored commit (in `vendors/OCHRE/`): `58f39d8746520786c26c02ce4c08618d3053c422`
 - Publication: Blonsky, M., Maguire, J., McKenna, K., Cutler, D., Balamurugan, S. P., & Jin, X. (2021). OCHRE: The Object-oriented, Controllable, High-resolution Residential Energy Model for Dynamic Integration Studies. *Applied Energy*, *290*, 116732. https://doi.org/10.1016/j.apenergy.2021.116732
 
 1. Architecture: Class Hierarchy and Structure
