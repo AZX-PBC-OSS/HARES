@@ -886,6 +886,43 @@ mod tests {
         );
     }
 
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the baseboard back to its own thermostat. The shared
+    /// simple-heating override arm covers the furnace and boiler classes
+    /// the same way.
+    #[test]
+    fn mode_release_returns_the_unit_to_its_own_thermostat() {
+        let cfg = config(3_000.0);
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let env = env(18.0); // below setpoint → thermostat would heat
+        eq.init(&cfg, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        assert_eq!(eq.update_control(&env), OperatingMode::Off);
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        let mode = eq.update_control(&env);
+        assert_eq!(
+            mode,
+            OperatingMode::Heating,
+            "the release must return the unit to its own thermostat"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            ports.thermal[0].sensible_gain_w > 0.0,
+            "the released unit must deliver per the thermostat again"
+        );
+    }
+
     #[test]
     fn demand_response_curtails_heating() {
         let cfg = config(3_000.0);

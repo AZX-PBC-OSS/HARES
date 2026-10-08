@@ -1381,6 +1381,9 @@ impl Equipment for HeatPumpWH {
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+            }
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
@@ -3867,6 +3870,38 @@ mod mutual_exclusion_tests {
         );
         assert!(!wh.backup_on, "backup must be off with HeatingHP override");
         assert_eq!(mode, OperatingMode::HeatPumpWH);
+    }
+
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the water heater back to its own thermostat.
+    #[test]
+    fn mode_release_returns_the_wh_to_its_own_thermostat() {
+        let cfg = base_config("MutuallyExclusive");
+        let mut wh = HeatPumpWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+
+        wh.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        assert_eq!(wh.update_control(&env_state()), OperatingMode::Off);
+        assert!(
+            !wh.compressor_on,
+            "the forced-off WH must not run its compressor"
+        );
+
+        wh.apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        let mode = wh.update_control(&env_state());
+        assert_ne!(
+            mode,
+            OperatingMode::Off,
+            "the release must return the WH to its own thermostat"
+        );
+        assert!(
+            wh.compressor_on,
+            "tank at 40°C is below the 52°C setpoint: the HP must fire again"
+        );
     }
 
     /// Verify state round-trip preserves the element_hp_control field.

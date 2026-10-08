@@ -738,6 +738,10 @@ impl Equipment for ScheduledLoad {
                 self.mode_override = Some(*mode);
                 Ok(())
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+                Ok(())
+            }
             ControlSignal::PowerSetpoint {
                 active_power_kw, ..
             } => {
@@ -1409,6 +1413,35 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         assert_eq!(ports.electrical.net_active_w(), 0.0);
+    }
+
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the load back to its schedule.
+    #[test]
+    fn mode_release_returns_the_load_to_its_schedule() {
+        let config = config_with_schedule("s", "Lighting", &[5.0]);
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Off,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(ports.electrical.net_active_w(), 0.0);
+
+        eq.apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert!(
+            (ports.electrical.net_active_w() - 5000.0).abs() < 10.0,
+            "the released load must follow its schedule again"
+        );
     }
 
     #[test]

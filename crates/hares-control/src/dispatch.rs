@@ -68,6 +68,7 @@ impl From<&ControlSignal> for PriorityTier {
             ControlSignal::ThermalSetpoint { .. }
             | ControlSignal::HumiditySetpoint { .. }
             | ControlSignal::ModeOverride { .. }
+            | ControlSignal::ModeOverrideRelease
             | ControlSignal::ThermalSetpointDelta { .. } => PriorityTier::UserOverride,
 
             ControlSignal::DemandResponse { .. }

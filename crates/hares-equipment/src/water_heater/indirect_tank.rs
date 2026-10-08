@@ -691,6 +691,9 @@ impl Equipment for IndirectTank {
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+            }
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
@@ -784,7 +787,8 @@ mod control_domain_tests {
     use crate::Equipment;
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, EnvironmentState, GridState, PortSlots, WeatherState, ZoneState,
+        ControlSignal, EnvironmentState, GridState, OperatingMode, PortSlots, WeatherState,
+        ZoneState,
     };
     use std::time::Duration;
 
@@ -871,6 +875,42 @@ mod control_domain_tests {
             |e| (e.setpoint_c, e.deadband_c),
             |e, db| e.deadband_c = db,
         );
+    }
+
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the indirect tank back to its own thermostat.
+    #[test]
+    fn mode_release_returns_the_tank_to_its_own_thermostat() {
+        let mut typed = config().typed::<IndirectTankConfig>().unwrap();
+        typed.initial_tank_temp_c = Some(40.0);
+        let cfg = crate::EquipmentConfig::from_typed(
+            "indirect".to_string(),
+            "Indirect Tank".to_string(),
+            typed,
+        )
+        .expect("typed config");
+        let mut eq = IndirectTank::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        assert_eq!(eq.update_control(&env()), OperatingMode::Off);
+        assert!(
+            !eq.heating_on,
+            "the forced-off tank must not call for boiler heat"
+        );
+
+        eq.apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        let mode = eq.update_control(&env());
+        assert_eq!(
+            mode,
+            OperatingMode::Heating,
+            "a cold tank is below the call edge: the release must let it heat again"
+        );
+        assert!(eq.heating_on);
     }
 
     /// The central validator rejects out-of-domain setpoints and load

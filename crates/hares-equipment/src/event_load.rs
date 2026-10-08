@@ -873,6 +873,9 @@ impl Equipment for EventBasedLoad {
             ControlSignal::ModeOverride { mode } => {
                 self.forced_mode = Some(mode_to_forced(*mode));
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.forced_mode = None;
+            }
             ControlSignal::PowerSetpoint {
                 active_power_kw, ..
             } => {
@@ -1466,6 +1469,9 @@ impl Equipment for WetAppliance {
             }
             ControlSignal::ModeOverride { mode } => {
                 self.forced_mode = Some(mode_to_forced(*mode));
+            }
+            ControlSignal::ModeOverrideRelease => {
+                self.forced_mode = None;
             }
             ControlSignal::EventDelay { delay_s } => {
                 if self.active {
@@ -2204,6 +2210,36 @@ mod tests {
         set_schedule_payload(&mut env, vec![0.0, 0.0]);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         assert!((ports.electrical.load_power_w - 750.0).abs() < 1e-6);
+    }
+
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the event load back to its own event schedule.
+    #[test]
+    fn mode_release_returns_the_event_to_its_own_schedule() {
+        let mut env = base_env();
+        let config = event_config("event", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Off,
+        })
+        .unwrap();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut ports = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert_eq!(
+            ports.electrical.load_power_w, 0.0,
+            "the forced-off event load must not run its event"
+        );
+
+        eq.apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            (ports.electrical.load_power_w - 1500.0).abs() < 1e-6,
+            "the released event load must start its event from its own schedule"
+        );
     }
 
     #[test]

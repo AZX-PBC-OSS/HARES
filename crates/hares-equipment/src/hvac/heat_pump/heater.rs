@@ -2719,6 +2719,9 @@ impl HeatPumpHeaterCore {
             ControlSignal::ModeOverride { mode } => {
                 self.ctrl_mode_override = Some(*mode);
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.ctrl_mode_override = None;
+            }
             ControlSignal::DemandResponse { level, duration_s } => {
                 self.apply_dr_level(*level);
                 self.dr_duration_remaining_s = *duration_s;
@@ -4078,6 +4081,158 @@ mod tests {
         assert_eq!(
             eq.core_output().state.operating_mode,
             Some(OperatingMode::HeatingHP)
+        );
+    }
+
+    #[test]
+    fn dr_forced_off_resumes_thermostat_control_at_event_end() {
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let env = env(18.0, 5.0, 0.003);
+        eq.init(&cfg, &env).unwrap();
+
+        // Before the event the thermostat calls for heat and delivers.
+        assert_eq!(eq.update_control(&env), OperatingMode::HeatingHP);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            ports.electrical.net_active_w() > 0.0,
+            "the thermostat call must deliver before the event"
+        );
+
+        // A DR event's TurnOff forces Off through ModeOverride. The forced
+        // mode is sticky by design and must hold through every step of the
+        // event.
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        for second in [60, 120, 180] {
+            let event_env = env_at(18.0, 5.0, 0.003, second);
+            assert_eq!(eq.update_control(&event_env), OperatingMode::Off);
+            ports.zero();
+            eq.step(&event_env, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            assert_eq!(
+                ports.electrical.net_active_w(),
+                0.0,
+                "the forced-off override must hold through every event step"
+            );
+        }
+
+        // The event's end dispatches the mode release. The step after the
+        // last event step must deliver per the thermostat again.
+        eq.apply_control(&ControlSignal::mode_release()).unwrap();
+        let after_env = env_at(18.0, 5.0, 0.003, 240);
+        assert_eq!(
+            eq.update_control(&after_env),
+            OperatingMode::HeatingHP,
+            "the release must hand the unit back to its own thermostat"
+        );
+        ports.zero();
+        eq.step(&after_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            ports.electrical.net_active_w() > 0.0,
+            "the step after the last event step must deliver per the thermostat again"
+        );
+    }
+
+    #[test]
+    fn dr_forced_on_returns_to_thermostat_control_at_event_end() {
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        // Zone above the heating band: the unit's own thermostat keeps it off.
+        let env = env(23.0, 5.0, 0.003);
+        eq.init(&cfg, &env).unwrap();
+        assert_eq!(eq.update_control(&env), OperatingMode::Off);
+
+        // A DR event forces the heat pump on; the forced mode holds through
+        // every step of the event.
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::HeatingHP,
+        })
+        .unwrap();
+        for second in [60, 120] {
+            let event_env = env_at(23.0, 5.0, 0.003, second);
+            assert_eq!(eq.update_control(&event_env), OperatingMode::HeatingHP);
+            ports.zero();
+            eq.step(&event_env, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            assert!(
+                ports.electrical.net_active_w() > 0.0,
+                "the forced-on override must hold through every event step"
+            );
+        }
+
+        // The event's end returns the unit to its own control: the
+        // thermostat, which keeps it off.
+        eq.apply_control(&ControlSignal::mode_release()).unwrap();
+        let after_env = env_at(23.0, 5.0, 0.003, 240);
+        assert_eq!(
+            eq.update_control(&after_env),
+            OperatingMode::Off,
+            "the release must return the forced-on unit to its thermostat"
+        );
+        ports.zero();
+        eq.step(&after_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            ports.electrical.net_active_w(),
+            0.0,
+            "no delivery after the release when the thermostat is satisfied"
+        );
+    }
+
+    #[test]
+    fn mode_override_and_cleared_state_survive_checkpoint_round_trip() {
+        let cfg = heater_config();
+        let env = env(23.0, 5.0, 0.003);
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::HeatingHP,
+        })
+        .unwrap();
+
+        let state = eq.save_state().unwrap();
+        let mut restored = ASHPHeater::new(cfg.clone());
+        restored.init(&cfg, &env).unwrap();
+        restored.load_state(&state).unwrap();
+        assert_eq!(
+            restored.core.ctrl_mode_override,
+            Some(OperatingMode::HeatingHP),
+            "the forced mode must survive the checkpoint round trip"
+        );
+        assert_eq!(
+            restored.update_control(&env),
+            OperatingMode::HeatingHP,
+            "the restored unit must still honour the forced mode"
+        );
+
+        restored
+            .apply_control(&ControlSignal::mode_release())
+            .unwrap();
+        let cleared_state = restored.save_state().unwrap();
+        let mut cleared = ASHPHeater::new(cfg.clone());
+        cleared.init(&cfg, &env).unwrap();
+        cleared.load_state(&cleared_state).unwrap();
+        assert_eq!(
+            cleared.core.ctrl_mode_override, None,
+            "the cleared override must survive the checkpoint round trip"
+        );
+        assert_eq!(
+            cleared.update_control(&env),
+            OperatingMode::Off,
+            "after the cleared round trip the thermostat controls again"
         );
     }
 

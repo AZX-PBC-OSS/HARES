@@ -366,6 +366,11 @@ pub fn apply_simple_mode_override_and_dr(
             );
             Ok(true)
         }
+        ControlSignal::ModeOverrideRelease => {
+            *mode_override = None;
+            tracing::debug!(equipment = equipment_name, "ModeOverrideRelease applied");
+            Ok(true)
+        }
         ControlSignal::DemandResponse {
             level,
             duration_s: _, // Discarded: simple heating equipment does not maintain a
@@ -655,10 +660,12 @@ mod tests {
     use crate::config::{ConfigPayload, ConfigValue};
 
     use super::{
-        DuctDseContext, cycling_load_fraction, loop_id_from_config, netted_cycling_duty,
-        parse_fuel_type, parse_zone_id_key, register_ebm_telemetry_keys, resolve_duct_dse,
-        step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
+        DuctDseContext, apply_simple_mode_override_and_dr, cycling_load_fraction,
+        loop_id_from_config, netted_cycling_duty, parse_fuel_type, parse_zone_id_key,
+        register_ebm_telemetry_keys, resolve_duct_dse, step_equivalent_battery,
+        write_ebm_telemetry, zone_id_from_config,
     };
+    use hares_types::{ControlSignal, OperatingMode};
 
     /// The fraction runs 0 at the release edge, 1 at the call edge, and
     /// clamps outside; one formula covers both axes (the heating band's
@@ -1057,6 +1064,27 @@ mod tests {
         assert_eq!(
             baseline, 0.0,
             "EBM baseline should stay at 0.0 when zone_capacitance_kwh_per_k is 0 (disabled)"
+        );
+    }
+
+    #[test]
+    fn simple_mode_override_release_clears_a_stored_override() {
+        let mut mode_override = Some(OperatingMode::Off);
+        let mut dr_level = hares_types::DRLevel::Normal;
+        let released = apply_simple_mode_override_and_dr(
+            &mut mode_override,
+            &mut dr_level,
+            &ControlSignal::ModeOverrideRelease,
+            "Test Heater",
+        )
+        .expect("the release must be consumed by the mode-override arm");
+        assert!(
+            released,
+            "the release must land on the override arm, not the catch-all"
+        );
+        assert_eq!(
+            mode_override, None,
+            "the release must clear the stored override"
         );
     }
 }

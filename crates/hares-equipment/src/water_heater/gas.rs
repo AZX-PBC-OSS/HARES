@@ -909,6 +909,9 @@ impl Equipment for GasWH {
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+            }
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
@@ -1286,6 +1289,33 @@ mod tests {
             |e| (e.setpoint_c, e.deadband_c),
             |e, db| e.deadband_c = db,
         );
+    }
+
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the gas WH back to its own thermostat.
+    #[test]
+    fn mode_release_returns_the_burner_to_its_own_thermostat() {
+        use hares_types::{ControlSignal, OperatingMode};
+
+        let mut eq = GasWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        assert_eq!(eq.update_control(&env(21.0)), OperatingMode::Off);
+        assert!(!eq.burner_on, "the forced-off burner must not fire");
+
+        eq.apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        let mode = eq.update_control(&env(21.0));
+        assert_eq!(
+            mode,
+            OperatingMode::Heating,
+            "tank at 40°C is below the 50°C call edge: the release must let the burner fire again"
+        );
+        assert!(eq.burner_on);
     }
 
     /// Reactive-power contract for the gas WH draft-inducer fan: the class

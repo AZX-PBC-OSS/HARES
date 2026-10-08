@@ -963,6 +963,11 @@ impl Equipment for Ventilation {
             ControlSignal::ModeOverride { mode } => {
                 self.mode = *mode;
             }
+            ControlSignal::ModeOverrideRelease => {
+                // The unit's own control is its schedule-driven state: the
+                // mode init establishes when no external command holds it.
+                self.mode = OperatingMode::Standby;
+            }
             ControlSignal::DemandResponse { level, duration_s } => {
                 self.dr_level = *level;
                 self.dr_duration_remaining_s = *duration_s;
@@ -2345,6 +2350,45 @@ mod tests {
             eq.core_output().flows.reactive_power_kvar,
             Some(0.0),
             "off equipment must report Some(0.0)"
+        );
+    }
+
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// returns the fan to its own schedule-driven control (the Standby
+    /// state init establishes when no external command holds it).
+    #[test]
+    fn mode_release_returns_the_fan_to_its_own_schedule_control() {
+        let cfg = hrv_config();
+        let mut v = Ventilation::new(cfg.clone());
+        let e = env(5.0, 20.0);
+        v.init(&cfg, &e).expect("init");
+
+        v.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .expect("mode override off");
+        let mut ports = PortSlots::default();
+        v.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+        assert_eq!(
+            ports.electrical.net_active_w(),
+            0.0,
+            "the forced-off fan must not run"
+        );
+
+        v.apply_control_unchecked(&ControlSignal::ModeOverrideRelease)
+            .expect("mode release");
+        v.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step after release");
+        let electric_w = ports.electrical.net_active_w();
+        assert!(
+            (electric_w - 50.0).abs() < 1.0,
+            "the released fan must run per its schedule again (50 W), got {electric_w} W"
+        );
+        assert_eq!(
+            v.core_output().state.operating_mode,
+            Some(OperatingMode::Standby),
+            "the released fan must be in its own-control standby state"
         );
     }
 

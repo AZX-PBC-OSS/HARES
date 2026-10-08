@@ -887,6 +887,9 @@ impl Equipment for Dehumidifier {
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+            }
             _ => {}
         }
         Ok(())

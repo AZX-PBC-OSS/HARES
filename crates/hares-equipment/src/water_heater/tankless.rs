@@ -658,6 +658,9 @@ impl Equipment for TanklessWH {
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+            }
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
@@ -1117,6 +1120,34 @@ mod tests {
             eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap(),
             0.0,
             "thermal_output_w must be zero when off"
+        );
+    }
+
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the tankless heater back to its own control and it fires on
+    /// the next draw.
+    #[test]
+    fn mode_release_returns_the_heater_to_its_own_control() {
+        use hares_types::{ControlSignal, OperatingMode};
+
+        let config = config();
+        let mut eq = TanklessWH::new(config.clone());
+        eq.init(&config, &env()).unwrap();
+
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        eq.apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+
+        let mut ports = PortSlots::from_declarations(eq.ports());
+        eq.step(&env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            eq.telemetry().get(tk::OUTLET_TEMP_C),
+            Some(50.0),
+            "the released heater must deliver its setpoint on a draw again"
         );
     }
 

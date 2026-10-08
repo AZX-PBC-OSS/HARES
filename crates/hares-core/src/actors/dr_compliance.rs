@@ -238,6 +238,9 @@ pub enum DrAction {
     /// Turn equipment off. Like every whole-unit action (a power limit, a
     /// curtailment, a DR level), on an end-use target it reaches a unit
     /// serving both setpoints only while that unit's mode is the end use's.
+    /// The forced mode it installs is released when the event ends (the
+    /// equipment-side [`ControlSignal::mode_release`]), so the unit returns
+    /// to its own control.
     TurnOff,
     /// Limit power draw to a maximum.
     PowerLimit { max_kw: f64 },
@@ -764,14 +767,11 @@ impl DrCompliance {
                     });
                 }
                 DrAction::TurnOff => {
-                    // ModeOverride clearing via ControlSignal is not currently
-                    // achievable: the equipment stores ctrl_mode_override as
-                    // Option<OperatingMode> where None means "autonomous", but
-                    // ControlSignal::ModeOverride always sets Some(mode).
-                    // OperatingMode::Auto does not exist in the enum.
-                    // Full clearing requires equipment-side changes to
-                    // apply_dr_level(DRLevel::Normal).
-                    // See Implementation Notes / Known Limitations.
+                    out.push(DispatchRequest {
+                        target: target.clone(),
+                        signal: ControlSignal::mode_release(),
+                        priority: PriorityTier::Grid,
+                    });
                 }
                 DrAction::LoadCurtailment { .. }
                 | DrAction::DemandResponse { .. }
@@ -2445,19 +2445,17 @@ mod tests {
     }
 
     #[test]
-    fn turnoff_modeoverride_dispatched_but_not_cleared_on_normal() {
-        // ModeOverride::Off (from TurnOff) is sticky on equipment but cannot
-        // be cleared via the current ControlSignal::ModeOverride API:
-        // OperatingMode::Auto does not exist, and setting any Other mode
-        // still sets Some(mode) rather than clearing to None.
-        // This test verifies the actor tracks TurnOff but does not emit a
-        // false-positive clearing signal (no OperatingMode::Auto exists).
+    fn turnoff_cleared_on_normal_transition() {
+        // TurnOff's ModeOverride::Off is sticky on equipment, so the event's
+        // end must dispatch the equipment-side mode release; otherwise the
+        // forced mode would stick after the event and the unit would never
+        // return to its own control.
         let mut actor = DrCompliance::new("Test")
             .with_compliance_model(AlwaysComply)
             .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
             .with_hvac_action(DrAction::off());
 
-        // Step 1: DR Critical — dispatch TurnOff
+        // Step 1: DR Critical — dispatch TurnOff.
         actor.set_dr_level(DRLevel::Critical);
         let env = test_env().build();
         let mut requests = Vec::new();
@@ -2470,17 +2468,71 @@ mod tests {
             }
         ));
 
-        // Step 2: DR Normal — no clearing signal for ModeOverride
-        // (PowerLimit { INFINITY } would be dispatched if PowerLimit was tracked,
-        // but TurnOff tracking only logs, does not dispatch)
+        // Step 2: DR Normal — the event's end releases the forced mode.
         actor.set_dr_level(DRLevel::Normal);
         let env2 = test_env().build();
         let mut requests2 = Vec::new();
         actor.decide(&env2, &mut requests2);
-        assert!(
-            requests2.is_empty(),
-            "TurnOff ModeOverride must not emit a false clearing signal"
+        assert_eq!(
+            requests2.len(),
+            1,
+            "the event's end must dispatch one mode release for the forced mode"
         );
+        assert_eq!(requests2[0].priority, PriorityTier::Grid);
+        assert_eq!(requests2[0].target, DispatchTarget::ByName("HVAC".into()));
+        assert_eq!(
+            requests2[0].signal,
+            ControlSignal::mode_release(),
+            "the clear must be the mode-override release form, not another forced mode"
+        );
+
+        // Step 3: consecutive Normal — the release is not re-dispatched.
+        let mut requests3 = Vec::new();
+        actor.decide(&env2, &mut requests3);
+        assert!(
+            requests3.is_empty(),
+            "consecutive Normal calls without intervening DR must not re-dispatch the release"
+        );
+    }
+
+    #[test]
+    fn turnoff_release_reaches_every_tracked_target() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByEndUse(EndUse::HVAC_HEATING))
+            .with_hvac_action(DrAction::off())
+            .with_load_target(
+                DispatchTarget::ByName("EVSE".into()),
+                DrAction::limit_power(4.0),
+            )
+            .with_load_target(DispatchTarget::ByName("HRV".into()), DrAction::off());
+
+        actor.set_dr_level(DRLevel::Critical);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 3);
+
+        actor.set_dr_level(DRLevel::Normal);
+        let env2 = test_env().build();
+        let mut requests2 = Vec::new();
+        actor.decide(&env2, &mut requests2);
+        assert_eq!(
+            requests2.len(),
+            3,
+            "every tracked sticky action needs its clear: two turn-offs and one power limit"
+        );
+        let releases = requests2
+            .iter()
+            .filter(|r| r.signal == ControlSignal::mode_release())
+            .count();
+        assert_eq!(
+            releases, 2,
+            "both turn-off targets must receive the release"
+        );
+        let cleared: Vec<&DispatchTarget> = requests2.iter().map(|r| &r.target).collect();
+        assert!(cleared.contains(&&DispatchTarget::ByEndUse(EndUse::HVAC_HEATING)));
+        assert!(cleared.contains(&&DispatchTarget::ByName("HRV".into())));
     }
 
     #[test]
@@ -2628,16 +2680,27 @@ mod tests {
         actor.decide(&env, &mut requests);
         assert_eq!(requests.len(), 2);
 
-        // Normal — only PowerLimit clear (TurnOff can't be cleared)
+        // Normal — one clear per sticky action: the mode release for the
+        // turn-off and the INFINITY power limit.
         actor.set_dr_level(DRLevel::Normal);
         let mut requests2 = Vec::new();
         actor.decide(&env, &mut requests2);
-        assert_eq!(requests2.len(), 1, "only PowerLimit clear dispatched");
+        assert_eq!(
+            requests2.len(),
+            2,
+            "one clear per tracked sticky action: the mode release and the power limit"
+        );
         assert!(
-            matches!(
-                &requests2[0].signal,
+            requests2
+                .iter()
+                .any(|r| r.signal == ControlSignal::mode_release()),
+            "the turn-off must be cleared with the mode release, not an original DR signal"
+        );
+        assert!(
+            requests2.iter().any(|r| matches!(
+                &r.signal,
                 ControlSignal::PowerLimit { max_power_kw, .. } if max_power_kw.is_infinite() && *max_power_kw > 0.0
-            ),
+            )),
             "must dispatch PowerLimit INFINITY clear, not original DR signal"
         );
     }

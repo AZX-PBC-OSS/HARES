@@ -1973,6 +1973,11 @@ impl Equipment for Generator {
                     )));
                 }
             },
+            ControlSignal::ModeOverrideRelease => {
+                // Return to self-consumption control, the same semantics the
+                // Standby mode command carries.
+                self.power_setpoint_kw = None;
+            }
             ControlSignal::SelfConsumption { enabled, .. } => {
                 // Toggle self-consumption mode on or off.
                 // When disabled, generator is locked off unless a PowerSetpoint is
@@ -4468,6 +4473,25 @@ mod tests {
             })
             .unwrap();
         assert!(generator.power_setpoint_kw.is_none());
+
+        // The mode release carries the same semantics as the Standby mode
+        // command: return to self-consumption control.
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+        assert!(generator.power_setpoint_kw.is_some());
+        generator
+            .apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        assert!(
+            generator.power_setpoint_kw.is_none(),
+            "the release must return the generator to its self-consumption control"
+        );
     }
 
     #[test]

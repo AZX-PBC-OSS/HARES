@@ -904,6 +904,9 @@ impl Equipment for ResistanceWH {
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+            }
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
@@ -2454,6 +2457,35 @@ mod element_priority_tests {
                 "lower must be off with ModeOverride::Off ({mode_str})"
             );
             assert_eq!(mode, OperatingMode::Off, "mode must be Off ({mode_str})");
+        }
+    }
+
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the resistance WH back to its own thermostat.
+    #[test]
+    fn mode_release_returns_the_elements_to_their_own_thermostat() {
+        for mode_str in ["MasterSlave", "Simultaneous"] {
+            let cfg = cold_config(mode_str);
+            let mut wh = ResistanceWH::new(cfg.clone());
+            wh.init(&cfg, &env_state()).unwrap();
+            wh.apply_control(&ControlSignal::ModeOverride {
+                mode: OperatingMode::Off,
+            })
+            .unwrap();
+            assert_eq!(wh.update_control(&env_state()), OperatingMode::Off);
+
+            wh.apply_control(&ControlSignal::ModeOverrideRelease)
+                .unwrap();
+            let mode = wh.update_control(&env_state());
+            assert_ne!(
+                mode,
+                OperatingMode::Off,
+                "the release must return the WH to its own thermostat ({mode_str})"
+            );
+            assert!(
+                wh.upper_element_on || wh.lower_element_on,
+                "a cold tank must fire an element after the release ({mode_str})"
+            );
         }
     }
 

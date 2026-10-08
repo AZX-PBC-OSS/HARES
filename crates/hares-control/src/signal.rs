@@ -26,6 +26,8 @@ pub trait ControlSignalConstructors {
 
     fn mode_override(mode: OperatingMode) -> ControlSignal;
 
+    fn mode_release() -> ControlSignal;
+
     fn duty_cycle(
         on_fraction: f64,
         period_s: Option<f64>,
@@ -122,6 +124,10 @@ impl ControlSignalConstructors for ControlSignal {
 
     fn mode_override(mode: OperatingMode) -> ControlSignal {
         ControlSignal::ModeOverride { mode }
+    }
+
+    fn mode_release() -> ControlSignal {
+        ControlSignal::ModeOverrideRelease
     }
 
     fn duty_cycle(
@@ -254,6 +260,11 @@ mod tests {
             ControlSignal::ModeOverride {
                 mode: OperatingMode::Defrost,
             }
+        );
+
+        assert_eq!(
+            ControlSignal::mode_release(),
+            ControlSignal::ModeOverrideRelease,
         );
 
         assert_eq!(

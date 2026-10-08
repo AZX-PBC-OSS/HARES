@@ -83,6 +83,12 @@ pub enum ControlSignal {
     ModeOverride {
         mode: OperatingMode,
     },
+    /// The release form of [`ControlSignal::ModeOverride`]: it clears a
+    /// stored mode override and hands the unit back to its own control
+    /// (its thermostat, schedule, or load command). An event that forced a
+    /// mode dispatches this when it ends, the way
+    /// [`ControlSignal::thermal_release`] releases a setpoint override.
+    ModeOverrideRelease,
     DutyCycle {
         on_fraction: f64,
         period_s: Option<f64>,
@@ -238,6 +244,17 @@ impl ControlSignal {
             cooling_setpoint_c: None,
             deadband_c: None,
         }
+    }
+
+    /// The release form of [`ControlSignal::ModeOverride`]; see the
+    /// variant. OCHRE's external controls re-apply (and so release) their
+    /// forcing every timestep (`HVAC.py` `update_external_control`), and
+    /// EnergyPlus availability schedules force a unit only while the
+    /// schedule holds the unit unavailable; this release is that end of
+    /// the forcing, applied to a stored override.
+    #[must_use]
+    pub const fn mode_release() -> Self {
+        Self::ModeOverrideRelease
     }
 
     /// Returns `true` for signals whose only effect is updating connection or
@@ -428,6 +445,7 @@ impl ControlSignal {
                 }
             }
             Self::ModeOverride { .. } => {}
+            Self::ModeOverrideRelease => {}
             Self::DutyCycle {
                 on_fraction,
                 period_s,
@@ -583,6 +601,7 @@ impl ControlSignal {
             Self::PowerLimit { .. } => ControlCapabilities::POWER_LIMIT,
             Self::SOCTarget { .. } => ControlCapabilities::SOC_TARGET,
             Self::ModeOverride { .. } => ControlCapabilities::MODE_OVERRIDE,
+            Self::ModeOverrideRelease => ControlCapabilities::MODE_OVERRIDE,
             Self::DutyCycle { .. } => ControlCapabilities::DUTY_CYCLE,
             Self::LoadFraction { .. } => ControlCapabilities::LOAD_FRACTION,
             Self::GridConnect { .. } => ControlCapabilities::GRID_CONNECT,
@@ -670,6 +689,7 @@ mod tests {
             ControlSignal::ModeOverride {
                 mode: OperatingMode::Standby,
             },
+            ControlSignal::ModeOverrideRelease,
             ControlSignal::DutyCycle {
                 on_fraction: 0.5,
                 period_s: Some(900.0),
