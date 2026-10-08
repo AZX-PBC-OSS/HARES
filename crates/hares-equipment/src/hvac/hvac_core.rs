@@ -481,6 +481,10 @@ pub struct HvacEquipment {
     pub thermostat_fsm: ThermostatFsm,
     pub runtime: HvacRuntimeState,
     pub control: HvacControlState,
+    /// A control error the dwelling loop cannot see (`update_control`
+    /// returns a mode): the following step fails with it before changing
+    /// any state, the IdealHvac contract.
+    control_error: Option<HaresError>,
 }
 
 impl HvacConfig {
@@ -575,7 +579,22 @@ impl HvacEquipment {
                 speed_count: 0,
                 max_enabled_speed: 0,
             },
+            control_error: None,
         }
+    }
+
+    /// Records a control error for the following step to fail with.
+    ///
+    /// `update_control` returns a mode the dwelling loop reads without an
+    /// error channel, so an error there is stashed here instead; the step
+    /// that follows takes it and fails before changing any state.
+    pub fn record_control_error(&mut self, err: HaresError) {
+        self.control_error = Some(err);
+    }
+
+    /// Takes the recorded control error, if any.
+    pub fn take_control_error(&mut self) -> Option<HaresError> {
+        self.control_error.take()
     }
 
     pub fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
@@ -925,7 +944,9 @@ impl HvacEquipment {
 
     pub fn update_mode(&mut self, env: &EnvironmentState) -> crate::Result<ThermostatMode> {
         let zone = self.config.served_zone()?;
-        self.thermostat_fsm.update_mode(env, zone)
+        self.thermostat_fsm.update_mode(env, zone).map_err(|err| {
+            HaresError::Equipment(format!("{:?}: {err}", self.config.equipment_type))
+        })
     }
 
     pub fn use_ideal_capacity(&self, env: &EnvironmentState) -> bool {
@@ -3314,13 +3335,15 @@ mod tests {
     }
 
     #[test]
-    fn schedule_setpoints_cleared_when_source_returns_none_after_valid_step() {
+    fn schedule_source_out_of_bounds_data_is_a_read_error() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.thermostat_fsm.static_setpoints = ThermalSetpoints {
             heating_c: 20.0,
             cooling_c: 25.0,
         };
-        // One-element shared source: step 0 returns a value, step 1 errors → None.
+        // One-element shared source with the Error boundary: step 0 returns
+        // a value, step 1's read is out of bounds. The read failure is an
+        // error, not a silent fall-through to the static setpoints.
         hvac.thermostat_fsm.heating_setpoint_source = Some(ScheduleSource::Shared {
             data: std::sync::Arc::from(vec![21.0]),
             cursor: 0,
@@ -3328,21 +3351,20 @@ mod tests {
         });
 
         hvac.thermostat_fsm
-            .resolve_profile_setpoints(&env(20.0, 60, 0));
-        assert!(
-            hvac.thermostat_fsm.schedule_setpoints.is_some(),
-            "step 0: source returned a value, schedule_setpoints must be Some"
-        );
+            .resolve_profile_setpoints(&env(20.0, 60, 0))
+            .expect("step 0: the source has data");
         assert_eq!(
             hvac.thermostat_fsm.schedule_setpoints.unwrap().heating_c,
             Some(21.0)
         );
 
-        hvac.thermostat_fsm
-            .resolve_profile_setpoints(&env(20.0, 60, 60));
+        let err = hvac
+            .thermostat_fsm
+            .resolve_profile_setpoints(&env(20.0, 60, 60))
+            .expect_err("step 1: the read is out of bounds and must fail");
         assert!(
-            hvac.thermostat_fsm.schedule_setpoints.is_none(),
-            "step 1: source returned None (out of bounds), schedule_setpoints must be cleared"
+            err.to_string().contains("out of bounds"),
+            "the error names the failed read: {err}"
         );
     }
 

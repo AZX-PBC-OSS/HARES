@@ -371,11 +371,12 @@ impl Equipment for TanklessWH {
         let mains_temp_c_source = self.mains_temp_c_source.as_mut();
         let (inlet_temp_c, schedule_draw_kg_s) = super::resolve_storage_step_inputs(
             env,
+            &self.descriptor.name,
             self.inlet_temp_c,
             self.draw_flow_rate_kg_s,
             draw_flow_rate_kg_s_source,
             mains_temp_c_source,
-        );
+        )?;
         let delta_t_c = (setpoint_c - inlet_temp_c).max(0.0);
         let _ = dt; // dt not used for tankless (on-demand model)
 

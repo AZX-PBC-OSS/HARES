@@ -611,11 +611,12 @@ impl Equipment for ResistanceWH {
         let mains_temp_c_source = self.mains_temp_c_source.as_mut();
         let (mains_temp_c, draw_flow_rate_kg_s) = resolve_storage_step_inputs(
             env,
+            &self.descriptor.name,
             self.mains_temp_c,
             self.draw_flow_rate_kg_s,
             draw_l_per_min_source,
             mains_temp_c_source,
-        );
+        )?;
         let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
         let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
         // Use step_tempered: TMV mixes hot tank water with cold mains to deliver
@@ -1114,6 +1115,37 @@ mod tests {
     fn config_from_typed(cfg: ElectricResistanceWaterHeaterConfig) -> EquipmentConfig {
         EquipmentConfig::from_typed("WH".to_string(), "Resistance Water Heater".to_string(), cfg)
             .unwrap()
+    }
+
+    #[test]
+    fn a_failing_schedule_read_fails_the_step_naming_the_equipment() {
+        let mut typed = typed_config();
+        // The draw source reads a schedule column; the environment carries
+        // no schedule payload, so the read fails. The failure must fail the
+        // step naming the equipment, not fall back to the configured draw
+        // silently.
+        typed.draw_flow_rate_source = Some(hares_types::ScheduleSourceConfig::ColumnRef {
+            col_idx: 0,
+            boundary: hares_types::BoundaryPolicy::Clamp,
+        });
+        let cfg = config_from_typed(typed);
+
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &env(21.0)).unwrap();
+
+        let mut p = ports();
+        let err = wh
+            .step(&env(21.0), Duration::from_secs(60), &mut p)
+            .expect_err("a schedule read failure must fail the step");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WH"),
+            "the error must name the equipment: {msg}"
+        );
+        assert!(
+            msg.contains("schedule"),
+            "the error must name the schedule read failure: {msg}"
+        );
     }
 
     fn typed_config() -> ElectricResistanceWaterHeaterConfig {

@@ -1222,9 +1222,20 @@ impl HeatPumpHeaterCore {
             return self.operating_mode;
         }
 
-        let control = self
-            .resolve_control(env)
-            .unwrap_or_else(|_| HeaterControl::off());
+        // A thermostat control error is recorded for the following step to
+        // fail with (the same contract the heating classes follow); the
+        // unit runs off this step.
+        let control = match self.resolve_control(env) {
+            Ok(control) => control,
+            Err(err) => {
+                self.hvac
+                    .record_control_error(HaresError::Equipment(format!(
+                        "{}: {err}",
+                        self.descriptor.name
+                    )));
+                HeaterControl::off()
+            }
+        };
 
         self.hvac.runtime.last_speed_index = control.speed_index;
         self.hvac.runtime.duty_cycle = control.duty_cycle;
@@ -1249,6 +1260,9 @@ impl HeatPumpHeaterCore {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        if let Some(err) = self.hvac.take_control_error() {
+            return Err(err);
+        }
         let ebm_window = step_equivalent_battery(&self.hvac, env)?;
         let dt_min = dt.as_secs_f64() / 60.0;
         let dt_s = dt.as_secs_f64();

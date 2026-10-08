@@ -189,7 +189,14 @@ impl Equipment for ElectricBaseboard {
             self.operating_mode = mode;
             return mode;
         }
-        self.operating_mode = update_heating_control(&mut self.hvac, env);
+        self.operating_mode =
+            match update_heating_control(&mut self.hvac, env, &self.descriptor.name) {
+                Ok(mode) => mode,
+                Err(err) => {
+                    self.hvac.record_control_error(err);
+                    OperatingMode::Off
+                }
+            };
         self.operating_mode
     }
 
@@ -199,6 +206,9 @@ impl Equipment for ElectricBaseboard {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        if let Some(err) = self.hvac.take_control_error() {
+            return Err(err);
+        }
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty * sf;

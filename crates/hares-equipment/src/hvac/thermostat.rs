@@ -354,19 +354,22 @@ impl ThermostatFsm {
     ///   1. Per-timestep schedule array (from CSV column)
     ///   2. 24-hour weekday/weekend profile (from HPXML thermostat)
     ///   3. None -- falls through to static_setpoints
-    pub fn resolve_profile_setpoints(&mut self, env: &EnvironmentState) {
+    ///
+    /// A source whose read fails is an error: a configured schedule the
+    /// step cannot read is corrupt input, not the absence of a schedule.
+    pub fn resolve_profile_setpoints(&mut self, env: &EnvironmentState) -> crate::Result<()> {
         if self.heating_setpoint_source.is_none() && self.cooling_setpoint_source.is_none() {
-            return;
+            return Ok(());
         }
 
-        let heating_c = self
-            .heating_setpoint_source
-            .as_mut()
-            .and_then(|source| source.value_at(env).ok());
-        let cooling_c = self
-            .cooling_setpoint_source
-            .as_mut()
-            .and_then(|source| source.value_at(env).ok());
+        let heating_c = match self.heating_setpoint_source.as_mut() {
+            Some(source) => Some(source.value_at(env)?),
+            None => None,
+        };
+        let cooling_c = match self.cooling_setpoint_source.as_mut() {
+            Some(source) => Some(source.value_at(env)?),
+            None => None,
+        };
 
         if heating_c.is_some() || cooling_c.is_some() {
             self.schedule_setpoints = Some(ScheduleSetpoints {
@@ -377,6 +380,7 @@ impl ThermostatFsm {
         } else {
             self.schedule_setpoints = None;
         }
+        Ok(())
     }
 
     /// Set the thermostat mode and record the transition timestamp.
@@ -438,12 +442,19 @@ impl ThermostatFsm {
         zone_id: ZoneId,
     ) -> crate::Result<ThermostatMode> {
         let zone_temp = lookup_zone_temp(env, zone_id)?;
-        Ok(self.update_mode_at(env, zone_temp))
+        self.update_mode_at(env, zone_temp)
     }
 
     /// [`Self::update_mode`] at a zone temperature the caller already read.
-    pub fn update_mode_at(&mut self, env: &EnvironmentState, zone_temp: f64) -> ThermostatMode {
-        self.resolve_profile_setpoints(env);
+    ///
+    /// A setpoint source whose read fails is an error; the caller names the
+    /// equipment that owns the source.
+    pub fn update_mode_at(
+        &mut self,
+        env: &EnvironmentState,
+        zone_temp: f64,
+    ) -> crate::Result<ThermostatMode> {
+        self.resolve_profile_setpoints(env)?;
         let setpoints = self.effective_setpoints();
 
         tracing::debug!(
@@ -463,7 +474,7 @@ impl ThermostatFsm {
                 min_cycle_time_s = self.thermostat.min_cycle_time_s,
                 "is_cycle_change_allowed: blocked by min_cycle_time"
             );
-            return self.mode;
+            return Ok(self.mode);
         }
 
         let hysteresis = self.thermostat.hysteresis_c;
@@ -577,11 +588,11 @@ impl ThermostatFsm {
                 min_off_time_s = self.min_off_time_s,
                 "can_transition_mode: blocked by min on/off time"
             );
-            return self.mode;
+            return Ok(self.mode);
         }
 
         self.set_mode(next_mode, env.current_time);
-        self.mode
+        Ok(self.mode)
     }
 
     /// Apply `ThermalSetpoint` and `ThermalSetpointDelta` control signals.

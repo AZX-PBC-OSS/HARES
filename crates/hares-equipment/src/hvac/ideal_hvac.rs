@@ -304,7 +304,10 @@ impl IdealHvac {
     /// solver's target in the deadband both use it.
     fn update_mode(&mut self, env: &EnvironmentState) -> crate::Result<ThermostatMode> {
         let zone_temp = lookup_zone_temp(env, self.served_zone()?)?;
-        let mode = self.thermostat_fsm.update_mode_at(env, zone_temp);
+        let mode = self
+            .thermostat_fsm
+            .update_mode_at(env, zone_temp)
+            .map_err(|err| HaresError::Equipment(format!("{}: {err}", self.descriptor.name)))?;
 
         let setpoints = self.thermostat_fsm.effective_setpoints();
         match self.thermostat_fsm.mode {
@@ -2282,7 +2285,48 @@ mod tests {
     }
 
     #[test]
-    fn schedule_setpoints_cleared_when_source_returns_none_after_valid_step() {
+    fn a_failing_setpoint_source_read_fails_the_step_naming_the_equipment() {
+        let mut cfg = config("IH");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let e = env(18.0, 60, 0);
+        eq.init(&cfg, &e).unwrap();
+
+        // The heating setpoint source reads a schedule column; the
+        // environment carries no schedule payload, so the read fails. The
+        // failure must fail the step naming the equipment, not fall back
+        // to the static setpoints silently.
+        eq.thermostat_fsm.heating_setpoint_source = Some(ScheduleSource::ColumnRef {
+            col_idx: 0,
+            boundary: BoundaryPolicy::Clamp,
+        });
+
+        eq.update_control(&e);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let err = eq
+            .step(&e, Duration::from_secs(60), &mut ports)
+            .expect_err("a schedule read failure must fail the step");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("IH"),
+            "the error must name the equipment: {msg}"
+        );
+        assert!(
+            msg.contains("schedule"),
+            "the error must name the schedule read failure: {msg}"
+        );
+    }
+
+    #[test]
+    fn schedule_source_out_of_bounds_data_is_a_read_error() {
         let mut cfg = config("IH");
         cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
@@ -2294,7 +2338,9 @@ mod tests {
         let e = env(20.0, 60, 0);
         eq.init(&cfg, &e).unwrap();
 
-        // One-element shared source: step 0 returns a value, step 1 errors → None.
+        // One-element shared source with the Error boundary: step 0 returns
+        // a value, step 1's read is out of bounds. The read failure is an
+        // error, not a silent fall-through to the static setpoints.
         eq.thermostat_fsm.heating_setpoint_source = Some(ScheduleSource::Shared {
             data: std::sync::Arc::from(vec![21.0f64]),
             cursor: 0,
@@ -2302,21 +2348,20 @@ mod tests {
         });
 
         eq.thermostat_fsm
-            .resolve_profile_setpoints(&env(20.0, 60, 0));
-        assert!(
-            eq.thermostat_fsm.schedule_setpoints.is_some(),
-            "step 0: source returned a value, schedule_setpoints must be Some"
-        );
+            .resolve_profile_setpoints(&env(20.0, 60, 0))
+            .expect("step 0: the source has data");
         assert_eq!(
             eq.thermostat_fsm.schedule_setpoints.unwrap().heating_c,
             Some(21.0)
         );
 
-        eq.thermostat_fsm
-            .resolve_profile_setpoints(&env(20.0, 60, 60));
+        let err = eq
+            .thermostat_fsm
+            .resolve_profile_setpoints(&env(20.0, 60, 60))
+            .expect_err("step 1: the read is out of bounds and must fail");
         assert!(
-            eq.thermostat_fsm.schedule_setpoints.is_none(),
-            "step 1: source returned None (out of bounds), schedule_setpoints must be cleared"
+            err.to_string().contains("out of bounds"),
+            "the error names the failed read: {err}"
         );
     }
 
@@ -2719,7 +2764,8 @@ mod tests {
         fsm.heating_setpoint_source = Some(shared);
 
         let env0 = env(15.0, 60, 0);
-        fsm.resolve_profile_setpoints(&env0);
+        fsm.resolve_profile_setpoints(&env0)
+            .expect("the source has data");
         let sp0 = fsm.schedule_setpoints.unwrap().heating_c.unwrap();
         assert!(
             (sp0 - 19.0).abs() < 1e-6,
@@ -2727,7 +2773,8 @@ mod tests {
         );
 
         let env1 = env(15.0, 60, 60);
-        fsm.resolve_profile_setpoints(&env1);
+        fsm.resolve_profile_setpoints(&env1)
+            .expect("the source has data");
         let sp1 = fsm.schedule_setpoints.unwrap().heating_c.unwrap();
         assert!(
             (sp1 - 20.0).abs() < 1e-6,
@@ -2735,7 +2782,8 @@ mod tests {
         );
 
         let env2 = env(15.0, 60, 120);
-        fsm.resolve_profile_setpoints(&env2);
+        fsm.resolve_profile_setpoints(&env2)
+            .expect("the source has data");
         let sp2 = fsm.schedule_setpoints.unwrap().heating_c.unwrap();
         assert!(
             (sp2 - 21.0).abs() < 1e-6,

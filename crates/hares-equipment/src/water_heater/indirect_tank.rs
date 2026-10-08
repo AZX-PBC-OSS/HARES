@@ -432,11 +432,12 @@ impl Equipment for IndirectTank {
         let mains_temp_c_source = self.mains_temp_c_source.as_mut();
         let (mains_temp_c, draw_flow_rate_kg_s) = resolve_storage_step_inputs(
             env,
+            &self.descriptor.name,
             self.mains_temp_c,
             self.draw_flow_rate_kg_s,
             draw_l_per_min_source,
             mains_temp_c_source,
-        );
+        )?;
         let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
         let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
 

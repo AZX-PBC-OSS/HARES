@@ -1032,7 +1032,9 @@ impl CoolingCore {
         }
 
         // A Cooling mode means the thermostat read the served zone, so the
-        // zone temperature is available whenever cooling is called for.
+        // zone temperature is available whenever cooling is called for. A
+        // thermostat control error is recorded for the following step to
+        // fail with, the same contract the heating classes follow.
         let cooling_zone_temp_c = match self.hvac.update_mode(env) {
             Ok(ThermostatMode::Cooling) => self
                 .hvac
@@ -1040,7 +1042,15 @@ impl CoolingCore {
                 .zone_id
                 .and_then(|zone| lookup_zone(env, zone).ok())
                 .map(|zone| zone.temperature_c),
-            _ => None,
+            Ok(_) => None,
+            Err(err) => {
+                self.hvac
+                    .record_control_error(HaresError::Equipment(format!(
+                        "{}: {err}",
+                        self.descriptor.name
+                    )));
+                None
+            }
         };
         if let Some(zone_temp) = cooling_zone_temp_c {
             let base_setpoint = self.hvac.effective_setpoints().cooling_c;
@@ -1129,6 +1139,9 @@ impl CoolingCore {
         ports: &mut PortSlots,
         companion_heating_rtf: Option<f64>,
     ) -> std::result::Result<(), HaresError> {
+        if let Some(err) = self.hvac.take_control_error() {
+            return Err(err);
+        }
         let ebm_window = step_equivalent_battery(&self.hvac, env)?;
         self.crankcase_heater_on = false;
         self.crankcase_heater_kw = 0.0;

@@ -115,30 +115,38 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 /// 1. Canonical weather mains temperature
 /// 2. Schedule-column mains temperature when weather is unavailable
 /// 3. Config default from equipment init
+///
+/// A configured schedule source whose read fails is an error naming the
+/// equipment: corrupt schedule data is not the absence of a schedule.
 pub(super) fn resolve_storage_step_inputs(
     env: &EnvironmentState,
+    equipment_name: &str,
     default_mains_temp_c: f64,
     default_draw_rate_kg_s: f64,
     draw_rate_kg_s_source: Option<&mut ScheduleSource>,
     mains_temp_c_source: Option<&mut ScheduleSource>,
-) -> (f64, f64) {
+) -> crate::Result<(f64, f64)> {
+    // `value_at` rejects non-finite values, so a read that returns is finite.
     let mains_temp_c = if env.weather.mains_temp_c.is_finite() {
         env.weather.mains_temp_c
+    } else if let Some(source) = mains_temp_c_source {
+        source
+            .value_at(env)
+            .map_err(|err| HaresError::Equipment(format!("{equipment_name}: {err}")))?
     } else {
-        mains_temp_c_source
-            .and_then(|source| source.value_at(env).ok())
-            .filter(|v| v.is_finite())
-            .unwrap_or_else(|| resolve_mains_temp_c(env, default_mains_temp_c))
+        resolve_mains_temp_c(env, default_mains_temp_c)
     };
 
-    // Schedule draw is interpreted as SI mass flow [kg/s].
-    let draw_rate_kg_s = draw_rate_kg_s_source
-        .and_then(|source| source.value_at(env).ok())
-        .filter(|v| v.is_finite())
-        .map(|draw_kg_s| draw_kg_s.max(0.0))
-        .unwrap_or(default_draw_rate_kg_s);
+    let draw_rate_kg_s = if let Some(source) = draw_rate_kg_s_source {
+        source
+            .value_at(env)
+            .map_err(|err| HaresError::Equipment(format!("{equipment_name}: {err}")))?
+            .max(0.0)
+    } else {
+        default_draw_rate_kg_s
+    };
 
-    (mains_temp_c, draw_rate_kg_s)
+    Ok((mains_temp_c, draw_rate_kg_s))
 }
 
 #[cfg(test)]
@@ -599,35 +607,58 @@ mod tests {
         };
         let (mains_temp_c, draw_rate_kg_s) = resolve_storage_step_inputs(
             &env,
+            "Test Water Heater",
             15.0,
             0.05,
             Some(&mut draw_source),
             Some(&mut mains_source),
-        );
+        )
+        .expect("a schedule read from a present payload succeeds");
 
         assert!((mains_temp_c - 6.0).abs() < 1e-12);
         assert!((draw_rate_kg_s - 10.0).abs() < 1e-12);
     }
 
     #[test]
-    fn storage_step_inputs_use_weather_when_schedule_missing_or_invalid() {
-        let mut env = env_with_payloads(Some(vec![f64::NAN]));
-        env.weather.mains_temp_c = 12.5;
+    fn a_failing_schedule_read_is_an_error_naming_the_equipment() {
+        // The draw source reads a column the one-element payload does not
+        // carry: the read fails the step naming the equipment, it does not
+        // fall back to the configured draw.
+        let mut env = env_with_payloads(Some(vec![10.0]));
+        env.weather.mains_temp_c = f64::NAN;
         let mut draw_source = ScheduleSource::ColumnRef {
             col_idx: 5,
-            boundary: BoundaryPolicy::Clamp,
+            boundary: BoundaryPolicy::Error,
         };
         let mut mains_source = ScheduleSource::ColumnRef {
             col_idx: 0,
             boundary: BoundaryPolicy::Clamp,
         };
-        let (mains_temp_c, draw_rate_kg_s) = resolve_storage_step_inputs(
+        let err = resolve_storage_step_inputs(
             &env,
+            "Gas Water Heater",
             15.0,
             0.08,
             Some(&mut draw_source),
             Some(&mut mains_source),
+        )
+        .expect_err("an out-of-bounds draw read must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Gas Water Heater"),
+            "the error must name the equipment: {msg}"
         );
+    }
+
+    #[test]
+    fn storage_step_inputs_use_weather_when_schedule_absent() {
+        let mut env = env_with_payloads(Some(vec![f64::NAN]));
+        env.weather.mains_temp_c = 12.5;
+        // No sources configured: the documented priority falls to the
+        // weather mains temperature and the config default draw.
+        let (mains_temp_c, draw_rate_kg_s) =
+            resolve_storage_step_inputs(&env, "Test Water Heater", 15.0, 0.08, None, None)
+                .expect("no sources configured, nothing to read");
 
         assert!((mains_temp_c - 12.5).abs() < 1e-12);
         assert!((draw_rate_kg_s - 0.08).abs() < 1e-12);
@@ -639,7 +670,8 @@ mod tests {
         env.weather.mains_temp_c = 14.25;
 
         let (mains_temp_c, draw_rate_kg_s) =
-            resolve_storage_step_inputs(&env, 15.0, 0.08, None, None);
+            resolve_storage_step_inputs(&env, "Test Water Heater", 15.0, 0.08, None, None)
+                .expect("no sources configured, nothing to read");
 
         assert!((mains_temp_c - 14.25).abs() < 1e-12);
         assert!((draw_rate_kg_s - 0.08).abs() < 1e-12);

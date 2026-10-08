@@ -245,7 +245,15 @@ pub fn netted_cycling_duty(
 /// the zone needs ([`cycling_load_fraction`]); an ideal-capacity unit's duty
 /// is preserved for the solver's dispatch to set. All other modes set duty
 /// to 0.0 and return `Off`.
-pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) -> OperatingMode {
+///
+/// A thermostat control error (a setpoint source whose schedule read
+/// fails, a zone the environment lost) is an error naming the equipment;
+/// the caller records it for the following step to fail with.
+pub fn update_heating_control(
+    hvac: &mut HvacEquipment,
+    env: &EnvironmentState,
+    equipment_name: &str,
+) -> crate::Result<OperatingMode> {
     // Safety cutoff: prevent simulation runaway where zone temperatures
     // reach physically impossible levels (e.g. 49.5 °C indoors in January).
     // Only the served (conditioned) zone is checked; duct zones in attics
@@ -263,7 +271,7 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
             "Safety cutoff: conditioned zone temperature exceeds max safe limit; forcing heating equipment Off"
         );
         hvac.runtime.duty_cycle = 0.0;
-        return OperatingMode::Off;
+        return Ok(OperatingMode::Off);
     }
 
     // Apply DR setpoint offset (set by apply_simple_mode_override_in_control)
@@ -304,14 +312,15 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
             } else {
                 hvac.runtime.duty_cycle = hvac.runtime.duty_cycle.clamp(0.0, 1.0);
             }
-            OperatingMode::Heating
+            Ok(OperatingMode::Heating)
         }
-        _ => {
+        Ok(_) => {
             if !hvac.use_ideal_capacity(env) {
                 hvac.runtime.duty_cycle = 0.0;
             }
-            OperatingMode::Off
+            Ok(OperatingMode::Off)
         }
+        Err(err) => Err(HaresError::Equipment(format!("{equipment_name}: {err}"))),
     };
 
     hvac.thermostat_fsm.runtime_setpoints = saved_runtime_setpoints;
