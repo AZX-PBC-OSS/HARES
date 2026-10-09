@@ -12,7 +12,7 @@ use hares_types::{
     CoreState, DRLevel, DutyCycleComponent, ElectricPower, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidNodeId, FluidType, FuelType, HaresError,
     HeatTransferDirection, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots,
-    Telemetry, TelemetryField, ThermalCategory, telemetry_keys as tk,
+    ScheduleSource, Telemetry, TelemetryField, ThermalCategory, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -182,6 +182,8 @@ pub struct HeatPumpWH {
     fluid_type: FluidType,
     mains_temp_c: f64,
     draw_flow_rate_kg_s: f64,
+    /// The wet appliances' untempered draw [kg/s], from its schedule column.
+    appliance_draw_source: Option<ScheduleSource>,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// blended pf 0.97 (OCHRE lab value) applied to the total electric draw
     /// (compressor + backup element + fan/parasitic). Real power stays
@@ -335,6 +337,7 @@ impl HeatPumpWH {
             fluid_type: FluidType::Water,
             mains_temp_c: 10.0,
             draw_flow_rate_kg_s: 0.0,
+            appliance_draw_source: None,
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -665,6 +668,10 @@ impl HeatPumpWH {
             parse_element_hp_control_mode(c.element_hp_control_mode.as_deref())?;
         self.mains_temp_c = super::require_mains_temp_c(env, "Heat Pump Water Heater")?;
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
+        self.appliance_draw_source = c
+            .appliance_draw_flow_rate_source
+            .clone()
+            .map(|s| s.into_runtime());
         self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.compressor_on_since_s = None;
@@ -966,8 +973,19 @@ impl Equipment for HeatPumpWH {
             self.tank.n_nodes(),
         );
 
-        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
-        let total_draw_kg_s = self.draw_flow_rate_kg_s + appliance_demand_kg_s;
+        let appliance_draw_kg_s = self
+            .appliance_draw_source
+            .as_mut()
+            .map(|source| {
+                source
+                    .value_at(env)
+                    .map_err(|err| {
+                        HaresError::Equipment(format!("{}: {err}", self.descriptor.name))
+                    })
+                    .map(|v| v.max(0.0))
+            })
+            .transpose()?;
+        let total_draw_kg_s = self.draw_flow_rate_kg_s + appliance_draw_kg_s.unwrap_or(0.0);
         let hot_draw_temp_c = self.tempering_valve_setpoint_c.unwrap_or(self.setpoint_c);
         let tmv = TemperedDrawConfig {
             tempered_draw_temp_c: self.fixture_delivery_temp_c,
@@ -976,7 +994,8 @@ impl Equipment for HeatPumpWH {
         };
         let tempered_flow_m3_s =
             self.draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
-        let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
+        let hot_flow_m3_s =
+            appliance_draw_kg_s.unwrap_or(0.0) / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
             TemperedDrawInputs {
                 ambient_temp_c: inlet.dry_bulb_c,
@@ -1656,6 +1675,7 @@ mod tests {
             tempering_valve_setpoint_c: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(0.0),
+            appliance_draw_flow_rate_source: None,
             compressor_power_w: Some(1200.0),
             backup_enable_offset_c: Some(3.0),
             min_ambient_temp_c: None,
@@ -1791,6 +1811,7 @@ mod tests {
             tempering_valve_setpoint_c: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: None,
+            appliance_draw_flow_rate_source: None,
             compressor_power_w: None,
             backup_enable_offset_c: None,
             min_ambient_temp_c: None,
@@ -1880,6 +1901,7 @@ mod tests {
             tempering_valve_setpoint_c: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: None,
+            appliance_draw_flow_rate_source: None,
             compressor_power_w: None,
             backup_enable_offset_c: None,
             min_ambient_temp_c: None,
@@ -1935,6 +1957,7 @@ mod tests {
             tempering_valve_setpoint_c: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: None,
+            appliance_draw_flow_rate_source: None,
             compressor_power_w: Some(1_499.4),
             backup_enable_offset_c: None,
             min_ambient_temp_c: None,
@@ -4439,6 +4462,7 @@ mod new_feature_tests {
             tempering_valve_setpoint_c: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(0.0),
+            appliance_draw_flow_rate_source: None,
             compressor_power_w: Some(1200.0),
             backup_enable_offset_c: Some(3.0),
             min_ambient_temp_c: None,

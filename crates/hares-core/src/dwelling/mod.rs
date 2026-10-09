@@ -2663,6 +2663,15 @@ fn build_from_blueprint_inner(
     // setpoints are configured -- the thermal solver back-calculates the exact
     // load needed to maintain the setpoint at each timestep.
     let mut schedule_warnings: Vec<hares_types::Warning> = Vec::new();
+    // The unavailable periods zero the schedule columns their table rows
+    // apply to, at the schedule's own resolution and before any injection, so
+    // the event windows, the design levels and the water heater's draw all
+    // read the zeroed columns. The hot-water appliance columns zero through
+    // their paired energy-use column's table row.
+    hares_io::apply_unavailable_periods(
+        environment.schedule_mut(),
+        &bp.building.unavailable_periods,
+    )?;
     hares_io::inject_schedule_into_specs(
         &mut equipment_specs,
         environment.schedule_mut(),
@@ -12722,6 +12731,7 @@ occupancy = 1.0
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: XmlNode {
                 name: String::new(),
                 attrs: HashMap::new(),

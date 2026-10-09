@@ -260,6 +260,7 @@ fn minimal_building() -> hares_io::Building {
         temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
         climate_zone_iecc: None,
+        unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
     }
@@ -701,6 +702,7 @@ fn leap_year_dec31_reads_correct_weather_row() {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml,
             parse_warnings: Vec::new(),
         }
@@ -919,6 +921,7 @@ fn wall_missing_azimuth_constructs_with_warning() {
         temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
         climate_zone_iecc: None,
+        unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
     };
@@ -1030,6 +1033,7 @@ fn roof_missing_azimuth_constructs_successfully() {
         temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
         climate_zone_iecc: None,
+        unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
     };
@@ -1137,6 +1141,7 @@ fn window_missing_azimuth_returns_error() {
         temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
         climate_zone_iecc: None,
+        unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
     };

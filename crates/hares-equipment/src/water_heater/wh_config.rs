@@ -87,6 +87,11 @@ pub struct GasWaterHeaterConfig {
     pub draw_flow_rate_kg_s: Option<f64>,
     pub draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub mains_temp_c_source: Option<ScheduleSourceConfig>,
+    /// The wet appliances' untempered hot-water draw [kg/s]: the normalized
+    /// `hot_water_clothes_washer` and `hot_water_dishwasher` schedule columns
+    /// `inject_water_heater_schedule_columns` builds, drawn at the hot supply
+    /// temperature (never mixed with cold mains).
+    pub appliance_draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub pilot_power_w: Option<f64>,
     pub flue_loss_fraction: Option<f64>,
     pub skin_loss_fraction: Option<f64>,
@@ -261,6 +266,11 @@ pub struct ElectricResistanceWaterHeaterConfig {
     pub draw_flow_rate_kg_s: Option<f64>,
     pub draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub mains_temp_c_source: Option<ScheduleSourceConfig>,
+    /// The wet appliances' untempered hot-water draw [kg/s]: the normalized
+    /// `hot_water_clothes_washer` and `hot_water_dishwasher` schedule columns
+    /// `inject_water_heater_schedule_columns` builds, drawn at the hot supply
+    /// temperature (never mixed with cold mains).
+    pub appliance_draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub performance_adjustment: Option<f64>,
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
@@ -423,6 +433,11 @@ pub struct TanklessWaterHeaterConfig {
     pub draw_flow_rate_kg_s: Option<f64>,
     pub draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub mains_temp_c_source: Option<ScheduleSourceConfig>,
+    /// The wet appliances' untempered hot-water draw [kg/s]: the normalized
+    /// `hot_water_clothes_washer` and `hot_water_dishwasher` schedule columns
+    /// `inject_water_heater_schedule_columns` builds, drawn at the hot supply
+    /// temperature (never mixed with cold mains).
+    pub appliance_draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub avg_water_draw_l_per_day: Option<f64>,
     pub zone_type: Option<String>,
     /// Minimum flow threshold [kg/s] below which the burner does not fire.
@@ -520,6 +535,11 @@ pub struct IndirectTankConfig {
     pub avg_water_draw_l_per_day: Option<f64>,
     pub draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub mains_temp_c_source: Option<ScheduleSourceConfig>,
+    /// The wet appliances' untempered hot-water draw [kg/s]: the normalized
+    /// `hot_water_clothes_washer` and `hot_water_dishwasher` schedule columns
+    /// `inject_water_heater_schedule_columns` builds, drawn at the hot supply
+    /// temperature (never mixed with cold mains).
+    pub appliance_draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub performance_adjustment: Option<f64>,
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
@@ -654,6 +674,11 @@ pub struct HeatPumpWaterHeaterConfig {
     pub tempering_valve_setpoint_c: Option<f64>,
     pub avg_water_draw_l_per_day: Option<f64>,
     pub draw_flow_rate_kg_s: Option<f64>,
+    /// The wet appliances' untempered hot-water draw [kg/s]: the normalized
+    /// `hot_water_clothes_washer` and `hot_water_dishwasher` schedule columns
+    /// `inject_water_heater_schedule_columns` builds, drawn at the hot supply
+    /// temperature (never mixed with cold mains).
+    pub appliance_draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub compressor_power_w: Option<f64>,
     pub backup_enable_offset_c: Option<f64>,
     pub min_ambient_temp_c: Option<f64>,
@@ -882,6 +907,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             pilot_power_w: Some(5.0),
             flue_loss_fraction: Some(0.1),
             skin_loss_fraction: None,
@@ -941,6 +967,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
@@ -994,6 +1021,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             avg_water_draw_l_per_day: Some(227.0),
             zone_type: None,
             min_flow_kg_s: None,
@@ -1043,6 +1071,7 @@ mod tests {
             tempering_valve_setpoint_c: Some(51.67),
             avg_water_draw_l_per_day: Some(227.0),
             draw_flow_rate_kg_s: None,
+            appliance_draw_flow_rate_source: None,
             compressor_power_w: None,
             backup_enable_offset_c: None,
             min_ambient_temp_c: None,
@@ -1112,6 +1141,7 @@ mod tests {
             avg_water_draw_l_per_day: Some(227.0),
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
@@ -1169,6 +1199,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             pilot_power_w: None,
             flue_loss_fraction: None,
             skin_loss_fraction: None,
@@ -1204,6 +1235,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1235,6 +1267,7 @@ mod tests {
             tempering_valve_setpoint_c: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: None,
+            appliance_draw_flow_rate_source: None,
             compressor_power_w: None,
             backup_enable_offset_c: None,
             min_ambient_temp_c: None,
@@ -1280,6 +1313,7 @@ mod tests {
             avg_water_draw_l_per_day: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1366,6 +1400,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             pilot_power_w: None,
             flue_loss_fraction: None,
             skin_loss_fraction: None,
@@ -1401,6 +1436,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1432,6 +1468,7 @@ mod tests {
             tempering_valve_setpoint_c: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: None,
+            appliance_draw_flow_rate_source: None,
             compressor_power_w: None,
             backup_enable_offset_c: None,
             min_ambient_temp_c: None,
@@ -1477,6 +1514,7 @@ mod tests {
             avg_water_draw_l_per_day: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1505,6 +1543,7 @@ mod tests {
             avg_water_draw_l_per_day: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1569,6 +1608,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             pilot_power_w: None,
             flue_loss_fraction: None,
             skin_loss_fraction: None,
@@ -1604,6 +1644,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1635,6 +1676,7 @@ mod tests {
             tempering_valve_setpoint_c: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: None,
+            appliance_draw_flow_rate_source: None,
             compressor_power_w: None,
             backup_enable_offset_c: None,
             min_ambient_temp_c: None,
@@ -1680,6 +1722,7 @@ mod tests {
             avg_water_draw_l_per_day: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1771,6 +1814,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             pilot_power_w: None,
             flue_loss_fraction: None,
             skin_loss_fraction: None,
@@ -1810,6 +1854,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1845,6 +1890,7 @@ mod tests {
             tempering_valve_setpoint_c: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: None,
+            appliance_draw_flow_rate_source: None,
             compressor_power_w: None,
             backup_enable_offset_c: None,
             min_ambient_temp_c: None,
@@ -1894,6 +1940,7 @@ mod tests {
             avg_water_draw_l_per_day: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,

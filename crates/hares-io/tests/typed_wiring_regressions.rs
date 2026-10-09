@@ -91,6 +91,7 @@ fn tankless_schedule_sources_round_trip_and_init() {
             col_idx: 7,
             boundary: BoundaryPolicy::Clamp,
         }),
+        appliance_draw_flow_rate_source: None,
         avg_water_draw_l_per_day: Some(220.0),
         zone_type: None,
         min_flow_kg_s: None,

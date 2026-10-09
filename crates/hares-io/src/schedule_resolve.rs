@@ -13,6 +13,7 @@ use hares_equipment::{
     HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
 };
 use hares_physics::constants::HOURS_PER_YEAR;
+use hares_physics::water_density_kg_m3;
 use hares_types::{
     BoundaryPolicy, FuelType, HaresError, ScheduleSourceConfig, Warning, normalize_ascii,
     parse_trimmed_f64,
@@ -278,7 +279,9 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
         csv_column: "vacancy",
         equipment_name: "",
         category: ScheduleCategory::NotUsed {
-            reason: "unavailable periods are not modelled",
+            reason: "the HPXML unavailable periods zero the schedule columns \
+                     their table rows apply to; the schedule file's own flag \
+                     column is not read",
         },
     },
     ColumnMapping {
@@ -292,21 +295,27 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
         csv_column: "power_outage",
         equipment_name: "",
         category: ScheduleCategory::NotUsed {
-            reason: "unavailable periods are not modelled",
+            reason: "the HPXML unavailable periods zero the schedule columns \
+                     their table rows apply to; the schedule file's own flag \
+                     column is not read",
         },
     },
     ColumnMapping {
         csv_column: "no_space_heating",
         equipment_name: "",
         category: ScheduleCategory::NotUsed {
-            reason: "unavailable periods are not modelled",
+            reason: "the HPXML unavailable periods zero the schedule columns \
+                     their table rows apply to; the schedule file's own flag \
+                     column is not read",
         },
     },
     ColumnMapping {
         csv_column: "no_space_cooling",
         equipment_name: "",
         category: ScheduleCategory::NotUsed {
-            reason: "unavailable periods are not modelled",
+            reason: "the HPXML unavailable periods zero the schedule columns \
+                     their table rows apply to; the schedule file's own flag \
+                     column is not read",
         },
     },
     // Water heater: read by inject_water_heater_schedule_columns, which no
@@ -321,29 +330,22 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
         equipment_name: "Water Heating",
         category: ScheduleCategory::WaterHeater,
     },
-    // Wet appliances draw their own hot water on the DHW demand loop during
-    // the water-draw phases of the cycles the dishwasher and clothes_washer
-    // event-window columns schedule; consuming the hot-water column as well
-    // would count the draw twice.
+    // The wet appliances' untempered hot-water draw: read by
+    // inject_water_heater_schedule_columns beside `hot_water_fixtures`, each
+    // column normalized to the appliance's daily hot-water volume
+    // (`daily_hot_water_m3` on the appliance's spec, the OpenStudio-HPXML
+    // `calc_clothes_washer_energy_gpd` / `calc_dishwasher_energy_gpd`
+    // result) with the peak flow the column's daily equivalent full-load
+    // hours give.
     ColumnMapping {
         csv_column: "hot_water_dishwasher",
         equipment_name: "",
-        category: ScheduleCategory::NotUsed {
-            reason: "the dishwasher draws its own hot water on the DHW demand \
-                     loop during the draw phases of the `dishwasher` column's \
-                     cycles; consuming this column as well would count the \
-                     draw twice",
-        },
+        category: ScheduleCategory::WaterHeater,
     },
     ColumnMapping {
         csv_column: "hot_water_clothes_washer",
         equipment_name: "",
-        category: ScheduleCategory::NotUsed {
-            reason: "the clothes washer draws its own hot water on the DHW \
-                     demand loop during the draw phases of the \
-                     `clothes_washer` column's cycles; consuming this column \
-                     as well would count the draw twice",
-        },
+        category: ScheduleCategory::WaterHeater,
     },
     // Charging and driving times come from the ev_driver actor's trip model,
     // not an OpenStudio-HPXML schedule.
@@ -757,7 +759,7 @@ pub fn inject_schedule_into_specs(
                 inject_power_schedule(spec, mapping, &csv_col_map, schedule, &profiles)?;
             }
             ScheduleCategory::EventWindow => {
-                inject_event_schedule(spec, mapping, &csv_col_map, schedule);
+                inject_event_schedule(spec, mapping, &csv_col_map, schedule)?;
             }
             ScheduleCategory::Occupancy => {
                 inject_occupancy_schedule(spec, schedule, &profiles);
@@ -982,8 +984,43 @@ fn inject_water_heater_schedule_columns(
 ) -> Result<(), HaresError> {
     let draw_col = first_present_column(csv_col_map, &["hot_water_fixtures"]);
     let mains_col = first_present_column(csv_col_map, &["hot_water_mains_temperature"]);
+    let appliance_col = first_present_column(
+        csv_col_map,
+        &["hot_water_clothes_washer", "hot_water_dishwasher"],
+    );
 
-    if draw_col.is_none() && mains_col.is_none() {
+    // The wet appliances' daily hot-water volumes and their columns. An
+    // appliance with a positive daily volume needs its column: the volume is
+    // drawn through the column's shape, so a file without it has no way to
+    // express the draw.
+    let washer_daily_l = wet_appliance_daily_volume_l(specs, "Clothes Washer");
+    let dishwasher_daily_l = wet_appliance_daily_volume_l(specs, "Dishwasher");
+    let washer_col = if washer_daily_l > 0.0 {
+        Some(
+            csv_col_map
+                .get("hot_water_clothes_washer")
+                .copied()
+                .ok_or_else(|| {
+                    missing_schedule_column_error("Clothes Washer", "hot_water_clothes_washer")
+                })?,
+        )
+    } else {
+        None
+    };
+    let dishwasher_col = if dishwasher_daily_l > 0.0 {
+        Some(
+            csv_col_map
+                .get("hot_water_dishwasher")
+                .copied()
+                .ok_or_else(|| {
+                    missing_schedule_column_error("Dishwasher", "hot_water_dishwasher")
+                })?,
+        )
+    } else {
+        None
+    };
+
+    if draw_col.is_none() && mains_col.is_none() && appliance_col.is_none() {
         return Ok(());
     }
 
@@ -991,7 +1028,10 @@ fn inject_water_heater_schedule_columns(
         if !STORAGE_WATER_HEATER_EQUIPMENT.contains(&spec.name.as_str()) {
             continue;
         }
-        let has_typed_sources = !matches!(spec.name.as_str(), "Heat Pump Water Heater");
+        // The heat pump water heater's typed config carries no fixture-draw
+        // or mains source field: its tempered fixture draw is not wired (a
+        // separate gap), so only the appliance draw reaches it here.
+        let supports_fixture_draw = spec.name.as_str() != "Heat Pump Water Heater";
         if let Some(col_idx) = draw_col {
             let raw_values = schedule.columns[col_idx].clone();
             let avg_daily_l = water_heater_avg_daily_draw_l(spec)?;
@@ -1012,18 +1052,135 @@ fn inject_water_heater_schedule_columns(
                     tracing::error!(equipment = %spec.name, error = %err, "{msg}");
                     HaresError::Io(msg)
                 })?;
-            if has_typed_sources {
+            if supports_fixture_draw {
                 set_typed_schedule_source(spec, "draw_flow_rate_source", derived_col_idx);
             }
         }
+        // The wet appliances' untempered draw beside the tempered fixture
+        // draw: each appliance's column normalized to its daily volume, in
+        // mass at the drawn water's density (the water heater's hot supply
+        // temperature). OpenStudio-HPXML v1.12.0 draws the appliances'
+        // WaterUseEquipment with no target temperature schedule
+        // (hotwater_appliances.rb:483-497, 520-534): the full hot
+        // withdrawal, never mixed with cold mains.
+        if washer_col.is_some() || dishwasher_col.is_some() {
+            let rho_kg_per_l = water_density_kg_m3(water_heater_hot_supply_temp_c(spec)) / 1000.0;
+            let mut appliance_draw: Option<Vec<f64>> = None;
+            if let Some(col_idx) = washer_col {
+                let series = normalize_draw_profile(
+                    &schedule.columns[col_idx],
+                    washer_daily_l * rho_kg_per_l,
+                );
+                appliance_draw = Some(series);
+            }
+            if let Some(col_idx) = dishwasher_col {
+                let series = normalize_draw_profile(
+                    &schedule.columns[col_idx],
+                    dishwasher_daily_l * rho_kg_per_l,
+                );
+                appliance_draw = match appliance_draw {
+                    Some(mut combined) => {
+                        for (sum, value) in combined.iter_mut().zip(series) {
+                            *sum += value;
+                        }
+                        Some(combined)
+                    }
+                    None => Some(series),
+                };
+            }
+            if let Some(series) = appliance_draw {
+                let col_name = format!(
+                    "appliance_hot_water_draw_kg_s_{}_{}",
+                    normalize_schedule_col_name(&spec.name),
+                    i
+                );
+                let appliance_col_idx = schedule
+                    .append_derived_column(&col_name, series, ColumnAggregation::Mean)
+                    .map_err(|err| {
+                        let msg = format!(
+                            "failed to append the appliance draw column for {}: {err}",
+                            spec.name
+                        );
+                        tracing::error!(equipment = %spec.name, error = %err, "{msg}");
+                        HaresError::Io(msg)
+                    })?;
+                set_typed_schedule_source(
+                    spec,
+                    "appliance_draw_flow_rate_source",
+                    appliance_col_idx,
+                );
+            }
+        }
         if let Some(col_idx) = mains_col
-            && has_typed_sources
+            && supports_fixture_draw
         {
             set_typed_schedule_source(spec, "mains_temp_c_source", col_idx);
         }
     }
     Ok(())
 }
+
+/// The daily hot-water volume [L/day] a wet appliance's spec resolves to
+/// (`daily_hot_water_m3`), 0.0 when the home has no such appliance.
+fn wet_appliance_daily_volume_l(specs: &[EquipmentSpec], name: &str) -> f64 {
+    specs
+        .iter()
+        .find(|s| s.name == name)
+        .and_then(|s| s.parameters.get("daily_hot_water_m3"))
+        .and_then(serde_json::Value::as_f64)
+        .map(hares_physics::units::volume_m3_to_l)
+        .unwrap_or(0.0)
+}
+
+/// The construction error for a schedule file without a column an appliance's
+/// draw or cycles need: names the equipment and the column.
+fn missing_schedule_column_error(equipment: &str, column: &str) -> HaresError {
+    let msg = format!(
+        "equipment '{equipment}' has a daily hot-water volume but the schedule \
+         file has no '{column}' column: the volume is drawn through the \
+         column's shape, and the constant-window fallback that used to paper \
+         over a missing column is gone"
+    );
+    tracing::error!(equipment, column, "{msg}");
+    HaresError::Equipment(msg)
+}
+
+/// The water heater's untempered hot supply temperature [°C], the temperature
+/// the drawn water leaves at: the config's hot draw temperature when set,
+/// else its setpoint, else OS-HPXML's water heater default setpoint of
+/// 125 F.
+fn water_heater_hot_supply_temp_c(spec: &EquipmentSpec) -> f64 {
+    use hares_equipment::{
+        ElectricResistanceWaterHeaterConfig, HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
+    };
+
+    let typed = spec.typed_config.as_ref();
+    let supply = |hot_draw: Option<Option<f64>>, setpoint: Option<Option<f64>>| {
+        hot_draw
+            .flatten()
+            .or_else(|| setpoint.flatten())
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C)
+    };
+    match spec.name.as_str() {
+        "Electric Resistance Water Heater" => typed
+            .and_then(|t| t.typed::<ElectricResistanceWaterHeaterConfig>().ok())
+            .map(|c| supply(Some(c.hot_draw_temp_c), Some(c.setpoint_c)))
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
+        "Tankless Water Heater" | "Gas Tankless Water Heater" => typed
+            .and_then(|t| t.typed::<TanklessWaterHeaterConfig>().ok())
+            .map(|c| supply(None, Some(c.setpoint_c)))
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
+        "Heat Pump Water Heater" => typed
+            .and_then(|t| t.typed::<HeatPumpWaterHeaterConfig>().ok())
+            .map(|c| supply(None, Some(c.tempering_valve_setpoint_c.or(c.setpoint_c))))
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
+        _ => DEFAULT_SUPPLY_TEMP_C,
+    }
+}
+
+/// OS-HPXML's water heater default setpoint: 125 F in °C (the same default
+/// the water heater's `DEFAULT_SETPOINT_C` carries).
+const DEFAULT_SUPPLY_TEMP_C: f64 = 51.666_666_7;
 
 fn tankless_avg_daily_draw_l(spec: &EquipmentSpec) -> Result<f64, HaresError> {
     let typed = spec.typed_config.as_ref().ok_or_else(|| {
@@ -1510,14 +1667,14 @@ fn inject_event_schedule(
     mapping: &ColumnMapping,
     csv_col_map: &HashMap<String, usize>,
     schedule: &ScheduleTimeSeries,
-) {
+) -> Result<(), HaresError> {
     // Skip if equipment already has event source keys.
     if spec.parameters.keys().any(|k| {
         k == "event_window_schedule_col"
             || k == "event_window_source"
             || k == "event_power_kw_series"
     }) {
-        return;
+        return Ok(());
     }
 
     let col_name = normalize_schedule_col_name(mapping.csv_column);
@@ -1526,7 +1683,7 @@ fn inject_event_schedule(
     if let Some(&col_idx) = csv_col_map.get(col_name.as_str()) {
         let fraction_series = &schedule.columns[col_idx];
         if fraction_series.is_empty() {
-            return;
+            return Ok(());
         }
 
         // Always inject the column index for the stochastic path.
@@ -1546,9 +1703,21 @@ fn inject_event_schedule(
             spec.parameters
                 .insert("event_power_kw_series".to_string(), Value::Array(kw_series));
         }
+        Ok(())
     } else if schedule_len > 0 {
-        spec.parameters
-            .insert("event_window_source".to_string(), Value::from("constant"));
+        // A schedule file without the appliance's power column is a
+        // construction error naming the column: the constant-window fallback
+        // that used to fill in here ran the cycles back to back, a silent
+        // default no input named.
+        Err(HaresError::Equipment(format!(
+            "equipment '{}' runs on the '{}' schedule column, which the \
+             schedule has no column for; the constant-window fallback is \
+             gone: a schedule file must carry the power column every event \
+             equipment runs on",
+            spec.name, mapping.csv_column
+        )))
+    } else {
+        Ok(())
     }
 }
 
@@ -2529,27 +2698,29 @@ mod tests {
     }
 
     #[test]
-    fn event_missing_csv_injects_constant_source() {
+    fn event_missing_csv_column_is_an_error() {
         let mut schedule = make_schedule(4);
         let mut specs = vec![make_spec("Dishwasher", 0.0)];
 
-        inject_schedule_into_specs(
+        let err = inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
             None,
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
-        .expect("inject_schedule_into_specs should succeed with valid config");
+        .expect_err("a schedule without the dishwasher column must fail");
 
-        assert_eq!(
-            specs[0]
-                .parameters
-                .get("event_window_source")
-                .and_then(Value::as_str),
-            Some("constant")
+        let message = err.to_string();
+        assert!(
+            message.contains("Dishwasher"),
+            "the error must name the equipment, got: {message}"
         );
-        assert!(!specs[0].parameters.contains_key("event_window_len"));
+        assert!(
+            message.contains("dishwasher"),
+            "the error must name the missing column, got: {message}"
+        );
+        assert!(!specs[0].parameters.contains_key("event_window_source"));
     }
 
     fn make_typed_spec<T: hares_equipment::EquipmentTypedConfig>(
@@ -2727,6 +2898,7 @@ mod tests {
                     draw_flow_rate_kg_s: None,
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
+                    appliance_draw_flow_rate_source: None,
                     performance_adjustment: Some(0.95),
                     zone_type: Some("conditioned".to_string()),
                     first_hour_rating_m3: Some(0.20),
@@ -2763,6 +2935,7 @@ mod tests {
                     draw_flow_rate_kg_s: None,
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
+                    appliance_draw_flow_rate_source: None,
                     pilot_power_w: Some(5.0),
                     flue_loss_fraction: Some(0.12),
                     skin_loss_fraction: None,
@@ -2797,6 +2970,7 @@ mod tests {
                     tempering_valve_setpoint_c: Some(51.67),
                     avg_water_draw_l_per_day: Some(avg_water_draw_l_per_day),
                     draw_flow_rate_kg_s: None,
+                    appliance_draw_flow_rate_source: None,
                     compressor_power_w: None,
                     backup_enable_offset_c: None,
                     min_ambient_temp_c: None,
@@ -2863,6 +3037,7 @@ mod tests {
                 draw_flow_rate_kg_s: Some(0.10),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 avg_water_draw_l_per_day,
                 zone_type: None,
                 min_flow_kg_s: None,
@@ -3079,6 +3254,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,

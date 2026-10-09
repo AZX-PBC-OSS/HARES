@@ -35,15 +35,16 @@ Positive displacement model: water drawn from top, mains injected at bottom. Eac
 
 ```mermaid
 graph LR
-    SCHED["Schedule<br/>(L/min CSV column)"] --> TOTAL["Total Draw<br/>(kg/s)"]
-    APP["Appliance Demand<br/>(DHW_DEMAND_LOOP)"] --> TOTAL
+    SCHED["Fixture Schedule<br/>(hot_water_fixtures column)"] --> TOTAL["Total Draw<br/>(kg/s)"]
+    APP["Appliance Schedule<br/>(hot_water_clothes_washer and<br/>hot_water_dishwasher columns)"] --> TOTAL
     TOTAL --> TMV["Tempering Mixing Valve"]
     MAINS["Mains Water Temp<br/>(Burch-Christensen)"] --> TMV
     TMV --> DRAW["Tank Draw<br/>(top out, bottom in)"]
 ```
 
-- Schedule + appliance demand (from wet loads like washers/dishwashers) are summed
-- Tempered draw: mixing valve blends tank outlet with mains water to reach fixture temperature
+- The tempered fixture draw and the wet appliances' untempered draw (each
+  appliance's column normalized to its daily volume) are summed
+- Tempered draw: mixing valve blends tank outlet with mains water to reach fixture temperature; the appliance draw bypasses the valve, the full hot withdrawal
 - Two setpoints: `tempered_draw_temp_c` (~40.6C fixture) and `hot_draw_temp_c` (~51.7C dishwasher)
 - Unmet load tracked when outlet < fixture setpoint
 - Outlet temperature snapshotted pre-step to prevent same-step heat inflation

@@ -93,6 +93,8 @@ pub struct IndirectTank {
     draw_flow_rate_kg_s: f64,
     draw_l_per_min_source: Option<ScheduleSource>,
     mains_temp_c_source: Option<ScheduleSource>,
+    /// The wet appliances' untempered draw [kg/s], from its schedule column.
+    appliance_draw_source: Option<ScheduleSource>,
     target_setpoint_c: f64,
     fixture_delivery_temp_c: f64,
     hot_draw_temp_c: Option<f64>,
@@ -173,6 +175,7 @@ impl IndirectTank {
             draw_flow_rate_kg_s: 0.0,
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
+            appliance_draw_source: None,
             target_setpoint_c: DEFAULT_SETPOINT_C,
             fixture_delivery_temp_c: 40.6,
             hot_draw_temp_c: None,
@@ -274,6 +277,10 @@ impl IndirectTank {
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
+        self.appliance_draw_source = c
+            .appliance_draw_flow_rate_source
+            .clone()
+            .map(|s| s.into_runtime());
 
         self.target_setpoint_c = self.setpoint_c;
         self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);
@@ -438,8 +445,22 @@ impl Equipment for IndirectTank {
             draw_l_per_min_source,
             mains_temp_c_source,
         )?;
-        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
-        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
+        // The wet appliances' untempered draw rides its own schedule column
+        // beside the tempered fixture draw: the full hot withdrawal, at the
+        // hot supply temperature, never mixed with cold mains.
+        let appliance_draw_kg_s = self
+            .appliance_draw_source
+            .as_mut()
+            .map(|source| {
+                source
+                    .value_at(env)
+                    .map_err(|err| {
+                        HaresError::Equipment(format!("{}: {err}", self.descriptor.name))
+                    })
+                    .map(|v| v.max(0.0))
+            })
+            .transpose()?;
+        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_draw_kg_s.unwrap_or(0.0);
 
         let hot_draw_temp_c = self.hot_draw_temp_c.unwrap_or(self.setpoint_c);
         let tmv = TemperedDrawConfig {
@@ -449,7 +470,8 @@ impl Equipment for IndirectTank {
         };
         let tempered_flow_m3_s =
             draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
-        let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
+        let hot_flow_m3_s =
+            appliance_draw_kg_s.unwrap_or(0.0) / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
             TemperedDrawInputs {
                 ambient_temp_c: ambient_c,
@@ -853,6 +875,7 @@ mod control_domain_tests {
             avg_water_draw_l_per_day: Some(227.0),
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
@@ -1066,6 +1089,7 @@ mod tests {
                 avg_water_draw_l_per_day: None,
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 performance_adjustment: None,
                 zone_type: Some(zone_type.to_string()),
                 first_hour_rating_m3: None,

@@ -1545,6 +1545,7 @@ pub(crate) fn build_synthetic_building(
             .unwrap_or(hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT),
         hvac_deadband_c: config.hvac.deadband_c,
         climate_zone_iecc: None,
+        unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
     };

@@ -18,6 +18,7 @@ mod resolve_pool;
 mod resolve_water_heater;
 pub mod validation;
 pub mod water_heater_ua;
+mod wet_appliance;
 pub(crate) mod xml_helpers;
 mod zone_geometry;
 

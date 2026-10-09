@@ -1624,6 +1624,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml,
             parse_warnings: Vec::new(),
         }

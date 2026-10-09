@@ -331,10 +331,10 @@ def test_parity(
 # One hour cannot see gaps that build up over a day. Measured over the 24 h
 # from 2019-05-05 00:00 at the 2026-10-07 physics tip, the schedule-driven
 # end uses agree to floating-point rounding (worst measured relative error
-# 1.9e-14, the Other aggregate), and two end uses still differ because OCHRE
+# 1.9e-14, the Other aggregate), and the end uses below differ because OCHRE
 # deviates from the reference:
 #
-# - Water Heating: OCHRE 1.008 kWh against HARES 12.283 kWh (12.2x). OCHRE's
+# - Water Heating: OCHRE 1.008 kWh against HARES 11.550 kWh (11.5x). OCHRE's
 #   tank never receives its fixtures' hot-water draw: its schedule builder
 #   emits the fixtures column as "Water Fixtures (L/min)"
 #   (ochre/utils/schedule.py:47, convert_water_column at :350-368) while its
@@ -343,35 +343,47 @@ def test_parity(
 #   columns reach the tank (0.0 for the washer this day). HARES keeps the
 #   reference draw (DIVERGENCES D-017): the fixtures' 256 L/day at the
 #   40.6 C delivery temperature is 8.1 kWh of delivered enthalpy, plus the
-#   tank's standby and the appliances' draws.
-# - HVAC Heating: HARES 32.495 kWh against OCHRE's 30.997 kWh (+4.8%). The
+#   tank's standby and the appliances' draws (whose daily volumes follow
+#   OpenStudio-HPXML's cycles rule, not OCHRE's older equations).
+# - HVAC Heating: HARES 32.504 kWh against OCHRE's 30.997 kWh (+4.9%). The
 #   two envelope models put the same constructions' capacitance in
 #   different places (DIVERGENCES D-012's class), so the thermostat's
 #   duty integrates differently over a day.
+# - Other Electric: HARES 7.356 kWh against OCHRE's 7.409 kWh (-0.7%). The
+#   wet appliances' annual energy and hot water follow OpenStudio-HPXML's
+#   cycles rule (operational in residents, Addendum 81 asset otherwise)
+#   where OCHRE runs its own older cycle equations over the occupancy-
+#   adjusted bedroom count; the columns' shapes are the same schedule.
 # ---------------------------------------------------------------------------
 
-# Measured 2026-10-07, both sides seeded 42 (kWh).
+# Measured 2026-10-08, both sides seeded 42 (kWh).
 PARITY_24H_HEATING_OCHRE_KWH = 30.9974
-PARITY_24H_HEATING_HARES_KWH = 32.4953
+PARITY_24H_HEATING_HARES_KWH = 32.5037
 PARITY_24H_WATER_HEATING_OCHRE_KWH = 1.0083
-PARITY_24H_WATER_HEATING_HARES_KWH = 12.2835
+PARITY_24H_WATER_HEATING_HARES_KWH = 11.5501
 PARITY_24H_TOTAL_OCHRE_KWH = 43.0500
-PARITY_24H_TOTAL_HARES_KWH = 55.8231
+PARITY_24H_TOTAL_HARES_KWH = 55.0445
 
 PARITY_24H_XFAILS: dict[str, str] = {
     "HVAC Heating Electric Power (kW)": (
-        "OCHRE 30.997 kWh against HARES 32.495 kWh over 24 h (+4.8%): the two "
+        "OCHRE 30.997 kWh against HARES 32.504 kWh over 24 h (+4.9%): the two "
         "envelope models' capacitance placement differs (DIVERGENCES D-012's class)"
     ),
     "Water Heating Electric Power (kW)": (
-        "OCHRE 1.008 kWh against HARES 12.283 kWh over 24 h (12.2x): OCHRE's tank "
+        "OCHRE 1.008 kWh against HARES 11.550 kWh over 24 h (11.5x): OCHRE's tank "
         "never receives the fixtures draw (schedule.py:47 names the column Water "
         "Fixtures (L/min); Water.py:287 reads Water Heating (L/min)); HARES keeps "
         "the reference draw (DIVERGENCES D-017)"
     ),
+    "Other Electric Power (kW)": (
+        "OCHRE 7.409 kWh against HARES 7.356 kWh over 24 h (-0.7%): the wet "
+        "appliances' energy and hot water follow OpenStudio-HPXML's cycles rule "
+        "where OCHRE runs its own older cycle equations over the occupancy-"
+        "adjusted bedroom count"
+    ),
     "Total Electric Power (kW)": (
-        "OCHRE 43.050 kWh against HARES 55.823 kWh over 24 h: the sum of the two "
-        "declared end-use divergences above"
+        "OCHRE 43.050 kWh against HARES 55.044 kWh over 24 h: the sum of the "
+        "three declared end-use divergences above"
     ),
 }
 

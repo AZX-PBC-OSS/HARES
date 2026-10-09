@@ -119,6 +119,8 @@ pub struct GasWH {
     draw_flow_rate_kg_s: f64,
     draw_l_per_min_source: Option<ScheduleSource>,
     mains_temp_c_source: Option<ScheduleSource>,
+    /// The wet appliances' untempered draw [kg/s], from its schedule column.
+    appliance_draw_source: Option<ScheduleSource>,
     flue_loss_fraction: f64,
     burner_efficiency_constant: f64,
     burner_efficiency_poly: Option<[f64; 3]>,
@@ -227,6 +229,7 @@ impl GasWH {
             draw_flow_rate_kg_s: 0.0,
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
+            appliance_draw_source: None,
             flue_loss_fraction: DEFAULT_FLUE_LOSS_FRACTION,
             burner_efficiency_constant: DEFAULT_BURNER_EFFICIENCY,
             burner_efficiency_poly: None,
@@ -359,6 +362,10 @@ impl GasWH {
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
+        self.appliance_draw_source = c
+            .appliance_draw_flow_rate_source
+            .clone()
+            .map(|s| s.into_runtime());
         self.zip = crate::config::resolve_reactive_zip(config)?;
         self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);
         self.hot_draw_temp_c = c.hot_draw_temp_c;
@@ -597,8 +604,22 @@ impl Equipment for GasWH {
             draw_l_per_min_source,
             mains_temp_c_source,
         )?;
-        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
-        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
+        // The wet appliances' untempered draw rides its own schedule column
+        // beside the tempered fixture draw: the full hot withdrawal, at the
+        // hot supply temperature, never mixed with cold mains.
+        let appliance_draw_kg_s = self
+            .appliance_draw_source
+            .as_mut()
+            .map(|source| {
+                source
+                    .value_at(env)
+                    .map_err(|err| {
+                        HaresError::Equipment(format!("{}: {err}", self.descriptor.name))
+                    })
+                    .map(|v| v.max(0.0))
+            })
+            .transpose()?;
+        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_draw_kg_s.unwrap_or(0.0);
         let hot_draw_temp_c = self.hot_draw_temp_c.unwrap_or(self.setpoint_c);
         let tmv = TemperedDrawConfig {
             tempered_draw_temp_c: self.fixture_delivery_temp_c,
@@ -607,7 +628,8 @@ impl Equipment for GasWH {
         };
         let tempered_flow_m3_s =
             draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
-        let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
+        let hot_flow_m3_s =
+            appliance_draw_kg_s.unwrap_or(0.0) / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
             TemperedDrawInputs {
                 ambient_temp_c: ambient_c,
@@ -1189,6 +1211,7 @@ mod tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 pilot_power_w: Some(50.0),
                 flue_loss_fraction: Some(0.2),
                 skin_loss_fraction: None,
@@ -2062,6 +2085,7 @@ mod tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 pilot_power_w: Some(0.0),
                 flue_loss_fraction: Some(0.0),
                 skin_loss_fraction: None,
@@ -2119,6 +2143,7 @@ mod tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 pilot_power_w: Some(0.0),
                 flue_loss_fraction: Some(flue_loss_fraction),
                 skin_loss_fraction: None,
@@ -2643,6 +2668,7 @@ mod tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 pilot_power_w: Some(50.0),
                 flue_loss_fraction: Some(0.2),
                 skin_loss_fraction: None,

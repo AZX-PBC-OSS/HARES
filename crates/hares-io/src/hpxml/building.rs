@@ -334,6 +334,10 @@ pub struct Building {
     /// Raw HPXML parse tree retained for downstream consumers that still read
     /// fields which have not been promoted to typed members on `Building`.
     pub details_xml: XmlNode,
+    /// `SoftwareInfo/extension/UnavailablePeriods`: the periods whose flagged
+    /// steps zero the schedule columns their `unavailable_periods.csv` rows
+    /// apply to (`crates/hares-io/src/unavailable_periods.rs`).
+    pub unavailable_periods: Vec<crate::unavailable_periods::UnavailablePeriod>,
     /// Schema warnings the parse raised (for example the HPXML 3.x
     /// deprecated-`EnergyFactor` notice), carried to the run instead of
     /// living only as `tracing` lines.
@@ -1337,6 +1341,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             .path(&["ClimateandRiskZones", "ClimateZoneIECC"])
             .and_then(|iecc| super::xml_helpers::child_text(iecc, "ClimateZone"))
             .filter(|zone| !zone.is_empty()),
+        unavailable_periods: crate::unavailable_periods::parse_unavailable_periods(root)?,
         details_xml: details.clone(),
         parse_warnings,
     })

@@ -98,6 +98,7 @@ fn probe_water_heater(
         draw_flow_rate_kg_s: None,
         draw_flow_rate_source: None,
         mains_temp_c_source: None,
+        appliance_draw_flow_rate_source: None,
         performance_adjustment: None,
         zone_type: zone_type.map(str::to_string),
         first_hour_rating_m3: None,

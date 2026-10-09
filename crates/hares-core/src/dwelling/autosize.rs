@@ -1172,6 +1172,7 @@ mod tests {
                 text: String::new(),
                 children: vec![],
             },
+            unavailable_periods: Vec::new(),
             parse_warnings: Vec::new(),
         }
     }

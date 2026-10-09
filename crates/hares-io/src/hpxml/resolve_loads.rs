@@ -12,6 +12,10 @@ use super::HpxmlError;
 use super::building::{Building, XmlNode, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec, build_typed_spec, canonical_instance_namer};
 use super::resolve_pool::resolve_pool_and_spa_loads;
+use super::wet_appliance::{
+    ClothesWasherInputs, DishwasherInputs, OccupancyInputs, calc_clothes_washer_energy_gpd,
+    calc_dishwasher_energy_gpd,
+};
 use super::xml_helpers::{
     capitalize, child_bool, child_f64, child_load_kwh, child_load_therms, child_text, element_id,
     parse_fuel, parse_schedule_extension_params,
@@ -98,6 +102,46 @@ pub(super) fn adjusted_bedroom_count(
             _ => (-1.47 + 1.69 * occ).max(0.0),
         },
         None => n_bedrooms_raw,
+    }
+}
+
+/// The `extension/UsageMultiplier` of an appliance element, 1.0 when absent.
+fn usage_multiplier_of(node: &XmlNode) -> f64 {
+    node.child("extension")
+        .and_then(|e| child_f64(e, "UsageMultiplier"))
+        .unwrap_or(1.0)
+}
+
+/// The occupancy inputs the OpenStudio-HPXML wet-appliance formulas read:
+/// the raw `NumberofResidents` (the operational branch's driver, whose zero
+/// value zeroes both appliances), the raw `NumberofBedrooms` with the
+/// parser's 3-bedroom fallback (the Addendum 81 asset branch's input), and
+/// whether the home is an apartment unit.
+fn wet_appliance_occupancy_inputs(details: &XmlNode) -> OccupancyInputs {
+    let n_occ = details
+        .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
+        .and_then(|n| parse_trimmed_f64(&n.text));
+    let nbeds = details
+        .path(&[
+            "BuildingSummary",
+            "BuildingConstruction",
+            "NumberofBedrooms",
+        ])
+        .and_then(|n| parse_trimmed_f64(&n.text))
+        .unwrap_or(3.0);
+    let is_apartment = details
+        .path(&[
+            "BuildingSummary",
+            "BuildingConstruction",
+            "ResidentialFacilityType",
+        ])
+        .map(|n| n.text.trim().to_ascii_lowercase())
+        .as_deref()
+        == Some("apartment unit");
+    OccupancyInputs {
+        n_occ,
+        nbeds,
+        is_apartment,
     }
 }
 
@@ -265,62 +309,57 @@ pub(super) fn resolve_scheduled_loads(
                         if let Some(imef) = child_f64(node, "IntegratedModifiedEnergyFactor") {
                             params.insert("imef".to_string(), json!(imef));
                         }
-                        params.insert("hot_water_draw_volume_l".to_string(), json!(15.0));
 
-                        // Convert RatedAnnualkWh to actual annual energy (OCHRE hpxml.py:1243-1262).
-                        // RatedAnnualkWh is a test-cycle rating; actual usage depends on
-                        // household size, appliance capacity, and label usage cycles.
-                        if let Some(rated_kwh) =
-                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
-                        {
-                            let capacity_ft3 = params
-                                .get("capacity_m3")
-                                .and_then(|v| v.as_f64())
-                                .map(|m3| m3 / 0.028_316_8)
-                                .unwrap_or(3.0);
-                            let label_usage = params
+                        // OpenStudio-HPXML v1.12.0 calc_clothes_washer_energy_gpd
+                        // (hotwater_appliances.rb:824-888): the adjusted annual
+                        // energy and the daily hot-water volume, from the
+                        // cycles-per-year rule (operational in residents,
+                        // Addendum 81 asset otherwise), the label algebra and
+                        // the rated value.
+                        let adjusted = child_load_kwh(node).or_else(|| {
+                            node.child("extension")
+                                .and_then(|ext| child_f64(ext, "AdjustedAnnualkWh"))
+                        });
+                        let inputs = ClothesWasherInputs {
+                            rated_annual_kwh: child_f64(node, "RatedAnnualkWh").unwrap_or(400.0),
+                            capacity_ft3: child_f64(node, "Capacity").unwrap_or(3.0),
+                            label_usage: params
                                 .get("label_usage_cycles_per_week")
                                 .and_then(|v| v.as_f64())
-                                .unwrap_or(6.0);
-                            let multiplier = node
-                                .child("extension")
-                                .and_then(|e| child_f64(e, "UsageMultiplier"))
-                                .unwrap_or(1.0);
-
-                            const GAS_H20: f64 = 0.3914;
-                            const ELEC_H20: f64 = 0.0178;
-                            // Read per-appliance label rates from HPXML, fall back
-                            // to OCHRE defaults when absent.
-                            let gas_rate = child_f64(node, "LabelGasRate").unwrap_or(1.09);
-                            let gas_cost = child_f64(node, "LabelAnnualGasCost").unwrap_or(27.0);
-                            let electric_rate =
-                                child_f64(node, "LabelElectricRate").unwrap_or(0.12);
-
-                            let lcy = label_usage * 52.0;
-                            let scy = 164.0 + n_bedrooms * 46.5;
-                            let acy = scy * ((3.0 * 2.08 + 1.59) / (capacity_ft3 * 2.08 + 1.59));
-                            let cw_appl = (gas_cost * GAS_H20 / gas_rate
-                                - rated_kwh * electric_rate * ELEC_H20 / electric_rate)
-                                / (electric_rate * GAS_H20 / gas_rate - ELEC_H20);
-                            let actual_kwh = cw_appl / lcy * acy * multiplier;
-                            params.insert("annual_electric_kwh".to_string(), json!(actual_kwh));
+                                .unwrap_or(6.0),
+                            label_electric_rate: child_f64(node, "LabelElectricRate")
+                                .unwrap_or(0.12),
+                            label_gas_rate: child_f64(node, "LabelGasRate").unwrap_or(1.09),
+                            label_annual_gas_cost: child_f64(node, "LabelAnnualGasCost")
+                                .unwrap_or(27.0),
+                            usage_multiplier: usage_multiplier_of(node),
+                            occupancy: wet_appliance_occupancy_inputs(details),
+                        };
+                        let (annual_kwh, gpd) = calc_clothes_washer_energy_gpd(&inputs, adjusted);
+                        tracing::debug!(
+                            appliance = "Clothes Washer",
+                            annual_electric_kwh = annual_kwh,
+                            daily_hot_water_m3 = conv::volume_gal_to_m3(gpd),
+                            "wet appliance hot water resolved (SI)",
+                        );
+                        if child_load_therms(node).is_none() {
+                            params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
                         }
+                        params.insert(
+                            "daily_hot_water_m3".to_string(),
+                            json!(conv::volume_gal_to_m3(gpd)),
+                        );
 
                         // Multi-phase cycle: fill, wash, rinse, spin.
-                        // Fill and wash/rinse phases draw hot water; spin does not.
                         params.insert("phase_len".to_string(), json!(4));
                         params.insert("phase_0_power_kw".to_string(), json!(0.02));
                         params.insert("phase_0_duration_s".to_string(), json!(300.0));
-                        params.insert("phase_0_has_water_draw".to_string(), json!(true));
                         params.insert("phase_1_power_kw".to_string(), json!(0.4));
                         params.insert("phase_1_duration_s".to_string(), json!(900.0));
-                        params.insert("phase_1_has_water_draw".to_string(), json!(true));
                         params.insert("phase_2_power_kw".to_string(), json!(0.02));
                         params.insert("phase_2_duration_s".to_string(), json!(300.0));
-                        params.insert("phase_2_has_water_draw".to_string(), json!(true));
                         params.insert("phase_3_power_kw".to_string(), json!(0.8));
                         params.insert("phase_3_duration_s".to_string(), json!(600.0));
-                        params.insert("phase_3_has_water_draw".to_string(), json!(false));
                     }
                     "ClothesDryer" => {
                         if let Some(cef) = child_f64(node, "CombinedEnergyFactor") {
@@ -407,57 +446,60 @@ pub(super) fn resolve_scheduled_loads(
                         if let Some(usage) = child_f64(node, "LabelUsage") {
                             params.insert("label_usage_cycles_per_week".to_string(), json!(usage));
                         }
-                        params.insert("hot_water_draw_volume_l".to_string(), json!(6.0));
 
-                        // Convert RatedAnnualkWh to actual annual energy (OCHRE hpxml.py:1336-1354).
-                        // RatedAnnualkWh is a test-cycle rating; actual usage depends on
-                        // household size, place-setting capacity, and label usage cycles.
-                        if let Some(rated_kwh) =
-                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
-                        {
-                            let capacity = params
+                        // OpenStudio-HPXML v1.12.0 calc_dishwasher_energy_gpd
+                        // (hotwater_appliances.rb:607-675): the adjusted annual
+                        // energy and the daily hot-water volume, from the
+                        // cycles-per-year rule (operational in residents,
+                        // Addendum 81 asset otherwise), the label algebra and
+                        // the rated value.
+                        let adjusted = child_load_kwh(node).or_else(|| {
+                            node.child("extension")
+                                .and_then(|ext| child_f64(ext, "AdjustedAnnualkWh"))
+                        });
+                        let inputs = DishwasherInputs {
+                            rated_annual_kwh: child_f64(node, "RatedAnnualkWh").unwrap_or(467.0),
+                            place_setting_capacity: params
                                 .get("place_setting_capacity")
                                 .and_then(|v| v.as_f64())
-                                .unwrap_or(12.0);
-                            let label_usage = params
+                                .unwrap_or(12.0),
+                            label_usage: params
                                 .get("label_usage_cycles_per_week")
                                 .and_then(|v| v.as_f64())
-                                .unwrap_or(4.0);
-                            let multiplier = node
-                                .child("extension")
-                                .and_then(|e| child_f64(e, "UsageMultiplier"))
-                                .unwrap_or(1.0);
-
-                            let gas_rate = child_f64(node, "LabelGasRate").unwrap_or(1.09);
-                            let gas_cost = child_f64(node, "LabelAnnualGasCost").unwrap_or(33.12);
-                            let electric_rate =
-                                child_f64(node, "LabelElectricRate").unwrap_or(0.12);
-
-                            let usage_annual = label_usage * 52.0;
-                            let kwh_per_cyc = ((gas_cost * 0.5497 / gas_rate
-                                - rated_kwh * electric_rate * 0.02504 / electric_rate)
-                                / (electric_rate * 0.5497 / gas_rate - 0.02504))
-                                / usage_annual;
-                            let dwcpy = (88.4 + 34.9 * n_bedrooms) * (12.0 / capacity);
-                            let actual_kwh = kwh_per_cyc * dwcpy * multiplier;
-                            params.insert("annual_electric_kwh".to_string(), json!(actual_kwh));
+                                .unwrap_or(4.0),
+                            label_electric_rate: child_f64(node, "LabelElectricRate")
+                                .unwrap_or(0.12),
+                            label_gas_rate: child_f64(node, "LabelGasRate").unwrap_or(1.09),
+                            label_annual_gas_cost: child_f64(node, "LabelAnnualGasCost")
+                                .unwrap_or(33.12),
+                            usage_multiplier: usage_multiplier_of(node),
+                            occupancy: wet_appliance_occupancy_inputs(details),
+                        };
+                        let (annual_kwh, gpd) = calc_dishwasher_energy_gpd(&inputs, adjusted);
+                        tracing::debug!(
+                            appliance = "Dishwasher",
+                            annual_electric_kwh = annual_kwh,
+                            daily_hot_water_m3 = conv::volume_gal_to_m3(gpd),
+                            "wet appliance hot water resolved (SI)",
+                        );
+                        if child_load_therms(node).is_none() {
+                            params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
                         }
+                        params.insert(
+                            "daily_hot_water_m3".to_string(),
+                            json!(conv::volume_gal_to_m3(gpd)),
+                        );
 
                         // Multi-phase cycle: fill, wash, drain, dry.
-                        // Fill and wash phases draw hot water; drain and dry do not.
                         params.insert("phase_len".to_string(), json!(4));
                         params.insert("phase_0_power_kw".to_string(), json!(0.05));
                         params.insert("phase_0_duration_s".to_string(), json!(120.0));
-                        params.insert("phase_0_has_water_draw".to_string(), json!(true));
                         params.insert("phase_1_power_kw".to_string(), json!(0.6));
                         params.insert("phase_1_duration_s".to_string(), json!(1200.0));
-                        params.insert("phase_1_has_water_draw".to_string(), json!(true));
                         params.insert("phase_2_power_kw".to_string(), json!(0.3));
                         params.insert("phase_2_duration_s".to_string(), json!(60.0));
-                        params.insert("phase_2_has_water_draw".to_string(), json!(false));
                         params.insert("phase_3_power_kw".to_string(), json!(0.8));
                         params.insert("phase_3_duration_s".to_string(), json!(900.0));
-                        params.insert("phase_3_has_water_draw".to_string(), json!(false));
                     }
                     "CookingRange"
                         if !params.contains_key("annual_electric_kwh")
@@ -2921,6 +2963,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: details,
             parse_warnings: Vec::new(),
         }
@@ -3006,19 +3049,21 @@ mod tests {
 
         // Dishwasher: kwh_per_cycle = ((33.12*0.5497/1.09 - 467*0.02504)
         //   / (0.12*0.5497/1.09 - 0.02504)) / (4*52) with the label defaults;
-        // dwcpy = (88.4 + 34.9*n_bedrooms) * (12/12) at n_bedrooms = 3.6.
+        // the cycles rule is OpenStudio-HPXML's operational form
+        // (scy = 91 + 30*n_occ = 181 at 3 residents), not the bedroom count.
         let kwh_per_cyc = ((33.12 * 0.5497 / 1.09 - 467.0 * 0.12 * 0.02504 / 0.12)
             / (0.12 * 0.5497 / 1.09 - 0.02504))
             / (4.0 * 52.0);
-        let expected = kwh_per_cyc * (88.4 + 34.9 * 3.6);
+        let expected = kwh_per_cyc * (91.0 + 30.0 * 3.0);
         let actual =
             param(find("Dishwasher"), "annual_electric_kwh").expect("dishwasher annual kWh");
         assert!(
             (actual - expected).abs() < 1e-9,
-            "dishwasher annual energy {actual} != adjusted-count {expected}"
+            "dishwasher annual energy {actual} != resident-cycles {expected}"
         );
 
-        // Cooking range (electric): 331 + 39*n_bedrooms at 3.6.
+        // Cooking range (electric): 331 + 39*n_bedrooms at 3.6, the
+        // OCHRE-adjusted count the range's own formula keeps.
         let expected_range = 331.0 + 39.0 * 3.6;
         let actual_range = param(find("Cooking Range"), "annual_electric_kwh").expect("range kWh");
         assert!(

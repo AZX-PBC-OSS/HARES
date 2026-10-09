@@ -118,3 +118,61 @@ cz2a_gas_furnace_ac_res_wh, 0.34 to 0.25 on cz6b_resistance_res_wh, 0.60 to
 unchanged (every golden runs the ideal path at its resolution); the
 single-building benchmark (60 s steps) runs about 10 % faster with the
 modulating fraction than with whole-step cycling.
+
+## Wet-appliance hot water follows the OpenStudio-HPXML daily volume
+
+The clothes washer's and dishwasher's daily hot-water volume is the
+OpenStudio-HPXML v1.12.0 `calc_clothes_washer_energy_gpd` and
+`calc_dishwasher_energy_gpd` result (ERI >= 2019A branch,
+`HPXMLtoOpenStudio/resources/hotwater_appliances.rb:824-888` and `:607-675`,
+fetched from the v1.12.0 tag): the cycles-per-year rule takes the
+operational form (`scy = 123 + 61 n_occ` washer, `scy = 91 + 30 n_occ`
+dishwasher, FSEC PF-464-15 Eqs. 1 and 3) when `NumberofResidents` is given
+and the RESNET HERS Addendum 81 asset form (Eq. 4.2-34 and Eq. 4.2-36a,
+split by apartment unit against every other facility type) otherwise; the
+label algebra with the `defaults.rb:5523-5530, 5586-5594` defaults turns the
+rated kWh into the water term; `UsageMultiplier` scales the annual energy
+and the daily volume alike; a negative result clamps at 0; a home with
+`NumberofResidents` 0 has neither. `extension/AdjustedAnnualkWh` is the
+adjusted annual energy: it is the resolved energy, never the rated input of
+a second adjustment (its water term back-derives the label-cycle energy the
+adjustment algebra would have produced).
+
+The volume is drawn the way OpenStudio-HPXML draws it: spread over the
+`hot_water_clothes_washer` and `hot_water_dishwasher` schedule columns with
+the peak flow the column's daily equivalent full-load hours give
+(`resources/schedules.rb:1353-1365`), untempered at the water heater's hot
+supply temperature (the appliances' WaterUseEquipment carries no target
+temperature schedule, `hotwater_appliances.rb:483-497, 520-534`: the full
+hot withdrawal, never mixed with cold mains), through the water heater's
+scheduled draw beside the tempered fixture draw. The volume converts to mass
+at the drawn water's density (`water_density_kg_m3` at the water heater's
+hot supply temperature, its setpoint by default). For a home without a
+schedule file the generator produces both columns from the appliance's own
+weekday, weekend and monthly fractions, the same
+`MonthWeekdayWeekendSchedule` object that shapes the electric cycle
+(`hotwater_appliances.rb:63-65, 155-157, 480-482, 517-519`), scaled to the
+daily water volume instead of the daily energy. Under an unavailable period
+the two columns zero on the same steps as `clothes_washer` and `dishwasher`,
+through the paired energy-use column's table row
+(`schedules.rb` `set_unavailable_periods`, `:1433-1437`). The appliance's
+own draw loop on the water heater's demand channel and its fixed per-cycle
+volume (15 L washer, 6 L dishwasher) are gone, so the daily volume no longer
+depends on the step length.
+
+OCHRE's difference is its older cycle equations: `parse_clothes_washer` and
+`parse_dishwasher` (`vendors/OCHRE/ochre/utils/hpxml.py:1243-1278,
+1336-1370`) use the pre-Addendum-81 asset equations
+(`scy = 164 + 46.5 n_beds`, `dwcpy = 88.4 + 34.9 n_beds`) over the
+occupancy-adjusted bedroom count, and the same untempered spread through the
+same columns (`ochre/utils/schedule.py:350-370`, `ochre/Models/Water.py:286-290`,
+flat 1000 kg/m3 water). The test_ochre_parity suite carries that documented
+difference.
+
+Measured direction of the delta (the dwelling goldens, annual appliance hot
+water): the parity homes' washer 27.4 to 9.8 L/d and dishwasher 21.1 to
+9.7 L/d; bldg0176227's washer 17.1 to 28.2 L/d and dishwasher 31.2 to
+14.0 L/d at 900 s; the volumes are identical at 60, 900 and 3600 s where the
+old replay drew 39.4 L/d at 3600 s against 17.1 at 900 s. The appliance
+electric energies move with the cycles rule; domestic hot water energy moves
+with the volumes, and space heating or cooling follows the tank gains.

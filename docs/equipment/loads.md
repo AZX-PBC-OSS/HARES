@@ -93,10 +93,13 @@ stateDiagram-v2
 ### Wet Appliance Variant
 
 Multi-phase cycles (e.g., washer: fill -> wash -> spin):
-- `phase_len` phases, each `phase_<n>_power_kw`, `phase_<n>_duration_s` and
-  optionally `phase_<n>_has_water_draw`; with no `phase_len`, one phase of
-  `active_power_kw` for `active_duration_s`
-- Optional `hot_water_draw_rate_kg_s` for DHW consumption (writes to `DHW_DEMAND_LOOP`)
+- `phase_len` phases, each `phase_<n>_power_kw` and `phase_<n>_duration_s`;
+  with no `phase_len`, one phase of `active_power_kw` for `active_duration_s`
+- The electric cycle replays the appliance's power column's events; the hot
+  water is a separate schedule-driven draw: the `hot_water_clothes_washer`
+  and `hot_water_dishwasher` columns normalized to the appliance's daily
+  volume (`daily_hot_water_m3` on the spec) and drawn untempered through the
+  water heater's appliance draw source
 
 ### Control Signals
 

@@ -530,11 +530,9 @@ mod tests {
             } else {
                 let phased = vec![
                     ("n_units", number(1.0)),
-                    ("hot_water_draw_volume_l", number(10.0)),
                     ("phase_len", number(1.0)),
                     ("phase_0_power_kw", number(1.0)),
                     ("phase_0_duration_s", number(60.0)),
-                    ("phase_0_has_water_draw", ConfigValue::Bool(true)),
                 ];
                 vec![
                     [column_sources, phased].concat(),

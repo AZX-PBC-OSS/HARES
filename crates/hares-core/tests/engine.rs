@@ -32,12 +32,16 @@ impl Scratch {
 }
 
 fn build_schedule_csv() -> String {
+    // The columns the base fixture's event equipment and wet appliances run
+    // on: a schedule file without an appliance's power column is a
+    // construction error, and the washer and dishwasher draw their hot water
+    // through their hot-water columns.
     [
-        "Time,Clothes Washer (kW),HVAC Heating (C)",
-        "2021-01-01T00:00:00-07:00,0.10,20.0",
-        "2021-01-01T00:15:00-07:00,0.20,20.5",
-        "2021-01-01T00:30:00-07:00,0.30,21.0",
-        "2021-01-01T00:45:00-07:00,0.40,21.5",
+        "Time,occupants,clothes_washer,clothes_dryer,dishwasher,cooking_range,hot_water_clothes_washer,hot_water_dishwasher,heating_setpoint",
+        "2021-01-01T00:00:00-07:00,1.0,0.10,0.10,0.10,0.10,0.10,0.10,20.0",
+        "2021-01-01T00:15:00-07:00,1.0,0.20,0.20,0.20,0.20,0.20,0.20,20.5",
+        "2021-01-01T00:30:00-07:00,1.0,0.30,0.30,0.30,0.30,0.30,0.30,21.0",
+        "2021-01-01T00:45:00-07:00,1.0,0.40,0.40,0.40,0.40,0.40,0.40,21.5",
     ]
     .join("\n")
 }

@@ -1927,6 +1927,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: "root".into(),
                 attrs: Default::default(),
@@ -3347,6 +3348,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -3560,6 +3562,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -3801,6 +3804,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -4043,6 +4047,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -4337,6 +4342,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -4609,6 +4615,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
@@ -4871,6 +4878,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: hares_io::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),

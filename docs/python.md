@@ -181,3 +181,20 @@ The extension hasn't been built yet. Run `uv run maturin develop`.
 **Wrong Python version**
 Maturin builds against the Python in the active virtualenv. Verify with
 `uv run python --version` — it should be 3.12.x or 3.13.x.
+
+## Numeric changes
+
+Every number a commit moves is recorded here: what moved, why, and the
+golden fixtures re-captured.
+
+- 2026-10-08: the wet appliances' daily hot-water volume and annual energy
+  follow the OpenStudio-HPXML v1.12.0
+  `calc_clothes_washer_energy_gpd` / `calc_dishwasher_energy_gpd` cycles
+  rule (operational in residents, Addendum 81 asset otherwise) instead of a
+  fixed 15 L and 6 L per cycle replayed on the step; the volume is drawn
+  through the `hot_water_clothes_washer` and `hot_water_dishwasher` schedule
+  columns at the column's peak flow and is step-independent. Every golden
+  re-captured: `full_year_hourly`, `full_year_900s_dst`, `leap_year_february_900s`,
+  `weather_wrap_900s`, `month_boundary_billing_3600s`, `consumer_shape_900s`,
+  `fleet_mixed_offset`, `resstock_2025_fleet` (each home has a washer or
+  dishwasher and a water heater).

@@ -116,6 +116,7 @@ fn probe_wh_config() -> ElectricResistanceWaterHeaterConfig {
         draw_flow_rate_kg_s: None,
         draw_flow_rate_source: None,
         mains_temp_c_source: None,
+        appliance_draw_flow_rate_source: None,
         performance_adjustment: None,
         zone_type: None,
         first_hour_rating_m3: None,

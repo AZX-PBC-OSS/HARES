@@ -337,6 +337,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             avg_water_draw_l_per_day: None,
             zone_type: None,
             min_flow_kg_s: None,

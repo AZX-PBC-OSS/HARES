@@ -80,6 +80,8 @@ pub struct TanklessWH {
     draw_flow_rate_kg_s: f64,
     draw_flow_rate_kg_s_source: Option<ScheduleSource>,
     mains_temp_c_source: Option<ScheduleSource>,
+    /// The wet appliances' untempered draw [kg/s], from its schedule column.
+    appliance_draw_source: Option<ScheduleSource>,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// control electronics at unity power factor by class default (Q exactly
     /// zero, real power untouched).
@@ -144,6 +146,7 @@ impl TanklessWH {
             draw_flow_rate_kg_s: 0.0,
             draw_flow_rate_kg_s_source: None,
             mains_temp_c_source: None,
+            appliance_draw_source: None,
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -285,6 +288,9 @@ impl TanklessWH {
         self.draw_flow_rate_kg_s_source =
             c.draw_flow_rate_source.map(|source| source.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.map(|source| source.into_runtime());
+        self.appliance_draw_source = c
+            .appliance_draw_flow_rate_source
+            .map(|source| source.into_runtime());
         self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.dr_setpoint_offset_c = 0.0;
@@ -386,8 +392,21 @@ impl Equipment for TanklessWH {
             None => self.rated_thermal_power_w,
         };
 
-        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
-        let total_draw_kg_s = schedule_draw_kg_s + appliance_demand_kg_s;
+        // The wet appliances' untempered draw rides its own schedule column
+        // beside the tempered fixture draw.
+        let appliance_draw_kg_s = self
+            .appliance_draw_source
+            .as_mut()
+            .map(|source| {
+                source
+                    .value_at(env)
+                    .map_err(|err| {
+                        HaresError::Equipment(format!("{}: {err}", self.descriptor.name))
+                    })
+                    .map(|v| v.max(0.0))
+            })
+            .transpose()?;
+        let total_draw_kg_s = schedule_draw_kg_s + appliance_draw_kg_s.unwrap_or(0.0);
 
         let draw_volume_l =
             total_draw_kg_s * dt.as_secs_f64() / water_density_kg_m3(inlet_temp_c) * 1000.0;
@@ -929,6 +948,7 @@ mod tests {
             draw_flow_rate_kg_s: Some(0.2),
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             avg_water_draw_l_per_day: None,
             zone_type: None,
             min_flow_kg_s: None,

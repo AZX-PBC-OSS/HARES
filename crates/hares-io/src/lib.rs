@@ -17,6 +17,7 @@ pub mod schedule;
 pub mod schedule_resolve;
 pub mod site_location;
 pub mod tmy3;
+pub mod unavailable_periods;
 pub mod weather;
 pub mod wsf;
 
@@ -82,6 +83,9 @@ pub use schedule_resolve::inject_schedule_into_specs;
 pub use schedule_resolve::{DefaultProfiles, DefaultScheduleProfile, load_default_profiles};
 pub use site_location::{FieldSource, SiteLocation, SiteLocationOverride, resolve_site_location};
 pub use tmy3::parse_tmy3;
+pub use unavailable_periods::{
+    NaturalVentilation, UnavailableKind, UnavailablePeriod, apply_unavailable_periods,
+};
 pub use weather::{
     ResampleMethod, ResampleOverrides, WeatherField, WeatherMeta, WeatherTimeSeries,
 };
