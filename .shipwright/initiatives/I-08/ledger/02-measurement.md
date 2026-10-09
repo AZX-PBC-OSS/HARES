@@ -2002,14 +2002,33 @@ row's State carried the two modes' labels swapped: the 0.773 set is the
 dynamic mode's and the 0.791 set the ideal mode's; the values themselves
 match on both lists.
 
+The full candidate set the investigation considered for this bias, each
+with its disposition and where its evidence lives, so "the last two" is
+reproducible: sky long-wave, ruled out because HARES's sky coupling
+matches EnergyPlus's; roof absorptance and emittance, ruled out because
+the same HPXML values sit on both sides; a radiant barrier, ruled out
+because BEopt has none; ventilation and terrain, not the cause, about
+0.1 °C of sensitivity; roof roughness, not the winter cause, about
+0.05 °C there, the departure registered as D-010; the interior film and
+ground long-wave, triaged in this entry, both reference-equivalent. The
+first five's evidence is the fix-or18c review's candidate triage of
+2026-10-05 (`verification/review-OR-18c-7b409ca5.md`) and the OD-56
+row's own record (`11-other-defects.md`). The free-float case's boundary
+conditions, the other half of the OD-56 row's scope, are untouched by
+this entry and stay with the row (`11-other-defects.md`, OD-56).
+
 Candidate 1, the interior film on the roof deck and the attic floor.
 
 The references. OS-HPXML v1.12.0 sets EnergyPlus's inside surface
 convection algorithm to TARP (`HPXMLtoOpenStudio/resources/simcontrols.rb:24-25`,
-the outside one to DOE-2 at `:21-22`) and builds its constructions with
-explicit air-film layers (`constructions.rb:405, :508, :607`; the roof's
-`AirFilmIndoorRoof` at `:18`, the attic floor's
-`AirFilmIndoorFloorAverage` at `:165`). EnergyPlus v24.2.0 evaluates the
+the outside one to DOE-2 at `:21-22`). Its own constructions name
+air-film layers (the roof's `AirFilmIndoorRoof` at `constructions.rb:18`,
+the attic floor's `AirFilmIndoorFloorAverage` at `:165`, added to the
+construction at `:405`, `:508`, `:607`), but it strips the AirFilm
+layers before a construction reaches EnergyPlus
+(`constructions.rb:3319`): the EnergyPlus film is not a material layer,
+it is the dynamic convection algorithm those settings select, evaluated
+per step. EnergyPlus v24.2.0 evaluates the
 TARP interior model per surface face per step: the dispatch at
 `ConvectionCoefficients.cc:319-328`, `CalcASHRAETARPNatural` at
 `:1879-1925` (enhanced when the surface-air temperature difference and
@@ -2018,7 +2037,14 @@ the face's signed cos of tilt share a sign, reduced otherwise,
 at `:1938-1940`, and the Walton magnitudes at
 `ConvectionCoefficients.hh:409` (vertical, 1.31·ΔT^(1/3)), `:433`
 (enhanced, 9.482·ΔT^(1/3)/(7.238-|cos|)) and `:455` (reduced,
-1.810·ΔT^(1/3)/(1.382+|cos|)). OCHRE freezes the same TARP model once
+1.810·ΔT^(1/3)/(1.382+|cos|)). The vendored EnergyPlus tree is
+v26.2.0-IOFreeze, and the Walton/TARP code is identical across the two
+versions (re-checked against the vendored copies: only formatting
+differs), so the v24.2.0 reading carries over at the v26.2 lines: the
+dispatch at `ConvectionCoefficients.cc:331-342`, `CalcASHRAETARPNatural`
+at `:1902-1948` (the sign logic `:1933-1945`), the negative cos at
+`:1961-1963`, the Walton magnitudes at the same `.hh` lines `:409`,
+`:433`, `:455`. OCHRE freezes the same TARP model once
 per boundary at the clamped ΔT of 12.9 K
 (`ochre/utils/envelope.py:342-402`, the clamp at `:374`, one value for
 both faces): the committed oracle fixtures carry the frozen interior
@@ -2033,39 +2059,62 @@ and the per-step TARP correction is wired but disabled
 (`crates/hares-core/src/dwelling/solver_builder.rs:1248-1252`). The
 frozen non-vertical baseline is the registered divergence D-031 (class
 (a) against OCHRE), pinned by
-`the_attic_floor_s_frozen_films_are_the_ashrae_simple_horizontal_values`.
+`the_attic_floor_s_frozen_films_are_the_ashrae_simple_horizontal_values`;
+D-031's justification's `DataHeatBalance.hh:613` and `:1842` are
+v26.2.0-IOFreeze lines (v24.2.0 has the same defaults at `:588` and
+`:1780`).
 
 Probe 1 (freeze OCHRE's TARP form on the deck's attic face and the
 attic floor, `tarp_h_natural` at the clamped 12.9 K in place of the
-Simple values for those two boundaries only): winter attic mean 3.57 to
+Simple values for those two boundaries only; the ideal mode's numbers
+throughout): winter attic mean 3.57 to
 3.71 (bias -1.25 to -1.11), MAE 1.299 to 1.138; summer mean 29.47 to
 29.30 (bias +0.51 to +0.34), MAE 0.899 to 0.563; spring MAE 0.791 to
 0.589. This reproduces the D-031 record (measured at `62ba224b`) and
 extends it to the summer case.
 
 Probe 2 (the per-step TARP model enabled on every interior face,
-`solver_builder.rs` `FilmCoefficientModel::PerStepTarp`): winter mean
-3.57 to 3.54 (MAE 1.299 to 1.324), summer mean 29.47 to 29.44 (MAE 0.899
-to 0.910), spring MAE 0.791 to 0.789; stable at the 60 s step. The
-correction fires on the deck (the winter roof heat gain -266.7 to
--359.0 W against OCHRE's -231.2) and barely on the floor, and the attic
+`solver_builder.rs` `FilmCoefficientModel::PerStepTarp`; the means and
+MAEs are the ideal mode's, the roof-gain figures the dynamic mode's):
+winter mean 3.57 to 3.54 (ideal; MAE 1.299 to 1.324), summer mean 29.47
+to 29.44 (ideal; MAE 0.899 to 0.910), spring MAE 0.791 to 0.789 (ideal);
+the run stable at the 60 s step. The correction fires on the deck (the
+winter roof heat gain -266.7 to -359.0 W against OCHRE's -231.2, the
+dynamic mode's figures) and barely on the floor, and the attic
 moves 0.03 °C.
 
-Verdict: reference-equivalent for the bias, no defect. The films' total
-leverage on the winter bias is at most 0.14 °C (probe 1) and the
+The stable 60 s run bears on the registered reason the switch is
+disabled: `solver_builder.rs:1248` pins AshraeSimple and `:1249-1252`
+registers the disable under T-0034, citing T-1922's Courant-condition
+constraint claimed to block PerStepTarp at the 60 s step with typical
+surface-layer capacitances.
+The probe is evidence that the constraint does not bite at the oracle
+fixtures' capacitances: the registered blocking reason does not hold
+there, and the probe says nothing about any other capacitance. The
+switch stays disabled: enabling it is a code fix, and the triage's rule
+fixes nothing without a failing test pair and a reference rule.
+
+Verdict: reference-equivalent for the bias, no defect. The films'
+leverage on the winter bias is at most 0.14 °C on the two boundaries
+probed, the deck's attic face and the attic floor (probe 1), and the
 OS-HPXML-literal per-step form moves it 0.03 °C the other way (probe
-2); neither explains the -1.25. The frozen-baseline divergence stays
-D-031's, class (a).
+2); neither explains the -1.25. The slab's conditioned face is in the
+same film class and was not probed. The frozen-baseline divergence
+stays D-031's, class (a).
 
 Candidate 2, ground long-wave exchange.
 
 The references. EnergyPlus v24.2.0's outside-face long-wave has a ground
 view whose temperature is the outdoor dry-bulb:
-`HeatBalanceSurfaceManager.cc:9199` (`TGround =
-state.dataEnvrn->OutDryBulbTemp`), the ground share entering the
-surface's balance at `:9391-9394`, the view split
+`HeatBalanceSurfaceManager.cc:9197` (`TGround =
+state.dataEnvrn->OutDryBulbTemp`), the ground share terms at `:9388`
+and `:9396`, the view split
 `ViewFactorGroundIR = 1 - ViewFactorSkyIR` (`SolarShading.cc:10362`),
-the same form on windows (`DataSurfaces.cc:318-323`). OCHRE radiates
+the same form on windows (`DataSurfaces.cc:318-323`); the vendored
+v26.2.0-IOFreeze tree carries the same code at
+`HeatBalanceSurfaceManager.cc:9764`, the ground share at `:9955` and
+`:9963`, `SolarShading.cc:10694` and `DataSurfaces.cc:320-325`. OCHRE
+radiates
 only outdoor-facing surfaces (`ochre/Models/Envelope.py:186`, `:772`)
 and sends the non-sky share to the outdoor-air temperature
 (`Envelope.py:145-149`). HARES: the same four-component form with the
@@ -2078,7 +2127,8 @@ all (`solver_builder.rs:148-152`, `:1011`).
 
 Probe 3 (upper bound: the whole non-sky share at the EPW shallow ground
 temperature on every opaque exterior face, a term neither reference
-has): winter mean 3.55 to 3.64 (bias -1.22 to -1.13), MAE 1.271 to
+has; the dynamic mode's numbers throughout): winter mean 3.55 to 3.64
+(bias -1.22 to -1.13), MAE 1.271 to
 1.174; summer mean 29.47 to 29.26 (bias +0.49 to +0.28), MAE 0.896 to
 0.868; spring MAE 0.773 to 0.786. The term carries 0.1 to 0.2 °C of
 leverage on this scenario and would diverge from OS-HPXML, OCHRE and

@@ -1365,11 +1365,17 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   algorithm's convection-only values (E+ `ConvectionCoefficients.cc`
   `CalcASHRAESimpleIntConvCoeff`: vertical 3.076, horizontal 4.040
   enhanced / 0.948 reduced, tilted 3.870 / 2.281), the direction taken
-  from the same interpolated typical zone temperatures OCHRE interpolates;
-  the per-step TARP correction (`FilmCoefficientModel::PerStepTarp`, the
-  default) then adds `delta_h = h_tarp - h_static` on top wherever TARP at
-  the actual difference exceeds the frozen value (stepping.rs
-  `apply_convection_forcing`).
+  from the same interpolated typical zone temperatures OCHRE interpolates.
+  Production pins `FilmCoefficientModel::AshraeSimple`
+  (`crates/hares-core/src/dwelling/solver_builder.rs:1248`), so the
+  per-step TARP correction is wired but not enabled in production
+  (`solver_builder.rs:1249-1252`, under T-0034/T-1922) and nothing adds
+  `delta_h = h_tarp - h_static` today; when the model is enabled, the
+  correction adds it on top wherever TARP at the actual difference
+  exceeds the frozen value (stepping.rs `apply_convection_forcing`).
+  The enum's `#[default]` derive sits on `PerStepTarp`
+  (`crates/hares-envelope/src/thermal_solver/config.rs:623-624`), a
+  library-level default the production wiring overrides.
 - **Justification:** on vertical surfaces the two frozen forms agree
   (3.076 against TARP's 1.31·12.9^(1/3) = 3.0759, 0.003%), so the choice
   of baseline is invisible there. On horizontal and tilted surfaces the
@@ -1380,7 +1386,8 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   A-matrix's linearization baseline, and the ASHRAE Simple table is a
   defensible baseline: it is EnergyPlus's own default inside convection
   algorithm when none is set (`DataHeatBalance.hh:613`,
-  `DataHeatBalance.hh:1842`), and with it the per-step correction
+  `DataHeatBalance.hh:1842`, v26.2.0-IOFreeze lines; v24.2.0 has the
+  same defaults at `:588` and `:1780`), and with it the per-step correction
   stays live on the horizontal surfaces (it fires above ΔT ≈ 1.6 K in the
   reduced direction), where OCHRE's larger frozen value would suppress it
   entirely at typical surface-air differences. Re-aligning the baseline to
@@ -1403,9 +1410,12 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   attic 0.03 °C and no further (the 2026-10-08 triage entry in
   `.shipwright/initiatives/I-08/ledger/02-measurement.md`). The floor
   coupling's frozen films therefore contribute at most about 0.14 °C of
-  the conditioned-attic winter cold bias and do not establish it; the
-  record's residual stays open with its cause unestablished. The
-  committed goldens carry the ASHRAE Simple baseline unchanged.
+  the conditioned-attic winter cold bias on the two boundaries probed
+  (the deck's attic face and the attic floor; the slab's conditioned
+  face is in the same film class and was not probed) and do not
+  establish it; the record's residual stays open with its cause
+  unestablished. The committed goldens carry the ASHRAE Simple baseline
+  unchanged.
 - **Pinning tests:**
   `crates/hares-physics/src/film_coefficients.rs`
   (`the_attic_floor_s_frozen_films_are_the_ashrae_simple_horizontal_values`
