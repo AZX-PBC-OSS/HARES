@@ -2261,26 +2261,38 @@ block green except the three cases above.
 
 ### The frozen row plan's per-step column access, 2026-10-09 (branch `row/r37-or2`, engine `084294dd` on `b17ed658`)
 
+CORRECTED the same day, on review: the first version of this record read
+about 390 ns against about 4.4 ns and claimed about 89x. Both sides were
+artifacts of the bench, which a reviewer found: the before side allocated
+its row buffer inside the iteration loop, while the real old code reused
+the roster-held `record_scratch` and paid no allocation; and the after
+side observed one slot of the row (`row[0]`, a slot the loop itself
+writes), which let the compiler dead-store-eliminate `begin_row`'s fill.
+The bench in the review-fix commit replaces both: the before side reuses
+its buffer across iterations exactly as `record_step` reused
+`record_scratch`, and both sides observe the whole row (an xor over every
+slot's value bits, the read the recorder's push performs in production).
+The numbers below are that corrected bench's.
+
 Criterion, `cargo bench -p hares-core --bench output_row_plan` (20
-samples, 1 s warm-up, 5 s measurement, this host, WSL2):
+samples, 1 s warm-up, 3 s measurement, this host, WSL2):
 
 - `per_step_hash_lookup`: the step path's before mechanism, one step's
   worth of output work on the verbosity-2 schema of a six-equipment
-  two-zone model: the row fill, then 28 column-name lookups against the
-  freeze-time name-to-position map (the totals, the weather and setpoint
-  context columns, and every envelope gain name, hits and misses alike),
-  writing the hits. Median about 390 ns per step (first run 389.5 ns,
-  range 383.8 to 391.1; a rerun under load 490.7 ns).
+  two-zone model: the reused row's fill, then 28 column-name lookups
+  against the freeze-time name-to-position map (the totals, the weather
+  and setpoint context columns, and every envelope gain name, hits and
+  misses alike), writing the hits. Median about 320 ns per step (318 to
+  323 ns across three runs).
 - `frozen_row_plan_write`: the after mechanism, the same one step's
-  worth: the frozen plan's `begin_row` (fill, validity clear, local
-  timestamp) and the same hit slots written by index. Median about
-  4.4 ns per step (first run 4.38 ns, range 4.33 to 4.41; a rerun under
-  load 6.18 ns).
+  worth: the frozen plan's `begin_row` (fill, validity clear, UTC epoch
+  timestamp) and the same hit slots written by index, the whole row
+  observed. Median about 10.1 to 13.6 ns per step across three runs.
 
-The per-step column access drops about 89x (the ratio held on every
-rerun, about 80x under load). The lookups cost under 1 percent of a
-full-year 900 s run's wall (about 14 ms of the 1.5 s full-year baseline
-wall), so the end-to-end effect sits inside noise; the per-step win
-compounds with the reporting work that follows on this path. The goldens
-are bitwise after the change (compare-all 7 manifests identical,
+The honest apples-to-apples ratio is about 24x to 32x (the medians sit
+near 25-30x), not 89x. The lookups cost under 1 percent of a full-year
+900 s run's wall (about 14 ms of the 1.5 s full-year baseline wall), so
+the end-to-end effect sits inside noise; the per-step win compounds with
+the reporting work that follows on this path. The goldens are bitwise
+after the change (compare-all 7 manifests identical,
 `full_year_900s_dst` identical), so no value moved.

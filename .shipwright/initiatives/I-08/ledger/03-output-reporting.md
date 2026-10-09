@@ -271,7 +271,9 @@ variable's `Unit`.
 resolves output columns through `output_column_index`, a
 `HashMap<String, usize>`, with lookups at `mod.rs:7169-7204` and
 `7347-7493`, although the mapping is fixed for the life of the run
-(13 per-step lookups at verbosity 2, `context.md` item 8). The equipment
+(28 per-step name-to-index lookups at verbosity 2, 33 with the observe
+feature's envelope diagnostics, hits and misses alike; the entry's first
+text said 13, a stale figure, corrected on review). The equipment
 column map is built by `build_equipment_column_map` (`mod.rs:540`) through
 `resolve_col` (`mod.rs:814`).
 
@@ -304,9 +306,16 @@ are outside this entry; `06-runtime-memory.md` RT-1 removes them.
 
 **Acceptance tests:**
 
-- `row_plan_places_values_at_golden_column_indices`: for every M-2 golden
-  fixture, the frame produced through `RowPlan` equals the golden
-  bitwise (`frame_golden compare-all`).
+- `row_plan_places_values_at_golden_column_indices`: the Verbosity-2
+  production plan's producer slots pinned against the frozen schema's
+  golden column indices at a fixed step of a real run (the third of
+  three): the plan spans exactly the schema's value columns, the placed
+  row equals the recorded row slot for slot on bits, and the slot the
+  plan resolves a variable to is the golden column index the freeze
+  resolved it at. The entry's first text defined this test as the golden
+  equivalence itself (`frame_golden compare-all`, which exists and runs
+  as the golden gate) and no named test; the named test is written as
+  the review's finding asked.
 - `unknown_selection_name_errors_listing_unknown_names`: `Named(["Total
   Electric Power (kW)", "Nope"])` fails naming `"Nope"`;
   `Named(["Total Electric Power (kw)"])` fails naming the unknown name and,
@@ -366,25 +375,46 @@ iterative matcher, no new dependency),
 `single_column_projection_bitwise_equals_full_verbosity_column` in
 `hares-core` over a real 24-step run whose plan holds a `Named`
 single-column selection and a `Verbosity(8)` selection, and
-`row_plan_places_values_at_golden_column_indices` through the golden
-gate. Gates: fmt; clippy `--all-features --all-targets -D warnings`;
-nextest `--all-features` 7591/7591 and `-F dst` 7523/7523; pytest 1375
-passed, 36 skipped, with the 3 failures and 1 module import error
-pre-existing on the base commit (missing optional `helics` and `pint`,
-and the resstock ctrl-c download test); pyright 0 new diagnostics (the
-environment's pre-existing missing-module errors unchanged); goldens
-bitwise: `compare-all` 7 manifests identical and `full_year_900s_dst`
-identical, no value movement. Measurement (criterion,
+`row_plan_places_values_at_golden_column_indices` as the named test
+above (the goldens themselves through the `frame_golden compare-all`
+gate). Gates: fmt; clippy `--all-features --all-targets -D warnings`;
+nextest `--all-features` 7593/7593 and `-F dst` 7526/7526 on the
+review-fix tree (two new tests; the parent measures 7591 and 7524, the
+first record's dst 7523 off by one); pytest canonical 1523 passed, 0
+failed, 0 skipped; pyright 0/0; goldens bitwise: `compare-all` 7
+manifests identical and `full_year_900s_dst` identical, no value
+movement. Correction on review: the first record's "pytest 1375 passed,
+36 skipped, with the 3 failures and 1 module import error pre-existing
+on the base commit (missing optional `helics` and `pint`, and the
+resstock ctrl-c download test)" came from the implementing agent's
+drifted venv; the canonical environment gives the 1523/0/0 above, and
+the failures it showed do not exist there. Measurement (criterion,
 `bench output_row_plan`, 20 samples, verbosity-2 schema of a
-six-equipment two-zone model): the per-step column access is about
-390 ns with the hash lookups and about 4.4 ns through the frozen plan's
-index writes, about 89x lower, the ratio held on reruns; the lookups
-cost under 1 percent of a full-year 900 s run's wall, so the
-end-to-end effect sits inside noise; recorded in `02-measurement.md`.
+six-equipment two-zone model, the corrected bench of the review-fix
+commit: the before side reuses its row buffer exactly as `record_step`
+reused `record_scratch`, both sides observe the whole row so no side's
+writes are dead-store eliminated): the per-step column access is about
+320 ns with the hash lookups and about 10 to 14 ns through the frozen
+plan's index writes, about 24x to 32x lower, medians near 25-30x. The
+first record's about 390 ns against about 4.4 ns, about 89x, was a bench
+artifact a reviewer found: the before side allocated its row inside the
+iteration loop (the real old code reused the roster-held
+`record_scratch`) and the after side observed one slot, which let the
+compiler drop `begin_row`'s fill; `02-measurement.md` carries the
+corrected record. Still under 1 percent of a full-year 900 s run's
+wall, so the end-to-end effect sits inside noise; the per-step win
+compounds with the reporting work that follows on this path.
 
 ## OR-3: destinations replace the output booleans (HARES#28)
 
 **Kind:** initiative work. Fixes HARES#28.
+
+**Note from the frozen row plan's review:** the row plan's per-row timestamp is
+stamped in UTC epoch seconds (`begin_row`, called with
+`step.timestamp.timestamp()`); a local-epoch stamp must not be assumed
+from that field. The run's UTC offset lives in the row's own timestamp
+column (and, from this entry on, in the report's destination pipeline,
+which must not read the plan's field as local epoch seconds).
 
 **Problem:** output is gated by booleans and a format enum
 (`write_output`, `output_format`, `retain_batches`,
@@ -2715,7 +2745,14 @@ hour. `PeriodReducer` (`plan.md` §2.6, with `PeriodCalendar`, `TimeRule`,
 `PeriodRow` and `ReduceError`) in `crates/hares-io/src/output/reduce.rs`
 (new), one per non-`Timestep` report, fed per step from the report's
 projection of the row plan and the row plan's `i64` naive local
-timestamp. It implements `plan.md` §2.6: calendar periods in local time,
+timestamp. A note from the frozen row plan's review: the plan's field is stamped
+in UTC epoch seconds (`begin_row`, called with
+`step.timestamp.timestamp()`), not naive local seconds; a local-epoch
+stamp must not be assumed from it. The reducer buckets on the local
+time the row's own timestamp column carries (the text below), so it
+must derive its local time from that column or from the run's fixed
+offset, never from the plan's field as if it were local. It implements
+`plan.md` §2.6: calendar periods in local time,
 rows labelled at period start, a `Step Count` column, reduction over
 non-null values by `VariableDef.aggregation` (`Sum`, `Mean`, `Mode` with
 ties to the lowest code, `Last`), `<name> [valid steps]` companions for
