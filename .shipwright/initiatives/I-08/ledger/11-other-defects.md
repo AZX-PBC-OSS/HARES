@@ -591,11 +591,16 @@ will report. RED first: `battery_without_declared_control_is_a_construction_erro
 failed on the unfixed tree with the build succeeding. Documentation added
 at `docs/equipment/battery.md` ("Declaring a Control"). Goldens bitwise
 identical, all 8 manifests (7 default + 1 dst; no golden carries a
-battery); nextest --all-features 7578/7578; pytest 1371 passed (3 failures
-and 1 error pre-existing on the base commit: the helics wheel checks, the
-ResStock download ctrl-C, the ochre_units pint import); pyright 3 errors,
-all pre-existing import resolution (pint, matplotlib), 0 new; fmt and
-clippy --all-features --all-targets -D warnings clean.
+battery); nextest --all-features 7578/7578; pytest 1519 passed, 0 failed,
+0 skipped; pyright 0 errors, 0 warnings; fmt and
+clippy --all-features --all-targets -D warnings clean. This state's first
+record said "pytest 1371 passed (3 failures and 1 error pre-existing on
+the base commit: the helics wheel checks, the ResStock download ctrl-C,
+the ochre_units pint import)" and "pyright 3 errors, all pre-existing
+import resolution (pint, matplotlib), 0 new": those numbers came from the
+implementing agent's drifted virtualenv, not the canonical environment,
+and were corrected on review to the canonical measurement (re-run at the
+branch tip: pytest 1519/0/0, pyright 0/0).
 
 **Dependencies:** OD-2 (strict overrides, so a misspelled `bms_mode` key is
 already an error). Consumer effect: the TRAP 2 case becomes a refusal in
