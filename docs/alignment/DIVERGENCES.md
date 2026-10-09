@@ -1057,6 +1057,14 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   fail when the shipped CSV's rows revert, when a declared 0.25 collapses
   into the undeclared default, or when the fan sizing reverts to the
   pre-expansion normalization.
+- **State:** FOLDED as `6785c32b`..`b0dcf2e6` on the head (2026-10-08,
+  branch `row/d020-mshp-stages` rebased onto the folded
+  `row/b17-hw-volume` chain): the CSV verbatim restore, the default
+  stage table, the declared cooler fan power and the byte pin all on
+  the head, this entry's number unchanged by the fold. The branch's
+  committed goldens predated the wet-appliance volume fold and were
+  re-captured at it (`282244b2`, `abb4ab95` on the branch, then
+  `b0dcf2e6`), the eight goldens identical at the fold gates.
 
 ## D-021: The HPWH's low-power compressor class is a continuous UEF transition
 
