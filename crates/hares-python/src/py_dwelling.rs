@@ -27,14 +27,29 @@ use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyType};
 use rand::SeedableRng;
 use std::sync::MutexGuard;
 
-pyo3::create_exception!(_hares, HaresConfigError, pyo3::exceptions::PyValueError);
-pyo3::create_exception!(_hares, HaresEquipmentError, pyo3::exceptions::PyValueError);
+// The exceptions register under the extension module's importable path, so
+// an exception pickled in one process unpickles in another: the parent
+// imports `__module__` and looks the class up there.
 pyo3::create_exception!(
-    _hares,
+    hares._hares,
+    HaresConfigError,
+    pyo3::exceptions::PyValueError
+);
+pyo3::create_exception!(
+    hares._hares,
+    HaresEquipmentError,
+    pyo3::exceptions::PyValueError
+);
+pyo3::create_exception!(
+    hares._hares,
     HaresSimulationError,
     pyo3::exceptions::PyRuntimeError
 );
-pyo3::create_exception!(_hares, FatalDwellingError, pyo3::exceptions::PyRuntimeError);
+pyo3::create_exception!(
+    hares._hares,
+    FatalDwellingError,
+    pyo3::exceptions::PyRuntimeError
+);
 
 use crate::conversions::{batches_or_steps_to_polars_df, chrono_to_py_datetime};
 use crate::py_actor::PyActor;
