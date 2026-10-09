@@ -42,6 +42,7 @@ fn minimal_xml_with_systems(systems_xml: &str) -> String {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -608,6 +609,7 @@ fn missing_enclosure_returns_error() {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -632,6 +634,7 @@ fn missing_site_returns_error() {
     <BuildingDetails>
       <BuildingSummary>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -669,6 +672,7 @@ fn complete_minimal_xml_passes_schema_check() {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -696,6 +700,7 @@ fn area_above_1000_without_units_is_converted_as_ft2() {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea>2000</ConditionedFloorArea>
           <ConditionedBuildingVolume>16000</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -729,6 +734,7 @@ fn area_without_units_is_treated_as_ft2() {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -972,6 +978,7 @@ fn wall_xml_with_stud_geometry(spacing_in: f64, width_in: f64) -> String {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -1075,6 +1082,7 @@ fn wall_xml_with_construction_type(construction_type_element: &str) -> String {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -1355,6 +1363,7 @@ fn cfm25_duct_leakage_parse_resolve_pipeline_succeeds() {
           <Longitude>-105.0</Longitude>
         </Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>

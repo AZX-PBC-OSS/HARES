@@ -684,10 +684,17 @@ fn parse_avg_water_draw_and_bedrooms(
 /// Public entry point: extract the bedroom count from a parsed [`Building`].
 ///
 /// Reads `<BuildingSummary>/<BuildingConstruction>/<NumberofBedrooms>` from
-/// the building's details XML. Falls back to data patches when the HPXML field
-/// is absent; falls back to 2.0 (the RESNET 301 default) when neither source
-/// is available.
-pub fn extract_bedroom_count(building: &Building, data_patches: Option<&HpxmlDataPatches>) -> f64 {
+/// the building's details XML. Falls back to data patches when the HPXML
+/// field is absent. The field is required input: OCHRE reads it with a
+/// direct index and fails on absence (hpxml.py:263,
+/// `construction["NumberofBedrooms"]`; the OS-HPXML defaults apply no
+/// default either, defaults.rb `apply_water_heaters` reads it directly,
+/// :3303), so an unavailable count is an error naming the field, never a
+/// substituted count.
+pub fn extract_bedroom_count(
+    building: &Building,
+    data_patches: Option<&HpxmlDataPatches>,
+) -> Result<f64, super::HpxmlError> {
     let details = &building.details_xml;
     let raw = details
         .path(&[
@@ -697,7 +704,15 @@ pub fn extract_bedroom_count(building: &Building, data_patches: Option<&HpxmlDat
         ])
         .and_then(|n| parse_trimmed_f64(&n.text));
     raw.or_else(|| data_patches.and_then(|p| p.number_of_bedrooms))
-        .unwrap_or(2.0)
+        .ok_or_else(|| super::HpxmlError::MissingField {
+            path: "BuildingSummary/BuildingConstruction/NumberofBedrooms",
+            system_kind: "BuildingConstruction",
+            system_id: "Building".to_string(),
+            reason: "the water heater tank volume and first-hour rating are sized by \
+                     the bedroom count; OCHRE reads the field with a direct index \
+                     and fails on absence (hpxml.py:263), so no count may be \
+                     substituted for it",
+        })
 }
 
 fn typed_spec<T>(
@@ -1871,6 +1886,47 @@ mod tests {
         assert!(
             cfg.parasitic_power_w.is_none(),
             "electric tankless must not have parasitic_power_w"
+        );
+    }
+
+    /// An HPXML whose construction names no NumberofBedrooms fails the
+    /// extract naming the field: the tank volume and the first-hour rating
+    /// are sized by it and OCHRE reads it with a direct index (hpxml.py:263).
+    #[test]
+    fn a_bedroom_count_without_numberofbedrooms_errors_naming_the_field() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let building = building_for_test(&root);
+
+        let err = extract_bedroom_count(&building, None)
+            .expect_err("an absent NumberofBedrooms must fail the extract");
+        assert!(
+            err.to_string().contains("NumberofBedrooms"),
+            "the error names the required field: {err}"
+        );
+
+        // A data patch satisfies the requirement when the HPXML field is
+        // absent.
+        let patches = HpxmlDataPatches {
+            number_of_bedrooms: Some(4.0),
+        };
+        assert_eq!(
+            extract_bedroom_count(&building, Some(&patches)).expect("the patch supplies the count"),
+            4.0
         );
     }
 

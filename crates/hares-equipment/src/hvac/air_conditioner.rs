@@ -360,6 +360,7 @@ impl Equipment for AirConditioner {
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
         EquipmentHealthCounts {
             curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
+            ..Default::default()
         }
     }
 }
@@ -445,6 +446,7 @@ impl Equipment for RoomAC {
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
         EquipmentHealthCounts {
             curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
+            ..Default::default()
         }
     }
 }

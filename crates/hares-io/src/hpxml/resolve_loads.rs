@@ -46,10 +46,11 @@ pub(crate) const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
 /// type and feeds the adjusted count to every appliance energy formula
 /// (hpxml.py:1664). HARES applies the same adjustment: when
 /// `NumberofResidents` is present the adjusted count replaces the raw
-/// `NumberofBedrooms` entirely; when it is absent OCHRE cannot run at all,
-/// so HARES keeps the raw count, then the ANSI/RESNET 301-2014 Table
-/// 4.2.2(1) Reference Home default of 3 bedrooms.
-fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> f64 {
+/// `NumberofBedrooms` entirely. `NumberofBedrooms` is required input:
+/// OCHRE reads it with a direct index and fails on absence (hpxml.py:263,
+/// `construction["NumberofBedrooms"]`), so an absent field is an error
+/// naming it, never a substituted count.
+fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> std::result::Result<f64, HpxmlError> {
     let n_bedrooms_raw = details
         .path(&[
             "BuildingSummary",
@@ -57,7 +58,14 @@ fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> f64 {
             "NumberofBedrooms",
         ])
         .and_then(|n| parse_trimmed_f64(&n.text))
-        .unwrap_or(3.0);
+        .ok_or_else(|| HpxmlError::MissingField {
+            path: "BuildingSummary/BuildingConstruction/NumberofBedrooms",
+            system_kind: "BuildingConstruction",
+            system_id: "Building".to_string(),
+            reason: "the appliance energy formulas are sized by the bedroom count; OCHRE \
+                     reads the field with a direct index and fails on absence \
+                     (hpxml.py:263), so no count may be substituted for it",
+        })?;
     let n_occupants = details
         .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
         .and_then(|n| parse_trimmed_f64(&n.text));
@@ -80,7 +88,7 @@ fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> f64 {
         n_occupants = n_occupants.unwrap_or(f64::NAN),
         "appliance bedroom count resolved"
     );
-    adjusted
+    Ok(adjusted)
 }
 
 /// OCHRE hpxml.py:791-800: the adjusted bedroom count the reference applies
@@ -448,7 +456,7 @@ pub(super) fn resolve_scheduled_loads(
     }
 
     if let Some(appliances) = details.child("Appliances") {
-        let n_bedrooms = resolve_bedroom_count_for_appliances(details);
+        let n_bedrooms = resolve_bedroom_count_for_appliances(details)?;
 
         // Pre-extract washer params for dryer energy calculation (OCHRE passes
         // the actual ClothesWasher to parse_clothes_dryer).
@@ -1094,7 +1102,7 @@ pub(super) fn resolve_scheduled_loads(
 
         if let Some(ceiling_fan) = lighting.child("CeilingFan") {
             let mut params = Map::new();
-            let n_bedrooms = resolve_bedroom_count_for_appliances(details);
+            let n_bedrooms = resolve_bedroom_count_for_appliances(details)?;
             let n_fans = child_f64(ceiling_fan, "Count").unwrap_or(n_bedrooms + 1.0);
             let efficiency_cfm_per_w = ceiling_fan
                 .path(&["Airflow", "Efficiency"])
@@ -2056,7 +2064,10 @@ mod tests {
             </BuildingDetails>"#,
         )
         .expect("parse");
-        assert_eq!(resolve_bedroom_count_for_appliances(&details), 4.0);
+        assert_eq!(
+            resolve_bedroom_count_for_appliances(&details).expect("bedroom count resolves"),
+            4.0
+        );
     }
 
     #[test]
@@ -2064,6 +2075,9 @@ mod tests {
         let details = parse_xml_document(
             r#"<BuildingDetails>
                 <BuildingSummary>
+                    <BuildingConstruction>
+                        <NumberofBedrooms>4</NumberofBedrooms>
+                    </BuildingConstruction>
                     <BuildingOccupancy>
                         <NumberofResidents>3</NumberofResidents>
                     </BuildingOccupancy>
@@ -2074,21 +2088,58 @@ mod tests {
         // OCHRE hpxml.py:794-797: occupants present, house type unknown in
         // this fragment, so the detached branch applies: -1.47 + 1.69*3.
         assert_eq!(
-            resolve_bedroom_count_for_appliances(&details),
+            resolve_bedroom_count_for_appliances(&details).expect("bedroom count resolves"),
             -1.47 + 1.69 * 3.0
         );
     }
 
     #[test]
-    fn bedroom_count_defaults_to_3_when_no_fields() {
+    fn bedroom_count_without_numberofbedrooms_errors_naming_the_field() {
+        // OCHRE reads NumberofBedrooms with a direct index and fails on
+        // absence (hpxml.py:263: `construction["NumberofBedrooms"]`): the
+        // field is required input and no count may be substituted for it.
         let details = parse_xml_document(
             r#"<BuildingDetails>
                 <BuildingSummary>
+                    <BuildingConstruction>
+                        <ConditionedFloorArea>2000</ConditionedFloorArea>
+                    </BuildingConstruction>
                 </BuildingSummary>
             </BuildingDetails>"#,
         )
         .expect("parse");
-        assert_eq!(resolve_bedroom_count_for_appliances(&details), 3.0);
+        let err = resolve_bedroom_count_for_appliances(&details)
+            .expect_err("an absent NumberofBedrooms must fail the resolve");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("NumberofBedrooms"),
+            "the error names the required field: {shown}"
+        );
+    }
+
+    #[test]
+    fn an_appliance_resolve_without_numberofbedrooms_errors_naming_the_field() {
+        // The appliance energy formulas are sized by the bedroom count; a
+        // resolve over a building whose construction names no
+        // NumberofBedrooms fails naming the field instead of sizing the
+        // appliances from a stand-in count.
+        let details = parse_xml_document(
+            "<BuildingDetails><Appliances>\
+             <ClothesWasher><Location>living space</Location></ClothesWasher>\
+             </Appliances></BuildingDetails>",
+        )
+        .expect("parse appliance details");
+        let building = Building {
+            details_xml: details,
+            ..appliance_test_building("", vec![conditioned_zone()])
+        };
+        let mut specs = Vec::new();
+        let err = resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect_err("an absent NumberofBedrooms must fail the appliance resolve");
+        assert!(
+            err.to_string().contains("NumberofBedrooms"),
+            "the error names the required field: {err}"
+        );
     }
 
     #[test]
@@ -2098,6 +2149,9 @@ mod tests {
         let details = parse_xml_document(
             r#"<BuildingDetails>
                 <BuildingSummary>
+                    <BuildingConstruction>
+                        <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
                     <BuildingOccupancy>
                         <NumberofResidents>1</NumberofResidents>
                     </BuildingOccupancy>
@@ -2105,7 +2159,10 @@ mod tests {
             </BuildingDetails>"#,
         )
         .expect("parse");
-        assert_eq!(resolve_bedroom_count_for_appliances(&details), -1.47 + 1.69);
+        assert_eq!(
+            resolve_bedroom_count_for_appliances(&details).expect("bedroom count resolves"),
+            -1.47 + 1.69
+        );
     }
 
     #[test]
@@ -3132,7 +3189,11 @@ mod tests {
 
     fn appliance_test_building(appliances: &str, zones: Vec<Zone>) -> Building {
         let details = parse_xml_document(&format!(
-            "<BuildingDetails><Appliances>{appliances}</Appliances></BuildingDetails>"
+            "<BuildingDetails>\
+             <BuildingSummary><BuildingConstruction>\
+             <NumberofBedrooms>3</NumberofBedrooms>\
+             </BuildingConstruction></BuildingSummary>\
+             <Appliances>{appliances}</Appliances></BuildingDetails>"
         ))
         .expect("parse appliance details");
         Building {

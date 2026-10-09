@@ -469,6 +469,7 @@ impl Equipment for HeatPumpHeaterCore {
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
         EquipmentHealthCounts {
             curve_index_clamps: self.hvac.take_biquadratic_clamp_count(),
+            ..Default::default()
         }
     }
 }

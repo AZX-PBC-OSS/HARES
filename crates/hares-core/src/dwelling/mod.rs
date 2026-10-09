@@ -2651,7 +2651,8 @@ fn build_from_blueprint_inner(
         // per-bedroom FHR values (DOE 10 CFR Part 430 App E test procedure
         // bases sizing on the dwelling, not on occupancy).
         let n_bedrooms =
-            hares_io::hpxml::extract_bedroom_count(&bp.building, config.patches.as_ref());
+            hares_io::hpxml::extract_bedroom_count(&bp.building, config.patches.as_ref())
+                .map_err(|err| HaresError::Dwelling(format!("water heater autosizing: {err}")))?;
         crate::dwelling::autosize::autosize_water_heater_capacities(
             &mut equipment_specs,
             Some(n_bedrooms),
@@ -5535,16 +5536,19 @@ impl Dwelling {
             }
         }
 
-        // Curve-index clamps: once per timestep, after the equipment step
+        // Health counters: once per timestep, after the equipment step
         // loops complete, drain each equipment's health counters into the
         // run total. Failed-and-rolled-back equipment are skipped for the
         // counters: take-and-discard would lose nothing (their counts
         // surface on the equipment's next successful step, take semantics
         // reset per take), and their step already failed the port contract.
         let mut step_curve_index_clamps: u64 = 0;
+        let mut step_fluid_payload_absences: u64 = 0;
         for (idx, eq) in self.equipment.iter_mut().enumerate() {
             if !self.step_failed[idx] {
-                step_curve_index_clamps += eq.take_health_counts().curve_index_clamps;
+                let counts = eq.take_health_counts();
+                step_curve_index_clamps += counts.curve_index_clamps;
+                step_fluid_payload_absences += counts.fluid_payload_absences;
             }
             // Warnings raised this step drain beside the health counts,
             // from failed-and-rolled-back equipment too (warnings only, no
@@ -5561,6 +5565,7 @@ impl Dwelling {
             }
         }
         self.health.curve_index_clamps += step_curve_index_clamps;
+        self.health.fluid_payload_absences += step_fluid_payload_absences;
 
         // Step 3c: propagate per-timestep ventilation recovery effectiveness
         // from equipment to the thermal solver config.  The Ventilation equipment
@@ -9571,6 +9576,7 @@ time_res_s = 60
 duration_s = 600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -9633,6 +9639,7 @@ time_res_s = 60
 duration_s = 600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -12243,11 +12250,13 @@ occupancy = 1.0
         let schedule_result = build_synthetic_schedule(&config).expect("build schedule");
         let weather = build_synthetic_weather(&config, &base_path).expect("build weather");
 
-        // Inject BuildingOccupancy / NumberofResidents into the HPXML details
-        // so resolve_equipment creates an Occupancy spec.  Without this node
-        // the BESTEST 600 building has no Occupancy equipment at all, and the
-        // construction path would succeed — exactly the happy path that the
-        // other tests already cover.
+        // Inject BuildingOccupancy / NumberofResidents into the HPXML
+        // details so resolve_equipment creates an Occupancy spec.  Without
+        // this node the BESTEST 600 building has no Occupancy equipment at
+        // all, and the construction path would succeed. That is exactly the happy
+        // path that the other tests already cover. The synthetic builder
+        // emits the building's BuildingSummary (its BuildingConstruction
+        // states NumberofBedrooms), so the occupancy joins that node.
         {
             let n_residents = XmlNode {
                 name: "NumberofResidents".to_string(),
@@ -12261,13 +12270,13 @@ occupancy = 1.0
                 text: String::new(),
                 children: vec![n_residents],
             };
-            let building_summary = XmlNode {
-                name: "BuildingSummary".to_string(),
-                attrs: HashMap::new(),
-                text: String::new(),
-                children: vec![building_occupancy],
-            };
-            building.details_xml.children.push(building_summary);
+            let building_summary = building
+                .details_xml
+                .children
+                .iter_mut()
+                .find(|node| node.name == "BuildingSummary")
+                .expect("the synthetic builder emits BuildingSummary");
+            building_summary.children.push(building_occupancy);
         }
 
         let sim_config = SimulationConfig {
@@ -12870,6 +12879,7 @@ time_res_s = 60
 duration_s = 120
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -12949,6 +12959,7 @@ time_res_s = 60
 duration_s = 120
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -13863,6 +13874,7 @@ time_res_s = 60
 duration_s = 600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -14625,6 +14637,7 @@ time_res_s = 60
 duration_s = 600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -16384,6 +16397,7 @@ time_res_s = 900
 duration_s = {duration}
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -17841,6 +17855,7 @@ duration_s = 172800
 initialization_duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -17920,6 +17935,7 @@ time_res_s = 60
 duration_s = 600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -18024,6 +18040,7 @@ time_res_s = 60
 duration_s = 120
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -18122,6 +18139,7 @@ time_res_s = 60
 duration_s = 120
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -18296,6 +18314,7 @@ time_res_s = 60
 duration_s = 600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -18470,6 +18489,7 @@ time_res_s = 60
 duration_s = 600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -18599,6 +18619,7 @@ time_res_s = 60
 duration_s = {}
 # extra steps to allow restart+duration
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -19284,6 +19305,7 @@ start_time = "2024-01-15T00:00:00Z"
 time_res_s = 60
 duration_s = 120
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -19348,6 +19370,7 @@ start_time = "2024-01-15T00:00:00Z"
 time_res_s = 60
 duration_s = 120
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]

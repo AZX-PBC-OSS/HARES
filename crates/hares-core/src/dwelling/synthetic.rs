@@ -139,6 +139,12 @@ fn default_max_consecutive_step_failures() -> u32 {
 pub(crate) struct SyntheticGeometryConfig {
     pub(crate) floor_area_m2: f64,
     pub(crate) zone_volume_m3: f64,
+    /// The bedroom count the dwelling states. Required: the dwelling build
+    /// reads it unconditionally (the water heater's tank volume and the
+    /// first-hour rating, the appliance energies; OCHRE reads the HPXML
+    /// field with a direct index and fails on absence, hpxml.py:263), so
+    /// the synthetic input states it like any other.
+    pub(crate) number_of_bedrooms: f64,
     #[serde(default)]
     pub(crate) mass_multiplier: Option<f64>,
 }
@@ -1084,7 +1090,30 @@ pub(crate) fn build_synthetic_building(
         name: "BuildingDetails".to_string(),
         attrs: HashMap::new(),
         text: String::new(),
-        children: details_children,
+        children: {
+            // The bedroom count the TOML states: the build reads it
+            // unconditionally (it sizes the water heater's tank and the
+            // appliance energies; OCHRE's hpxml.py:263 reads the HPXML
+            // field with a direct index), so the synthetic input carries
+            // it like any other required field.
+            details_children.push(hares_io::hpxml::building::XmlNode {
+                name: "BuildingSummary".to_string(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![hares_io::hpxml::building::XmlNode {
+                    name: "BuildingConstruction".to_string(),
+                    attrs: HashMap::new(),
+                    text: String::new(),
+                    children: vec![hares_io::hpxml::building::XmlNode {
+                        name: "NumberofBedrooms".to_string(),
+                        attrs: HashMap::new(),
+                        text: config.geometry.number_of_bedrooms.to_string(),
+                        children: Vec::new(),
+                    }],
+                }],
+            });
+            details_children
+        },
     };
 
     let mut boundaries: Vec<Boundary> = if let Some(boundary_configs) = &config.boundaries {
@@ -2143,6 +2172,7 @@ time_res_s = 3600
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2224,6 +2254,7 @@ time_res_s = 3600
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2273,6 +2304,7 @@ time_res_s = 3600
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2325,6 +2357,7 @@ time_res_s = 3600
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2373,6 +2406,7 @@ time_res_s = 3600
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2431,6 +2465,7 @@ time_res_s = 3600
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2481,6 +2516,7 @@ start_time = "2024-07-21T19:00:00Z"
 time_res_s = 3600
 duration_s = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 129.6
 mass_multiplier = 1.0
@@ -2564,6 +2600,7 @@ duration_s = 3600
 initialization_duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2588,6 +2625,7 @@ time_res_s = 60
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2613,6 +2651,7 @@ duration_s = 3600
 initialization_duration_s = -1
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2642,6 +2681,7 @@ time_res_s = 60
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2680,6 +2720,7 @@ time_res_s = 60
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2722,6 +2763,7 @@ time_res_s = 60
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2768,6 +2810,7 @@ time_res_s = 3600
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2807,6 +2850,7 @@ start_time = "2024-01-01T00:00:00Z"
 time_res_s = 3600
 duration_s = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -2846,6 +2890,7 @@ time_res_s = 3600
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2896,6 +2941,7 @@ time_res_s = 3600
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2958,6 +3004,7 @@ time_res_s = 3600
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2997,6 +3044,7 @@ time_res_s = 3600
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -3076,6 +3124,7 @@ start_time = "2024-01-01T00:00:00Z"
 time_res_s = 3600
 duration_s = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -3161,6 +3210,7 @@ start_time = "2024-01-01T00:00:00Z"
 time_res_s = 3600
 duration_s = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 129.6
 [materials]
@@ -3313,7 +3363,8 @@ attached_to_wall_id = "south-wall"
         ] {
             let toml = format!(
                 "building_id = 1\n[simulation]\nstart_time = \"2024-01-01T00:00:00Z\"\n\
-                 time_res_s = 3600\nduration_s = 3600\n[geometry]\nfloor_area_m2 = {floor_area}\n\
+                 time_res_s = 3600\nduration_s = 3600\n[geometry]\nnumber_of_bedrooms = 3.0\n\
+                 floor_area_m2 = {floor_area}\n\
                  zone_volume_m3 = {volume}\n[materials]\nwall_r_value_m2_k_w = 2.0\n[hvac]\n\
                  equipment_name = \"None\"\n"
             );
@@ -3333,6 +3384,7 @@ start_time = "2024-01-01T00:00:00Z"
 time_res_s = 3600
 duration_s = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -3377,6 +3429,7 @@ start_time = "2024-01-01T00:00:00Z"
 time_res_s = 3600
 duration_s = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -3431,6 +3484,7 @@ start_time = "2024-01-01T00:00:00Z"
 time_res_s = 3600
 duration_s = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -3519,6 +3573,7 @@ start_time = "2024-01-01T00:00:00Z"
 time_res_s = 3600
 duration_s = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -3643,6 +3698,7 @@ start_time = "2024-01-01T00:00:00Z"
 time_res_s = 3600
 duration_s = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 100.0
 zone_volume_m3 = 300.0
 [materials]
@@ -3716,6 +3772,7 @@ time_res_s = 60
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -3823,6 +3880,7 @@ time_res_s = 60
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -3964,6 +4022,7 @@ time_res_s = 60
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4057,6 +4116,7 @@ time_res_s = 60
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4152,6 +4212,7 @@ time_res_s = 60
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4203,6 +4264,7 @@ time_res_s = 60
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4255,6 +4317,7 @@ time_res_s = 60
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4310,6 +4373,7 @@ time_res_s = 60
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4371,6 +4435,7 @@ time_res_s = 60
 duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4434,6 +4499,7 @@ time_res_s = 3600
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4470,6 +4536,7 @@ time_res_s = 3600
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4496,6 +4563,7 @@ time_res_s = 3600
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4533,6 +4601,7 @@ time_res_s = 3600
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4568,6 +4637,7 @@ time_res_s = 3600
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4604,6 +4674,7 @@ time_res_s = 3600
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4667,6 +4738,7 @@ time_res_s = 3600
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4720,6 +4792,7 @@ time_res_s = 3600
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4773,6 +4846,7 @@ time_res_s = 3600
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4828,6 +4902,7 @@ time_res_s = 3600
 duration_s = 3600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 

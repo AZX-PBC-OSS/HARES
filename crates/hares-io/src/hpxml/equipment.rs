@@ -699,7 +699,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
+        <BuildingConstruction><NumberofBedrooms>3</NumberofBedrooms><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>
@@ -732,7 +732,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
+        <BuildingConstruction><NumberofBedrooms>3</NumberofBedrooms><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>
@@ -774,7 +774,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
+        <BuildingConstruction><NumberofBedrooms>3</NumberofBedrooms><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems><HVAC>{hvac_inner}</HVAC></Systems>
@@ -955,7 +955,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
+        <BuildingConstruction><NumberofBedrooms>3</NumberofBedrooms><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>{systems_inner}</Systems>
@@ -1611,7 +1611,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
+        <BuildingConstruction><NumberofBedrooms>3</NumberofBedrooms><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Appliances>{appliance_inner}</Appliances>
@@ -2334,7 +2334,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
+        <BuildingConstruction><NumberofBedrooms>3</NumberofBedrooms><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume><NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>{systems_inner}</Systems>

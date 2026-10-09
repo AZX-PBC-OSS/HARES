@@ -498,6 +498,15 @@ fn build_solver_boundaries(
                     // the models disagree by 40–50%; at high wind (15 m/s),
                     // the gap widens further.  This telemetry column makes
                     // that divergence observable.
+                    // The zone labels here cannot carry a None zone type:
+                    // `zone_type_to_label`'s None arm maps to Outdoor, but
+                    // this block only runs after
+                    // `building_to_boundary_inputs` (which every solver
+                    // build calls first, with n_zones >= 1) has errored on
+                    // every boundary whose interior zone names neither its
+                    // adjacency nor a surface to derive it from. A None
+                    // interior zone reaching this diagnostic would mean
+                    // that gate passed a None through, which it cannot.
                     let interior_label =
                         zone_type_to_label(&boundary.id, boundary.interior_zone.as_ref())?;
                     let exterior_label =

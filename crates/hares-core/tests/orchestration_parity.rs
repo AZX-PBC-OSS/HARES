@@ -79,6 +79,7 @@ time_res_s = 60
 duration_s = {duration_s}
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -386,6 +387,7 @@ time_res_s = 60
 duration_s = 21600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -431,6 +433,7 @@ time_res_s = 60
 duration_s = 21600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -601,6 +604,7 @@ time_res_s = 300
 duration_s = 18000
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -648,6 +652,7 @@ time_res_s = 300
 duration_s = 18000
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 

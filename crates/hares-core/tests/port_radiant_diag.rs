@@ -51,6 +51,7 @@ time_res_s = 60
 duration_s = 300
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -140,6 +141,7 @@ time_res_s = 60
 duration_s = 600
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 

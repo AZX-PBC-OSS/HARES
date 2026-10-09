@@ -423,6 +423,12 @@ pub(crate) fn find_zone_idx(
     zone_type: Option<&hares_io::hpxml::ZoneType>,
     n_zones: usize,
 ) -> Result<usize> {
+    // The zero-zone edge returns zone 0 without consulting the zone type:
+    // every production caller passes at least one zone (the solver build's
+    // `n_zones = env.zones.len().max(1)`, the synthetic builder's 1), so
+    // the edge is unreachable for real input; it exists for the empty-zone
+    // call shape, and zone 0 is the only index an empty zone list can name.
+    // Pinned by find_zone_idx_zero_zones_returns_zero.
     if n_zones == 0 {
         return Ok(0);
     }

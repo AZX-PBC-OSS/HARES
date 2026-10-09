@@ -6,10 +6,11 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
-    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FluidDomainPayload, FluidNodeId, FluidType, FuelPower, FuelType, HaresError,
-    HeatTransferDirection, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots,
-    Telemetry, TelemetryField, ThermalCategory,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentHealthCounts, EquipmentId, ExecutionStage, FluidDomainPayload, FluidNodeId, FluidType,
+    FuelPower, FuelType, HaresError, HeatTransferDirection, LoopId, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    Warning,
 };
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +100,18 @@ pub struct ElectricBoiler {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
+    /// Whether the fluid domain has published a payload this run. The
+    /// absent-payload escape is bounded: silent before the first publish,
+    /// a counted degradation after it.
+    fluid_payload_seen: bool,
+    /// Absent-payload steps since the last health drain (after the first
+    /// publish; the count reaches the run's health through
+    /// `take_health_counts`).
+    fluid_payload_absences: u64,
+    /// Warnings raised since the last drain (the late absent-payload
+    /// degradations; they reach the run's warning log through
+    /// `drain_warnings`).
+    warnings: Vec<Warning>,
     /// Rule R1 reactive-only ZIP for the primary component (resistive
     /// element, class default pf 1.0 → Q exactly zero); real power stays
     /// bit-identical.
@@ -135,13 +148,23 @@ pub struct GasBoiler {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
+    /// Whether the fluid domain has published a payload this run: the
+    /// absent-payload escape is silent only before the first publish.
+    fluid_payload_seen: bool,
+    /// Absent-payload steps since the last health drain (after the first
+    /// publish).
+    fluid_payload_absences: u64,
+    /// Warnings raised since the last drain (the late absent-payload
+    /// degradations).
+    warnings: Vec<Warning>,
     /// Rule R1 reactive-only ZIP: circulation pump/aux pf 0.84;
     /// Q comes from ZipLoad::reactive_kvar.
     zip: hares_types::zip::ResolvedZip,
 }
 
-/// Version 2: the thermostat hysteresis is persisted.
-const BOILER_CHECKPOINT_VERSION: u32 = 2;
+/// Version 3: the fluid domain's first-publish marker is persisted (the
+/// absent-payload escape's bound survives a checkpoint resume).
+const BOILER_CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BoilerState {
@@ -161,6 +184,9 @@ struct BoilerState {
     return_temp_c: f64,
     mode_override: Option<OperatingMode>,
     dr_level: DRLevel,
+    /// The fluid domain has published a payload this run (bounds the
+    /// absent-payload escape across a checkpoint resume).
+    fluid_payload_seen: bool,
 }
 
 impl ElectricBoiler {
@@ -209,6 +235,9 @@ impl ElectricBoiler {
             use_ideal: false,
             mode_override: None,
             dr_level: DRLevel::Normal,
+            fluid_payload_seen: false,
+            fluid_payload_absences: 0,
+            warnings: Vec::new(),
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -281,6 +310,9 @@ impl Equipment for ElectricBoiler {
         }
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
+        self.fluid_payload_seen = false;
+        self.fluid_payload_absences = 0;
+        self.warnings.clear();
         self.telemetry = electric_boiler_default_telemetry();
         register_ebm_telemetry_keys(&mut self.telemetry);
         self.core_output = CoreOutput::default();
@@ -343,9 +375,43 @@ impl Equipment for ElectricBoiler {
         let electric_kw = element_kw + pump_kw;
 
         let loop_id = bound_loop_id(self.loop_id, "Electric Boiler", &self.descriptor.name)?;
-        let return_temp_c =
-            loop_return_temp_c(env, loop_id, "Electric Boiler", &self.descriptor.name)?
-                .unwrap_or(self.default_return_temp_c);
+        let payload_was_seen = self.fluid_payload_seen;
+        let return_temp_read = loop_return_temp_c(
+            env,
+            loop_id,
+            "Electric Boiler",
+            &self.descriptor.name,
+            &mut self.fluid_payload_seen,
+        )?;
+        let return_temp_c = match return_temp_read {
+            Some(temp) => temp,
+            None => {
+                // The fluid domain published no payload: the configured
+                // return temperature covers the step. Before the first
+                // publish that is the escape's whole contract (the first
+                // step runs before the envelope's first resolve); after
+                // it, the absence is a degradation: logged, and counted in
+                // the run's health.
+                if payload_was_seen {
+                    self.fluid_payload_absences += 1;
+                    let message = format!(
+                        "Electric Boiler '{}': the fluid domain published no payload \
+                         this step; the return temperature of loop {loop_id:?} reads \
+                         from the configured return temperature until the fluid \
+                         domain publishes again",
+                        self.descriptor.name
+                    );
+                    tracing::warn!(
+                        equipment = %self.descriptor.name,
+                        loop_id = ?loop_id,
+                        "{message}"
+                    );
+                    self.warnings
+                        .push(Warning::new(self.descriptor.name.clone(), message));
+                }
+                self.default_return_temp_c
+            }
+        };
         let cp_used = cp_j_kg_k(self.fluid_type);
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
             return_temp_c + thermal_output_w / (self.flow_rate_kg_s * cp_used)
@@ -459,6 +525,17 @@ impl Equipment for ElectricBoiler {
         Some(self.zip)
     }
 
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            curve_index_clamps: 0,
+            fluid_payload_absences: std::mem::take(&mut self.fluid_payload_absences),
+        }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &BoilerState {
@@ -477,6 +554,7 @@ impl Equipment for ElectricBoiler {
                 return_temp_c: self.telemetry.get(tk::RETURN_TEMP_C).unwrap_or(0.0),
                 mode_override: self.mode_override,
                 dr_level: self.dr_level,
+                fluid_payload_seen: self.fluid_payload_seen,
             },
             Self::checkpoint_version(),
             "ElectricBoiler",
@@ -501,6 +579,7 @@ impl Equipment for ElectricBoiler {
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
         self.dr_level = decoded.dr_level;
+        self.fluid_payload_seen = decoded.fluid_payload_seen;
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
@@ -627,6 +706,9 @@ impl GasBoiler {
             use_ideal: false,
             mode_override: None,
             dr_level: DRLevel::Normal,
+            fluid_payload_seen: false,
+            fluid_payload_absences: 0,
+            warnings: Vec::new(),
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -727,6 +809,9 @@ impl Equipment for GasBoiler {
         }
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
+        self.fluid_payload_seen = false;
+        self.fluid_payload_absences = 0;
+        self.warnings.clear();
         self.telemetry = gas_boiler_default_telemetry();
         register_ebm_telemetry_keys(&mut self.telemetry);
         self.core_output = CoreOutput::default();
@@ -778,8 +863,43 @@ impl Equipment for GasBoiler {
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * plr * sf;
         let loop_id = bound_loop_id(self.loop_id, "Gas Boiler", &self.descriptor.name)?;
-        let return_temp_c = loop_return_temp_c(env, loop_id, "Gas Boiler", &self.descriptor.name)?
-            .unwrap_or(self.default_return_temp_c);
+        let payload_was_seen = self.fluid_payload_seen;
+        let return_temp_read = loop_return_temp_c(
+            env,
+            loop_id,
+            "Gas Boiler",
+            &self.descriptor.name,
+            &mut self.fluid_payload_seen,
+        )?;
+        let return_temp_c = match return_temp_read {
+            Some(temp) => temp,
+            None => {
+                // The fluid domain published no payload: the configured
+                // return temperature covers the step. Before the first
+                // publish that is the escape's whole contract (the first
+                // step runs before the envelope's first resolve); after
+                // it, the absence is a degradation: logged, and counted in
+                // the run's health.
+                if payload_was_seen {
+                    self.fluid_payload_absences += 1;
+                    let message = format!(
+                        "Gas Boiler '{}': the fluid domain published no payload \
+                         this step; the return temperature of loop {loop_id:?} reads \
+                         from the configured return temperature until the fluid \
+                         domain publishes again",
+                        self.descriptor.name
+                    );
+                    tracing::warn!(
+                        equipment = %self.descriptor.name,
+                        loop_id = ?loop_id,
+                        "{message}"
+                    );
+                    self.warnings
+                        .push(Warning::new(self.descriptor.name.clone(), message));
+                }
+                self.default_return_temp_c
+            }
+        };
         // Condensing EIR polynomial uses zone air temperature (OCHRE HVAC.py:651:
         // t_in = self.zone.temperature), not return water temperature.
         let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
@@ -931,6 +1051,17 @@ impl Equipment for GasBoiler {
         Some(self.zip)
     }
 
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            curve_index_clamps: 0,
+            fluid_payload_absences: std::mem::take(&mut self.fluid_payload_absences),
+        }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &BoilerState {
@@ -949,6 +1080,7 @@ impl Equipment for GasBoiler {
                 return_temp_c: self.telemetry.get(tk::RETURN_TEMP_C).unwrap_or(0.0),
                 mode_override: self.mode_override,
                 dr_level: self.dr_level,
+                fluid_payload_seen: self.fluid_payload_seen,
             },
             Self::checkpoint_version(),
             "GasBoiler",
@@ -973,6 +1105,7 @@ impl Equipment for GasBoiler {
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
         self.dr_level = decoded.dr_level;
+        self.fluid_payload_seen = decoded.fluid_payload_seen;
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
@@ -1078,17 +1211,22 @@ fn bound_loop_id(loop_id: Option<LoopId>, kind: &str, name: &str) -> crate::Resu
     })
 }
 
-/// The bound loop's mean return temperature from the fluid domain's payload,
-/// or `None` when the fluid domain has not written a payload yet (the first
-/// step, before the envelope's first resolve; the boiler's configured return
-/// temperature covers it). A payload that does not decode, or a decoded
-/// payload that does not carry the bound loop, is an error naming the boiler
-/// and the loop: corrupt fluid state is not the absence of fluid state.
+/// The bound loop's mean return temperature from the fluid domain's payload.
+///
+/// `payload_seen` tracks whether the fluid domain has published a payload
+/// this run and is set to true the moment a payload is present. A payload
+/// that does not decode, or a decoded payload that does not carry the bound
+/// loop, is an error naming the boiler and the loop: corrupt fluid state is
+/// not the absence of fluid state. The absence itself is the caller's
+/// `None`: silent before the first publish (the configured return
+/// temperature covers the first step, before the envelope's first resolve),
+/// a logged and counted degradation after it.
 fn loop_return_temp_c(
     env: &EnvironmentState,
     loop_id: LoopId,
     kind: &str,
     name: &str,
+    payload_seen: &mut bool,
 ) -> crate::Result<Option<f64>> {
     let Some(payload) = env
         .domains
@@ -1098,6 +1236,7 @@ fn loop_return_temp_c(
     else {
         return Ok(None);
     };
+    *payload_seen = true;
     let states = FluidDomainPayload::decode(payload).map_err(|err| {
         HaresError::Equipment(format!(
             "{kind} '{name}': the fluid domain's payload does not decode, so the \
@@ -1371,7 +1510,8 @@ mod tests {
     };
 
     use super::{
-        DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_NON_CONDENSING_EIR_COEFFS, ElectricBoiler, GasBoiler,
+        DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_NON_CONDENSING_EIR_COEFFS, DEFAULT_RETURN_TEMP_C,
+        ElectricBoiler, GasBoiler,
     };
 
     /// The per-fluid cp table must be positive and finite for every fluid
@@ -1846,6 +1986,124 @@ mod tests {
             shown.contains("LoopId(1)") && shown.contains("no loop"),
             "the error names the missing loop: {shown}"
         );
+    }
+
+    /// The first step's absent payload stays silent: before the fluid
+    /// domain's first publish the boiler's configured return temperature
+    /// covers the step, with no warning and no health event.
+    #[test]
+    fn the_first_step_absent_payload_runs_on_the_configured_return_temperature() {
+        let cfg = gb_config(10_000.0, 0.95);
+        let mut eq = GasBoiler::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.hvac.runtime.duty_cycle = 0.5;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
+
+        // No fluid payload at all: the slot was never written.
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("the first step's absent payload runs on the configured return temp");
+        let configured = eq.telemetry().get(tk::RETURN_TEMP_C).unwrap();
+        assert_eq!(
+            configured, DEFAULT_RETURN_TEMP_C,
+            "the absent payload's return temperature is the configured one"
+        );
+
+        let mut warnings = Vec::new();
+        eq.drain_warnings(&mut warnings);
+        assert!(
+            warnings.is_empty(),
+            "the first step's absence stays silent: {warnings:?}"
+        );
+        let counts = Equipment::take_health_counts(&mut eq);
+        assert_eq!(
+            counts.fluid_payload_absences, 0,
+            "the first step's absence is not a health event"
+        );
+    }
+
+    /// A fluid payload that goes absent after the fluid domain has
+    /// published once is the established degradation: the step still runs
+    /// on the configured return temperature, and the absence is a logged
+    /// warning counted in the run's health. An unbounded silent escape
+    /// would substitute the configured temperature for any step's missing
+    /// payload without a trace.
+    #[test]
+    fn an_absent_payload_after_the_first_publish_warns_and_counts() {
+        let cfg = gb_config(10_000.0, 0.95);
+        let mut eq = GasBoiler::new(cfg.clone());
+        let mut env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.hvac.runtime.duty_cycle = 0.5;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
+
+        let payload = DomainUpdate {
+            domain_id: FLUID,
+            zone_temperatures_c: vec![],
+            custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
+                loop_id: LoopId(1),
+                fluid_type: FluidType::Water,
+                heating_power_w: 0.0,
+                cooling_power_w: 0.0,
+                net_power_w: 0.0,
+                mean_supply_temp_c: 45.0,
+                mean_return_temp_c: 40.0,
+            }]),
+        };
+
+        // Step 1: the fluid domain publishes; the return temperature is the
+        // payload's.
+        env.domains.fluid.set_from(&payload);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("the published payload decodes");
+        assert_eq!(eq.telemetry().get(tk::RETURN_TEMP_C).unwrap(), 40.0);
+
+        // Step 2: the payload goes absent after the publish. The step still
+        // runs on the configured return temperature, and the absence is
+        // counted.
+        env.domains.fluid.clear();
+        eq.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("the absent payload degrades to the configured return temp");
+        assert_eq!(
+            eq.telemetry().get(tk::RETURN_TEMP_C).unwrap(),
+            DEFAULT_RETURN_TEMP_C,
+            "the configured return temperature covers the absent payload"
+        );
+
+        let mut warnings = Vec::new();
+        eq.drain_warnings(&mut warnings);
+        assert_eq!(warnings.len(), 1, "the late absence warns: {warnings:?}");
+        assert!(
+            warnings[0].message.contains("Gas Boiler 'GB'")
+                && warnings[0].message.contains("LoopId(1)"),
+            "the warning names the boiler and the loop: {:?}",
+            warnings[0].message
+        );
+        let counts = Equipment::take_health_counts(&mut eq);
+        assert_eq!(
+            counts.fluid_payload_absences, 1,
+            "the late absence is counted in the run's health"
+        );
+
+        // The count is take-semantics: a clean step reports none.
+        let counts = Equipment::take_health_counts(&mut eq);
+        assert_eq!(counts.fluid_payload_absences, 0);
     }
 
     #[test]

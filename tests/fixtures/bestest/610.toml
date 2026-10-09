@@ -7,6 +7,7 @@ duration_s = 172800
 initialization_duration_s = 86400  # 1 day warmup (lightweight construction)
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 

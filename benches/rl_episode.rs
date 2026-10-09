@@ -76,6 +76,7 @@ time_res_s = {time_res_s}
 duration_s = {duration_s}
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 

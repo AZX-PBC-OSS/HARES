@@ -38,6 +38,10 @@ pub struct EquipmentHealthCounts {
     /// Total number of biquadratic curve-index clamps: an out-of-bounds
     /// curve index was evaluated and clamped to the last same-type curve.
     pub curve_index_clamps: u64,
+    /// Total number of fluid-payload absences after the domain's first
+    /// publish: a boiler stepped on its configured return temperature
+    /// because the fluid domain published no payload that step.
+    pub fluid_payload_absences: u64,
 }
 
 #[cfg(test)]
@@ -71,12 +75,14 @@ mod tests {
     fn default_health_counts_are_zero() {
         let counts = EquipmentHealthCounts::default();
         assert_eq!(counts.curve_index_clamps, 0);
+        assert_eq!(counts.fluid_payload_absences, 0);
     }
 
     #[test]
     fn health_counts_round_trip_through_json() {
         let counts = EquipmentHealthCounts {
             curve_index_clamps: 3,
+            fluid_payload_absences: 2,
         };
         let json = serde_json::to_string(&counts).expect("serialize EquipmentHealthCounts");
         let decoded: EquipmentHealthCounts =

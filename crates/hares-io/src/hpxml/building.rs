@@ -1423,9 +1423,12 @@ fn parse_boundaries(
     // wall the boundary list does not hold is an error naming both ids.
     // The derivation is recorded as a parse warning naming the door and the
     // wall it was taken from.
-    // Windows and skylights inherit the same way, from their own parse pass
-    // (their boundary entries join the list after this block); see
-    // `inherit_subsurface_interior_zone`.
+    // Windows inherit the same way, from their own parse pass (their
+    // boundary entries join the list after this block); see
+    // `inherit_subsurface_interior_zone`. Skylights follow the skylight
+    // rule in their own parse pass (`skylight_interior_zone`): the
+    // conditioned space their attached roof or floor names, failing when
+    // that parent surface is unconditioned.
     if let Some(doors) = enclosure.child("Doors") {
         for door in doors.children_named("Door") {
             let Some(wall_id) = door
@@ -1484,9 +1487,12 @@ fn parse_boundaries(
 /// surface's interior zone. OS-HPXML seats a subsurface in its parent
 /// surface's space (`geometry.rb` `set_surface_interior` takes the
 /// subsurface's space from `window.wall`'s interior adjacency, :1470-1476,
-/// applied to windows, skylights and doors at :510-523, :555-559,
-/// :602-606). An `AttachedToWall` idref that matches no parsed boundary is
-/// an error naming both ids.
+/// applied to windows and doors at :510-523, :555-559). An
+/// `AttachedToWall` idref that matches no parsed boundary is an error
+/// naming both ids. Skylights follow the skylight rule instead (see
+/// `skylight_interior_zone`): the schema names no `AttachedToWall` and no
+/// adjacency child on a Skylight, and the reference seats a skylight in
+/// the conditioned space from its parent roof or floor alone.
 pub(crate) fn inherit_subsurface_interior_zone(
     boundaries: &[Boundary],
     subsurface_kind: &'static str,
@@ -1683,13 +1689,16 @@ fn parse_windows(
 
 /// Parse `<Enclosure>/<Skylights>/<Skylight>` elements.
 ///
-/// HPXML 4.x defines Skylight as an extension of the Window base type, so the
-/// schema is identical: `Area`, `Azimuth`, `UFactor`, `SHGC`, `InteriorShading`,
-/// `ExteriorShading`, `FractionOperable`, and `AttachedToWall`.  The key
-/// difference is the tilt: skylights are roof-mounted (horizontal, 0° tilt)
-/// rather than wall-mounted (vertical, 90° tilt).
+/// HPXML v4's Skylight shares the WindowInfo group with Window, but the
+/// schema's parent-surface references differ: a Skylight names
+/// `AttachedToRoof` (required; the OS-HPXML schematron asserts
+/// "Expected AttachedToRoof", EPvalidator.sch [Skylight]) and optionally
+/// `AttachedToFloor` (the shaft or sun-tunnel connection), and defines no
+/// adjacency children.
 ///
-/// Ref: HPXML 4.2 §6.5 "Windows"; Skylight extends Window base type.
+/// Ref: HPXML 4.0 XSD `Skylight` (WindowInfo + AttachedToRoof/AttachedToFloor);
+/// OS-HPXML v1.12.0 hpxml.rb `Skylight` (`attached_to_roof_idref`,
+/// `attached_to_floor_idref`).
 fn parse_skylights(
     details: &XmlNode,
     boundaries: &mut Vec<Boundary>,
@@ -1762,40 +1771,25 @@ fn parse_skylights(
                 None => (1.0, 1.0),
             };
 
-        let attached_to_wall_id = skylight
-            .child("AttachedToWall")
+        let attached_to_roof_id = skylight
+            .child("AttachedToRoof")
+            .and_then(|n| n.attrs.get("idref").cloned());
+        let attached_to_floor_id = skylight
+            .child("AttachedToFloor")
             .and_then(|n| n.attrs.get("idref").cloned());
 
-        let skylight_interior = parse_zone_ref(skylight.child("InteriorAdjacentTo"));
-        let skylight_exterior = parse_zone_ref(skylight.child("ExteriorAdjacentTo"))
-            .or_else(|| infer_exterior_zone(&BoundaryType::Skylight));
-
-        #[cfg(feature = "observe")]
-        if skylight_interior == Some(ZoneType::Adjacent)
-            || skylight_exterior == Some(ZoneType::Adjacent)
-        {
-            tracing::info!(
-                target: "observe",
-                column = "adjacent_boundary_rewrite",
-                boundary_id = id,
-                interior_before = ?skylight_interior,
-                exterior_before = ?skylight_exterior,
-                "rewriting Adjacent zone reference to match non-Adjacent zone"
-            );
-        }
-
-        let (skylight_interior, skylight_exterior) =
-            rewrite_adjacent_zone_pair(skylight_interior, skylight_exterior);
-
-        // The subsurface's interior zone derives from its attached roof when
-        // it states none (the OS-HPXML subsurface rule).
-        let skylight_interior = inherit_subsurface_interior_zone(
+        // The skylight's interior zone follows the OS-HPXML skylight rule
+        // (the schema defines no adjacency children on Skylight to read).
+        let skylight_interior = skylight_interior_zone(
             boundaries,
-            "Skylight",
             &id,
-            attached_to_wall_id.as_deref(),
-            skylight_interior,
+            attached_to_roof_id.as_deref(),
+            attached_to_floor_id.as_deref(),
         )?;
+        // The exterior is outdoors: geometry.rb apply_skylights sets the
+        // skylight's parent surface's outside boundary condition outdoors
+        // unconditionally (:689).
+        let skylight_exterior = infer_exterior_zone(&BoundaryType::Skylight);
 
         skylights.push(Window {
             id: id.clone(),
@@ -1808,7 +1802,10 @@ fn parse_skylights(
             fraction_operable,
             exterior_shading_summer,
             exterior_shading_winter,
-            attached_to_wall_id,
+            // The parent surface's idref: a skylight's AttachedToRoof (the
+            // schema's required parent reference, whose area the skylight
+            // comes off).
+            attached_to_wall_id: attached_to_roof_id,
         });
 
         // Skylight tilt defaults to 0° (horizontal, roof-mounted).
@@ -1843,6 +1840,97 @@ fn parse_skylights(
     }
 
     Ok(skylights)
+}
+
+/// A skylight's interior zone per the OS-HPXML skylight rule: the skylight
+/// lives in the conditioned space. Its conditioned-ness comes from the
+/// parent surface it names: the attached floor when `AttachedToFloor` is
+/// stated (a skylight with a shaft through an attic), else the roof
+/// (hpxml.rb `Skylight#is_conditioned` reads the floor when present, then
+/// the roof). A parent surface whose interior adjacency is not conditioned
+/// fails the parse naming the rule (geometry.rb `apply_skylights` :639-641:
+/// "Skylight '...' not connected to conditioned space; if it's a skylight
+/// with a shaft, use AttachedToFloor to connect it to conditioned space.");
+/// a connected skylight's parent surface is seated unconditionally in the
+/// conditioned space (geometry.rb :687-688). `AttachedToRoof` is required:
+/// the OS-HPXML schematron asserts "Expected AttachedToRoof" on every
+/// skylight (EPvalidator.sch [Skylight]). An idref that matches no
+/// roof (or floor) boundary is an error naming both ids (hpxml.rb
+/// `Skylight#roof`/`#floor`: "Attached roof '...' not found for skylight
+/// '...'").
+fn skylight_interior_zone(
+    boundaries: &[Boundary],
+    skylight_id: &str,
+    attached_roof_id: Option<&str>,
+    attached_floor_id: Option<&str>,
+) -> Result<Option<ZoneType>, HpxmlError> {
+    let roof_id = attached_roof_id.ok_or_else(|| {
+        HpxmlError::Parse(
+            format!(
+                "skylight '{skylight_id}': expected AttachedToRoof; the OS-HPXML \
+                 schematron requires it and the skylight's interior zone derives \
+                 from the parent surface it names"
+            )
+            .into(),
+        )
+    })?;
+    let roof =
+        find_skylight_parent_surface(boundaries, "roof", "AttachedToRoof", roof_id, skylight_id)?;
+    // The floor, when stated, decides the skylight's conditioned-ness first.
+    let deciding = match attached_floor_id {
+        Some(floor_id) => find_skylight_parent_surface(
+            boundaries,
+            "floor",
+            "AttachedToFloor",
+            floor_id,
+            skylight_id,
+        )?,
+        None => roof,
+    };
+    match deciding.interior_zone {
+        // The conditioned locations ("conditioned space", "basement -
+        // conditioned", "crawlspace - conditioned", "other housing unit";
+        // hpxml.rb `conditioned_locations` :12311-12316) merge into the one
+        // conditioned space here: geometry.rb seats the skylight's parent
+        // surface in the conditioned space, never in the named location.
+        Some(ZoneType::Conditioned) | Some(ZoneType::Adjacent) => Ok(Some(ZoneType::Conditioned)),
+        _ => Err(HpxmlError::Parse(
+            format!(
+                "skylight '{skylight_id}': not connected to conditioned space; if \
+                 it's a skylight with a shaft, use AttachedToFloor to connect it \
+                 to conditioned space (the OS-HPXML skylight rule: geometry.rb \
+                 apply_skylights :639-641 seats a skylight only when its parent \
+                 surface's interior adjacency is conditioned, :687-688 seats the \
+                 parent surface in the conditioned space)"
+            )
+            .into(),
+        )),
+    }
+}
+
+/// Find the skylight's parent surface of one boundary type by idref; an
+/// idref that matches no such boundary is an error naming the skylight and
+/// the idref (the reference's own lookup fails the same way).
+fn find_skylight_parent_surface<'a>(
+    boundaries: &'a [Boundary],
+    parent_kind: &str,
+    element_name: &str,
+    parent_id: &str,
+    skylight_id: &str,
+) -> Result<&'a Boundary, HpxmlError> {
+    boundaries
+        .iter()
+        .find(|bd| bd.id == parent_id && boundary_type_label(&bd.boundary_type) == parent_kind)
+        .ok_or_else(|| {
+            HpxmlError::Parse(
+                format!(
+                    "skylight '{skylight_id}': its {element_name} idref '{parent_id}' \
+                     matches no parsed {parent_kind}, so the skylight's interior \
+                     zone cannot be derived from it"
+                )
+                .into(),
+            )
+        })
 }
 
 fn parse_boundary(
@@ -4652,6 +4740,15 @@ mod tests {
       </BuildingSummary>
       <Enclosure>
         <Walls />
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
         <Skylights>
           {skylight_xml}
         </Skylights>
@@ -5890,6 +5987,7 @@ mod tests {
         let xml = xml_with_skylight(
             r#"<Skylight>
                 <SystemIdentifier id="SK1"/>
+                <AttachedToRoof idref="Roof1"/>
                 <Area units="m2">5.0</Area>
                 <Azimuth>0</Azimuth>
                 <UFactor>0.35</UFactor>
@@ -5920,6 +6018,7 @@ mod tests {
         let xml = xml_with_skylight(
             r#"<Skylight>
                 <SystemIdentifier id="SK1"/>
+                <AttachedToRoof idref="Roof1"/>
                 <UFactor>0.35</UFactor>
                 <SHGC>0.30</SHGC>
             </Skylight>"#,
@@ -5935,6 +6034,7 @@ mod tests {
         let xml = xml_with_skylight(
             r#"<Skylight>
                 <SystemIdentifier id="SK1"/>
+                <AttachedToRoof idref="Roof1"/>
                 <Area>0</Area>
                 <UFactor>0.35</UFactor>
                 <SHGC>0.30</SHGC>
@@ -5951,6 +6051,7 @@ mod tests {
         let xml = xml_with_skylight(
             r#"<Skylight>
                 <SystemIdentifier id="SK1"/>
+                <AttachedToRoof idref="Roof1"/>
                 <Area units="m2">5.0</Area>
                 <UFactor>0.35</UFactor>
                 <SHGC>0.30</SHGC>
@@ -5968,79 +6069,12 @@ mod tests {
     }
 
     #[test]
-    fn skylight_exterior_zone_defaults_to_outdoor() {
-        let xml = xml_with_skylight(
-            r#"<Skylight>
-                <SystemIdentifier id="SK1"/>
-                <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
-                <Area units="m2">5.0</Area>
-                <UFactor>0.55</UFactor>
-                <SHGC>0.35</SHGC>
-            </Skylight>"#,
-        );
-        let building = parse_building(&xml).expect("parse should succeed");
-        let boundary = building
-            .boundaries
-            .iter()
-            .find(|b| b.boundary_type == BoundaryType::Skylight)
-            .expect("skylight boundary expected");
-        assert_eq!(boundary.interior_zone, Some(ZoneType::Conditioned));
-        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
-    }
-
-    #[test]
-    fn skylight_interior_adjacent_to_attic_parsed() {
-        let xml = xml_with_skylight(
-            r#"<Skylight>
-                <SystemIdentifier id="SK1"/>
-                <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
-                <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
-                <Area units="m2">3.0</Area>
-                <UFactor>0.55</UFactor>
-                <SHGC>0.35</SHGC>
-            </Skylight>"#,
-        );
-        let building = parse_building(&xml).expect("parse should succeed");
-        let boundary = building
-            .boundaries
-            .iter()
-            .find(|b| b.boundary_type == BoundaryType::Skylight)
-            .expect("skylight boundary expected");
-        assert_eq!(boundary.interior_zone, Some(ZoneType::Attic));
-        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
-    }
-
-    #[test]
-    fn multiple_skylights_parsed() {
-        let xml = xml_with_skylight(
-            r#"<Skylight>
-                <SystemIdentifier id="SK1"/>
-                <Area units="m2">2.0</Area>
-                <UFactor>0.35</UFactor>
-                <SHGC>0.30</SHGC>
-            </Skylight>
-            <Skylight>
-                <SystemIdentifier id="SK2"/>
-                <Area units="m2">3.0</Area>
-                <UFactor>0.55</UFactor>
-                <SHGC>0.35</SHGC>
-            </Skylight>"#,
-        );
-        let building = parse_building(&xml).expect("parse should succeed");
-        assert_eq!(building.skylights.len(), 2);
-        assert_eq!(
-            building
-                .boundaries
-                .iter()
-                .filter(|b| b.boundary_type == BoundaryType::Skylight)
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn skylight_attached_to_roof_subtracts_area() {
-        // Skylight with AttachedToWall pointing to a Roof boundary.
+    fn skylight_exterior_is_outdoor_without_attached_roof_zones() {
+        // Schema-conformant skylight (HPXML v4: WindowInfo group plus
+        // AttachedToRoof/AttachedToFloor; no adjacency children): the
+        // exterior is outdoors (geometry.rb apply_skylights sets the parent
+        // surface's outside boundary condition outdoors, :689) and the
+        // interior is the conditioned space via its attached roof.
         let xml = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
   <Building>
@@ -6070,7 +6104,277 @@ mod tests {
             <Area units="m2">5.0</Area>
             <UFactor>0.55</UFactor>
             <SHGC>0.35</SHGC>
-            <AttachedToWall idref="Roof1"/>
+            <AttachedToRoof idref="Roof1"/>
+          </Skylight>
+        </Skylights>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let building = parse_building(xml).expect("parse should succeed");
+        let boundary = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Skylight)
+            .expect("skylight boundary expected");
+        assert_eq!(boundary.interior_zone, Some(ZoneType::Conditioned));
+        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
+    }
+
+    #[test]
+    fn skylight_with_shaft_attached_to_floor_is_conditioned() {
+        // A skylight with a shaft through an attic states both
+        // AttachedToRoof (the attic roof it penetrates) and AttachedToFloor
+        // (the conditioned-space ceiling). The floor decides the skylight's
+        // conditioned-ness first (hpxml.rb Skylight#is_conditioned reads the
+        // floor when present, then the roof), so the skylight lives in the
+        // conditioned space even though its roof is the attic's.
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>attic - unvented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
+        <FrameFloors>
+          <FrameFloor>
+            <SystemIdentifier id="AtticFloor1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>attic - unvented</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+            <Insulation>
+              <Layer><NominalRValue>30</NominalRValue></Layer>
+            </Insulation>
+          </FrameFloor>
+        </FrameFloors>
+        <Skylights>
+          <Skylight>
+            <SystemIdentifier id="SK1"/>
+            <Area units="m2">5.0</Area>
+            <UFactor>0.55</UFactor>
+            <SHGC>0.35</SHGC>
+            <AttachedToRoof idref="Roof1"/>
+            <AttachedToFloor idref="AtticFloor1"/>
+          </Skylight>
+        </Skylights>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let building = parse_building(xml).expect("parse should succeed");
+        let boundary = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Skylight)
+            .expect("skylight boundary expected");
+        assert_eq!(
+            boundary.interior_zone,
+            Some(ZoneType::Conditioned),
+            "the shaft's floor connects the skylight to the conditioned space"
+        );
+        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
+    }
+
+    #[test]
+    fn skylight_on_unconditioned_roof_fails_naming_the_rule() {
+        // The OS-HPXML skylight rule: a skylight whose parent surface's
+        // interior adjacency is not conditioned fails ("Skylight '...'
+        // not connected to conditioned space; if it's a skylight with a
+        // shaft, use AttachedToFloor to connect it to conditioned space.",
+        // geometry.rb apply_skylights :639-641).
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>attic - unvented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
+        <Skylights>
+          <Skylight>
+            <SystemIdentifier id="SK1"/>
+            <Area units="m2">5.0</Area>
+            <UFactor>0.55</UFactor>
+            <SHGC>0.35</SHGC>
+            <AttachedToRoof idref="Roof1"/>
+          </Skylight>
+        </Skylights>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let err = parse_building(xml)
+            .expect_err("a skylight on an unconditioned roof must fail the parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SK1") && msg.contains("not connected to conditioned space"),
+            "the error names the skylight and the rule: {msg}"
+        );
+    }
+
+    #[test]
+    fn skylight_without_attached_roof_fails_naming_the_schematron_rule() {
+        // The OS-HPXML schematron requires AttachedToRoof on every skylight
+        // ("Expected AttachedToRoof", EPvalidator.sch [Skylight]); a
+        // skylight naming no parent surface has no zone to derive and the
+        // old zone-0 acceptance is gone.
+        let xml = xml_with_skylight(
+            r#"<Skylight>
+                <SystemIdentifier id="SK1"/>
+                <Area units="m2">5.0</Area>
+                <UFactor>0.55</UFactor>
+                <SHGC>0.35</SHGC>
+            </Skylight>"#,
+        );
+        let err = parse_building(&xml)
+            .expect_err("a skylight with no AttachedToRoof must fail the parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SK1") && msg.contains("AttachedToRoof"),
+            "the error names the skylight and the required element: {msg}"
+        );
+    }
+
+    #[test]
+    fn skylight_dangling_attached_roof_errors_naming_both_ids() {
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Skylights>
+          <Skylight>
+            <SystemIdentifier id="SK1"/>
+            <Area units="m2">5.0</Area>
+            <UFactor>0.55</UFactor>
+            <SHGC>0.35</SHGC>
+            <AttachedToRoof idref="RoofN"/>
+          </Skylight>
+        </Skylights>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let err = parse_building(xml).expect_err("a dangling AttachedToRoof must fail the parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SK1") && msg.contains("RoofN"),
+            "the error names the skylight and the dangling idref: {msg}"
+        );
+    }
+
+    #[test]
+    fn multiple_skylights_parsed() {
+        let xml = xml_with_skylight(
+            r#"<Skylight>
+                <SystemIdentifier id="SK1"/>
+                <AttachedToRoof idref="Roof1"/>
+                <Area units="m2">2.0</Area>
+                <UFactor>0.35</UFactor>
+                <SHGC>0.30</SHGC>
+            </Skylight>
+            <Skylight>
+                <SystemIdentifier id="SK2"/>
+                <AttachedToRoof idref="Roof1"/>
+                <Area units="m2">3.0</Area>
+                <UFactor>0.55</UFactor>
+                <SHGC>0.35</SHGC>
+            </Skylight>"#,
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(building.skylights.len(), 2);
+        assert_eq!(
+            building
+                .boundaries
+                .iter()
+                .filter(|b| b.boundary_type == BoundaryType::Skylight)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn skylight_attached_to_roof_subtracts_area_and_seats_conditioned() {
+        // Schema-conformant skylight: AttachedToRoof (HPXML v4 XSD;
+        // OS-HPXML hpxml.rb Skylight reads attached_to_roof_idref). The
+        // skylight's area comes off its parent roof, and its interior zone
+        // is the conditioned space its cathedral roof names (the OS-HPXML
+        // skylight rule: geometry.rb apply_skylights seats the parent
+        // surface unconditionally in the conditioned space, :687-688).
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
+        <Skylights>
+          <Skylight>
+            <SystemIdentifier id="SK1"/>
+            <Area units="m2">5.0</Area>
+            <UFactor>0.55</UFactor>
+            <SHGC>0.35</SHGC>
+            <AttachedToRoof idref="Roof1"/>
           </Skylight>
         </Skylights>
       </Enclosure>
@@ -6089,6 +6393,17 @@ mod tests {
             "roof area should be reduced by skylight area: expected 95, got {}",
             roof.area_m2
         );
+        let boundary = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Skylight)
+            .expect("skylight boundary expected");
+        assert_eq!(
+            boundary.interior_zone,
+            Some(ZoneType::Conditioned),
+            "the skylight seats in the conditioned space its roof names"
+        );
+        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
     }
 
     #[test]

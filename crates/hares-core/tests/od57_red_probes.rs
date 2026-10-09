@@ -383,3 +383,43 @@ fn red_probe_window_dangling_attached_wall() {
         "{shown}"
     );
 }
+
+/// An HPXML whose construction names no NumberofBedrooms fails at the
+/// resolve naming the field: the appliance energy formulas and the water
+/// heater's tank volume and first-hour rating are sized by it, and OCHRE
+/// reads the field with a direct index and fails on absence (hpxml.py:263).
+/// Before the strictness the extract silently substituted 2.0 and the
+/// appliance side 3.0, so the autosizer's own missing-count error was
+/// unreachable.
+#[test]
+fn red_probe_bedroom_count_without_numberofbedrooms() {
+    use hares_io::defaults::DefaultsStore;
+
+    let base =
+        std::fs::read_to_string(project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"))
+            .expect("the base fixture reads");
+    let absent = base.replace("<NumberofBedrooms>3</NumberofBedrooms>\n          ", "");
+    assert_ne!(
+        absent, base,
+        "the fixture's NumberofBedrooms line must match"
+    );
+    let building = parse_hpxml_str(&absent).expect("the parse itself succeeds");
+
+    // The water-heater autosize feed errors naming the field.
+    let err = hares_io::hpxml::extract_bedroom_count(&building, None)
+        .expect_err("an absent NumberofBedrooms must fail the extract");
+    assert!(
+        err.to_string().contains("NumberofBedrooms"),
+        "the error names the required field: {err}"
+    );
+
+    // The appliance resolve errors the same way.
+    let mut warnings = Vec::new();
+    let err =
+        hares_io::hpxml::resolve_equipment(&building, &DefaultsStore::empty(), None, &mut warnings)
+            .expect_err("an absent NumberofBedrooms must fail the appliance resolve");
+    assert!(
+        err.to_string().contains("NumberofBedrooms"),
+        "the error names the required field: {err}"
+    );
+}
