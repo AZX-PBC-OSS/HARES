@@ -518,10 +518,6 @@ pub(super) fn resolve_water_heaters(
             "fraction_dhw_load_served".to_string(),
             json!(fraction_dhw_load_served),
         );
-        spec.parameters.insert(
-            "draws_dhw_load".to_string(),
-            json!(fraction_dhw_load_served > 0.0),
-        );
 
         // Set autosize_water_heater flag when capacity or tank volume is
         // absent for storage-type water heaters. Tankless water heaters

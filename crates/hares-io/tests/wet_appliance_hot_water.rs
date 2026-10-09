@@ -1253,6 +1253,16 @@ fn multi_water_heater_fractions_sum_to_one_and_cannot_be_negative() {
         message.contains("-0.2") && message.contains("wh1"),
         "the error must name the system and the negative value, got: {message}"
     );
+
+    // The dead draws_dhw_load parameter stays deleted: the consumers
+    // re-derive the zero-draw skip from fraction_dhw_load_served itself.
+    for wh in wh_specs {
+        assert!(
+            !wh.parameters.contains_key("draws_dhw_load"),
+            "draws_dhw_load is a dead parameter: {} carries it",
+            wh.name
+        );
+    }
 }
 
 fn generated_schedule_7d() -> hares_io::ScheduleTimeSeries {
