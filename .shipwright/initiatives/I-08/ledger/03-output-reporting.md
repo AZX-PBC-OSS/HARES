@@ -297,7 +297,7 @@ change: `crates/hares-core/tests/fixtures/schema/v{0..8}.json` (the
 all-classes fixture: one spec per registered class, PV
 instance-qualified as `"PV #1"`, plus `"Television"` and `"Pool Heater"`
 pinning the classifier outcomes, and one of each built-in actor) and
-`kinds.json` (944 variables, one entry per line: unit, kind with
+`kinds.json` (941 variables, one entry per line: unit, kind with
 across-homes and labels, aggregation, sampling, nullability), reviewed
 with this commit. The schema pin holds in both profiles (the
 observe-gated columns are tagged in the pin and filtered by the active
