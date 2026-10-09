@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 import math
 import secrets
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 import warnings
 
 import numpy as np
@@ -92,6 +92,53 @@ def _normalize_config(config: object) -> GymDwellingConfig:
     return config
 
 
+def validate_reward_fn(reward_fn: object) -> None:
+    """The reward is the callable's own or, for None, the batch path's
+    default; any other value is the caller's error, named by field and
+    type, refused at construction instead of the first step."""
+    if reward_fn is not None and not callable(reward_fn):
+        raise TypeError(
+            f"reward_fn must be callable or None, got {type(reward_fn).__name__}"
+        )
+
+
+def validated_observation_fields(observation_fields: object) -> list[str]:
+    """Only a list or tuple of strings is accepted: a bare string would
+    iterate per character, and a non-string element would fail later and
+    far from the cause. The error names the field, the type and the
+    value."""
+    if not isinstance(observation_fields, (list, tuple)):
+        raise TypeError(
+            "observation_fields must be a list or tuple of strings, "
+            f"got {type(observation_fields).__name__}: {observation_fields!r}"
+        )
+    fields = cast("list[object] | tuple[object, ...]", observation_fields)
+    out: list[str] = []
+    for field in fields:
+        if not isinstance(field, str):
+            raise TypeError(
+                "observation_fields must be a list or tuple of strings, "
+                f"got element {field!r} of type {type(field).__name__}"
+            )
+        out.append(field)
+    return out
+
+
+def validate_episode_length(episode_length: object) -> None:
+    """An episode must be a positive timedelta: a non-positive one would
+    otherwise coerce to a silent one-step episode, and any other type
+    would fail on its first attribute access. The error names the field
+    and the value."""
+    if not isinstance(episode_length, timedelta):
+        raise TypeError(
+            f"episode_length must be a timedelta, got {type(episode_length).__name__}"
+        )
+    if episode_length.total_seconds() <= 0:
+        raise ValueError(
+            f"episode_length must be at least one step, got {episode_length}"
+        )
+
+
 def sorted_action_layout(
     action_space_config: Mapping[str, Sequence[str]],
 ) -> tuple[list[tuple[str, str]], dict[str, str]]:
@@ -139,14 +186,36 @@ def _infer_signal_type(fields: Sequence[str]) -> str:
     raise ValueError(f"unsupported action field set: {sorted(fields)}")
 
 
+# The Python-side action-field bounds table: the same fields with the same
+# bounds as the engine's exposed table, pinned in both directions by
+# test_python_action_bounds_match_the_engine.
+_ACTION_FIELD_BOUNDS: dict[str, tuple[float, float]] = {
+    "connected": (0.0, 1.0),
+    "cool_c": (-50.0, 80.0),
+    "cooling_setpoint_c": (-50.0, 80.0),
+    "duty_cycle": (0.0, 1.0),
+    "enabled": (0.0, 1.0),
+    "fraction": (0.0, 1.0),
+    "heat_c": (-50.0, 80.0),
+    "heating_setpoint_c": (-50.0, 80.0),
+    "load_fraction": (0.0, 1.0),
+    "max_rh": (0.0, 1.0),
+    "max_soc": (0.0, 1.0),
+    "min_rh": (0.0, 1.0),
+    "min_soc": (0.0, 1.0),
+    "on_fraction": (0.0, 1.0),
+    "setpoint_c": (-50.0, 80.0),
+    "soc": (0.0, 1.0),
+    "solar_only_charging": (0.0, 1.0),
+    "target_rh": (0.0, 1.0),
+    "target_soc": (0.0, 1.0),
+}
+
+
 def field_bounds(field: str) -> tuple[float, float]:
     name = field.lower()
-    if name in {"soc", "target_soc", "min_soc", "max_soc", "fraction", "load_fraction", "on_fraction", "duty_cycle", "target_rh", "min_rh", "max_rh"}:
-        return (0.0, 1.0)
-    if name in {"connected", "enabled", "solar_only_charging"}:
-        return (0.0, 1.0)
-    if name in {"setpoint_c", "heat_c", "cool_c", "heating_setpoint_c", "cooling_setpoint_c"}:
-        return (-50.0, 80.0)
+    if name in _ACTION_FIELD_BOUNDS:
+        return _ACTION_FIELD_BOUNDS[name]
     return (_BROAD_LOW, _BROAD_HIGH)
 
 
@@ -386,7 +455,7 @@ class DwellingGymEnv(_GYM_BASE):
         config: GymDwellingConfig,
         observation_fields: Sequence[str],
         action_space_config: Mapping[str, Sequence[str]],
-        reward_fn: Callable[[RewardContext], float],
+        reward_fn: Callable[[RewardContext], float] | None,
         episode_length: timedelta,
         field_bounds_overrides: Mapping[str, tuple[float, float]] | None = None,
     ) -> None:
@@ -394,7 +463,9 @@ class DwellingGymEnv(_GYM_BASE):
             raise ImportError("gymnasium is required for RL environments")
 
         self._config = _normalize_config(config)
-        self._observation_fields = [str(field) for field in observation_fields]
+        self._observation_fields = validated_observation_fields(observation_fields)
+        validate_reward_fn(reward_fn)
+        validate_episode_length(episode_length)
         self._reward_fn = reward_fn
         self._episode_length = episode_length
         self._action_layout, self._signal_type_by_equipment = sorted_action_layout(
@@ -468,7 +539,9 @@ class DwellingGymEnv(_GYM_BASE):
         time_res_s: float = 60.0
         if self._config.sim_config is not None:
             time_res_s = float(self._config.sim_config.time_res_s)
-        self._max_steps = max(1, int(math.ceil(episode_length.total_seconds() / time_res_s)))
+        # The episode covers at least one step: the constructor refused a
+        # non-positive episode_length, so the ceiling is never below one.
+        self._max_steps = int(math.ceil(self._episode_length.total_seconds() / time_res_s))
         self._steps_elapsed: int = 0
         self._active_seed: int | None = None
 
@@ -559,13 +632,18 @@ class DwellingGymEnv(_GYM_BASE):
         self._steps_elapsed += 1
         truncated = self._steps_elapsed >= self._max_steps
 
-        reward_context = RewardContext(
-            step=step_data,
-            telemetry_zone=telemetry.zone(),
-            telemetry_equipment=telemetry.equipment(),
-            total_power_kw=float(telemetry.total_power_kw),
-        )
-        reward = float(self._reward_fn(reward_context))
+        if self._reward_fn is None:
+            # The batch path's default reward: the negative net electric
+            # power of the step.
+            reward = -float(step_data["net_electric_power_kw"])
+        else:
+            reward_context = RewardContext(
+                step=step_data,
+                telemetry_zone=telemetry.zone(),
+                telemetry_equipment=telemetry.equipment(),
+                total_power_kw=float(telemetry.total_power_kw),
+            )
+            reward = float(self._reward_fn(reward_context))
         warning_count, warning_messages = drain_step_warnings(self._dwelling)
         info: dict[str, Any] = {
             "step": step_data,

@@ -30,6 +30,9 @@ from .gym_env import (
     observation_field_bounds,
     sorted_action_layout,
     telemetry_to_observation,
+    validate_episode_length,
+    validate_reward_fn,
+    validated_observation_fields,
 )
 
 __all__ = [
@@ -54,12 +57,16 @@ class VecDwellingGymEnv:
         dwellings: Sequence[PyDwelling],
         observation_fields: Sequence[str],
         action_space_config: Mapping[str, Sequence[str]],
-        reward_fn: Callable[[RewardContext], float],
+        reward_fn: Callable[[RewardContext], float] | None,
         episode_length: timedelta,
         time_res_s: float | None = None,
         field_bounds_overrides: Mapping[str, tuple[float, float]] | None = None,
         verify_observation_equivalence: bool = False,
     ) -> None:
+        self._observation_fields = validated_observation_fields(observation_fields)
+        validate_reward_fn(reward_fn)
+        validate_episode_length(episode_length)
+
         start_method = multiprocessing.get_start_method(allow_none=True)
         if start_method == "fork":
             raise RuntimeError(
@@ -100,10 +107,10 @@ class VecDwellingGymEnv:
         action_low_arr = np.asarray(action_low, dtype=np.float64)
         action_high_arr = np.asarray(action_high, dtype=np.float64)
         bounds = [
-            observation_field_bounds(f) for f in observation_fields
+            observation_field_bounds(f) for f in self._observation_fields
         ]
         if field_bounds_overrides:
-            for idx, field in enumerate(observation_fields):
+            for idx, field in enumerate(self._observation_fields):
                 override = field_bounds_overrides.get(field)
                 if override is not None:
                     bounds[idx] = (float(override[0]), float(override[1]))
@@ -119,7 +126,7 @@ class VecDwellingGymEnv:
             self.observation_space = spaces.Box(
                 low=obs_low,
                 high=obs_high,
-                shape=(len(observation_fields),),
+                shape=(len(self._observation_fields),),
                 dtype=np.float64,
             )
             self.action_space = spaces.Box(
@@ -129,17 +136,19 @@ class VecDwellingGymEnv:
                 dtype=np.float64,
             )
         else:
-            self.observation_space = {"shape": (len(observation_fields),), "dtype": np.float64}
+            self.observation_space = {
+                "shape": (len(self._observation_fields),),
+                "dtype": np.float64,
+            }
             self.action_space = {
                 "shape": (len(self._action_layout),),
                 "dtype": np.float64,
                 "low": action_low_arr,
                 "high": action_high_arr,
             }
-        self._observation_fields = list(observation_fields)
         self._observation_bounds: dict[str, tuple[float, float]] = {
             field: (float(low), float(high))
-            for field, (low, high) in zip(observation_fields, bounds)
+            for field, (low, high) in zip(self._observation_fields, bounds)
         }
         self._reward_fn = reward_fn
         self._verify_observation_equivalence = verify_observation_equivalence
@@ -173,7 +182,7 @@ class VecDwellingGymEnv:
                 stacklevel=2,
             )
 
-        self._max_steps = max(1, int(math.ceil(episode_length.total_seconds() / _time_res)))
+        self._max_steps = int(math.ceil(episode_length.total_seconds() / _time_res))
         self._time_res_s = _time_res
 
         _logger = logging.getLogger(__name__)

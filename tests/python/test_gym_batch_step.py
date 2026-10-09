@@ -94,6 +94,18 @@ def test_batch_step_refuses_deadband_bounds_wider_than_a_dwellings_band():
         )
 
 
+def test_clip_action_refuses_a_non_finite_action():
+    """The single-dwelling clip path refuses a non-finite action the way the
+    batch path does: a rejected call that records nothing, not a clamp."""
+    from hares._hares import clip_action
+
+    dwelling = make_dwelling(duration_s=600)
+    with pytest.raises(ValueError, match="not finite"):
+        clip_action(dwelling, [float("nan")], [("Gas Furnace", "heat_c")])
+    with pytest.raises(ValueError, match="not finite"):
+        clip_action(dwelling, [float("inf")], [("Gas Furnace", "heat_c")])
+
+
 def test_batch_step_refusal_reaches_no_dwelling():
     """A refused action in the second dwelling leaves the first untouched:
     its out-of-range setpoint is never queued, so its next step rejects

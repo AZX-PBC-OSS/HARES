@@ -176,8 +176,8 @@ The `hares.rl` package wraps the engine in Gymnasium environments
 through the extension's `batch_step`). Both paths clamp every action value
 to the declared bounds of its column before the value reaches the dwelling,
 and the clamped values are counted on the acting dwelling's run health in
-every build: `health().clamped_actions` accumulates them over the run,
-alongside the other run-total counters.
+every build; the count is exposed with the run's `RunResult`, alongside the
+other run-total counters.
 
 ## Troubleshooting
 

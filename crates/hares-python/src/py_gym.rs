@@ -173,29 +173,42 @@ fn build_control_signal(
     Ok(signal)
 }
 
+/// The engine's declared action-field bounds: one `(low, high)` pair per
+/// named field. This is the canonical table: the gym's action space is
+/// built from it, every clip path clamps to it, and the gym's Python-side
+/// table is pinned to it in both directions.
+fn field_bounds_entries() -> &'static [(&'static str, (f64, f64))] {
+    &[
+        ("connected", (0.0, 1.0)),
+        ("cool_c", (-50.0, 80.0)),
+        ("cooling_setpoint_c", (-50.0, 80.0)),
+        ("duty_cycle", (0.0, 1.0)),
+        ("enabled", (0.0, 1.0)),
+        ("fraction", (0.0, 1.0)),
+        ("heat_c", (-50.0, 80.0)),
+        ("heating_setpoint_c", (-50.0, 80.0)),
+        ("load_fraction", (0.0, 1.0)),
+        ("max_rh", (0.0, 1.0)),
+        ("max_soc", (0.0, 1.0)),
+        ("min_rh", (0.0, 1.0)),
+        ("min_soc", (0.0, 1.0)),
+        ("on_fraction", (0.0, 1.0)),
+        ("setpoint_c", (-50.0, 80.0)),
+        ("soc", (0.0, 1.0)),
+        ("solar_only_charging", (0.0, 1.0)),
+        ("target_rh", (0.0, 1.0)),
+        ("target_soc", (0.0, 1.0)),
+    ]
+}
+
 /// The declared bounds of one action field, the table the gym's action
 /// space is built from and every clip path clamps to.
 fn field_bounds(field: &str) -> (f64, f64) {
-    match field.to_lowercase().as_str() {
-        "soc"
-        | "target_soc"
-        | "min_soc"
-        | "max_soc"
-        | "fraction"
-        | "load_fraction"
-        | "on_fraction"
-        | "duty_cycle"
-        | "target_rh"
-        | "min_rh"
-        | "max_rh"
-        | "connected"
-        | "enabled"
-        | "solar_only_charging" => (0.0, 1.0),
-        "setpoint_c" | "heat_c" | "cool_c" | "heating_setpoint_c" | "cooling_setpoint_c" => {
-            (-50.0, 80.0)
-        }
-        _ => (-1.0e6, 1.0e6),
-    }
+    let name = field.to_lowercase();
+    field_bounds_entries()
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map_or((-1.0e6, 1.0e6), |(_, bounds)| *bounds)
 }
 
 /// Clamp each action value to its column's bounds pair and count the clamped
@@ -336,15 +349,7 @@ fn map_action_to_signals(
         ));
     }
     validate_action_bounds(action_layout, action_bounds)?;
-
-    for (idx, (equipment, field)) in action_layout.iter().enumerate() {
-        let raw_value = action[idx];
-        if !raw_value.is_finite() {
-            return Err(format!(
-                "action value at index {idx} for {equipment}.{field} is not finite: {raw_value}",
-            ));
-        }
-    }
+    check_actions_finite(action_layout, action)?;
 
     let (clipped_values, clamped_count) = clamp_action(action, action_bounds);
 
@@ -393,8 +398,25 @@ fn map_action_to_signals(
     Ok((signals, clamped_count))
 }
 
-/// Reject a signal holding a NaN or infinite value: a NaN action survives
-/// clipping, so the finiteness screen is a typed error in every build.
+/// Every action value is finite: a NaN or infinite value survives
+/// clipping, so the call is refused with a typed error naming the layout
+/// column and the value, in every build profile. A refused call clamps
+/// nothing and counts nothing.
+fn check_actions_finite(action_layout: &[(String, String)], action: &[f64]) -> Result<(), String> {
+    for (idx, (equipment, field)) in action_layout.iter().enumerate() {
+        let raw_value = action[idx];
+        if !raw_value.is_finite() {
+            return Err(format!(
+                "action value at index {idx} for {equipment}.{field} is not finite: {raw_value}",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse, changing nothing, a signal holding a NaN or infinite value: a
+/// NaN action survives clipping, so the finiteness screen is a typed error
+/// in every build.
 fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
     let check = |name: &str, v: f64| {
         assert!(
@@ -687,6 +709,9 @@ pub fn clip_action_py(
     }
     let action_bounds =
         resolve_action_bounds(dwelling, &action_layout).map_err(PyValueError::new_err)?;
+    // The same screen as the batch path: a non-finite action is a refused
+    // call, not a clamp count.
+    check_actions_finite(&action_layout, &action).map_err(PyValueError::new_err)?;
     let (values, clamped_count) = clamp_action(&action, &action_bounds);
     dwelling.record_clamped_actions(clamped_count)?;
     Ok(values)
@@ -698,6 +723,17 @@ pub fn clip_action_py(
 #[pyo3(signature = (field))]
 pub fn field_bounds_py(field: &str) -> (f64, f64) {
     field_bounds(field)
+}
+
+/// The engine's whole declared action-field bounds table, so the gym's
+/// Python-side table can be pinned against this one in both directions:
+/// growth on either side fails the pin.
+#[pyfunction(name = "field_bounds_table")]
+pub fn field_bounds_table_py() -> HashMap<String, (f64, f64)> {
+    field_bounds_entries()
+        .iter()
+        .map(|(field, bounds)| (field.to_string(), *bounds))
+        .collect()
 }
 
 #[cfg(test)]
@@ -820,6 +856,46 @@ mod tests {
                 .clamped_actions;
             assert_eq!(untouched_clamped, 0, "an in-bounds action clamps nothing");
         });
+    }
+
+    /// A non-finite action on the single-dwelling clip path is a refused
+    /// call, the batch path's semantics: the error is typed, and the
+    /// dwelling's run health records nothing.
+    #[test]
+    fn clip_action_refuses_a_non_finite_action() {
+        Python::attach(|py| {
+            for raw in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let dwelling = base_dwelling(py);
+                let layout = vec![("Gas Furnace".to_string(), "heating_setpoint_c".to_string())];
+                let err = clip_action_py(&dwelling.bind(py).borrow(), vec![raw], layout)
+                    .expect_err("a non-finite action is refused");
+                assert!(err.is_instance_of::<PyValueError>(py));
+                let message = err.value(py).to_string();
+                assert!(message.contains("not finite"), "{raw}: {message}");
+
+                let clamped = dwelling
+                    .bind(py)
+                    .borrow()
+                    .acquire_string()
+                    .expect("not poisoned")
+                    .health()
+                    .clamped_actions;
+                assert_eq!(clamped, 0, "a refused call records nothing");
+            }
+        });
+    }
+
+    /// The exposed bounds table and the lookup agree: every named field
+    /// returns its own entry's bounds, case-insensitively, and a field
+    /// neither names falls through to the broad bounds.
+    #[test]
+    fn field_bounds_table_and_lookup_agree() {
+        assert!(!field_bounds_entries().is_empty(), "the table is not empty");
+        for (field, bounds) in field_bounds_entries() {
+            assert_eq!(field_bounds(field), *bounds, "{field}");
+            assert_eq!(field_bounds(&field.to_uppercase()), *bounds, "{field}");
+        }
+        assert_eq!(field_bounds("mystery_field"), (-1.0e6, 1.0e6));
     }
 
     fn therm_layout() -> (Vec<(String, String)>, HashMap<String, String>) {

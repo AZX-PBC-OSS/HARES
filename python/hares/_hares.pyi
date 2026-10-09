@@ -2839,5 +2839,12 @@ def clip_action(
     action: list[float],
     action_layout: list[tuple[str, str]],
 ) -> list[float]: ...
+# clip_action refuses a non-finite action with a ValueError naming the
+# layout column and the value, before anything is clamped or counted.
 
 def field_bounds(field: str) -> tuple[float, float]: ...
+
+# field_bounds_table: the engine's whole declared action-field bounds
+# table, one (low, high) pair per named field, the table the gym's
+# Python-side table is pinned against in both directions.
+def field_bounds_table() -> dict[str, tuple[float, float]]: ...

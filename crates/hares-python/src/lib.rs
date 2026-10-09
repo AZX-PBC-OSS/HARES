@@ -174,6 +174,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_gym::batch_step_py, m)?)?;
     m.add_function(wrap_pyfunction!(py_gym::clip_action_py, m)?)?;
     m.add_function(wrap_pyfunction!(py_gym::field_bounds_py, m)?)?;
+    m.add_function(wrap_pyfunction!(py_gym::field_bounds_table_py, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_weather, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_epw, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_psm3, m)?)?;

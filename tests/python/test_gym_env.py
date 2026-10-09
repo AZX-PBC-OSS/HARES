@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 import math
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -421,6 +421,15 @@ def test_apply_action_clips_at_bounds():
             assert low <= val <= high, f"heat_c {val} should be in [{low}, {high}]"
     finally:
         gym_env.build_control_signal = original
+
+
+def test_gym_step_refuses_a_non_finite_action():
+    """A non-finite action is a refused call on the single-dwelling path
+    too: the clip binding rejects it the way the batch path does, instead
+    of counting it as one clamped value."""
+    env = _make_env()
+    with pytest.raises(ValueError, match="not finite"):
+        env.step(np.array([float("nan")], dtype=np.float64))
 
 
 def test_vec_gym_out_of_bounds_actions_no_nan():
@@ -1305,6 +1314,79 @@ def test_gym_zero_master_seed_reaches_the_dwelling():
     assert env._dwelling.config().master_seed == 0
 
 
+def test_gym_rejects_non_positive_episode_length():
+    """A non-positive episode_length is a ValueError naming the field and
+    the value at construction, never a silent one-step episode."""
+    for length in (timedelta(0), timedelta(minutes=-5)):
+        with pytest.raises(ValueError, match="episode_length") as caught:
+            _make_env(episode_length=length)
+        assert str(length) in str(caught.value)
+
+
+def test_gym_rejects_non_timedelta_episode_length():
+    """An episode_length that is not a timedelta is a TypeError naming the
+    field and the type, not an attribute error from deep inside."""
+    with pytest.raises(TypeError, match="episode_length.*got int"):
+        _make_env(episode_length=cast(Any, 300))
+
+
+def test_gym_rejects_uncallable_reward_fn():
+    """A reward_fn that is not callable is a TypeError at construction
+    naming the field and the type, not a crash at the first step."""
+    with pytest.raises(TypeError, match="reward_fn.*got str"):
+        DwellingGymEnv(
+            config=_DWELLING_CONFIG,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=cast(Any, "not callable"),
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_gym_accepts_a_none_reward_fn_with_the_batch_default():
+    """A None reward_fn is accepted and steps with the batch path's default
+    reward: the negative net electric power of the step."""
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=None,
+        episode_length=timedelta(minutes=5),
+    )
+    _obs, reward, _terminated, _truncated, info = env.step(
+        np.array([21.0], dtype=np.float64)
+    )
+    assert reward == -info["step"]["net_electric_power_kw"]
+
+
+def test_gym_rejects_bare_string_observation_fields():
+    """A bare string observation_fields would iterate per character: it is
+    a TypeError naming the field and the value."""
+    with pytest.raises(TypeError, match="observation_fields.*got str") as caught:
+        DwellingGymEnv(
+            config=_DWELLING_CONFIG,
+            observation_fields=cast(Any, "total_power_kw"),
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+        )
+    assert "total_power_kw" in str(caught.value)
+
+
+def test_gym_rejects_a_non_string_observation_field():
+    """An observation_fields element that is not a string is a TypeError
+    naming the field and the element."""
+    with pytest.raises(TypeError, match="observation_fields") as caught:
+        DwellingGymEnv(
+            config=_DWELLING_CONFIG,
+            observation_fields=cast(Any, ["total_power_kw", 3]),
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+        )
+    assert "got element 3 of type int" in str(caught.value)
+
+
 def test_gym_forwards_every_sim_config_field(tmp_path: Path):
     """A gym built with a SimulationConfig whose every field differs from its
     default, write_output=False among them, records no output, and the config
@@ -1511,6 +1593,51 @@ def test_vec_gym_time_res_s_negative_raises():
         )
 
 
+def test_vec_gym_rejects_non_positive_episode_length():
+    """A non-positive episode_length is a ValueError naming the field and
+    the value at construction, never a silent one-step episode."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    for length in (timedelta(0), timedelta(minutes=-5)):
+        with pytest.raises(ValueError, match="episode_length") as caught:
+            VecDwellingGymEnv(
+                dwellings=dwellings,
+                observation_fields=_OBS_FIELDS,
+                action_space_config=_ACTION_CONFIG,
+                reward_fn=lambda ctx: -ctx["total_power_kw"],
+                episode_length=length,
+            )
+        assert str(length) in str(caught.value)
+
+
+def test_vec_gym_rejects_uncallable_reward_fn():
+    """A reward_fn that is not callable is a TypeError at construction
+    naming the field and the type."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    with pytest.raises(TypeError, match="reward_fn.*got str"):
+        VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=cast(Any, "not callable"),
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_vec_gym_rejects_bare_string_observation_fields():
+    """A bare string observation_fields would iterate per character: it is
+    a TypeError naming the field and the value."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    with pytest.raises(TypeError, match="observation_fields.*got str") as caught:
+        VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=cast(Any, "total_power_kw"),
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+        )
+    assert "total_power_kw" in str(caught.value)
+
+
 # ---------------------------------------------------------------------------
 # Action bounds: the engine's table is the canonical one, the Python-side
 # table pins it, and clamped actions are counted in every build.
@@ -1518,33 +1645,21 @@ def test_vec_gym_time_res_s_negative_raises():
 
 
 def test_python_action_bounds_match_the_engine():
-    """For every field the Python-side table names, it returns the same
-    bounds as the extension's table, and the two fall through to the same
-    broad bounds for a field neither names."""
+    """The engine's exposed bounds table and the Python-side table name the
+    same fields with the same bounds in both directions, so growth on
+    either side fails the pin, and both fall through to the same broad
+    bounds for a field neither names, case-insensitively."""
     from hares._hares import field_bounds as rust_field_bounds
+    from hares._hares import field_bounds_table as rust_field_bounds_table
+    from hares.rl.gym_env import _ACTION_FIELD_BOUNDS
 
-    named = (
-        "soc",
-        "target_soc",
-        "min_soc",
-        "max_soc",
-        "fraction",
-        "load_fraction",
-        "on_fraction",
-        "duty_cycle",
-        "target_rh",
-        "min_rh",
-        "max_rh",
-        "connected",
-        "enabled",
-        "solar_only_charging",
-        "setpoint_c",
-        "heat_c",
-        "cool_c",
-        "heating_setpoint_c",
-        "cooling_setpoint_c",
-    )
-    for field in (*named, "HEAT_C", "mystery_field"):
+    engine_table = rust_field_bounds_table()
+    assert engine_table, "the engine's table must not be empty"
+    for field, engine in engine_table.items():
         python = field_bounds(field)
-        engine = rust_field_bounds(field)
         assert python == engine, f"{field}: python {python}, engine {engine}"
+    for field, python in _ACTION_FIELD_BOUNDS.items():
+        engine = rust_field_bounds(field)
+        assert engine == python, f"{field}: engine {engine}, python {python}"
+    for name in ("HEAT_C", "Mystery_Field"):
+        assert field_bounds(name) == rust_field_bounds(name), name
