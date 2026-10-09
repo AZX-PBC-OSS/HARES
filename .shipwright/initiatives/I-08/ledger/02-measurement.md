@@ -2205,3 +2205,56 @@ review re-measured the engine at the gate engine, by editable install:
 `cargo nextest run --workspace --all-features` 7799 passed (7718 in
 the default profile), `uv run --no-sync pytest tests/python` 1520
 passed.
+
+### The row 33 stop condition, 2026-10-09, the OCHRE parity tolerances on the held weather (branch `row/r33-in6`, worktree of `56ae417e`, uncommitted working tree)
+
+Load average at write time: 13.60 (1 min).
+
+The entry's stop condition fired: a `test_ochre_parity.py` metric left
+its existing tolerance, so the entry stopped before committing and the
+operator decides. The mechanism is the one the entry's stop condition
+names: the old override hold was applied inside the engine's resampling,
+whose weather indexing carries today's half-hour shift
+(`midpoint_offset_secs` 1800, the same 30-minute lag OCHRE's
+midpoint-stamped `resample().ffill()` produces; the sides agreed step
+for step, which is why the 1-hour cooling case passed at 1e-9 before).
+The held file is read through the interval-end label at its own interval
+(`midpoint_offset_secs` 1800/N per the entry: 30 s at N=60), so the
+HARES weather timeline now runs about 29.5 minutes ahead of OCHRE's.
+The held values are the same zero-order hold (the committed-file
+equality test proves the bytes; the record order is the hold), so this
+is a pure phase shift of the weather grid, not a different value.
+
+Measured on the branch (Denver, window 2019-05-05 13:00 to 14:00 local,
+1-minute steps, both sides seeded 42):
+
+- 1 h, Total Electric Power: OCHRE 0.4015574052175426 kWh, HARES
+  0.3773907385508761 kWh, relative error 6.018e-02, tolerance 1e-9.
+- 1 h, HVAC Cooling Electric Power: OCHRE 0.025 kWh, HARES
+  0.0008333333333333334 kWh, relative error 9.667e-01, tolerance 1e-9.
+- 24 h record check, HVAC Heating Electric Power: HARES measured
+  31.6769 kWh against its pinned record 32.5037 kWh, 2.5% off, record
+  band 2%.
+
+What held within its existing bounds: the Rust parity corpus
+(`parity_outputs_against_reference_corpus`, every fixture within its
+drift-locked bands against the OCHRE reference parquets), the
+conditioned, freefloat and envelope oracles, `envelope_opaque_loads`,
+`conditioned_basement`, the remaining 59 OCHRE-marked Python cases and
+the other 24 h record checks.
+
+The goldens are bitwise in both profiles (compare-all and -F dst), and
+the engine's own resampling defaults are unchanged: the tests that
+pinned the default methods' exact values passed through the refactor
+untouched, and no golden uses the overrides.
+
+Options for the operator (a tolerance is never widened inside this
+structural entry): (a) re-capture the 1 h/24 h parity records and
+tightened windows with the delta and the phase-shift cause recorded
+here, keeping the strict band on every case that still discriminates;
+(b) have the comparison feed OCHRE the held file too (its midpoint
+stamps at the file's own interval then agree with the engine's
+interval-end reading step for step), which changes the reference side
+of the comparison and is outside this entry's rule; (c) park the row.
+The working tree keeps the full implementation, uncommitted, with the
+block green except the three cases above.
