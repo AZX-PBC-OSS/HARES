@@ -8038,16 +8038,27 @@ fn cfg_gated_helper() {
         dwelling.active_equipment_ids = equipment.iter().map(|eq| eq.descriptor().id).collect();
         dwelling.roster.hvac_thermal_consistency =
             build_hvac_thermal_consistency(&dwelling.ports, &equipment);
-        // The freeze-time column index, rebuilt from the recorder's frozen
-        // schema (empty when output is off, exactly as the plan builder sees
-        // it); the bindings' equipment half follows the test's roster.
-        let column_index = dwelling
+        // The full producer bindings, rebuilt from the recorder's frozen
+        // schema exactly as the roster-change plan rebuilds them: the
+        // dwelling-level half follows the roster too (the setpoint chain's
+        // first-HVAC equipment position among it), so a shorter roster
+        // degrades to unbound columns instead of leaving a stale equipment
+        // position the step indexes out of bounds. With output off there is
+        // no frozen schema, so the bindings resolve against an empty one
+        // (every column unbound, the plan's writes a no-op).
+        let bindings_schema = dwelling
             .recorder
             .as_ref()
-            .map_or_else(HashMap::new, |r| build_output_column_index(r.schema()));
-        dwelling.roster.bindings.equipment =
-            plan_equipment_columns(&equipment, &column_index, dwelling.output_verbosity)
-                .expect("test helper: test-equipment column map must resolve");
+            .map(|r| r.schema().clone())
+            .unwrap_or_else(arrow::datatypes::Schema::empty);
+        let actor_refs: Vec<&dyn Actor> = dwelling.actors.iter().map(AsRef::as_ref).collect();
+        dwelling.roster.bindings = build_output_row_bindings(
+            &bindings_schema,
+            &equipment,
+            &actor_refs,
+            dwelling.output_verbosity,
+        )
+        .expect("test helper: producer bindings must resolve against the frozen schema");
         dwelling
             .solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
@@ -18880,6 +18891,231 @@ occupancy = 0.0
             "every flushed row's column equals the projection's read of the \
              same step, on bits"
         );
+    }
+
+    /// The production plan's placement, pinned at a fixed step of a real
+    /// run: the Verbosity(2) plan's producer slots sit at the frozen
+    /// schema's value-column indices (the columns the golden digests
+    /// address, the timestamp column leading), and the row the plan placed
+    /// is the row the recorder recorded, slot for slot, on bits.
+    #[test]
+    fn row_plan_places_values_at_golden_column_indices() {
+        use arrow::array::Float64Array;
+
+        let mut dwelling = bestest_dwelling();
+        let equipment = equipment_refs(&dwelling.equipment);
+        let actors: Vec<&dyn Actor> = dwelling.actors.iter().map(AsRef::as_ref).collect();
+        // The schema at verbosity 2 for this dwelling, built exactly as the
+        // freeze builds it.
+        let specs = equipment_descriptor_specs(&equipment);
+        let schema = hares_io::build_schema(&specs, 2, &dwelling.zone_names());
+        let schema = enrich_schema_with_telemetry_units(schema, &equipment);
+        let schema = extend_schema_with_actor_columns(&schema, &actors);
+        // The golden column indices: every value column's position by name,
+        // the map the freeze resolved against.
+        let golden_columns = build_output_column_index(&schema);
+        let row_plan = hares_io::RowPlan::build(
+            &[hares_io::Selection::Verbosity(2)],
+            &hares_io::SchemaSurface::new(&schema),
+        )
+        .expect("plan builds");
+        let bindings =
+            build_output_row_bindings(&schema, &equipment, &actors, 2).expect("bindings resolve");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = StreamingRecorder::new(
+            schema,
+            1,
+            hares_io::OutputFormat::Csv,
+            &tmp.path().join("golden_placement.csv"),
+            true,
+            hares_io::RotationPolicy::None,
+        )
+        .expect("recorder");
+        dwelling.recorder = Some(recorder);
+        dwelling.write_output = true;
+        dwelling.output_verbosity = 2;
+        dwelling.roster.row_plan = row_plan;
+        dwelling.roster.bindings = bindings;
+
+        // Three steps of the real run; the third is the fixed step the pin
+        // reads. A chunk size of 1 flushes one batch per row, so batch
+        // FIXED_STEP is that step's recorded row.
+        const FIXED_STEP: usize = 2;
+        let mut last_step = None;
+        for _ in 0..=FIXED_STEP {
+            last_step = Some(dwelling.step().expect("dwelling steps"));
+        }
+        let step = last_step.expect("the run stepped");
+
+        let batches: Vec<_> = dwelling
+            .recorder
+            .as_ref()
+            .expect("recorder with retained batches")
+            .flushed_batches()
+            .to_vec();
+        assert!(batches.len() > FIXED_STEP, "one batch flushed per row");
+        let batch = &batches[FIXED_STEP];
+        assert_eq!(batch.num_rows(), 1, "a chunk size of 1 flushes row by row");
+        // The plan's slots span exactly the value columns, and the placed
+        // row is the recorded row slot for slot: plan slot s is frame
+        // column s+1, on bits.
+        assert_eq!(
+            dwelling.roster.row_plan.slots(),
+            golden_columns.len(),
+            "the plan spans exactly the schema's value columns"
+        );
+        for slot in 0..dwelling.roster.row_plan.slots() {
+            let column = batch.column(slot + 1);
+            let values = column
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("float64 column");
+            assert_eq!(
+                values.value(0).to_bits(),
+                dwelling.roster.row_plan.row()[slot].to_bits(),
+                "the plan's slot {slot} must sit at frame column {}",
+                slot + 1
+            );
+        }
+        // And the placement is by name: the slot the plan resolves a
+        // variable to is the golden column index the freeze resolved it at.
+        let name = "Total Electric Power (kW)";
+        let golden_index = golden_columns[name];
+        assert_eq!(
+            batch.schema().field(golden_index + 1).name(),
+            name,
+            "the golden index must address the named frame column"
+        );
+        let column = batch.column(golden_index + 1);
+        let values = column
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("float64 column");
+        assert_eq!(
+            values.value(0).to_bits(),
+            step.net_electric_power_kw.to_bits(),
+            "the placed value at the named variable's golden index is the \
+             step's own value, on bits"
+        );
+    }
+
+    /// Swapping in a shorter roster rebuilds the whole producer bindings
+    /// against the frozen schema: the setpoint chain's first-HVAC equipment
+    /// position follows the new roster (unbound when it carries none), so
+    /// the step after the swap neither indexes a stale position out of
+    /// bounds nor reads the wrong equipment's telemetry. The row the step
+    /// places is checked at its rebuilt slots.
+    #[test]
+    fn replace_with_shorter_roster_rebuilds_the_bindings_and_steps() {
+        let mut dwelling = bestest_dwelling();
+        let equipment = equipment_refs(&dwelling.equipment);
+        let actors: Vec<&dyn Actor> = dwelling.actors.iter().map(AsRef::as_ref).collect();
+        let specs = equipment_descriptor_specs(&equipment);
+        let schema = hares_io::build_schema(&specs, 0, &dwelling.zone_names());
+        let schema = enrich_schema_with_telemetry_units(schema, &equipment);
+        let schema = extend_schema_with_actor_columns(&schema, &actors);
+        let row_plan = hares_io::RowPlan::build(
+            &[hares_io::Selection::Verbosity(0)],
+            &hares_io::SchemaSurface::new(&schema),
+        )
+        .expect("plan builds");
+        let bindings =
+            build_output_row_bindings(&schema, &equipment, &actors, 0).expect("bindings resolve");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = StreamingRecorder::new(
+            schema,
+            1,
+            hares_io::OutputFormat::Csv,
+            &tmp.path().join("shorter_roster.csv"),
+            true,
+            hares_io::RotationPolicy::None,
+        )
+        .expect("recorder");
+        dwelling.recorder = Some(recorder);
+        dwelling.write_output = true;
+        dwelling.output_verbosity = 0;
+        dwelling.roster.row_plan = row_plan;
+        dwelling.roster.bindings = bindings;
+
+        // First swap: two stubs, the second named so the bindings freeze
+        // its equipment position (1) as the setpoint chain's first HVAC.
+        let mut load = TestEquipment::new("Interference Load", ControlCapabilities::empty());
+        load.init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init load stub");
+        let mut heater = TestEquipment::new("Storage Heater", ControlCapabilities::empty());
+        heater
+            .init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init heater stub");
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(load), Box::new(heater)]);
+        assert_eq!(
+            dwelling.roster.bindings.dwelling.first_hvac,
+            Some(1),
+            "the rebuilt bindings must freeze the new roster's first HVAC position"
+        );
+
+        // Second swap: one stub, no HVAC, a roster shorter than the frozen
+        // position. The rebuilt bindings unbind the setpoint chain; a stale
+        // position 1 would index the swapped roster out of bounds.
+        let mut load2 = TestEquipment::new("Sole Load", ControlCapabilities::empty());
+        load2
+            .init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init sole load stub");
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(load2)]);
+        assert_eq!(
+            dwelling.roster.bindings.dwelling.first_hvac, None,
+            "the shorter roster carries no HVAC, so the setpoint chain must unbind"
+        );
+
+        // The step lands, and the row is correct at the rebuilt bindings:
+        // the placed row is the recorded row slot for slot, on bits.
+        let step = dwelling.step().expect("step after the shorter swap");
+        let placed: Vec<u64> = dwelling
+            .roster
+            .row_plan
+            .row()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        let total_electric = dwelling
+            .roster
+            .bindings
+            .dwelling
+            .total_electric
+            .expect("the level-0 schema binds the total electric column");
+        assert_eq!(total_electric, 0, "the first value column at level 0");
+        assert_eq!(
+            placed[total_electric],
+            step.net_electric_power_kw.to_bits(),
+            "the placed total electric power is the step's own value, on bits"
+        );
+        let batches: Vec<_> = dwelling
+            .recorder
+            .as_ref()
+            .expect("recorder with retained batches")
+            .flushed_batches()
+            .to_vec();
+        assert!(!batches.is_empty(), "the step's row was flushed");
+        use arrow::array::Float64Array;
+        let batch = &batches[batches.len() - 1];
+        assert_eq!(batch.num_rows(), 1, "a chunk size of 1 flushes row by row");
+        assert_eq!(
+            placed.len(),
+            batch.num_columns() - 1,
+            "the placed row addresses every value column"
+        );
+        for (slot, &bits) in placed.iter().enumerate() {
+            let values = batch
+                .column(slot + 1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("float64 column");
+            assert_eq!(
+                values.value(0).to_bits(),
+                bits,
+                "the placed row must be the recorded row at slot {slot}, on bits"
+            );
+        }
     }
 
     /// An equipment whose name shadows a reserved aggregate column ("Total")

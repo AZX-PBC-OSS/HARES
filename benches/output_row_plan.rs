@@ -3,10 +3,13 @@
 //! plan's index writes.
 //!
 //! Both sides do one step's worth of output work on the verbosity-2 schema
-//! of a small single-family model: the before side fills the row and
-//! resolves every column name the step path touches (hits and misses
+//! of a small single-family model: the before side fills the reused row
+//! buffer the way `record_step` filled its roster-held `record_scratch`
+//! and resolves every column name the step path touches (hits and misses
 //! alike, the envelope gain names included); the after side begins the
-//! frozen plan's row and writes the same hit slots by index.
+//! frozen plan's row and writes the same hit slots by index. Both sides
+//! observe the whole row, so no side's write work can be dead-store
+//! eliminated.
 
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -98,15 +101,27 @@ fn bench_output_row_plan(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
 
+    // One step's rows are consumed whole by the recorder's push, so both
+    // sides observe the whole row: an xor over the value bits, every slot
+    // read. Observing one slot lets the compiler drop the stores nothing
+    // reads, including the fill each side's step begins with.
+    fn observe(row: &[f64]) -> u64 {
+        row.iter().map(|v| v.to_bits()).fold(0u64, |a, b| a ^ b)
+    }
+
     group.bench_function("per_step_hash_lookup", |b| {
+        // The old step path reused one roster-held buffer across steps
+        // (`record_scratch.fill(0.0)`), so the fill is the only work the
+        // before side pays for the row: no allocation.
+        let mut row = vec![0.0; column_index.len()];
         b.iter(|| {
-            let mut row = vec![0.0; column_index.len()];
+            row.fill(0.0);
             for name in STEP_LOOKUPS {
                 if let Some(&idx) = column_index.get(black_box(*name)) {
                     row[idx] = 1.0;
                 }
             }
-            black_box(row)
+            black_box(observe(&row));
         })
     });
 
@@ -119,7 +134,7 @@ fn bench_output_row_plan(c: &mut Criterion) {
             for &idx in &frozen {
                 row[idx] = 1.0;
             }
-            black_box(row[0])
+            black_box(observe(row));
         })
     });
 

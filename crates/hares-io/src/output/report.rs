@@ -112,8 +112,10 @@ pub struct RowPlan {
     /// declarations and the batch builders; until then every produced
     /// slot is written and the bitset stays clear.
     validity: Vec<u64>,
-    /// The current row's local timestamp (epoch seconds at the row
-    /// timestamp's offset), stamped per step.
+    /// The current row's timestamp as UTC epoch seconds, stamped per step.
+    /// Not a local-epoch stamp: the offset the run's row timestamps carry
+    /// is not applied here (the row's own timestamp column carries it);
+    /// nothing reading this field may assume local epoch seconds.
     local_timestamp: i64,
     /// One projection per selection, in selection order: slot indices.
     projections: Vec<Vec<usize>>,
@@ -189,8 +191,8 @@ impl RowPlan {
     }
 
     /// Begins a row: zeroes the union row, clears the validity bitset and
-    /// stamps the row's local timestamp. Called once per step, before the
-    /// producers write.
+    /// stamps the row's timestamp (UTC epoch seconds). Called once per
+    /// step, before the producers write.
     pub fn begin_row(&mut self, local_timestamp: i64) {
         self.row.fill(0.0);
         self.validity.fill(0);
@@ -207,7 +209,9 @@ impl RowPlan {
         &self.row
     }
 
-    /// The current row's local timestamp.
+    /// The current row's timestamp as UTC epoch seconds. The run's UTC
+    /// offset is not applied: a local-epoch stamp must not be assumed from
+    /// this field (the row's timestamp column carries the offset).
     pub fn local_timestamp(&self) -> i64 {
         self.local_timestamp
     }
