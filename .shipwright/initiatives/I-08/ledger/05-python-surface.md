@@ -370,6 +370,57 @@ its own test on the surface that row belongs to.
 
 **Verification:** `uv run --no-sync pytest tests/python`.
 
+**State:** committed `9904a698` (2026-10-09, branch `row/r35-py2`, cut
+from `b17ed658` with PY-8 not yet landed, so this entry ran ahead of its
+dependency and the row 34 surface it assumes is still to come). The three
+constructors take one typed config: `Dwelling.from_hpxml`,
+`DwellingBlueprint.from_hpxml` and `DwellingConfig` share the signature
+`*, config` (required, a `SimulationConfig`), `bldg_id=0`,
+`initialization_duration=None`, `defaults=None` (the renamed
+`defaults_path`), `overrides=None`, `**unexpected`. The kwargs path's
+second config, its own defaults and the hard-coded `retain_batches: true`
+are deleted with `KNOWN_KWARGS` and the site-keyword extractor;
+`config.to_sim_config()` is the one config build. `**unexpected` names
+the right error through one shared helper (`utils.rs`
+`check_unexpected_kwargs`/`unexpected_keyword_error`): a removed-key
+lookup in the `DwellingTable`, `SimulationConfig` then `PythonKeyword`
+scope raises the table's replacement-naming message, a current
+`SimulationConfig` field name raises `TypeError` naming
+`config=SimulationConfig(<name>=...)`, anything else raises `TypeError`
+naming it, as Python's own is; all three constructors raise the same
+class (the old surface's `ValueError` on `from_hpxml` was the entry's
+named problem). The entry's `PythonKeyword` rows landed here (not with
+PY-8, whose `SimulationConfig`-scope TOML rows wait for its fixture
+migration): `defaults_path` naming `defaults`; `duration_s` and
+`time_res_s` naming `SimulationConfig.duration` and `.time_res`; the
+four site keywords naming `SimulationConfig.site_location`;
+`output_to_parquet` naming `SimulationConfig.output_format`; and
+`hpxml_dir` naming `buildings_dir`, the pin `12-inputs.md` B-9a deferred
+to this machinery, landed now (`Fleet.from_resstock` gained
+`**unexpected` and its test asserts the replacement). The gym wrapper is
+consistent: `GymDwellingConfig.defaults_path` renamed `defaults`, the
+gym passes `config=` on every construction (the engine's defaults when
+the plan sets none), and `Dwelling.config` became a getter (the method
+call sites migrated; the stub declares the property).
+`SimulationPlan` builds each segment's `SimulationConfig` and keeps the
+dwelling-level keywords beside it. RED: the rejection suite failed on
+the base (the five sim keywords beside `config=` succeeded, the removed
+keywords raised no replacement-naming error, the unknown keyword raised
+`ValueError`, the differential failed on the then-unknown `defaults=`);
+GREEN: `sim_keyword_next_to_config_is_type_error` (five),
+`unknown_keyword_is_type_error`, `removed_keyword_names_replacement`
+(nine keys, all three constructors), the fleet pin, and the differential
+pinning every old kwarg's value read back off `dw.config` (35 tests).
+Every caller migrated: about 30 test files, conftest's `make_dwelling`
+splitting its kwargs at the helper, the notebook, the docs' example.
+Gates: goldens bitwise both feature sets (7 manifests plus
+`full_year_900s_dst`, no movement, no re-capture), nextest
+--all-features 7585/7585, pytest 1556 passed / 0 failed / 0 skipped,
+pyright 0 errors, fmt and clippy clean. One environmental note for the
+next runner: the ResStock ctrl_c resilience test hangs without the
+`resstock` extra's httpx (the child's stall is never cut and the urllib
+fallback blocks the join), green with every extra synced.
+
 **Commit:** `fix: from_hpxml takes one typed SimulationConfig`
 
 **Dependencies:** PY-8; `12-inputs.md` IN-6.
