@@ -58,8 +58,7 @@ exceptions are created under the bare module name `_hares`
 - `python/hares/_hares.pyi`, every import in `python/`, `tests/python/`,
   `scripts/`, `notebooks/simulation_explorer.py`, `README.md`,
   `docs/python.md`, `docs/development.md`, and the path strings in code
-  comments (`crates/hares-equipment/src/pv/array_config.rs:56`,
-  `crates/hares-equipment/src/pv/lut.rs:36`).
+  comments (`crates/hares-equipment/src/pv/lut.rs:36`).
 - Cache directories become `<cache base>/hares/weather` and
   `<cache base>/hares/resstock`; existing `ochre_next` caches are not
   read, moved or aliased.
@@ -101,8 +100,9 @@ still tracked when this row ran) and the acceptance test's own lines
 naming the old name it pins absent. The download caches resolve under
 `hares/weather` and `hares/resstock`. Gates: cargo fmt, clippy
 --all-features --all-targets and the doc links unchanged (the three
-broken intra-doc links predate this row), nextest --all-features
-7795/7795, pytest 1487 passed 0 skipped (four acceptance tests new),
+broken intra-doc links predate this row), nextest --workspace
+--all-features 7795/7795 (7575 in the default profile), pytest 1487
+passed 0 skipped (four acceptance tests new),
 pyright 0 errors, the eight golden fixtures bitwise across both
 `frame_golden` feature sets, `uv lock` regenerated.
 
