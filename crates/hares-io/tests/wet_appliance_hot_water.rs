@@ -1037,6 +1037,117 @@ fn washer_with_rated_kwh_requires_the_whole_label_set() {
     );
 }
 
+/// The OCCUPANCY_XML building with the given ERI calculation version in
+/// the HPXML header.
+fn occupancy_xml_with_eri_version(version: &str) -> String {
+    format!(
+        r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <SoftwareInfo>
+    <extension><ERICalculation><Version>{version}</Version></ERICalculation></extension>
+  </SoftwareInfo>
+  {OCCUPANCY_XML}
+</HPXML>"#
+    )
+}
+
+/// The pre-2019 branch reads only the fields its algebra consumes: a
+/// washer carrying RatedAnnualkWh, Capacity and the rate/cost fields the
+/// pre-2019 form reads, but omitting LabelUsage, resolves where v1.12.0
+/// accepts it (get_clothes_washer_values defaults LabelUsage to 999,
+/// 'unused'). The label fields' all-or-nothing rule binds only the
+/// branches that read them: on latest the washer still needs LabelUsage.
+#[test]
+fn pre2019_washer_needs_only_the_fields_its_algebra_reads() {
+    let defaults = repo_defaults();
+
+    // The full label set on 2019 resolves.
+    let building = hares_io::hpxml::parse_hpxml_str(&occupancy_xml_with_eri_version("2019"))
+        .expect("the full label set parses");
+    resolve_equipment(&building, &defaults, None, &mut Vec::new())
+        .expect("a washer with the whole label set resolves on 2019");
+
+    // The washer without LabelUsage (the field the pre-2019 algebra never
+    // reads) resolves too.
+    let xml =
+        occupancy_xml_with_eri_version("2019").replacen("<LabelUsage>6.0</LabelUsage>", "", 1);
+    let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
+    let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
+        .expect("the pre-2019 washer algebra never reads LabelUsage, so the washer resolves");
+    let washer = wet_appliance_spec(&specs, "Clothes Washer");
+    assert!(
+        spec_f64(washer, "daily_hot_water_m3") > 0.0,
+        "the washer still draws hot water"
+    );
+
+    // On latest the branch reads LabelUsage, so its absence still fails
+    // the resolve naming the field.
+    let xml =
+        occupancy_xml_with_eri_version("latest").replacen("<LabelUsage>6.0</LabelUsage>", "", 1);
+    let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
+    let err = resolve_equipment(&building, &defaults, None, &mut Vec::new())
+        .expect_err("the modern branch reads LabelUsage, so its absence must fail the resolve");
+    assert!(
+        err.to_string().contains("LabelUsage"),
+        "the error must name LabelUsage, got: {err}"
+    );
+}
+
+/// The pre-2019 dishwasher algebra is the energy-factor form: it reads
+/// the place count and the rated value (or the energy factor) and none
+/// of the label fields, so a dishwasher carrying PlaceSettingCapacity
+/// and RatedAnnualkWh with no label field at all resolves where v1.12.0
+/// accepts it (get_dishwasher_values defaults the set to 999, 'unused').
+#[test]
+fn pre2019_dishwasher_needs_only_the_fields_its_algebra_reads() {
+    let defaults = repo_defaults();
+
+    // The full label set on 2019 resolves.
+    let building = hares_io::hpxml::parse_hpxml_str(&occupancy_xml_with_eri_version("2019"))
+        .expect("the full label set parses");
+    resolve_equipment(&building, &defaults, None, &mut Vec::new())
+        .expect("a dishwasher with the whole label set resolves on 2019");
+
+    // The dishwasher without any label field resolves: the pre-2019
+    // algebra reads none of them.
+    let xml = occupancy_xml_with_eri_version("2019").replacen(
+        "          <LabelElectricRate>0.12</LabelElectricRate>
+          <LabelGasRate>1.09</LabelGasRate>
+          <LabelAnnualGasCost>33.12</LabelAnnualGasCost>
+          <PlaceSettingCapacity>12</PlaceSettingCapacity>
+          <LabelUsage>4.0</LabelUsage>",
+        "          <PlaceSettingCapacity>12</PlaceSettingCapacity>",
+        1,
+    );
+    let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
+    let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
+        .expect("the pre-2019 dishwasher algebra reads no label field, so the dishwasher resolves");
+    let dishwasher = wet_appliance_spec(&specs, "Dishwasher");
+    assert!(
+        spec_f64(dishwasher, "daily_hot_water_m3") > 0.0,
+        "the dishwasher still draws hot water"
+    );
+
+    // On latest the branch reads the label fields, so their absence still
+    // fails the resolve naming the first missing one.
+    let xml = occupancy_xml_with_eri_version("latest").replacen(
+        "          <LabelElectricRate>0.12</LabelElectricRate>
+          <LabelGasRate>1.09</LabelGasRate>
+          <LabelAnnualGasCost>33.12</LabelAnnualGasCost>
+          <PlaceSettingCapacity>12</PlaceSettingCapacity>
+          <LabelUsage>4.0</LabelUsage>",
+        "          <PlaceSettingCapacity>12</PlaceSettingCapacity>",
+        1,
+    );
+    let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
+    let err = resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect_err(
+        "the modern dishwasher reads the label fields, so their absence must fail the resolve",
+    );
+    assert!(
+        err.to_string().contains("LabelUsage") || err.to_string().contains("LabelElectricRate"),
+        "the error must name a label field, got: {err}"
+    );
+}
+
 fn occupied_bldg0527060() -> String {
     let xml = std::fs::read_to_string(fixture(
         "tests/fixtures/resstock/2025.1/bldg0527060/home.xml",

@@ -192,8 +192,11 @@ fn wet_appliance_eri_version(building: &Building) -> Result<EriVersion, HpxmlErr
 /// whole set defaults together when `RatedAnnualkWh` is absent (the
 /// version's `get_clothes_washer_values`), and a provided
 /// `RatedAnnualkWh` means none of the label fields is defaulted — every
-/// one the algebra reads must be on the HPXML, the input combination the
-/// reference's own algebra would otherwise crash on.
+/// one the branch's algebra reads must be on the HPXML, the input
+/// combination the reference's own algebra would otherwise crash on. The
+/// rule binds the fields the branch reads: the pre-2019 label algebra
+/// never reads `LabelUsage` (its cycles come from the bedrooms form), so
+/// it keeps the version's 999 'unused' default when the HPXML omits it.
 fn washer_label_inputs(
     node: &XmlNode,
     eri_version: EriVersion,
@@ -234,10 +237,16 @@ fn washer_label_inputs(
             }
         });
     }
+    let modern = matches!(eri_version, EriVersion::Y2019To2022 | EriVersion::Latest);
     Ok(WasherLabelInputs {
         rated_annual_kwh: require("RatedAnnualkWh")?,
         capacity_ft3: require("Capacity")?,
-        label_usage: require("LabelUsage")?,
+        label_usage: match child_f64(node, "LabelUsage") {
+            Some(usage) => usage,
+            None if modern => require("LabelUsage")?,
+            // The pre-2019A algebra never reads it: the version's default.
+            None => 999.0,
+        },
         label_electric_rate: require("LabelElectricRate")?,
         label_gas_rate: require("LabelGasRate")?,
         label_annual_gas_cost: require("LabelAnnualGasCost")?,
@@ -261,15 +270,34 @@ struct WasherLabelInputs {
 /// label field is defaulted. With the place count on the HPXML, the rated
 /// annual kWh falls back to 215 / EnergyFactor (the reference's
 /// `calc_dishwasher_annual_kwh_from_ef`); neither present is the missing
-/// input the reference's own algebra would crash on.
+/// input the reference's own algebra would crash on. The rule binds the
+/// fields the branch reads: the pre-2019 energy-factor form reads no label
+/// field, so each keeps the version's 999 'unused' default when the HPXML
+/// omits it.
 fn dishwasher_label_inputs(
     node: &XmlNode,
     eri_version: EriVersion,
 ) -> Result<DishwasherLabelInputs, HpxmlError> {
     let system_id = element_id(node).unwrap_or_else(|| "unknown".to_string());
     let energy_factor = child_f64(node, "EnergyFactor");
+    let modern = matches!(eri_version, EriVersion::Y2019To2022 | EriVersion::Latest);
+    let label_field = |name: &'static str| -> Result<f64, HpxmlError> {
+        match child_f64(node, name) {
+            Some(value) => Ok(value),
+            // The pre-2019A algebra reads no label field: the version's
+            // 'unused' default.
+            None if !modern => Ok(999.0),
+            None => Err(HpxmlError::Parse(
+                format!(
+                    "Dishwasher `{system_id}`: the HPXML provides PlaceSettingCapacity, so \
+                     no other label field is defaulted (defaults.rb:4305 defaults the \
+                     whole set together): {name} is required"
+                )
+                .into(),
+            )),
+        }
+    };
     if child_f64(node, "PlaceSettingCapacity").is_none() {
-        let modern = matches!(eri_version, EriVersion::Y2019To2022 | EriVersion::Latest);
         return Ok(if modern {
             DishwasherLabelInputs {
                 rated_annual_kwh: 467.0,
@@ -294,18 +322,6 @@ fn dishwasher_label_inputs(
             }
         });
     }
-    let require = |name: &'static str| -> Result<f64, HpxmlError> {
-        child_f64(node, name).ok_or_else(|| {
-            HpxmlError::Parse(
-                format!(
-                    "Dishwasher `{system_id}`: the HPXML provides PlaceSettingCapacity, so \
-                     no other label field is defaulted (defaults.rb:4305 defaults the \
-                     whole set together): {name} is required"
-                )
-                .into(),
-            )
-        })
-    };
     let rated_annual_kwh = match child_f64(node, "RatedAnnualkWh") {
         Some(rated) => rated,
         None if energy_factor.is_some() => 215.0 / energy_factor.expect("checked above"),
@@ -322,12 +338,13 @@ fn dishwasher_label_inputs(
     };
     Ok(DishwasherLabelInputs {
         rated_annual_kwh,
-        place_setting_capacity: require("PlaceSettingCapacity")?,
+        place_setting_capacity: child_f64(node, "PlaceSettingCapacity")
+            .expect("PlaceSettingCapacity checked above"),
         energy_factor,
-        label_usage: require("LabelUsage")?,
-        label_electric_rate: require("LabelElectricRate")?,
-        label_gas_rate: require("LabelGasRate")?,
-        label_annual_gas_cost: require("LabelAnnualGasCost")?,
+        label_usage: label_field("LabelUsage")?,
+        label_electric_rate: label_field("LabelElectricRate")?,
+        label_gas_rate: label_field("LabelGasRate")?,
+        label_annual_gas_cost: label_field("LabelAnnualGasCost")?,
     })
 }
 
