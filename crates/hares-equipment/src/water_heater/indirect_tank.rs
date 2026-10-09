@@ -1016,11 +1016,74 @@ mod control_domain_tests {
     fn ports() -> PortSlots {
         PortSlots {
             thermal: vec![hares_types::ThermalAccumulator::new(hares_types::ZoneId(2))],
-            fluid: vec![hares_types::FluidAccumulator::new(
-                hares_types::LoopId(3),
-                hares_types::FluidType::Water,
-            )],
+            fluid: vec![
+                hares_types::FluidAccumulator::new(
+                    hares_types::LoopId(3),
+                    hares_types::FluidType::Water,
+                ),
+                // The DHW draw's outbound loop accumulator.
+                hares_types::FluidAccumulator::new(
+                    crate::water_heater::DHW_DEMAND_LOOP,
+                    hares_types::FluidType::Water,
+                ),
+            ],
             ..Default::default()
+        }
+    }
+
+    /// The wet appliances' draw reaches the tank through the wired schedule
+    /// column: at every time step the tank's reported draw is the column's
+    /// value for that step (the fixture draw is zero here), so a step never
+    /// sees a stale or dropped appliance draw.
+    #[test]
+    fn appliance_draw_column_reaches_the_tank_at_every_step() {
+        use hares_types::{
+            BoundaryPolicy, DomainUpdate, SCHEDULE_DOMAIN_ID, ScheduleSourceConfig,
+            telemetry_keys as tk,
+        };
+
+        let mut typed = config().typed::<IndirectTankConfig>().unwrap();
+        typed.appliance_draw_flow_rate_source = Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 1,
+            boundary: BoundaryPolicy::Clamp,
+        });
+        let cfg = crate::EquipmentConfig::from_typed(
+            "indirect".to_string(),
+            "Indirect Tank".to_string(),
+            typed,
+        )
+        .expect("typed config");
+
+        let mut eq = IndirectTank::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        // Per-step appliance draw values [kg/s]: distinct across the steps
+        // so a stale read cannot pass.
+        let step_draws = [0.0, 0.002, 0.0, 0.005, 0.001];
+        for (step, draw_kg_s) in step_draws.iter().enumerate() {
+            let mut env = env();
+            env.domains.schedule.set_from(&DomainUpdate {
+                domain_id: SCHEDULE_DOMAIN_ID,
+                zone_temperatures_c: Vec::new(),
+                custom_payload: Some(vec![0.0, *draw_kg_s]),
+            });
+            env.current_time = chrono::FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 1, 0, step as u32, 0)
+                .single()
+                .expect("valid");
+
+            let mut p = ports();
+            eq.step(&env, Duration::from_secs(60), &mut p).unwrap();
+
+            let got = eq
+                .telemetry()
+                .get(tk::DRAW_FLOW_RATE_KG_S)
+                .unwrap_or_else(|| panic!("step {step}: the tank publishes its draw"));
+            assert!(
+                (got - draw_kg_s).abs() < 1e-9,
+                "step {step}: the tank's draw must be the column's {draw_kg_s} kg/s, got {got}"
+            );
         }
     }
 }

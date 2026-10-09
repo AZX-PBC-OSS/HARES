@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use chrono::{Datelike, Timelike};
 use hares_equipment::{
     ConfigPayload, ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig,
-    HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
+    HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
 use hares_physics::constants::HOURS_PER_YEAR;
 use hares_physics::water_density_kg_m3;
@@ -968,13 +968,14 @@ fn set_typed_schedule_source(spec: &mut EquipmentSpec, field: &str, col_idx: usi
     }
 }
 
-/// Storage water heater equipment names that consume draw and mains schedule sources.
-const STORAGE_WATER_HEATER_EQUIPMENT: &[&str] = &[
+/// Water heater equipment names that consume draw and mains schedule sources.
+const WATER_HEATER_EQUIPMENT: &[&str] = &[
     "Electric Resistance Water Heater",
     "Gas Water Heater",
     "Heat Pump Water Heater",
     "Tankless Water Heater",
     "Gas Tankless Water Heater",
+    "Indirect Tank",
 ];
 
 fn inject_water_heater_schedule_columns(
@@ -1025,7 +1026,7 @@ fn inject_water_heater_schedule_columns(
     }
 
     for (i, spec) in specs.iter_mut().enumerate() {
-        if !STORAGE_WATER_HEATER_EQUIPMENT.contains(&spec.name.as_str()) {
+        if !WATER_HEATER_EQUIPMENT.contains(&spec.name.as_str()) {
             continue;
         }
         // The heat pump water heater's typed config carries no fixture-draw
@@ -1166,6 +1167,14 @@ fn water_heater_hot_supply_temp_c(spec: &EquipmentSpec) -> f64 {
             .and_then(|t| t.typed::<ElectricResistanceWaterHeaterConfig>().ok())
             .map(|c| supply(Some(c.hot_draw_temp_c), Some(c.setpoint_c)))
             .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
+        "Gas Water Heater" => typed
+            .and_then(|t| t.typed::<GasWaterHeaterConfig>().ok())
+            .map(|c| supply(Some(c.hot_draw_temp_c), Some(c.setpoint_c)))
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
+        "Indirect Tank" => typed
+            .and_then(|t| t.typed::<IndirectTankConfig>().ok())
+            .map(|c| supply(Some(c.hot_draw_temp_c), Some(c.setpoint_c)))
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
         "Tankless Water Heater" | "Gas Tankless Water Heater" => typed
             .and_then(|t| t.typed::<TanklessWaterHeaterConfig>().ok())
             .map(|c| supply(None, Some(c.setpoint_c)))
@@ -1283,6 +1292,29 @@ fn water_heater_avg_daily_draw_l(spec: &EquipmentSpec) -> Result<f64, HaresError
             cfg.avg_water_draw_l_per_day.ok_or_else(|| {
                 let msg = format!(
                     "heat pump water heater '{}' requires typed avg_water_draw_l_per_day",
+                    spec.name
+                );
+                tracing::error!(equipment = %spec.name, "{msg}");
+                HaresError::Equipment(msg)
+            })
+        }
+        "Indirect Tank" => {
+            let typed = spec.typed_config.as_ref().ok_or_else(|| {
+                let msg = format!("indirect tank '{}' requires typed config", spec.name);
+                tracing::error!(equipment = %spec.name, "{msg}");
+                HaresError::Equipment(msg)
+            })?;
+            let cfg = typed.typed::<IndirectTankConfig>().map_err(|err| {
+                let msg = format!(
+                    "indirect tank '{}' typed config failed to decode: {err}",
+                    spec.name
+                );
+                tracing::error!(equipment = %spec.name, error = %err, "{msg}");
+                HaresError::Equipment(msg)
+            })?;
+            cfg.avg_water_draw_l_per_day.ok_or_else(|| {
+                let msg = format!(
+                    "indirect tank '{}' requires typed avg_water_draw_l_per_day",
                     spec.name
                 );
                 tracing::error!(equipment = %spec.name, "{msg}");
@@ -3310,7 +3342,7 @@ mod tests {
 
     #[test]
     fn unsupported_water_heater_type_returns_err() {
-        // An equipment spec whose name is in STORAGE_WATER_HEATER_EQUIPMENT but is
+        // An equipment spec whose name is in WATER_HEATER_EQUIPMENT but is
         // not handled by water_heater_avg_daily_draw_l triggers the 'other' arm.
         // Since all current entries are handled, test the defensive arm directly.
         let spec = EquipmentSpec {

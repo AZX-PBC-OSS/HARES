@@ -363,6 +363,128 @@ fn appliance_hot_water_draw_rides_the_schedule_columns_with_the_peak_flow_rule()
     }
 }
 
+const COMBI_BOILER_XML: &str = r#"<Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingOccupancy><NumberofResidents>3</NumberofResidents></BuildingOccupancy>
+        <BuildingConstruction>
+          <ResidentialFacilityType>single-family detached</ResidentialFacilityType>
+          <NumberofBedrooms>3</NumberofBedrooms>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <WaterHeating>
+        <WaterHeatingSystem>
+          <SystemIdentifier id="wh"/>
+          <FuelType>natural gas</FuelType>
+          <WaterHeaterType>space-heating boiler with storage tank</WaterHeaterType>
+          <HotWaterTemperature units="F">120</HotWaterTemperature>
+          <TankVolume>40</TankVolume>
+        </WaterHeatingSystem>
+      </WaterHeating>
+      <Appliances>
+        <ClothesWasher>
+          <SystemIdentifier id="cw"/>
+          <RatedAnnualkWh>284.0</RatedAnnualkWh>
+          <LabelElectricRate>0.12</LabelElectricRate>
+          <LabelGasRate>1.09</LabelGasRate>
+          <LabelAnnualGasCost>27.0</LabelAnnualGasCost>
+          <LabelUsage>6.0</LabelUsage>
+          <Capacity>4.2</Capacity>
+        </ClothesWasher>
+        <Dishwasher>
+          <SystemIdentifier id="dw"/>
+          <RatedAnnualkWh>307.0</RatedAnnualkWh>
+          <LabelElectricRate>0.12</LabelElectricRate>
+          <LabelGasRate>1.09</LabelGasRate>
+          <LabelAnnualGasCost>33.12</LabelAnnualGasCost>
+          <PlaceSettingCapacity>12</PlaceSettingCapacity>
+          <LabelUsage>4.0</LabelUsage>
+        </Dishwasher>
+      </Appliances>
+    </BuildingDetails>
+  </Building>"#;
+
+/// The combi-boiler home's Indirect Tank is a water heating system class
+/// like any other: the wet appliances' draw reaches its tank through the
+/// same normalized schedule column, at every row the schedule has.
+#[test]
+fn combi_boiler_indirect_tank_receives_the_appliance_draw() {
+    use hares_physics::water_density_kg_m3;
+
+    let defaults = repo_defaults();
+    let xml = format!(
+        r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">{COMBI_BOILER_XML}</HPXML>"#
+    );
+    let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
+    let mut specs =
+        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("equipment resolves");
+    let washer_daily_m3 = spec_f64(
+        wet_appliance_spec(&specs, "Clothes Washer"),
+        "daily_hot_water_m3",
+    );
+    let dw_daily_m3 = spec_f64(
+        wet_appliance_spec(&specs, "Dishwasher"),
+        "daily_hot_water_m3",
+    );
+    assert!(
+        washer_daily_m3 > 0.0 && dw_daily_m3 > 0.0,
+        "the home's wet appliances have hot-water volumes"
+    );
+
+    let mut schedule = generated_schedule_7d();
+    hares_io::inject_schedule_into_specs(
+        &mut specs,
+        &mut schedule,
+        Some(&project_root().join("defaults")),
+        &defaults,
+        &mut Vec::new(),
+    )
+    .expect("injection succeeds");
+
+    let wh = specs
+        .iter()
+        .find(|s| s.name == "Indirect Tank")
+        .expect("the combi boiler resolves to an Indirect Tank");
+
+    // The appliance draw column rides the wet appliances' schedule columns
+    // at the peak flow the columns' daily equivalent full-load hours give,
+    // in mass at the drawn water's temperature: the tank's hot supply.
+    let col_idx = appliance_draw_source_col(wh);
+    let setpoint_c = spec_f64(wh, "setpoint_c");
+    let rho = water_density_kg_m3(setpoint_c);
+    let washer_mass_kg = washer_daily_m3 * rho;
+    let dw_mass_kg = dw_daily_m3 * rho;
+
+    let hwcw_idx = schedule.column_index["hot_water_clothes_washer"];
+    let hwdw_idx = schedule.column_index["hot_water_dishwasher"];
+    let hwcw = &schedule.columns[hwcw_idx];
+    let hwdw = &schedule.columns[hwdw_idx];
+    let step_s = f64::from(schedule.source_step_secs);
+    let rows_per_day = 86_400.0 / step_s;
+    let days = hwcw.len() as f64 / rows_per_day;
+    let washer_eflh = hwcw.iter().sum::<f64>() / days;
+    let dw_eflh = hwdw.iter().sum::<f64>() / days;
+    let washer_peak_kg_s = washer_mass_kg / (washer_eflh * 3600.0);
+    let dw_peak_kg_s = dw_mass_kg / (dw_eflh * 3600.0);
+
+    let derived = &schedule.columns[col_idx];
+    assert_eq!(derived.len(), hwcw.len());
+    for i in 0..derived.len() {
+        let expected = hwcw[i] * washer_peak_kg_s + hwdw[i] * dw_peak_kg_s;
+        assert!(
+            (derived[i] - expected).abs() <= 1e-12 + 1e-9 * expected.abs(),
+            "the indirect tank's appliance draw column row {i}: got {}, \
+             expected the peak flow times the column fractions {expected}",
+            derived[i]
+        );
+    }
+}
+
 fn appliance_draw_source_col(wh: &hares_io::EquipmentSpec) -> usize {
     let typed = wh.typed_config.as_ref().expect("WH has a typed config");
     let payload = match &typed.payload {
