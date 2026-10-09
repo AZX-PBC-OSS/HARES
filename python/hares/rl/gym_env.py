@@ -55,14 +55,13 @@ class GymDwellingConfig:
     """Configuration for a single dwelling used by the gym environment.
 
     Use ``sim_config`` to pass simulation-level settings (time resolution,
-    output verbosity, etc.); ``None`` builds the engine's default
-    ``SimulationConfig``.
+    output verbosity, etc.) instead of the old untyped ``kwargs`` dict.
     """
 
     hpxml: str
     schedule: str
     weather: str
-    defaults: str | None = None
+    defaults_path: str | None = None
     sim_config: SimulationConfig | None = None
 
 
@@ -473,17 +472,19 @@ class DwellingGymEnv(_GYM_BASE):
             action_space_config
         )
 
-        # One typed config: the whole SimulationConfig, defaults when the
-        # plan sets none, so every field reaches the dwelling by
-        # construction and the engine validates it.
+        hpxml_kwargs: dict[str, Any] = {}
+        if self._config.defaults_path is not None:
+            hpxml_kwargs["defaults_path"] = self._config.defaults_path
+        if self._config.sim_config is not None:
+            # The whole object, so every field reaches the dwelling by
+            # construction and the engine validates it.
+            hpxml_kwargs["config"] = self._config.sim_config
+
         self._dwelling = PyDwelling.from_hpxml(
             hpxml=self._config.hpxml,
             schedule=self._config.schedule,
             weather=self._config.weather,
-            config=self._config.sim_config
-            if self._config.sim_config is not None
-            else SimulationConfig(),
-            defaults=self._config.defaults,
+            **hpxml_kwargs,
         )
         self._dwelling.initialize()
         self._initial_snapshot = bytes(self._dwelling.save_state())

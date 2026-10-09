@@ -7,7 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from hares import DwellingConfig, SimulationConfig
-from hares import Fleet as PyFleet, SimulationConfig
+from hares import Fleet as PyFleet
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
@@ -206,7 +206,7 @@ def test_from_resstock_accepts_enum(tmp_path: Path) -> None:
     pq.write_table(table, metadata)
     _write_extracted_building(tmp_path, 12345)
 
-    from hares import ResStockVersion, SimulationConfig
+    from hares import ResStockVersion
 
     fleet = PyFleet.from_resstock(
         str(metadata),
@@ -349,7 +349,7 @@ def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
 @pytest.mark.slow
 def test_simulate_resolution_enum_works(tmp_path: Path) -> None:
     """Verify simulate(resolution=AggregationResolution.Hourly) works."""
-    from hares import AggregationResolution, SimulationConfig
+    from hares import AggregationResolution
 
     fleet = _build_simulatable_fleet(tmp_path, 1)
     results = fleet.simulate(resolution=AggregationResolution.Hourly)
@@ -487,7 +487,7 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
         hpxml=str(fixture_dir / "base.xml"),
         schedule=schedule,
         weather=weather,
-        defaults=str(HARES_DEFAULTS),
+        defaults_path=str(HARES_DEFAULTS),
         bldg_id=1,
     )
     config2 = DwellingConfig(
@@ -495,7 +495,7 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
         hpxml=str(fixture_dir / "base-battery.xml"),
         schedule=schedule,
         weather=weather,
-        defaults=str(HARES_DEFAULTS),
+        defaults_path=str(HARES_DEFAULTS),
         overrides=battery_overrides,
         bldg_id=2,
     )
