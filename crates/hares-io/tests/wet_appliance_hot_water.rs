@@ -1159,6 +1159,102 @@ fn occupied_bldg0527060() -> String {
     )
 }
 
+/// A building with two storage water heaters, each carrying the given
+/// declared `FractionDHWLoadServed` (`None` omits the element), the
+/// minimal structure the equipment resolve needs.
+fn two_water_heater_xml(fractions: [Option<&str>; 2]) -> String {
+    let wh = |id: &str, fraction: Option<&str>| -> String {
+        let fraction = fraction
+            .map(|f| format!("<FractionDHWLoadServed>{f}</FractionDHWLoadServed>"))
+            .unwrap_or_default();
+        format!(
+            r#"<WaterHeatingSystem>
+            <SystemIdentifier id="{id}"/>
+            <FuelType>electricity</FuelType>
+            <WaterHeaterType>storage water heater</WaterHeaterType>
+            <Location>living space</Location>
+            <TankVolume>40.0</TankVolume>
+            <HeatingCapacity>18767.0</HeatingCapacity>
+            <EnergyFactor>0.95</EnergyFactor>
+            {fraction}
+          </WaterHeatingSystem>"#
+        )
+    };
+    format!(
+        r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0"><Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingOccupancy><NumberofResidents>3</NumberofResidents></BuildingOccupancy>
+        <BuildingConstruction>
+          <ResidentialFacilityType>single-family detached</ResidentialFacilityType>
+          <NumberofBedrooms>3</NumberofBedrooms>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <WaterHeating>
+        {}{}
+      </WaterHeating>
+    </BuildingDetails>
+  </Building></HPXML>"#,
+        wh("wh1", fractions[0]),
+        wh("wh2", fractions[1]),
+    )
+}
+
+/// The multi-system apportionment is the schematron's sum rule
+/// (EPvalidator.sch:290): the declared FractionDHWLoadServed values sum
+/// to 1 (within [0.99, 1.01]) when any system declares one, or no system
+/// declares one, and a negative fraction is a validation error naming
+/// the system, not a value the resolve silently clamps to a zero draw.
+#[test]
+fn multi_water_heater_fractions_sum_to_one_and_cannot_be_negative() {
+    let defaults = repo_defaults();
+    let resolve = |xml: &str| -> std::result::Result<
+        Vec<hares_io::EquipmentSpec>,
+        Box<dyn std::error::Error>,
+    > {
+        let building = hares_io::hpxml::parse_hpxml_str(xml).expect("the xml parses");
+        resolve_equipment(&building, &defaults, None, &mut Vec::new()).map_err(Into::into)
+    };
+
+    // 0.6/0.6 sums to 1.2: the resolve fails naming the systems and the sum.
+    let err = resolve(&two_water_heater_xml([Some("0.6"), Some("0.6")]))
+        .expect_err("fractions summing to 1.2 must fail the resolve");
+    let message = err.to_string();
+    assert!(
+        message.contains("1.2") && message.contains("wh1") && message.contains("wh2"),
+        "the error must name the systems and the sum, got: {message}"
+    );
+
+    // 0.5/0.5 sums to 1: the file resolves.
+    let specs = resolve(&two_water_heater_xml([Some("0.5"), Some("0.5")]))
+        .expect("fractions summing to 1 must resolve");
+    let wh_specs: Vec<_> = specs
+        .iter()
+        .filter(|s| s.name.contains("Water Heater"))
+        .collect();
+    assert_eq!(wh_specs.len(), 2, "both water heaters resolve");
+
+    // The element on no system at all is the schematron's other escape:
+    // the absent value reads as 1.0 on every system.
+    resolve(&two_water_heater_xml([None, None]))
+        .expect("a file without any declared fraction resolves");
+
+    // A negative share is a validation error naming the system, not a
+    // silent clamp to a zero-draw system.
+    let err = resolve(&two_water_heater_xml([Some("-0.2"), Some("1.2")]))
+        .expect_err("a negative fraction must fail the resolve");
+    let message = err.to_string();
+    assert!(
+        message.contains("-0.2") && message.contains("wh1"),
+        "the error must name the system and the negative value, got: {message}"
+    );
+}
+
 fn generated_schedule_7d() -> hares_io::ScheduleTimeSeries {
     let start = chrono::DateTime::parse_from_rfc3339("2018-01-01T00:00:00-05:00").expect("start");
     let profiles =

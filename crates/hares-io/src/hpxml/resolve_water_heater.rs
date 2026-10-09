@@ -167,6 +167,9 @@ pub(super) fn resolve_water_heaters(
     let details = &building.details_xml;
     let (avg_water_draw_l_per_day, n_bedrooms) =
         parse_avg_water_draw_and_bedrooms(details, data_patches)?;
+    // The systems that declare a FractionDHWLoadServed, in file order, for
+    // the schematron's sum rule after the loop.
+    let mut declared_fractions: Vec<(String, f64)> = Vec::new();
 
     for wh in descendants_named(details, "WaterHeatingSystem") {
         let wh_type = child_text(wh, "WaterHeaterType").unwrap_or_default();
@@ -489,10 +492,31 @@ pub(super) fn resolve_water_heaters(
         // file without it has a single system serving everything, so the
         // absent value reads as 1.0. A share of zero draws nothing, the
         // same skip `if gpd_frac > 0` runs.
-        let fraction_dhw_load_served = child_f64(wh, "FractionDHWLoadServed").unwrap_or(1.0);
+        let fraction_dhw_load_served = match child_f64(wh, "FractionDHWLoadServed") {
+            // A negative share is a validation error, not a value the
+            // clamp silently turns into a zero-draw system: the schematron
+            // bounds the element and a mistyped negative would otherwise
+            // hide the mistype behind a max(0.0).
+            Some(raw) if raw < 0.0 || !raw.is_finite() => {
+                return Err(super::HpxmlError::InvalidField {
+                    path: "WaterHeatingSystem/FractionDHWLoadServed",
+                    system_kind: "Water Heating System",
+                    system_id: element_id(wh).unwrap_or_else(|| "unknown".to_string()),
+                    value_received: raw.to_string(),
+                    reason: "the share of the home's hot-water load the system serves \
+                             cannot be negative",
+                });
+            }
+            Some(raw) => {
+                declared_fractions
+                    .push((element_id(wh).unwrap_or_else(|| "unknown".to_string()), raw));
+                raw
+            }
+            None => 1.0,
+        };
         spec.parameters.insert(
             "fraction_dhw_load_served".to_string(),
-            json!(fraction_dhw_load_served.max(0.0)),
+            json!(fraction_dhw_load_served),
         );
         spec.parameters.insert(
             "draws_dhw_load".to_string(),
@@ -532,6 +556,29 @@ pub(super) fn resolve_water_heaters(
     // must carry a unique SystemIdentifier/@id so downstream code can
     // cross-reference individual water heaters without ambiguity.
     let wh_count = descendants_named(details, "WaterHeatingSystem").len();
+    // The schematron's sum rule (EPvalidator.sch:290) on the multi-system
+    // path: the declared FractionDHWLoadServed values sum to 1 (within
+    // [0.99, 1.01]) when any system declares one, or no system declares
+    // one. Shares outside the band apportion the hot-water load wrongly,
+    // so the resolve fails naming the systems and the sum.
+    if wh_count > 1 && !declared_fractions.is_empty() {
+        let sum: f64 = declared_fractions.iter().map(|(_, f)| *f).sum();
+        if !(0.99..=1.01).contains(&sum) {
+            let systems: Vec<String> = declared_fractions
+                .iter()
+                .map(|(id, f)| format!("{id}: {f}"))
+                .collect();
+            return Err(super::HpxmlError::Parse(
+                format!(
+                    "sum(FractionDHWLoadServed) across {wh_count} WaterHeatingSystem elements \
+                     is {sum} (systems: {}): the schematron expects the shares to sum to 1 \
+                     (within [0.99, 1.01]) or the element on no system at all",
+                    systems.join(", "),
+                )
+                .into(),
+            ));
+        }
+    }
     if wh_count > 1 {
         let wh_specs_start = specs.len().saturating_sub(wh_count);
         let ids: Vec<_> = specs[wh_specs_start..]
