@@ -106,6 +106,43 @@ passed 0 skipped (four acceptance tests new),
 pyright 0 errors, the eight golden fixtures bitwise across both
 `frame_golden` feature sets, `uv lock` regenerated.
 
+**State:** committed `04e3a481` (2026-10-09, branch `row/r34-py8`). The
+differential REDs proved at the parent before the unification: the Python
+constructor's `retain_batches` default true against the TOML path's false
+(the kwargs path hard-coded it too, so every `from_hpxml` caller ran with
+batches retained and read full `results()` frames from a default nothing
+declared); the TOML path's silent acceptance of an out-of-range site
+coordinate while the Python constructor rejected the same value with two
+different messages of its own; the synthetic `[simulation]` table's silent
+acceptance of unknown keys, an `[output]` table and an
+`initialization_duration_s` key; and `Dwelling::from_config` running no
+validation, so a directly constructed config with a misaligned duration
+built a dwelling. The unification: `SimulationConfig::validate()` (the
+five `from_toml` checks, the u32 seconds check, the site-location check
+with the binding's messages) runs on every construction path;
+`SimulationConfig::to_toml()` added; the REMOVED_KEYS rows landed with the
+one message per key shared by the `[simulation]` table's check and the
+Python keyword surfaces (pinned equal); the synthetic `[simulation]` table
+deserialises as `SimulationConfig` with `initialization_duration_s` a
+top-level dwelling key and the twin configs deleted, the ten bestest
+fixtures migrated; the Python surface is the newtype with the keyword-only
+constructor, the Rust serde default constants referenced by name in the
+signature, `duration`/`time_res` taking int seconds or a timedelta, the
+frozen `SiteLocationOverride` pyclass raising validate()'s message, the
+`**unexpected` removed-key lookups, getters, `validate()`, `to_toml()`,
+`from_toml()`; `PyDwellingConfig` wraps the Rust `DwellingConfig`; the
+mirror fields, conversions, Python-side default constants and
+`build_config`/`KNOWN_KWARGS` deleted, `from_hpxml` (Dwelling and
+DwellingBlueprint) taking the one config plus the dwelling-level keywords,
+so `duration_s=`, `time_res_s=`, the four site keywords and
+`output_to_parquet` raise their removed-key messages from this row;
+`SimulationPlan` builds `SimulationConfig` through the constructor, the
+gym's `config=sim_config` calls unchanged; the stale `sim_config` copy on
+`PyDwelling` read through the config instead. Gates: fmt, clippy
+--all-features --all-targets clean, nextest --all-features 7595/7595,
+pytest 1537 passed 0 failed 0 skipped, pyright 0, the eight goldens
+bitwise (compare-all 7 identical, -F dst identical), no golden moved.
+
 ## PY-8: one config type across TOML, synthetic TOML and Python
 
 **Kind:** initiative work (`dl-i08-architecture.config`).
