@@ -196,10 +196,16 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     let mut meta = parse_location_header(location_line)?;
     let records_per_hour = ensure_hourly_data_period(data_period_line)?;
     // A sub-hourly file (N records per hour) is read in order at its own
-    // interval: source step 3600/N, the same half-interval label as the
-    // hourly convention, scaled.
+    // interval: source step 3600/N. The midpoint lag stays at the hourly
+    // convention's fixed 30 minutes: OCHRE's set_annual_index shifts every
+    // stamp by a fixed timedelta(minutes=30) whatever the file's resolution
+    // (vendors/OCHRE/ochre/utils/schedule.py:169, applied at :110), and its
+    // weather step's resample().ffill() (:555) carries the last stamp at or
+    // before each step, so a record's value enters the step at coverage
+    // start plus 30 minutes. Scaling the lag to 1800/N made the held file's
+    // read switch each hour's value about 29.5 minutes early and put the
+    // weather phase ahead of OCHRE's by the same amount.
     meta.source_step_secs = 3600 / records_per_hour;
-    meta.midpoint_offset_secs = 1800 / records_per_hour;
     let epw_ground_temps = parse_ground_temperatures(ground_temp_line);
 
     let mut records = Vec::new();
@@ -1457,9 +1463,15 @@ mod tests {
     fn reads_a_held_subhourly_file_at_its_own_interval() {
         // The Python adapter's OCHRE hold: each hourly record repeated four
         // times (900 s interval), minute field at each sub-interval's end.
-        // The reader walks the records in order: source step 900 s, the
-        // half-interval offset 450 s, and the sub-hourly values pass through
-        // unchanged.
+        // The reader walks the records in order: source step 900 s. The
+        // midpoint lag stays the hourly convention's fixed 30 minutes
+        // (1800 s): OCHRE shifts every stamp by a fixed timedelta
+        // (minutes=30) whatever the file's resolution
+        // (ochre/utils/schedule.py:169, applied at :110), and its
+        // resample().ffill() (:555) carries the last stamp at or before
+        // each step, so a record's value enters the step at coverage start
+        // plus 30 minutes. Scaling the lag by 1/N switches each held
+        // hour's value about 29.5 minutes early.
         let epw = build_synthetic_epw(8760, |row, fields| {
             if row % 2 == 0 {
                 fields[6] = "12.5".to_string();
@@ -1470,7 +1482,7 @@ mod tests {
         let held = hold_epw_records(&epw, 4);
         let parsed = parse_epw_str(&held).expect("the held file parses");
         assert_eq!(parsed.meta.source_step_secs, 900);
-        assert_eq!(parsed.meta.midpoint_offset_secs, 450);
+        assert_eq!(parsed.meta.midpoint_offset_secs, 1800);
         assert_eq!(parsed.len(), 8760 * 4);
         // Each hour's four records carry the hour's value, in source order.
         for hour in 0..12 {

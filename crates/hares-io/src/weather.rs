@@ -295,10 +295,13 @@ pub struct WeatherMeta {
     /// Native timestep of the source file in seconds (e.g. 3600 for EPW, 300 for 5-min PSM3).
     pub source_step_secs: u32,
     /// Seconds to subtract from simulation time when indexing into the
-    /// resampled weather array. For EPW (hour-ending convention), this is
-    /// `source_step_secs / 2` (1800s for hourly) so that PCHIP knot positions
-    /// align with period midpoints, matching OCHRE/pvlib's +30min convention.
-    /// For hour-beginning formats (PSM3), this is 0.
+    /// resampled weather array. For EPW (hour-ending convention) this is
+    /// the fixed 30-minute lag, 1800 s at every records-per-hour: OCHRE
+    /// shifts each record's stamp by a fixed `timedelta(minutes=30)`
+    /// whatever the file's interval (ochre/utils/schedule.py:169, applied
+    /// at :110) and its `resample().ffill()` (:555) then carries the last
+    /// stamp at or before each step, so the lag does not scale with the
+    /// source's resolution. For hour-beginning formats (PSM3), this is 0.
     pub midpoint_offset_secs: u32,
     /// Whether this weather format embeds its own site location (latitude,
     /// longitude, timezone) in its header. EPW, PSM3, and TMY3 do (`true`);

@@ -11,7 +11,13 @@ Each hourly record is repeated ``3600 / time_res_s`` times with the minute
 field set to the end of its sub-interval (EnergyPlus's sub-hourly EPW
 convention). The engine's EPW reader reads such a file in record order at
 its own interval; a file whose interval equals the run's step resamples at
-factor 1 (a no-op).
+factor 1 (a no-op). The read keeps OCHRE's phase: OCHRE stamps every record
+at its coverage start plus a fixed 30 minutes whatever the file's interval
+(``set_annual_index``, ochre/utils/schedule.py:169 and :110) and its step
+carries the last stamp at or before it (``resample().ffill()``,
+schedule.py:555), so the reader holds the hourly convention's fixed
+30-minute lag over the held file too, and each hour's value switches at
+coverage start plus 30 minutes on both sides.
 
 Use from Python as ``hold_weather(weather, time_res_s)`` and from the shell
 as ``python -m hares.adapters.ochre hold <weather> <time_res_s> [output]``.
@@ -56,6 +62,11 @@ def hold_weather(weather: str | Path, time_res_s: int) -> str:
     ``3600 / time_res_s`` records per hour, and each hourly record written
     once per sub-interval with its minute field at the sub-interval's end.
     Every other field of every record is unchanged.
+
+    The held file reads at OCHRE's phase: the engine's EPW reader keeps the
+    hourly convention's fixed 30-minute lag over the held records, so each
+    hour's value is in effect from coverage start plus 30 minutes, the same
+    switch OCHRE's midpoint-stamped ``resample().ffill()`` step makes.
 
     The step must divide the hour in whole minutes (for instance 3600, 900,
     300, 60), because the engine's EPW reader accepts a held file's record

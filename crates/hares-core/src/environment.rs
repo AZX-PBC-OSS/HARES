@@ -2278,6 +2278,95 @@ mod tests {
         );
     }
 
+    /// The held weather file's phase at a step boundary. OCHRE's step
+    /// carries, at time T, the hourly record whose period contains T minus
+    /// the fixed 30-minute shift: `set_annual_index` moves every stamp by a
+    /// fixed `timedelta(minutes=30)` whatever the file's resolution
+    /// (vendors/OCHRE/ochre/utils/schedule.py:169, applied at :110), and the
+    /// weather step's `resample().ffill()` (:555) carries the last stamp at
+    /// or before T. The EPW reader must give the adapter's held file the
+    /// same lag, so the held read switches each hour's value at coverage
+    /// start plus 30 minutes, exactly when OCHRE's step switches.
+    #[test]
+    fn held_weather_reads_the_reference_phase_at_a_step_boundary() {
+        // A held 900 s file: each hourly record repeated four times, dry
+        // bulb 10 + the record's hour, so every hour is distinguishable.
+        let mut lines = vec![
+            "LOCATION,Test Site,CO,USA,TMY3,999999,39.74,-104.99,0.0,1609.3".to_string(),
+            "DESIGN CONDITIONS,0".to_string(),
+            "GROUND TEMPERATURES,0".to_string(),
+            "TYPICAL/EXTREME PERIODS,0".to_string(),
+            "HOLIDAYS/DAYLIGHT SAVINGS,Yes,0,0,0".to_string(),
+            "COMMENTS 1,synthetic".to_string(),
+            "COMMENTS 2,synthetic".to_string(),
+            "DATA PERIODS,1,4,Data,Sunday, 1/ 1,12/31".to_string(),
+        ];
+        let jan1 = chrono::NaiveDate::from_ymd_opt(2021, 1, 1).expect("date");
+        for day_index in 0..365usize {
+            let date = jan1 + Duration::days(day_index as i64);
+            for hod in 1..=24u32 {
+                let hour = day_index * 24 + (hod as usize - 1);
+                let dry_bulb = 10.0 + (hour % 24) as f64;
+                for sub in 0..4usize {
+                    lines.push(format!(
+                        "2021,{},{},{},{}.0,0,{dry_bulb},10.0,50,101325,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+                        date.month(),
+                        date.day(),
+                        hod,
+                        (sub + 1) * 15
+                    ));
+                }
+            }
+        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("held_900s.epw");
+        std::fs::write(&path, lines.join("\n") + "\n").expect("write held EPW");
+        let weather = hares_io::epw::parse_epw(&path).expect("the held file parses");
+        assert_eq!(weather.meta.source_step_secs, 900);
+        assert_eq!(weather.meta.midpoint_offset_secs, 1800);
+
+        let start = utc_offset().with_ymd_and_hms(2021, 1, 1, 0, 0, 0).unwrap();
+        let mut manager = EnvironmentManager::new(
+            weather,
+            schedule_series(),
+            &building(Some(21.0)),
+            StdDuration::from_secs(900),
+            start,
+            None,
+        )
+        .expect("manager");
+
+        let mut clock = SimClock::new(start, Duration::seconds(900), Duration::hours(4));
+        // Step wall times and the record OCHRE's step has in effect: the
+        // hour containing wall time minus 30 minutes. 00:30 and 01:00 sit
+        // inside hour 1's hold on both sides; 01:15, 02:15 and 03:15 are
+        // the first steps where a scaled lag would have moved on.
+        let expected_by_step: [(u64, f64); 5] = [
+            (2, 10.0),  // 00:30: hour 1 (rows 0..3)
+            (4, 10.0),  // 01:00: hour 1 still
+            (5, 10.0),  // 01:15: hour 1; the scaled lag reads hour 2 here
+            (9, 11.0),  // 02:15: hour 2; the scaled lag reads hour 3 here
+            (13, 12.0), // 03:15: hour 3; the scaled lag reads hour 4 here
+        ];
+        for step in 0..16u64 {
+            let env = manager.update(&clock, &[]).unwrap();
+            for &(expected_step, expected_temp) in &expected_by_step {
+                if step == expected_step {
+                    assert!(
+                        (env.weather.outdoor_temp_c - expected_temp).abs() < 1e-9,
+                        "step {step} (wall {:?}): outdoor {} must be the reference \
+                         convention's value {expected_temp}",
+                        clock.current_time(),
+                        env.weather.outdoor_temp_c
+                    );
+                }
+            }
+            if clock.next().is_none() {
+                break;
+            }
+        }
+    }
+
     /// compute_annual_offset: leap year (2024) -- May 5 noon.
     /// Feb has 29 days so May 5 = ordinal 126, ordinal0 = 125.
     /// (125*86400 + 12*3600) / 3600 = 3012.
