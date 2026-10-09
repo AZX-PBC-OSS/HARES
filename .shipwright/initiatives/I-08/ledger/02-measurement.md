@@ -2189,3 +2189,19 @@ target. The engine worktrees `97e96368` and `f35eef8a` remain under
 `.workstrees/`; the old-consumer checkout used for the pre-rename leg
 is `/tmp/opencode/consumer-base` (a worktree of the consumer at
 `78568b5`).
+
+Correction, 2026-10-09 (the independent review's required finding). As
+committed, the consumer tree at `70ebbfc` does not resolve its engine
+extra: the submodule pin it carries, `5ece4060`, predates the package
+rename, and that pin's `pyproject.toml` still names the old package, so
+`uv sync --extra engine` fails at the committed state with "Package
+metadata name ochre-next does not match given name hares-py". The
+committed tree resolves its engine extra only once the pin bump lands,
+and the pin bump follows the engine folds (the engine rows on this
+branch fold first); it is the row's closing step. Every gate recorded
+above therefore ran against the gate engine `b2419945` by editable
+install of that checkout, not against the pinned tree. The independent
+review re-measured the engine at the gate engine, by editable install:
+`cargo nextest run --workspace --all-features` 7799 passed (7718 in
+the default profile), `uv run --no-sync pytest tests/python` 1520
+passed.
