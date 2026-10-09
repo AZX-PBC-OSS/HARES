@@ -263,6 +263,57 @@ variable's `Unit`.
 
 **Dependencies:** OR-5, OR-11, M-2 (golden fixtures).
 
+**State:** committed `0c1e072b` (branch `row/r36-or1`, one commit). The
+declarations: `hares-types/src/output.rs` (new) holds `Unit` (one variant
+per distinct unit of the census, `symbol()` returning today's column
+spelling; `"C"`/`"°C"`, `"fraction"`/`"ratio"`, `"code"`/`"index"` merged;
+`Unit::Enum` kept its own variant because the fleet averages `enum`
+columns and sums `code` ones), `VariableKind` with `AcrossHomes` and
+`EnumLabels`, `Aggregation`, `Sampling` and the new typed
+`TelemetryField`; a const constructor vocabulary (power, temperature,
+ratio, state, code, stock, constant, running total, step count, timer)
+makes a declaration read as its classification, and all 431 equipment
+declaration sites moved to it. `Actor::output_variables` is a required
+trait method: the seven built-in actors declare their keys, the test and
+Python actors declare none, and `Telemetry::from_fields` builds and seals
+every actor's telemetry (an `insert` of a new key latches like a `set` of
+one; the dwelling's step-end check fails the step with
+`InvariantViolation` naming the actor and the key; registration rejects
+an unsealed map or a declared/telemetry key disagreement). The catalogue
+(`hares-io/src/output/catalogue.rs`, new) merges the dwelling-level
+static table, the static per-capability table (the `Mode (-)` column's
+labels are `EnumLabels::Static`), the static per-zone-template table,
+each equipment's declarations and each actor's, in schema-block order; a
+duplicate name or a kind-contradicting aggregation is an assembly error.
+The schema derives from the catalogue (`extract_unit_from_name` and
+`field_with_unit` deleted; field metadata `unit` is `Unit::symbol()`),
+`extend_schema_with_actor_columns` is deleted (the catalogue appends the
+actor columns), and `Dwelling::catalogue()` is readable from build on,
+before the first step. The bug-compatible column set calls the old
+classifiers from the one expansion function in the catalogue builder.
+
+The pins were written from the pre-catalogue pipeline before any code
+change: `crates/hares-core/tests/fixtures/schema/v{0..8}.json` (the
+all-classes fixture: one spec per registered class, PV
+instance-qualified as `"PV #1"`, plus `"Television"` and `"Pool Heater"`
+pinning the classifier outcomes, and one of each built-in actor) and
+`kinds.json` (944 variables, one entry per line: unit, kind with
+across-homes and labels, aggregation, sampling, nullability), reviewed
+with this commit. The schema pin holds in both profiles (the
+observe-gated columns are tagged in the pin and filtered by the active
+feature set). The fleet's unit rules are pinned unchanged under the
+canonical symbols (`fleet_unit_rules_unchanged_by_canonical_symbols`).
+
+Gates: nextest --all-features 7602/7602, pytest 1523 passed / 0 failed,
+pyright 0 errors, fmt and clippy `-D warnings` clean (default, dst,
+observe, all-features), goldens bitwise identical through
+`frame_golden compare-all` in both profiles (no movement). The field
+metadata change, listed in the commit body: the EV `Connection State (-)`
+and `Charging Level (-)` columns carry `unit: "code"` (the declarations'
+canonical symbol) where the name-parsed metadata carried `"-"`, and
+`Natural Ventilation Cd` carries `unit: ""` where it carried no unit key;
+no column name, Arrow type, nullability or order moved.
+
 ## OR-2: the row plan replaces per-step column lookup
 
 **Kind:** initiative work.
