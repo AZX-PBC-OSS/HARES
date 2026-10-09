@@ -36,7 +36,7 @@ from .gym_env import (
 )
 
 if TYPE_CHECKING:
-    from ochre_next._hares_types import StepResult
+    from hares._hares_types import StepResult
 
 __all__ = [
     "RewardContext",

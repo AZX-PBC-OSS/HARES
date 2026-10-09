@@ -859,6 +859,16 @@ def _fetch_weather_for_station(
     return weather_dest
 
 
+class ResStockMetadataError(ValueError):
+    """A ResStock metadata parquet cannot answer a sample-weight lookup.
+
+    Raised when the parquet has no recognisable weight column or the
+    requested building is absent from it, naming the parquet and the columns
+    searched or the missing building: a caller that asked for the lookup
+    asked for this error, not for a default.
+    """
+
+
 def _weight_column(df: pl.DataFrame) -> str | None:
     """Return the ResStock sample-weight column name, or None if absent.
 
@@ -869,12 +879,22 @@ def _weight_column(df: pl.DataFrame) -> str | None:
     return next((c for c in df.columns if "sample_weight" in c.lower()), None)
 
 
-def _lookup_sample_weight(metadata_path: str | Path, bldg_id: int) -> float | None:
-    """Return *bldg_id*'s sample weight from a metadata parquet, or None.
+def _missing_weight_column_error(metadata_path: str | Path, df: pl.DataFrame) -> ResStockMetadataError:
+    """The error for a metadata parquet with no weight column: it names the
+    parquet and the columns searched."""
+    return ResStockMetadataError(
+        f"ResStock metadata parquet {metadata_path} has no sample-weight "
+        f"column (searched columns: {df.columns})"
+    )
 
-    Returns None when the parquet has no recognisable weight column or the
-    building is not present in it, so the caller can decide how to handle a
-    missing weight. Uses the same column-detection logic as the fleet path so
+
+def _lookup_sample_weight(metadata_path: str | Path, bldg_id: int) -> float:
+    """Return *bldg_id*'s sample weight from a metadata parquet.
+
+    Raises ``ResStockMetadataError`` when the parquet has no recognisable
+    weight column or the building is not present in it: a caller that passed
+    *metadata_path* asked for the lookup, so a failed lookup is an error, not
+    a default. Uses the same column-detection logic as the fleet path so
     the single-building and fleet weights are guaranteed to agree.
     """
     import polars as pl
@@ -882,11 +902,13 @@ def _lookup_sample_weight(metadata_path: str | Path, bldg_id: int) -> float | No
     df = pl.read_parquet(metadata_path)
     weight_col = _weight_column(df)
     if weight_col is None:
-        return None
+        raise _missing_weight_column_error(metadata_path, df)
     id_col = _bldg_id_col(df)
     matched = df.filter(pl.col(id_col) == bldg_id)
     if matched.height == 0:
-        return None
+        raise ResStockMetadataError(
+            f"building {bldg_id} not found in ResStock metadata parquet {metadata_path}"
+        )
     return float(matched[weight_col][0])
 
 
@@ -897,26 +919,17 @@ def _resolve_sample_weight(
 ) -> float:
     """Resolve the sample weight for a single building.
 
-    Precedence: an explicit *sample_weight* wins over *metadata_path*; a
-    metadata lookup wins over the default. When neither yields a weight the
-    value defaults to 1.0 and a ``UserWarning`` is emitted, because an
-    unweighted result cannot be correctly aggregated to population level.
+    Precedence: an explicit *sample_weight* wins over *metadata_path*. With
+    *metadata_path* the lookup either yields the weight or raises
+    ``ResStockMetadataError`` naming what is missing, because the caller
+    asked for the lookup. When neither is given the value defaults to 1.0
+    and a ``UserWarning`` is emitted, because an unweighted result cannot be
+    correctly aggregated to population level.
     """
     if sample_weight is not None:
         weight = sample_weight
     elif metadata_path is not None:
-        looked_up = _lookup_sample_weight(metadata_path, bldg_id)
-        if looked_up is None:
-            warnings.warn(
-                f"Building {bldg_id} not found in metadata {metadata_path!r}; "
-                f"sample_weight defaults to 1.0. Population-level aggregation of "
-                f"this building will not be correctly weighted.",
-                UserWarning,
-                stacklevel=3,
-            )
-            weight = 1.0
-        else:
-            weight = looked_up
+        weight = _lookup_sample_weight(metadata_path, bldg_id)
     else:
         warnings.warn(
             "No metadata_path or sample_weight provided; sample_weight defaults "
@@ -1066,7 +1079,10 @@ def _fetch_fleet(
             upgrade_id=upgrade_id,
             cache_dir=base_cache,
             weather_format=weather_format,
-            sample_weight=weights.get(bid, 1.0),
+            # Every requested id is checked against the metadata before this
+            # fetch starts, so the weight is always present: an index read,
+            # never a default.
+            sample_weight=weights[bid],
             _checksum_failures=checksum_failures[bid],
         )
 
@@ -1140,24 +1156,34 @@ def fetch_resstock_fleet(
 
     df = pl.read_parquet(metadata_path)
 
+    weight_col = _weight_column(df)
+    if weight_col is None:
+        raise _missing_weight_column_error(metadata_path, df)
+
+    id_col = _bldg_id_col(df)
+
+    if bldg_ids is not None:
+        ids_in_metadata = {int(i) for i in df[id_col].to_list()}
+        absent = [bid for bid in bldg_ids if bid not in ids_in_metadata]
+        if absent:
+            raise ResStockMetadataError(
+                f"buildings {absent} not found in ResStock metadata parquet "
+                f"{metadata_path}"
+            )
+
     if filter:
         for col, val in filter.items():
             df = df.filter(pl.col(col) == val)
 
-    weight_col = _weight_column(df)
-
     if bldg_ids is not None:
-        id_col = _bldg_id_col(df)
         df = df.filter(pl.col(id_col).is_in(bldg_ids))
     elif n_buildings is not None:
         df = df.sample(n=min(n_buildings, len(df)), shuffle=True, seed=0)
 
-    id_col = _bldg_id_col(df)
     selected_ids: list[int] = df[id_col].to_list()
     weights: dict[int, float] = {}
-    if weight_col is not None:
-        for bid, w in zip(df[id_col].to_list(), df[weight_col].to_list()):
-            weights[int(bid)] = float(w)
+    for bid, w in zip(df[id_col].to_list(), df[weight_col].to_list()):
+        weights[int(bid)] = float(w)
 
     base_cache = cache_dir if cache_dir is not None else _default_cache_dir()
 
