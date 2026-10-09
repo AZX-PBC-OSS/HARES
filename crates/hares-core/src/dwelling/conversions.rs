@@ -1092,16 +1092,22 @@ pub(crate) fn validate_battery_controls(
             continue;
         }
         let merged = merged_equipment_config(spec, overrides)?;
-        let battery: hares_equipment::BatteryConfig = merged.typed()?;
-        if battery.bms_mode.is_some() {
-            continue;
-        }
         let display = spec
             .instance_name
             .as_deref()
             .unwrap_or(&typed.name)
             .to_string();
         let system = spec.system_id.as_deref().unwrap_or("unknown");
+        let battery: hares_equipment::BatteryConfig = merged.typed().map_err(|err| {
+            HaresError::Equipment(format!(
+                "battery '{display}' (SystemIdentifier '{system}', input '{}'): \
+                 its typed config cannot be read: {err}",
+                hpxml_path.display()
+            ))
+        })?;
+        if battery.bms_mode.is_some() {
+            continue;
+        }
         return Err(HaresError::Equipment(format!(
             "battery '{display}' (SystemIdentifier '{system}', input '{}'): \
              no control is declared for it and HPXML has none to resolve; \

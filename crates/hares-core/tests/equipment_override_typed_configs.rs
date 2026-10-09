@@ -391,3 +391,63 @@ fn bms_observed_soc(dwelling: &Dwelling) -> f64 {
         .copied()
         .unwrap_or(0.0)
 }
+
+/// A battery whose typed payload cannot be read fails the build naming the
+/// battery, its SystemIdentifier and the input document: the control check
+/// reads every battery's merged config before any equipment is constructed,
+/// and a payload the schema rejects must surface with the same context the
+/// missing-control error carries, not an anonymous deserialization failure.
+#[test]
+fn unreadable_battery_config_fails_the_build_naming_the_battery() {
+    let mut blueprint = hares_core::dwelling::DwellingBlueprint::from_config(config(
+        &fixture("base.xml"),
+        None,
+        10,
+    ))
+    .expect("the base dwelling must plan");
+    blueprint
+        .add_equipment_spec(hares_io::EquipmentSpec {
+            name: "Battery".to_string(),
+            instance_name: Some("House Battery".to_string()),
+            fuel_type: hares_types::FuelType::Electric,
+            parameters: serde_json::Map::new(),
+            typed_overrides: serde_json::Map::new(),
+            zip_params: None,
+            typed_config: Some(hares_equipment::EquipmentConfig::with_payload(
+                "House Battery".to_string(),
+                "Battery".to_string(),
+                hares_equipment::ConfigPayload::Typed {
+                    type_name: "Battery".to_string(),
+                    version: 1,
+                    data: json!({ "capacity_kwh": "not a number" }),
+                },
+            )),
+            system_id: Some("BAT-1".to_string()),
+            related_hvac_idref: None,
+            primary_role: None,
+        })
+        .expect("add the battery spec");
+
+    let err = blueprint
+        .build()
+        .err()
+        .expect("an unreadable battery config must fail the build");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("House Battery"),
+        "the error must name the battery, got: {msg}"
+    );
+    assert!(
+        msg.contains("BAT-1"),
+        "the error must name the battery's SystemIdentifier, got: {msg}"
+    );
+    assert!(
+        msg.contains("base.xml"),
+        "the error must name the input document, got: {msg}"
+    );
+    assert!(
+        msg.contains("typed config"),
+        "the error must carry the deserialization cause, got: {msg}"
+    );
+}

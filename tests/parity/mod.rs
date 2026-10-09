@@ -985,6 +985,49 @@ fn integrate_kw_series(series: &[f64]) -> f64 {
 }
 
 #[cfg(test)]
+mod dwelling_overrides_tests {
+    use std::fs;
+
+    use super::{dwelling_overrides, parse_fixture_config};
+
+    /// The collision is pinned: a fixture whose `[overrides]` table names a
+    /// key the `[ev]` section's derived override also claims fails authoring
+    /// with the key and both sources named. Dropping the collision branch
+    /// in `dwelling_overrides` fails this test.
+    #[test]
+    fn overrides_and_ev_tables_claiming_one_key_fail_authoring() {
+        let config = parse_fixture_config(
+            "[overrides]\n\
+             \"Electric Vehicle\" = { \"heater_power_w\" = 0.0 }\n\
+             \n\
+             [ev]\n\
+             initial_soc = 0.5\n",
+        )
+        .expect("the fixture config must parse");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let building_xml = dir.path().join("building.xml");
+        fs::write(
+            &building_xml,
+            "<Building><PlugLoad><PlugLoadType>electric vehicle \
+             charging</PlugLoadType></PlugLoad></Building>",
+        )
+        .expect("the fixture building must write");
+
+        let err = dwelling_overrides(&config, &building_xml)
+            .expect_err("a key both tables claim is a fixture-authoring error");
+
+        assert!(
+            err.contains("Electric Vehicle"),
+            "the error must name the colliding key, got: {err}"
+        );
+        assert!(
+            err.contains("[overrides]") && err.contains("[ev]"),
+            "the error must name both override sources, got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod hvac_prefix_matcher_tests {
     use super::{annual_energy_for_prefixes, matches_hvac_prefix};
     use std::collections::BTreeMap;
