@@ -567,13 +567,7 @@ fn period_flags_are_half_open_and_wrap_the_year_end() {
 #[test]
 fn leap_year_schedule_flags_mar_1_and_dec_31_on_their_own_days() {
     // Hourly rows for five days of the 2024 leap year.
-    let days = [
-        (2, 28),
-        (2, 29),
-        (3, 1),
-        (12, 30),
-        (12, 31),
-    ];
+    let days = [(2, 28), (2, 29), (3, 1), (12, 30), (12, 31)];
     let mut timestamps = Vec::new();
     for (month, day) in days {
         for hour in 0..24 {
