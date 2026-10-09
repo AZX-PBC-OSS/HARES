@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 from abc import abstractmethod
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from typing import Any
 
 import polars as pl
@@ -2248,37 +2249,36 @@ def required_main_panel_ampacity(
 class SimulationConfig:
     def __init__(
         self,
-        start_time: str | None = ...,
-        duration_s: int | None = ...,
-        time_res_s: int | None = ...,
-        output_verbosity: int | None = ...,
+        *,
+        start_time: str,
+        duration: int | timedelta,
+        time_res: int | timedelta = ...,
+        output_verbosity: int = ...,
         output_path: str | None = ...,
-        write_output: bool | None = ...,
-        output_to_parquet: bool | None = ...,
-        output_chunk_size: int | None = ...,
-        master_seed: int | None = ...,
-        civil_timezone: str | None = ...,
+        write_output: bool = ...,
+        output_format: str = ...,
+        retain_batches: bool = ...,
+        rotation: str = ...,
+        output_chunk_size: int = ...,
         setpoint_deadband_c: float | None = ...,
-        latitude: float | None = ...,
-        longitude: float | None = ...,
-        elevation_m: float | None = ...,
-        utc_offset_h: float | None = ...,
-        retain_batches: bool | None = ...,
-        rotation: str | None = ...,
-        max_consecutive_step_failures: int | None = ...,
+        master_seed: int = ...,
+        civil_timezone: str | None = ...,
+        site_location: SiteLocationOverride | None = ...,
+        max_consecutive_step_failures: int = ...,
+        **unexpected: object,
     ) -> None: ...
     @property
     def start_time(self) -> str: ...
     @start_time.setter
     def start_time(self, value: str) -> None: ...
     @property
-    def duration_s(self) -> int: ...
-    @duration_s.setter
-    def duration_s(self, value: int) -> None: ...
+    def duration(self) -> int: ...
+    @duration.setter
+    def duration(self, value: int | timedelta) -> None: ...
     @property
-    def time_res_s(self) -> int: ...
-    @time_res_s.setter
-    def time_res_s(self, value: int) -> None: ...
+    def time_res(self) -> int: ...
+    @time_res.setter
+    def time_res(self, value: int | timedelta) -> None: ...
     @property
     def output_verbosity(self) -> int: ...
     @output_verbosity.setter
@@ -2292,9 +2292,9 @@ class SimulationConfig:
     @write_output.setter
     def write_output(self, value: bool) -> None: ...
     @property
-    def output_to_parquet(self) -> bool: ...
-    @output_to_parquet.setter
-    def output_to_parquet(self, value: bool) -> None: ...
+    def output_format(self) -> str: ...
+    @output_format.setter
+    def output_format(self, value: str) -> None: ...
     @property
     def output_chunk_size(self) -> int: ...
     @output_chunk_size.setter
@@ -2312,33 +2312,44 @@ class SimulationConfig:
     @civil_timezone.setter
     def civil_timezone(self, value: str | None) -> None: ...
     @property
-    def latitude(self) -> float | None: ...
-    @latitude.setter
-    def latitude(self, value: float | None) -> None: ...
-    @property
-    def longitude(self) -> float | None: ...
-    @longitude.setter
-    def longitude(self, value: float | None) -> None: ...
-    @property
-    def elevation_m(self) -> float | None: ...
-    @elevation_m.setter
-    def elevation_m(self, value: float | None) -> None: ...
-    @property
-    def utc_offset_h(self) -> float | None: ...
-    @utc_offset_h.setter
-    def utc_offset_h(self, value: float | None) -> None: ...
+    def site_location(self) -> SiteLocationOverride: ...
+    @site_location.setter
+    def site_location(self, value: SiteLocationOverride) -> None: ...
     @property
     def retain_batches(self) -> bool: ...
     @retain_batches.setter
     def retain_batches(self, value: bool) -> None: ...
     @property
-    def rotation(self) -> str | None: ...
+    def rotation(self) -> str: ...
     @rotation.setter
-    def rotation(self, value: str | None) -> None: ...
+    def rotation(self, value: str) -> None: ...
     @property
     def max_consecutive_step_failures(self) -> int: ...
     @max_consecutive_step_failures.setter
     def max_consecutive_step_failures(self, value: int) -> None: ...
+    def validate(self) -> None: ...
+    def to_toml(self) -> str: ...
+    @classmethod
+    def from_toml(cls, s: str) -> SimulationConfig: ...
+    def __repr__(self) -> str: ...
+
+class SiteLocationOverride:
+    def __init__(
+        self,
+        *,
+        latitude_deg: float | None = None,
+        longitude_deg: float | None = None,
+        elevation_m: float | None = None,
+        utc_offset_h: float | None = None,
+    ) -> None: ...
+    @property
+    def latitude_deg(self) -> float | None: ...
+    @property
+    def longitude_deg(self) -> float | None: ...
+    @property
+    def elevation_m(self) -> float | None: ...
+    @property
+    def utc_offset_h(self) -> float | None: ...
     def __repr__(self) -> str: ...
 
 class DwellingConfig:
@@ -2347,11 +2358,13 @@ class DwellingConfig:
         hpxml: str,
         schedule: str | None,
         weather: str,
-        config: SimulationConfig | None = ...,
-        defaults_path: str | None = ...,
-        bldg_id: int | None = ...,
+        config: SimulationConfig,
+        *,
+        bldg_id: int = ...,
         initialization_duration: int | None = ...,
+        defaults_path: str | None = ...,
         overrides: dict[str, Any] | None = ...,
+        **unexpected: object,
     ) -> None: ...
     @property
     def hpxml(self) -> str: ...
@@ -2360,7 +2373,7 @@ class DwellingConfig:
     @property
     def weather(self) -> str: ...
     @property
-    def config(self) -> SimulationConfig | None: ...
+    def config(self) -> SimulationConfig: ...
     @property
     def defaults_path(self) -> str | None: ...
     @property
@@ -2626,23 +2639,13 @@ class DwellingBlueprint:
         hpxml: str,
         schedule: str | None,
         weather: str,
+        config: SimulationConfig,
         *,
-        start_time: str | datetime.datetime | None = ...,
-        duration_s: int | float | datetime.timedelta = ...,
-        time_res_s: int | float | datetime.timedelta = ...,
-        defaults_path: str | None = ...,
         bldg_id: int = ...,
-        master_seed: int = ...,
-        output_verbosity: int = ...,
-        output_path: str | None = ...,
-        write_output: bool = ...,
-        output_to_parquet: bool = ...,
-        output_chunk_size: int = ...,
-        civil_timezone: str | None = ...,
-        setpoint_deadband_c: float | None = ...,
-        initialization_duration: int | float | datetime.timedelta | None = ...,
+        initialization_duration: int | None = ...,
+        defaults_path: str | None = ...,
         overrides: dict[str, Any] | None = ...,
-        config: SimulationConfig | None = ...,
+        **unexpected: object,
     ) -> DwellingBlueprint: ...
     def equipment_names(self) -> list[str]: ...
     def remove_equipment(self, name: str) -> None: ...
@@ -2667,23 +2670,13 @@ class Dwelling:
         hpxml: str,
         schedule: str | None,
         weather: str,
+        config: SimulationConfig,
         *,
-        start_time: str | datetime.datetime | None = ...,
-        duration_s: int | float | datetime.timedelta = ...,
-        time_res_s: int | float | datetime.timedelta = ...,
-        defaults_path: str | None = ...,
         bldg_id: int = ...,
-        master_seed: int = ...,
-        output_verbosity: int = ...,
-        output_path: str | None = ...,
-        write_output: bool = ...,
-        output_to_parquet: bool = ...,
-        output_chunk_size: int = ...,
-        civil_timezone: str | None = ...,
-        setpoint_deadband_c: float | None = ...,
-        initialization_duration: int | float | datetime.timedelta | None = ...,
+        initialization_duration: int | None = ...,
+        defaults_path: str | None = ...,
         overrides: dict[str, Any] | None = ...,
-        config: SimulationConfig | None = ...,
+        **unexpected: object,
     ) -> Dwelling: ...
     def initialize(self) -> None: ...
     def timesteps(self) -> TimestepsIter: ...

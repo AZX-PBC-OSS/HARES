@@ -62,9 +62,13 @@ fn write_synthetic_toml(path: &Path, spec: SyntheticTomlSpec<'_>) {
 
 [simulation]
 start_time = "{start_time}"
-time_res_s = 60
-duration_s = {duration_s}
-
+time_res = 60
+duration = {duration_s}
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = false
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -89,13 +93,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#
     );
     fs::write(path, content).expect("failed to write synthetic TOML");
@@ -409,8 +406,13 @@ fn write_mode_toml(path: &std::path::Path) {
     let content = r#"building_id = 4243
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 3600
+time_res = 60
+duration = 3600
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -432,14 +434,7 @@ ach = 0.0
 occupancy = 1.0
 [event_load]
 active_power_kw = 1.5
-event_probability = 1.0
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
-"#;
+event_probability = 1.0"#;
     fs::write(path, content).expect("write synthetic TOML");
 }
 

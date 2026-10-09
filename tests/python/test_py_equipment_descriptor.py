@@ -9,6 +9,7 @@ from hares import (
     EndUse,
     ExecutionStage,
     FuelType,
+    SimulationConfig,
     TelemetryField,
 )
 
@@ -24,18 +25,7 @@ SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 def dwelling():
     from hares import Dwelling
 
-    dw = Dwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time="2019-01-01T00:00:00",
-        duration_s=3600,
-        time_res_s=60,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42,
-        master_seed=0,
-        write_output=False,
-    )
+    dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
     dw.initialize()
     return dw
 

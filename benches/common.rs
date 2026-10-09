@@ -155,9 +155,12 @@ pub fn synthetic_toml_case(path: &PathBuf, duration_s: i64) {
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = {duration_s}
-
+time_res = 60
+duration = {duration_s}
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -179,12 +182,6 @@ pressure_kpa = 101.325
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#
     );
     fs::write(path, toml).expect("failed to write synthetic TOML fixture");

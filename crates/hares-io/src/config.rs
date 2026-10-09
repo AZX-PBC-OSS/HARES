@@ -95,14 +95,66 @@ pub struct RemovedKey {
 ///
 /// Each row's `replacement` is the error text a surface raises for the key:
 /// it names where the capability lives now, or that nothing replaces it.
-pub static REMOVED_KEYS: &[RemovedKey] = &[RemovedKey {
-    scope: KeyScope::DwellingTable,
-    key: "resample_overrides",
-    replacement: "the engine has no per-field weather resampling overrides; \
+pub static REMOVED_KEYS: &[RemovedKey] = &[
+    RemovedKey {
+        scope: KeyScope::DwellingTable,
+        key: "resample_overrides",
+        replacement: "the engine has no per-field weather resampling overrides; \
                       for OCHRE comparisons hold the weather with the Python adapter \
                       (`hares.adapters.ochre.hold_weather`) and pass the held file \
                       as the weather input",
-}];
+    },
+    RemovedKey {
+        scope: KeyScope::DwellingTable,
+        key: "output",
+        replacement: "the synthetic [output] table is gone: its output fields \
+                      (write_output, output_path, output_format, output_chunk_size, \
+                      output_verbosity, rotation, master_seed, retain_batches) live \
+                      in the [simulation] table; per-report destinations (reports) \
+                      replace the output booleans in a later row",
+    },
+    RemovedKey {
+        scope: KeyScope::SimulationConfig,
+        key: "initialization_duration_s",
+        replacement: "pass initialization_duration_s at the top level of the dwelling \
+                      table, not under [simulation]",
+    },
+    RemovedKey {
+        scope: KeyScope::SimulationConfig,
+        key: "duration_s",
+        replacement: "pass duration (seconds)",
+    },
+    RemovedKey {
+        scope: KeyScope::SimulationConfig,
+        key: "time_res_s",
+        replacement: "pass time_res (seconds)",
+    },
+    RemovedKey {
+        scope: KeyScope::PythonKeyword,
+        key: "latitude",
+        replacement: "pass site_location = SiteLocationOverride(latitude_deg=...)",
+    },
+    RemovedKey {
+        scope: KeyScope::PythonKeyword,
+        key: "longitude",
+        replacement: "pass site_location = SiteLocationOverride(longitude_deg=...)",
+    },
+    RemovedKey {
+        scope: KeyScope::PythonKeyword,
+        key: "elevation_m",
+        replacement: "pass site_location = SiteLocationOverride(elevation_m=...)",
+    },
+    RemovedKey {
+        scope: KeyScope::PythonKeyword,
+        key: "utc_offset_h",
+        replacement: "pass site_location = SiteLocationOverride(utc_offset_h=...)",
+    },
+    RemovedKey {
+        scope: KeyScope::PythonKeyword,
+        key: "output_to_parquet",
+        replacement: "pass output_format = \"parquet\"",
+    },
+];
 
 /// The replacement text of the removed key matching `scope` and `key`, if any.
 #[must_use]
@@ -128,6 +180,15 @@ pub fn check_removed_toml_keys(
         }
     }
     Ok(())
+}
+
+/// The removed-key error message a surface raises for `scope` and `key`:
+/// one message per key, so the same removed key reads the same from the
+/// `[simulation]` table a synthetic TOML file carries and from a Python
+/// keyword surface.
+pub fn removed_key_message(scope: KeyScope, key: &str) -> Option<String> {
+    removed_key(scope, key)
+        .map(|replacement| format!("configuration key '{key}' was removed: {replacement}"))
 }
 
 /// Simulation configuration controlling temporal loop, output, and RNG.
@@ -247,27 +308,53 @@ impl SimulationConfig {
     /// Parse and validate a `SimulationConfig` from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, ConfigError> {
         let table: toml::Table = toml::from_str(s)?;
-        check_removed_toml_keys(&table, KeyScope::SimulationConfig, "the simulation config")?;
+        for key in table.keys() {
+            if let Some(message) = removed_key_message(KeyScope::SimulationConfig, key) {
+                return Err(ConfigError::Validation(message));
+            }
+        }
         let cfg: SimulationConfig = toml::from_str(s)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
 
-        let duration_secs = cfg.duration.num_seconds();
+    /// Serialise the config to a TOML string: [`Self::from_toml`]'s inverse,
+    /// so a config built through any surface round-trips the same way.
+    pub fn to_toml(&self) -> Result<String, ConfigError> {
+        toml::to_string(self)
+            .map_err(|err| ConfigError::Validation(format!("serialization error: {err}")))
+    }
+
+    /// Every check on the config's fields, run by every construction path:
+    /// `from_toml`, the dwelling constructors and the Python binding's
+    /// constructor all call this, so a config is validated the same way no
+    /// matter which surface built it.
+    ///
+    /// # Errors
+    ///
+    /// A duration or resolution that is not positive, a resolution the
+    /// duration is not a multiple of, a resolution outside the `u32` seconds
+    /// range the metrics calculators require, an out-of-range verbosity or
+    /// deadband, or an out-of-range site-location field.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let duration_secs = self.duration.num_seconds();
         if duration_secs <= 0 {
             return Err(ConfigError::Validation(
                 "duration must be greater than zero".into(),
             ));
         }
 
-        let time_res_secs = cfg.time_res.num_seconds();
+        let time_res_secs = self.time_res.num_seconds();
         if time_res_secs <= 0 {
             return Err(ConfigError::Validation(
                 "time_res must be greater than zero".into(),
             ));
         }
 
-        if cfg.output_verbosity > MAX_VERBOSITY {
+        if self.output_verbosity > MAX_VERBOSITY {
             return Err(ConfigError::Validation(format!(
                 "output_verbosity must be 0-{MAX_VERBOSITY}, got {}",
-                cfg.output_verbosity
+                self.output_verbosity
             )));
         }
 
@@ -277,7 +364,7 @@ impl SimulationConfig {
             )));
         }
 
-        if let Some(deadband_c) = cfg.setpoint_deadband_c
+        if let Some(deadband_c) = self.setpoint_deadband_c
             && (!deadband_c.is_finite() || deadband_c < 0.0)
         {
             return Err(ConfigError::Validation(format!(
@@ -285,7 +372,11 @@ impl SimulationConfig {
             )));
         }
 
-        Ok(cfg)
+        self.time_res_secs_u32()?;
+
+        self.site_location.validate()?;
+
+        Ok(())
     }
 
     /// Number of timesteps in the simulation.
@@ -296,8 +387,18 @@ impl SimulationConfig {
     }
 }
 
-const DEFAULT_TIME_RES_SECS: i64 = 60;
-const DEFAULT_CHUNK_SIZE: usize = 10_000;
+/// The default `time_res` in seconds, the one default every surface
+/// references: the serde default and the Python constructor's signature.
+pub const DEFAULT_TIME_RES_SECS: i64 = 60;
+
+/// The default rows-per-batch chunk size, shared by the serde default and
+/// the Python constructor's signature.
+pub const DEFAULT_OUTPUT_CHUNK_SIZE: usize = 10_000;
+
+/// The default `write_output`, shared by the serde default and the Python
+/// constructor's signature.
+pub const DEFAULT_WRITE_OUTPUT: bool = true;
+
 /// The highest `output_verbosity` a `SimulationConfig` accepts. Public
 /// because every surface that sets the field outside `from_toml` (the
 /// fleet's verbosity builder) applies the same bound.
@@ -308,11 +409,11 @@ fn default_time_res() -> Duration {
 }
 
 fn default_output_chunk_size() -> usize {
-    DEFAULT_CHUNK_SIZE
+    DEFAULT_OUTPUT_CHUNK_SIZE
 }
 
 fn default_write_output() -> bool {
-    true
+    DEFAULT_WRITE_OUTPUT
 }
 
 mod duration_seconds {
@@ -720,5 +821,275 @@ output_verboisty = 3
             err.to_string().contains("time_res"),
             "the error must name the resolution, got: {err}"
         );
+    }
+
+    // Row 34: the site-location check runs on every construction path, so
+    // the TOML path and a Rust-built config fail the same out-of-range
+    // coordinate with the message the Python constructor raises.
+    #[test]
+    fn toml_site_location_out_of_range_is_a_validate_error() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00Z"
+duration = 3600
+
+[site_location]
+latitude_deg = 95.0
+"#;
+        let toml_err = SimulationConfig::from_toml(toml)
+            .expect_err("an out-of-range site coordinate is a validate error on the TOML path too");
+        let built = SimulationConfig {
+            start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                .expect("start time parses"),
+            duration: Duration::seconds(3600),
+            time_res: Duration::seconds(60),
+            output_verbosity: 0,
+            output_path: None,
+            write_output: true,
+            output_format: OutputFormat::Csv,
+            output_chunk_size: 10_000,
+            setpoint_deadband_c: None,
+            master_seed: 0,
+            civil_timezone: None,
+            site_location: SiteLocationOverride {
+                latitude_deg: Some(95.0),
+                ..SiteLocationOverride::default()
+            },
+            retain_batches: false,
+            rotation: RotationPolicy::None,
+            max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        };
+        let built_err = built
+            .validate()
+            .expect_err("the same config built in Rust fails validate()");
+        assert_eq!(
+            built_err.to_string(),
+            toml_err.to_string(),
+            "one site-location check, one message, on every path"
+        );
+        assert!(
+            built_err.to_string().contains("latitude")
+                && built_err.to_string().contains("[-90, 90]"),
+            "the message names the field and its range, got: {built_err}"
+        );
+    }
+
+    #[test]
+    fn site_location_validation_covers_every_field_and_boundary() {
+        let valid = [
+            (Some(90.0), Some(180.0), Some(9000.0), Some(14.0)),
+            (Some(-90.0), Some(-180.0), Some(-500.0), Some(-14.0)),
+            (None, None, None, None),
+        ];
+        for (lat, lon, elev, off) in valid {
+            let site = SiteLocationOverride {
+                latitude_deg: lat,
+                longitude_deg: lon,
+                elevation_m: elev,
+                utc_offset_h: off,
+            };
+            site.validate()
+                .expect("boundary values are inside the physical ranges");
+        }
+        let rejected: [(&str, SiteLocationOverride); 9] = [
+            (
+                "latitude",
+                SiteLocationOverride {
+                    latitude_deg: Some(90.001),
+                    ..SiteLocationOverride::default()
+                },
+            ),
+            (
+                "latitude",
+                SiteLocationOverride {
+                    latitude_deg: Some(f64::NAN),
+                    ..SiteLocationOverride::default()
+                },
+            ),
+            (
+                "longitude",
+                SiteLocationOverride {
+                    longitude_deg: Some(-180.001),
+                    ..SiteLocationOverride::default()
+                },
+            ),
+            (
+                "longitude",
+                SiteLocationOverride {
+                    longitude_deg: Some(f64::INFINITY),
+                    ..SiteLocationOverride::default()
+                },
+            ),
+            (
+                "elevation_m",
+                SiteLocationOverride {
+                    elevation_m: Some(9000.1),
+                    ..SiteLocationOverride::default()
+                },
+            ),
+            (
+                "elevation_m",
+                SiteLocationOverride {
+                    elevation_m: Some(-500.1),
+                    ..SiteLocationOverride::default()
+                },
+            ),
+            (
+                "utc_offset_h",
+                SiteLocationOverride {
+                    utc_offset_h: Some(14.1),
+                    ..SiteLocationOverride::default()
+                },
+            ),
+            (
+                "utc_offset_h",
+                SiteLocationOverride {
+                    utc_offset_h: Some(f64::NEG_INFINITY),
+                    ..SiteLocationOverride::default()
+                },
+            ),
+            (
+                "latitude",
+                SiteLocationOverride {
+                    latitude_deg: Some(f64::NAN),
+                    longitude_deg: Some(f64::NAN),
+                    elevation_m: Some(f64::NAN),
+                    utc_offset_h: Some(f64::NAN),
+                },
+            ),
+        ];
+        for (field, site) in rejected {
+            let err = site
+                .validate()
+                .expect_err("an out-of-range field is an error");
+            assert!(
+                err.to_string().contains(field),
+                "the message names the offending field {field}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn removed_key_messages_are_shared_by_every_surface() {
+        // The message the synthetic [simulation] table's check raises and the
+        // message a Python keyword surface raises are one string: the
+        // replacement text the row carries.
+        let duration_s = removed_key_message(KeyScope::SimulationConfig, "duration_s")
+            .expect("duration_s is a removed key of the simulation config");
+        assert!(
+            duration_s.contains("duration (seconds)"),
+            "the message names the replacement, got: {duration_s}"
+        );
+        let latitude = removed_key_message(KeyScope::PythonKeyword, "latitude")
+            .expect("latitude is a removed keyword");
+        assert!(
+            latitude.contains("site_location") && latitude.contains("latitude_deg"),
+            "the message names the replacement, got: {latitude}"
+        );
+        assert!(
+            removed_key_message(KeyScope::SimulationConfig, "not_removed").is_none(),
+            "an unknown key is no removed key"
+        );
+    }
+
+    #[test]
+    fn removed_keys_scopes_pin_this_rows_rows() {
+        // Every row this entry adds, in its scope: the dwelling table's
+        // [output] table, the [simulation] table's old keys, and the Python
+        // keyword surface's old names.
+        let expected: [(KeyScope, &str); 9] = [
+            (KeyScope::DwellingTable, "output"),
+            (KeyScope::SimulationConfig, "initialization_duration_s"),
+            (KeyScope::SimulationConfig, "duration_s"),
+            (KeyScope::SimulationConfig, "time_res_s"),
+            (KeyScope::PythonKeyword, "latitude"),
+            (KeyScope::PythonKeyword, "longitude"),
+            (KeyScope::PythonKeyword, "elevation_m"),
+            (KeyScope::PythonKeyword, "utc_offset_h"),
+            (KeyScope::PythonKeyword, "output_to_parquet"),
+        ];
+        for (scope, key) in expected {
+            assert!(
+                removed_key(scope, key).is_some(),
+                "{key:?} must be a removed key of the {scope:?} scope"
+            );
+        }
+        // initialization_duration_s stays valid in the dwelling table's
+        // scope: the top-level synthetic key is not removed until B-2.
+        assert!(
+            removed_key(KeyScope::DwellingTable, "initialization_duration_s").is_none(),
+            "the top-level initialization_duration_s stays valid"
+        );
+    }
+
+    #[test]
+    fn to_toml_inverts_from_toml() {
+        let toml = r#"
+start_time = "2024-06-15T12:00:00+00:00"
+duration = 7200
+time_res = 300
+output_verbosity = 5
+output_path = "/tmp/sim_output.csv"
+write_output = false
+output_format = "parquet"
+output_chunk_size = 5000
+setpoint_deadband_c = 1.5
+master_seed = 42
+retain_batches = true
+civil_timezone = "America/Denver"
+rotation = "daily"
+max_consecutive_step_failures = 2
+
+[site_location]
+latitude_deg = 39.7392
+longitude_deg = -104.9903
+elevation_m = 1609.0
+utc_offset_h = -7.0
+"#;
+        let cfg = SimulationConfig::from_toml(toml).expect("parse config");
+        let serialized = cfg.to_toml().expect("serialize config");
+        let round_tripped =
+            SimulationConfig::from_toml(&serialized).expect("re-parse serialized config");
+        assert_eq!(cfg, round_tripped, "to_toml inverts from_toml");
+        for key in [
+            "start_time",
+            "duration",
+            "time_res",
+            "output_verbosity",
+            "output_path",
+            "write_output",
+            "output_format",
+            "output_chunk_size",
+            "setpoint_deadband_c",
+            "master_seed",
+            "retain_batches",
+            "civil_timezone",
+            "rotation",
+            "max_consecutive_step_failures",
+            "site_location",
+        ] {
+            assert!(
+                serialized.contains(key),
+                "the serialized TOML carries the field name {key}: {serialized}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_toml_rejects_the_removed_simulation_keys() {
+        for (key, value) in [
+            ("duration_s", "3600"),
+            ("time_res_s", "60"),
+            ("initialization_duration_s", "86400"),
+        ] {
+            let toml = format!(
+                "\nstart_time = \"2024-01-01T00:00:00Z\"\nduration = 3600\n{key} = {value}\n"
+            );
+            let err = SimulationConfig::from_toml(&toml)
+                .expect_err("a removed [simulation] key is an error on the plain TOML path too");
+            assert!(
+                err.to_string().contains(key),
+                "the error names the removed key {key}, got: {err}"
+            );
+        }
     }
 }

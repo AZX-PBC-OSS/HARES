@@ -18,9 +18,14 @@ fn write_minimal_toml_with_output(path: &Path, csv_path: &Path) {
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = true
+output_path = "{}"
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -43,14 +48,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = true
-output_path = "{}"
-master_seed = 0
 "#,
         csv_path.display()
     );

@@ -47,9 +47,13 @@ fn observer_post_solvers_forwards_port_radiant_w() {
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 300
-
+time_res = 60
+duration = 300
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = false
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -72,13 +76,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#;
     fs::write(&path, content).expect("failed to write synthetic TOML");
 
@@ -137,9 +134,14 @@ fn diagnostic_csv_contains_all_envelope_diag_columns() {
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
+output_verbosity = 4
+output_format = "csv"
+output_chunk_size = 1000
+write_output = true
+output_path = "{}"
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -162,14 +164,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 4
-output_format = "csv"
-output_chunk_size = 1000
-write_output = true
-output_path = "{}"
-master_seed = 0
 "#,
         csv_path.display()
     );

@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from hares import SimulationConfig
 
 HARES_ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLES = HARES_ROOT / "data" / "examples"
@@ -54,18 +55,7 @@ def sim_result():
     """Run PV+battery dwelling with TOU tariff once, share across all tests."""
     from hares import Dwelling, ElectricTariff
 
-    dw = Dwelling.from_hpxml(
-        str(HPXML), str(SCHEDULE), str(WEATHER),
-        start_time="2019-07-01T12:00:00",
-        duration_s=SIM_DURATION_S,
-        time_res_s=TIME_RES_S,
-        defaults_path=str(DEFAULTS),
-        bldg_id=1,
-        master_seed=42,
-        output_verbosity=3,
-        write_output=False,
-        overrides=BATTERY_OVERRIDES,
-    )
+    dw = Dwelling.from_hpxml(str(HPXML), str(SCHEDULE), str(WEATHER), defaults_path=str(DEFAULTS), bldg_id=1, overrides=BATTERY_OVERRIDES, config=SimulationConfig(start_time="2019-07-01T12:00:00", duration=SIM_DURATION_S, time_res=TIME_RES_S, master_seed=42, output_verbosity=3, write_output=False))
     dw.initialize()
     dw.set_electric_tariff(ElectricTariff.from_urdb_json(str(URDB_TOU)))
 
@@ -236,18 +226,7 @@ class TestHvacActiveCooling:
         """With 21 °C cooling setpoint the AC must deliver cooling in July."""
         from hares import ControlSignal, Dwelling
 
-        dw = Dwelling.from_hpxml(
-            str(HPXML), str(SCHEDULE), str(WEATHER),
-            start_time="2019-07-01T12:00:00",
-            duration_s=2 * 86400,
-            time_res_s=TIME_RES_S,
-            defaults_path=str(DEFAULTS),
-            bldg_id=1,
-            master_seed=42,
-            output_verbosity=3,
-            write_output=False,
-            overrides=BATTERY_OVERRIDES,
-        )
+        dw = Dwelling.from_hpxml(str(HPXML), str(SCHEDULE), str(WEATHER), defaults_path=str(DEFAULTS), bldg_id=1, overrides=BATTERY_OVERRIDES, config=SimulationConfig(start_time="2019-07-01T12:00:00", duration=2 * 86400, time_res=TIME_RES_S, master_seed=42, output_verbosity=3, write_output=False))
         dw.initialize()
 
         cool_signal = ControlSignal.thermal_setpoint(cool_c=21.0)
@@ -300,18 +279,7 @@ class TestBillingSummary:
         asserts the emitted summary passes the plausibility checks."""
         from hares import Dwelling, ElectricTariff
 
-        dw = Dwelling.from_hpxml(
-            str(HPXML), str(SCHEDULE), str(WEATHER),
-            start_time="2019-06-28T00:00:00",
-            duration_s=SIM_DURATION_S,
-            time_res_s=TIME_RES_S,
-            defaults_path=str(DEFAULTS),
-            bldg_id=1,
-            master_seed=42,
-            output_verbosity=3,
-            write_output=False,
-            overrides=BATTERY_OVERRIDES,
-        )
+        dw = Dwelling.from_hpxml(str(HPXML), str(SCHEDULE), str(WEATHER), defaults_path=str(DEFAULTS), bldg_id=1, overrides=BATTERY_OVERRIDES, config=SimulationConfig(start_time="2019-06-28T00:00:00", duration=SIM_DURATION_S, time_res=TIME_RES_S, master_seed=42, output_verbosity=3, write_output=False))
         dw.initialize()
         dw.set_electric_tariff(ElectricTariff.from_urdb_json(str(URDB_TOU)))
 

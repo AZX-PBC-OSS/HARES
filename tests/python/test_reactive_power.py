@@ -21,6 +21,7 @@ from typing import Any, TypedDict
 from conftest import make_dwelling
 
 import pathlib
+from hares import SimulationConfig
 
 ROOT = __import__("pathlib").Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
@@ -451,7 +452,7 @@ class TestDefaultEvZeroQ:
 
 class TestZipPfOverride:
     def test_zip_pf_override_changes_q_leaves_p_identical(self, tmp_path):
-        from hares import Dwelling
+        from hares import Dwelling, SimulationConfig
 
         # July afternoon so the AC compressor actually runs (a pf override
         # retargets the compressor component; the resistive crankcase heater
@@ -473,15 +474,34 @@ class TestZipPfOverride:
             "master_seed": 0,
             "write_output": False,
         }
+        sim_config = SimulationConfig(
+            start_time=common["start_time"],
+            duration=common["duration_s"],
+            time_res=common["time_res_s"],
+            master_seed=common["master_seed"],
+            write_output=common["write_output"],
+        )
 
         # Baseline: no override.
-        dw_base = Dwelling.from_hpxml(**common)
+        dw_base = Dwelling.from_hpxml(
+            hpxml=common["hpxml"],
+            schedule=common["schedule"],
+            weather=common["weather"],
+            defaults_path=common["defaults_path"],
+            bldg_id=common["bldg_id"],
+            config=sim_config,
+        )
         dw_base.initialize()
 
         # Override: change Air Conditioner compressor pf from 0.96 → 0.9.
         dw_ov = Dwelling.from_hpxml(
+            hpxml=common["hpxml"],
+            schedule=common["schedule"],
+            weather=common["weather"],
+            defaults_path=common["defaults_path"],
+            bldg_id=common["bldg_id"],
+            config=sim_config,
             overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
-            **common,
         )
         dw_ov.initialize()
 
@@ -532,7 +552,7 @@ class TestZipPfOverride:
         )
 
     def test_zip_override_telemetry_reactive_key_present(self, tmp_path):
-        from hares import Dwelling
+        from hares import Dwelling, SimulationConfig
 
         # July afternoon: the compressor must run for Q != 0 — on winter
         # standby only the resistive crankcase heater draws power and the
@@ -554,10 +574,22 @@ class TestZipPfOverride:
             "master_seed": 0,
             "write_output": False,
         }
+        sim_config = SimulationConfig(
+            start_time=common["start_time"],
+            duration=common["duration_s"],
+            time_res=common["time_res_s"],
+            master_seed=common["master_seed"],
+            write_output=common["write_output"],
+        )
 
         dw = Dwelling.from_hpxml(
+            hpxml=common["hpxml"],
+            schedule=common["schedule"],
+            weather=common["weather"],
+            defaults_path=common["defaults_path"],
+            bldg_id=common["bldg_id"],
+            config=sim_config,
             overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
-            **common,
         )
         dw.initialize()
 
@@ -661,16 +693,7 @@ class TestResolvedZipInspection:
     def test_ashp_heater_resolved_zip_pf_084(self):
         from hares import ASHPHeater, DwellingBlueprint, EndUse
 
-        bp = DwellingBlueprint.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            duration_s=600,
-            time_res_s=60,
-            write_output=False,
-        )
+        bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=600, time_res=60, write_output=False, start_time="2019-01-01T00:00:00"))
         bp.remove_equipment_by_end_use([EndUse.HVAC_HEATING])
         bp.add_equipment(
             ASHPHeater("ASHP", capacity_w=12000, hspf=9.5, backup_capacity_w=5000)
@@ -689,19 +712,7 @@ class TestResolvedZipInspection:
     def test_user_zip_override_pf_09_visible(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-07-01T14:00:00",
-            duration_s=600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, overrides={"Air Conditioner": {"zip": {"pf": 0.9}}}, config=SimulationConfig(start_time="2019-07-01T14:00:00", duration=600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
 
         zip_dict = dw.equipment_zip("Air Conditioner")

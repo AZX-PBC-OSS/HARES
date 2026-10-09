@@ -196,40 +196,6 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
 }
 
 #[test]
-fn run_with_zero_duration_reports_zero_step() {
-    // The genuine zero-step edge case (duration == 0) stays distinguishable
-    // from the not-retained case.
-    let scratch = Scratch::with_inputs();
-
-    let mut sim_config = simulation_config(scratch.path("output.csv"));
-    sim_config.duration = Duration::zero();
-    sim_config.retain_batches = true;
-
-    let config = DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config,
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        patches: None,
-    };
-
-    let engine = SimulationEngine::new();
-    let result = engine.run(config).expect("engine run should succeed");
-
-    match &result.status {
-        SimStatus::Flagged(reason) => assert!(
-            reason.contains("zero-step"),
-            "duration == 0 must be reported as zero-step, got: {reason}"
-        ),
-        other => panic!("expected Flagged status, got: {other:?}"),
-    }
-}
-
-#[test]
 fn run_returns_err_for_missing_hpxml_path() {
     let scratch = Scratch::with_inputs();
     let config = DwellingConfig {
@@ -384,10 +350,12 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
     );
 }
 
-/// A run with no timesteps must be flagged as a true zero-step run -- not
-/// reported as Ok with zeroed metrics.
+/// A zero-duration config is a validate error on the Rust construction path
+/// too: the same check from_toml runs, so a run with no timesteps cannot
+/// reach the engine through a built dwelling. The engine's zero-step flag
+/// stays as the finalization defense for a recorder that recorded no rows.
 #[test]
-fn run_with_zero_duration_flags_zero_step() {
+fn run_with_zero_duration_is_a_validate_error() {
     let scratch = Scratch::with_inputs();
 
     let mut sim_config = simulation_config_with_flags(scratch.path("output.csv"), false, true);
@@ -406,18 +374,13 @@ fn run_with_zero_duration_flags_zero_step() {
     };
 
     let engine = SimulationEngine::new();
-    let result = engine
+    let err = engine
         .run(config)
-        .expect("zero-duration run should succeed");
-
+        .expect_err("a zero-duration config must not build a dwelling");
     assert!(
-        matches!(&result.status, SimStatus::Flagged(msg) if msg.contains("zero-step")),
-        "zero-duration run must be flagged as zero-step, got: {:?}",
-        result.status
-    );
-    assert_eq!(
-        result.metrics.simulation_duration_hours, 0.0,
-        "zero-step run must report zero duration"
+        err.to_string()
+            .contains("duration must be greater than zero"),
+        "the error is validate()'s, got: {err}"
     );
 }
 

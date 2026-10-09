@@ -56,6 +56,7 @@ from ochre.utils import units as ochre_unit_registry
 register_removed_units(ochre_unit_registry.ureg)
 
 import pandas as pd
+from hares import SimulationConfig
 
 if ochre_mod.__version__ != EXPECTED_OCHRE_VERSION:
     pytest.fail(
@@ -260,19 +261,7 @@ def hares_48h(tmp_path_factory: pytest.TempPathFactory) -> pl.DataFrame:
     """Run HARES for 48h and return the per-step polars DataFrame."""
     from hares import Dwelling as HaresDwelling
 
-    dwelling = HaresDwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time=START_HARES,
-        time_res_s=TIME_RES_MIN * 60,
-        duration_s=DURATION_H * 3600,
-        output_verbosity=9,
-        defaults_path=str(HARES_DEFAULTS),
-        master_seed=42,
-        write_output=True,
-        output_path=str(tmp_path_factory.mktemp("thermal_trace") / "hares_thermal_trace.csv"),
-    )
+    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, output_verbosity=9, master_seed=42, write_output=True, output_path=str(tmp_path_factory.mktemp("thermal_trace") / "hares_thermal_trace.csv")))
     dwelling.initialize()
     return dwelling.simulate()
 

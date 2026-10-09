@@ -148,6 +148,33 @@ impl SiteLocationOverride {
             && self.elevation_m.is_none()
             && self.utc_offset_h.is_none()
     }
+
+    /// The one site-location check every surface runs: `validate()` on the
+    /// simulation config, and the Python `SiteLocationOverride`
+    /// constructor's `ValueError`. Only set fields are checked.
+    ///
+    /// # Errors
+    ///
+    /// A set field that is not finite, or outside its physical range:
+    /// latitude [-90, 90] degrees, longitude [-180, 180] degrees,
+    /// elevation [-500, 9000] m, UTC offset [-14, 14] hours.
+    pub fn validate(&self) -> Result<(), crate::config::ConfigError> {
+        for (value, (low, high), name, unit) in [
+            (self.latitude_deg, (-90.0, 90.0), "latitude", "degrees"),
+            (self.longitude_deg, (-180.0, 180.0), "longitude", "degrees"),
+            (self.elevation_m, (-500.0, 9000.0), "elevation_m", "m"),
+            (self.utc_offset_h, (-14.0, 14.0), "utc_offset_h", "hours"),
+        ] {
+            if let Some(v) = value
+                && (!v.is_finite() || !(low..=high).contains(&v))
+            {
+                return Err(crate::config::ConfigError::Validation(format!(
+                    "{name} must be finite and within [{low}, {high}] {unit}, got {v}"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A fully resolved site location with per-field provenance.

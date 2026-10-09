@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hares
 import hares._hares as _hares
+from hares import SimulationConfig
 
 
 # ---------------------------------------------------------------------------
@@ -286,25 +287,27 @@ class TestModeEnum:
 
 
 class TestSimulationConfigInterface:
-    def test_default_construction(self) -> None:
-        cfg = hares.SimulationConfig()
+    def test_construction(self) -> None:
+        cfg = hares.SimulationConfig(start_time="2024-01-01T00:00:00Z", duration=3600)
         assert cfg is not None
 
     def test_properties_readable_after_construction(self) -> None:
-        cfg = hares.SimulationConfig(duration_s=3600, time_res_s=60)
-        assert cfg.duration_s == 3600
-        assert cfg.time_res_s == 60
+        cfg = hares.SimulationConfig(start_time="2024-01-01T00:00:00Z", duration=3600, time_res=60)
+        assert cfg.duration == 3600
+        assert cfg.time_res == 60
 
     def test_mutable_properties_are_settable(self) -> None:
-        cfg = hares.SimulationConfig()
-        cfg.duration_s = 7200
-        assert cfg.duration_s == 7200
+        cfg = hares.SimulationConfig(start_time="2024-01-01T00:00:00Z", duration=3600)
+        cfg.duration = 7200
+        assert cfg.duration == 7200
 
     def test_repr_is_non_empty_string(self) -> None:
-        cfg = hares.SimulationConfig()
+        cfg = hares.SimulationConfig(start_time="2024-01-01T00:00:00Z", duration=3600)
         assert isinstance(repr(cfg), str) and repr(cfg)
 
     def test_optional_properties_accept_none(self) -> None:
-        cfg = hares.SimulationConfig(output_path=None, civil_timezone=None)
+        cfg = hares.SimulationConfig(
+            start_time="2024-01-01T00:00:00Z", duration=3600, output_path=None, civil_timezone=None
+        )
         assert cfg.output_path is None
         assert cfg.civil_timezone is None

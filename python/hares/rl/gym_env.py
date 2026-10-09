@@ -538,7 +538,7 @@ class DwellingGymEnv(_GYM_BASE):
 
         time_res_s: float = 60.0
         if self._config.sim_config is not None:
-            time_res_s = float(self._config.sim_config.time_res_s)
+            time_res_s = float(self._config.sim_config.time_res)
         # The episode covers at least one step: the constructor refused a
         # non-positive episode_length, so the ceiling is never below one.
         self._max_steps = int(math.ceil(self._episode_length.total_seconds() / time_res_s))

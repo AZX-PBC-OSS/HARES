@@ -10,7 +10,7 @@ from typing import Any
 
 import polars as pl
 
-from hares import Dwelling, DwellingBlueprint
+from hares import Dwelling, DwellingBlueprint, SimulationConfig
 
 
 def _noop(_bp: DwellingBlueprint) -> None:
@@ -52,23 +52,30 @@ class SimulationPlan:
         self.hpxml = hpxml
         self.schedule = schedule
         self.weather = weather
+        # Every simulation-level field rides on the one SimulationConfig the
+        # constructor builds, so a plan can configure recording like any
+        # other caller.
+        self._sim_kwargs: dict[str, Any] = {
+            "time_res": time_res_s,
+            "output_verbosity": output_verbosity,
+            "master_seed": master_seed,
+            **extra_kwargs,
+        }
         self.base_kwargs: dict[str, Any] = {
             "defaults_path": defaults_path,
             "bldg_id": bldg_id,
-            "time_res_s": time_res_s,
-            "output_verbosity": output_verbosity,
-            "master_seed": master_seed,
             "initialization_duration": initialization_duration,
-            **extra_kwargs,
         }
         self.segments: list[SimulationSegment] = []
 
         DwellingBlueprint.from_hpxml(
             hpxml, schedule, weather,
-            start_time="2000-01-01T00:00:00",
-            duration_s=time_res_s,
+            config=self._config("2000-01-01T00:00:00", time_res_s),
             **self.base_kwargs,
         )
+
+    def _config(self, start_time: str, duration_s: int) -> SimulationConfig:
+        return SimulationConfig(start_time=start_time, duration=duration_s, **self._sim_kwargs)
 
     def add_segment(
         self,
@@ -101,8 +108,7 @@ class SimulationPlan:
                 self.hpxml,
                 self.schedule,
                 self.weather,
-                start_time=seg.start.isoformat(),
-                duration_s=seg.duration_s,
+                config=self._config(seg.start.isoformat(), seg.duration_s),
                 **kwargs,
             )
             seg.setup(bp)

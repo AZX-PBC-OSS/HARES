@@ -12,12 +12,15 @@ internal_gains_sensible_fraction = 1.0
 # ASHRAE 140 reference bands) uses 0.3.
 internal_gains_radiant_fraction = 0.3
 
+initialization_duration_s = 86400  # 1 day warmup (lightweight construction)
 [simulation]
 start_time = "2024-01-01T00:00:00-07:00"
-time_res_s = 3600
-duration_s = 31536000
-initialization_duration_s = 86400  # 1 day warmup (lightweight construction)
-
+time_res = 3600
+duration = 31536000
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 10000
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -234,9 +237,3 @@ attached_to_wall_id = "south-wall"
 [schedule]
 occupancy = 0.0
 occupants_present = false
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 10000
-master_seed = 0

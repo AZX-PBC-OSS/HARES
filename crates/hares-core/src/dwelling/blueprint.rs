@@ -42,6 +42,12 @@ pub struct DwellingBlueprint {
 impl DwellingBlueprint {
     /// Build blueprint from a DwellingConfig by parsing HPXML, weather, and schedule files.
     pub fn from_config(config: DwellingConfig) -> Result<Self, HaresError> {
+        // The same validation the TOML path runs: a config built in Rust
+        // code is checked exactly like one parsed from a file.
+        config
+            .sim_config
+            .validate()
+            .map_err(|err| HaresError::Io(err.to_string()))?;
         let mut building = hares_io::parse_hpxml(&config.hpxml_path)
             .map_err(|err| HaresError::Io(format!("HPXML parse failed: {err}")))?;
 

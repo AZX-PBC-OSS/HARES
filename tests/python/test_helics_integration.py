@@ -410,25 +410,13 @@ class _FaultyAggregator:
 
 
 def _new_dwelling(*, bldg_id: int = 42) -> Dwelling:
-    dwelling = Dwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time="2019-01-01T00:00:00",
-        duration_s=_DURATION_S,
-        time_res_s=int(_TIME_RES_S),
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=bldg_id,
-        master_seed=0,
-        output_verbosity=0,
-        write_output=False,
-    )
+    dwelling = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=bldg_id, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=_DURATION_S, time_res=int(_TIME_RES_S), master_seed=0, output_verbosity=0, write_output=False))
     dwelling.initialize()
     return dwelling
 
 
 def _new_fleet(n_dwellings: int = 3) -> SteppableFleet:
-    sim_config = SimulationConfig(duration_s=_DURATION_S, time_res_s=int(_TIME_RES_S), write_output=False)
+    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=_DURATION_S, time_res=int(_TIME_RES_S), write_output=False)
     configs = [
         DwellingConfig(
             hpxml=HPXML,
@@ -788,17 +776,7 @@ def test_multi_rate_dwelling_steps_only_at_own_period() -> None:
     AGG_STEPS = DWELL_DURATION_S // AGG_TIME_RES_S  # 18
 
     with _Federation(n_federates=2) as federation:
-        dwelling_raw = Dwelling.from_hpxml(
-            HPXML, SCHEDULE, WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=DWELL_DURATION_S,
-            time_res_s=DWELL_TIME_RES_S,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=99,
-            master_seed=0,
-            output_verbosity=0,
-            write_output=False,
-        )
+        dwelling_raw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=99, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=DWELL_DURATION_S, time_res=DWELL_TIME_RES_S, master_seed=0, output_verbosity=0, write_output=False))
         dwelling_raw.initialize()
         recording = _RecordingDwelling(dwelling_raw)
 
@@ -986,17 +964,7 @@ def test_voltage_in_volts_triggers_out_of_range_warning() -> None:
     act on it.
     """
     with _Federation(n_federates=2) as federation:
-        dwelling_raw = Dwelling.from_hpxml(
-            HPXML, SCHEDULE, WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=300,  # 5 steps at 60s
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=99,
-            master_seed=0,
-            output_verbosity=0,
-            write_output=False,
-        )
+        dwelling_raw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=99, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=300, time_res=60, master_seed=0, output_verbosity=0, write_output=False))
         dwelling_raw.initialize()
         orchestrator_ref: list[HELICSDwelling] = []
 
@@ -1137,19 +1105,7 @@ _YEAR_DRIFT_TOLERANCE_S = 8.76e-3  # 1e-6 per step × 8760 steps
 
 
 def _new_year_dwelling(bldg_id: int = 42) -> Dwelling:
-    dwelling = Dwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time="2019-01-01T00:00:00",
-        duration_s=_YEAR_DURATION_S,
-        time_res_s=int(_YEAR_TIME_RES_S),
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=bldg_id,
-        master_seed=0,
-        output_verbosity=0,
-        write_output=False,
-    )
+    dwelling = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=bldg_id, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=_YEAR_DURATION_S, time_res=int(_YEAR_TIME_RES_S), master_seed=0, output_verbosity=0, write_output=False))
     dwelling.initialize()
     return dwelling
 
@@ -1342,19 +1298,7 @@ def test_drift_guard_raises_when_cumulative_drift_exceeds_tolerance() -> None:
     _DURATION = _STEPS * int(_TIME_RES)
 
     with _Federation(n_federates=1) as federation:
-        dwelling = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=_DURATION,
-            time_res_s=int(_TIME_RES),
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=99,
-            master_seed=0,
-            output_verbosity=0,
-            write_output=False,
-        )
+        dwelling = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=99, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=_DURATION, time_res=int(_TIME_RES), master_seed=0, output_verbosity=0, write_output=False))
         dwelling.initialize()
 
         helics_dwelling = federation.helics_dwelling(dwelling, "drift_guard", max_time_drift_tolerance_s=-1.0)

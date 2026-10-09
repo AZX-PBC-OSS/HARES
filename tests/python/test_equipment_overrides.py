@@ -26,6 +26,7 @@ from hares import (
     TanklessWaterHeater,
 )
 from hares._hares import HaresEquipmentError
+from hares import SimulationConfig
 
 SAMPLES = ROOT / "vendors/OCHRE/test/OS-HPXML Sample Files"
 GAS_BACKUP_SAMPLE = str(
@@ -37,18 +38,7 @@ START = "2023-01-15T10:00:00-07:00"
 
 
 def make_sample_dwelling(hpxml: str, **kw):
-    dw = Dwelling.from_hpxml(
-        hpxml,
-        None,
-        WEATHER,
-        start_time=START,
-        duration_s=timedelta(hours=24),
-        time_res_s=900,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=1,
-        write_output=False,
-        **kw,
-    )
+    dw = Dwelling.from_hpxml(hpxml, None, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=1, config=SimulationConfig(start_time=START, duration=timedelta(hours=24), time_res=900, write_output=False), **kw)
     dw.initialize()
     return dw
 
@@ -134,17 +124,7 @@ class TestTypedSpecBuilderConstructions:
     BASE_SAMPLE = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 
     def make_blueprint(self, hpxml: str):
-        bp = DwellingBlueprint.from_hpxml(
-            hpxml,
-            None,
-            WEATHER,
-            start_time=START,
-            duration_s=timedelta(hours=24),
-            time_res_s=900,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=1,
-            write_output=False,
-        )
+        bp = DwellingBlueprint.from_hpxml(hpxml, None, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=1, config=SimulationConfig(start_time=START, duration=timedelta(hours=24), time_res=900, write_output=False))
         return bp
 
     def build_and_step(self, hpxml: str, equipment, replace: str | None = None) -> None:

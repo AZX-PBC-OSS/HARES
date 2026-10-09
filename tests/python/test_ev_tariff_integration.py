@@ -9,6 +9,7 @@ from typing import NotRequired, TypedDict
 import polars as pl
 import pytest
 from conftest import make_dwelling, output_in_test_dir
+from hares import SimulationConfig
 
 
 class _OutputKwargs(TypedDict):
@@ -367,20 +368,7 @@ class TestHpxmlDeclaredEv:
         hpxml_path = tmp_path / "with_ev.xml"
         hpxml_path.write_text(xml)
 
-        dw = Dwelling.from_hpxml(
-            str(hpxml_path),
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3 * 86400,
-            time_res_s=900,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=42,
-            output_verbosity=1,
-            write_output=True,
-            output_path=str(tmp_path / "dwelling_42.csv"),
-        )
+        dw = Dwelling.from_hpxml(str(hpxml_path), SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3 * 86400, time_res=900, master_seed=42, output_verbosity=1, retain_batches=True, write_output=True, output_path=str(tmp_path / "dwelling_42.csv")))
         dw.initialize()
         df = dw.simulate()
 

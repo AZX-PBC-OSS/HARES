@@ -10,7 +10,7 @@ use hares_envelope::longwave_radiation::{
 };
 use hares_envelope::{BoundaryInput, ExteriorTarget, LayerInput, ZoneInput};
 use hares_equipment::{ConfigPayload, EquipmentConfig, config::ConfigValue};
-use hares_io::{Building, DefaultsStore, SimulationConfig};
+use hares_io::{Building, DefaultsStore};
 use hares_types::{DomainUpdate, EnvironmentState, ExecutionStage, HaresError, ZoneId};
 use serde_json::{Map, Value};
 
@@ -1515,21 +1515,6 @@ pub(crate) fn required_duration(kwargs: &HashMap<String, Value>, key: &str) -> R
     Err(HaresError::Io(format!(
         "unsupported duration format for `{key}`"
     )))
-}
-
-pub(crate) fn validate_sim_config(sim_config: &SimulationConfig) -> Result<()> {
-    if sim_config.duration.num_seconds() <= 0 {
-        return Err(HaresError::Io("duration must be > 0".to_string()));
-    }
-    if sim_config.time_res.num_seconds() <= 0 {
-        return Err(HaresError::Io("time_res must be > 0".to_string()));
-    }
-    if sim_config.duration.num_seconds() % sim_config.time_res.num_seconds() != 0 {
-        return Err(HaresError::Io(
-            "duration must be evenly divisible by time_res".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Map HPXML `<SiteType>` to [`TerrainClass`] for the wind on every leakage

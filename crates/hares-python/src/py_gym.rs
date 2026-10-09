@@ -776,19 +776,25 @@ mod tests {
 
         let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         root.push("../..");
-        let kwargs = PyDict::new(py);
-        kwargs
-            .set_item("start_time", "2019-01-01T00:00:00")
-            .unwrap();
-        kwargs.set_item("duration_s", 600_i64).unwrap();
-        kwargs.set_item("time_res_s", 60_i64).unwrap();
-        kwargs
-            .set_item(
-                "defaults_path",
-                root.join("defaults").to_string_lossy().into_owned(),
-            )
-            .unwrap();
-        kwargs.set_item("write_output", false).unwrap();
+        let sim_config = crate::py_config::PySimulationConfig::new(
+            "2019-01-01T00:00:00",
+            crate::py_config::WholeSeconds(600),
+            crate::py_config::WholeSeconds(60),
+            0,
+            None,
+            false,
+            "csv",
+            false,
+            "none",
+            hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+            None,
+            0,
+            None,
+            None,
+            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            None,
+        )
+        .expect("the sim config builds");
         let mut dwelling = PyDwelling::from_hpxml(
             &py.get_type::<PyDwelling>(),
             root.join("tests/fixtures/hpxml/ochre_samples/base.xml")
@@ -802,7 +808,12 @@ mod tests {
             root.join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
                 .to_string_lossy()
                 .into_owned(),
-            Some(&kwargs),
+            sim_config,
+            0,
+            None,
+            Some(root.join("defaults").to_string_lossy().into_owned()),
+            None,
+            None,
         )
         .expect("base.xml must load");
         dwelling.initialize().expect("initialize must succeed");

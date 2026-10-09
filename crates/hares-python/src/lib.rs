@@ -22,7 +22,7 @@ mod py_weather;
 mod utils;
 
 use py_actor::{PyActor, PyDRLevel, PyDispatchRequest, PyMode, PyPriority, PySignal};
-use py_config::{PyDwellingConfig, PySimulationConfig};
+use py_config::{PyDwellingConfig, PySimulationConfig, PySiteLocationOverride};
 use py_control::PyControlSignal;
 use py_dwelling::{PyDwelling, PyTimestepsIter};
 use py_enums::{
@@ -54,6 +54,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDwelling>()?;
     m.add_class::<PyTimestepsIter>()?;
     m.add_class::<PySimulationConfig>()?;
+    m.add_class::<PySiteLocationOverride>()?;
     m.add_class::<PyDwellingConfig>()?;
     m.add_class::<PyControlSignal>()?;
     m.add_class::<PyTelemetry>()?;

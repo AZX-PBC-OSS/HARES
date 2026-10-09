@@ -18,6 +18,8 @@ from __future__ import annotations
 import datetime as dt
 import sys
 import tempfile
+
+from hares import SimulationConfig
 import time
 from pathlib import Path
 
@@ -146,19 +148,7 @@ def _run_hares(output_dir: Path) -> tuple[dict[str, float], float, float]:
     from hares import Battery, Dwelling as HaresDwelling, PV
 
     t0 = time.perf_counter()
-    dwelling = HaresDwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time=START_HARES,
-        time_res_s=TIME_RES_MIN * 60,
-        duration_s=DURATION_H * 3600,
-        output_verbosity=6,
-        defaults_path=str(HARES_DEFAULTS),
-        master_seed=42,
-        write_output=True,
-        output_path=str(output_dir / "hares_bench_4month_der.csv"),
-    )
+    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, output_verbosity=6, master_seed=42, write_output=True, output_path=str(output_dir / "hares_bench_4month_der.csv")))
     dwelling.initialize()
 
     dwelling.add_pv(PV("PV", PV_CAPACITY_KW, PV_TILT_DEG, PV_AZIMUTH_HARES))

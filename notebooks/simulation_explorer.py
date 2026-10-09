@@ -369,6 +369,7 @@ def _run_simulation(
         Battery,
         Dwelling,
         EvArchetypeId,
+        SimulationConfig,
         VehicleId,
     )
 
@@ -415,13 +416,15 @@ def _run_simulation(
                 hpxml,
                 schedule,
                 weather,
-                start_time=f"{start_date}T00:00:00",
-                duration_s=duration_days * 86400,
-                time_res_s=time_res_s,
+                SimulationConfig(
+                    start_time=f"{start_date}T00:00:00",
+                    duration=duration_days * 86400,
+                    time_res=time_res_s,
+                    master_seed=seed_val,
+                    output_verbosity=3,
+                ),
                 defaults_path=defaults,
                 bldg_id=42,
-                master_seed=seed_val,
-                output_verbosity=3,
             )
             dw.initialize()
 

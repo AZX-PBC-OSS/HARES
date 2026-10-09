@@ -1,10 +1,12 @@
 """Tests for Python-side dwelling behavior (step, telemetry, error handling)."""
 
 import math
+from typing import Any, cast
 import pytest
 from datetime import datetime
 
 from pathlib import Path
+from hares import SimulationConfig
 
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
@@ -81,18 +83,7 @@ class TestStep:
     def test_step_returns_correct_keys_and_types(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
 
         result = dw.step()
@@ -120,18 +111,7 @@ class TestTelemetry:
     def test_telemetry_zone_returns_correct_data(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
         dw.step()
 
@@ -151,18 +131,7 @@ class TestTelemetry:
     def test_equipment_core_output_matches_telemetry_vectors(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
         for _ in range(3):
             dw.step()
@@ -173,18 +142,7 @@ class TestStepError:
     def test_step_without_initialize_raises_runtime_error(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
 
         with pytest.raises(RuntimeError, match=r"step\(\) called before initialize"):
             dw.step()
@@ -192,18 +150,7 @@ class TestStepError:
     def test_simulate_without_initialize_raises_runtime_error(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
 
         with pytest.raises(RuntimeError, match=r"simulate\(\) called before initialize"):
             dw.simulate()
@@ -211,18 +158,7 @@ class TestStepError:
     def test_step_after_initialize_succeeds(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
         result = dw.step()
         assert "timestamp" in result
@@ -230,18 +166,7 @@ class TestStepError:
     def test_step_past_end_raises_runtime_error(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=180,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=180, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
 
         for _ in range(3):
@@ -265,18 +190,7 @@ class TestStepError:
     def test_telemetry_equipment_returns_correct_data(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
         dw.step()
 
@@ -291,161 +205,62 @@ class TestStepError:
 
 
 class TestDurationValidation:
-    def test_duration_s_inf_raises_value_error(self):
+    def test_duration_inf_raises_type_error(self):
         from hares import Dwelling
 
-        with pytest.raises(ValueError, match=r"duration must be finite"):
-            Dwelling.from_hpxml(
-                HPXML,
-                SCHEDULE,
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=float("inf"),
-                time_res_s=60,
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
+        # A float is not int seconds nor a timedelta: the two duration forms
+        # the config accepts, so the extraction refuses it as a TypeError.
+        with pytest.raises(TypeError, match=r"expected int seconds or a datetime.timedelta"):
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=cast(Any, float("inf")), time_res=60, master_seed=0, write_output=False))
 
-    def test_duration_s_neg_inf_raises_value_error(self):
+    def test_duration_neg_inf_raises_type_error(self):
         from hares import Dwelling
 
-        with pytest.raises(ValueError, match=r"duration must be finite"):
-            Dwelling.from_hpxml(
-                HPXML,
-                SCHEDULE,
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=float("-inf"),
-                time_res_s=60,
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
+        with pytest.raises(TypeError, match=r"expected int seconds or a datetime.timedelta"):
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=cast(Any, float("-inf")), time_res=60, master_seed=0, write_output=False))
 
-    def test_time_res_s_inf_raises_value_error(self):
+    def test_time_res_inf_raises_type_error(self):
         from hares import Dwelling
 
-        with pytest.raises(ValueError, match=r"duration must be finite"):
-            Dwelling.from_hpxml(
-                HPXML,
-                SCHEDULE,
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=3600,
-                time_res_s=float("inf"),
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
+        with pytest.raises(TypeError, match=r"expected int seconds or a datetime.timedelta"):
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=cast(Any, float("inf")), master_seed=0, write_output=False))
 
-    def test_duration_s_zero_raises_value_error(self):
+    def test_duration_zero_raises_value_error(self):
         from hares import Dwelling
 
-        with pytest.raises(ValueError, match=r"positive"):
-            Dwelling.from_hpxml(
-                HPXML,
-                SCHEDULE,
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=0,
-                time_res_s=60,
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
+        with pytest.raises(ValueError, match=r"duration must be positive"):
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=0, time_res=60, master_seed=0, write_output=False))
 
-    def test_time_res_s_zero_raises_value_error(self):
+    def test_time_res_zero_raises_value_error(self):
         from hares import Dwelling
 
-        with pytest.raises(ValueError, match=r"positive"):
-            Dwelling.from_hpxml(
-                HPXML,
-                SCHEDULE,
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=3600,
-                time_res_s=0,
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
+        with pytest.raises(ValueError, match=r"time_res must be positive"):
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=0, master_seed=0, write_output=False))
 
-    def test_duration_s_above_chrono_bound_raises_value_error(self):
+    def test_duration_float_above_chrono_bound_raises_type_error(self):
         from hares import Dwelling
 
-        # 1e17 fits in i64 but exceeds chrono's Duration::seconds bound (~9.22e15).
+        # 1e17 is a float, not int seconds nor a timedelta.
+        with pytest.raises(TypeError, match="expected int seconds or a datetime.timedelta"):
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=cast(Any, 1e17), time_res=60, master_seed=0, write_output=False))
+
+    def test_time_res_float_above_chrono_bound_raises_type_error(self):
+        from hares import Dwelling
+
+        with pytest.raises(TypeError, match="expected int seconds or a datetime.timedelta"):
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=cast(Any, 1e17), master_seed=0, write_output=False))
+
+    def test_duration_int_above_chrono_bound_raises_value_error(self):
+        from hares import Dwelling
+
+        # Plain int (10**17): an int is accepted as seconds, and chrono's
+        # bound (i64::MAX / 1000 ~ 9.22e15) rejects it as too large.
         with pytest.raises(ValueError, match="too large for chrono Duration"):
-            Dwelling.from_hpxml(
-                HPXML,
-                SCHEDULE,
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=1e17,
-                time_res_s=60,
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=10**17, time_res=60, master_seed=0, write_output=False))
 
-    def test_time_res_s_above_chrono_bound_raises_value_error(self):
+    def test_time_res_int_above_chrono_bound_raises_value_error(self):
         from hares import Dwelling
 
         with pytest.raises(ValueError, match="too large for chrono Duration"):
-            Dwelling.from_hpxml(
-                HPXML,
-                SCHEDULE,
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=3600,
-                time_res_s=1e17,
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
-
-    def test_duration_s_int_above_chrono_bound_raises_value_error(self):
-        from hares import Dwelling
-
-        # Plain int (10**17) exercises extract_seconds's i64 branch (A),
-        # which skips ok_f64_seconds and relies solely on try_seconds.
-        with pytest.raises(ValueError, match="too large for chrono Duration"):
-            Dwelling.from_hpxml(
-                HPXML,
-                SCHEDULE,
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=10**17,
-                time_res_s=60,
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
-
-    def test_time_res_s_int_above_chrono_bound_raises_value_error(self):
-        from hares import Dwelling
-
-        # Plain int (10**17) exercises extract_seconds's i64 branch (A),
-        # which skips ok_f64_seconds and relies solely on try_seconds.
-        with pytest.raises(ValueError, match="too large for chrono Duration"):
-            Dwelling.from_hpxml(
-                HPXML,
-                SCHEDULE,
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=3600,
-                time_res_s=10**17,
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=10**17, master_seed=0, write_output=False))
 

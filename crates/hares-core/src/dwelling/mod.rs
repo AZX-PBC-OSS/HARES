@@ -118,8 +118,7 @@ use roster::RosterCaches;
 use conversions::{
     apply_humidity_update_to_zones, apply_thermal_update_to_zones, chrono_to_std_duration,
     default_output_path, duration_to_u32_secs, merged_equipment_config, required_datetime,
-    required_duration, required_path, validate_equipment_override_keys, validate_sim_config,
-    validate_wildcard_override,
+    required_duration, required_path, validate_equipment_override_keys, validate_wildcard_override,
 };
 #[cfg(any(feature = "profiling", test))]
 use hares_types::alloc_count::thread_allocations;
@@ -2203,6 +2202,12 @@ pub struct HpxmlInputs<'a> {
 impl Dwelling {
     /// Builds a dwelling from HPXML + schedule/weather paths and simulation config.
     pub fn from_config(config: DwellingConfig) -> Result<Self> {
+        // The same validation the TOML path runs: a config built in Rust
+        // code is checked exactly like one parsed from a file.
+        config
+            .sim_config
+            .validate()
+            .map_err(|err| HaresError::Io(err.to_string()))?;
         let building = parse_hpxml(&config.hpxml_path)
             .map_err(|err| HaresError::Io(format!("HPXML parse failed: {err}")))?;
 
@@ -2341,57 +2346,37 @@ impl Dwelling {
             .map_err(|err| HaresError::Io(format!("failed to read TOML config: {err}")))?;
         // Removed keys are rejected before deserialising, from the removed-keys
         // table every surface consults: the file's top level is the dwelling
-        // table, its [simulation] table a simulation config.
+        // table (its own message naming the surface), its [simulation] table
+        // a simulation config (the same message the Python keyword surface
+        // raises for the same key).
         let table: toml::Table = toml::from_str(&toml_str)
             .map_err(|err| HaresError::Io(format!("failed to parse TOML config: {err}")))?;
+        hares_io::check_removed_toml_keys(
+            &table,
+            hares_io::KeyScope::DwellingTable,
+            "the dwelling table",
+        )
+        .map_err(|err| HaresError::Io(err.to_string()))?;
         let sim_table = table
             .get("simulation")
             .and_then(|v| v.as_table())
             .ok_or_else(|| HaresError::Io("TOML config has no [simulation] table".to_string()))?;
-        for (scope, keys, surface) in [
-            (
-                hares_io::KeyScope::DwellingTable,
-                table.keys().collect::<Vec<_>>(),
-                "the dwelling table",
-            ),
-            (
-                hares_io::KeyScope::SimulationConfig,
-                sim_table.keys().collect::<Vec<_>>(),
-                "the [simulation] table",
-            ),
-        ] {
-            for key in keys {
-                if let Some(replacement) = hares_io::removed_key(scope, key) {
-                    return Err(HaresError::Io(format!(
-                        "configuration key '{key}' was removed from {surface}: {replacement}"
-                    )));
-                }
+        for key in sim_table.keys() {
+            if let Some(message) =
+                hares_io::removed_key_message(hares_io::KeyScope::SimulationConfig, key)
+            {
+                return Err(HaresError::Io(message));
             }
         }
         let mut config: SyntheticTomlConfig = toml::from_str(&toml_str)
             .map_err(|err| HaresError::Io(format!("failed to parse TOML config: {err}")))?;
         if let Some(write_output) = write_output_override {
-            config.output.write_output = write_output;
+            config.simulation.write_output = write_output;
         }
-
-        let sim_config = SimulationConfig {
-            start_time: config.simulation.start_time,
-            duration: Duration::seconds(config.simulation.duration_s),
-            time_res: Duration::seconds(config.simulation.time_res_s),
-            output_verbosity: config.output.output_verbosity,
-            output_path: config.output.output_path.as_ref().map(PathBuf::from),
-            write_output: config.output.write_output,
-            output_format: config.output.output_format,
-            output_chunk_size: config.output.output_chunk_size,
-            setpoint_deadband_c: None,
-            master_seed: config.output.master_seed,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: config.output.retain_batches,
-            rotation: config.output.rotation,
-            max_consecutive_step_failures: config.simulation.max_consecutive_step_failures,
-        };
-        validate_sim_config(&sim_config)?;
+        config
+            .simulation
+            .validate()
+            .map_err(|err| HaresError::Io(err.to_string()))?;
 
         let schedule_result = build_synthetic_schedule(&config)?;
         let hpxml_building = build_synthetic_building(
@@ -2408,13 +2393,10 @@ impl Dwelling {
             schedule_path: None,
             weather_path: path.to_path_buf(),
             defaults_path: None,
-            sim_config,
+            sim_config: config.simulation.clone(),
             overrides: config.overrides.clone(),
             bldg_id: config.building_id.unwrap_or(0),
-            initialization_duration: config
-                .simulation
-                .initialization_duration_s
-                .map(StdDuration::from_secs),
+            initialization_duration: config.initialization_duration_s.map(StdDuration::from_secs),
             patches: None,
         };
 
@@ -9601,9 +9583,13 @@ fn cfg_gated_helper() {
 
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -9628,13 +9614,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#,
         )
         .expect("write synthetic TOML");
@@ -9664,9 +9643,8 @@ master_seed = 0
 
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -12308,24 +12286,8 @@ occupancy = 1.0
             building_summary.children.push(building_occupancy);
         }
 
-        let sim_config = SimulationConfig {
-            start_time: config.simulation.start_time,
-            duration: chrono::Duration::seconds(config.simulation.duration_s),
-            time_res: chrono::Duration::seconds(config.simulation.time_res_s),
-            output_verbosity: config.output.output_verbosity,
-            output_path: config.output.output_path.as_ref().map(PathBuf::from),
-            write_output: config.output.write_output,
-            output_format: config.output.output_format,
-            output_chunk_size: config.output.output_chunk_size,
-            setpoint_deadband_c: None,
-            master_seed: config.output.master_seed,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: config.output.retain_batches,
-            rotation: config.output.rotation,
-            max_consecutive_step_failures: config.simulation.max_consecutive_step_failures,
-        };
-        validate_sim_config(&sim_config).expect("valid sim config");
+        let sim_config = config.simulation.clone();
+        sim_config.validate().expect("valid sim config");
 
         // Point defaults_path at a defaults directory whose store loads
         // (the shipped zip, generator-curve and EV-mapping files; a store
@@ -12389,10 +12351,7 @@ occupancy = 1.0
             sim_config,
             overrides: config.overrides.clone(),
             bldg_id: config.building_id.unwrap_or(0),
-            initialization_duration: config
-                .simulation
-                .initialization_duration_s
-                .map(StdDuration::from_secs),
+            initialization_duration: config.initialization_duration_s.map(StdDuration::from_secs),
             patches: None,
         };
 
@@ -12902,9 +12861,13 @@ occupancy = 1.0
             r#"building_id = 999
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 120
-
+time_res = 60
+duration = 120
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -12936,13 +12899,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#,
         )
         .expect("write synthetic TOML");
@@ -12982,9 +12938,13 @@ master_seed = 0
             r#"building_id = 999
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 120
-
+time_res = 60
+duration = 120
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -13009,13 +12969,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#,
         )
         .expect("write synthetic TOML");
@@ -13897,9 +13850,13 @@ master_seed = 0
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = false
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -13922,13 +13879,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#;
         fs::write(path, content).expect("failed to write synthetic TOML");
     }
@@ -14660,9 +14610,15 @@ master_seed = 0
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
+output_verbosity = 8
+output_format = "csv"
+output_chunk_size = 1
+write_output = true
+retain_batches = true
+output_path = "{}"
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -14685,15 +14641,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 8
-output_format = "csv"
-output_chunk_size = 1
-write_output = true
-retain_batches = true
-output_path = "{}"
-master_seed = 0
 "#,
                 output_path.display()
             ),
@@ -16420,9 +16367,13 @@ master_seed = 0
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 900
-duration_s = {duration}
-
+time_res = 900
+duration = {duration}
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 42
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -16455,13 +16406,6 @@ cooldown_duration_s = 900.0
 event_probability = 0.25
 sensible_gain_fraction = 0.72
 latent_gain_fraction = 0.08
-
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 42
 "#,
             duration = STEPS * 900,
         );
@@ -17875,12 +17819,16 @@ master_seed = 42
 
         let toml_content = r#"building_id = 2002
 
+initialization_duration_s = 86400
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 3600
-duration_s = 172800
-initialization_duration_s = 86400
-
+time_res = 3600
+duration = 172800
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 42
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -17905,13 +17853,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 42
 "#;
 
         fs::write(&toml_path_a, toml_content).expect("write TOML A");
@@ -17958,9 +17899,13 @@ master_seed = 42
 
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 7
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -17985,13 +17930,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 7
 "#;
 
         fs::write(&toml_path_a, toml_content).expect("write TOML A");
@@ -18063,9 +18001,13 @@ master_seed = 7
             r#"building_id = 999
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 120
-
+time_res = 60
+duration = 120
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -18090,13 +18032,6 @@ ach = 0.5
 
 [schedule]
 occupancy = 1.0
-
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#,
         )
         .expect("write synthetic TOML");
@@ -18162,9 +18097,13 @@ master_seed = 0
             r#"building_id = 999
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 120
-
+time_res = 60
+duration = 120
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -18189,13 +18128,6 @@ ach = 0.5
 
 [schedule]
 occupancy = 1.0
-
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#,
         )
         .expect("write synthetic TOML");
@@ -18337,9 +18269,13 @@ master_seed = 0
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = false
+master_seed = {master_seed}
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -18362,13 +18298,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = {master_seed}
 
 [event_load]
 active_power_kw = 0.5
@@ -18512,9 +18441,13 @@ latent_gain_fraction = 0.08
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = false
+master_seed = {master_seed}
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -18537,13 +18470,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = {master_seed}
 
 [event_load]
 active_power_kw = 0.5
@@ -18642,9 +18568,14 @@ event_probability_schedule = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = {}
+time_res = 60
+duration = {}
 # extra steps to allow restart+duration
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = false
+master_seed = 42
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -18667,13 +18598,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 42
 "#,
                 // 5 min = 5 steps at 60s resolution.
                 300
@@ -19329,8 +19253,13 @@ master_seed = 42
             r#"building_id = 998
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 120
+time_res = 60
+duration = 120
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -19352,14 +19281,7 @@ ach = 0.0
 occupancy = 1.0
 [event_load]
 active_power_kw = 1.5
-event_probability = 1.0
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
-"#,
+event_probability = 1.0"#,
         )
         .expect("write synthetic TOML");
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
@@ -19394,8 +19316,13 @@ master_seed = 0
             r#"building_id = 999
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 120
+time_res = 60
+duration = 120
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -19414,14 +19341,7 @@ pressure_kpa = 101.325
 [infiltration]
 ach = 0.0
 [schedule]
-occupancy = 1.0
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
-"#,
+occupancy = 1.0"#,
         )
         .expect("write synthetic TOML");
 

@@ -27,9 +27,12 @@ const SYNTHETIC_RC_DWELLING_TOML: &str = r#"building_id = 999
 
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 3600
-
+time_res = 60
+duration = 3600
+output_verbosity = 0
+output_format = "csv"
+write_output = false
+master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -82,12 +85,6 @@ specific_heat_j_kg_k = 1000.0
 [schedule]
 occupancy = 0.0
 occupants_present = false
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-write_output = false
-master_seed = 0
 "#;
 
 /// Builds a synthetic dwelling with RC envelope from the shared TOML fixture.

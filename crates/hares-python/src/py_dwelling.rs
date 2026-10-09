@@ -1,7 +1,6 @@
 //! Python bindings for dwelling simulation.
 
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -15,9 +14,7 @@ use hares_equipment::{
     BatteryConfig, BatteryLutType, EquipmentConfig, EquipmentRegistry, EvConfig,
     ProtocolBridgeConfig, PvConfig, config::ConfigValue,
 };
-use hares_io::{
-    OutputFormat, SimulationConfig, SiteLocationOverride, output::metrics::MetricsCalculator,
-};
+use hares_io::output::metrics::MetricsCalculator;
 use hares_types::panic_hook::{self, PanicHookGuard};
 use hares_types::{BatteryChemistry, EvConnectionState, HaresError, SurfaceIrradiance};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -54,7 +51,6 @@ use crate::conversions::{batches_or_steps_to_polars_df, chrono_to_py_datetime};
 use crate::py_actor::PyActor;
 use crate::py_actor::PyPriority;
 use crate::py_config::PySimulationConfig;
-use crate::py_config::parse_rotation_policy;
 use crate::py_control::PyControlSignal;
 use crate::py_enums::PyLutType;
 use crate::py_enums::{PyEvArchetypeId, PyVehicleId};
@@ -64,15 +60,8 @@ use crate::py_equipment::{
 };
 use crate::py_metrics::PySimulationMetrics;
 use crate::py_telemetry::PyTelemetry;
-use crate::utils::extract_datetime;
-use crate::utils::extract_seconds;
 use crate::utils::finite_f64_optional;
-use crate::utils::python_to_json_value;
 use crate::utils::validate_finite;
-
-const DEFAULT_START: &str = "2019-01-01T00:00:00Z";
-const DEFAULT_DURATION_S: i64 = 24 * 60 * 60;
-const DEFAULT_STEP_S: i64 = 60;
 
 fn parse_solar_override(
     py: Python<'_>,
@@ -668,7 +657,6 @@ pub struct PyDwelling {
     pub(crate) poisoned: AtomicBool,
     pub(crate) mutex_poison_events: std::sync::atomic::AtomicU64,
     pub(crate) config: DwellingConfig,
-    sim_config: PySimulationConfig,
     initial_state: Option<Vec<u8>>,
     initialized: bool,
     registry: ActorRegistry,
@@ -680,23 +668,39 @@ pub struct PyDwelling {
 #[pymethods]
 impl PyDwelling {
     #[classmethod]
-    #[pyo3(signature = (hpxml, schedule, weather, **kwargs))]
+    #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, initialization_duration = None, defaults_path = None, overrides = None, **unexpected))]
     pub fn from_hpxml(
         _cls: &Bound<'_, PyType>,
         hpxml: String,
         schedule: Option<String>,
         weather: String,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        config: crate::py_config::PySimulationConfig,
+        bldg_id: i64,
+        initialization_duration: Option<i64>,
+        defaults_path: Option<String>,
+        overrides: Option<&Bound<'_, PyDict>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let config = build_config(hpxml, schedule, weather, kwargs)?;
-        let sim_config = PySimulationConfig::from_sim_config(&config.sim_config);
+        // The dwelling-level keywords are the config's own; every simulation
+        // setting rides on the one SimulationConfig object.
+        let config = crate::py_config::PyDwellingConfig::new(
+            hpxml,
+            schedule,
+            weather,
+            config,
+            bldg_id,
+            initialization_duration,
+            defaults_path,
+            overrides,
+            unexpected,
+        )?;
+        let config = config.to_dwelling_config()?;
         let dwelling = Dwelling::from_config(config.clone()).map_err(to_py_err)?;
         Ok(Self {
             dwelling: Mutex::new(dwelling),
             poisoned: AtomicBool::new(false),
             mutex_poison_events: std::sync::atomic::AtomicU64::new(0),
             config,
-            sim_config,
             initial_state: None,
             initialized: false,
             registry: ActorRegistry::new(),
@@ -704,6 +708,12 @@ impl PyDwelling {
             zone_keys: None,
             gas_tariff: None,
         })
+    }
+
+    fn config(&self) -> PySimulationConfig {
+        // Read through the dwelling's config, so a rebuilt one (a new seed)
+        // is the config the object reports.
+        PySimulationConfig(self.config.sim_config.clone())
     }
 
     pub fn initialize(&mut self) -> PyResult<()> {
@@ -1630,7 +1640,16 @@ impl PyDwelling {
         }
 
         let schema = batches[0].schema();
-        let time_res_secs = self.sim_config.time_res_s() as u32;
+        let time_res_secs =
+            u32::try_from(self.config.sim_config.time_res.num_seconds()).map_err(|_| {
+                PyValueError::new_err(
+                    self.config
+                        .sim_config
+                        .time_res_secs_u32()
+                        .expect_err("the same bound validate() rejects")
+                        .to_string(),
+                )
+            })?;
 
         let mut calculator =
             MetricsCalculator::new(&schema, time_res_secs, &self.config.sim_config).map_err(
@@ -1700,10 +1719,6 @@ impl PyDwelling {
             "Dwelling(bldg_id={}, initialized={})",
             self.config.bldg_id, self.initialized
         )
-    }
-
-    fn config(&self) -> PySimulationConfig {
-        self.sim_config.clone()
     }
 
     pub fn set_solar_override(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -2116,13 +2131,11 @@ fn ev_driver_params(
 
 impl PyDwelling {
     pub(crate) fn from_blueprint_build(dwelling: Dwelling, config: DwellingConfig) -> Self {
-        let sim_config = PySimulationConfig::from_sim_config(&config.sim_config);
         Self {
             dwelling: Mutex::new(dwelling),
             poisoned: AtomicBool::new(false),
             mutex_poison_events: std::sync::atomic::AtomicU64::new(0),
             config,
-            sim_config,
             initial_state: None,
             initialized: false,
             registry: ActorRegistry::new(),
@@ -2330,367 +2343,6 @@ impl PyTimestepsIter {
             self.next_step, self.total_steps
         )
     }
-}
-
-const KNOWN_KWARGS: &[&str] = &[
-    "config",
-    "start_time",
-    "time_res_s",
-    "duration_s",
-    "output_to_parquet",
-    "output_path",
-    "write_output",
-    "output_verbosity",
-    "output_chunk_size",
-    "master_seed",
-    "civil_timezone",
-    "setpoint_deadband_c",
-    "bldg_id",
-    "initialization_duration",
-    "defaults_path",
-    "overrides",
-    "latitude",
-    "longitude",
-    "elevation_m",
-    "utc_offset_h",
-    "rotation",
-    "max_consecutive_step_failures",
-];
-
-/// Extract an explicit [`SiteLocationOverride`] from the `latitude`,
-/// `longitude`, `elevation_m`, and `utc_offset_h` kwargs.
-///
-/// Each is optional; any provided value overrides the HPXML/weather-derived
-/// value during site-location resolution. Values are validated for finiteness
-/// and physical range so a typo fails fast rather than silently producing
-/// wrong solar geometry.
-fn extract_site_location_override(
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<SiteLocationOverride> {
-    let get = |name: &str| -> PyResult<Option<f64>> {
-        kwargs
-            .and_then(|k| k.get_item(name).ok().flatten())
-            .map(|obj| obj.extract::<f64>())
-            .transpose()
-    };
-
-    let latitude_deg = get("latitude")?;
-    if let Some(lat) = latitude_deg
-        && (!lat.is_finite() || !(-90.0..=90.0).contains(&lat))
-    {
-        return Err(PyValueError::new_err(format!(
-            "latitude must be finite and within [-90, 90] degrees, got {lat}"
-        )));
-    }
-
-    let longitude_deg = get("longitude")?;
-    if let Some(lon) = longitude_deg
-        && (!lon.is_finite() || !(-180.0..=180.0).contains(&lon))
-    {
-        return Err(PyValueError::new_err(format!(
-            "longitude must be finite and within [-180, 180] degrees, got {lon}"
-        )));
-    }
-
-    let elevation_m = get("elevation_m")?;
-    if let Some(elev) = elevation_m
-        && (!elev.is_finite() || !(-500.0..=9000.0).contains(&elev))
-    {
-        return Err(PyValueError::new_err(format!(
-            "elevation_m must be finite and within [-500, 9000] m, got {elev}"
-        )));
-    }
-
-    let utc_offset_h = get("utc_offset_h")?;
-    if let Some(off) = utc_offset_h
-        && (!off.is_finite() || !(-14.0..=14.0).contains(&off))
-    {
-        return Err(PyValueError::new_err(format!(
-            "utc_offset_h must be finite and within [-14, 14] hours, got {off}"
-        )));
-    }
-
-    Ok(SiteLocationOverride {
-        latitude_deg,
-        longitude_deg,
-        elevation_m,
-        utc_offset_h,
-    })
-}
-
-pub(crate) fn build_config(
-    hpxml: String,
-    schedule: Option<String>,
-    weather: String,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<DwellingConfig> {
-    let kwargs = kwargs.cloned();
-
-    if let Some(ref k) = kwargs {
-        for key in k.keys() {
-            let key_str: String = key.extract()?;
-            if !KNOWN_KWARGS.contains(&key_str.as_str()) {
-                // A removed key errors with the removed-keys table's message
-                // (it names where the capability lives now), not the generic
-                // unknown-keyword refusal.
-                if let Some(replacement) =
-                    hares_io::removed_key(hares_io::KeyScope::DwellingTable, &key_str)
-                {
-                    return Err(PyValueError::new_err(format!(
-                        "configuration keyword '{key_str}' was removed: {replacement}"
-                    )));
-                }
-                return Err(PyValueError::new_err(format!(
-                    "unknown keyword argument: '{key_str}'"
-                )));
-            }
-        }
-    }
-
-    let py_config: Option<PySimulationConfig> = if let Some(k) = kwargs.as_ref() {
-        if let Ok(Some(value)) = k.get_item("config") {
-            Some(value.extract::<PySimulationConfig>()?)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let sim_config = if let Some(py_cfg) = py_config {
-        py_cfg.to_sim_config()?
-    } else {
-        let start_time = match kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("start_time").ok().flatten())
-            .map(|obj| extract_datetime(&obj))
-            .transpose()?
-        {
-            Some(dt) => dt,
-            None => default_start()?,
-        };
-
-        let time_res_s = match kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("time_res_s").ok().flatten())
-            .map(|obj| extract_seconds(&obj))
-            .transpose()?
-        {
-            Some(v) if v > 0 => v,
-            Some(_) => {
-                return Err(PyValueError::new_err("time_res_s must be positive"));
-            }
-            None => DEFAULT_STEP_S,
-        };
-        let time_res = Duration::try_seconds(time_res_s).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "time_res_s too large for chrono Duration: {time_res_s}"
-            ))
-        })?;
-
-        let duration_s = match kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("duration_s").ok().flatten())
-            .map(|obj| extract_seconds(&obj))
-            .transpose()?
-        {
-            Some(v) if v > 0 => v,
-            Some(_) => {
-                return Err(PyValueError::new_err("duration_s must be positive"));
-            }
-            None => DEFAULT_DURATION_S,
-        };
-        let duration = Duration::try_seconds(duration_s).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "duration_s too large for chrono Duration: {duration_s}"
-            ))
-        })?;
-
-        let output_to_parquet = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("output_to_parquet").ok().flatten())
-            .map(|obj| obj.extract::<bool>())
-            .transpose()?
-            .unwrap_or(false);
-
-        let output_path = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("output_path").ok().flatten())
-            .map(|obj| obj.extract::<String>().map(PathBuf::from))
-            .transpose()?;
-
-        let write_output = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("write_output").ok().flatten())
-            .map(|obj| obj.extract::<bool>())
-            .transpose()?
-            .unwrap_or(true);
-
-        let output_verbosity = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("output_verbosity").ok().flatten())
-            .map(|obj| obj.extract::<u8>())
-            .transpose()?
-            .unwrap_or(0);
-
-        let output_chunk_size = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("output_chunk_size").ok().flatten())
-            .map(|obj| obj.extract::<usize>())
-            .transpose()?
-            .unwrap_or(10_000);
-
-        let master_seed = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("master_seed").ok().flatten())
-            .map(|obj| obj.extract::<u64>())
-            .transpose()?
-            .unwrap_or(0);
-
-        let civil_timezone = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("civil_timezone").ok().flatten())
-            .map(|obj| obj.extract::<String>())
-            .transpose()?;
-
-        let setpoint_deadband_c = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("setpoint_deadband_c").ok().flatten())
-            .map(|obj| obj.extract::<f64>())
-            .transpose()?;
-
-        if let Some(db) = setpoint_deadband_c
-            && (!db.is_finite() || db < 0.0)
-        {
-            return Err(PyValueError::new_err(format!(
-                "setpoint_deadband_c must be finite and non-negative, got {db}"
-            )));
-        }
-
-        let site_location = extract_site_location_override(kwargs.as_ref())?;
-
-        let rotation = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("rotation").ok().flatten())
-            .map(|obj| obj.extract::<String>())
-            .transpose()?;
-        if let Some(ref rot) = rotation {
-            parse_rotation_policy(rot)?;
-        }
-        let rotation_policy = rotation
-            .as_deref()
-            .map(parse_rotation_policy)
-            .transpose()?
-            .unwrap_or(hares_io::RotationPolicy::None);
-
-        let max_consecutive_step_failures = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("max_consecutive_step_failures").ok().flatten())
-            .map(|obj| obj.extract::<u32>())
-            .transpose()?
-            .unwrap_or(hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES);
-
-        if duration.num_milliseconds() % time_res.num_milliseconds() != 0 {
-            return Err(PyValueError::new_err(format!(
-                "duration ({}s) must be an exact multiple of time_res ({}s)",
-                duration.num_seconds(),
-                time_res.num_seconds(),
-            )));
-        }
-
-        SimulationConfig {
-            start_time,
-            duration,
-            time_res,
-            output_verbosity,
-            output_path,
-            write_output,
-            output_format: if output_to_parquet {
-                OutputFormat::Parquet
-            } else {
-                OutputFormat::Csv
-            },
-            output_chunk_size,
-            setpoint_deadband_c,
-            master_seed,
-            civil_timezone,
-            site_location,
-            retain_batches: true,
-            rotation: rotation_policy,
-            max_consecutive_step_failures,
-        }
-    };
-
-    let bldg_id = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("bldg_id").ok().flatten())
-        .map(|obj| obj.extract::<i64>())
-        .transpose()?
-        .unwrap_or(0);
-
-    let initialization_duration = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("initialization_duration").ok().flatten())
-        .map(|obj| {
-            let secs = extract_seconds(&obj)?;
-            if secs < 0 {
-                return Err(PyValueError::new_err(
-                    "initialization_duration must be non-negative",
-                ));
-            }
-            Ok(secs)
-        })
-        .transpose()?
-        .and_then(|secs| {
-            if secs == 0 {
-                None
-            } else {
-                Some(std::time::Duration::from_secs(secs as u64))
-            }
-        });
-
-    let defaults_path = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("defaults_path").ok().flatten())
-        .map(|obj| obj.extract::<String>())
-        .transpose()?
-        .map(PathBuf::from);
-
-    let overrides: Option<serde_json::Value> = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("overrides").ok().flatten())
-        .map(|obj| python_to_json_value(&obj))
-        .transpose()?
-        // Python `None` is the idiomatic "not provided" — translate it to
-        // the Rust contract's `Option::None` (no overrides) rather than
-        // `Some(Value::Null)`, which the dwelling-assembly validator
-        // rejects as a misconfigured non-object payload. A JSON `null`
-        // nested INSIDE a provided dict keeps its meaning (a null override
-        // field, rejected per-key downstream).
-        .filter(|v| !v.is_null());
-
-    Ok(DwellingConfig {
-        hpxml_path: PathBuf::from(hpxml),
-        // `None` requests a schedule generated from the HPXML; a set path
-        // must be readable at construction.
-        schedule_path: schedule.map(PathBuf::from),
-        weather_path: PathBuf::from(weather),
-        defaults_path,
-        sim_config,
-        overrides,
-        bldg_id,
-        initialization_duration,
-        patches: None,
-    })
-}
-
-fn default_start() -> PyResult<DateTime<FixedOffset>> {
-    DateTime::parse_from_rfc3339(DEFAULT_START).map_err(|e| {
-        PyValueError::new_err(format!(
-            "internal error: default start time constant is invalid: {}",
-            e
-        ))
-    })
 }
 
 pub(crate) fn to_py_err(err: HaresError) -> PyErr {
@@ -2963,9 +2615,8 @@ mod tests {
     use pyo3::exceptions::PyValueError;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList};
 
-    use super::default_start;
     use super::pv_config_from_py;
-    use super::{DEFAULT_START, parse_solar_override_from_dict, parse_solar_override_from_list};
+    use super::{parse_solar_override_from_dict, parse_solar_override_from_list};
     use crate::py_equipment::PyPv;
     use crate::utils::extract_seconds;
     use crate::utils::{extract_datetime, parse_datetime_str};
@@ -3209,20 +2860,6 @@ mod tests {
             let dt = result.unwrap();
             assert_eq!(dt.time().nanosecond(), 0);
         });
-    }
-
-    #[test]
-    fn test_default_start_is_valid_rfc3339() {
-        chrono::DateTime::parse_from_rfc3339(DEFAULT_START).expect("DEFAULT_START must be valid");
-    }
-
-    #[test]
-    fn test_default_start_returns_expected_value() {
-        let result = default_start().unwrap();
-        assert_eq!(
-            result.format("%Y-%m-%dT%H:%M:%S%z").to_string(),
-            "2019-01-01T00:00:00+0000"
-        );
     }
 
     fn pv_env(tilt_deg: f64, azimuth_deg: f64) -> EnvironmentState {
@@ -3911,25 +3548,37 @@ mod profiling_summary_tests {
             let fixture = root.join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
             let defaults = root.join("defaults");
 
-            let kwargs = PyDict::new(py);
-            kwargs
-                .set_item("start_time", "2023-01-01T00:00:00-07:00")
-                .unwrap();
-            kwargs.set_item("duration_s", 96 * 3600_i64).unwrap();
-            kwargs.set_item("time_res_s", 3600_i64).unwrap();
-            kwargs
-                .set_item("defaults_path", defaults.to_string_lossy().into_owned())
-                .unwrap();
-            kwargs.set_item("bldg_id", 1_i64).unwrap();
-            kwargs.set_item("master_seed", 0_u64).unwrap();
-            kwargs.set_item("write_output", false).unwrap();
+            let sim_config = crate::py_config::PySimulationConfig::new(
+                "2023-01-01T00:00:00-07:00",
+                crate::py_config::WholeSeconds(96 * 3600),
+                crate::py_config::WholeSeconds(3600),
+                0,
+                None,
+                false,
+                "csv",
+                false,
+                "none",
+                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                None,
+                0,
+                None,
+                None,
+                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                None,
+            )
+            .expect("the sim config builds");
 
             let mut dwelling = PyDwelling::from_hpxml(
                 &py.get_type::<PyDwelling>(),
                 fixture.join("building.xml").to_string_lossy().into_owned(),
                 Some(fixture.join("schedule.csv").to_string_lossy().into_owned()),
                 fixture.join("weather.epw").to_string_lossy().into_owned(),
-                Some(&kwargs),
+                sim_config,
+                1,
+                None,
+                Some(defaults.to_string_lossy().into_owned()),
+                None,
+                None,
             )
             .expect("cz2a fixture must load");
 

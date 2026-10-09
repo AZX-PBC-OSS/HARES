@@ -8,6 +8,7 @@ from hares import (
     EndUse,
 )
 from conftest import HPXML, SCHEDULE, WEATHER, HARES_DEFAULTS
+from hares import SimulationConfig
 
 # Run simulations long enough to see meaningful energy use (at least 10 simulation steps)
 DURATION_S = 3600  # 1 hour
@@ -15,14 +16,27 @@ TIME_RES_S = 600   # 10 minute steps
 
 
 def _make_blueprint(**kw: Any):
-    params: dict[str, Any] = dict(duration_s=DURATION_S, time_res_s=TIME_RES_S)
-    params.update(kw)
-    return DwellingBlueprint.from_hpxml(
-        HPXML, SCHEDULE, WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42, **params,
-        write_output=False,
-    )
+    """The sim-level kwargs (duration_s, time_res_s, and any SimulationConfig
+    field) ride on the one config the constructor builds; the dwelling-level
+    keywords pass through."""
+    sim: dict[str, Any] = {
+        "start_time": "2019-01-01T00:00:00",
+        "duration": kw.pop("duration_s", DURATION_S),
+        "time_res": kw.pop("time_res_s", TIME_RES_S),
+        "write_output": False,
+    }
+    for name in (
+        "master_seed",
+        "output_verbosity",
+        "rotation",
+        "civil_timezone",
+        "setpoint_deadband_c",
+        "output_chunk_size",
+        "retain_batches",
+    ):
+        if name in kw:
+            sim[name] = kw.pop(name)
+    return DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(**sim), **kw)
 
 
 def _collect_step_powers(bp, max_steps=None):

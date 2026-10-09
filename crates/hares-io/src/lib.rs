@@ -22,9 +22,10 @@ pub mod weather;
 pub mod wsf;
 
 pub use config::{
-    ConfigError, DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES, KeyScope, MAX_VERBOSITY, OutputFormat,
+    ConfigError, DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES, DEFAULT_OUTPUT_CHUNK_SIZE,
+    DEFAULT_TIME_RES_SECS, DEFAULT_WRITE_OUTPUT, KeyScope, MAX_VERBOSITY, OutputFormat,
     REMOVED_KEYS, RemovedKey, RotationPolicy, SimulationConfig, check_removed_toml_keys,
-    removed_key,
+    removed_key, removed_key_message,
 };
 pub use defaults::{
     BiquadraticCoefficients, DefaultsCategory, DefaultsError, DefaultsStore, EquipmentDefaults,

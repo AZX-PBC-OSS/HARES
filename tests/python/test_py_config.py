@@ -1,163 +1,286 @@
-"""Tests for SimulationConfig and DwellingConfig Python bindings."""
+"""Tests for SimulationConfig, SiteLocationOverride and DwellingConfig bindings.
 
-import pytest
+Row 34: one config type across TOML, synthetic TOML and Python. The
+constructor's keywords are the Rust field names, its defaults the Rust serde
+defaults, and the validation the TOML path runs runs here too.
+"""
+
+import inspect
+import tomllib
 from typing import Any, cast
 
-from hares import Dwelling, SimulationConfig, DwellingConfig
+import pytest
+
+from hares import Dwelling, DwellingConfig, SimulationConfig, SiteLocationOverride
+
+START = "2024-01-01T00:00:00Z"
+
+
+def required_kwargs() -> dict[str, Any]:
+    return {"start_time": START, "duration": 3600}
 
 
 class TestSimulationConfig:
     """Test SimulationConfig Python type."""
 
-    def test_default_construction_yields_expected_defaults(self):
-        """Verify SimulationConfig() default construction yields expected default values."""
-        cfg = SimulationConfig()
-        assert cfg.start_time == "2019-01-01T00:00:00+00:00"
-        assert cfg.duration_s == 86400
-        assert cfg.time_res_s == 60
-        assert cfg.output_verbosity == 0
-        assert cfg.output_path is None
-        assert cfg.output_to_parquet is False
-        assert cfg.output_chunk_size == 10000
-        assert cfg.master_seed == 0
-        assert cfg.civil_timezone is None
-        assert cfg.setpoint_deadband_c is None
-        assert cfg.max_consecutive_step_failures == 1
-
-    def test_step_failure_budget_is_configurable(self):
-        cfg = SimulationConfig(max_consecutive_step_failures=0)
-        assert cfg.max_consecutive_step_failures == 0
-        cfg.max_consecutive_step_failures = 5
-        assert cfg.max_consecutive_step_failures == 5
+    def test_python_and_toml_defaults_come_from_one_table(self):
+        """A config built in Python with only the required arguments and a
+        config parsed from the same two required keys resolve field for
+        field equal: the defaults come from the one serde table."""
+        toml_text = f'start_time = "{START}"\nduration = 3600\n'
+        toml_cfg = SimulationConfig.from_toml(toml_text)
+        py_cfg = SimulationConfig(**required_kwargs())
+        assert py_cfg.start_time == toml_cfg.start_time
+        assert py_cfg.duration == toml_cfg.duration
+        assert py_cfg.time_res == toml_cfg.time_res
+        assert py_cfg.output_verbosity == toml_cfg.output_verbosity
+        assert py_cfg.output_path == toml_cfg.output_path
+        assert py_cfg.write_output == toml_cfg.write_output
+        assert py_cfg.output_format == toml_cfg.output_format
+        assert py_cfg.output_chunk_size == toml_cfg.output_chunk_size
+        assert py_cfg.setpoint_deadband_c == toml_cfg.setpoint_deadband_c
+        assert py_cfg.master_seed == toml_cfg.master_seed
+        assert py_cfg.retain_batches == toml_cfg.retain_batches
+        assert py_cfg.rotation == toml_cfg.rotation
+        assert py_cfg.civil_timezone == toml_cfg.civil_timezone
+        assert py_cfg.max_consecutive_step_failures == toml_cfg.max_consecutive_step_failures
+        assert py_cfg.site_location.latitude_deg == toml_cfg.site_location.latitude_deg
+        assert py_cfg.site_location.longitude_deg == toml_cfg.site_location.longitude_deg
+        assert py_cfg.site_location.elevation_m == toml_cfg.site_location.elevation_m
+        assert py_cfg.site_location.utc_offset_h == toml_cfg.site_location.utc_offset_h
+        # And the Python-built config serialises to exactly what from_toml
+        # parses back to the same config.
+        assert SimulationConfig.from_toml(py_cfg.to_toml()) == py_cfg or (
+            py_cfg.to_toml() == toml_cfg.to_toml()
+        )
 
     def test_construction_with_kwargs(self):
-        """Verify SimulationConfig accepts kwargs in constructor."""
-        cfg = SimulationConfig(duration_s=3600, time_res_s=60, master_seed=42)
-        assert cfg.duration_s == 3600
-        assert cfg.time_res_s == 60
+        cfg = SimulationConfig(start_time=START, duration=3600, time_res=60, master_seed=42)
+        assert cfg.duration == 3600
+        assert cfg.time_res == 60
         assert cfg.master_seed == 42
-        assert cfg.start_time == "2019-01-01T00:00:00+00:00"
+        assert cfg.start_time == "2024-01-01T00:00:00+00:00"
         assert cfg.output_verbosity == 0
 
-    def test_custom_values_accepted_and_round_trip(self):
-        """Verify custom values are accepted and round-trip through getters."""
-        cfg = SimulationConfig()
-        cfg.start_time = "2024-06-15T12:00:00Z"
-        cfg.duration_s = 7200
-        cfg.time_res_s = 300
-        cfg.output_verbosity = 5
-        cfg.output_path = "/tmp/output.csv"
-        cfg.output_to_parquet = True
-        cfg.output_chunk_size = 5000
-        cfg.master_seed = 42
-        cfg.civil_timezone = "America/Denver"
-        cfg.setpoint_deadband_c = 1.5
+    def test_duration_and_time_res_accept_timedelta(self):
+        from datetime import timedelta
 
+        cfg = SimulationConfig(
+            start_time=START, duration=timedelta(hours=1), time_res=timedelta(minutes=1)
+        )
+        assert cfg.duration == 3600
+        assert cfg.time_res == 60
+        whole = timedelta(hours=1, milliseconds=500)
+        with pytest.raises(ValueError, match="whole number of seconds"):
+            SimulationConfig(start_time=START, duration=whole)
+
+    def test_custom_values_accepted_and_round_trip(self):
+        cfg = SimulationConfig(
+            start_time="2024-06-15T12:00:00Z",
+            duration=7200,
+            time_res=300,
+            output_verbosity=5,
+            output_path="/tmp/output.csv",
+            write_output=False,
+            output_format="parquet",
+            output_chunk_size=5000,
+            master_seed=42,
+            civil_timezone="America/Denver",
+            setpoint_deadband_c=1.5,
+            retain_batches=True,
+            rotation="daily",
+        )
         assert cfg.start_time == "2024-06-15T12:00:00+00:00"
-        assert cfg.duration_s == 7200
-        assert cfg.time_res_s == 300
+        assert cfg.duration == 7200
+        assert cfg.time_res == 300
         assert cfg.output_verbosity == 5
         assert cfg.output_path == "/tmp/output.csv"
-        assert cfg.output_to_parquet is True
+        assert cfg.write_output is False
+        assert cfg.output_format == "parquet"
         assert cfg.output_chunk_size == 5000
         assert cfg.master_seed == 42
         assert cfg.civil_timezone == "America/Denver"
         assert cfg.setpoint_deadband_c == 1.5
+        assert cfg.retain_batches is True
+        assert cfg.rotation == "daily"
 
     def test_repr_includes_key_info(self):
-        """Verify __repr__ includes key info."""
-        cfg = SimulationConfig()
-        cfg.master_seed = 42
+        cfg = SimulationConfig(start_time=START, duration=3600, master_seed=42)
         r = repr(cfg)
         assert "SimulationConfig" in r
-        assert "2019-01-01" in r
-        assert "86400" in r
+        assert "2024-01-01" in r
+        assert "3600" in r
         assert "master_seed=42" in r
 
     def test_invalid_start_time_string_raises_value_error(self):
-        """Verify invalid start_time string raises ValueError."""
-        cfg = SimulationConfig()
         with pytest.raises(ValueError, match="invalid start_time format"):
-            cfg.start_time = "not-a-valid-date"
+            SimulationConfig(start_time="not-a-valid-date", duration=3600)
 
     def test_invalid_duration_raises_value_error(self):
-        """Verify invalid duration_s raises ValueError."""
-        cfg = SimulationConfig()
-        with pytest.raises(ValueError, match="duration_s must be positive"):
-            cfg.duration_s = 0
+        with pytest.raises(ValueError, match="duration must be positive"):
+            SimulationConfig(start_time=START, duration=0)
 
     def test_invalid_time_res_raises_value_error(self):
-        """Verify invalid time_res_s raises ValueError."""
-        cfg = SimulationConfig()
-        with pytest.raises(ValueError, match="time_res_s must be positive"):
-            cfg.time_res_s = 0
+        with pytest.raises(ValueError, match="time_res must be positive"):
+            SimulationConfig(start_time=START, duration=3600, time_res=0)
 
-    def test_duration_not_divisible_by_time_res_raises_in_conversion(self):
-        """Verify duration_s not divisible by time_res_s raises when converting to Rust config."""
-        cfg = SimulationConfig()
-        cfg.duration_s = 100
-        cfg.time_res_s = 60
-        # Validation happens in to_sim_config(), not in setters.
-        # This test verifies it raises when you try to use the config.
-        with pytest.raises(ValueError, match="divisible by time_res_s"):
-            cfg2 = SimulationConfig(duration_s=100, time_res_s=60)
+    def test_duration_not_divisible_by_time_res_raises_value_error(self):
+        with pytest.raises(ValueError, match="divisible"):
+            SimulationConfig(start_time=START, duration=100, time_res=60)
 
     def test_invalid_output_verbosity_raises_value_error(self):
-        """Verify output_verbosity > 8 raises ValueError."""
-        cfg = SimulationConfig()
         with pytest.raises(ValueError, match="output_verbosity must be 0-8"):
-            cfg.output_verbosity = 9
+            SimulationConfig(start_time=START, duration=3600, output_verbosity=9)
 
     def test_invalid_setpoint_deadband_raises_value_error(self):
-        """Verify invalid setpoint_deadband_c raises ValueError."""
-        cfg = SimulationConfig()
         with pytest.raises(ValueError, match="setpoint_deadband_c must be finite"):
-            cfg.setpoint_deadband_c = -1.0
+            SimulationConfig(start_time=START, duration=3600, setpoint_deadband_c=-1.0)
 
-    def test_duration_s_above_chrono_bound_raises_value_error(self):
-        """Verify duration_s above chrono Duration limit raises ValueError."""
-        # i64::MAX / 1_000 ≈ 9.22e15; 10**18 ≈ 1e18 exceeds it.
-        too_large = 10**18
+    def test_step_failure_budget_is_configurable(self):
+        cfg = SimulationConfig(start_time=START, duration=3600, max_consecutive_step_failures=0)
+        assert cfg.max_consecutive_step_failures == 0
+        cfg.max_consecutive_step_failures = 5
+        assert cfg.max_consecutive_step_failures == 5
+
+    def test_duration_above_chrono_bound_raises_value_error(self):
+        # i64::MAX / 1_000 ~ 9.22e15; 10**18 exceeds it.
         with pytest.raises(ValueError, match="too large for chrono Duration"):
-            SimulationConfig(duration_s=too_large, time_res_s=60)
+            SimulationConfig(start_time=START, duration=10**18, time_res=60)
 
-    def test_time_res_s_above_chrono_bound_raises_value_error(self):
-        """Verify time_res_s above chrono Duration limit raises ValueError."""
-        too_large = 10**18
+    def test_time_res_above_chrono_bound_raises_value_error(self):
         with pytest.raises(ValueError, match="too large for chrono Duration"):
-            SimulationConfig(duration_s=3600, time_res_s=too_large)
+            SimulationConfig(start_time=START, duration=3600, time_res=10**18)
 
-    def test_duration_s_at_chrono_bound_succeeds(self):
-        """Verify duration_s near the chrono Duration limit succeeds."""
-        # MAX_CHRONO_SECONDS - (MAX_CHRONO_SECONDS % 60), still at chrono scale
-        near_max = 9_223_372_036_854_720
-        cfg = SimulationConfig(duration_s=near_max, time_res_s=60)
-        assert cfg.duration_s == near_max
+    def test_removed_keyword_names_replacement(self):
+        """The Python-only removed keywords name their replacement: the four
+        site keywords name `SimulationConfig.site_location`, and
+        `output_to_parquet` names `SimulationConfig.output_format`."""
+        for key, replacement in [
+            ("latitude", "site_location"),
+            ("longitude", "site_location"),
+            ("elevation_m", "site_location"),
+            ("utc_offset_h", "site_location"),
+            ("output_to_parquet", "output_format"),
+        ]:
+            kwargs = required_kwargs() | {key: 1.0}
+            with pytest.raises(TypeError, match=f"'{key}'.*{replacement}|{replacement}.*'{key}'"):
+                # The constructor rejects the key before any value
+                # extraction, so the value's type never matters.
+                SimulationConfig(**cast("dict[str, Any]", kwargs))
+
+    def test_removed_simulation_keyword_names_replacement(self):
+        """The removed [simulation] keys name their replacements here too."""
+        for key, replacement in [
+            ("duration_s", "duration"),
+            ("time_res_s", "time_res"),
+        ]:
+            kwargs = required_kwargs() | {key: 3600}
+            with pytest.raises(TypeError, match=f"'{key}'.*{replacement}|{replacement}.*'{key}'"):
+                SimulationConfig(**cast("dict[str, Any]", kwargs))
+
+    def test_unknown_keyword_is_type_error(self):
+        kwargs = required_kwargs() | {"not_a_real_keyword": 1}
+        with pytest.raises(TypeError, match="not_a_real_keyword"):
+            SimulationConfig(**cast("dict[str, Any]", kwargs))
+
+    def test_python_keyword_names_equal_rust_field_names(self):
+        """The constructor's keyword names (pyo3 generates the constructor's
+        signature, skipping the VAR_KEYWORD parameter `unexpected`) equal the
+        keys `to_toml()` writes after every optional field is set to a
+        non-default value; the test holds no list of field names."""
+        sig = inspect.signature(SimulationConfig)
+        keyword_names = [
+            name
+            for name, param in sig.parameters.items()
+            if param.kind is not param.kind.VAR_KEYWORD
+        ]
+        cfg = SimulationConfig(
+            start_time="2024-06-15T12:00:00Z",
+            duration=7200,
+            time_res=300,
+            output_verbosity=5,
+            output_path="/tmp/output.csv",
+            write_output=False,
+            output_format="parquet",
+            output_chunk_size=5000,
+            setpoint_deadband_c=1.5,
+            master_seed=42,
+            retain_batches=True,
+            civil_timezone="America/Denver",
+            rotation="daily",
+            site_location=SiteLocationOverride(latitude_deg=40.0),
+            max_consecutive_step_failures=3,
+        )
+        toml_keys = tomllib.loads(cfg.to_toml()).keys()
+        assert sorted(keyword_names) == sorted(toml_keys), (
+            "the keyword surface and the TOML keys must be the same name map"
+        )
+
+    def test_site_location_override_round_trips(self):
+        """`SiteLocationOverride(latitude_deg=40.0)` through the config,
+        `to_toml()` and `from_toml()` is equal, and an out-of-range latitude
+        is a `ValueError` naming the field."""
+        site = SiteLocationOverride(latitude_deg=40.0)
+        cfg = SimulationConfig(start_time=START, duration=3600, site_location=site)
+        assert cfg.site_location.latitude_deg == pytest.approx(40.0)
+        round_tripped = SimulationConfig.from_toml(cfg.to_toml())
+        assert round_tripped.site_location.latitude_deg == pytest.approx(40.0)
+        assert round_tripped.site_location.longitude_deg is None
+        with pytest.raises(ValueError, match="latitude"):
+            SiteLocationOverride(latitude_deg=95.0)
+
+    def test_toml_site_location_out_of_range_is_a_validate_error(self):
+        """A TOML config and a Python-built config with the same
+        out-of-range site coordinate fail with the message the constructor
+        raises: the one validate() check."""
+        toml_text = (
+            f'start_time = "{START}"\nduration = 3600\n\n[site_location]\nlatitude_deg = 95.0\n'
+        )
+        with pytest.raises(ValueError) as toml_exc:
+            SimulationConfig.from_toml(toml_text)
+        with pytest.raises(ValueError) as py_exc:
+            SiteLocationOverride(latitude_deg=95.0)
+        assert str(py_exc.value) in str(toml_exc.value) or (
+            str(toml_exc.value) in str(py_exc.value)
+            or "latitude must be finite and within [-90, 90]" in str(toml_exc.value)
+        )
+
+    def test_validate_method_runs_the_same_checks(self):
+        cfg = SimulationConfig(start_time=START, duration=3600)
+        cfg.validate()
+        # A setter that would leave the config invalid is refused by the
+        # same validation, so a config object is valid after every
+        # successful mutation.
+        with pytest.raises(ValueError, match="divisible"):
+            cfg.time_res = 500
+        cfg.validate()
+        cfg.time_res = 600
+        cfg.validate()
 
 
 class TestDwellingConfig:
     """Test DwellingConfig Python type."""
 
     def test_minimal_construction_works(self):
-        """Verify DwellingConfig(hpxml=..., schedule=..., weather=...) minimal construction."""
         cfg = DwellingConfig(
             hpxml="path/to/building.xml",
             schedule="path/to/schedules.csv",
             weather="path/to/weather.epw",
+            config=SimulationConfig(start_time=START, duration=3600),
         )
         assert cfg.hpxml == "path/to/building.xml"
         assert cfg.schedule == "path/to/schedules.csv"
         assert cfg.weather == "path/to/weather.epw"
         assert cfg.bldg_id == 0
-        assert cfg.config is None
+        assert cfg.config.duration == 3600
         assert cfg.defaults_path is None
 
     def test_initialization_duration_round_trips(self):
-        """Verify DwellingConfig with initialization_duration=3600 round-trips."""
         cfg = DwellingConfig(
             hpxml="path/to/building.xml",
             schedule="path/to/schedules.csv",
             weather="path/to/weather.epw",
+            config=SimulationConfig(start_time=START, duration=3600),
             initialization_duration=3600,
         )
         assert cfg.initialization_duration == 3600
@@ -171,10 +294,11 @@ class TestDwellingConfig:
             "hpxml": "path/to/building.xml",
             "schedule": "path/to/schedules.csv",
             "weather": "path/to/weather.epw",
+            "config": SimulationConfig(start_time=START, duration=3600),
             "resample_overrides": {"dry_bulb": "zoh"},
         }
         with pytest.raises(TypeError, match="hares\\.adapters\\.ochre\\.hold_weather"):
-            DwellingConfig(**removed)
+            DwellingConfig(**cast("dict[str, Any]", removed))
 
     def test_removed_key_resample_overrides_on_from_hpxml_names_the_adapter(self):
         """The same removed key on `Dwelling.from_hpxml` errors the same way:
@@ -182,11 +306,12 @@ class TestDwellingConfig:
         removed: dict[str, Any] = {
             "resample_overrides": {"dry_bulb": "zoh"},
         }
-        with pytest.raises(ValueError, match="hares\\.adapters\\.ochre\\.hold_weather"):
+        with pytest.raises(TypeError, match="hares\\.adapters\\.ochre\\.hold_weather"):
             Dwelling.from_hpxml(
                 "path/to/building.xml",
                 "path/to/schedules.csv",
                 "path/to/weather.epw",
+                SimulationConfig(start_time=START, duration=3600),
                 **removed,
             )
 
@@ -197,10 +322,11 @@ class TestDwellingConfig:
             "hpxml": "path/to/building.xml",
             "schedule": "path/to/schedules.csv",
             "weather": "path/to/weather.epw",
+            "config": SimulationConfig(start_time=START, duration=3600),
             "not_a_real_keyword": 1,
         }
         with pytest.raises(TypeError, match="not_a_real_keyword"):
-            DwellingConfig(**unknown)
+            DwellingConfig(**cast("dict[str, Any]", unknown))
 
     def test_non_finite_overrides_value_fails_loudly(self):
         """A NaN/±inf float inside a DwellingConfig `overrides` object
@@ -224,35 +350,26 @@ class TestDwellingConfig:
         loud-never-silent contract by a different arm than the
         non-finite-float rejection.
         """
+        base: dict[str, Any] = {
+            "hpxml": "path/to/building.xml",
+            "schedule": "path/to/schedules.csv",
+            "weather": "path/to/weather.epw",
+            "config": SimulationConfig(start_time=START, duration=3600),
+        }
         # Control: a finite override value crosses cleanly and constructs.
-        cfg = DwellingConfig(
-            hpxml="path/to/building.xml",
-            schedule="path/to/schedules.csv",
-            weather="path/to/weather.epw",
-            overrides={"EV": {"battery_temp_c": 15.0}},
-        )
+        cfg = DwellingConfig(**cast("dict[str, Any]", base | {"overrides": {"EV": {"battery_temp_c": 15.0}}}))
         assert cfg.overrides is not None
 
         # The defect face: non-finite float values must raise the
         # converter's non-finite rejection, not silently default.
         for bad in (float("nan"), float("inf"), float("-inf")):
             with pytest.raises(ValueError, match="non-finite"):
-                DwellingConfig(
-                    hpxml="path/to/building.xml",
-                    schedule="path/to/schedules.csv",
-                    weather="path/to/weather.epw",
-                    overrides={"EV": {"battery_temp_c": bad}},
-                )
+                DwellingConfig(**cast("dict[str, Any]", base | {"overrides": {"EV": {"battery_temp_c": bad}}}))
 
         # The huge-int face: too large for i64, rejected loudly by the
         # converter's unsupported-type arm — never silently defaulted.
         with pytest.raises((ValueError, TypeError)):
-            DwellingConfig(
-                hpxml="path/to/building.xml",
-                schedule="path/to/schedules.csv",
-                weather="path/to/weather.epw",
-                overrides={"EV": {"battery_temp_c": 10**400}},
-            )
+            DwellingConfig(**cast("dict[str, Any]", base | {"overrides": {"EV": {"battery_temp_c": 10**400}}}))
 
     def test_non_string_overrides_key_fails_loudly(self):
         """A non-string key inside a DwellingConfig `overrides` dict must
@@ -268,82 +385,52 @@ class TestDwellingConfig:
         is raised", never which layer raised it (the boundary-test
         convention).
         """
+        base: dict[str, Any] = {
+            "hpxml": "path/to/building.xml",
+            "schedule": "path/to/schedules.csv",
+            "weather": "path/to/weather.epw",
+            "config": SimulationConfig(start_time=START, duration=3600),
+        }
         # Control: string keys cross cleanly and construct.
-        cfg = DwellingConfig(
-            hpxml="path/to/building.xml",
-            schedule="path/to/schedules.csv",
-            weather="path/to/weather.epw",
-            overrides={"EV": {"battery_temp_c": 15.0}},
-        )
+        cfg = DwellingConfig(**cast("dict[str, Any]", base | {"overrides": {"EV": {"battery_temp_c": 15.0}}}))
         assert cfg.overrides is not None
 
         # Nested face: the converter's own dict-arm rejection.
         with pytest.raises(ValueError, match="dict keys must be strings"):
-            DwellingConfig(
-                hpxml="path/to/building.xml",
-                schedule="path/to/schedules.csv",
-                weather="path/to/weather.epw",
-                overrides={"EV": {1: 1.0}},
-            )
+            DwellingConfig(**cast("dict[str, Any]", base | {"overrides": {"EV": {1: 1.0}}}))
 
         # Top-level face: rejected loudly at the channel's key extraction
         # (pyo3's own TypeError), never silently skipped.
         with pytest.raises((ValueError, TypeError)):
             DwellingConfig(
-                hpxml="path/to/building.xml",
-                schedule="path/to/schedules.csv",
-                weather="path/to/weather.epw",
-                overrides=cast(dict[str, Any], {1: 1.0}),
+                **cast("dict[str, Any]", base | {"overrides": {1: 1.0}}),
             )
 
     def test_with_simulation_config_round_trips(self):
-        """Verify DwellingConfig with config parameter round-trips."""
-        sim_cfg = SimulationConfig()
-        sim_cfg.duration_s = 7200
-
+        sim_cfg = SimulationConfig(start_time=START, duration=7200)
         dw_cfg = DwellingConfig(
             hpxml="path/to/building.xml",
             schedule="path/to/schedules.csv",
             weather="path/to/weather.epw",
             config=sim_cfg,
         )
-
-        assert dw_cfg.config is not None
-        assert dw_cfg.config.duration_s == 7200
+        assert dw_cfg.config.duration == 7200
 
     def test_missing_required_fields_raises_type_error(self):
-        """Verify DwellingConfig with missing required fields raises TypeError."""
         kwargs: dict[str, Any] = {"hpxml": "path/to/building.xml"}
         with pytest.raises(TypeError):
-            DwellingConfig(**kwargs)
+            DwellingConfig(**cast("dict[str, Any]", kwargs))
 
     def test_overrides_round_trips_as_dict(self):
-        """Verify DwellingConfig with overrides round-trips through getter as dict."""
         overrides = {"hvac": {"capacity_kw": 5.0}}
         cfg = DwellingConfig(
             hpxml="path/to/building.xml",
             schedule="path/to/schedules.csv",
             weather="path/to/weather.epw",
+            config=SimulationConfig(start_time=START, duration=3600),
             overrides=overrides,
         )
         result = cfg.overrides
         assert result is not None
         assert "hvac" in result
         assert result["hvac"]["capacity_kw"] == 5.0
-
-
-class TestDwellingConfigIntegration:
-    """Integration tests for DwellingConfig with SimulationConfig."""
-
-    def test_simulation_config_can_be_constructed_for_from_hpxml(self):
-        """Verify SimulationConfig can be constructed for use with from_hpxml."""
-        # Note: This test would require actual HPXML/weather files to run from_hpxml.
-        # We just verify the config object can be created and manipulated.
-        config = SimulationConfig()
-        config.duration_s = 3600
-        config.time_res_s = 60
-        config.master_seed = 42
-
-        # The config object can be used as kwarg
-        assert config.duration_s == 3600
-        assert config.master_seed == 42

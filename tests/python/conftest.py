@@ -142,22 +142,38 @@ def make_dwelling(
     output_verbosity: int = 0,
     start_time: str = "2019-01-01T00:00:00",
     write_output: bool = False,
+    output_path: str | None = None,
+    retain_batches: bool = True,
+    sim_config=None,
     **kw,
 ):
-    from hares import Dwelling
+    """Build and initialize a dwelling from the committed BEopt inputs.
 
+    The sim config states every field the tests' frames read:
+    `retain_batches=True` keeps the recorder's batches in memory, which
+    `results()` and `metrics()` read for the full schema. Nothing in the
+    engine defaults it on: the config object always carries it.
+    """
+    from hares import Dwelling, SimulationConfig
+
+    if sim_config is None:
+        sim_config = SimulationConfig(
+            start_time=start_time,
+            duration=duration_s,
+            time_res=time_res_s,
+            master_seed=seed,
+            output_verbosity=output_verbosity,
+            write_output=write_output,
+            output_path=output_path,
+            retain_batches=retain_batches,
+        )
     dw = Dwelling.from_hpxml(
         HPXML,
         SCHEDULE,
         WEATHER,
-        start_time=start_time,
-        duration_s=duration_s,
-        time_res_s=time_res_s,
+        config=sim_config,
         defaults_path=str(HARES_DEFAULTS),
         bldg_id=42,
-        master_seed=seed,
-        output_verbosity=output_verbosity,
-        write_output=write_output,
         **kw,
     )
     dw.initialize()

@@ -122,8 +122,8 @@ def _make_gym_env(action_config: dict[str, list[str]]):
             defaults_path=str(HARES_DEFAULTS),
             sim_config=SimulationConfig(
                 start_time="2019-01-01T00:00:00",
-                duration_s=600,
-                time_res_s=60,
+                duration=600,
+                time_res=60,
                 write_output=False,
             ),
         ),

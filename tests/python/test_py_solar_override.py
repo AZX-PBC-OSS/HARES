@@ -5,6 +5,7 @@ import polars as pl
 import pytest
 from pathlib import Path
 from typing import Any, cast
+from hares import SimulationConfig
 
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
@@ -27,18 +28,7 @@ class TestSurfaceIds:
     def test_surface_ids_returns_list_of_ints(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
 
         ids = dw.surface_ids()
@@ -52,18 +42,7 @@ class TestSolarOverrideNumpy:
     def test_set_solar_override_zero_arrays_produces_zero_pv_output(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
 
         surface_ids = dw.surface_ids()
@@ -98,16 +77,7 @@ class TestSolarOverrideNumpy:
         from hares import Dwelling
 
         def make_dwelling():
-            dw = Dwelling.from_hpxml(
-                HPXML, SCHEDULE, WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=3600,
-                time_res_s=60,
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
+            dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
             dw.initialize()
             return dw
 
@@ -160,18 +130,7 @@ class TestSolarOverrideDataFrame:
     def test_set_solar_override_from_csv_via_dataframe(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
 
         df = pl.read_csv(PVLIB_SOLAR_CSV)
@@ -189,18 +148,7 @@ class TestSolarOverrideParquet:
     def test_set_solar_override_from_parquet_file(self, tmp_path: Path):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
 
         df = pl.read_csv(PVLIB_SOLAR_CSV)
@@ -221,18 +169,7 @@ class TestSolarOverrideClear:
     def test_clear_solar_override_restores_perez_model(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
 
         dw.step()
@@ -289,18 +226,7 @@ class TestSolarOverrideListOfDicts:
     def test_set_solar_override_from_list_of_dicts(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
 
         surface_ids = dw.surface_ids()
@@ -332,18 +258,7 @@ class TestSolarOverrideValidation:
     def test_invalid_input_raises_value_error(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
 
         with pytest.raises(ValueError):
@@ -352,18 +267,7 @@ class TestSolarOverrideValidation:
     def test_invalid_dict_raises_value_error(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, master_seed=0, write_output=False))
         dw.initialize()
 
         with pytest.raises(ValueError):
@@ -375,18 +279,7 @@ class TestSolarOverridePVProduction:
         from hares import Dwelling
         import numpy as np
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-07-15T12:00:00",
-            duration_s=6 * 3600,
-            time_res_s=3600,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-07-15T12:00:00", duration=6 * 3600, time_res=3600, master_seed=0, write_output=False))
         dw.initialize()
 
         surface_ids = dw.surface_ids()
@@ -441,18 +334,7 @@ class TestSolarOverridePVProduction:
     def _summer_night_pv_dwelling():
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML_PV,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-07-15T00:00:00",
-            duration_s=6 * 3600,
-            time_res_s=3600,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML_PV, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-07-15T00:00:00", duration=6 * 3600, time_res=3600, master_seed=0, write_output=False))
         dw.initialize()
         return dw
 
@@ -500,18 +382,7 @@ class TestSolarOverridePVProduction:
     def test_summer_daytime_with_pv_produces_negative_power(self):
         from hares import Dwelling, PV
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-07-15T10:00:00",
-            duration_s=6 * 3600,
-            time_res_s=3600,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-07-15T10:00:00", duration=6 * 3600, time_res=3600, master_seed=0, write_output=False))
         pv = PV(name="roof_pv", capacity_kw=10.0, tilt=30.0, azimuth=180.0)
         dw.add_pv(pv)
         dw.initialize()

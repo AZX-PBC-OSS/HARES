@@ -3,6 +3,7 @@
 import pytest
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER
 from hares import (
+    SimulationConfig,
     AirConditioner,
     ASHPCooler,
     ASHPHeater,
@@ -22,16 +23,7 @@ from hares import (
 
 
 def _make_blueprint():
-    return DwellingBlueprint.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42,
-        duration_s=300,
-        time_res_s=60,
-        write_output=False,
-    )
+    return DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, write_output=False, start_time="2019-01-01T00:00:00"))
 
 
 def test_missing_capacity_raises():

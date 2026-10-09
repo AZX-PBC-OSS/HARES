@@ -33,15 +33,33 @@ pub struct PyDwellingBlueprint {
 impl PyDwellingBlueprint {
     /// Create a DwellingBlueprint from HPXML, schedule, and weather file paths.
     #[classmethod]
-    #[pyo3(signature = (hpxml, schedule, weather, **kwargs))]
+    #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, initialization_duration = None, defaults_path = None, overrides = None, **unexpected))]
     pub fn from_hpxml(
         _cls: &Bound<'_, PyType>,
         hpxml: String,
         schedule: Option<String>,
         weather: String,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        config: crate::py_config::PySimulationConfig,
+        bldg_id: i64,
+        initialization_duration: Option<i64>,
+        defaults_path: Option<String>,
+        overrides: Option<&Bound<'_, PyDict>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let config = crate::py_dwelling::build_config(hpxml, schedule, weather, kwargs)?;
+        // The dwelling-level keywords are the config's own; every simulation
+        // setting rides on the one SimulationConfig object.
+        let py_config = crate::py_config::PyDwellingConfig::new(
+            hpxml,
+            schedule,
+            weather,
+            config,
+            bldg_id,
+            initialization_duration,
+            defaults_path,
+            overrides,
+            unexpected,
+        )?;
+        let config = py_config.to_dwelling_config()?;
         let inner = DwellingBlueprint::from_config(config.clone()).map_err(to_py_err)?;
         Ok(Self {
             inner: Some(inner),

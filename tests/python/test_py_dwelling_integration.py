@@ -13,6 +13,7 @@ import polars as pl
 import pytest
 
 from conftest import make_dwelling
+from hares import SimulationConfig
 
 
 def _num(value: object) -> float:
@@ -42,8 +43,8 @@ class TestConstructionRoundTrip:
     def test_from_hpxml_returns_config(self, initialized_dwelling):
         dw = initialized_dwelling
         cfg = dw.config()
-        assert cfg.duration_s == 300
-        assert cfg.time_res_s == 60
+        assert cfg.duration == 300
+        assert cfg.time_res == 60
         assert cfg.master_seed == 0
 
     def test_overrides_none_builds_and_non_object_overrides_raise(self):

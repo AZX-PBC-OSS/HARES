@@ -4,7 +4,7 @@ import math
 
 import pytest
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict, cast
 
 from conftest import output_in_test_dir
 
@@ -17,6 +17,7 @@ WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 from hares import Dwelling, SimulationMetrics
+from hares import SimulationConfig
 
 
 class _OutputKwargs(TypedDict):
@@ -25,26 +26,27 @@ class _OutputKwargs(TypedDict):
 
 
 # metrics() and the simulate() DataFrame read the output pipeline, so these
-# tests run with write_output=True.
+# tests run with write_output=True. The dict feeds the one SimulationConfig,
+# and the fixture aims its output_path at a per-test temporary directory.
 _OUTPUT: _OutputKwargs = {"write_output": True}
 _output_in_test_dir = output_in_test_dir(_OUTPUT, "dwelling_0.csv")
 
 
+def _base_config(**extra: Any) -> SimulationConfig:
+    # retain_batches=True: metrics() reads the batches the recorder retains;
+    # the config states it because nothing defaults it on for the caller.
+    return SimulationConfig(
+        start_time="2019-01-01T00:00:00",
+        duration=3600,
+        time_res=60,
+        retain_batches=True,
+        **cast("dict[str, Any]", _OUTPUT | extra),
+    )
+
+
 class TestMetrics:
     def test_metrics_after_simulate(self):
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            output_verbosity=1,
-            **_OUTPUT,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=_base_config(master_seed=0, output_verbosity=1))
         dw.initialize()
         dw.simulate()
 
@@ -89,17 +91,7 @@ class TestMetrics:
         )
 
     def test_metrics_repr_works(self):
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            output_verbosity=1,
-            **_OUTPUT,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(output_verbosity=1))
         dw.initialize()
         dw.simulate()
 
@@ -111,34 +103,14 @@ class TestMetrics:
         assert isinstance(repr(metrics.efficiency), str)
 
     def test_metrics_before_simulate_raises(self, tmp_path):
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            write_output=True,
-            output_path=str(tmp_path / "dwelling_0.csv"),
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, retain_batches=True, write_output=True, output_path=str(tmp_path / "dwelling_0.csv")))
         dw.initialize()
 
         with pytest.raises(ValueError, match="no batches flushed"):
             dw.metrics()
 
     def test_envelope_loads_none_at_low_verbosity(self):
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            output_verbosity=0,
-            **_OUTPUT,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(output_verbosity=0))
         dw.initialize()
         dw.simulate()
 
@@ -147,18 +119,7 @@ class TestMetrics:
         assert metrics.envelope_loads_kwh is None
 
     def test_envelope_loads_present_at_high_verbosity(self, tmp_path):
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            output_verbosity=6,
-            write_output=True,
-            output_path=str(tmp_path / "dwelling_0.csv"),
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, retain_batches=True, output_verbosity=6, write_output=True, output_path=str(tmp_path / "dwelling_0.csv")))
         dw.initialize()
         dw.simulate()
 
@@ -188,17 +149,7 @@ class TestMetrics:
         )
 
     def test_gas_energy_available_when_fuel_type_present(self):
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            output_verbosity=1,
-            **_OUTPUT,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(output_verbosity=1))
         dw.initialize()
         dw.simulate()
 
@@ -211,17 +162,7 @@ class TestMetrics:
             assert metrics.gas_energy.total_therms > 0
 
     def test_combined_total_energy_kwh(self):
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            output_verbosity=1,
-            **_OUTPUT,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(output_verbosity=1))
         dw.initialize()
         dw.simulate()
 
@@ -235,17 +176,7 @@ class TestMetrics:
 
     def test_total_energy_kwh_has_expected_properties(self):
         """Verify the renamed/added TotalEnergyKwh properties are accessible."""
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            output_verbosity=1,
-            **_OUTPUT,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(output_verbosity=1))
         dw.initialize()
         dw.simulate()
 
@@ -267,17 +198,7 @@ class TestMetrics:
 
         For a dwelling without PV, gross_pv_generation_kwh should be zero.
         """
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            output_verbosity=1,
-            **_OUTPUT,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(output_verbosity=1))
         dw.initialize()
         dw.simulate()
 
@@ -305,17 +226,7 @@ class TestMetrics:
         (kW)\" aggregate column, which is a pre-existing infrastructure gap
         (see T-0326 Known Limitations).
         """
-        dw = Dwelling.from_hpxml(
-            HPXML_PV,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-07-15T00:00:00Z",
-            duration_s=86400,
-            time_res_s=900,
-            defaults_path=str(HARES_DEFAULTS),
-            output_verbosity=1,
-            **_OUTPUT,
-        )
+        dw = Dwelling.from_hpxml(HPXML_PV, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(start_time="2019-07-15T00:00:00Z", duration=86400, time_res=900))
         dw.initialize()
         dw.simulate()
 

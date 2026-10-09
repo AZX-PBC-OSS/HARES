@@ -188,7 +188,7 @@ class VecDwellingGymEnv:
             _time_res = time_res_s
         else:
             try:
-                _cfg_time_res = self._dwellings[0].config().time_res_s
+                _cfg_time_res = self._dwellings[0].config().time_res
                 if _cfg_time_res and _cfg_time_res > 0:
                     _time_res = float(_cfg_time_res)
                 else:
