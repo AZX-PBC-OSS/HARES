@@ -109,23 +109,24 @@ def test_vec_env_refuses_to_import_without_the_extension_entrypoint(
 # ---------------------------------------------------------------------------
 
 
-def _make_gym_env(action_config: dict[str, list[str]], output_dir: Path):
+def _make_gym_env(action_config: dict[str, list[str]]):
     pytest.importorskip("gymnasium")
-    from hares.rl.gym_env import DwellingGymEnv
+    from hares._hares import SimulationConfig
+    from hares.rl.gym_env import DwellingGymEnv, GymDwellingConfig
 
     return DwellingGymEnv(
-        config={
-            "hpxml": HPXML,
-            "schedule": SCHEDULE,
-            "weather": WEATHER,
-            "defaults_path": str(HARES_DEFAULTS),
-            "start_time": "2019-01-01T00:00:00",
-            "duration_s": 600,
-            "time_res_s": 60,
-            # The gym env's dict path cannot disable write_output; the recorder
-            # lands in the test's own directory.
-            "output_path": str(output_dir / "dwelling_0.csv"),
-        },
+        config=GymDwellingConfig(
+            hpxml=HPXML,
+            schedule=SCHEDULE,
+            weather=WEATHER,
+            defaults_path=str(HARES_DEFAULTS),
+            sim_config=SimulationConfig(
+                start_time="2019-01-01T00:00:00",
+                duration_s=600,
+                time_res_s=60,
+                write_output=False,
+            ),
+        ),
         observation_fields=_OBS_FIELDS,
         action_space_config=action_config,
         reward_fn=lambda ctx: -ctx["total_power_kw"],
@@ -133,9 +134,9 @@ def _make_gym_env(action_config: dict[str, list[str]], output_dir: Path):
     )
 
 
-def test_gym_env_clean_step_reports_zero_warnings(tmp_path: Path):
+def test_gym_env_clean_step_reports_zero_warnings():
     """A clean DwellingGymEnv step surfaces warning_count == 0.0, no list."""
-    env = _make_gym_env(_CLEAN_ACTION_CONFIG, tmp_path)
+    env = _make_gym_env(_CLEAN_ACTION_CONFIG)
     env.reset(seed=42)
     # The first step's info carries the fixture's construction notices
     # (base.xml gives no ShieldingofHome); the next clean step has none.
@@ -148,10 +149,10 @@ def test_gym_env_clean_step_reports_zero_warnings(tmp_path: Path):
     assert "warnings" not in info
 
 
-def test_gym_env_surfaces_rejected_control_signal(tmp_path: Path):
+def test_gym_env_surfaces_rejected_control_signal():
     """A dispatch-time control rejection shows up in DwellingGymEnv step info,
     and the messages are drained exactly once."""
-    env = _make_gym_env(_REJECTED_ACTION_CONFIG, tmp_path)
+    env = _make_gym_env(_REJECTED_ACTION_CONFIG)
     env.reset(seed=42)
 
     _, _, _, _, info = env.step(np.array([70.0], dtype=np.float64))

@@ -81,65 +81,14 @@ class RewardContext(TypedDict):
 # ---------------------------------------------------------------------------
 
 
-def _coerce_seconds(value: Any) -> float:
-    if isinstance(value, timedelta):
-        return value.total_seconds()
-    if isinstance(value, (int, float)):
-        return float(value)
-    return 60.0
-
-
-def _normalize_config(config: GymDwellingConfig | Mapping[str, Any]) -> GymDwellingConfig:
-    if isinstance(config, GymDwellingConfig):
-        return config
-    # Legacy dict path: extract known SimulationConfig fields into a
-    # SimulationConfig object so the result is always typed.
-    raw_time_res = config.get("time_res_s")
-    raw_duration = config.get("duration_s")
-    time_res_s: int | None = int(_coerce_seconds(raw_time_res)) if raw_time_res is not None else None
-    duration_s: int | None = int(_coerce_seconds(raw_duration)) if raw_duration is not None else None
-    sim_config = SimulationConfig(
-        start_time=str(config["start_time"]) if "start_time" in config else None,
-        duration_s=duration_s,
-        time_res_s=time_res_s,
-        output_verbosity=int(config["output_verbosity"]) if "output_verbosity" in config else None,
-        output_path=str(config["output_path"]) if "output_path" in config else None,
-        output_to_parquet=bool(config["output_to_parquet"]) if "output_to_parquet" in config else None,
-        output_chunk_size=int(config["output_chunk_size"]) if "output_chunk_size" in config else None,
-        master_seed=int(config["master_seed"]) if "master_seed" in config else None,
-    )
-    return GymDwellingConfig(
-        hpxml=str(config["hpxml"]),
-        schedule=str(config["schedule"]),
-        weather=str(config["weather"]),
-        defaults_path=str(config["defaults_path"]) if "defaults_path" in config else None,
-        sim_config=sim_config,
-    )
-
-
-def _sim_config_to_kwargs(sim_config: SimulationConfig) -> dict[str, Any]:
-    """Extract non-None fields from a SimulationConfig into a flat kwargs dict
-    suitable for ``PyDwelling.from_hpxml``."""
-    out: dict[str, Any] = {}
-    if sim_config.start_time:
-        out["start_time"] = sim_config.start_time
-    if sim_config.duration_s:
-        out["duration_s"] = sim_config.duration_s
-    if sim_config.time_res_s:
-        out["time_res_s"] = sim_config.time_res_s
-    if sim_config.output_verbosity:
-        out["output_verbosity"] = sim_config.output_verbosity
-    if sim_config.output_path is not None:
-        out["output_path"] = sim_config.output_path
-    out["output_to_parquet"] = sim_config.output_to_parquet
-    out["output_chunk_size"] = sim_config.output_chunk_size
-    if sim_config.master_seed:
-        out["master_seed"] = sim_config.master_seed
-    if sim_config.civil_timezone is not None:
-        out["civil_timezone"] = sim_config.civil_timezone
-    if sim_config.setpoint_deadband_c is not None:
-        out["setpoint_deadband_c"] = sim_config.setpoint_deadband_c
-    return out
+def _normalize_config(config: object) -> GymDwellingConfig:
+    """The gym accepts only its typed config: any other value, a mapping
+    among them, is the caller's error, named by type."""
+    if not isinstance(config, GymDwellingConfig):
+        raise TypeError(
+            f"config must be a GymDwellingConfig, got {type(config).__name__}"
+        )
+    return config
 
 
 def sorted_action_layout(
@@ -433,7 +382,7 @@ def drain_step_warnings(dwelling: Any) -> tuple[float, list[str]]:
 class DwellingGymEnv(_GYM_BASE):
     def __init__(
         self,
-        config: GymDwellingConfig | Mapping[str, Any],
+        config: GymDwellingConfig,
         observation_fields: Sequence[str],
         action_space_config: Mapping[str, Sequence[str]],
         reward_fn: Callable[[RewardContext], float],
@@ -455,7 +404,9 @@ class DwellingGymEnv(_GYM_BASE):
         if self._config.defaults_path is not None:
             hpxml_kwargs["defaults_path"] = self._config.defaults_path
         if self._config.sim_config is not None:
-            hpxml_kwargs.update(_sim_config_to_kwargs(self._config.sim_config))
+            # The whole object, so every field reaches the dwelling by
+            # construction and the engine validates it.
+            hpxml_kwargs["config"] = self._config.sim_config
 
         self._dwelling = PyDwelling.from_hpxml(
             hpxml=self._config.hpxml,
@@ -514,7 +465,7 @@ class DwellingGymEnv(_GYM_BASE):
         )
 
         time_res_s: float = 60.0
-        if self._config.sim_config is not None and self._config.sim_config.time_res_s:
+        if self._config.sim_config is not None:
             time_res_s = float(self._config.sim_config.time_res_s)
         self._max_steps = max(1, int(math.ceil(episode_length.total_seconds() / time_res_s)))
         self._steps_elapsed: int = 0

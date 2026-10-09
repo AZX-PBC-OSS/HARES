@@ -13,11 +13,17 @@ import pytest
 pytest.importorskip("gymnasium")
 
 import numpy as np
-from conftest import output_in_test_dir
 from gymnasium import spaces
 
 from hares._hares import Dwelling as PyDwelling
-from hares.rl.gym_env import DwellingGymEnv, observation_field_bounds, sorted_action_layout, telemetry_to_observation
+from hares._hares import SimulationConfig
+from hares.rl.gym_env import (
+    DwellingGymEnv,
+    GymDwellingConfig,
+    observation_field_bounds,
+    sorted_action_layout,
+    telemetry_to_observation,
+)
 from hares.rl.vec_env import VecDwellingGymEnv
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,17 +32,18 @@ HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
-_DWELLING_CONFIG = {
-    "hpxml": HPXML,
-    "schedule": SCHEDULE,
-    "weather": WEATHER,
-    "defaults_path": str(HARES_DEFAULTS),
-    "start_time": "2019-01-01T00:00:00",
-    "duration_s": 600,
-    "time_res_s": 60,
-}
-# The gym env's dict path cannot disable write_output.
-_output_in_test_dir = output_in_test_dir(_DWELLING_CONFIG, "dwelling_0.csv")
+_DWELLING_CONFIG = GymDwellingConfig(
+    hpxml=HPXML,
+    schedule=SCHEDULE,
+    weather=WEATHER,
+    defaults_path=str(HARES_DEFAULTS),
+    sim_config=SimulationConfig(
+        start_time="2019-01-01T00:00:00",
+        duration_s=600,
+        time_res_s=60,
+        write_output=False,
+    ),
+)
 
 
 def _obs_box(env: DwellingGymEnv | VecDwellingGymEnv) -> spaces.Box:
@@ -1209,6 +1216,158 @@ def test_vec_gym_verify_observation_equivalence_reports_nan_mismatch():
     )
     assert "NaN mismatch" in warning_text, (
         f"warning should report 'NaN mismatch', got: {warning_text}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Configuration strictness: the gym rejects bad values with typed errors
+# instead of coercing them, and forwards the whole typed config.
+# ---------------------------------------------------------------------------
+
+
+def _gym_config(sim_config: SimulationConfig | None = None) -> GymDwellingConfig:
+    return GymDwellingConfig(
+        hpxml=HPXML,
+        schedule=SCHEDULE,
+        weather=WEATHER,
+        defaults_path=str(HARES_DEFAULTS),
+        sim_config=sim_config,
+    )
+
+
+def test_gym_rejects_mapping_config():
+    """A mapping config is a TypeError: the gym accepts only its typed config."""
+    mapping = cast(GymDwellingConfig, {"hpxml": HPXML, "schedule": SCHEDULE, "weather": WEATHER})
+    with pytest.raises(TypeError, match="GymDwellingConfig"):
+        DwellingGymEnv(
+            config=mapping,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_gym_rejects_non_numeric_time_res():
+    """A time_res that is not a number is a TypeError, never a silent
+    60 s default."""
+    mapping = cast(
+        GymDwellingConfig,
+        {
+            "hpxml": HPXML,
+            "schedule": SCHEDULE,
+            "weather": WEATHER,
+            "defaults_path": str(HARES_DEFAULTS),
+            "time_res_s": "600",
+        },
+    )
+    with pytest.raises(TypeError, match="GymDwellingConfig"):
+        DwellingGymEnv(
+            config=mapping,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_gym_zero_time_res_reaches_validation():
+    """A zero resolution raises the engine's resolution error instead of
+    being replaced by the default."""
+    with pytest.raises(ValueError, match="time_res_s must be positive"):
+        DwellingGymEnv(
+            config=_gym_config(SimulationConfig(time_res_s=0)),
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_gym_zero_master_seed_reaches_the_dwelling():
+    """A master_seed of 0 is the seed the built dwelling's config reports,
+    not a value the wrapper drops for its default."""
+    env = DwellingGymEnv(
+        config=_gym_config(
+            SimulationConfig(
+                duration_s=600,
+                time_res_s=60,
+                write_output=False,
+                master_seed=0,
+            )
+        ),
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    assert env._dwelling.config().master_seed == 0
+
+
+def test_gym_forwards_every_sim_config_field(tmp_path: Path):
+    """A gym built with a SimulationConfig whose every field differs from its
+    default, write_output=False among them, records no output, and the config
+    read back from the built dwelling equals the one passed on every field
+    the class exposes.
+
+    civil_timezone stays at its default here: the engine honours it only in
+    a dst build, and the gate's extension is a plain build. Its getter is
+    pinned at the config surface in test_py_config.py.
+    """
+    sim_config = SimulationConfig(
+        start_time="2019-03-04T05:06:07",
+        duration_s=7200,
+        time_res_s=900,
+        output_verbosity=2,
+        output_path=str(tmp_path / "gym_output.csv"),
+        write_output=False,
+        output_to_parquet=True,
+        output_chunk_size=1234,
+        master_seed=7,
+        setpoint_deadband_c=1.5,
+        latitude=40.0,
+        longitude=-105.0,
+        elevation_m=1600.0,
+        utc_offset_h=-7.0,
+        retain_batches=False,
+        rotation="daily",
+        max_consecutive_step_failures=3,
+    )
+    env = DwellingGymEnv(
+        config=_gym_config(sim_config),
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    built = env._dwelling.config()
+    for field in (
+        "start_time",
+        "duration_s",
+        "time_res_s",
+        "output_verbosity",
+        "output_path",
+        "write_output",
+        "output_to_parquet",
+        "output_chunk_size",
+        "master_seed",
+        "civil_timezone",
+        "setpoint_deadband_c",
+        "latitude",
+        "longitude",
+        "elevation_m",
+        "utc_offset_h",
+        "retain_batches",
+        "rotation",
+        "max_consecutive_step_failures",
+    ):
+        passed = getattr(sim_config, field)
+        reported = getattr(built, field)
+        assert reported == passed, (
+            f"{field}: passed {passed!r}, the dwelling reports {reported!r}"
+        )
+    assert not (tmp_path / "gym_output.csv").exists(), (
+        "the gym recorded output with write_output=False"
     )
 
 
