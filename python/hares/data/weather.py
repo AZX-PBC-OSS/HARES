@@ -12,7 +12,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from ochre_next.data._checksum import (
+from hares.data._checksum import (
     remove_cache_with_sidecar as _remove_cache_with_sidecar,
     validate_cache_integrity as _validate_cache_integrity,
     write_sha256_sidecar as _write_sha256_sidecar,
@@ -33,7 +33,7 @@ def _default_weather_cache_dir() -> Path:
     """Return the default cache directory for weather files."""
     xdg = os.environ.get("XDG_CACHE_HOME")
     base = Path(xdg) if xdg else Path.home() / ".cache"
-    return base / "ochre_next" / "weather"
+    return base / "hares" / "weather"
 
 
 def get_epw_for_fips(
@@ -48,7 +48,7 @@ def get_epw_for_fips(
     Args:
         fips: County FIPS code (e.g. ``"G0800130"``).
         cache_dir: Override cache directory. Defaults to
-            ``~/.cache/ochre_next/weather/``.
+            ``~/.cache/hares/weather/``.
 
     Returns:
         Path to the cached ``.epw`` file.

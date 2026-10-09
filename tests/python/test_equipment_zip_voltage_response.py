@@ -233,7 +233,7 @@ class TestScheduleDataIntegrity:
         error must carry its cause (which value, which column) to the
         caller through the bindings.
         """
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         lines = Path(SCHEDULE).read_text().splitlines()
         column_name = lines[0].split(",")[3]
@@ -284,7 +284,7 @@ class TestZipDataIntegrity:
         """
         import re
 
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         defaults = tmp_path / "defaults"
         defaults.mkdir()
@@ -335,7 +335,7 @@ class TestZipDataIntegrity:
         every electric power value). A config typo must be rejected at the
         boundary with its cause, not deferred to a mid-simulation crash.
         """
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         with pytest.raises(Exception) as excinfo:
             Dwelling.from_hpxml(

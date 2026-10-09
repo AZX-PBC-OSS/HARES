@@ -25,7 +25,7 @@ PVLIB_SOLAR_SUMMER_CSV = str(
 
 class TestSurfaceIds:
     def test_surface_ids_returns_list_of_ints(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -50,7 +50,7 @@ class TestSurfaceIds:
 
 class TestSolarOverrideNumpy:
     def test_set_solar_override_zero_arrays_produces_zero_pv_output(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -95,7 +95,7 @@ class TestSolarOverrideNumpy:
             )
 
     def test_set_solar_override_preserves_timestep_order(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         def make_dwelling():
             dw = Dwelling.from_hpxml(
@@ -158,7 +158,7 @@ class TestSolarOverrideNumpy:
 
 class TestSolarOverrideDataFrame:
     def test_set_solar_override_from_csv_via_dataframe(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -187,7 +187,7 @@ class TestSolarOverrideDataFrame:
 
 class TestSolarOverrideParquet:
     def test_set_solar_override_from_parquet_file(self, tmp_path: Path):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -219,7 +219,7 @@ class TestSolarOverrideParquet:
 
 class TestSolarOverrideClear:
     def test_clear_solar_override_restores_perez_model(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -287,7 +287,7 @@ class TestSolarOverrideClear:
 
 class TestSolarOverrideListOfDicts:
     def test_set_solar_override_from_list_of_dicts(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -330,7 +330,7 @@ class TestSolarOverrideListOfDicts:
 
 class TestSolarOverrideValidation:
     def test_invalid_input_raises_value_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -350,7 +350,7 @@ class TestSolarOverrideValidation:
             dw.set_solar_override(cast("str", 12345))
 
     def test_invalid_dict_raises_value_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -372,7 +372,7 @@ class TestSolarOverrideValidation:
 
 class TestSolarOverridePVProduction:
     def test_solar_override_affects_thermal_gains(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
         import numpy as np
 
         dw = Dwelling.from_hpxml(
@@ -439,7 +439,7 @@ class TestSolarOverridePVProduction:
 
     @staticmethod
     def _summer_night_pv_dwelling():
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML_PV,
@@ -459,7 +459,7 @@ class TestSolarOverridePVProduction:
     def test_override_without_the_pv_surfaces_is_rejected_at_the_call(self):
         """The pvlib CSV carries only the envelope surfaces; the PV cannot
         step without its own, so the override is refused when set."""
-        from ochre_next._hares import HaresConfigError
+        from hares._hares import HaresConfigError
 
         dw = self._summer_night_pv_dwelling()
         df = pl.read_csv(PVLIB_SOLAR_SUMMER_CSV).head(24)
@@ -498,7 +498,7 @@ class TestSolarOverridePVProduction:
                     )
 
     def test_summer_daytime_with_pv_produces_negative_power(self):
-        from ochre_next import Dwelling, PV
+        from hares import Dwelling, PV
 
         dw = Dwelling.from_hpxml(
             HPXML,

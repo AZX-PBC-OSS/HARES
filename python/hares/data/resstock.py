@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from typing_extensions import TypeIs  # typing.TypeIs is Python 3.13+
 
-from ochre_next.data._checksum import (
+from hares.data._checksum import (
     remove_cache_with_sidecar as _remove_cache_with_sidecar,
     validate_cache_integrity as _validate_cache_integrity,
     write_sha256_sidecar as _write_sha256_sidecar,
@@ -30,7 +30,7 @@ from ochre_next.data._checksum import (
 if TYPE_CHECKING:
     import httpx
 
-    from ochre_next.data._cuttable_transport import Connections
+    from hares.data._cuttable_transport import Connections
     import polars as pl
 
 log = logging.getLogger(__name__)
@@ -150,7 +150,7 @@ def _version_config(version: str) -> _VersionConfig:
 def _default_cache_dir() -> Path:
     xdg = os.environ.get("XDG_CACHE_HOME")
     base = Path(xdg) if xdg else Path.home() / ".cache"
-    return base / "ochre_next" / "resstock"
+    return base / "hares" / "resstock"
 
 
 def _building_cache_dir(cache_dir: Path, version: str, bldg_id: int) -> Path:
@@ -435,7 +435,7 @@ class _SharedClient:
             if self._current is None:
                 import httpx
 
-                from ochre_next.data._cuttable_transport import Connections, CuttableTransport
+                from hares.data._cuttable_transport import Connections, CuttableTransport
 
                 connections = Connections()
                 client = httpx.Client(
@@ -833,7 +833,7 @@ def _fetch_weather_for_station(
         # TMY3 EPW from BuildStock_TMY3_FIPS.zip.
         # All TMY3 versions share the same EPW dataset, so use a
         # version-independent cache directory.
-        from ochre_next.data.weather import get_epw_for_fips
+        from hares.data.weather import get_epw_for_fips
 
         weather_cache = cache_dir / "weather"
         weather_path = get_epw_for_fips(fips, cache_dir=weather_cache)

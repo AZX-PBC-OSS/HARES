@@ -275,10 +275,10 @@ class _FakeFleet:
 
 
 def _clear_helics_modules() -> None:
-    sys.modules.pop("ochre_next.helics", None)
-    sys.modules.pop("ochre_next.helics.dwelling", None)
-    sys.modules.pop("ochre_next.helics.federate", None)
-    sys.modules.pop("ochre_next.helics.fleet", None)
+    sys.modules.pop("hares.helics", None)
+    sys.modules.pop("hares.helics.dwelling", None)
+    sys.modules.pop("hares.helics.federate", None)
+    sys.modules.pop("hares.helics.fleet", None)
 
 
 def _import_fleet_module(
@@ -287,7 +287,7 @@ def _import_fleet_module(
     fake_helics = _FakeHelicsModule()
     _clear_helics_modules()
     monkeypatch.setitem(sys.modules, "helics", fake_helics)
-    module = importlib.import_module("ochre_next.helics.fleet")
+    module = importlib.import_module("hares.helics.fleet")
     return module, fake_helics
 
 
@@ -305,7 +305,7 @@ def test_import_guard_without_helics(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(builtins, "__import__", _raising_import)
 
     with pytest.raises(ImportError, match="HELICS not installed"):
-        importlib.import_module("ochre_next.helics.fleet")
+        importlib.import_module("hares.helics.fleet")
 
 
 def test_helics_fleet_config_and_registration(monkeypatch: pytest.MonkeyPatch):

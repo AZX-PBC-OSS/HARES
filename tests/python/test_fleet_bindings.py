@@ -3,7 +3,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from ochre_next import Fleet
+from hares import Fleet
 
 _RESSTOCK_HPXML = """<?xml version="1.0" encoding="UTF-8"?>
 <HPXML xmlns="http://hpxmlonline.com/2023/09" schemaVersion="4.0">

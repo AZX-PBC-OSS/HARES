@@ -14,7 +14,7 @@ try:
     import helics
 except ImportError as exc:  # pragma: no cover - exercised via import test
     raise ImportError(
-        "HELICS not installed. Install with: pip install 'ochre_next[helics]'"
+        "HELICS not installed. Install with: pip install 'hares[helics]'"
     ) from exc
 
 
@@ -153,7 +153,7 @@ def make_dwelling_federate_config(
     command_parts = [
         "python",
         "-m",
-        "ochre_next.helics.dwelling",
+        "hares.helics.dwelling",
         f"--name={shlex.quote(name)}",
         f"--hpxml={shlex.quote(str(hpxml_path))}",
         f"--weather={shlex.quote(str(weather_path))}",

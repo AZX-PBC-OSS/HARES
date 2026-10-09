@@ -12,7 +12,7 @@ import warnings
 
 import numpy as np
 
-from ochre_next._hares import (
+from hares._hares import (
     ControlSignal as PyControlSignal,
     Dwelling as PyDwelling,
     SimulationConfig,
@@ -23,8 +23,8 @@ if TYPE_CHECKING:
     from gymnasium import spaces
 
     # The extension's step() returns a plain dict at runtime; its declared
-    # shape lives in ochre_next._hares_types.
-    from ochre_next._hares_types import StepResult
+    # shape lives in hares._hares_types.
+    from hares._hares_types import StepResult
 
     _GYM_BASE = gym.Env
 else:

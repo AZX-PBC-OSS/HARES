@@ -12,7 +12,7 @@ from ._hares import DwellingConfig
 from ._hares import ControlSignal
 from ._hares import Telemetry
 
-from ochre_next.simulation_plan import SimulationPlan, SimulationSegment
+from hares.simulation_plan import SimulationPlan, SimulationSegment
 
 # Equipment types
 from ._hares import Battery

@@ -6,11 +6,11 @@
 //! azimuth angles) rather than calendar month/hour. This decouples the LUT
 //! from the generating EPW file's geographic location:
 //!
-//! - **Before (T-0085):** the LUT used `month`/`hour` as temporal-proxy axes.
+//! - **Before:** the LUT used `month`/`hour` as temporal-proxy axes.
 //!   PVWatts internally translates horizontal irradiance to tilted-surface
 //!   irradiance using sun position, so a LUT generated from a Phoenix EPW
 //!   would produce different AC power than one from Seattle for the same
-//!   (month, hour, GHI, DNI, DHI, temp) tuple — a 5–15% systematic bias.
+//!   (month, hour, GHI, DNI, DHI, temp) tuple, a 5 to 15% systematic bias.
 //!
 //! - **Now:** the LUT uses `solar_zenith_deg` and `solar_azimuth_deg` axes.
 //!   Sun position is computed by the LUT generator from the EPW's location
@@ -30,20 +30,20 @@
 //! fields (see Known Limitations below).
 //!
 //! LUT files in the legacy `month`/`hour` column format are **not
-//! supported** — the loader returns a descriptive error if it finds those
+//! supported**: the loader returns a descriptive error if it finds those
 //! columns instead of `solar_zenith_deg`/`solar_azimuth_deg`. Re-generate
-//! LUTs with the updated Python adapter (`python/ochre_next/adapters/sam_pv.py`).
+//! LUTs with the updated Python adapter (`python/hares/adapters/sam_pv.py`).
 //!
 //! ## Known Limitations
 //!
 //! - **What:** The invariant check cannot compare LUT location against the
 //!   simulation site location because `EnvironmentState` does not carry
 //!   latitude/longitude fields.
-//!   **Constraint:** `hares-types::EnvironmentState` — adding location fields
+//!   **Constraint:** `hares-types::EnvironmentState`: adding location fields
 //!   requires a coordinated crate-level change.
 //!   **Tried:** logging the LUT location at load time (informational only).
 //!   **Resolvable when:** `EnvironmentState` gains `site_latitude_deg` and
-//!   `site_longitude_deg` fields (tracked in a follow-up ticket).
+//!   `site_longitude_deg` fields (tracked in a follow-up issue).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;

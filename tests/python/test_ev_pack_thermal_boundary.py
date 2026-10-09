@@ -15,7 +15,7 @@ attached", never which layer raised it.
 import pytest
 
 from conftest import make_dwelling
-from ochre_next import EV
+from hares import EV
 
 
 def attach_hostile_ev(**kwargs):

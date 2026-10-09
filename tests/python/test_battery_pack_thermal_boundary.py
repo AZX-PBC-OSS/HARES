@@ -18,7 +18,7 @@ layer raised it.
 import pytest
 
 from conftest import make_dwelling
-from ochre_next import Battery
+from hares import Battery
 
 
 def attach_hostile_battery(**kwargs):

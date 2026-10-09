@@ -69,9 +69,9 @@ class _FakeHelicsModule:
 
 
 def _clear_helics_modules() -> None:
-    sys.modules.pop("ochre_next.helics", None)
-    sys.modules.pop("ochre_next.helics.broker", None)
-    sys.modules.pop("ochre_next.helics.runner", None)
+    sys.modules.pop("hares.helics", None)
+    sys.modules.pop("hares.helics.broker", None)
+    sys.modules.pop("hares.helics.runner", None)
 
 
 def _import_broker_runner_modules(
@@ -80,8 +80,8 @@ def _import_broker_runner_modules(
     fake_helics = _FakeHelicsModule()
     _clear_helics_modules()
     monkeypatch.setitem(sys.modules, "helics", fake_helics)
-    broker_module = importlib.import_module("ochre_next.helics.broker")
-    runner_module = importlib.import_module("ochre_next.helics.runner")
+    broker_module = importlib.import_module("hares.helics.broker")
+    runner_module = importlib.import_module("hares.helics.runner")
     return broker_module, runner_module, fake_helics
 
 
@@ -99,7 +99,7 @@ def test_broker_import_guard_without_helics(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(builtins, "__import__", _raising_import)
 
     with pytest.raises(ImportError, match="HELICS not installed"):
-        importlib.import_module("ochre_next.helics.broker")
+        importlib.import_module("hares.helics.broker")
 
 
 def test_runner_import_guard_without_helics(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,7 +116,7 @@ def test_runner_import_guard_without_helics(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(builtins, "__import__", _raising_import)
 
     with pytest.raises(ImportError, match="HELICS not installed"):
-        importlib.import_module("ochre_next.helics.runner")
+        importlib.import_module("hares.helics.runner")
 
 
 def test_create_broker_wait_and_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -378,7 +378,7 @@ def test_make_dwelling_federate_config(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert fed.name == "house_1"
-    assert "python -m ochre_next.helics.dwelling" in fed.exec_command
+    assert "python -m hares.helics.dwelling" in fed.exec_command
     assert "--hpxml=/data/house.xml" in fed.exec_command
     assert "--weather=/data/weather.epw" in fed.exec_command
     assert "--schedule=/data/schedule.csv" in fed.exec_command

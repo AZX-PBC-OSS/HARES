@@ -56,12 +56,12 @@ try:
     import helics
 except ImportError as exc:  # pragma: no cover - exercised via import test
     raise ImportError(
-        "HELICS not installed. Install with: pip install 'ochre_next[helics]'"
+        "HELICS not installed. Install with: pip install 'hares[helics]'"
     ) from exc
 
-from ochre_next import ControlSignal
-from ochre_next._hares import MAX_TANK_THERMOSTAT_BAND_C
-from ochre_next._hares import Dwelling as PyDwelling
+from hares import ControlSignal
+from hares._hares import MAX_TANK_THERMOSTAT_BAND_C
+from hares._hares import Dwelling as PyDwelling
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike, is_json_object
 from .federate import (

@@ -16,9 +16,9 @@ import numpy as np
 from conftest import output_in_test_dir
 from gymnasium import spaces
 
-from ochre_next._hares import Dwelling as PyDwelling
-from ochre_next.rl.gym_env import DwellingGymEnv, observation_field_bounds, sorted_action_layout, telemetry_to_observation
-from ochre_next.rl.vec_env import VecDwellingGymEnv
+from hares._hares import Dwelling as PyDwelling
+from hares.rl.gym_env import DwellingGymEnv, observation_field_bounds, sorted_action_layout, telemetry_to_observation
+from hares.rl.vec_env import VecDwellingGymEnv
 
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
@@ -110,7 +110,7 @@ def _water_heater_name(dwelling: PyDwelling) -> str:
 
 
 def test_deadband_action_bounds_follow_the_target_thermostat_class():
-    from ochre_next._hares import (
+    from hares._hares import (
         MAX_HVAC_THERMOSTAT_BAND_C,
         MAX_TANK_THERMOSTAT_BAND_C,
         MIN_THERMOSTAT_BAND_C,
@@ -144,7 +144,7 @@ def test_deadband_action_bounds_follow_the_target_thermostat_class():
 
 
 def test_thermostat_band_range_is_the_target_class():
-    from ochre_next._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+    from hares._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
 
     dwelling = _make_dwelling()
     assert dwelling.thermostat_band_range("Gas Furnace") == (
@@ -181,7 +181,7 @@ def test_band_range_and_zip_each_carry_their_own_doc():
 
 
 def test_vec_env_bounds_a_deadband_by_each_dwelling_s_target_class():
-    from ochre_next._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+    from hares._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
 
     dwellings = [_make_dwelling(seed=i) for i in range(2)]
     # The fixture's construction notices (base.xml gives no ShieldingofHome,
@@ -217,7 +217,7 @@ class _DwellingWithBand:
 
 
 def test_vec_env_refuses_a_fleet_whose_deadband_bounds_differ():
-    from ochre_next._hares import MAX_TANK_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+    from hares._hares import MAX_TANK_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
 
     other_class = _DwellingWithBand(
         _make_dwelling(seed=1), (MIN_THERMOSTAT_BAND_C, MAX_TANK_THERMOSTAT_BAND_C)
@@ -322,8 +322,8 @@ def test_vec_gym_rejects_fork_start_method(monkeypatch: pytest.MonkeyPatch):
 
 def test_vec_gym_random_policy_100_steps():
     """100-step random-policy integration test exercises Rust batch_step with >=2 signal types."""
-    from ochre_next import Battery
-    from ochre_next._hares import Dwelling as PyDwelling
+    from hares import Battery
+    from hares._hares import Dwelling as PyDwelling
 
     n_dwel = 2
     obs_fields = ["total_power_kw", "outdoor_temp"]
@@ -383,7 +383,7 @@ def test_apply_action_clips_at_bounds():
     low = action_space.low[0]
     high = action_space.high[0]
 
-    from ochre_next.rl import gym_env
+    from hares.rl import gym_env
     original = gym_env.build_control_signal
     captured = []
 
@@ -422,7 +422,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
     the declared action-space bounds before applying it, so the
     observations and rewards stay finite.
     """
-    import ochre_next.rl.vec_env as ve
+    import hares.rl.vec_env as ve
 
     assert ve.rust_batch_step is not None, (
         "the extension registers batch_step; without it the vec env does not import"
@@ -444,7 +444,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
         )
         for i in range(n_dwel)
     ]
-    from ochre_next import Battery
+    from hares import Battery
     for dw in dwellings:
         dw.add_battery(Battery("Batt", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0))
 
@@ -487,7 +487,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
 
 def test_observation_field_bounds_all_finite():
     """Every known observation key (and the fallback) returns finite bounds."""
-    from ochre_next.rl.gym_env import observation_field_bounds
+    from hares.rl.gym_env import observation_field_bounds
 
     fields = [
         "outdoor_temp",
@@ -930,7 +930,7 @@ def test_initial_observation_warning_emitted_once():
     )
 
     # Reset the module-level flag so we get a clean test
-    import ochre_next.rl.gym_env as gym_env_mod
+    import hares.rl.gym_env as gym_env_mod
     gym_env_mod._warned_initial_nan = False
 
     with warnings.catch_warnings(record=True) as w:
@@ -950,7 +950,7 @@ def test_initial_observation_warning_emitted_once():
 def test_vec_gym_reset_observation_nan_and_mask():
     """VecDwellingGymEnv.reset() returns NaN obs with per-env mask and one-time warning."""
     import warnings
-    import ochre_next.rl.vec_env as ve
+    import hares.rl.vec_env as ve
 
     dwellings = [_make_dwelling(seed=i) for i in range(4)]
     env = VecDwellingGymEnv(
@@ -1168,7 +1168,7 @@ def test_vec_gym_verify_observation_equivalence_reports_nan_mismatch():
     import warnings
     from unittest.mock import patch
 
-    import ochre_next.rl.vec_env as vec_env_module
+    import hares.rl.vec_env as vec_env_module
 
     dwellings = [_make_dwelling(seed=0) for _ in range(1)]
     env = VecDwellingGymEnv(

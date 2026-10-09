@@ -43,7 +43,7 @@ def _is_peak(step_idx: int) -> bool:
 @pytest.fixture(scope="module")
 def sim_result():
     """Run PV+battery dwelling with TOU tariff once, share across all tests."""
-    from ochre_next import Dwelling, ElectricTariff
+    from hares import Dwelling, ElectricTariff
 
     dw = Dwelling.from_hpxml(
         str(HPXML), str(SCHEDULE), str(WEATHER),
@@ -215,7 +215,7 @@ class TestHvacActiveCooling:
 
     def test_ac_runs_with_low_setpoint(self):
         """With 21 °C cooling setpoint the AC must deliver cooling in July."""
-        from ochre_next import ControlSignal, Dwelling
+        from hares import ControlSignal, Dwelling
 
         dw = Dwelling.from_hpxml(
             str(HPXML), str(SCHEDULE), str(WEATHER),

@@ -10,7 +10,7 @@ from typing import Any
 
 import polars as pl
 
-from ochre_next import Dwelling, DwellingBlueprint
+from hares import Dwelling, DwellingBlueprint
 
 
 def _noop(_bp: DwellingBlueprint) -> None:

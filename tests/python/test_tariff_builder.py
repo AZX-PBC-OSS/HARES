@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from conftest import make_dwelling
-from ochre_next import ElectricTariff, GasTariff, GasTariffBuilder, TariffBuilder
+from hares import ElectricTariff, GasTariff, GasTariffBuilder, TariffBuilder
 
 
 def _make_simple_tou_builder() -> TariffBuilder:

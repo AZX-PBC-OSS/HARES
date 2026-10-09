@@ -3,7 +3,7 @@ requires = ["maturin>=1.15.0"]
 build-backend = "maturin"
 
 [project]
-name = "ochre_next"
+name = "hares-py"
 version = "0.1.0"
 description = "HARES: High-performance Agent-based Residential Energy Simulation"
 requires-python = ">=3.12,<3.14"
@@ -78,7 +78,7 @@ default-groups = ["dev"]
 
 [tool.maturin]
 python-source = "python"
-module-name = "ochre_next._hares"
+module-name = "hares._hares"
 manifest-path = "crates/hares-python/Cargo.toml"
 include = [
     {path = "defaults/**", format = ["sdist", "wheel"]},
@@ -86,7 +86,7 @@ include = [
 
 [tool.pyright]
 # "standard" is the baseline for scripts/ and tests/. The shipped package
-# (python/ochre_next, the _hares.pyi stub included) runs at strict: pyright
+# (python/hares, the _hares.pyi stub included) runs at strict: pyright
 # has no per-environment typeCheckingMode, so the environment below lists
 # every rule strict promotes over standard, re-levelled to "error".
 typeCheckingMode = "standard"
@@ -97,7 +97,7 @@ include = ["python", "scripts", "tests", "typings", "notebooks"]
 exclude = ["tests/fixtures"]
 
 [[tool.pyright.executionEnvironments]]
-root = "python/ochre_next"
+root = "python/hares"
 strictListInference = true
 strictSetInference = true
 strictDictionaryInference = true

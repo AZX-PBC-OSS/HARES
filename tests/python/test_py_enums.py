@@ -1,7 +1,7 @@
 """Tests for Python enum and bitflag bindings."""
 
 import pytest
-from ochre_next import (
+from hares import (
     EndUse,
     FuelType,
     OperatingMode,

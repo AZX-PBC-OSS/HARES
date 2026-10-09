@@ -61,11 +61,11 @@ try:
     import helics
 except ImportError as exc:  # pragma: no cover - exercised via import test
     raise ImportError(
-        "HELICS not installed. Install with: pip install 'ochre_next[helics]'"
+        "HELICS not installed. Install with: pip install 'hares[helics]'"
     ) from exc
 
-from ochre_next import ControlSignal
-from ochre_next._hares import SteppableFleet as PySteppableFleet
+from hares import ControlSignal
+from hares._hares import SteppableFleet as PySteppableFleet
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike, is_json_object
 from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, STALE_SUBSCRIPTION_THRESHOLD, VOLTAGE_PU_MAX, VOLTAGE_PU_MIN, handle_time_grant, set_publication_info, validate_control_signal

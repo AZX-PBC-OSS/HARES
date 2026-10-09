@@ -1,7 +1,7 @@
 """Tests for the battery product catalog."""
 
 import pytest
-from ochre_next import Battery, BatteryProductId
+from hares import Battery, BatteryProductId
 
 
 PRODUCT_IDS = Battery.product_catalog()
@@ -100,7 +100,7 @@ class TestBatteryCatalogFactories:
         Uses July start to ensure cell temperature is above the 0°C charge
         lockout (Denver January ambient is -19°C which blocks charging).
         """
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
         from conftest import make_dwelling
 
         dw = make_dwelling(
@@ -201,7 +201,7 @@ class TestBatteryThermalBehavior:
         gives reliable margin without masking a broken heater (which would
         never cross 0 C at all: passive equilibrium equals ambient).
         """
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
         from conftest import make_dwelling
 
         dw = make_dwelling(
@@ -238,7 +238,7 @@ class TestBatteryThermalBehavior:
         The IQ 5P has min_charge_temp_c=-20°C, so it should charge even in
         Denver January (-19°C) -- just at a derated rate.
         """
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
         from conftest import make_dwelling
 
         dw = make_dwelling(

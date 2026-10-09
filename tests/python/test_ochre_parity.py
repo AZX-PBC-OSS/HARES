@@ -130,7 +130,7 @@ def _run_ochre_24h() -> dict[str, float]:
 
 def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
     """Run HARES via simulate() and parse the DataFrame for column kWh."""
-    from ochre_next import Dwelling as HaresDwelling
+    from hares import Dwelling as HaresDwelling
 
     dwelling = HaresDwelling.from_hpxml(
         HPXML,
@@ -159,7 +159,7 @@ def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
 
 def _run_hares_simulate_24h(output_dir: Path) -> dict[str, float]:
     """Run HARES via simulate() and parse the DataFrame for the 24-hour window."""
-    from ochre_next import Dwelling as HaresDwelling
+    from hares import Dwelling as HaresDwelling
 
     dwelling = HaresDwelling.from_hpxml(
         HPXML,

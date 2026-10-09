@@ -5,8 +5,8 @@ from datetime import datetime
 import polars as pl
 import pytest
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER
-from ochre_next import ASHPCooler, ASHPHeater, Battery, DwellingBlueprint, EndUse
-from ochre_next.simulation_plan import SimulationPlan
+from hares import ASHPCooler, ASHPHeater, Battery, DwellingBlueprint, EndUse
+from hares.simulation_plan import SimulationPlan
 
 
 def test_simulation_plan_single_segment():

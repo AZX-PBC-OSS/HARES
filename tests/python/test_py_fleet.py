@@ -6,8 +6,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from ochre_next import DwellingConfig, SimulationConfig
-from ochre_next import Fleet as PyFleet
+from hares import DwellingConfig, SimulationConfig
+from hares import Fleet as PyFleet
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
@@ -205,7 +205,7 @@ def test_from_resstock_accepts_enum(tmp_path: Path) -> None:
     pq.write_table(table, metadata)
     _write_extracted_building(tmp_path, 12345)
 
-    from ochre_next import ResStockVersion
+    from hares import ResStockVersion
 
     fleet = PyFleet.from_resstock(
         str(metadata),
@@ -345,7 +345,7 @@ def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
 @pytest.mark.slow
 def test_simulate_resolution_enum_works(tmp_path: Path) -> None:
     """Verify simulate(resolution=AggregationResolution.Hourly) works."""
-    from ochre_next import AggregationResolution
+    from hares import AggregationResolution
 
     fleet = _build_simulatable_fleet(tmp_path, 1)
     results = fleet.simulate(resolution=AggregationResolution.Hourly)

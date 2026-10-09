@@ -10,7 +10,7 @@ import pytest
 
 from pathlib import Path
 
-from ochre_next import Battery, ControlSignal, Dwelling, EV, LutType
+from hares import Battery, ControlSignal, Dwelling, EV, LutType
 
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"

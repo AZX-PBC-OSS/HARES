@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ochre_next import DwellingConfig, SimulationConfig, SteppableFleet
+from hares import DwellingConfig, SimulationConfig, SteppableFleet
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"

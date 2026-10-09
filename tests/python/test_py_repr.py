@@ -17,7 +17,7 @@ SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 @pytest.fixture(scope="module")
 def dwelling():
-    from ochre_next import Dwelling as PyDwelling
+    from hares import Dwelling as PyDwelling
 
     dw = PyDwelling.from_hpxml(
         HPXML,
@@ -52,7 +52,7 @@ class TestPyRepr:
 
 class TestBatteryRepr:
     def test_battery_repr(self):
-        from ochre_next import Battery
+        from hares import Battery
 
         b = Battery(name="test_batt", capacity_kwh=10.0)
         r = repr(b)
@@ -63,7 +63,7 @@ class TestBatteryRepr:
 
 class TestPvSoilingConfigRepr:
     def test_pv_soiling_config_repr(self):
-        from ochre_next import PvSoilingConfig
+        from hares import PvSoilingConfig
 
         c = PvSoilingConfig()
         r = repr(c)
@@ -75,7 +75,7 @@ class TestPvSoilingConfigRepr:
 
 class TestPvRepr:
     def test_pv_repr(self):
-        from ochre_next import PV
+        from hares import PV
 
         pv = PV(name="test_pv", capacity_kw=5.0, tilt=30.0, azimuth=180.0)
         r = repr(pv)
@@ -88,7 +88,7 @@ class TestPvRepr:
 
 class TestEvRepr:
     def test_ev_repr(self):
-        from ochre_next import EV
+        from hares import EV
 
         ev = EV(name="test_ev", capacity_kwh=75.0, max_charging_kw=11.0)
         r = repr(ev)

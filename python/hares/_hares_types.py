@@ -4,7 +4,7 @@ The compiled ``_hares`` module is a Rust extension and cannot carry
 TypedDicts, so the shape declarations live here and ``_hares.pyi`` imports
 them instead of re-declaring them (keeping the stub from drifting from the
 runtime shapes). The gym layer's per-step ``info`` payload (``StepInfo``)
-lives here too so ``ochre_next.rl`` can re-export it.
+lives here too so ``hares.rl`` can re-export it.
 
 ``StepResult`` uses PEP 728's ``extra_items``, which needs
 ``typing_extensions.TypedDict`` on the supported Pythons (the stdlib
@@ -91,7 +91,7 @@ class ProfilingSummary(TypedDict):
     per_actor: list[ActorTimingSummary]
 
 class StepInfo(TypedDict):
-    """Per-step ``info`` payload for :class:`ochre_next.rl.DwellingGymEnv`.
+    """Per-step ``info`` payload for :class:`hares.rl.DwellingGymEnv`.
 
     ``warning_count`` and ``warnings`` follow the same contract as the Rust
     ``batch_step`` fast path: ``warning_count`` (float) is always present and

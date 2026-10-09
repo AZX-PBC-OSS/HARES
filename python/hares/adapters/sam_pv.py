@@ -305,7 +305,7 @@ def _run_pvwatts(
     if _pvwatts is None:
         raise ImportError(
             "PySAM is required for SAM PV adapter; install with: "
-            "pip install 'ochre_next[sam]'"
+            "pip install 'hares[sam]'"
         )
 
     pv = _pvwatts.new()

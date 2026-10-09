@@ -16,7 +16,7 @@ HPXML_PV = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base-pv.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
-from ochre_next import Dwelling, SimulationMetrics
+from hares import Dwelling, SimulationMetrics
 
 
 class _OutputKwargs(TypedDict):

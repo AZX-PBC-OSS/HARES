@@ -21,8 +21,8 @@ import numpy as np
 import pytest
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER, make_dwelling
 
-import ochre_next.rl.vec_env as vec_env_module
-from ochre_next.rl.vec_env import VecDwellingGymEnv
+import hares.rl.vec_env as vec_env_module
+from hares.rl.vec_env import VecDwellingGymEnv
 
 _OBS_FIELDS = ["total_power_kw", "outdoor_temp"]
 
@@ -82,24 +82,24 @@ def test_vec_env_refuses_to_import_without_the_extension_entrypoint(
     import sys
     import types
 
-    from ochre_next import _hares as real_extension
+    from hares import _hares as real_extension
 
-    stub = types.ModuleType("ochre_next._hares")
+    stub = types.ModuleType("hares._hares")
     for name in dir(real_extension):
         if name != "batch_step" and not name.startswith("__"):
             setattr(stub, name, getattr(real_extension, name))
 
-    real_module = importlib.import_module("ochre_next.rl.vec_env")
+    real_module = importlib.import_module("hares.rl.vec_env")
     module_file = real_module.__file__
     assert module_file is not None, "the vec env module is loaded from a file"
     spec = importlib.util.spec_from_file_location(
-        "ochre_next.rl.vec_env_without_entrypoint",
+        "hares.rl.vec_env_without_entrypoint",
         Path(module_file),
     )
     assert spec is not None and spec.loader is not None
     probe = importlib.util.module_from_spec(spec)
 
-    monkeypatch.setitem(sys.modules, "ochre_next._hares", stub)
+    monkeypatch.setitem(sys.modules, "hares._hares", stub)
     with pytest.raises(ImportError, match="batch_step"):
         spec.loader.exec_module(probe)
 
@@ -111,7 +111,7 @@ def test_vec_env_refuses_to_import_without_the_extension_entrypoint(
 
 def _make_gym_env(action_config: dict[str, list[str]], output_dir: Path):
     pytest.importorskip("gymnasium")
-    from ochre_next.rl.gym_env import DwellingGymEnv
+    from hares.rl.gym_env import DwellingGymEnv
 
     return DwellingGymEnv(
         config={

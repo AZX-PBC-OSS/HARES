@@ -68,7 +68,7 @@ they execute inside the project virtualenv.
 
 **[Maturin](https://www.maturin.rs/)** bridges Rust and Python. It
 compiles the Rust extension module (`hares-python` crate) and installs it
-into the virtualenv as the `ochre_next._hares` package. See
+into the virtualenv as the `hares._hares` package. See
 [Python Bindings](python.md) for the full architecture.
 
 ```bash

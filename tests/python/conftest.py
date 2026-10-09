@@ -110,29 +110,29 @@ def output_in_test_dir(config: Mapping[str, object], filename: str) -> Callable[
 
 
 def _is_helics_module(name: str) -> bool:
-    return name in ("helics", "ochre_next.helics") or name.startswith(("helics.", "ochre_next.helics."))
+    return name in ("helics", "hares.helics") or name.startswith(("helics.", "hares.helics."))
 
 
 @pytest.fixture
 def restore_helics_modules() -> Iterator[None]:
-    """Put back the real ``helics`` and ``ochre_next.helics`` modules after the test.
+    """Put back the real ``helics`` and ``hares.helics`` modules after the test.
 
-    For a test that re-imports ``ochre_next.helics`` under a fake ``helics``:
+    For a test that re-imports ``hares.helics`` under a fake ``helics``:
     without it the fake-bound modules stay in ``sys.modules``, and every later
     test in the process that imports them gets the fake.
     """
-    import ochre_next
+    import hares
 
     saved = {name: module for name, module in sys.modules.items() if _is_helics_module(name)}
-    package = ochre_next.__dict__.get("helics")
+    package = hares.__dict__.get("helics")
     yield
     for name in [name for name in sys.modules if _is_helics_module(name)]:
         del sys.modules[name]
     sys.modules.update(saved)
     if package is None:
-        ochre_next.__dict__.pop("helics", None)
+        hares.__dict__.pop("helics", None)
     else:
-        ochre_next.__dict__["helics"] = package
+        hares.__dict__["helics"] = package
 
 
 def make_dwelling(
@@ -144,7 +144,7 @@ def make_dwelling(
     write_output: bool = False,
     **kw,
 ):
-    from ochre_next import Dwelling
+    from hares import Dwelling
 
     dw = Dwelling.from_hpxml(
         HPXML,

@@ -10,7 +10,7 @@ CZ2A = ROOT / "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh"
 
 
 def _cz2a_dwelling():
-    from ochre_next import Dwelling
+    from hares import Dwelling
 
     dw = Dwelling.from_hpxml(
         str(CZ2A / "building.xml"),

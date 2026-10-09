@@ -6,8 +6,8 @@ sys.path.insert(0, 'python')
 import polars as pl
 import pandas as pd
 import numpy as np
-from ochre_next import Dwelling, PV
-from ochre_next.data import fetch_resstock_building
+from hares import Dwelling, PV
+from hares.data import fetch_resstock_building
 
 bldg = fetch_resstock_building(1, version='2025.1')
 

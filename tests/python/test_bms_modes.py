@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from ochre_next import (
+from hares import (
     BmsAction,
     BmsMode,
     BmsScheduleWindow,

@@ -1,6 +1,6 @@
 """Data fetching utilities for ResStock and weather data."""
 
-from ochre_next.data.resstock import (
+from hares.data.resstock import (
     ResStockBuilding,
     ResStockVersion,
     WeatherFormat,

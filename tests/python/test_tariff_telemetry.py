@@ -6,7 +6,7 @@ import datetime
 
 from conftest import make_dwelling
 
-from ochre_next import BillingPeriodSummary, ElectricTariff, TariffTelemetry
+from hares import BillingPeriodSummary, ElectricTariff, TariffTelemetry
 
 
 def _build_tou_tariff():

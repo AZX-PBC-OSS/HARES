@@ -287,7 +287,7 @@ def _get_sam_battery(chemistry: str) -> Any:
         if _battery_sam is None:
             raise ImportError(
                 "PySAM is required for SAM battery adapter; install with: "
-                "pip install 'ochre_next[sam]'"
+                "pip install 'hares[sam]'"
             )
         _SAM_BATT_CACHE[sam_name] = _battery_sam.default(sam_name)
     return _SAM_BATT_CACHE[sam_name]

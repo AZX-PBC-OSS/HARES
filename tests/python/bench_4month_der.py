@@ -143,7 +143,7 @@ def _run_ochre() -> tuple[dict[str, float], float, float]:
 
 def _run_hares(output_dir: Path) -> tuple[dict[str, float], float, float]:
     """Run HARES with PV + Battery for 120 days, writing its output into ``output_dir``."""
-    from ochre_next import Battery, Dwelling as HaresDwelling, PV
+    from hares import Battery, Dwelling as HaresDwelling, PV
 
     t0 = time.perf_counter()
     dwelling = HaresDwelling.from_hpxml(

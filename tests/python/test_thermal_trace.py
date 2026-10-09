@@ -258,7 +258,7 @@ def ochre_48h() -> pd.DataFrame:
 @pytest.fixture(scope="module")
 def hares_48h(tmp_path_factory: pytest.TempPathFactory) -> pl.DataFrame:
     """Run HARES for 48h and return the per-step polars DataFrame."""
-    from ochre_next import Dwelling as HaresDwelling
+    from hares import Dwelling as HaresDwelling
 
     dwelling = HaresDwelling.from_hpxml(
         HPXML,

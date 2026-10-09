@@ -2,7 +2,7 @@
 
 import pytest
 from typing import cast
-from ochre_next import (
+from hares import (
     ControlSignal,
     DispatchRequest,
     IdealCapacityMode,

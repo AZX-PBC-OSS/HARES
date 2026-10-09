@@ -1,4 +1,4 @@
-"""Tests for ochre_next.adapters (HARES-053)."""
+"""Tests for hares.adapters."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ class TestSamPvGeneratePvLut:
 
     def test_generate_pv_lut_passes_inv_efficiency_to_sam(self, tmp_path: Path) -> None:
         """generate_pv_lut must pass inv_efficiency through to _run_pvwatts."""
-        from ochre_next.adapters import sam_pv
+        from hares.adapters import sam_pv
 
         weather = self._make_weather_file(tmp_path)
         raw_output = self._mock_pvwatts_output()
@@ -72,7 +72,7 @@ class TestSamPvGeneratePvLut:
     def test_malformed_pvwatts_output_raises_value_error(self, tmp_path: Path) -> None:
         """A pvwatts mapping missing required keys must fail with a clear
         ValueError, not a bare KeyError from deep inside LUT construction."""
-        from ochre_next.adapters import sam_pv
+        from hares.adapters import sam_pv
 
         weather = self._make_weather_file(tmp_path)
         raw_output = self._mock_pvwatts_output()
@@ -90,7 +90,7 @@ class TestSamPvGeneratePvLut:
                 )
 
     def test_generate_returns_pvlut_with_correct_schema(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import sam_pv
+        from hares.adapters import sam_pv
 
         weather = self._make_weather_file(tmp_path)
         raw_output = self._mock_pvwatts_output()
@@ -110,7 +110,7 @@ class TestSamPvGeneratePvLut:
         assert set(lut.table.column_names) == expected_columns
 
     def test_save_writes_parquet(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import sam_pv
+        from hares.adapters import sam_pv
 
         weather = self._make_weather_file(tmp_path)
         raw_output = self._mock_pvwatts_output()
@@ -133,7 +133,7 @@ class TestSamPvGeneratePvLut:
         assert "ac_power_kw" in table.column_names
 
     def test_cache_hit_skips_pysam(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import sam_pv
+        from hares.adapters import sam_pv
 
         weather = self._make_weather_file(tmp_path)
         raw_output = self._mock_pvwatts_output()
@@ -165,7 +165,7 @@ class TestSamPvGeneratePvLut:
             assert lut2.metadata.get("cached") is True
 
     def test_changed_input_invalidates_cache(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import sam_pv
+        from hares.adapters import sam_pv
 
         weather = self._make_weather_file(tmp_path)
         raw_output = self._mock_pvwatts_output()
@@ -196,7 +196,7 @@ class TestSamPvGeneratePvLut:
             assert mock_run.call_count == 2
 
     def test_changed_weather_file_invalidates_cache(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import sam_pv
+        from hares.adapters import sam_pv
 
         weather = self._make_weather_file(tmp_path)
         raw_output = self._mock_pvwatts_output()
@@ -238,7 +238,7 @@ class TestSolarPosition:
 
     def test_returns_numeric_tuple_without_name_error(self) -> None:
         """Catch the NameError: _solar_position must not reference undefined variables."""
-        from ochre_next.adapters.sam_pv import _solar_position
+        from hares.adapters.sam_pv import _solar_position
 
         zenith, azimuth = _solar_position(40.0, 0.0, 0.0, 4380)
 
@@ -249,7 +249,7 @@ class TestSolarPosition:
 
     def test_midnight_sun_below_horizon(self) -> None:
         """At midnight UTC, lat=40°N, the sun should be below the horizon."""
-        from ochre_next.adapters.sam_pv import _solar_position
+        from hares.adapters.sam_pv import _solar_position
 
         hour_of_year = 0  # Jan 1 00:00-01:00
         zenith, _ = _solar_position(40.0, 0.0, 0.0, hour_of_year)
@@ -262,7 +262,7 @@ class TestSolarPosition:
         `solar_position_at_lat40_equinox_noon` (solar_parity.rs:308).
         Spencer model tolerance ±3° for zenith, ±30° for azimuth.
         """
-        from ochre_next.adapters.sam_pv import _solar_position
+        from hares.adapters.sam_pv import _solar_position
 
         day_80_noon = 80 * 24 + 12  # March 21 noon (leap-year ordinal 80), non-leap day
         zenith, azimuth = _solar_position(40.0, 0.0, 0.0, day_80_noon)
@@ -276,7 +276,7 @@ class TestSolarPosition:
 
     def test_varying_inputs_all_return(self) -> None:
         """Call _solar_position across a range of hours and latitudes."""
-        from ochre_next.adapters.sam_pv import _solar_position
+        from hares.adapters.sam_pv import _solar_position
 
         for lat in (-60.0, 0.0, 40.0, 70.0):
             for h in (0, 8760 // 4, 8760 // 2, 8760 * 3 // 4, 8759):
@@ -298,7 +298,7 @@ class TestSamBatteryExtractCellParams:
     """Tests for sam_battery.extract_cell_params."""
 
     def test_returns_cellparams_with_defaults(self) -> None:
-        from ochre_next.adapters import sam_battery
+        from hares.adapters import sam_battery
 
         result = sam_battery.extract_cell_params("LFP", 10.0, source="defaults")
         assert isinstance(result, sam_battery.CellParams)
@@ -310,7 +310,7 @@ class TestSamBatteryExtractCellParams:
         assert "n_parallel" in result.params["cell"]
 
     def test_save_writes_toml(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import sam_battery
+        from hares.adapters import sam_battery
 
         result = sam_battery.extract_cell_params("NMC", 10.0, source="defaults")
         out_path = tmp_path / "cell_params.toml"
@@ -326,7 +326,7 @@ class TestSamBatteryExtractCellParams:
         assert "[degradation]" in text
 
     def test_toml_contains_all_required_keys(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import sam_battery
+        from hares.adapters import sam_battery
 
         result = sam_battery.extract_cell_params("NMC", 10.0, source="defaults")
         out_path = tmp_path / "cell_params.toml"
@@ -346,7 +346,7 @@ class TestSamBatteryExtractCellParams:
         assert "degradation" in data
 
     def test_cache_hit(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import sam_battery
+        from hares.adapters import sam_battery
 
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
@@ -358,7 +358,7 @@ class TestSamBatteryExtractCellParams:
         assert r2.metadata.get("cached") is True
 
     def test_different_chemistry_invalidates_cache(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import sam_battery
+        from hares.adapters import sam_battery
 
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
@@ -370,7 +370,7 @@ class TestSamBatteryExtractCellParams:
         assert r2.metadata.get("cached") is False
 
     def test_unknown_chemistry_falls_back_to_nmc(self) -> None:
-        from ochre_next.adapters import sam_battery
+        from hares.adapters import sam_battery
 
         result = sam_battery.extract_cell_params("UNKNOWN", 10.0, source="defaults")
         assert result.params["cell"]["chemistry"] == "UNKNOWN"
@@ -387,7 +387,7 @@ class TestPybammBatteryEfficiencyLut:
     """Tests for pybamm_battery.generate_efficiency_lut."""
 
     def test_returns_efficiency_lut_with_defaults(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         lut = pybamm_battery.generate_efficiency_lut(
             chemistry="NMC",
@@ -405,7 +405,7 @@ class TestPybammBatteryEfficiencyLut:
         assert lut.table.num_rows > 0
 
     def test_save_writes_parquet(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         lut = pybamm_battery.generate_efficiency_lut(
             chemistry="NMC",
@@ -425,7 +425,7 @@ class TestPybammBatteryEfficiencyLut:
         assert "efficiency" in table.column_names
 
     def test_power_range_kw_is_required_keyword(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         # Typed as Any: the call passes power_range_kw positionally on
         # purpose, which the signature rejects statically and at runtime.
@@ -434,7 +434,7 @@ class TestPybammBatteryEfficiencyLut:
             generate("NMC", 50, 14, 4, (0, 45), (0.1, 0.95), (-5, 5), 0)
 
     def test_without_pybamm_returns_defaults(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         with mock.patch.object(pybamm_battery, "_pybamm", None):
             lut = pybamm_battery.generate_efficiency_lut(
@@ -454,7 +454,7 @@ class TestPybammBatteryEfficiencyLut:
     # --- chemistry-specific nominal voltage ---
 
     def test_metadata_includes_v_nominal_for_nmc(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         lut = pybamm_battery.generate_efficiency_lut(
             chemistry="NMC",
@@ -469,7 +469,7 @@ class TestPybammBatteryEfficiencyLut:
         assert lut.metadata["v_nominal"] == 3.6
 
     def test_metadata_includes_v_nominal_for_lfp(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         lut = pybamm_battery.generate_efficiency_lut(
             chemistry="LFP",
@@ -484,7 +484,7 @@ class TestPybammBatteryEfficiencyLut:
         assert lut.metadata["v_nominal"] == 3.2
 
     def test_metadata_includes_v_nominal_for_lto(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         lut = pybamm_battery.generate_efficiency_lut(
             chemistry="LTO",
@@ -499,7 +499,7 @@ class TestPybammBatteryEfficiencyLut:
         assert lut.metadata["v_nominal"] == 2.4
 
     def test_explicit_v_nominal_overrides_chemistry(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         lut = pybamm_battery.generate_efficiency_lut(
             chemistry="LFP",
@@ -515,7 +515,7 @@ class TestPybammBatteryEfficiencyLut:
         assert lut.metadata["v_nominal"] == 3.85
 
     def test_invalid_v_nominal_raises_assertion_error(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         with pytest.raises(AssertionError, match="Invalid nominal voltage"):
             pybamm_battery.generate_efficiency_lut(
@@ -531,7 +531,7 @@ class TestPybammBatteryEfficiencyLut:
             )
 
     def test_invalid_high_v_nominal_raises_assertion_error(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         with pytest.raises(AssertionError, match="Invalid nominal voltage"):
             pybamm_battery.generate_efficiency_lut(
@@ -547,7 +547,7 @@ class TestPybammBatteryEfficiencyLut:
             )
 
     def test_hash_differs_by_v_nominal(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         h_nmc = pybamm_battery._canonical_hash_efficiency(
             "NMC", 50, 14, 4, 3.6, (0, 45), (0.1, 0.95), (-5, 5), 0,
@@ -558,7 +558,7 @@ class TestPybammBatteryEfficiencyLut:
         assert h_nmc != h_lfp
 
     def test_cache_invalidated_by_different_v_nominal(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
@@ -590,7 +590,7 @@ class TestPybammBatteryEfficiencyLut:
         assert lut2.metadata.get("cached") is False
 
     def test_unknown_chemistry_falls_back_to_3_6v(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         lut = pybamm_battery.generate_efficiency_lut(
             chemistry="UNKNOWN",
@@ -606,7 +606,7 @@ class TestPybammBatteryEfficiencyLut:
 
     def test_default_efficiency_lut_unchanged_for_nmc(self) -> None:
         """Regression: NMC default efficiency values must be numerically unchanged."""
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         with mock.patch.object(pybamm_battery, "_pybamm", None):
             lut = pybamm_battery.generate_efficiency_lut(
@@ -631,7 +631,7 @@ class TestPybammBatteryEfficiencyLut:
         directly governs the current calculation.  A regression that
         reintroduces a hardcoded 3.6 V would cause all chemistries to produce
         identical current sets and this test would fail."""
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         def _build_fake_pybamm(currents: list[float]) -> mock.MagicMock:
             fake = mock.MagicMock()
@@ -698,7 +698,7 @@ class TestPybammBatteryDegradationParams:
     """Tests for pybamm_battery.generate_degradation_params."""
 
     def test_returns_degradation_params(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         result = pybamm_battery.generate_degradation_params(
             chemistry="NMC",
@@ -709,7 +709,7 @@ class TestPybammBatteryDegradationParams:
         assert "model" in result.params
 
     def test_save_writes_toml(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         result = pybamm_battery.generate_degradation_params(
             chemistry="NMC",
@@ -723,7 +723,7 @@ class TestPybammBatteryDegradationParams:
         assert "model" in text
 
     def test_without_pybamm_returns_defaults(self) -> None:
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         with mock.patch.object(pybamm_battery, "_pybamm", None):
             result = pybamm_battery.generate_degradation_params(
@@ -736,7 +736,7 @@ class TestPybammBatteryDegradationParams:
 
     def test_produces_consistent_output_with_and_without_pybamm(self) -> None:
         """Degradation params must be identical regardless of PyBaMM availability."""
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         with mock.patch.object(pybamm_battery, "_pybamm", None):
             result_without = pybamm_battery.generate_degradation_params(
@@ -757,7 +757,7 @@ class TestPybammBatteryDegradationParams:
     def test_metadata_indicates_builtin_source(self) -> None:
         """metadata["source"] must be "builtin" so consumers can distinguish
         parameter origins."""
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         result = pybamm_battery.generate_degradation_params(
             chemistry="LFP",
@@ -769,7 +769,7 @@ class TestPybammBatteryDegradationParams:
     def test_existing_degradation_toml_unchanged(self, tmp_path: Path) -> None:
         """Degradation params TOML output must be byte-identical to prevent
         regressions in downstream consumers that depend on the TOML format."""
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         result = pybamm_battery.generate_degradation_params(
             chemistry="NMC",
@@ -805,7 +805,7 @@ class TestChargingLutFallback:
         """
         import itertools
 
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         call_counter = {"count": 0}
         grid_order: list[tuple[int, int, int]] = []
@@ -858,7 +858,7 @@ class TestChargingLutFallback:
         successfully-solved neighbor, not zeros."""
         import numpy as np
 
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         # Grid: 7 temps × 8 crates × 4 SOHs = 224 points.
         # Fail the last temperature at highest C-rate and lowest SOH:
@@ -902,7 +902,7 @@ class TestChargingLutFallback:
     def test_cc_cv_fallback_when_no_neighbor_exists(self) -> None:
         """When the very first grid point fails, there are no solved neighbors
         and the fallback uses linear derating."""
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         # Fail the very first grid point: temp[0] = -15°C, crate[0] = 0.04C, soh[0] = 0.70
         fail_idx: set[tuple[int, int, int]] = {(0, 0, 0)}
@@ -932,7 +932,7 @@ class TestChargingLutFallback:
     def test_lut_coverage_fields_present(self) -> None:
         """Every ChargingCurveLutData must have lut_coverage and fallback_mask
         regardless of whether any solves failed."""
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         fake_pybamm = self._setup_pybamm_mock(set())
 
@@ -954,7 +954,7 @@ class TestChargingLutFallback:
         have non-zero max power fraction across the SOC range."""
         import numpy as np
 
-        from ochre_next.adapters import pybamm_battery
+        from hares.adapters import pybamm_battery
 
         fake_pybamm = self._setup_pybamm_mock(set())
         with mock.patch.object(pybamm_battery, "_pybamm", fake_pybamm):
@@ -988,14 +988,14 @@ class TestFallbackChain:
     """Tests for adapters.__init__.resolve_battery_params."""
 
     def test_resolve_without_external_tools(self) -> None:
-        from ochre_next.adapters import resolve_battery_params
+        from hares.adapters import resolve_battery_params
 
         result = resolve_battery_params("NMC", 10.0)
         assert result.params["cell"]["chemistry"] == "NMC"
         assert "v_nominal" in result.params["cell"]
 
     def test_resolve_with_cache(self, tmp_path: Path) -> None:
-        from ochre_next.adapters import resolve_battery_params
+        from hares.adapters import resolve_battery_params
 
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
@@ -1004,7 +1004,7 @@ class TestFallbackChain:
         assert r1.params["cell"]["chemistry"] == "LFP"
 
     def test_reexports(self) -> None:
-        from ochre_next import adapters
+        from hares import adapters
 
         assert callable(adapters.generate_pv_lut)
         assert callable(adapters.extract_cell_params)

@@ -159,7 +159,7 @@ def parse_args() -> argparse.Namespace:
         "--actual-parquet",
         type=Path,
         default=None,
-        help="Optional precomputed HARES parquet path; skips running ochre_next when provided.",
+        help="Optional precomputed HARES parquet path; skips running hares when provided.",
     )
     parser.add_argument(
         "--reference-parquet",
@@ -305,9 +305,9 @@ def run_hares(
         pdf = pd.read_parquet(actual_parquet)
         return _normalize_time_index(pdf, sim_cfg["start_time"]), pd.DataFrame()
 
-    import ochre_next
+    import hares
 
-    dwelling_sim = ochre_next.Dwelling.from_hpxml(
+    dwelling_sim = hares.Dwelling.from_hpxml(
         str((fixture_dir / "building.xml").resolve()),
         str((fixture_dir / "schedule.csv").resolve()),
         str((fixture_dir / "weather.epw").resolve()),
@@ -323,7 +323,7 @@ def run_hares(
     pdf = dwelling_sim.simulate().to_pandas()
     pdf = _normalize_time_index(pdf, sim_cfg["start_time"])
 
-    dwelling_obs = ochre_next.Dwelling.from_hpxml(
+    dwelling_obs = hares.Dwelling.from_hpxml(
         str((fixture_dir / "building.xml").resolve()),
         str((fixture_dir / "schedule.csv").resolve()),
         str((fixture_dir / "weather.epw").resolve()),

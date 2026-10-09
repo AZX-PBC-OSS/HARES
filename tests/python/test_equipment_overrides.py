@@ -17,7 +17,7 @@ import pytest
 
 from conftest import HARES_DEFAULTS, ROOT, WEATHER
 
-from ochre_next import (
+from hares import (
     ASHPHeater,
     Dwelling,
     DwellingBlueprint,
@@ -25,7 +25,7 @@ from ochre_next import (
     GasWaterHeater,
     TanklessWaterHeater,
 )
-from ochre_next._hares import HaresEquipmentError
+from hares._hares import HaresEquipmentError
 
 SAMPLES = ROOT / "vendors/OCHRE/test/OS-HPXML Sample Files"
 GAS_BACKUP_SAMPLE = str(

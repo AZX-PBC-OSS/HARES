@@ -24,13 +24,13 @@ if importlib.util.find_spec("helics") is None:  # pragma: no cover - optional de
 
 import helics
 
-from ochre_next import Battery, ControlSignal, Dwelling, DwellingConfig, SimulationConfig, SteppableFleet
+from hares import Battery, ControlSignal, Dwelling, DwellingConfig, SimulationConfig, SteppableFleet
 
 if TYPE_CHECKING:
     # The extension's step() returns a plain dict at runtime; its declared
-    # shape lives in ochre_next._hares_types.
-    from ochre_next._hares_types import StepResult
-from ochre_next.helics import (
+    # shape lives in hares._hares_types.
+    from hares._hares_types import StepResult
+from hares.helics import (
     HELICSDwelling,
     HELICSFleet,
     create_broker,
@@ -39,9 +39,9 @@ from ochre_next.helics import (
     request_time_with_timeout,
     wait_for_pending_aborts,
 )
-from ochre_next.helics import federate as federate_module
-from ochre_next.helics.broker import allocate_ephemeral_port
-from ochre_next.helics.federate import create_value_federate
+from hares.helics import federate as federate_module
+from hares.helics.broker import allocate_ephemeral_port
+from hares.helics.federate import create_value_federate
 
 # Last-resort backstop: raw HELICS calls block inside the C library where
 # SIGALRM cannot interrupt them, so use pytest-timeout's thread method.
@@ -491,12 +491,12 @@ def _avg(values: list[float]) -> float:
 
 
 def _clear_helics_modules() -> None:
-    sys.modules.pop("ochre_next.helics", None)
-    sys.modules.pop("ochre_next.helics.broker", None)
-    sys.modules.pop("ochre_next.helics.dwelling", None)
-    sys.modules.pop("ochre_next.helics.federate", None)
-    sys.modules.pop("ochre_next.helics.fleet", None)
-    sys.modules.pop("ochre_next.helics.runner", None)
+    sys.modules.pop("hares.helics", None)
+    sys.modules.pop("hares.helics.broker", None)
+    sys.modules.pop("hares.helics.dwelling", None)
+    sys.modules.pop("hares.helics.federate", None)
+    sys.modules.pop("hares.helics.fleet", None)
+    sys.modules.pop("hares.helics.runner", None)
 
 
 def test_a_federate_that_fails_before_it_is_ready_fails_the_test_with_its_own_error() -> None:
@@ -756,7 +756,7 @@ def test_helics_import_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(builtins, "__import__", _raising_import)
 
     with pytest.raises(ImportError, match="HELICS not installed"):
-        from ochre_next.helics import HELICSDwelling  # noqa: F401
+        from hares.helics import HELICSDwelling  # noqa: F401
 
 
 def test_stale_broker_raises_timeout_instead_of_hanging() -> None:

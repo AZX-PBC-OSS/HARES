@@ -1,7 +1,7 @@
 # Python Bindings
 
 HARES exposes its Rust simulation engine to Python through [PyO3](https://pyo3.rs/)
-and [Maturin](https://www.maturin.rs/). The resulting package is called `ochre_next`.
+and [Maturin](https://www.maturin.rs/). The resulting package is called `hares`.
 
 ## Prerequisites
 
@@ -27,7 +27,7 @@ uv sync
 uv run maturin develop
 
 # Verify the install
-uv run python -c "from ochre_next import Dwelling; print('ok')"
+uv run python -c "from hares import Dwelling; print('ok')"
 ```
 
 ## Building
@@ -64,8 +64,8 @@ The wheel lands in `target/wheels/` and can be installed with `uv pip install`.
 ```
 pyproject.toml          Maturin build config + Python project metadata
 ├── crates/hares-python  PyO3 cdylib crate (Cargo.toml lib type = ["cdylib"])
-│   └── src/lib.rs       #[pymodule] entry point → ochre_next._hares
-└── python/ochre_next/   Pure-Python package that re-exports Rust types
+│   └── src/lib.rs       #[pymodule] entry point → hares._hares
+└── python/hares/   Pure-Python package that re-exports Rust types
     ├── __init__.py      Dwelling, Fleet, ControlSignal
     ├── _hares.pyi       Type stubs for IDE/mypy support
     ├── adapters/        PyBaMM, PySAM adapters
@@ -76,7 +76,7 @@ pyproject.toml          Maturin build config + Python project metadata
 
 Maturin reads `[tool.maturin]` in `pyproject.toml` to find the Rust manifest
 (`crates/hares-python/Cargo.toml`) and the Python source root (`python/`).
-It compiles the cdylib, names it `ochre_next._hares`, and places the `.so`
+It compiles the cdylib, names it `hares._hares`, and places the `.so`
 alongside the Python source.
 
 ## Running tests
@@ -113,7 +113,7 @@ uv pip install -e ".[rl]"       # Gymnasium RL environments
 ## Usage example
 
 ```python
-from ochre_next import Dwelling, ControlSignal
+from hares import Dwelling, ControlSignal
 
 dw = Dwelling.from_hpxml(
     hpxml="path/to/building.xml",

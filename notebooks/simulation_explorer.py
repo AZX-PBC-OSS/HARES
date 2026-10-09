@@ -96,7 +96,7 @@ def _building_resolver(
             kind="info",
         )
     elif building_source.value == "resstock":
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         with mo.status.spinner(title="Fetching ResStock building from OEDI S3..."):
             _bldg = fetch_resstock_building(
@@ -363,7 +363,7 @@ def _run_simulation(
 
     from typing import Any, cast
 
-    from ochre_next import (
+    from hares import (
         EV,
         PV,
         Battery,
@@ -626,7 +626,7 @@ def _visualizations(
     bldg_weather,
     go, make_subplots, pl,
 ):
-    from ochre_next import parse_epw
+    from hares import parse_epw
 
     _step_hours = sim_meta["time_res_s"] / 3600.0
     _duration_days = sim_meta["duration_days"]

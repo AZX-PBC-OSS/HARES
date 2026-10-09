@@ -3,7 +3,7 @@
 import pytest
 from typing import Any, cast
 
-from ochre_next import SimulationConfig, DwellingConfig
+from hares import SimulationConfig, DwellingConfig
 
 
 class TestSimulationConfig:

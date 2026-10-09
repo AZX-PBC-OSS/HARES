@@ -4,7 +4,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from ochre_next import Dwelling, DwellingConfig, Fleet, SimulationConfig
+from hares import Dwelling, DwellingConfig, Fleet, SimulationConfig
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"

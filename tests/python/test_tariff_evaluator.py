@@ -7,7 +7,7 @@ without a full dwelling simulation.
 import datetime as _dt
 from datetime import datetime, timedelta
 
-from ochre_next import ElectricTariff, TariffEvaluator
+from hares import ElectricTariff, TariffEvaluator
 
 off_utc = _dt.timezone(_dt.timedelta(0))
 

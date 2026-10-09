@@ -2,7 +2,7 @@
 
 import pytest
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER
-from ochre_next import (
+from hares import (
     AirConditioner,
     ASHPCooler,
     ASHPHeater,

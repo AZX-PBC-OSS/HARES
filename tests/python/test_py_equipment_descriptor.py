@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from ochre_next import (
+from hares import (
     ControlCapabilities,
     ControlSignal,
     EndUse,
@@ -22,7 +22,7 @@ SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 @pytest.fixture(scope="module")
 def dwelling():
-    from ochre_next import Dwelling
+    from hares import Dwelling
 
     dw = Dwelling.from_hpxml(
         HPXML,

@@ -15,8 +15,8 @@ def _ev_soc(dw, name: str) -> float:
 
 
 def test_duplicate_equipment_name_raises_equipment_error():
-    from ochre_next import Battery
-    from ochre_next._hares import HaresEquipmentError
+    from hares import Battery
+    from hares._hares import HaresEquipmentError
 
     dw = make_dwelling()
     dw.add_battery(Battery("Bat", 10.0))
@@ -29,8 +29,8 @@ def test_duplicate_equipment_name_raises_equipment_error():
 
 
 def test_replacing_missing_equipment_raises_config_error():
-    from ochre_next import Battery
-    from ochre_next._hares import HaresConfigError
+    from hares import Battery
+    from hares._hares import HaresConfigError
 
     dw = make_dwelling()
     names = dw.equipment_names()
@@ -42,8 +42,8 @@ def test_replacing_missing_equipment_raises_config_error():
 
 
 def test_rejected_add_pv_registers_no_irradiance_surface():
-    from ochre_next import PV
-    from ochre_next._hares import HaresEquipmentError
+    from hares import PV
+    from hares._hares import HaresEquipmentError
 
     dw = make_dwelling()
     dw.add_pv(PV("PV1", 5.0, 30.0, 180.0))
@@ -56,8 +56,8 @@ def test_rejected_add_pv_registers_no_irradiance_surface():
 
 
 def test_duplicate_add_ev_with_driver_reports_the_duplicate_equipment():
-    from ochre_next import EvArchetypeId, VehicleId
-    from ochre_next._hares import HaresEquipmentError
+    from hares import EvArchetypeId, VehicleId
+    from hares._hares import HaresEquipmentError
 
     dw = make_dwelling()
     dw.add_ev_with_driver(VehicleId.tesla_model_y_lr(), EvArchetypeId.daily_commuter_l2(), seed=42)
@@ -75,7 +75,7 @@ def test_adding_an_ev_leaves_the_existing_drivers_trajectory_unchanged():
     """A second add_ev attaches the new EV's driver only: the first EV's
     driver keeps its state, so the first EV's state of charge follows the
     same path as in a dwelling where the second EV never arrives."""
-    from ochre_next import EV
+    from hares import EV
 
     def ev1_soc(add_second: bool) -> list[float]:
         dw = make_dwelling(duration_s=3 * 86400, time_res_s=900, seed=42)

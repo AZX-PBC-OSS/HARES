@@ -34,7 +34,7 @@ try:
     import helics
 except ImportError as exc:  # pragma: no cover - exercised via import test
     raise ImportError(
-        "HELICS not installed. Install with: pip install 'ochre_next[helics]'"
+        "HELICS not installed. Install with: pip install 'hares[helics]'"
     ) from exc
 
 from ._types import HelicsCoreLike, HelicsFederateInfoLike, HelicsFederateLike

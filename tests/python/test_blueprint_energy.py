@@ -2,7 +2,7 @@
 
 import pytest
 from typing import Any
-from ochre_next import (
+from hares import (
     Dwelling, DwellingBlueprint, GasFurnace, ASHPHeater, ASHPCooler,
     AirConditioner, GasWaterHeater, HeatPumpWH, ElectricResistanceWH,
     EndUse,

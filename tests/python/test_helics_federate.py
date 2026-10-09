@@ -85,7 +85,7 @@ class _BlockingOnlyFederate:
 
 
 def test_enter_executing_mode_completes_via_async_api() -> None:
-    from ochre_next.helics.federate import enter_executing_mode_with_timeout
+    from hares.helics.federate import enter_executing_mode_with_timeout
 
     fed = _AsyncFakeFederate(completes_after=2)
     enter_executing_mode_with_timeout(fed, timeout_s=5.0, fed_name="fed_a")
@@ -97,7 +97,7 @@ def test_enter_executing_mode_completes_via_async_api() -> None:
 
 
 def test_enter_executing_mode_times_out_and_aborts() -> None:
-    from ochre_next.helics.federate import enter_executing_mode_with_timeout
+    from hares.helics.federate import enter_executing_mode_with_timeout
 
     fed = _AsyncFakeFederate(completes_after=None)
     start = time.monotonic()
@@ -120,7 +120,7 @@ def test_enter_executing_mode_times_out_and_aborts() -> None:
 
 
 def test_request_time_completes_via_async_api() -> None:
-    from ochre_next.helics.federate import request_time_with_timeout
+    from hares.helics.federate import request_time_with_timeout
 
     fed = _AsyncFakeFederate(completes_after=1, granted=120.0)
     granted = request_time_with_timeout(fed, 120.0, timeout_s=5.0, fed_name="fed_c")
@@ -132,7 +132,7 @@ def test_request_time_completes_via_async_api() -> None:
 
 
 def test_request_time_times_out_and_aborts() -> None:
-    from ochre_next.helics.federate import request_time_with_timeout
+    from hares.helics.federate import request_time_with_timeout
 
     fed = _AsyncFakeFederate(completes_after=None)
     with pytest.raises(TimeoutError, match="was not granted time 60.0s within 0.2s"):
@@ -143,7 +143,7 @@ def test_request_time_times_out_and_aborts() -> None:
 
 
 def test_blocking_fallback_without_async_api() -> None:
-    from ochre_next.helics.federate import (
+    from hares.helics.federate import (
         enter_executing_mode_with_timeout,
         request_time_with_timeout,
     )
@@ -165,7 +165,7 @@ def test_wait_for_pending_aborts_tracks_blocked_teardown() -> None:
     """
     import threading
 
-    from ochre_next.helics.federate import (
+    from hares.helics.federate import (
         enter_executing_mode_with_timeout,
         wait_for_pending_aborts,
     )
@@ -193,20 +193,20 @@ def test_wait_for_pending_aborts_tracks_blocked_teardown() -> None:
 
 
 def test_core_init_timeout_option_renders_milliseconds() -> None:
-    from ochre_next.helics.federate import core_init_timeout_option
+    from hares.helics.federate import core_init_timeout_option
 
     assert core_init_timeout_option(2.5) == "--timeout=2500ms"
     assert core_init_timeout_option(0.0004) == "--timeout=1ms"
 
 
 def test_core_init_string_names_an_in_process_broker_without_opening_a_port() -> None:
-    from ochre_next.helics.federate import core_init_string
+    from hares.helics.federate import core_init_string
 
     assert core_init_string("inproc", "federation_a", 2.0) == "--broker=federation_a --timeout=2000ms"
 
 
 def test_core_init_string_gives_a_network_core_the_broker_url_and_a_local_port() -> None:
-    from ochre_next.helics.federate import core_init_string
+    from hares.helics.federate import core_init_string
 
     init = core_init_string("zmq", "10.0.0.7:23404", 2.0).split()
 
@@ -218,14 +218,14 @@ def test_core_init_string_gives_a_network_core_the_broker_url_and_a_local_port()
 
 @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
 def test_validate_timeout_rejects_non_positive_and_non_finite(bad: float) -> None:
-    from ochre_next.helics.federate import validate_timeout
+    from hares.helics.federate import validate_timeout
 
     with pytest.raises(ValueError):
         validate_timeout(bad, "timeout_s")
 
 
 def test_validate_timeout_rejects_non_numeric() -> None:
-    from ochre_next.helics.federate import validate_timeout
+    from hares.helics.federate import validate_timeout
 
     not_a_number: Any = "soon"
     with pytest.raises(TypeError):
@@ -323,7 +323,7 @@ class _FakeCores:
 
 @pytest.fixture
 def federate_module(monkeypatch: pytest.MonkeyPatch) -> Any:
-    from ochre_next.helics import federate
+    from hares.helics import federate
 
     monkeypatch.setattr(federate, "_port_pair_taken", lambda port: port in _TAKEN_PORTS)
     return federate
@@ -376,7 +376,7 @@ def test_every_failed_core_is_freed_once_even_after_its_object_is_collected(
 def test_a_released_helics_core_leaves_its_object_nothing_to_free() -> None:
     import helics
 
-    from ochre_next.helics import federate
+    from hares.helics import federate
 
     core = helics.helicsCreateCore("inproc", "core_release_probe", "")
 
@@ -404,7 +404,7 @@ def test_a_core_without_the_wrappers_finalizer_is_released_and_left_to_its_wrapp
 
     core = _FinalizerlessCore()
 
-    with caplog.at_level(logging.WARNING, logger="ochre_next.helics.federate"):
+    with caplog.at_level(logging.WARNING, logger="hares.helics.federate"):
         assert federate_module._release(core) is None
 
     assert released == ["disconnect", "wait"]

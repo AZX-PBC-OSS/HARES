@@ -40,7 +40,7 @@ import pytest
 
 from conftest import make_dwelling
 
-import ochre_next
+import hares
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
@@ -77,14 +77,14 @@ def test_finite_grid_voltage_attaches() -> None:
 def test_non_finite_ocv_table_fails_loudly_at_the_boundary(bad: float) -> None:
     dwelling = make_dwelling()
     dwelling.add_battery(
-        ochre_next.Battery(
+        hares.Battery(
             "Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.5
         )
     )
     with pytest.raises((TypeError, ValueError)):
         dwelling.set_equipment_lut(
             "Bat",
-            ochre_next.LutType.Ocv,
+            hares.LutType.Ocv,
             [(0.0, 3.0), (0.5, bad), (1.0, 3.7)],
         )
 
@@ -100,14 +100,14 @@ def test_negative_infinite_ocv_table_is_already_rejected() -> None:
     """
     dwelling = make_dwelling()
     dwelling.add_battery(
-        ochre_next.Battery(
+        hares.Battery(
             "Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.5
         )
     )
     with pytest.raises((TypeError, ValueError)):
         dwelling.set_equipment_lut(
             "Bat",
-            ochre_next.LutType.Ocv,
+            hares.LutType.Ocv,
             [(0.0, 3.0), (0.5, float("-inf")), (1.0, 3.7)],
         )
 
@@ -117,16 +117,16 @@ def test_finite_ocv_table_attaches() -> None:
     # guard lands.
     dwelling = make_dwelling()
     dwelling.add_battery(
-        ochre_next.Battery(
+        hares.Battery(
             "Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.5
         )
     )
     dwelling.set_equipment_lut(
         "Bat",
-        ochre_next.LutType.Ocv,
+        hares.LutType.Ocv,
         [(0.0, 3.0), (0.5, 3.5), (1.0, 3.7)],
     )
-    assert dwelling.has_equipment_lut("Bat", ochre_next.LutType.ocv())
+    assert dwelling.has_equipment_lut("Bat", hares.LutType.ocv())
 
 
 # The fourth member of the class, found by the coverage round's
@@ -151,83 +151,83 @@ def test_finite_ocv_table_attaches() -> None:
     "build",
     [
         pytest.param(
-            lambda: ochre_next.ControlSignal.from_dict(
+            lambda: hares.ControlSignal.from_dict(
                 {"type": "ThermalSetpoint", "heating_setpoint_c": float("nan")}
             ),
             id="from_dict-thermal-heating_setpoint_c",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.from_dict(
+            lambda: hares.ControlSignal.from_dict(
                 {"type": "ThermalSetpoint", "cooling_setpoint_c": float("nan")}
             ),
             id="from_dict-thermal-cooling_setpoint_c",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.from_dict(
+            lambda: hares.ControlSignal.from_dict(
                 {"type": "ThermalSetpoint", "deadband_c": float("nan")}
             ),
             id="from_dict-thermal-deadband_c",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.from_dict(
+            lambda: hares.ControlSignal.from_dict(
                 {"type": "PowerSetpoint", "active_power_kw": 1.0, "min_soc": float("nan")}
             ),
             id="from_dict-power-min_soc",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.from_dict(
+            lambda: hares.ControlSignal.from_dict(
                 {"type": "PowerSetpoint", "active_power_kw": 1.0, "max_soc": float("nan")}
             ),
             id="from_dict-power-max_soc",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.from_dict(
+            lambda: hares.ControlSignal.from_dict(
                 {"type": "HumiditySetpoint", "target_rh": float("nan")}
             ),
             id="from_dict-humidity-target_rh",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.from_dict(
+            lambda: hares.ControlSignal.from_dict(
                 {"type": "HumiditySetpoint", "target_rh": 0.5, "min_rh": float("nan")}
             ),
             id="from_dict-humidity-min_rh",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.from_dict(
+            lambda: hares.ControlSignal.from_dict(
                 {"type": "HumiditySetpoint", "target_rh": 0.5, "max_rh": float("nan")}
             ),
             id="from_dict-humidity-max_rh",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.from_dict(
+            lambda: hares.ControlSignal.from_dict(
                 {"type": "PowerLimit", "max_power_kw": 5.0, "ramp_rate_kw_per_s": float("nan")}
             ),
             id="from_dict-power_limit-ramp_rate",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.from_dict(
+            lambda: hares.ControlSignal.from_dict(
                 {"type": "DutyCycle", "on_fraction": 0.5, "period_s": float("nan")}
             ),
             id="from_dict-duty_cycle-period_s",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.thermal_setpoint(heat_c=float("nan")),
+            lambda: hares.ControlSignal.thermal_setpoint(heat_c=float("nan")),
             id="typed-thermal-heat_c",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.thermal_setpoint(cool_c=float("nan")),
+            lambda: hares.ControlSignal.thermal_setpoint(cool_c=float("nan")),
             id="typed-thermal-cool_c",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.thermal_setpoint(deadband_c=float("nan")),
+            lambda: hares.ControlSignal.thermal_setpoint(deadband_c=float("nan")),
             id="typed-thermal-deadband_c",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.power_setpoint(kw=1.0, min_soc=float("nan")),
+            lambda: hares.ControlSignal.power_setpoint(kw=1.0, min_soc=float("nan")),
             id="typed-power-min_soc",
         ),
         pytest.param(
-            lambda: ochre_next.ControlSignal.power_setpoint(kw=1.0, max_soc=float("nan")),
+            lambda: hares.ControlSignal.power_setpoint(kw=1.0, max_soc=float("nan")),
             id="typed-power-max_soc",
         ),
     ],
@@ -245,8 +245,8 @@ def test_validated_control_signal_fields_stay_loud() -> None:
     faces must stay loud through the fix.
     """
     with pytest.raises((TypeError, ValueError), match="finite"):
-        ochre_next.ControlSignal.from_dict(
+        hares.ControlSignal.from_dict(
             {"type": "SOCTarget", "target_soc": float("nan")}
         )
     with pytest.raises((TypeError, ValueError), match="finite"):
-        ochre_next.ControlSignal.power_setpoint(kw=float("nan"))
+        hares.ControlSignal.power_setpoint(kw=float("nan"))

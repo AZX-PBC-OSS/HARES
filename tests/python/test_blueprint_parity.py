@@ -1,7 +1,7 @@
 """Verify DwellingBlueprint.from_hpxml().build() == Dwelling.from_hpxml()."""
 
 import pytest
-from ochre_next import Dwelling, DwellingBlueprint
+from hares import Dwelling, DwellingBlueprint
 from conftest import HPXML, SCHEDULE, WEATHER, HARES_DEFAULTS
 
 

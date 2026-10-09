@@ -260,9 +260,9 @@ class _SingleTimestepDwelling(_FakeDwelling):
 
 
 def _clear_helics_modules() -> None:
-    sys.modules.pop("ochre_next.helics", None)
-    sys.modules.pop("ochre_next.helics.dwelling", None)
-    sys.modules.pop("ochre_next.helics.federate", None)
+    sys.modules.pop("hares.helics", None)
+    sys.modules.pop("hares.helics.dwelling", None)
+    sys.modules.pop("hares.helics.federate", None)
 
 
 def _import_dwelling_module(
@@ -271,7 +271,7 @@ def _import_dwelling_module(
     fake_helics = _FakeHelicsModule()
     _clear_helics_modules()
     monkeypatch.setitem(sys.modules, "helics", fake_helics)
-    module = importlib.import_module("ochre_next.helics.dwelling")
+    module = importlib.import_module("hares.helics.dwelling")
     return module, fake_helics
 
 
@@ -289,7 +289,7 @@ def test_import_guard_without_helics(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(builtins, "__import__", _raising_import)
 
     with pytest.raises(ImportError, match="HELICS not installed"):
-        importlib.import_module("ochre_next.helics.dwelling")
+        importlib.import_module("hares.helics.dwelling")
 
 
 def test_helics_dwelling_config_and_registration(monkeypatch: pytest.MonkeyPatch):

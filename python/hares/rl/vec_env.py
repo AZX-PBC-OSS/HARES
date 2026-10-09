@@ -13,8 +13,8 @@ import warnings
 
 import numpy as np
 
-from ochre_next._hares import Dwelling as PyDwelling
-from ochre_next._hares import batch_step as rust_batch_step
+from hares._hares import Dwelling as PyDwelling
+from hares._hares import batch_step as rust_batch_step
 
 try:
     from gymnasium import spaces

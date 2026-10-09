@@ -153,7 +153,7 @@ def test_a_preconditioning_event_its_unit_cannot_serve_is_a_config_error() -> No
     registration as a `HaresConfigError` that names both setpoints in
     plain words, and the dwelling keeps no actor for it.
     """
-    from ochre_next._hares import HaresConfigError
+    from hares._hares import HaresConfigError
 
     dwelling = make_dwelling()
     heater = next(

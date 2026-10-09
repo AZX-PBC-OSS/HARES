@@ -3,7 +3,7 @@
 import datetime as dt
 from pathlib import Path
 
-import ochre_next as hares
+import hares as hares
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
@@ -19,7 +19,7 @@ HARES_DEFAULTS = REPO / "defaults"
 @pytest.fixture
 def dwelling_summer_24h():
     """Dwelling configured for a July day, 15-min steps, 24 hours."""
-    from ochre_next import Dwelling
+    from hares import Dwelling
 
     return Dwelling.from_hpxml(
         hpxml=HPXML,
@@ -35,7 +35,7 @@ def dwelling_summer_24h():
 @pytest.fixture
 def dwelling_winter_24h():
     """Dwelling configured for a January day, 15-min steps, 24 hours."""
-    from ochre_next import Dwelling
+    from hares import Dwelling
 
     return Dwelling.from_hpxml(
         hpxml=HPXML,
@@ -51,7 +51,7 @@ def dwelling_winter_24h():
 @pytest.fixture
 def dwelling_all_north():
     """Dwelling with both roof planes facing north (azimuth 0°)."""
-    from ochre_next import Dwelling
+    from hares import Dwelling
 
     return Dwelling.from_hpxml(
         hpxml=HPXML_ALL_NORTH,
@@ -212,7 +212,7 @@ class TestPvPowerProduction:
 
     @staticmethod
     def _make_pv_dwelling(start: str, duration_s: int = 86400, time_res_s: int = 900):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         return Dwelling.from_hpxml(
             hpxml=HPXML_PV,
@@ -296,7 +296,7 @@ class TestPvPowerProduction:
     @pytest.mark.slow
     def test_no_pv_all_positive_power(self):
         """Without PV, net power should always be non-negative."""
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             hpxml=HPXML,

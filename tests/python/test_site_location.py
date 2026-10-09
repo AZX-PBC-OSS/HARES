@@ -68,7 +68,7 @@ class TestSimulationConfigSiteFields:
     """`SimulationConfig` exposes the four site-location fields."""
 
     def test_construct_with_site_fields(self):
-        from ochre_next import SimulationConfig
+        from hares import SimulationConfig
 
         cfg = SimulationConfig(
             duration_s=3600,
@@ -84,7 +84,7 @@ class TestSimulationConfigSiteFields:
         assert cfg.utc_offset_h == pytest.approx(-6.0)
 
     def test_site_fields_default_none(self):
-        from ochre_next import SimulationConfig
+        from hares import SimulationConfig
 
         cfg = SimulationConfig(duration_s=3600, time_res_s=60)
         assert cfg.latitude is None
@@ -93,7 +93,7 @@ class TestSimulationConfigSiteFields:
         assert cfg.utc_offset_h is None
 
     def test_setters_validate_range(self):
-        from ochre_next import SimulationConfig
+        from hares import SimulationConfig
 
         cfg = SimulationConfig(duration_s=3600, time_res_s=60)
         cfg.latitude = 40.0
@@ -104,7 +104,7 @@ class TestSimulationConfigSiteFields:
             cfg.utc_offset_h = 99.0
 
     def test_constructor_rejects_out_of_range(self):
-        from ochre_next import SimulationConfig
+        from hares import SimulationConfig
 
         with pytest.raises((ValueError, Exception)):
             SimulationConfig(duration_s=3600, time_res_s=60, longitude=999.0)

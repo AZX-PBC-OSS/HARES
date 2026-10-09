@@ -79,7 +79,7 @@ def assert_core_output_matches_telemetry(dw):
 
 class TestStep:
     def test_step_returns_correct_keys_and_types(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -118,7 +118,7 @@ class TestStep:
 
 class TestTelemetry:
     def test_telemetry_zone_returns_correct_data(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -149,7 +149,7 @@ class TestTelemetry:
             )
 
     def test_equipment_core_output_matches_telemetry_vectors(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -171,7 +171,7 @@ class TestTelemetry:
 
 class TestStepError:
     def test_step_without_initialize_raises_runtime_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -190,7 +190,7 @@ class TestStepError:
             dw.step()
 
     def test_simulate_without_initialize_raises_runtime_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -209,7 +209,7 @@ class TestStepError:
             dw.simulate()
 
     def test_step_after_initialize_succeeds(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -228,7 +228,7 @@ class TestStepError:
         assert "timestamp" in result
 
     def test_step_past_end_raises_runtime_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -263,7 +263,7 @@ class TestStepError:
             )
 
     def test_telemetry_equipment_returns_correct_data(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -292,7 +292,7 @@ class TestStepError:
 
 class TestDurationValidation:
     def test_duration_s_inf_raises_value_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         with pytest.raises(ValueError, match=r"duration must be finite"):
             Dwelling.from_hpxml(
@@ -309,7 +309,7 @@ class TestDurationValidation:
             )
 
     def test_duration_s_neg_inf_raises_value_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         with pytest.raises(ValueError, match=r"duration must be finite"):
             Dwelling.from_hpxml(
@@ -326,7 +326,7 @@ class TestDurationValidation:
             )
 
     def test_time_res_s_inf_raises_value_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         with pytest.raises(ValueError, match=r"duration must be finite"):
             Dwelling.from_hpxml(
@@ -343,7 +343,7 @@ class TestDurationValidation:
             )
 
     def test_duration_s_zero_raises_value_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         with pytest.raises(ValueError, match=r"positive"):
             Dwelling.from_hpxml(
@@ -360,7 +360,7 @@ class TestDurationValidation:
             )
 
     def test_time_res_s_zero_raises_value_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         with pytest.raises(ValueError, match=r"positive"):
             Dwelling.from_hpxml(
@@ -377,7 +377,7 @@ class TestDurationValidation:
             )
 
     def test_duration_s_above_chrono_bound_raises_value_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         # 1e17 fits in i64 but exceeds chrono's Duration::seconds bound (~9.22e15).
         with pytest.raises(ValueError, match="too large for chrono Duration"):
@@ -395,7 +395,7 @@ class TestDurationValidation:
             )
 
     def test_time_res_s_above_chrono_bound_raises_value_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         with pytest.raises(ValueError, match="too large for chrono Duration"):
             Dwelling.from_hpxml(
@@ -412,7 +412,7 @@ class TestDurationValidation:
             )
 
     def test_duration_s_int_above_chrono_bound_raises_value_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         # Plain int (10**17) exercises extract_seconds's i64 branch (A),
         # which skips ok_f64_seconds and relies solely on try_seconds.
@@ -431,7 +431,7 @@ class TestDurationValidation:
             )
 
     def test_time_res_s_int_above_chrono_bound_raises_value_error(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         # Plain int (10**17) exercises extract_seconds's i64 branch (A),
         # which skips ok_f64_seconds and relies solely on try_seconds.

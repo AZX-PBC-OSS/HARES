@@ -17,7 +17,7 @@ try:
     import helics
 except ImportError as exc:  # pragma: no cover - exercised via import test
     raise ImportError(
-        "HELICS not installed. Install with: pip install 'ochre_next[helics]'"
+        "HELICS not installed. Install with: pip install 'hares[helics]'"
     ) from exc
 
 _PORT_BY_BROKER: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
@@ -45,7 +45,7 @@ def create_broker(
     passes it to HELICS to avoid collisions under parallel test execution.
 
     Example:
-        >>> from ochre_next.helics.runner import FederateConfig, generate_cosim_config
+        >>> from hares.helics.runner import FederateConfig, generate_cosim_config
         >>> broker = create_broker(n_federates=2)
         >>> broker_port = get_broker_port(broker)
         >>> config = generate_cosim_config(

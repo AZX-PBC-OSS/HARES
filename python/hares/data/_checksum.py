@@ -4,7 +4,7 @@ Downloaded files store a ``.sha256`` sidecar alongside the cached file.
 On subsequent cache hits the stored hash is compared with the current
 file content to detect bit-rot or truncated writes.
 
-The pattern follows ``ochre_next.adapters.sam_pv._canonical_hash`` which
+The pattern follows ``hares.adapters.sam_pv._canonical_hash`` which
 also uses ``hashlib.sha256`` for content verification.
 """
 

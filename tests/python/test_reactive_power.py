@@ -92,7 +92,7 @@ def _equipment_core_output(dw, name):
 
 class TestBatteryPowerFactorCharging:
     def test_charging_q_positive_and_ratio_matches_tan_acos_pf(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -126,7 +126,7 @@ class TestBatteryPowerFactorCharging:
         )
 
     def test_core_output_reactive_matches_telemetry(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -162,7 +162,7 @@ class TestBatteryPowerFactorCharging:
 
 class TestBatteryReactiveSetpoint:
     def test_reactive_setpoint_reflected_in_telemetry(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -194,7 +194,7 @@ class TestBatteryReactiveSetpoint:
         )
 
     def test_power_factor_setpoint_reflected_in_telemetry(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -226,7 +226,7 @@ class TestBatteryReactiveSetpoint:
         )
 
     def test_power_setpoint_with_reactive_kvar_accepted(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -263,7 +263,7 @@ class TestBatteryReactiveSetpoint:
 
 class TestEvPowerFactorCharging:
     def test_charging_with_pf_0_9_produces_reactive_power_q_positive(self):
-        from ochre_next import ControlSignal, EV, EvConnectionState
+        from hares import ControlSignal, EV, EvConnectionState
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -294,7 +294,7 @@ class TestEvPowerFactorCharging:
         )
 
     def test_core_output_reactive_matches_telemetry(self):
-        from ochre_next import ControlSignal, EV, EvConnectionState
+        from hares import ControlSignal, EV, EvConnectionState
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -322,7 +322,7 @@ class TestEvPowerFactorCharging:
 
 class TestEvReactiveSetpoint:
     def _make_ev_dwelling(self, **ev_kw: Any):
-        from ochre_next import EV, EvConnectionState
+        from hares import EV, EvConnectionState
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -340,7 +340,7 @@ class TestEvReactiveSetpoint:
         return dw
 
     def test_reactive_setpoint_reflected_in_telemetry(self):
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         dw = self._make_ev_dwelling(
             power_factor=0.9, charger_capacity_kva=10.0
@@ -356,7 +356,7 @@ class TestEvReactiveSetpoint:
         )
 
     def test_power_factor_setpoint_reflected_in_telemetry(self):
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         dw = self._make_ev_dwelling()
         dw.apply_control("TestEV", ControlSignal.power_factor_setpoint(0.8))
@@ -373,7 +373,7 @@ class TestEvReactiveSetpoint:
         )
 
     def test_power_setpoint_with_reactive_kvar_accepted(self):
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         dw = self._make_ev_dwelling(charger_capacity_kva=10.0)
         dw.apply_control(
@@ -389,7 +389,7 @@ class TestEvReactiveSetpoint:
 
     def test_real_power_unchanged_by_reactive_setpoint(self):
         """Sending a ReactiveSetpoint must not alter real power."""
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         dw = self._make_ev_dwelling(power_factor=0.9, charger_capacity_kva=10.0)
         dw.apply_control("TestEV", ControlSignal.power_setpoint(3.0))
@@ -413,7 +413,7 @@ class TestEvReactiveSetpoint:
 
 class TestDefaultEvZeroQ:
     def test_default_ev_emits_q_zero_and_real_power_unchanged(self):
-        from ochre_next import ControlSignal, EV, EvConnectionState
+        from hares import ControlSignal, EV, EvConnectionState
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -451,7 +451,7 @@ class TestDefaultEvZeroQ:
 
 class TestZipPfOverride:
     def test_zip_pf_override_changes_q_leaves_p_identical(self, tmp_path):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         # July afternoon so the AC compressor actually runs (a pf override
         # retargets the compressor component; the resistive crankcase heater
@@ -532,7 +532,7 @@ class TestZipPfOverride:
         )
 
     def test_zip_override_telemetry_reactive_key_present(self, tmp_path):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         # July afternoon: the compressor must run for Q != 0 — on winter
         # standby only the resistive crankcase heater draws power and the
@@ -581,7 +581,7 @@ class TestZipPfOverride:
 
 class TestDefaultBatteryZeroQ:
     def test_default_battery_q_zero(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -630,7 +630,7 @@ def _equipment_resolved_zip(dw, name):
 
 class TestResolvedZipInspection:
     def _add_battery(self, dw, **kw):
-        from ochre_next import Battery
+        from hares import Battery
 
         bat = Battery(
             "Bat",
@@ -659,7 +659,7 @@ class TestResolvedZipInspection:
         assert _equipment_resolved_zip(dw, "Bat") == zip_dict
 
     def test_ashp_heater_resolved_zip_pf_084(self):
-        from ochre_next import ASHPHeater, DwellingBlueprint, EndUse
+        from hares import ASHPHeater, DwellingBlueprint, EndUse
 
         bp = DwellingBlueprint.from_hpxml(
             HPXML,
@@ -687,7 +687,7 @@ class TestResolvedZipInspection:
         assert _equipment_resolved_zip(dw, "ASHP") == zip_dict
 
     def test_user_zip_override_pf_09_visible(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         dw = Dwelling.from_hpxml(
             HPXML,
@@ -715,7 +715,7 @@ class TestResolvedZipInspection:
         assert _equipment_resolved_zip(dw, "Air Conditioner") == zip_dict
 
     def test_battery_power_factor_setpoint_updates_resolved_zip(self):
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         dw = make_dwelling(duration_s=600, time_res_s=60)
         dw.initialize()

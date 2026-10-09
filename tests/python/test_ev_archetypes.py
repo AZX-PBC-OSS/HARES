@@ -1,7 +1,7 @@
 """Tests for EV archetype presets (DER-010)."""
 
 import pytest
-from ochre_next import EV, EvArchetypeId, VehicleId
+from hares import EV, EvArchetypeId, VehicleId
 
 from conftest import make_dwelling
 

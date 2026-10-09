@@ -1,7 +1,7 @@
 """Tests for the EV vehicle catalog."""
 
 import pytest
-from ochre_next import EV, VehicleId
+from hares import EV, VehicleId
 
 
 VEHICLE_IDS = EV.vehicle_catalog()
