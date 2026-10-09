@@ -10,11 +10,12 @@ check `validate()` runs.
 
 from __future__ import annotations
 
+import re
 from typing import Any, cast
 
 import pytest
 
-from conftest import make_dwelling
+from conftest import REMOVED_SITE_KEYWORD_MESSAGES, make_dwelling
 from hares import SimulationConfig, SiteLocationOverride
 
 START = "2019-01-01T00:00:00"
@@ -107,9 +108,10 @@ class TestFromHpxmlSiteLocation:
 
     def test_removed_site_kwargs_name_site_location(self):
         """The old `latitude=`/`longitude=`/`elevation_m=`/`utc_offset_h=`
-        keywords on the config constructor name their replacement."""
-        for key in ("latitude", "longitude", "elevation_m", "utc_offset_h"):
-            with pytest.raises(TypeError, match="site_location"):
+        keywords on the config constructor raise the removed-keys table's
+        full message, the one string the Rust pins assert too."""
+        for key, message in REMOVED_SITE_KEYWORD_MESSAGES.items():
+            with pytest.raises(TypeError, match=re.escape(message)):
                 # The constructor rejects the key before any value
                 # extraction, so the value's type never matters.
                 SimulationConfig(

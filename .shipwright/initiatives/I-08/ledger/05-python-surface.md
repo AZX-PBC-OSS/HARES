@@ -138,7 +138,15 @@ so `duration_s=`, `time_res_s=`, the four site keywords and
 `output_to_parquet` raise their removed-key messages from this row;
 `SimulationPlan` builds `SimulationConfig` through the constructor, the
 gym's `config=sim_config` calls unchanged; the stale `sim_config` copy on
-`PyDwelling` read through the config instead. Gates: fmt, clippy
+`PyDwelling` read through the config instead. One consequence of the
+unified default `retain_batches = false`, recorded here as the row's
+intent: a dwelling built on the default config reads a `metrics()` that
+raises ("no batches flushed yet") and a `results()` that returns the
+two-column steps fallback, because no batches are retained; a caller
+that wants the batch schema or `metrics()` opts in explicitly with
+`retain_batches = True` on the config, as `SimulationPlan` does (its
+`run()` returns `results()`, so the plan's own kwargs default it true,
+overridable by an explicit caller pass). Gates: fmt, clippy
 --all-features --all-targets clean, nextest --all-features 7595/7595,
 pytest 1537 passed 0 failed 0 skipped, pyright 0, the eight goldens
 bitwise (compare-all 7 identical, -F dst identical), no golden moved.

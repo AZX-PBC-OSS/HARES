@@ -594,11 +594,18 @@ impl PyDwellingConfig {
         // carried (the removed-keys table's message names where the
         // capability lives now) or a typo Python itself would refuse. The
         // first offending keyword is named, as Python's own check does.
+        // Every scope is in the lookup, so a removed key names its
+        // replacement on the dwelling constructors too, not only on the
+        // config's own.
         if let Some(unexpected) = unexpected {
             unexpected_keyword_error(
                 "DwellingConfig",
                 unexpected,
-                &[hares_io::KeyScope::DwellingTable],
+                &[
+                    hares_io::KeyScope::DwellingTable,
+                    hares_io::KeyScope::SimulationConfig,
+                    hares_io::KeyScope::PythonKeyword,
+                ],
             )?;
         }
 

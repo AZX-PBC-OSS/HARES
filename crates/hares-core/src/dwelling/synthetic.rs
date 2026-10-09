@@ -2627,6 +2627,82 @@ equipment_name = "None"
     // key, an [output] table is a removed key naming where its fields went,
     // and the warmup seconds are a top-level dwelling key, never a
     // [simulation] key.
+    /// One representative per `validate()` check class, run through
+    /// the synthetic TOML path: a synthetic file whose [simulation] table
+    /// fails only that check fails `Dwelling::from_toml_config` with the
+    /// same message `SimulationConfig::from_toml` gives for the same table.
+    #[test]
+    fn synthetic_toml_validate_fires_like_from_toml_per_check_class() {
+        use crate::dwelling::Dwelling;
+        use hares_io::SimulationConfig;
+        use std::fs;
+
+        // Each case: (name, the [simulation] table's text as the synthetic
+        // file carries it, the same config's keys as `from_toml` reads
+        // them). The site case spells its sub-table nested, as TOML
+        // requires under a table header.
+        let start = "start_time = \"2024-01-01T00:00:00Z\"";
+        let cases: &[(&str, String, String)] = &[
+            (
+                "zero duration",
+                format!("{start}\ntime_res = 60\nduration = 0\n"),
+                format!("{start}\ntime_res = 60\nduration = 0\n"),
+            ),
+            (
+                "zero time_res",
+                format!("{start}\ntime_res = 0\nduration = 3600\n"),
+                format!("{start}\ntime_res = 0\nduration = 3600\n"),
+            ),
+            (
+                "verbosity above 8",
+                format!("{start}\ntime_res = 60\nduration = 3600\noutput_verbosity = 9\n"),
+                format!("{start}\ntime_res = 60\nduration = 3600\noutput_verbosity = 9\n"),
+            ),
+            (
+                "misaligned duration",
+                format!("{start}\ntime_res = 900\nduration = 3601\n"),
+                format!("{start}\ntime_res = 900\nduration = 3601\n"),
+            ),
+            (
+                "negative deadband",
+                format!("{start}\ntime_res = 60\nduration = 3600\nsetpoint_deadband_c = -1.0\n"),
+                format!("{start}\ntime_res = 60\nduration = 3600\nsetpoint_deadband_c = -1.0\n"),
+            ),
+            (
+                "time_res above u32 seconds",
+                format!("{start}\ntime_res = 4294967296\nduration = 8589934592\n"),
+                format!("{start}\ntime_res = 4294967296\nduration = 8589934592\n"),
+            ),
+            (
+                "out-of-range latitude",
+                format!(
+                    "{start}\ntime_res = 60\nduration = 3600\n\n[simulation.site_location]\nlatitude_deg = 95.0\n"
+                ),
+                format!(
+                    "{start}\ntime_res = 60\nduration = 3600\n\n[site_location]\nlatitude_deg = 95.0\n"
+                ),
+            ),
+        ];
+        for (case, file_sim_table, from_toml_text) in cases {
+            let toml = format!(
+                "building_id = 1\n\n[simulation]\n{file_sim_table}\n\n[geometry]\nnumber_of_bedrooms = 3.0\nfloor_area_m2 = 48.0\nzone_volume_m3 = 129.6\n\n[materials]\nwall_r_value_m2_k_w = 2.0\n\n[hvac]\nequipment_name = \"None\"\n"
+            );
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("case.toml");
+            fs::write(&path, &toml).expect("write temp TOML");
+            let Err(err) = Dwelling::from_toml_config(&path) else {
+                panic!("{case}: the synthetic path must refuse an invalid config");
+            };
+            let toml_err = SimulationConfig::from_toml(from_toml_text)
+                .expect_err(&format!("{case}: from_toml refuses the same values"));
+            assert!(
+                err.to_string().contains(&toml_err.to_string()),
+                "{case}: one validation, one message; from_toml gives {toml_err}, \
+                 the synthetic path gives {err}"
+            );
+        }
+    }
+
     #[test]
     fn synthetic_toml_rejects_unknown_key() {
         let toml = r#"

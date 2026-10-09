@@ -33,6 +33,29 @@ HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
+# The removed-key messages the four site keywords raise on every Python
+# constructor, exactly as the Rust removed-keys table spells them. One
+# constant: every Python pin of the message reads it, so a wording change
+# is one edit, and the pins assert the full text, not a fragment.
+REMOVED_SITE_KEYWORD_MESSAGES: dict[str, str] = {
+    "latitude": (
+        "configuration key 'latitude' was removed: pass site_location = "
+        "SiteLocationOverride(latitude_deg=...)"
+    ),
+    "longitude": (
+        "configuration key 'longitude' was removed: pass site_location = "
+        "SiteLocationOverride(longitude_deg=...)"
+    ),
+    "elevation_m": (
+        "configuration key 'elevation_m' was removed: pass site_location = "
+        "SiteLocationOverride(elevation_m=...)"
+    ),
+    "utc_offset_h": (
+        "configuration key 'utc_offset_h' was removed: pass site_location = "
+        "SiteLocationOverride(utc_offset_h=...)"
+    ),
+}
+
 # The modules marked ochre import OCHRE (or its group's xmltodict) at module
 # level, with no skip guard, and marker selection applies only after a module
 # is imported. The rule:

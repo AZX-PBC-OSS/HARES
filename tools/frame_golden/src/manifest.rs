@@ -254,6 +254,7 @@ const SIMULATION_KEYS: &[&str] = &[
     "civil_timezone",
     "rotation",
     "site_location",
+    "max_consecutive_step_failures",
 ];
 
 /// The feature set the running binary was built with. The tool's features
@@ -563,4 +564,60 @@ pub fn select_manifests(dir: &Path, features: &[String]) -> FrameGoldenResult<Ve
         }
     }
     Ok(selected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pin: `SIMULATION_KEYS` is exactly `SimulationConfig`'s field
+    /// names. A struct field the list omits makes a manifest that sets it
+    /// rejected as an unknown key (the list went stale, as
+    /// `max_consecutive_step_failures` did); a list entry the struct lacks
+    /// lets a manifest through that the engine's own deserialisation then
+    /// refuses. `to_toml()` serialises every field, so the serialised
+    /// table's key set is the struct's field-name set.
+    #[test]
+    fn simulation_keys_match_the_struct() {
+        let cfg = hares_io::SimulationConfig {
+            start_time: chrono::DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")
+                .expect("parse start"),
+            duration: chrono::Duration::seconds(86400),
+            time_res: chrono::Duration::seconds(3600),
+            output_verbosity: 2,
+            output_path: Some(std::path::PathBuf::from("out.csv")),
+            write_output: false,
+            output_format: hares_io::OutputFormat::Csv,
+            output_chunk_size: 1024,
+            setpoint_deadband_c: Some(1.0),
+            master_seed: 0,
+            retain_batches: false,
+            civil_timezone: Some("UTC".into()),
+            rotation: hares_io::RotationPolicy::None,
+            site_location: hares_io::SiteLocationOverride {
+                latitude_deg: Some(40.0),
+                longitude_deg: None,
+                elevation_m: None,
+                utc_offset_h: None,
+            },
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        };
+        let text = cfg.to_toml().expect("serialise the config");
+        let table: toml::Table = toml::from_str(&text).expect("parse the TOML back");
+
+        for key in table.keys() {
+            assert!(
+                SIMULATION_KEYS.contains(&key.as_str()),
+                "SIMULATION_KEYS omits the struct field {key:?}; a manifest that \
+                 sets it in [simulation] is rejected as an unknown key"
+            );
+        }
+        for key in SIMULATION_KEYS {
+            assert!(
+                table.contains_key(*key),
+                "SIMULATION_KEYS entry {key:?} is no SimulationConfig field; the \
+                 manifest would accept a key the engine then refuses"
+            );
+        }
+    }
 }

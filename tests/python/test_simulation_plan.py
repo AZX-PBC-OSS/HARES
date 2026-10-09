@@ -67,6 +67,33 @@ def test_simulation_plan_empty_segments_raises():
         plan.run()
 
 
+def test_run_returns_the_full_batch_schema(tmp_path):
+    """run()'s frame is the recorder's batch schema, not the two-column
+    steps fallback: the plan defaults retain_batches=True because its
+    contract is returning dw.results(), whose full schema exists only when
+    the recorder's flushed batches are retained."""
+    plan = SimulationPlan(
+        HPXML,
+        SCHEDULE,
+        WEATHER,
+        defaults_path=str(HARES_DEFAULTS),
+        bldg_id=42,
+        time_res_s=60,
+        write_output=True,
+        output_path=str(tmp_path / "plan_output.csv"),
+        output_chunk_size=4,
+    )
+    plan.add_segment(
+        start=datetime(2024, 1, 1, 0, 0),
+        end=datetime(2024, 1, 1, 0, 10),
+    )
+    results = plan.run()
+    assert "segment" in results.columns
+    # Batch-schema columns the steps fallback cannot carry.
+    assert "Outdoor Dry Bulb (C)" in results.columns
+    assert "Temperature - Indoor (C)" in results.columns
+
+
 def test_simulation_plan_swap_furnace_to_ashp():
     plan = SimulationPlan(
         HPXML,

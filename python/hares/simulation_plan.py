@@ -54,11 +54,17 @@ class SimulationPlan:
         self.weather = weather
         # Every simulation-level field rides on the one SimulationConfig the
         # constructor builds, so a plan can configure recording like any
-        # other caller.
+        # other caller. retain_batches=true is the plan's own default, not
+        # the engine's: run() returns dw.results(), whose full batch schema
+        # exists only when the recorder's flushed batches are retained. The
+        # engine's default is false, which turns run()'s frame into the
+        # two-column steps fallback. A caller can still pass
+        # retain_batches=False explicitly through extra_kwargs.
         self._sim_kwargs: dict[str, Any] = {
             "time_res": time_res_s,
             "output_verbosity": output_verbosity,
             "master_seed": master_seed,
+            "retain_batches": True,
             **extra_kwargs,
         }
         self.base_kwargs: dict[str, Any] = {

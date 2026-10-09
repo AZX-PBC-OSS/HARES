@@ -6,11 +6,13 @@ defaults, and the validation the TOML path runs runs here too.
 """
 
 import inspect
+import re
 import tomllib
 from typing import Any, cast
 
 import pytest
 
+from conftest import REMOVED_SITE_KEYWORD_MESSAGES
 from hares import Dwelling, DwellingConfig, SimulationConfig, SiteLocationOverride
 
 START = "2024-01-01T00:00:00Z"
@@ -153,19 +155,19 @@ class TestSimulationConfig:
 
     def test_removed_keyword_names_replacement(self):
         """The Python-only removed keywords name their replacement: the four
-        site keywords name `SimulationConfig.site_location`, and
+        site keywords raise the removed-keys table's full message (the one
+        shared constant, the same string the Rust pins assert), and
         `output_to_parquet` names `SimulationConfig.output_format`."""
-        for key, replacement in [
-            ("latitude", "site_location"),
-            ("longitude", "site_location"),
-            ("elevation_m", "site_location"),
-            ("utc_offset_h", "site_location"),
-            ("output_to_parquet", "output_format"),
-        ]:
+        for key, message in REMOVED_SITE_KEYWORD_MESSAGES.items():
             kwargs = required_kwargs() | {key: 1.0}
-            with pytest.raises(TypeError, match=f"'{key}'.*{replacement}|{replacement}.*'{key}'"):
+            with pytest.raises(TypeError, match=re.escape(message)):
                 # The constructor rejects the key before any value
                 # extraction, so the value's type never matters.
+                SimulationConfig(**cast("dict[str, Any]", kwargs))
+
+        for key, replacement in [("output_to_parquet", "output_format")]:
+            kwargs = required_kwargs() | {key: 1.0}
+            with pytest.raises(TypeError, match=f"'{key}'.*{replacement}|{replacement}.*'{key}'"):
                 SimulationConfig(**cast("dict[str, Any]", kwargs))
 
     def test_removed_simulation_keyword_names_replacement(self):
@@ -314,6 +316,45 @@ class TestDwellingConfig:
                 SimulationConfig(start_time=START, duration=3600),
                 **removed,
             )
+
+    def test_removed_simulation_key_names_replacement_on_every_dwelling_constructor(self):
+        """A removed [simulation] key on the dwelling constructors names its
+        replacement: the SimulationConfig-scope rows fire on every
+        constructor, not only on `SimulationConfig` itself. One case per
+        scope per constructor pins the scope list."""
+        for key, replacement in [
+            ("duration_s", "pass duration"),
+            ("initialization_duration_s", "top level"),
+        ]:
+            kwargs: dict[str, Any] = {
+                "hpxml": "path/to/building.xml",
+                "schedule": "path/to/schedules.csv",
+                "weather": "path/to/weather.epw",
+                "config": SimulationConfig(start_time=START, duration=3600),
+                key: 3600,
+            }
+            with pytest.raises(TypeError, match=key):
+                DwellingConfig(**cast("dict[str, Any]", kwargs))
+            with pytest.raises(TypeError, match=replacement):
+                DwellingConfig(**cast("dict[str, Any]", kwargs))
+            with pytest.raises(TypeError, match=key):
+                Dwelling.from_hpxml(**cast("dict[str, Any]", kwargs))
+
+    def test_removed_python_keyword_names_replacement_on_every_dwelling_constructor(self):
+        """A removed Python keyword on the dwelling constructors names its
+        replacement: the PythonKeyword-scope rows fire on every constructor
+        too. One case per scope per constructor pins the scope list."""
+        kwargs: dict[str, Any] = {
+            "hpxml": "path/to/building.xml",
+            "schedule": "path/to/schedules.csv",
+            "weather": "path/to/weather.epw",
+            "config": SimulationConfig(start_time=START, duration=3600),
+            "latitude": 40.0,
+        }
+        with pytest.raises(TypeError, match="site_location"):
+            DwellingConfig(**cast("dict[str, Any]", kwargs))
+        with pytest.raises(TypeError, match="site_location"):
+            Dwelling.from_hpxml(**cast("dict[str, Any]", kwargs))
 
     def test_dwelling_config_unknown_keyword_is_type_error(self):
         """Another unknown keyword on `DwellingConfig(...)` raises `TypeError`

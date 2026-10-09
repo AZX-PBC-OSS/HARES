@@ -48,6 +48,7 @@ impl DwellingBlueprint {
             .sim_config
             .validate()
             .map_err(|err| HaresError::Io(err.to_string()))?;
+
         let mut building = hares_io::parse_hpxml(&config.hpxml_path)
             .map_err(|err| HaresError::Io(format!("HPXML parse failed: {err}")))?;
 
