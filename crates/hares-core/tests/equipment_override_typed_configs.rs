@@ -12,8 +12,10 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, TimeZone};
+use hares_core::actors::{BatteryManagementActor, BmsParams};
 use hares_core::{Dwelling, DwellingConfig};
 use hares_io::OutputFormat;
+use hares_types::{BmsMode, GridExportRule};
 use serde_json::{Value, json};
 
 #[path = "../../../tests/support/denver_offset.rs"]
@@ -266,4 +268,126 @@ fn blueprint_added_pv_applies_the_spec_bag_override() {
         mirrored,
         overridden
     );
+}
+
+// An HPXML battery whose control cannot be resolved is a construction
+// error naming the input, not a silent default control. HPXML has no
+// battery-control element, and OCHRE resolves a battery's control per
+// step from a control signal or its schedule
+// (ochre/Equipment/Generator.py:27, ochre/Equipment/Battery.py:205),
+// never from HPXML, so an uncontrolled battery seeds no management
+// actor and idles for the whole run while looking configured. The
+// declared routes are the battery override's `bms_mode` (`"Manual"`
+// included: the battery follows commands) and a `BatteryManagement`
+// actor targeting the battery.
+const MANUAL_BMS_MODE: &str = "\"Manual\"";
+
+#[test]
+fn battery_without_declared_control_is_a_construction_error() {
+    let err = Dwelling::from_config(config(&fixture("base-battery.xml"), None, 10))
+        .err()
+        .expect("a battery with no declared control must fail the build");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Battery1"),
+        "the error must name the battery's HPXML SystemIdentifier, got: {msg}"
+    );
+    assert!(
+        msg.contains("base-battery.xml"),
+        "the error must name the input document, got: {msg}"
+    );
+    assert!(
+        msg.contains("bms_mode"),
+        "the error must name the declaration the input is missing, got: {msg}"
+    );
+}
+
+#[test]
+fn explicit_manual_battery_builds() {
+    let overrides = json!({ "Battery": { "bms_mode": MANUAL_BMS_MODE } });
+    let mut dwelling =
+        Dwelling::from_config(config(&fixture("base-battery.xml"), Some(overrides), 10))
+            .expect("an explicitly declared Manual battery is a declared control and must build");
+    dwelling
+        .step()
+        .expect("the declared control must step without an error");
+    let soc = bms_observed_soc(&dwelling);
+    assert_eq!(
+        soc, 0.0,
+        "a declared Manual battery seeds no management actor of its own: it \
+         follows commands, so no BMS channel may report for it"
+    );
+}
+
+#[test]
+fn bms_actor_counts_as_declared_control() {
+    // The registered-actor route: a battery joined to a built dwelling and
+    // driven by a BatteryManagement actor needs no bms_mode declaration,
+    // because the actor is the control.
+    let mut dwelling = Dwelling::from_config(config(&fixture("base.xml"), None, 10))
+        .expect("the base dwelling must build");
+
+    let battery_cfg: hares_equipment::BatteryConfig = serde_json::from_value(json!({
+        "capacity_kwh": 13.5,
+        "max_charge_kw": 5.0,
+        "max_discharge_kw": 5.0,
+    }))
+    .expect("minimal BatteryConfig");
+    let eq_config = hares_equipment::EquipmentConfig::from_typed(
+        "Battery".to_string(),
+        "Battery".to_string(),
+        battery_cfg,
+    )
+    .expect("typed battery config");
+    let mut battery = hares_equipment::EquipmentRegistry::new()
+        .create("Battery", eq_config.clone())
+        .expect("create the battery");
+    battery
+        .init(&eq_config, dwelling.latest_env())
+        .expect("init the battery");
+    dwelling
+        .add_equipment(battery)
+        .expect("the battery joins the built dwelling");
+
+    dwelling
+        .add_actor(Box::new(BatteryManagementActor::new(
+            "Battery",
+            BmsParams {
+                bms_mode: BmsMode::SelfConsumption {
+                    min_soc: 0.1,
+                    max_soc: 1.0,
+                    solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
+                },
+                grid_export_rule: GridExportRule::Unrestricted,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+                price_schedule: None,
+                steps_per_day: 24,
+                min_dwell_steps: 0,
+            },
+        )))
+        .expect("the actor targeting the battery must attach");
+
+    for _ in 0..6 {
+        dwelling.step().expect("the run must step");
+    }
+    let soc = bms_observed_soc(&dwelling);
+    assert!(
+        soc > 0.0 && soc < 0.5,
+        "the actor must drive the battery from its declared initial SOC \
+         (self-consumption discharges into the load), got soc = {soc}"
+    );
+}
+
+fn bms_observed_soc(dwelling: &Dwelling) -> f64 {
+    dwelling
+        .telemetry()
+        .unwrap()
+        .actor_telemetry
+        .get("BatteryManagementActor:Battery")
+        .and_then(|channels| channels.get("soc"))
+        .copied()
+        .unwrap_or(0.0)
 }

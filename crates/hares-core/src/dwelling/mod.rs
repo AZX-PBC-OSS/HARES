@@ -2903,6 +2903,13 @@ fn build_from_blueprint_inner(
         validate_wildcard_override(&override_root, &population)?;
     }
 
+    // An HPXML battery whose control cannot be resolved is a construction
+    // error naming the input, not a silent default control: the merged
+    // config's `bms_mode` is the one declaration assembly can see, and a
+    // battery without one would idle for the whole run. Runs before any
+    // equipment is constructed, beside the override validations above.
+    conversions::validate_battery_controls(&equipment_specs, &override_root, &config.hpxml_path)?;
+
     let registry = EquipmentRegistry::new();
     let mut equipment: Vec<Box<dyn Equipment>> = Vec::new();
     let mut equipment_by_rng_stream: HashMap<u64, (String, &str)> = HashMap::new();

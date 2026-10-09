@@ -1,7 +1,7 @@
 //! Conversion helpers between I/O types and envelope/equipment types.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, FixedOffset};
@@ -1058,6 +1058,63 @@ pub(crate) fn merged_equipment_config(
 /// The reserved override object that carries an equipment's ZIP
 /// coefficients, which every equipment takes.
 const RESERVED_ZIP_OVERRIDE: &str = "zip";
+
+/// The typed-config type name of the stationary battery.
+const BATTERY_TYPE_NAME: &str = "Battery";
+
+/// Every stationary battery's control must be declared where the dwelling
+/// is assembled: HPXML has no battery-control element, and OCHRE resolves a
+/// battery's control per step from a control signal or its schedule
+/// (Equipment/Generator.py:27, Equipment/Battery.py:205), never from
+/// HPXML. A battery resolved with no `bms_mode` would otherwise take the
+/// `Manual` default silently, seed no management actor, and idle for the
+/// whole run while looking configured. The override map is the one route a
+/// declared control has into assembly (a `BatteryManagement` actor joins a
+/// built dwelling and drives the battery from outside the input), so a
+/// battery whose merged config still carries no `bms_mode` fails here,
+/// named with its input.
+///
+/// Runs before any equipment is constructed so the build fails before side
+/// effects, not partway through the population.
+pub(crate) fn validate_battery_controls(
+    specs: &[hares_io::EquipmentSpec],
+    overrides: &Value,
+    hpxml_path: &Path,
+) -> Result<()> {
+    for spec in specs {
+        let Some(typed) = &spec.typed_config else {
+            continue;
+        };
+        let ConfigPayload::Typed { type_name, .. } = &typed.payload else {
+            continue;
+        };
+        if type_name != BATTERY_TYPE_NAME {
+            continue;
+        }
+        let merged = merged_equipment_config(spec, overrides)?;
+        let battery: hares_equipment::BatteryConfig = merged.typed()?;
+        if battery.bms_mode.is_some() {
+            continue;
+        }
+        let display = spec
+            .instance_name
+            .as_deref()
+            .unwrap_or(&typed.name)
+            .to_string();
+        let system = spec.system_id.as_deref().unwrap_or("unknown");
+        return Err(HaresError::Equipment(format!(
+            "battery '{display}' (SystemIdentifier '{system}', input '{}'): \
+             no control is declared for it and HPXML has none to resolve; \
+             built as is, the battery takes the `Manual` default, seeds no \
+             management actor and idles for the whole run. Declare \
+             `bms_mode` on the battery's override (\"Manual\" follows \
+             commands) or add a `BatteryManagement` actor targeting \
+             '{display}'",
+            hpxml_path.display()
+        )));
+    }
+    Ok(())
+}
 
 fn non_object_overrides(overrides: &Value) -> HaresError {
     HaresError::Equipment(format!(

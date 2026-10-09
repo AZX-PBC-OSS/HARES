@@ -2398,13 +2398,17 @@ fn user_added_actor_resolves_its_equipment_binding_on_add() {
     let hpxml = tmp.path().join("fixture_battery_user_actor.xml");
     std::fs::write(&hpxml, inject_battery(&src)).expect("write battery-injected HPXML");
 
+    // The battery's control is declared `Manual`: the battery follows
+    // commands, and the user BMS added below is the command source. A
+    // Manual declaration seeds no auto-registered BMS, which the
+    // duplicate-name check below still proves.
     let config = DwellingConfig {
         hpxml_path: hpxml,
         schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(Duration::hours(6), None, 0),
-        overrides: None,
+        overrides: Some(serde_json::json!({ "Battery": { "bms_mode": "\"Manual\"" } })),
         bldg_id: 100,
         initialization_duration: None,
         resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),

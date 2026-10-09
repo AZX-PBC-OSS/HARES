@@ -114,6 +114,13 @@ struct FixtureConfig {
     /// `tests/python/generate_parity_reference.py`).
     #[serde(default)]
     ochre: Option<OchrePins>,
+    /// The fixture's equipment overrides, carried verbatim into the
+    /// dwelling config: the battery fixtures declare their control here
+    /// (`bms_mode = '"Manual"'`, the idle battery the OCHRE reference
+    /// models). Merged with the `[ev]` section's derived override, which
+    /// owns the `"Electric Vehicle"` key.
+    #[serde(default)]
+    overrides: Option<toml::Table>,
 }
 
 /// The generator's pins on OCHRE. `initial_temp_setpoint_c` is the indoor
@@ -438,6 +445,44 @@ fn ev_override(
     })))
 }
 
+/// The dwelling config's override map: the fixture's `[overrides]` table
+/// with the `[ev]` section's derived override merged in. A key both claim
+/// is a fixture-authoring error: one equipment, one override source.
+fn dwelling_overrides(
+    config: &FixtureConfig,
+    building_xml: &Path,
+) -> Result<Option<serde_json::Value>, String> {
+    let ev = ev_override(config, building_xml)?;
+    let fixture_overrides = config.overrides.as_ref().map(|table| {
+        serde_json::to_value(table)
+            .unwrap_or_else(|err| panic!("the [overrides] table must serialize: {err}"))
+    });
+    match (fixture_overrides, ev) {
+        (None, None) => Ok(None),
+        (Some(map), None) | (None, Some(map)) => Ok(Some(map)),
+        (Some(mut fixture_map), Some(ev_map)) => {
+            let (Some(fixture_obj), Some(ev_obj)) =
+                (fixture_map.as_object_mut(), ev_map.as_object())
+            else {
+                return Err(format!(
+                    "the fixture [overrides] table and the [ev] section's \
+                     override must both be objects, got {fixture_map} and {ev_map}"
+                ));
+            };
+            for (key, value) in ev_obj {
+                if fixture_obj.insert(key.clone(), value.clone()).is_some() {
+                    return Err(format!(
+                        "the fixture [overrides] table names '{key}' and the \
+                         [ev] section derives an override for it too: one \
+                         equipment, one override source"
+                    ));
+                }
+            }
+            Ok(Some(fixture_map))
+        }
+    }
+}
+
 fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, String> {
     let config_contents = fs::read_to_string(&fixture.config_toml).map_err(|err| {
         format!(
@@ -461,14 +506,15 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
         weather_path: fixture.weather_epw.clone(),
         sim_config,
         defaults_path: Some(defaults_path),
-        // One-sided divergence, forced and documented: see
-        // `ev_override` — every EV fixture models the heaterless vehicle
+        // The fixture's `[overrides]` table (the battery fixtures declare
+        // their control there) with the EV override merged in: see
+        // `ev_override`. Every EV fixture models the heaterless vehicle
         // its OCHRE reference models, and charging fixtures (`[ev]`
         // section) additionally pin the deterministic discharged-at-start
         // scenario both simulators charge identically (the reference's
         // event file pins the OCHRE side; initial SOC, a warm pack, and an
         // Immediate strategy pin the HARES side).
-        overrides: ev_override(&config, &fixture.building_xml)?,
+        overrides: dwelling_overrides(&config, &fixture.building_xml)?,
         bldg_id: config.bldg_id.unwrap_or(1),
         initialization_duration: config
             .initialization_duration_seconds

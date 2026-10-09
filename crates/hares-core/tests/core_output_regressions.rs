@@ -44,13 +44,20 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
     let mut sim_config = sim_config;
     sim_config.write_output = false;
 
+    // The fixture's `[overrides]` table, verbatim: the battery fixtures
+    // declare their control here (`bms_mode = '"Manual"'`, the idle
+    // battery the OCHRE reference models).
+    let overrides = config_value
+        .get("overrides")
+        .map(|table| serde_json::to_value(table).expect("overrides table serializes"));
+
     let config = DwellingConfig {
         hpxml_path: root.join("building.xml"),
         schedule_path: Some(root.join("schedule.csv")),
         weather_path: root.join("weather.epw"),
         defaults_path: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")),
         sim_config,
-        overrides: None,
+        overrides,
         bldg_id,
         initialization_duration: None,
         resample_overrides: None,

@@ -132,6 +132,18 @@ fn equipment_init_failure_fails_assembly() {
 /// behind.
 const NOT_BUILDING_FIXTURES: &[&str] = &["base-enclosure-windows-physical-properties.xml"];
 
+/// The battery fixtures declare their control: `Manual`, the idle battery
+/// the fixtures' OCHRE references model. The marker is the HPXML
+/// `<Batteries>` container: vehicle batteries live under `<Vehicles>` and
+/// resolve to EV equipment, which declares no stationary control. The
+/// override names an equipment only when the input carries one, so a
+/// corpus fixture without a battery carries no override.
+fn corpus_overrides(fixture_path: &Path) -> Option<Value> {
+    let xml = std::fs::read_to_string(fixture_path).ok()?;
+    xml.contains("<Batteries>")
+        .then(|| json!({ "Battery": { "bms_mode": "\"Manual\"" } }))
+}
+
 /// Every checked-in HPXML fixture path: the curated `hpxml/` tree (the
 /// ochre samples plus the parser-dev fixture), every resstock `home.xml`,
 /// and every parity case's `building.xml`.
@@ -199,7 +211,9 @@ fn every_fixture_builds_every_equipment() {
             .display()
             .to_string();
 
-        let blueprint = match DwellingBlueprint::from_config(config(&fixture_path)) {
+        let mut cfg = config(&fixture_path);
+        cfg.overrides = corpus_overrides(&fixture_path);
+        let blueprint = match DwellingBlueprint::from_config(cfg) {
             Ok(blueprint) => blueprint,
             Err(err) => {
                 let not_building = fixture_path.file_name().is_some_and(|name| {
@@ -294,7 +308,16 @@ fn a_wildcard_override_builds_every_corpus_fixture_or_fails_typed() {
             .display()
             .to_string();
         let mut cfg = config(&fixture_path);
-        cfg.overrides = Some(json!({ "all": { "sensible_gain_fraction": 0.5 } }));
+        // The wildcard override plus the battery fixtures' declared
+        // control, in one map.
+        let mut override_map = json!({ "all": { "sensible_gain_fraction": 0.5 } });
+        if let Some(battery) = corpus_overrides(&fixture_path)
+            && let (Some(map), Some(battery_obj)) =
+                (override_map.as_object_mut(), battery.as_object())
+        {
+            map.extend(battery_obj.clone());
+        }
+        cfg.overrides = Some(override_map);
         let outcome = match DwellingBlueprint::from_config(cfg) {
             Ok(blueprint) => blueprint.build().map(|_| ()),
             Err(err) => Err(err),

@@ -45,6 +45,12 @@ fn sim_config(output_path: PathBuf) -> SimulationConfig {
 /// schedule and Denver weather file every other ochre-sample test in this
 /// crate uses.
 fn ochre_dwelling(hpxml_name: &str, output_dir: &tempfile::TempDir) -> Dwelling {
+    // The battery fixture declares its control (`Manual`: the battery
+    // follows commands, which is this test's remove-and-re-add cycle);
+    // the other fixtures carry no battery, and an override key naming no
+    // equipment is an error.
+    let overrides = (hpxml_name == "base-battery.xml")
+        .then(|| serde_json::json!({ "Battery": { "bms_mode": "\"Manual\"" } }));
     Dwelling::from_config(DwellingConfig {
         hpxml_path: project_root()
             .join("tests/fixtures/hpxml/ochre_samples")
@@ -53,7 +59,7 @@ fn ochre_dwelling(hpxml_name: &str, output_dir: &tempfile::TempDir) -> Dwelling 
         weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         defaults_path: Some(project_root().join("defaults")),
         sim_config: sim_config(output_dir.path().join("out.csv")),
-        overrides: None,
+        overrides,
         bldg_id: 100,
         initialization_duration: None,
         resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),

@@ -474,6 +474,10 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
 
     sim_config = SimulationConfig(duration_s=3600, time_res_s=60, output_verbosity=1, write_output=False)
 
+    # The battery dwelling declares the control it tests: `Manual`, the
+    # idle battery the column-mismatch scenario was built on.
+    battery_overrides = {"Battery": {"bms_mode": '"Manual"'}}
+
     config1 = DwellingConfig(
         hpxml=str(fixture_dir / "base.xml"),
         schedule=schedule,
@@ -488,6 +492,7 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
         weather=weather,
         config=sim_config,
         defaults_path=str(HARES_DEFAULTS),
+        overrides=battery_overrides,
         bldg_id=2,
     )
     fleet = PyFleet.from_buildings([config1, config2])

@@ -26,6 +26,12 @@ struct FixtureConfig {
     bldg_id: Option<i64>,
     #[serde(default)]
     initialization_duration_seconds: Option<i64>,
+    /// The fixture's equipment overrides, carried verbatim into the
+    /// dwelling config: the battery fixtures declare their control here
+    /// (`bms_mode = '"Manual"'`, the idle battery the OCHRE reference
+    /// models).
+    #[serde(default)]
+    overrides: Option<toml::Table>,
 }
 
 #[derive(Debug)]
@@ -681,7 +687,12 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
         weather_path: fixture.weather_epw(),
         sim_config,
         defaults_path: Some(defaults_path),
-        overrides: None,
+        // The fixture's `[overrides]` table, verbatim: the battery
+        // fixtures declare their control here, and a fixture with none
+        // carries no overrides.
+        overrides: config
+            .overrides
+            .map(|table| serde_json::to_value(&table).expect("overrides table serializes")),
         bldg_id: config.bldg_id.unwrap_or(1),
         initialization_duration: config
             .initialization_duration_seconds

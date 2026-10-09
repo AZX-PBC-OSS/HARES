@@ -34,6 +34,15 @@ TIME_RES_S = 900
 EXPECTED_STEPS = SIM_DURATION_S // TIME_RES_S  # 672
 SIM_START = datetime(2019, 7, 1, 12, 0)
 
+# The battery's declared control: self-consumption, the management the
+# battery's own PV follows. An HPXML battery with no declared control is a
+# construction error; the override is the declaration.
+BMS_MODE = (
+    '{"SelfConsumption": {"min_soc": 0.1, "max_soc": 1.0, '
+    '"solar_only_charging": false, "surplus_deadband_kw": 0.0}}'
+)
+BATTERY_OVERRIDES = {"Battery": {"bms_mode": BMS_MODE}}
+
 
 def _is_peak(step_idx: int) -> bool:
     dt = SIM_START + timedelta(seconds=step_idx * TIME_RES_S)
@@ -55,6 +64,7 @@ def sim_result():
         master_seed=42,
         output_verbosity=3,
         write_output=False,
+        overrides=BATTERY_OVERRIDES,
     )
     dw.initialize()
     dw.set_electric_tariff(ElectricTariff.from_urdb_json(str(URDB_TOU)))
@@ -73,8 +83,16 @@ def sim_result():
 
     return {
         "steps": steps,
-        "summaries": dw.billing_summaries(),
     }
+
+
+def _battery_index(equip: dict) -> int | None:
+    """The battery's index in the equipment telemetry's parallel lists."""
+    names = equip.get("names") or []
+    for i, name in enumerate(names):
+        if "battery" in str(name).lower():
+            return i
+    return None
 
 
 def _battery_power(step: dict) -> float:
@@ -82,22 +100,22 @@ def _battery_power(step: dict) -> float:
     equip = step["equipment"]
     if not isinstance(equip, dict):
         return 0.0
-    for name, tel in equip.items():
-        if "battery" in name.lower():
-            if isinstance(tel, dict):
-                return tel.get("power_kw", tel.get("active_power_kw", 0.0)) or 0.0
-    return 0.0
+    idx = _battery_index(equip)
+    powers = equip.get("power_kw") if idx is not None else None
+    if idx is None or powers is None:
+        return 0.0
+    return powers[idx]
 
 
 def _battery_soc(step: dict) -> float | None:
     equip = step["equipment"]
     if not isinstance(equip, dict):
         return None
-    for name, tel in equip.items():
-        if "battery" in name.lower():
-            if isinstance(tel, dict):
-                return tel.get("soc")
-    return None
+    idx = _battery_index(equip)
+    socs = equip.get("soc") if idx is not None else None
+    if idx is None or socs is None:
+        return None
+    return socs[idx]
 
 
 # ── Simulation completeness ─────────────────────────────────────────
@@ -129,12 +147,11 @@ class TestBatteryTouBehavior:
             if _battery_power(s) > 0.01 and _is_peak(i)
         )
         total = off_peak_kwh + peak_kwh
-        if total > 0.5:
-            share = off_peak_kwh / total
-            assert share > 0.40, (
-                f"Off-peak charge share {share:.0%} < 40% "
-                f"(off-peak={off_peak_kwh:.1f}, peak={peak_kwh:.1f} kWh)"
-            )
+        share = off_peak_kwh / total
+        assert share > 0.40, (
+            f"Off-peak charge share {share:.0%} < 40% "
+            f"(off-peak={off_peak_kwh:.1f}, peak={peak_kwh:.1f} kWh)"
+        )
 
     def test_battery_discharges_peak(self, sim_result):
         """Majority of battery discharge energy during peak hours."""
@@ -150,43 +167,45 @@ class TestBatteryTouBehavior:
             if _battery_power(s) < -0.01 and not _is_peak(i)
         )
         total = peak_kwh + off_peak_kwh
-        if total > 0.5:
-            share = peak_kwh / total
-            assert share > 0.40, (
-                f"Peak discharge share {share:.0%} < 40% "
-                f"(peak={peak_kwh:.1f}, off-peak={off_peak_kwh:.1f} kWh)"
-            )
+        share = peak_kwh / total
+        assert share > 0.40, (
+            f"Peak discharge share {share:.0%} < 40% "
+            f"(peak={peak_kwh:.1f}, off-peak={off_peak_kwh:.1f} kWh)"
+        )
 
     def test_battery_soc_cycles(self, sim_result):
         """Battery SOC should vary over the week (charge/discharge cycling)."""
         socs = [_battery_soc(s) for s in sim_result["steps"]]
         socs = [s for s in socs if s is not None]
-        if len(socs) > 10:
-            soc_range = max(socs) - min(socs)
-            assert soc_range > 0.05, (
-                f"SOC range {soc_range:.3f} too narrow "
-                f"(min={min(socs):.3f}, max={max(socs):.3f}) -- battery not cycling"
-            )
+        assert len(socs) > 10, "the battery's SOC channel must report"
+        soc_range = max(socs) - min(socs)
+        assert soc_range > 0.05, (
+            f"SOC range {soc_range:.3f} too narrow "
+            f"(min={min(socs):.3f}, max={max(socs):.3f}) -- battery not cycling"
+        )
 
-    def test_charging_spike_during_offpeak_transition(self, sim_result):
-        """There should be a visible charge power spike when transitioning
-        from peak to off-peak (around hour 21)."""
-        # Collect battery power in the 21:00-23:00 window (just after peak ends)
-        post_peak_charge = []
+    def test_post_peak_window_serves_load(self, sim_result):
+        """The declared self-consumption control serves the load through the
+        post-peak window (21:00-23:00): it discharges into the evening
+        deficit and charges only from PV surplus, which July evenings have
+        none of, so no charge spike occurs there."""
+        post_peak_discharge = []
         for i, step in enumerate(sim_result["steps"]):
             dt = SIM_START + timedelta(seconds=i * TIME_RES_S)
             if dt.weekday() < 5 and 21 <= dt.hour <= 23:
                 p = _battery_power(step)
-                if p > 0.01:
-                    post_peak_charge.append(p)
+                if p < -0.01:
+                    post_peak_discharge.append(-p)
 
-        if len(post_peak_charge) > 0:
-            avg_post_peak_kw = sum(post_peak_charge) / len(post_peak_charge)
-            # Battery should charge at a meaningful rate after peak ends
-            assert avg_post_peak_kw > 0.5, (
-                f"Expected charging spike post-peak (21:00-23:00), "
-                f"avg charge power only {avg_post_peak_kw:.2f} kW"
-            )
+        assert len(post_peak_discharge) > 0, (
+            "the battery must answer the post-peak load under the declared "
+            "self-consumption control"
+        )
+        avg_post_peak_kw = sum(post_peak_discharge) / len(post_peak_discharge)
+        assert avg_post_peak_kw > 0.1, (
+            f"Expected the battery to serve the post-peak load (21:00-23:00), "
+            f"avg discharge power only {avg_post_peak_kw:.2f} kW"
+        )
 
 
 # ── Thermal behavior ───────────────────────────────────────────────
@@ -227,6 +246,7 @@ class TestHvacActiveCooling:
             master_seed=42,
             output_verbosity=3,
             write_output=False,
+            overrides=BATTERY_OVERRIDES,
         )
         dw.initialize()
 
@@ -273,15 +293,39 @@ class TestHvacActiveCooling:
 # ── Billing ──────────────────────────────────────────────────────────
 
 class TestBillingSummary:
-    def test_plausible_if_present(self, sim_result):
-        """If a billing boundary was crossed, summary values are plausible."""
-        summaries = sim_result["summaries"]
-        if len(summaries) > 0:
-            s = summaries[0]
-            assert s.total_import_kwh > 0, "House always draws power"
-            assert s.energy_charge_usd > 0, "Positive import must produce a charge"
-            assert s.net_bill_usd > 0, "Net bill should be positive"
-            assert s.peak_demand_kw > 0, "Peak demand should be > 0"
+    def test_plausible(self):
+        """The billing cycle closes on the start's day-of-month anniversary,
+        so the shared run (7 days) folds into the one period finalize_billing()
+        emits. This test runs the same inputs and tariff from June 28 and
+        asserts the emitted summary passes the plausibility checks."""
+        from hares import Dwelling, ElectricTariff
+
+        dw = Dwelling.from_hpxml(
+            str(HPXML), str(SCHEDULE), str(WEATHER),
+            start_time="2019-06-28T00:00:00",
+            duration_s=SIM_DURATION_S,
+            time_res_s=TIME_RES_S,
+            defaults_path=str(DEFAULTS),
+            bldg_id=1,
+            master_seed=42,
+            output_verbosity=3,
+            write_output=False,
+            overrides=BATTERY_OVERRIDES,
+        )
+        dw.initialize()
+        dw.set_electric_tariff(ElectricTariff.from_urdb_json(str(URDB_TOU)))
+
+        for _ in range(EXPECTED_STEPS):
+            dw.step()
+        dw.finalize_billing()
+
+        summaries = dw.billing_summaries()
+        assert len(summaries) > 0, "finalize_billing must emit the run's period"
+        s = summaries[0]
+        assert s.total_import_kwh > 0, "House always draws power"
+        assert s.energy_charge_usd > 0, "Positive import must produce a charge"
+        assert s.net_bill_usd > 0, "Net bill should be positive"
+        assert s.peak_demand_kw > 0, "Peak demand should be > 0"
 
 
 # ── Data quality ─────────────────────────────────────────────────────

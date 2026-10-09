@@ -110,6 +110,29 @@ so the fade and the derate each apply exactly once.
 
 ## Control Modes
 
+### Declaring a Control
+
+An HPXML battery must have a declared control: HPXML has no
+battery-control element, and OCHRE resolves a battery's control per step
+from a control signal or its schedule (`Equipment/Generator.py:27`,
+`Equipment/Battery.py:205`), never from HPXML. A battery built without a
+declared control would silently take the `Manual` default, seed no
+management actor, and idle for the whole run while looking configured, so
+dwelling assembly fails with a construction error naming the battery and
+the input document when neither route below declares one.
+
+The two ways to declare a control:
+
+1. **The battery override's `bms_mode`**, on the dwelling config's
+   equipment override map (`overrides={"Battery": {"bms_mode": ...}}` in
+   Python; the JSON text of the `BmsMode`, e.g. `'"Manual"'` or a
+   `{"SelfConsumption": {...}}` object serialised to a string). `Manual`
+   declared explicitly is a declared control: the battery follows commands,
+   as a gym or co-simulation drives it.
+2. **A registered `BatteryManagement` actor targeting the battery**,
+   added to the built dwelling (`add_actor_by_name("BatteryManagement",
+   name, {"target": "Battery", ...})`).
+
 ```mermaid
 graph TD
     PS["PowerSetpoint<br/>(Priority 1)"] -->|"direct AC target"| CLAMP["Power Clamping"]
