@@ -2150,3 +2150,42 @@ the winter cold bias: it stays open at -1.25 (ideal) and -1.22
 (dynamic) with its cause unestablished. The probes were temporary
 patches at this branch, each reverted after its run; the oracle bounds
 reproduce unchanged.
+
+### The rename row's consumer gate captures, 2026-10-09 (consumer branch `row/cn13-follow-rename`, gate engine `b2419945`)
+
+Four DE-trace captures with the CN-0 tool, this host, the production
+set unchanged:
+
+- The shipped baseline `B0-de-trace.json`: captured 2026-10-07 at
+  consumer `3840751` on engine `27db4a1e`.
+- The old consumer (`78568b5`, importing the old name) against the
+  pre-rename engine `97e96368`: differs from the shipped baseline on
+  260 field paths (every premise's trace, fit and score). The
+  baseline's engine sits on the audit line that diverged at
+  `ebdb1a17`; `27db4a1e` is not an ancestor of the phase-1 line the
+  rename sits on, and the difference is already fully present at the
+  pre-rename engine. The rename is not its cause.
+- This consumer at the renamed engine `f35eef8a` (the pure rename
+  commit): `compare` prints `identical` against the previous capture,
+  bitwise. The rename moves no number through the consumer's
+  production capture: old consumer and pre-rename engine versus this
+  consumer and the renamed engine is the only variable pair, and it
+  compares equal.
+- This consumer at the gate engine `b2419945` (rows 28 to 30b and the
+  shipped-parquet weight fix on top of the rename): `identical` to the
+  rename-commit capture, and the capture ran twice (`identical`), so
+  rows 28 to 30b are bitwise for the consumer and the capture is
+  deterministic.
+
+The gate: 348 passed, 0 failed, 7 skipped (the base seven environment
+skips; the two new acceptance cases are the +2), ruff clean, the
+contract check PASS on the schema regenerated against the gate engine
+(engine sha256 prefix `da6f1391ab79bcc0`, 84 witnessed homes, 9 of 9
+cross-check agreements), the bundle VERIFY clean (exit 1 on the base
+skips, as the gate records). The cache moved from `~/.cache/ochre_next`
+to `~/.cache/hares` under the operator checkpoint: 6741 files, sha256
+manifests identical before and after, the source not nested in the
+target. The engine worktrees `97e96368` and `f35eef8a` remain under
+`.workstrees/`; the old-consumer checkout used for the pre-rename leg
+is `/tmp/opencode/consumer-base` (a worktree of the consumer at
+`78568b5`).
