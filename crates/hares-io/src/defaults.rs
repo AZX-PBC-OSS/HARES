@@ -3017,7 +3017,9 @@ max_Tdb,{tdb_max}\n",
     /// so they legitimately deviate from proportional scaling (the reason
     /// the runtime check only warned. The deviating (family, speed) set is
     /// pinned: a data edit that introduces a deviation outside it fails
-    /// here.
+    /// here. OCHRE's `ASHP Heater` 11.0 HSPF row ("Manual") joins the
+    /// mini-split families in the deviation set: the reference's data is
+    /// the reference's data (D-020).
     #[test]
     fn hspf_cop_monotone_in_shipped_csv() {
         let defaults_dir = shipped_defaults_dir();
@@ -3032,6 +3034,7 @@ max_Tdb,{tdb_max}\n",
             by_family.entry(name).or_default().insert(stage);
         }
         let expected: std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> = [
+            ("ASHP Heater", [1, 2, 3, 4].into_iter().collect()),
             ("MSHP Heater", [1, 2, 3, 4].into_iter().collect()),
             ("MSHP Cooler", [1, 2, 3, 4].into_iter().collect()),
             ("Air Conditioner", [1].into_iter().collect()),
@@ -3317,7 +3320,7 @@ system_losses_fraction = 0.14
     }
 
     #[test]
-    fn ashp_heater_4speed_cops_monotonically_increase_with_hspf() {
+    fn ashp_heater_4speed_cops_decline_with_speed() {
         let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -3348,23 +3351,23 @@ system_losses_fraction = 0.14
             ashp_heater_4sp.len()
         );
 
-        let n_stages = ashp_heater_4sp[0].cops.len();
-        for stage in 0..n_stages {
-            for i in 1..ashp_heater_4sp.len() {
-                let cop_prev = ashp_heater_4sp[i - 1].cops[stage];
-                let cop_curr = ashp_heater_4sp[i].cops[stage];
-                let eff_prev = ashp_heater_4sp[i - 1].efficiency_value;
-                let eff_curr = ashp_heater_4sp[i].efficiency_value;
-                let expected_cop = cop_prev * (eff_curr / eff_prev);
+        // Within each row the per-stage COPs decline with speed: OCHRE's
+        // rows carry this property (per-stage COPs drop as the stage rises).
+        // The cross-tier proportionality a previous state of this test
+        // pinned does not hold in the reference's data: its 11.0 HSPF row
+        // ("Manual", COPs [4.55, 4.36, 4.17, 3.98]) sits below its 10.47
+        // HSPF row, and the reference's data is the reference's data
+        // (D-020).
+        for row in &ashp_heater_4sp {
+            for stage in 1..row.cops.len() {
+                let cop_low = row.cops[stage - 1];
+                let cop_curr = row.cops[stage];
                 assert!(
-                    cop_curr > expected_cop * 0.99,
-                    "ASHP Heater COP at speed {} not monotonic: {} HSPF COP={:.3} < {} HSPF COP={:.3} (expected ~{:.3} proportional)",
-                    stage + 1,
-                    eff_curr,
-                    cop_curr,
-                    eff_prev,
-                    cop_prev,
-                    expected_cop
+                    cop_curr < cop_low,
+                    "ASHP Heater {} HSPF COP at speed {} not below the previous speed: \
+                     {cop_curr:.3} >= {cop_low:.3}",
+                    row.efficiency_value,
+                    stage + 1
                 );
             }
         }
@@ -3384,28 +3387,17 @@ system_losses_fraction = 0.14
             .hvac_multispeed_parameters("ASHP Heater", "HSPF", 4, 11.0)
             .expect("11.0 HSPF ASHP Heater 4-speed row should exist");
 
-        // Scaled from 10.47 HSPF BEopt row COPs [6.0975, 5.2085, 4.4020, 4.2058]
-        // with scale factor 11.0/10.47 ≈ 1.0506 → [6.41, 5.47, 4.62, 4.42]
-        assert!(
-            (row.cops[0] - 6.41).abs() < 0.02,
-            "COP₁ expected ~6.41, got {}",
-            row.cops[0]
-        );
-        assert!(
-            (row.cops[1] - 5.47).abs() < 0.02,
-            "COP₂ expected ~5.47, got {}",
-            row.cops[1]
-        );
-        assert!(
-            (row.cops[2] - 4.62).abs() < 0.02,
-            "COP₃ expected ~4.62, got {}",
-            row.cops[2]
-        );
-        assert!(
-            (row.cops[3] - 4.42).abs() < 0.02,
-            "COP₄ expected ~4.42, got {}",
-            row.cops[3]
-        );
+        // OCHRE's row ("Manual"): COPs [4.55, 4.36, 4.17, 3.98]. A previous
+        // state of the CSV scaled the 10.47 HSPF BEopt row by 11.0/10.47;
+        // the reference's data is the reference's data (D-020).
+        let expected_cops = [4.55, 4.36, 4.17, 3.98];
+        for (i, (&actual, &expected)) in row.cops.iter().zip(expected_cops.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 0.02,
+                "COP{} expected ~{expected}, got {actual}",
+                i + 1
+            );
+        }
     }
 
     // ── Water heater defaults CSV tests ──────────────────────────────────

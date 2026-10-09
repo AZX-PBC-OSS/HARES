@@ -1483,8 +1483,7 @@ fn try_build_heat_pump_heater_config(
             plf_max: curve_bounds.plf_max,
             min_compressor_fraction: params
                 .get("min_compressor_fraction")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.25),
+                .and_then(Value::as_f64),
             eir_part_load_benefit: params.get("eir_part_load_benefit").and_then(Value::as_f64),
             er_stages: params
                 .get("er_stages")
@@ -1691,8 +1690,7 @@ fn try_build_heat_pump_cooler_config(
             plf_max: curve_bounds.plf_max,
             min_compressor_fraction: params
                 .get("min_compressor_fraction")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.25),
+                .and_then(Value::as_f64),
             eir_part_load_benefit: params.get("eir_part_load_benefit").and_then(Value::as_f64),
             er_stages: params
                 .get("er_stages")

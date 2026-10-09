@@ -993,45 +993,70 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   silent on the no-input table.
 - **HARES behavior (since this fix):** the resolve layer applies the
   shipped `defaults/HVAC Multispeed Parameters.csv` for every multi-speed
-  lookup, and the `MSHP Heater` rows are restored to OCHRE's exact values:
-  they had been renormalized to a 1.0 top (0.33333, 0.5, 0.66667, 1.0,
-  commit `6debdf13`), capping the unit at rated where the reference's top
-  stage delivers 1.2 times rated. The heater's no-stage fallback generates
-  OCHRE's ratios instead of the even family it generated before
+  lookup, and every row OCHRE ships (`ASHP Cooler`, `ASHP Heater`,
+  `MSHP Cooler`, `MSHP Heater`) is OCHRE's, verbatim down to the
+  "Received From" provenance column, pinned line-for-line against the
+  vendored reference CSV. The shipped file had re-derived rows: the
+  `MSHP Heater` ratios renormalized to a 1.0 top (0.33333, 0.5, 0.66667,
+  1.0, commit `6debdf13`), capping the unit at rated where the
+  reference's top stage delivers 1.2 times rated; the `ASHP Heater`
+  4-speed ratios renormalized by 1/1.17 and the `MSHP Cooler` ratios by
+  1/1.2 with re-derived COPs on their 11.0 HSPF and 14.5 SEER rows
+  (commits `f0ea43ad`, `5e5a3e7e`). Those were broken windows: the
+  reference's data is the reference's data, and however much a
+  re-derivation might have merit it must not live silently in a defaults
+  file that carries OCHRE's values. The heater's no-stage fallback
+  generates OCHRE's ratios instead of the even family it generated before
   (0.25, 0.50, 0.75, 1.00 at a flat EIR); the fallback keeps a flat EIR
   (it has no CSV access; the resolve layer owns the per-stage COPs), and
   `eir_part_load_benefit` or explicit `stage_heating_eirs` still win. A
   declared `min_compressor_fraction` (HPXML `MinimumCapacity`) keeps the
-  even family from that fraction as the explicit override. The biquadratic
-  temperature curves are a different mechanism and keep the OCHRE CSV
-  columns (D-014). The `MSHP Cooler` and `ASHP Heater` rows carry the same
-  renormalization and are out of scope here: their stage tables are their
-  own quantities.
+  even family from that fraction as the explicit override: declaredness
+  is explicit (an `Option` through the resolve path, not a sentinel
+  compare), so a declared 0.25 keeps the even family too. The fan's
+  specific power normalizes to the top stage's airflow (OCHRE's
+  `rated_flow_rate = max(flow_rate_list)`, `HVAC.py:145-150`), sized
+  after the stage table is final. The biquadratic temperature curves are
+  a different mechanism and keep the OCHRE CSV columns (D-014); the CSV's
+  Air Flow Ratio columns are unread on both sides (D-032).
+- **Out-of-scope rows:** every row OCHRE ships is restored and pinned.
+  The shipped CSV's remaining families (`Gas Furnace`, `Air Conditioner`,
+  `GSHP Cooler`, `GSHP Heater`) have no OCHRE row: they are HARES-only
+  data, unchanged by this fix, among them the `GSHP Heater` 4-speed rows
+  whose capacity ratios were scaled from the pre-restore renormalized
+  `ASHP Heater` ratios by the ground-loop premium.
 - **Justification:** class (b) at the data layer and the fallback. The
   reference answers the no-input case (the CSV row, raise on miss) and
-  EnergyPlus declares stages explicitly; HARES's renormalized ratios and
-  even-spacing family matched neither. The modulation model is not the
-  gap: HARES's variable-speed ideal path interpolates stages the way
-  OCHRE's ideal capacity does.
-- **Measured impact:** no checked-in HPXML fixture or golden carries a
-  mini-split, so every golden compares bitwise. The mini-split parity
-  fixture (`cz5a_minisplit_gas_wh`, HeatingCapacity 36000 Btu/h = 10.55 kW,
-  HSPF 9.2, no stage list) now resolves to OCHRE's exact stage table
-  (4.22, 6.33, 8.44 and 12.66 kW at EIRs 0.1945, 0.2525, 0.2833 and
-  0.3215); before the fix it ran the renormalized ratios (3.52, 5.28,
-  7.03 and 10.55 kW). Its parity metrics are unchanged within bands: the
-  reference window's outdoor temperature (-19.4 °C) sits below the 0 °F
-  compressor lockout both sides default to, so the window never operates
-  the compressor and the stage table has no vote there; the peak residual
-  is the ER dispatch difference established in `tests/parity/mod.rs`.
+  EnergyPlus declares stages explicitly; HARES's renormalized ratios,
+  re-derived rows and even-spacing family matched neither. The modulation
+  model is not the gap: HARES's variable-speed ideal path interpolates
+  stages the way OCHRE's ideal capacity does.
+- **Measured impact:** no bitwise golden carries a mini-split. The
+  mini-split parity fixture (`cz5a_minisplit_gas_wh`, HeatingCapacity
+  36000 Btu/h = 10.55 kW, HSPF 9.2, no stage list) resolves to OCHRE's
+  exact stage table (4.22, 6.33, 8.44 and 12.66 kW at EIRs 0.1945, 0.2525,
+  0.2833 and 0.3215); before the fix it ran the renormalized ratios (3.52,
+  5.28, 7.03 and 10.55 kW). Its parity metrics are unchanged within bands:
+  the reference window's outdoor temperature (-19.4 °C) sits below the 0 °F
+  compressor lockout both sides default to (`hpxml.py:947-951`), so the
+  window never operates the compressor and the stage table's only vote
+  there is the fan's capacity-proportional flow (`staging.rs:466`); the
+  peak residual is the ER dispatch difference established in
+  `tests/parity/mod.rs`.
 - **Pinning tests:** `crates/hares-io/tests/hvac_csv_tests.rs`
-  (`mshp_heater_rows_match_ochre_capacity_ratios_and_cops`),
+  (`shipped_multispeed_rows_match_ochre_verbatim` fails when any row
+  OCHRE ships reverts to a re-derivation, provenance included;
+  `mshp_heater_rows_match_ochre_capacity_ratios_and_cops` covers all
+  seven `MSHP Heater` rows; `mshp_cooler_14_5_seer_row_is_ochres`),
   `crates/hares-equipment/src/hvac/heat_pump/heater.rs`
   (`mshp_default_stages_follow_ochre_stage_table`,
+  `mshp_declared_min_compressor_fraction_25_keeps_even_family`,
+  `mshp_fan_power_normalizes_to_the_top_stage`,
   `mshp_eir_identical_across_all_stages`,
-  `mshp_stage_heating_eirs_preserved_when_is_mini_split`). The first two
-  fail when the shipped CSV's ratios revert to the renormalized values or
-  the fallback reverts to the even spacing.
+  `mshp_stage_heating_eirs_preserved_when_is_mini_split`). The first three
+  fail when the shipped CSV's rows revert, when a declared 0.25 collapses
+  into the undeclared default, or when the fan sizing reverts to the
+  pre-expansion normalization.
 
 ## D-021: The HPWH's low-power compressor class is a continuous UEF transition
 
@@ -1382,3 +1407,44 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   `ashrae_simple_vertical_returns_3_076`,
   `ashrae_simple_horizontal_enhanced`, `ashrae_simple_horizontal_reduced`
   fail when any frozen value moves).
+
+## D-032: The multispeed CSV's Air Flow Ratio columns are unread on both sides
+
+- **Quantity:** the per-stage fan flow of a multi-speed HVAC unit whose
+  stage table comes from the multispeed CSV (`HVAC Multispeed
+  Parameters.csv`): whether the CSV's `Air Flow Ratio` columns set it.
+- **Reference behavior:** OCHRE never reads the columns. The string
+  "Air Flow Ratio" appears nowhere in its Python; the multispeed loader's
+  comment claims it updates "capacity ratios, air flow ratio, EIR, SHR"
+  (`HVAC.py:790`) but the code updates only capacity, EIR and SHR
+  (`HVAC.py:792-795`). The dispatch derives every stage's flow rate from
+  the stage's capacity, `flow_rate_list = [cap / 1000 / rho_air /
+  cp_air / delta_t for cap in self.capacity_list]` for the dynamic units
+  a mini-split belongs to, `ratio * capacity` for the rest
+  (`HVAC.py:126-145`), and normalizes the fan power per unit flow by
+  `rated_flow_rate = max(flow_rate_list)`, so the top stage draws the
+  declared fan power ("Rated Auxiliary Power (W)", fed by HPXML
+  `FanPowerWatts`, `hpxml.py:900-911`).
+- **HARES behavior:** the columns are parsed into
+  `HvacMultispeedParameters.airflow_ratios` and unread, the same dead
+  data. The dispatch is capacity-proportional flow
+  (`airflow_m3_s_for_capacity_w`, `staging.rs:466`) and the fan's
+  specific power divides by the top stage's airflow, sized after the
+  stage table is final (the heater's init), so the top stage draws the
+  declared fan power, OCHRE's normalization. Reading the columns would
+  diverge from the reference's code: the MSHP Heater's CSV flow ratios
+  (0.55556, 0.66667, 0.77778, 1.0) disagree per stage with its capacity
+  ratios (0.4, 0.6, 0.8, 1.2), whose proportional flow the reference
+  actually dispatches.
+- **Justification:** class (a). The reference's loader comment
+  misdescribes its code; the code is the behavior, and HARES follows the
+  code. The columns stay dead data on both sides.
+- **Measured impact:** none through the multispeed dispatch: both sides'
+  per-stage flows are capacity-proportional and both sides' top stage
+  draws the declared fan power, so the CSV's flow ratios never enter
+  either model. The heater's no-stage fallback sized the fan before the
+  stage expansion, overdrawing the 1.2 top stage by 20%; the sizing now
+  runs after it.
+- **Pinning tests:** `crates/hares-equipment/src/hvac/heat_pump/heater.rs`
+  (`mshp_fan_power_normalizes_to_the_top_stage` fails when the fan sizing
+  reverts to the pre-expansion normalization).

@@ -1213,7 +1213,7 @@ mod tests {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
-                    min_compressor_fraction: 0.25,
+                    min_compressor_fraction: None,
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,

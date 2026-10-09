@@ -4,13 +4,9 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::core_config::default_one;
-use super::heat_pump::constants::DEFAULT_MIN_COMPRESSOR_FRACTION;
 use super::heat_pump::defrost::DefrostConfig;
 use super::heating_config::{DuctConfig, HvacSetpointConfig};
 
-fn default_min_compressor_fraction() -> f64 {
-    DEFAULT_MIN_COMPRESSOR_FRACTION
-}
 use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
 use hares_types::{FuelType, ThermostatBandClass, validate_thermostat_band_c};
@@ -85,13 +81,16 @@ pub struct HeatPumpCommonConfig {
     pub plf_min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plf_max: Option<f64>,
-    /// Minimum compressor speed as a fraction of rated capacity for mini-split heat pumps.
-    /// Default 0.25 matches the original hardcoded value; OCHRE uses 0.40 for MSHP Heater
-    /// (from "HVAC Multispeed Parameters.csv"). EnergyPlus sets minimum compressor capacity
-    /// via the ratio of Speed 1 to Speed N `Gross Rated Heating Capacity` fields in
+    /// Minimum compressor speed as a fraction of rated capacity for mini-split heat
+    /// pumps, as declared by the input (HPXML `MinimumCapacity` / HeatingCapacity).
+    /// `None` (the serde default) means undeclared: the mini-split heater takes
+    /// OCHRE's default stage table (`MSHP_DEFAULT_STAGE_RATIOS`). A declared value,
+    /// including 0.25, keeps the even stage family from that fraction as the
+    /// explicit override. EnergyPlus sets minimum compressor capacity via the ratio
+    /// of Speed 1 to Speed N `Gross Rated Heating Capacity` fields in
     /// `Coil:Heating:DX:MultiSpeed` — there is no single "minimum fraction" parameter.
-    #[serde(default = "default_min_compressor_fraction")]
-    pub min_compressor_fraction: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_compressor_fraction: Option<f64>,
     /// Fractional EIR reduction at part load: `eir[i] = rated_eir * (1 - benefit * (1 - frac[i]))`.
     /// Default `None` = 0.0 (constant EIR, current behavior). Values of 0.1–0.2 are typical
     /// for inverter compressors where COP improves at lower compressor speeds due to reduced
@@ -222,7 +221,7 @@ impl Default for HeatPumpCommonConfig {
             ff_max: None,
             plf_min: None,
             plf_max: None,
-            min_compressor_fraction: 0.25,
+            min_compressor_fraction: None,
             eir_part_load_benefit: None,
             er_stages: 1,
             charge_defect_ratio: None,
@@ -437,13 +436,13 @@ impl HeatPumpHeaterConfig {
                 }
             }
         }
-        if self.common.is_mini_split {
-            let v = self.common.min_compressor_fraction;
-            if !v.is_finite() || !(0.1..=0.5).contains(&v) {
-                return Err(HaresError::Equipment(format!(
-                    "HeatPumpHeaterConfig: min_compressor_fraction must be in [0.1, 0.5], got {v}"
-                )));
-            }
+        if self.common.is_mini_split
+            && let Some(v) = self.common.min_compressor_fraction
+            && (!v.is_finite() || !(0.1..=0.5).contains(&v))
+        {
+            return Err(HaresError::Equipment(format!(
+                "HeatPumpHeaterConfig: min_compressor_fraction must be in [0.1, 0.5], got {v}"
+            )));
         }
         if let Some(v) = self.common.eir_part_load_benefit {
             if !v.is_finite() || !(0.0..=1.0).contains(&v) {
@@ -668,13 +667,13 @@ impl HeatPumpCoolerConfig {
             ));
         }
 
-        if self.common.is_mini_split {
-            let v = self.common.min_compressor_fraction;
-            if !v.is_finite() || !(0.1..=0.5).contains(&v) {
-                return Err(HaresError::Equipment(format!(
-                    "HeatPumpCoolerConfig: min_compressor_fraction must be in [0.1, 0.5], got {v}"
-                )));
-            }
+        if self.common.is_mini_split
+            && let Some(v) = self.common.min_compressor_fraction
+            && (!v.is_finite() || !(0.1..=0.5).contains(&v))
+        {
+            return Err(HaresError::Equipment(format!(
+                "HeatPumpCoolerConfig: min_compressor_fraction must be in [0.1, 0.5], got {v}"
+            )));
         }
         if let Some(v) = self.common.eir_part_load_benefit {
             if !v.is_finite() || !(0.0..=1.0).contains(&v) {
@@ -763,7 +762,7 @@ mod tests {
                 ff_max: Some(1.2),
                 plf_min: Some(0.7),
                 plf_max: Some(1.0),
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: Some(0.25),
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -982,7 +981,7 @@ mod tests {
                 ff_max: Some(1.2),
                 plf_min: Some(0.7),
                 plf_max: Some(1.0),
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: Some(0.25),
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -1124,7 +1123,7 @@ mod tests {
                 cooling_capacity_w: Some(12_000.0),
                 cooling_eir: Some(0.25),
                 is_mini_split: true,
-                min_compressor_fraction: 0.05,
+                min_compressor_fraction: Some(0.05),
                 ..HeatPumpCommonConfig::default()
             },
             stage_shrs: None,
@@ -1139,7 +1138,7 @@ mod tests {
             "cooler validation must reject min_compressor_fraction < 0.1; got: {err}",
         );
 
-        cfg_below.common.min_compressor_fraction = 0.55;
+        cfg_below.common.min_compressor_fraction = Some(0.55);
         let err = cfg_below.validate().unwrap_err();
         assert!(
             err.to_string()
@@ -1149,17 +1148,30 @@ mod tests {
     }
 
     #[test]
-    fn min_compressor_fraction_defaults_to_25_percent() {
+    fn min_compressor_fraction_defaults_to_undeclared() {
         let json = serde_json::json!({
             "heating_capacity_w": 10_000.0,
             "heating_eir": 0.25,
         });
         let cfg: HeatPumpHeaterConfig = serde_json::from_value(json).unwrap();
         assert!(
-            (cfg.common.min_compressor_fraction - 0.25).abs() < 1e-9,
-            "default min_compressor_fraction must be 0.25; got {}",
+            cfg.common.min_compressor_fraction.is_none(),
+            "default min_compressor_fraction must be undeclared; got {:?}",
             cfg.common.min_compressor_fraction,
         );
+    }
+
+    #[test]
+    fn min_compressor_fraction_declared_25_percent_round_trips() {
+        // A declared 0.25 must survive as declared: it is not the undeclared
+        // default. The declared value keeps the even stage family (D-020).
+        let json = serde_json::json!({
+            "heating_capacity_w": 10_000.0,
+            "heating_eir": 0.25,
+            "min_compressor_fraction": 0.25,
+        });
+        let cfg: HeatPumpHeaterConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.common.min_compressor_fraction, Some(0.25));
     }
 
     #[test]

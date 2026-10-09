@@ -52,15 +52,16 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // so the old 33.6 % / 32.3 % residuals are closed at 1.2 % and
         // 1.2 %, inside the default bands). The cause is established: the
         // minute is ER-only on both sides, because the compressor locks
-        // out at OCHRE's 0 F default (-17.78 C, hpxml.py:956-963) above
+        // out at OCHRE's 0 F default (-17.78 C, hpxml.py:947-951) above
         // the window's -19.4 C. HARES's binary backup strip fires its
         // full 17.58 kW rating for the minute plus ~0.3 kW fan; OCHRE's
         // ER fills the ideal load 14.41 kW plus its 0.25 kW fan and the
         // 0.15 kW pan heater (HVAC.py:1396-1407, 1427-1436, 1482-1497).
         // EnergyPlus's unitary heat pump fires the full supplementary
         // element as HARES does; OCHRE's ideal ER fill is its own
-        // continuous dispatch. The default stage table (D-020) has no
-        // vote here: the window never operates the compressor.
+        // continuous dispatch. The default stage table (D-020)'s only
+        // vote in this window is the fan's capacity-proportional flow
+        // (staging.rs:466): the window never operates the compressor.
         ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(21.5),
         // cz6b_resistance_res_wh: both models cycle the resistance element
         // at its rating from the same pinned start, but the two envelope

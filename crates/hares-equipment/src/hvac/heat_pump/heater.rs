@@ -851,49 +851,26 @@ impl HeatPumpHeaterCore {
             );
         }
 
-        if let Some(fan_power_w) = cfg.common.fan_power_w {
-            let rated_capacity_w = self
-                .hvac
-                .config
-                .heating_capacities_w
-                .last()
-                .copied()
-                .unwrap_or_else(|| {
-                    tracing::warn!(
-                        "HeatPumpHeater fan-power sizing: heating_capacities_w is empty; \
-                         falling back to DEFAULT_HEATING_CAPACITY_W = {DEFAULT_HEATING_CAPACITY_W} W"
-                    );
-                    DEFAULT_HEATING_CAPACITY_W
-                });
-            let rated_airflow_m3_s = self.hvac.config.airflow_m3_s_per_w * rated_capacity_w;
-            self.hvac.config.fan_power_w_per_m3_s = if rated_airflow_m3_s > 0.0 {
-                fan_power_w.max(0.0) / rated_airflow_m3_s
-            } else {
-                0.0
-            };
-        }
-
         if cfg.common.is_mini_split || matches!(self.variant, HeaterVariant::Minisplit) {
             self.hvac.config.speed_control_mode = SpeedControlMode::VariableSpeedIdeal;
             if self.hvac.config.heating_capacities_w.len() == 1 {
                 let base_cap = self.hvac.config.heating_capacities_w[0];
                 let base_eir = self.hvac.config.eir_by_stage[0];
-                let min_frac = cfg.common.min_compressor_fraction;
                 let n: usize = 4;
                 // The default stage table is OCHRE's `MSHP Heater` row
                 // (MSHP_DEFAULT_STAGE_RATIOS): the top stage exceeds rated and
                 // the CSV's per-stage COP columns are adopted at the resolve
                 // layer for HPXML inputs. EnergyPlus's Coil:Heating:DX:MultiSpeed
                 // takes explicit stage capacities and has no spacing default.
-                // A declared min_compressor_fraction (HPXML MinimumCapacity)
-                // keeps the even family from that fraction as the explicit
-                // override.
-                let ratios: Vec<f64> = if min_frac == DEFAULT_MIN_COMPRESSOR_FRACTION {
-                    MSHP_DEFAULT_STAGE_RATIOS.to_vec()
-                } else {
-                    (0..n)
+                // A declared min_compressor_fraction (HPXML MinimumCapacity),
+                // including exactly 0.25, keeps the even family from that
+                // fraction as the explicit override; undeclared takes OCHRE's
+                // table.
+                let ratios: Vec<f64> = match cfg.common.min_compressor_fraction {
+                    Some(min_frac) => (0..n)
                         .map(|i| min_frac + (1.0 - min_frac) * i as f64 / (n - 1) as f64)
-                        .collect()
+                        .collect(),
+                    None => MSHP_DEFAULT_STAGE_RATIOS.to_vec(),
                 };
                 self.hvac.config.heating_capacities_w =
                     ratios.iter().map(|r| base_cap * r).collect();
@@ -953,6 +930,35 @@ impl HeatPumpHeaterCore {
                         is_heat_pump: true,
                     },
                 )?
+            };
+        }
+
+        // Fan-specific power is normalized to the TOP stage's airflow, sized
+        // after the stage table above is final: OCHRE's fan power per unit
+        // flow divides by `rated_flow_rate = max(flow_rate_list)` with the
+        // flow rates derived from the per-stage capacities (HVAC.py:126-150),
+        // so the reference's declared fan power ("Rated Auxiliary Power (W)",
+        // fed by HPXML FanPowerWatts) is the max-stage fan power. Sizing
+        // before the stage expansion would overdraw the 1.2 top stage by 20%.
+        if let Some(fan_power_w) = cfg.common.fan_power_w {
+            let rated_capacity_w = self
+                .hvac
+                .config
+                .heating_capacities_w
+                .last()
+                .copied()
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "HeatPumpHeater fan-power sizing: heating_capacities_w is empty; \
+                         falling back to DEFAULT_HEATING_CAPACITY_W = {DEFAULT_HEATING_CAPACITY_W} W"
+                    );
+                    DEFAULT_HEATING_CAPACITY_W
+                });
+            let rated_airflow_m3_s = self.hvac.config.airflow_m3_s_per_w * rated_capacity_w;
+            self.hvac.config.fan_power_w_per_m3_s = if rated_airflow_m3_s > 0.0 {
+                fan_power_w.max(0.0) / rated_airflow_m3_s
+            } else {
+                0.0
             };
         }
 
@@ -1052,7 +1058,9 @@ impl HeatPumpHeaterCore {
         self.telemetry.set(tk::BACKUP_EIR, self.backup_eir);
         self.telemetry.set(
             tk::MIN_COMPRESSOR_FRACTION,
-            cfg.common.min_compressor_fraction,
+            cfg.common
+                .min_compressor_fraction
+                .unwrap_or(DEFAULT_MIN_COMPRESSOR_FRACTION),
         );
 
         self.heating_shr = cfg.heating_shr.unwrap_or(1.0);
@@ -2862,7 +2870,7 @@ mod tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -2925,7 +2933,7 @@ mod tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -3024,7 +3032,7 @@ mod tests {
         const RATED_W: f64 = 10_000.0;
 
         let mut typed = mshp_typed_config(RATED_W);
-        typed.common.min_compressor_fraction = 0.30;
+        typed.common.min_compressor_fraction = Some(0.30);
         let cfg =
             EquipmentConfig::from_typed("mshp_min30".to_string(), "MSHP Heater".to_string(), typed)
                 .unwrap();
@@ -3058,6 +3066,80 @@ mod tests {
             (stages[3] - RATED_W).abs() < 0.5,
             "stage 4 must be 100% of rated; got {:.2} W",
             stages[3],
+        );
+    }
+
+    #[test]
+    fn mshp_declared_min_compressor_fraction_25_keeps_even_family() {
+        // A declared min_compressor_fraction of exactly 0.25 is declared, not
+        // undeclared: it must keep the even stage family [0.25, 0.50, 0.75,
+        // 1.00] of rated, not collapse into the undeclared default's OCHRE
+        // table (D-020). The previous sentinel compare (== 0.25) silently
+        // discarded the declaration.
+        const RATED_W: f64 = 10_000.0;
+
+        let mut typed = mshp_typed_config(RATED_W);
+        typed.common.min_compressor_fraction = Some(0.25);
+        let cfg =
+            EquipmentConfig::from_typed("mshp_min25".to_string(), "MSHP Heater".to_string(), typed)
+                .unwrap();
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let e = env(18.0, 5.0, 0.004);
+        eq.init(&cfg, &e).unwrap();
+
+        let stages = &eq.core.hvac.config.heating_capacities_w;
+        let expected: Vec<f64> = (0..4)
+            .map(|i| RATED_W * (0.25 + 0.75 * i as f64 / 3.0))
+            .collect();
+        for (i, (&actual, &exp)) in stages.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - exp).abs() < 0.5,
+                "stage {} capacity = {:.2} W, expected the even family's {:.2} W",
+                i + 1,
+                actual,
+                exp,
+            );
+        }
+    }
+
+    #[test]
+    fn mshp_fan_power_normalizes_to_the_top_stage() {
+        // The declared fan power is the TOP stage's fan power, matching
+        // OCHRE's normalization: fan power per unit flow divides by the max
+        // flow rate, and the per-stage flows derive from the per-stage
+        // capacities (HVAC.py:126-150). With the OCHRE default table the top
+        // stage is 1.2 x rated, so sizing the fan before the stage expansion
+        // would overdraw it by 20%.
+        const RATED_W: f64 = 10_000.0;
+        const FAN_POWER_W: f64 = 300.0;
+        const AIRFLOW_M3_S_PER_W: f64 = 4.0e-5;
+
+        let mut typed = mshp_typed_config(RATED_W);
+        typed.common.fan_power_w = Some(FAN_POWER_W);
+        typed.common.airflow_m3_s_per_w = Some(AIRFLOW_M3_S_PER_W);
+        let cfg = EquipmentConfig::from_typed(
+            "mshp_fan_norm".to_string(),
+            "MSHP Heater".to_string(),
+            typed,
+        )
+        .unwrap();
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let e = env(18.0, 5.0, 0.004);
+        eq.init(&cfg, &e).unwrap();
+
+        let top_cap_w = eq
+            .core
+            .hvac
+            .config
+            .heating_capacities_w
+            .last()
+            .copied()
+            .unwrap();
+        let fan_power_per_m3_s = eq.core.hvac.config.fan_power_w_per_m3_s;
+        let top_stage_fan_w = fan_power_per_m3_s * AIRFLOW_M3_S_PER_W * top_cap_w;
+        assert!(
+            (top_stage_fan_w - FAN_POWER_W).abs() < 1e-6,
+            "top-stage fan power = {top_stage_fan_w} W, expected the declared {FAN_POWER_W} W"
         );
     }
 
@@ -3143,7 +3225,7 @@ mod tests {
     #[test]
     fn mshp_validate_rejects_min_compressor_fraction_out_of_range() {
         let mut cfg_below = mshp_typed_config(10_000.0);
-        cfg_below.common.min_compressor_fraction = 0.05;
+        cfg_below.common.min_compressor_fraction = Some(0.05);
         let err = cfg_below.validate().unwrap_err();
         assert!(
             err.to_string()
@@ -3152,7 +3234,7 @@ mod tests {
         );
 
         let mut cfg_above = mshp_typed_config(10_000.0);
-        cfg_above.common.min_compressor_fraction = 0.55;
+        cfg_above.common.min_compressor_fraction = Some(0.55);
         let err = cfg_above.validate().unwrap_err();
         assert!(
             err.to_string()
@@ -7875,7 +7957,7 @@ mod tests {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
-                    min_compressor_fraction: 0.25,
+                    min_compressor_fraction: None,
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     ..Default::default()
@@ -8276,7 +8358,7 @@ mod ideal_capacity_tests {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
-                    min_compressor_fraction: 0.25,
+                    min_compressor_fraction: None,
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
@@ -8495,7 +8577,7 @@ mod ideal_capacity_tests {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
-                    min_compressor_fraction: 0.25,
+                    min_compressor_fraction: None,
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
@@ -8661,7 +8743,7 @@ mod ideal_capacity_tests {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
-                    min_compressor_fraction: 0.25,
+                    min_compressor_fraction: None,
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
@@ -8768,7 +8850,7 @@ mod ideal_capacity_tests {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
-                    min_compressor_fraction: 0.25,
+                    min_compressor_fraction: None,
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
@@ -8900,7 +8982,7 @@ mod ideal_capacity_tests {
                         ..Default::default()
                     },
                     hysteresis_c: Some(1.0),
-                    min_compressor_fraction: 0.25,
+                    min_compressor_fraction: None,
                     er_stages: 1,
                     ..Default::default()
                 },
