@@ -319,14 +319,55 @@ pub(crate) fn parse_unavailable_periods(
         let begin_day = require_f64("BeginDayOfMonth")? as u32;
         let end_month = require_f64("EndMonth")? as u32;
         let end_day = require_f64("EndDayOfMonth")? as u32;
-        let begin_hour = child_f64(node, "BeginHourOfDay").unwrap_or(0.0) as u32;
-        let end_hour = child_f64(node, "EndHourOfDay").unwrap_or(24.0) as u32;
+        let require_hour = |name: &'static str,
+                            path: &'static str,
+                            default: f64,
+                            lower: f64,
+                            upper: f64,
+                            range_reason: &'static str|
+         -> Result<u32, HpxmlError> {
+            match child_f64(node, name) {
+                None => Ok(default as u32),
+                // The schematron bounds the hour and the field is a whole
+                // hour of day: a negative value saturating to 0 or a
+                // fractional one truncating in the cast would silently
+                // shift the period, so both are validation errors.
+                Some(raw)
+                    if !raw.is_finite() || raw.fract() != 0.0 || raw < lower || raw > upper =>
+                {
+                    Err(HpxmlError::InvalidField {
+                        path,
+                        system_kind: "Unavailable Period",
+                        system_id: id.clone(),
+                        value_received: raw.to_string(),
+                        reason: range_reason,
+                    })
+                }
+                Some(raw) => Ok(raw as u32),
+            }
+        };
+        let begin_hour = require_hour(
+            "BeginHourOfDay",
+            "UnavailablePeriod/BeginHourOfDay",
+            0.0,
+            0.0,
+            23.0,
+            "the begin hour must be a whole number from 0 to 23",
+        )?;
+        let end_hour = require_hour(
+            "EndHourOfDay",
+            "UnavailablePeriod/EndHourOfDay",
+            24.0,
+            1.0,
+            24.0,
+            "the end hour must be a whole number from 1 to 24",
+        )?;
 
         if !(1..=12).contains(&begin_month) || !(1..=12).contains(&end_month) {
             return Err(HpxmlError::InvalidField {
                 path: "UnavailablePeriod/{BeginMonth,EndMonth}",
                 system_kind: "Unavailable Period",
-                system_id: id,
+                system_id: id.clone(),
                 value_received: format!("{begin_month}, {end_month}"),
                 reason: "months must be one of 1 to 12",
             });
@@ -339,30 +380,12 @@ pub(crate) fn parse_unavailable_periods(
                 return Err(HpxmlError::InvalidField {
                     path: "UnavailablePeriod/{BeginDayOfMonth,EndDayOfMonth}",
                     system_kind: "Unavailable Period",
-                    system_id: id,
+                    system_id: id.clone(),
                     value_received: format!("{month}/{day} ({name})"),
                     reason: "the date does not exist on a non-leap calendar; the day \
                              must be one the month has",
                 });
             }
-        }
-        if begin_hour > 23 {
-            return Err(HpxmlError::InvalidField {
-                path: "UnavailablePeriod/BeginHourOfDay",
-                system_kind: "Unavailable Period",
-                system_id: id,
-                value_received: begin_hour.to_string(),
-                reason: "the begin hour must be 0 to 23",
-            });
-        }
-        if !(1..=24).contains(&end_hour) {
-            return Err(HpxmlError::InvalidField {
-                path: "UnavailablePeriod/EndHourOfDay",
-                system_kind: "Unavailable Period",
-                system_id: id,
-                value_received: end_hour.to_string(),
-                reason: "the end hour must be 1 to 24",
-            });
         }
         let natural_ventilation = match child_text(node, "NaturalVentilation") {
             None => NaturalVentilation::RegularSchedule,

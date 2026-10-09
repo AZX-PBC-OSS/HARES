@@ -846,6 +846,36 @@ fn half_year_vacancy_removes_volume_instead_of_redistributing_it() {
     }
 }
 
+/// OS-HPXML's schematron bounds the period hours (EPvalidator.sch:216-223:
+/// BeginHourOfDay 0 to 23, EndHourOfDay 1 to 24, both integers): a negative
+/// hour and a fractional one are validation errors, not values the cast
+/// silently saturates or truncates.
+#[test]
+fn unavailable_period_hours_reject_out_of_range_negative_and_fractional_values() {
+    let xml = std::fs::read_to_string(fixture(
+        "tests/fixtures/resstock/2025.1/bldg0527060/home.xml",
+    ))
+    .expect("home.xml readable");
+    for (begin_hour, end_hour) in [("-2", "24"), ("5.5", "24"), ("0", "0"), ("0", "25.5")] {
+        let xml = xml.replace(
+            "<ColumnName>Vacancy</ColumnName>",
+            &format!(
+                "<ColumnName>Vacancy</ColumnName>\
+                 <BeginHourOfDay>{begin_hour}</BeginHourOfDay>\
+                 <EndHourOfDay>{end_hour}</EndHourOfDay>"
+            ),
+        );
+        let err = hares_io::hpxml::parse_hpxml_str(&xml)
+            .expect_err("an out-of-range, negative or fractional hour must fail the parse");
+        let message = err.to_string();
+        assert!(
+            message.contains("hour"),
+            "the error must name the hour field for BeginHourOfDay {begin_hour}, \
+             EndHourOfDay {end_hour}, got: {message}"
+        );
+    }
+}
+
 fn occupied_bldg0527060() -> String {
     let xml = std::fs::read_to_string(fixture(
         "tests/fixtures/resstock/2025.1/bldg0527060/home.xml",
