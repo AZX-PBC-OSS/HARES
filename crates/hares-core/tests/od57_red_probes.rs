@@ -109,7 +109,9 @@ fn gas_config(loop_id: Option<u16>) -> EquipmentConfig {
             zone_type: None,
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
-            conversion_efficiency: None,
+            // The burner efficiency is required at init (no default may
+            // stand in for it); the probe's subject is the loop id.
+            conversion_efficiency: Some(0.78),
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
             pilot_fraction_to_tank: None,

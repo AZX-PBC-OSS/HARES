@@ -323,64 +323,34 @@ pub fn rebuild_hvac_typed_config(
     duct_params: &DuctDseParams,
 ) -> std::result::Result<EquipmentConfig, HpxmlError> {
     match name {
-        "Gas Furnace" => try_build_gas_furnace_config(name, params, duct_params)?
-            .ok_or_else(|| rebuild_failed(name)),
-        "Electric Furnace" => try_build_electric_furnace_config(name, params, duct_params)?
-            .ok_or_else(|| rebuild_failed(name)),
-        "Gas Boiler" => {
-            try_build_gas_boiler_config(name, params)?.ok_or_else(|| rebuild_failed(name))
-        }
-        "Electric Boiler" => {
-            try_build_electric_boiler_config(name, params)?.ok_or_else(|| rebuild_failed(name))
-        }
-        "Electric Baseboard" => {
-            try_build_electric_baseboard_config(name, params)?.ok_or_else(|| rebuild_failed(name))
-        }
-        "Ideal HVAC" => {
-            try_build_ideal_hvac_config(name, params).ok_or_else(|| rebuild_failed(name))
-        }
-        "Air Conditioner" => try_build_central_ac_config(name, params, duct_params)?
-            .ok_or_else(|| rebuild_failed(name)),
-        "Room AC" => try_build_room_ac_config(name, params).ok_or_else(|| rebuild_failed(name)),
+        "Gas Furnace" => try_build_gas_furnace_config(name, params, duct_params),
+        "Electric Furnace" => try_build_electric_furnace_config(name, params, duct_params),
+        "Gas Boiler" => try_build_gas_boiler_config(name, params),
+        "Electric Boiler" => try_build_electric_boiler_config(name, params),
+        "Electric Baseboard" => try_build_electric_baseboard_config(name, params),
+        "Ideal HVAC" => try_build_ideal_hvac_config(name, params),
+        "Air Conditioner" => try_build_central_ac_config(name, params, duct_params),
+        "Room AC" => try_build_room_ac_config(name, params),
         "ASHP Heater" | "MSHP Heater" => {
             let is_mini_split = name.starts_with("MSHP");
-            try_build_heat_pump_heater_config(name, params, duct_params, is_mini_split)?
-                .ok_or_else(|| rebuild_failed(name))
+            try_build_heat_pump_heater_config(name, params, duct_params, is_mini_split)
         }
         "ASHP Cooler" | "MSHP Cooler" => {
             let is_mini_split = name.starts_with("MSHP");
-            try_build_heat_pump_cooler_config(name, params, duct_params, is_mini_split)?
-                .ok_or_else(|| rebuild_failed(name))
+            try_build_heat_pump_cooler_config(name, params, duct_params, is_mini_split)
         }
         "GSHP Heater" | "WSHP Heater" => {
-            try_build_heat_pump_heater_config(name, params, duct_params, false)?
-                .ok_or_else(|| rebuild_failed(name))
+            try_build_heat_pump_heater_config(name, params, duct_params, false)
         }
         "GSHP Cooler" | "WSHP Cooler" => {
-            try_build_heat_pump_cooler_config(name, params, duct_params, false)?
-                .ok_or_else(|| rebuild_failed(name))
+            try_build_heat_pump_cooler_config(name, params, duct_params, false)
         }
-        "Dehumidifier" => {
-            try_build_dehumidifier_config(name, params).ok_or_else(|| rebuild_failed(name))
-        }
+        "Dehumidifier" => try_build_dehumidifier_config(name, params),
         other => Err(HpxmlError::Parse(
             format!("rebuild_hvac_typed_config called with unrecognized equipment name '{other}'")
                 .into(),
         )),
     }
-}
-
-/// The rebuild failure for `name`: the typed config did not build from the
-/// spec's parameters, so autosizing could not replace its placeholder
-/// capacities.
-fn rebuild_failed(name: &str) -> HpxmlError {
-    HpxmlError::Parse(
-        format!(
-            "autosized typed config for '{name}' did not build from the spec's \
-             parameters; the raw spec with placeholder capacities is not a valid fallback"
-        )
-        .into(),
-    )
 }
 
 /// Compute a `DuctConfig` from the duct parameter bundle produced by
@@ -803,21 +773,43 @@ fn extract_curve_bounds(params: &Map<String, Value>) -> CurveBounds {
 /// Returns `Err(HpxmlError::MissingField)` when `heating_capacity_w` is absent
 /// (caller catches this when `autosize_heating` is set and assigns `None`
 /// typed_config until autosizing computes the real capacity).
-/// Returns `Err(HpxmlError::MissingField)` when AFUE is absent — efficiency
-/// must be specified explicitly and never silently defaulted.
+/// The heating capacity the resistance and combustion builders require: a
+/// missing one is `MissingField` naming the element. The resolver maps a
+/// capacity `MissingField` to "typed config pending autosizing" only when
+/// the spec is flagged `autosize_heating`; a builder outcome is never
+/// silently a raw spec.
+fn heating_capacity_w_from_params(
+    params: &Map<String, Value>,
+    name: &str,
+    system_kind: &'static str,
+) -> std::result::Result<f64, HpxmlError> {
+    params
+        .get("heating_capacity_w")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| HpxmlError::MissingField {
+            path: "HeatingSystem/HeatingCapacity",
+            system_kind,
+            system_id: name.to_string(),
+            reason: "HeatingCapacity is required; provide it in HPXML or let the dwelling builder autosize it",
+        })
+}
+
+/// Build a `GasFurnaceConfig` typed config from the resolved params map.
+///
+/// # Errors
+///
+/// `HpxmlError::MissingField` when `heating_capacity_w` is absent
+/// (caller catches this when `autosize_heating` is set and assigns `None`
+/// typed_config until autosizing computes the real capacity), when AFUE is
+/// absent (efficiency must be specified explicitly and never silently
+/// defaulted), or a `from_typed` failure naming the equipment and the
+/// config type.
 fn try_build_gas_furnace_config(
     name: &str,
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
-) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
-    let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
-        return Err(HpxmlError::MissingField {
-            path: "HeatingSystem/HeatingCapacity",
-            system_kind: "Gas Furnace",
-            system_id: name.to_string(),
-            reason: "HeatingCapacity is required; provide it in HPXML or let the dwelling builder autosize it",
-        });
-    };
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
+    let capacity_w = heating_capacity_w_from_params(params, name, "Gas Furnace")?;
     let afue = afue_from_params(params, name, "Gas Furnace")?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
@@ -857,21 +849,25 @@ fn try_build_gas_furnace_config(
             cooling_setpoint_source,
         },
     };
-    Ok(Some(
+    Ok(
         EquipmentConfig::from_typed(name.to_string(), "Gas Furnace".to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
-    ))
+    )
 }
 
 /// Build an `ElectricFurnaceConfig` typed config.
+///
+/// # Errors
+///
+/// `HpxmlError::MissingField` naming `HeatingSystem/HeatingCapacity` when
+/// the heating capacity is absent, the efficiency helpers' errors, or a
+/// `from_typed` failure naming the equipment and the config type.
 fn try_build_electric_furnace_config(
     name: &str,
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
-) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
-    let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
-        return Ok(None);
-    };
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
+    let capacity_w = heating_capacity_w_from_params(params, name, "Electric Furnace")?;
     let heating_efficiency = resistance_efficiency_from_params(params, name, "Electric Furnace")?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
@@ -909,28 +905,23 @@ fn try_build_electric_furnace_config(
             cooling_setpoint_source,
         },
     };
-    Ok(Some(
+    Ok(
         EquipmentConfig::from_typed(name.to_string(), "Electric Furnace".to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
-    ))
+    )
 }
 
 /// Build a `GasBoilerConfig` typed config.
 ///
-/// Returns `Err(HpxmlError::MissingField)` when `heating_capacity_w` is absent
+/// # Errors
+///
+/// `HpxmlError::MissingField` when `heating_capacity_w` is absent
 /// or when the boiler has a capacity but no AFUE.
 fn try_build_gas_boiler_config(
     name: &str,
     params: &Map<String, Value>,
-) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
-    let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
-        return Err(HpxmlError::MissingField {
-            path: "HeatingSystem/HeatingCapacity",
-            system_kind: "Gas Boiler",
-            system_id: name.to_string(),
-            reason: "HeatingCapacity is required; provide it in HPXML or let the dwelling builder autosize it",
-        });
-    };
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
+    let capacity_w = heating_capacity_w_from_params(params, name, "Gas Boiler")?;
     let afue = afue_from_params(params, name, "Gas Boiler")?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
@@ -1001,20 +992,24 @@ fn try_build_gas_boiler_config(
     if cfg.condensing && cfg.return_temp_c >= 70.0 {
         cfg.return_temp_c = 65.0;
     }
-    Ok(Some(
+    Ok(
         EquipmentConfig::from_typed(name.to_string(), "Gas Boiler".to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
-    ))
+    )
 }
 
 /// Build an `ElectricBoilerConfig` typed config.
+///
+/// # Errors
+///
+/// `HpxmlError::MissingField` naming `HeatingSystem/HeatingCapacity` when
+/// the heating capacity is absent, the efficiency helper's error, or a
+/// `from_typed` failure naming the equipment and the config type.
 fn try_build_electric_boiler_config(
     name: &str,
     params: &Map<String, Value>,
-) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
-    let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
-        return Ok(None);
-    };
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
+    let capacity_w = heating_capacity_w_from_params(params, name, "Electric Boiler")?;
     let heating_efficiency = resistance_efficiency_from_params(params, name, "Electric Boiler")?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
@@ -1074,10 +1069,10 @@ fn try_build_electric_boiler_config(
             cooling_setpoint_source,
         },
     };
-    Ok(Some(
+    Ok(
         EquipmentConfig::from_typed(name.to_string(), "Electric Boiler".to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
-    ))
+    )
 }
 
 /// Build an `ElectricBaseboardConfig` typed config.
@@ -1085,13 +1080,17 @@ fn try_build_electric_boiler_config(
 /// Electric resistance heating is by definition 100% efficient at the appliance
 /// (all electrical input becomes heat). This conventional value is documented in
 /// ASHRAE Handbook — HVAC Systems and Equipment 2020, Ch. 33 "Furnaces".
+///
+/// # Errors
+///
+/// `HpxmlError::MissingField` naming `HeatingSystem/HeatingCapacity` when
+/// the heating capacity is absent, the efficiency helper's error, or a
+/// `from_typed` failure naming the equipment and the config type.
 fn try_build_electric_baseboard_config(
     name: &str,
     params: &Map<String, Value>,
-) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
-    let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
-        return Ok(None);
-    };
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
+    let capacity_w = heating_capacity_w_from_params(params, name, "Electric Baseboard")?;
     let zone_id = zone_id_from_params(params);
     let heating_efficiency = resistance_efficiency_from_params(params, name, "Electric Baseboard")?;
 
@@ -1110,14 +1109,21 @@ fn try_build_electric_baseboard_config(
             cooling_setpoint_source,
         },
     };
-    Ok(Some(
+    Ok(
         EquipmentConfig::from_typed(name.to_string(), "Electric Baseboard".to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
-    ))
+    )
 }
 
 /// Build an `IdealHvacConfig` typed config.
-fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
+fn try_build_ideal_hvac_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
     let heating_capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64);
     let cooling_capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64);
     let heating_eir = params
@@ -1156,19 +1162,32 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
         capacity_biquadratic_coeffs: None,
         eir_biquadratic_coeffs: None,
     };
-    Some(
+    Ok(
         EquipmentConfig::from_typed(name.to_string(), "Ideal HVAC".to_string(), cfg)
-            .ok()?
+            .map_err(|err| {
+                HpxmlError::Parse(
+                    format!(
+                        "equipment '{name}': its 'Ideal HVAC' typed config failed to build: {err}"
+                    )
+                    .into(),
+                )
+            })?
             .with_setpoints_reconciled(setpoints),
     )
 }
 
 /// Build a `CentralAirConditionerConfig` typed config.
+///
+/// # Errors
+///
+/// `HpxmlError::MissingField` when the efficiency or the cooling capacity
+/// is absent, the duct config's error, or a `from_typed` failure naming
+/// the equipment and the config type.
 fn try_build_central_ac_config(
     name: &str,
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
-) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
     // SEER first, then EER as the stated metric (the speed-inference
     // fallback below accepts EER-only systems for the same reason).
     let stated_efficiency = seer_from_params(params).or_else(|| eer_from_params(params));
@@ -1280,18 +1299,61 @@ fn try_build_central_ac_config(
     };
     Ok(
         EquipmentConfig::from_typed(name.to_string(), "Air Conditioner".to_string(), cfg)
-            .ok()
-            .map(|c| c.with_setpoints_reconciled(setpoints)),
+            .map_err(|err| {
+                HpxmlError::Parse(
+                    format!(
+                        "equipment '{name}': its 'Air Conditioner' typed config failed to build: {err}"
+                    )
+                    .into(),
+                )
+            })?
+            .with_setpoints_reconciled(setpoints),
     )
 }
 
+/// The cooling capacity the cooling builders require: a missing one is
+/// `MissingField` naming the element. The resolver maps a capacity
+/// `MissingField` to "typed config pending autosizing" only when the spec
+/// is flagged `autosize_cooling`.
+fn cooling_capacity_w_from_params(
+    params: &Map<String, Value>,
+    name: &str,
+    system_kind: &'static str,
+) -> std::result::Result<f64, HpxmlError> {
+    params
+        .get("cooling_capacity_w")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| HpxmlError::MissingField {
+            path: "CoolingSystem/CoolingCapacity",
+            system_kind,
+            system_id: name.to_string(),
+            reason: "CoolingCapacity is required; provide it in HPXML or let the dwelling builder autosize it",
+        })
+}
+
 /// Build a `RoomAcConfig` typed config.
-fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
-    let capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64)?;
+///
+/// # Errors
+///
+/// `HpxmlError::MissingField` naming `CoolingSystem/CoolingCapacity` when
+/// the cooling capacity is absent or `CoolingSystem/AnnualCoolingEfficiency`
+/// (EER) when the efficiency is absent, or a `from_typed` failure naming
+/// the equipment and the config type.
+fn try_build_room_ac_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
+    let capacity_w = cooling_capacity_w_from_params(params, name, "Room AC")?;
     // Room ACs are rated with EER, not SEER. SEER cannot be substituted for EER
     // because the test conditions and cycling correction factors differ; treating
     // SEER as EER would overestimate efficiency by ~10–15%.
-    let eer = eer_from_params(params)?;
+    let eer = eer_from_params(params).ok_or_else(|| HpxmlError::MissingField {
+        path: "CoolingSystem/AnnualCoolingEfficiency",
+        system_kind: "Room AC",
+        system_id: name.to_string(),
+        reason: "Room ACs are rated with EER, not SEER; provide AnnualCoolingEfficiency \
+                 with Units='EER'",
+    })?;
     let eir = BTU_PER_HR_PER_W / eer.max(1e-6);
 
     let curve_bounds = extract_curve_bounds(params);
@@ -1336,18 +1398,29 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
         crankcase_capacity_curve_coeffs: None,
         min_oat_compressor_cooling_c: None,
     };
-    Some(
+    Ok(
         EquipmentConfig::from_typed(name.to_string(), "Room AC".to_string(), cfg)
-            .ok()?
+            .map_err(|err| {
+                HpxmlError::Parse(
+                    format!(
+                        "equipment '{name}': its 'Room AC' typed config failed to build: {err}"
+                    )
+                    .into(),
+                )
+            })?
             .with_setpoints_reconciled(setpoints),
     )
 }
 
 /// Build a `DehumidifierConfig` typed config.
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
 fn try_build_dehumidifier_config(
     name: &str,
     params: &Map<String, Value>,
-) -> Option<EquipmentConfig> {
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
     let setpoints = extract_setpoints_reconciled(params);
     let cfg = DehumidifierConfig {
         equipment_id: None,
@@ -1367,9 +1440,16 @@ fn try_build_dehumidifier_config(
         min_operating_temp_c: None,
         max_operating_temp_c: None,
     };
-    Some(
+    Ok(
         EquipmentConfig::from_typed(name.to_string(), "Dehumidifier".to_string(), cfg)
-            .ok()?
+            .map_err(|err| {
+                HpxmlError::Parse(
+                    format!(
+                        "equipment '{name}': its 'Dehumidifier' typed config failed to build: {err}"
+                    )
+                    .into(),
+                )
+            })?
             .with_setpoints_reconciled(setpoints),
     )
 }
@@ -1380,7 +1460,7 @@ fn try_build_heat_pump_heater_config(
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
     is_mini_split: bool,
-) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
     let heating_capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64);
     let cooling_capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64);
     let n_speeds = if is_mini_split {
@@ -1575,10 +1655,10 @@ fn try_build_heat_pump_heater_config(
             d
         },
     };
-    Ok(Some(
+    Ok(
         EquipmentConfig::from_typed(name.to_string(), ochre_class.to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
-    ))
+    )
 }
 
 /// Build a `HeatPumpCoolerConfig` typed config from combined heat-pump params.
@@ -1587,7 +1667,7 @@ fn try_build_heat_pump_cooler_config(
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
     is_mini_split: bool,
-) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
+) -> std::result::Result<EquipmentConfig, HpxmlError> {
     let heating_capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64);
     let cooling_capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64);
     let n_speeds = if is_mini_split {
@@ -1764,10 +1844,10 @@ fn try_build_heat_pump_cooler_config(
             .and_then(Value::as_f64)
             .unwrap_or(10.0),
     };
-    Ok(Some(
+    Ok(
         EquipmentConfig::from_typed(name.to_string(), ochre_class.to_string(), cfg)?
             .with_setpoints_reconciled(setpoints),
-    ))
+    )
 }
 
 /// OCHRE `get_duct_info` threshold for "insulated floor" (IP R-value 5.3 → SI).
@@ -2124,7 +2204,7 @@ pub(super) fn resolve_hvac(
         }
         let typed_config = match name.as_str() {
             "Gas Furnace" => match try_build_gas_furnace_config(&name, &params, &duct_params) {
-                Ok(config) => config,
+                Ok(config) => Some(config),
                 Err(HpxmlError::MissingField { .. })
                     if params
                         .get("autosize_heating")
@@ -2135,9 +2215,22 @@ pub(super) fn resolve_hvac(
                 }
                 Err(e) => return Err(e),
             },
-            "Electric Furnace" => try_build_electric_furnace_config(&name, &params, &duct_params)?,
+            "Electric Furnace" => {
+                match try_build_electric_furnace_config(&name, &params, &duct_params) {
+                    Ok(config) => Some(config),
+                    Err(HpxmlError::MissingField { .. })
+                        if params
+                            .get("autosize_heating")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false) =>
+                    {
+                        None
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
             "Gas Boiler" => match try_build_gas_boiler_config(&name, &params) {
-                Ok(config) => config,
+                Ok(config) => Some(config),
                 Err(HpxmlError::MissingField { .. })
                     if params
                         .get("autosize_heating")
@@ -2148,9 +2241,31 @@ pub(super) fn resolve_hvac(
                 }
                 Err(e) => return Err(e),
             },
-            "Electric Boiler" => try_build_electric_boiler_config(&name, &params)?,
-            "Electric Baseboard" => try_build_electric_baseboard_config(&name, &params)?,
-            "Ideal HVAC" => try_build_ideal_hvac_config(&name, &params),
+            "Electric Boiler" => match try_build_electric_boiler_config(&name, &params) {
+                Ok(config) => Some(config),
+                Err(HpxmlError::MissingField { .. })
+                    if params
+                        .get("autosize_heating")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false) =>
+                {
+                    None
+                }
+                Err(e) => return Err(e),
+            },
+            "Electric Baseboard" => match try_build_electric_baseboard_config(&name, &params) {
+                Ok(config) => Some(config),
+                Err(HpxmlError::MissingField { .. })
+                    if params
+                        .get("autosize_heating")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false) =>
+                {
+                    None
+                }
+                Err(e) => return Err(e),
+            },
+            "Ideal HVAC" => Some(try_build_ideal_hvac_config(&name, &params)?),
             // Unreachable: canonical_hvac_heating_name generates exactly the
             // six names matched above and rejects all others with Err.
             _ => unreachable!(
@@ -2275,7 +2390,7 @@ pub(super) fn resolve_hvac(
         );
         let typed_config = match name.as_str() {
             "Air Conditioner" => match try_build_central_ac_config(&name, &params, &duct_params) {
-                Ok(config) => config,
+                Ok(config) => Some(config),
                 Err(HpxmlError::MissingField { .. })
                     if params
                         .get("autosize_cooling")
@@ -2286,8 +2401,24 @@ pub(super) fn resolve_hvac(
                 }
                 Err(e) => return Err(e),
             },
-            "Room AC" => try_build_room_ac_config(&name, &params),
-            "MSHP Cooler" => try_build_heat_pump_cooler_config(&name, &params, &duct_params, true)?,
+            "Room AC" => match try_build_room_ac_config(&name, &params) {
+                Ok(config) => Some(config),
+                Err(HpxmlError::MissingField { .. })
+                    if params
+                        .get("autosize_cooling")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false) =>
+                {
+                    None
+                }
+                Err(e) => return Err(e),
+            },
+            "MSHP Cooler" => Some(try_build_heat_pump_cooler_config(
+                &name,
+                &params,
+                &duct_params,
+                true,
+            )?),
             // Unreachable: canonical_hvac_cooling_name validates all names.
             _ => unreachable!(
                 "canonical_hvac_cooling_name validated '{}' but typed_config match did not cover it",
@@ -2576,18 +2707,18 @@ pub(super) fn resolve_hvac(
         insert_startup_degradation(&mut heater_params, heater_name, true);
         insert_startup_degradation(&mut cooler_params, cooler_name, false);
 
-        let heater_typed = try_build_heat_pump_heater_config(
+        let heater_typed = Some(try_build_heat_pump_heater_config(
             heater_name,
             &heater_params,
             &duct_params,
             is_mini_split,
-        )?;
-        let cooler_typed = try_build_heat_pump_cooler_config(
+        )?);
+        let cooler_typed = Some(try_build_heat_pump_cooler_config(
             cooler_name,
             &cooler_params,
             &duct_params,
             is_mini_split,
-        )?;
+        )?);
 
         let mut heater_spec = build_spec(
             heater_name.to_string(),
@@ -2688,7 +2819,7 @@ pub(super) fn resolve_hvac(
         if let Some(setpoint) = child_f64(dehumidifier, "DehumidistatSetpoint") {
             params.insert("target_rh".to_string(), json!(setpoint));
         }
-        let typed_config = try_build_dehumidifier_config("Dehumidifier", &params);
+        let typed_config = Some(try_build_dehumidifier_config("Dehumidifier", &params)?);
         let mut spec = build_spec(
             "Dehumidifier".to_string(),
             FuelType::Electric,
@@ -4634,8 +4765,7 @@ mod tests {
         let params = minimal_furnace_params(0.96, 10_000.0);
         let duct_params = DuctDseParams::default();
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &duct_params)
-            .expect("gas furnace builder must not error with valid params")
-            .expect("gas furnace builder must produce a typed config when capacity is present");
+            .expect("gas furnace builder must not error with valid params");
         assert!(ec.is_typed(), "EquipmentConfig must be typed");
         use hares_equipment::hvac::heating_config::GasFurnaceConfig;
         let cfg: GasFurnaceConfig = ec.typed().expect("must deserialize to GasFurnaceConfig");
@@ -4669,8 +4799,7 @@ mod tests {
             longitude_deg: -105.0,
         };
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &duct_params)
-            .expect("gas furnace builder must not error with explicit airflow")
-            .expect("gas furnace builder must produce a typed config when capacity is present");
+            .expect("gas furnace builder must not error with explicit airflow");
         use hares_equipment::hvac::heating_config::GasFurnaceConfig;
         let cfg: GasFurnaceConfig = ec.typed().expect("must deserialize to GasFurnaceConfig");
         let expected = 1_200.0 * CFM_TO_M3_S / 24_000.0;
@@ -4868,8 +4997,7 @@ mod tests {
         let params = minimal_central_ac_params(16.0, 12_000.0);
         let duct_params = DuctDseParams::default();
         let ec = try_build_central_ac_config("Air Conditioner", &params, &duct_params)
-            .expect("central AC builder must succeed with valid params")
-            .unwrap();
+            .expect("central AC builder must succeed with valid params");
         assert!(ec.is_typed(), "EquipmentConfig must be typed");
         assert_eq!(
             ec.ochre_class, "Air Conditioner",
@@ -4900,8 +5028,7 @@ mod tests {
         params.insert("plf_min".to_string(), json!(0.6));
         params.insert("plf_max".to_string(), json!(1.0));
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("central AC builder must succeed")
-            .unwrap();
+            .expect("central AC builder must succeed");
         use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
         let cfg: CentralAirConditionerConfig = ec
             .typed()
@@ -4921,8 +5048,7 @@ mod tests {
         let mut params = minimal_central_ac_params(16.0, 12_000.0);
         params.insert("airflow_defect_ratio".to_string(), json!(0.0));
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("central AC builder must succeed")
-            .unwrap();
+            .expect("central AC builder must succeed");
         use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
         let cfg: CentralAirConditionerConfig = ec
             .typed()
@@ -4932,8 +5058,7 @@ mod tests {
 
         params.insert("airflow_defect_ratio".to_string(), json!(-0.25));
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("central AC builder must succeed")
-            .unwrap();
+            .expect("central AC builder must succeed");
         let cfg: CentralAirConditionerConfig = ec
             .typed()
             .expect("must deserialize to CentralAirConditionerConfig");
@@ -4947,8 +5072,7 @@ mod tests {
         params.insert("airflow_defect_ratio".to_string(), json!(-0.25));
         params.insert("cooling_airflow_cfm".to_string(), json!(1_500.0));
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("central AC builder must succeed")
-            .unwrap();
+            .expect("central AC builder must succeed");
         use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
         let cfg: CentralAirConditionerConfig = ec
             .typed()
@@ -5252,15 +5376,16 @@ mod tests {
     }
 
     #[test]
-    fn room_ac_builder_returns_none_when_only_seer_available() {
+    fn room_ac_builder_rejects_seer_as_eer_substitute() {
         let mut params = Map::new();
         params.insert("cooling_capacity_w".to_string(), json!(3_500.0));
         params.insert("efficiency_seer".to_string(), json!(12.0));
-        // No EER present -- must return None rather than silently substituting SEER.
-        let result = try_build_room_ac_config("Room AC", &params);
+        // No EER present -- must error rather than silently substituting SEER.
+        let err = try_build_room_ac_config("Room AC", &params)
+            .expect_err("room AC builder must not accept SEER as EER substitute");
         assert!(
-            result.is_none(),
-            "room AC builder must not accept SEER as EER substitute"
+            matches!(&err, HpxmlError::MissingField { path, .. } if *path == "CoolingSystem/AnnualCoolingEfficiency"),
+            "expected MissingField naming the efficiency element, got: {err}"
         );
     }
 
@@ -5354,10 +5479,7 @@ mod tests {
         .expect("MSHP cooler typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpCoolerConfig;
-        let cfg: HeatPumpCoolerConfig = ec
-            .expect("equipment config should be present")
-            .typed()
-            .expect("typed cooler config");
+        let cfg: HeatPumpCoolerConfig = ec.typed().expect("typed cooler config");
         assert!(cfg.common.is_mini_split);
         assert_eq!(cfg.common.number_of_speeds, 4);
     }
@@ -5379,10 +5501,7 @@ mod tests {
         .expect("ASHP cooler typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpCoolerConfig;
-        let cfg: HeatPumpCoolerConfig = ec
-            .expect("equipment config should be present")
-            .typed()
-            .expect("typed cooler config");
+        let cfg: HeatPumpCoolerConfig = ec.typed().expect("typed cooler config");
         assert_eq!(cfg.common.number_of_speeds, 2);
         assert_eq!(cfg.stage_shrs, Some(vec![0.81, 0.74]));
     }
@@ -5407,10 +5526,7 @@ mod tests {
         .expect("ASHP heater typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpHeaterConfig;
-        let cfg: HeatPumpHeaterConfig = ec
-            .expect("equipment config should be present")
-            .typed()
-            .expect("typed heater config");
+        let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
         assert_eq!(cfg.hp_lockout_temp_c, Some(-12.0));
         assert_eq!(cfg.er_lockout_temp_c, Some(2.0));
         assert_eq!(cfg.max_oat_supplemental_c, Some(18.0));
@@ -5510,8 +5626,7 @@ mod tests {
             }),
         );
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("AC typed config should be built")
-            .unwrap();
+            .expect("AC typed config should be built");
 
         use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
         let cfg: CentralAirConditionerConfig = ec.typed().expect("typed AC config");
@@ -5561,8 +5676,7 @@ mod tests {
         params.insert("zone_id".to_string(), json!(1u16));
 
         let ec = try_build_electric_baseboard_config("Electric Baseboard", &params)
-            .expect("builder must succeed with capacity and zone_id")
-            .expect("typed config must be present");
+            .expect("builder must succeed with capacity and zone_id");
         use hares_equipment::hvac::heating_config::ElectricBaseboardConfig;
         let cfg: ElectricBaseboardConfig = ec
             .typed()
@@ -5583,8 +5697,7 @@ mod tests {
         params.insert("heating_efficiency".to_string(), json!(1.0));
 
         let ec = try_build_electric_baseboard_config("Electric Baseboard", &params)
-            .expect("builder must succeed with capacity only")
-            .expect("typed config must be present");
+            .expect("builder must succeed with capacity only");
         use hares_equipment::hvac::heating_config::ElectricBaseboardConfig;
         let cfg: ElectricBaseboardConfig = ec
             .typed()
@@ -5641,8 +5754,7 @@ mod tests {
         params.insert("zone_id".to_string(), json!(2u16));
         let duct_params = DuctDseParams::default();
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &duct_params)
-            .expect("builder must succeed")
-            .expect("typed config must be present");
+            .expect("builder must succeed");
         let cfg: GasFurnaceConfig = ec.typed().expect("must deserialize to GasFurnaceConfig");
         assert_eq!(
             cfg.zone_id,
@@ -5657,8 +5769,7 @@ mod tests {
         params.insert("zone_id".to_string(), json!(2u16));
         let duct_params = DuctDseParams::default();
         let ec = try_build_central_ac_config("Air Conditioner", &params, &duct_params)
-            .expect("typed config must be present")
-            .unwrap();
+            .expect("typed config must be present");
         let cfg: CentralAirConditionerConfig = ec
             .typed()
             .expect("must deserialize to CentralAirConditionerConfig");
@@ -5680,7 +5791,6 @@ mod tests {
         let ec = try_build_heat_pump_heater_config("ASHP Heater", &params, &duct_params, false)
             .expect("typed config must be present");
         let cfg: HeatPumpHeaterConfig = ec
-            .expect("equipment config should be present")
             .typed()
             .expect("must deserialize to HeatPumpHeaterConfig");
         assert_eq!(
@@ -5701,7 +5811,6 @@ mod tests {
         let ec = try_build_heat_pump_cooler_config("ASHP Cooler", &params, &duct_params, false)
             .expect("typed config must be present");
         let cfg: HeatPumpCoolerConfig = ec
-            .expect("equipment config should be present")
             .typed()
             .expect("must deserialize to HeatPumpCoolerConfig");
         assert_eq!(
@@ -6082,8 +6191,7 @@ mod tests {
         );
 
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &DuctDseParams::default())
-            .expect("builder must not error")
-            .expect("builder must produce a typed config");
+            .expect("builder must not error");
 
         let reconciliations = ec
             .setpoints_reconciled
@@ -6107,8 +6215,7 @@ mod tests {
         params.insert("fan_power_w".to_string(), json!(0.0));
 
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &DuctDseParams::default())
-            .expect("builder must not error")
-            .expect("builder must produce a typed config");
+            .expect("builder must not error");
 
         assert!(
             ec.setpoints_reconciled.is_none(),
@@ -6174,8 +6281,7 @@ mod tests {
         params.insert("fan_power_w".to_string(), json!(0.0));
 
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &DuctDseParams::default())
-            .expect("try_build_gas_furnace_config must not error with AFUE and capacity")
-            .expect("try_build_gas_furnace_config must produce a typed config");
+            .expect("try_build_gas_furnace_config must not error with AFUE and capacity");
 
         let typed_cfg: GasFurnaceConfig = ec
             .typed()
@@ -6230,8 +6336,7 @@ mod tests {
         params.insert("zone_id".to_string(), json!(1));
 
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
-            .expect("try_build_central_ac_config must succeed with SEER and capacity")
-            .unwrap();
+            .expect("try_build_central_ac_config must succeed with SEER and capacity");
 
         let typed_cfg: CentralAirConditionerConfig = ec
             .typed()
@@ -6397,8 +6502,7 @@ mod tests {
         apply_multispeed_furnace_parameters(&mut params, &defaults, "Gas Furnace");
 
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &DuctDseParams::default())
-            .expect("must not error for 2-speed gas furnace")
-            .expect("must build config for 2-speed gas furnace");
+            .expect("must not error for 2-speed gas furnace");
 
         use hares_equipment::hvac::heating_config::GasFurnaceConfig;
         let cfg: GasFurnaceConfig = ec.typed().expect("must deserialize to GasFurnaceConfig");
@@ -6593,10 +6697,7 @@ mod tests {
         .expect("MSHP heater typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpHeaterConfig;
-        let cfg: HeatPumpHeaterConfig = ec
-            .expect("equipment config should be present")
-            .typed()
-            .expect("typed heater config");
+        let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
         assert!(cfg.common.is_mini_split);
         assert_eq!(cfg.common.number_of_speeds, 4);
     }
@@ -6617,10 +6718,7 @@ mod tests {
         .expect("MSHP heater typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpHeaterConfig;
-        let cfg: HeatPumpHeaterConfig = ec
-            .expect("equipment config should be present")
-            .typed()
-            .expect("typed heater config");
+        let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
         assert!(cfg.common.is_mini_split);
         assert_eq!(cfg.common.number_of_speeds, 4);
     }
@@ -7380,5 +7478,229 @@ mod tests {
         let scaled_caps = scale_mshp_cooler_capacity_ratios_for_seer(25.0, &caps_1);
         // Single element = last element = max speed → stays at 1.0
         assert!((scaled_caps[0] - 1.0).abs() < 1e-9);
+    }
+
+    /// A required input a builder cannot find is `MissingField` naming the
+    /// HPXML element, never a silent "no typed config" outcome: a spec
+    /// silently left raw would run its defaults with the input's value
+    /// nowhere in the error log.
+    #[test]
+    fn hvac_builder_missing_input_names_the_element() {
+        let duct_params = DuctDseParams::default();
+        let ac_params = Map::from_iter([
+            ("cooling_capacity_w".to_string(), json!(12_000.0)),
+            ("zone_id".to_string(), json!(2u16)),
+        ]);
+        let err = try_build_central_ac_config("Air Conditioner", &ac_params, &duct_params)
+            .expect_err("an Air Conditioner without SEER or EER is a MissingField");
+        assert!(
+            matches!(&err, HpxmlError::MissingField { path, .. } if *path == "CoolingSystem/AnnualCoolingEfficiency"),
+            "expected MissingField naming the efficiency element, got: {err}"
+        );
+
+        let room_params = Map::from_iter([
+            ("cooling_capacity_w".to_string(), json!(5_000.0)),
+            ("zone_id".to_string(), json!(3u16)),
+        ]);
+        let err = try_build_room_ac_config("Room AC", &room_params)
+            .expect_err("a Room AC without EER is a MissingField");
+        assert!(
+            matches!(&err, HpxmlError::MissingField { path, .. } if *path == "CoolingSystem/AnnualCoolingEfficiency"),
+            "expected MissingField naming the efficiency element, got: {err}"
+        );
+
+        let furnace_params = Map::from_iter([
+            ("efficiency_cop".to_string(), json!(1.0)),
+            ("zone_id".to_string(), json!(2u16)),
+        ]);
+        let err = try_build_electric_furnace_config(
+            "Electric Furnace",
+            &furnace_params,
+            &duct_params,
+        )
+        .expect_err(
+            "an Electric Furnace without a capacity and without autosize_heating is a MissingField",
+        );
+        assert!(
+            matches!(&err, HpxmlError::MissingField { path, .. } if *path == "HeatingSystem/HeatingCapacity"),
+            "expected MissingField naming the capacity element, got: {err}"
+        );
+    }
+
+    /// A rebuild error is the builder's own named error, not the generic
+    /// rebuild message: the dispatch's former `None` → `rebuild_failed`
+    /// mapping (which swallowed the missing-input name) is gone, and a
+    /// rebuild that fails construction carries the element and cause.
+    #[test]
+    fn hvac_typed_config_rebuild_error_fails_construction() {
+        let duct_params = DuctDseParams::default();
+        for (name, kind, params, needle) in [
+            (
+                "Air Conditioner",
+                "Central AC",
+                json!({
+                    "cooling_capacity_w": 12_000.0,
+                    "zone_id": 2,
+                }),
+                "CoolingSystem/AnnualCoolingEfficiency",
+            ),
+            (
+                "Room AC",
+                "Room AC",
+                json!({
+                    "cooling_capacity_w": 5_000.0,
+                    "zone_id": 3,
+                }),
+                "CoolingSystem/AnnualCoolingEfficiency",
+            ),
+            (
+                "Electric Furnace",
+                "Electric Furnace",
+                json!({
+                    "efficiency_cop": 1.0,
+                    "zone_id": 2,
+                }),
+                "HeatingSystem/HeatingCapacity",
+            ),
+        ] {
+            let params: Map<String, Value> = params.as_object().cloned().unwrap();
+            let err = rebuild_hvac_typed_config(name, &params, &duct_params)
+                .expect_err("the rebuild propagates the builder's named error");
+            let message = err.to_string();
+            assert!(
+                message.contains(kind) && message.contains(needle),
+                "the rebuild's error names the equipment and the missing element, got: {message}"
+            );
+        }
+
+        // The unknown-name error names the name (the dispatch's own arm).
+        let err = rebuild_hvac_typed_config("Not An Equipment", &Map::new(), &duct_params)
+            .expect_err("an unrecognized name is an error naming it");
+        assert!(
+            err.to_string().contains("Not An Equipment"),
+            "the error names the equipment, got: {err}"
+        );
+    }
+
+    /// A missing capacity is "typed config pending autosizing" only when the
+    /// spec is flagged for autosizing: the resolver maps a capacity
+    /// `MissingField` to a pending spec when `autosize_heating` is set, and
+    /// a missing input autosizing cannot supply (the efficiency) is an error.
+    #[test]
+    fn missing_capacity_is_pending_only_when_autosizing() {
+        let mut building = empty_building(vec![conditioned_zone()]);
+        building.details_xml = XmlNode {
+            name: String::new(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![XmlNode {
+                name: "Systems".into(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![XmlNode {
+                    name: "HVAC".into(),
+                    attrs: HashMap::new(),
+                    text: String::new(),
+                    children: vec![electric_furnace_xml(None, Some("1.0"))],
+                }],
+            }],
+        };
+
+        let defaults = DefaultsStore::empty();
+        let mut specs = Vec::new();
+        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+            .expect("the flagged furnace stays pending for autosizing");
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Electric Furnace")
+            .expect("must resolve Electric Furnace");
+        assert!(
+            spec.typed_config.is_none() && spec.parameters.contains_key("autosize_heating"),
+            "the capacity MissingField maps to a pending spec under the autosize flag"
+        );
+
+        let mut building = empty_building(vec![conditioned_zone()]);
+        building.details_xml = XmlNode {
+            name: String::new(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![XmlNode {
+                name: "Systems".into(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![XmlNode {
+                    name: "HVAC".into(),
+                    attrs: HashMap::new(),
+                    text: String::new(),
+                    children: vec![electric_furnace_xml(Some("36000"), None)],
+                }],
+            }],
+        };
+        let err = resolve_hvac(
+            &building,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .expect_err("a missing efficiency is not a capacity autosizing supplies");
+        assert!(
+            matches!(&err, HpxmlError::MissingField { path, .. } if *path == "HeatingSystem/AnnualHeatingEfficiency"),
+            "expected MissingField naming the efficiency element, got: {err}"
+        );
+    }
+
+    fn electric_furnace_xml(capacity_btu_h: Option<&str>, cop: Option<&str>) -> XmlNode {
+        let mut children = vec![XmlNode {
+            name: "HeatingSystemType".into(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![XmlNode {
+                name: "Furnace".into(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![],
+            }],
+        }];
+        children.push(XmlNode {
+            name: "HeatingSystemFuel".into(),
+            attrs: HashMap::new(),
+            text: "electricity".into(),
+            children: vec![],
+        });
+        if let Some(capacity) = capacity_btu_h {
+            children.push(XmlNode {
+                name: "HeatingCapacity".into(),
+                attrs: HashMap::new(),
+                text: capacity.into(),
+                children: vec![],
+            });
+        }
+        if let Some(cop) = cop {
+            children.push(XmlNode {
+                name: "AnnualHeatingEfficiency".into(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![
+                    XmlNode {
+                        name: "Units".into(),
+                        attrs: HashMap::new(),
+                        text: "COP".into(),
+                        children: vec![],
+                    },
+                    XmlNode {
+                        name: "Value".into(),
+                        attrs: HashMap::new(),
+                        text: cop.into(),
+                        children: vec![],
+                    },
+                ],
+            });
+        }
+        XmlNode {
+            name: "HeatingSystem".into(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children,
+        }
     }
 }

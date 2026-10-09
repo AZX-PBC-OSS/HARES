@@ -378,7 +378,7 @@ impl GasWH {
 
         self.flue_loss_fraction = c.flue_loss_fraction.unwrap_or(DEFAULT_FLUE_LOSS_FRACTION);
 
-        // Fallback chain for burner efficiency:
+        // Efficiency precedence for the burner:
         // 1. conversion_efficiency — the physically meaningful parameter (direct use).
         // 2. energy_factor — pre-2015 EF test procedure value (direct use).
         // 3. uniform_energy_factor — post-2015 UEF test procedure value;
@@ -388,7 +388,9 @@ impl GasWH {
         //    UEF values are systematically higher than EF; raw UEF used as
         //    burner efficiency overestimates efficiency by 1-3% for typical
         //    gas storage water heaters.
-        // 4. DEFAULT_BURNER_EFFICIENCY (0.78) — a plausible gas WH efficiency.
+        // A config with none of the three is a construction error: the
+        // built-in 0.78 it used to fall back to would silently re-rate the
+        // burner.
         let (efficiency, source) = if let Some(ce) = c.conversion_efficiency {
             (ce, 1.0)
         } else if let Some(ef) = c.energy_factor {
@@ -397,7 +399,13 @@ impl GasWH {
             let ef = UEF_TO_EF_GAS_SLOPE * uef + UEF_TO_EF_GAS_INTERCEPT;
             (ef * c.performance_adjustment.unwrap_or(1.0), 3.0)
         } else {
-            (DEFAULT_BURNER_EFFICIENCY, 0.0)
+            return Err(hares_types::HaresError::Equipment(format!(
+                "Gas Water Heater '{}': its config carries no efficiency field \
+                 (conversion_efficiency, energy_factor, or uniform_energy_factor); \
+                 the burner efficiency is a physical input and no default may \
+                 stand in for it",
+                config.name
+            )));
         };
 
         // source: 0=Default, 1=ConversionEfficiency, 2=EnergyFactor, 3=UniformEnergyFactor
@@ -1145,6 +1153,7 @@ mod tests {
         ZoneState, telemetry_keys as tk,
     };
 
+    use super::DEFAULT_BURNER_EFFICIENCY;
     use super::GasWH;
     use crate::{Equipment, EquipmentConfig};
     use hares_types::AmbientLocation;
@@ -1226,7 +1235,7 @@ mod tests {
                 zone_type: None,
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
-                conversion_efficiency: None,
+                conversion_efficiency: Some(DEFAULT_BURNER_EFFICIENCY),
                 fixture_delivery_temp_c: None,
                 hot_draw_temp_c: None,
                 pilot_fraction_to_tank: None,
@@ -2412,26 +2421,22 @@ mod tests {
     }
 
     #[test]
-    fn default_efficiency_source_is_zero() {
-        // When no efficiency inputs are provided, source should be 0 (Default).
+    fn gas_water_heater_without_efficiency_is_an_error() {
+        // When no efficiency input is provided, construction fails naming
+        // the water heater: the built-in 0.78 it used to fall back to would
+        // silently re-rate the burner.
         let cfg = config_with_extras(&[
             ("conversion_efficiency", None),
             ("energy_factor", None),
             ("uniform_energy_factor", None),
         ]);
         let mut eq = GasWH::new(cfg.clone());
-        eq.init(&cfg, &env(21.0)).unwrap();
-
+        let err = eq
+            .init(&cfg, &env(21.0))
+            .expect_err("a gas water heater with no efficiency field is a construction error");
         assert!(
-            (eq.burner_efficiency_constant - super::DEFAULT_BURNER_EFFICIENCY).abs() < 1e-9,
-            "fallback should use DEFAULT_BURNER_EFFICIENCY"
-        );
-        assert_eq!(
-            eq.telemetry()
-                .get(tk::BURNER_EFFICIENCY_SOURCE)
-                .unwrap_or(-1.0),
-            0.0,
-            "source must be 0 (Default)"
+            err.to_string().contains("GWH"),
+            "the error names the water heater, got: {err}"
         );
     }
 
@@ -2683,7 +2688,7 @@ mod tests {
                 zone_type: Some(zone_type.to_string()),
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
-                conversion_efficiency: None,
+                conversion_efficiency: Some(DEFAULT_BURNER_EFFICIENCY),
                 fixture_delivery_temp_c: None,
                 hot_draw_temp_c: None,
                 pilot_fraction_to_tank: None,

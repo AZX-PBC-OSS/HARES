@@ -59,6 +59,7 @@ pub enum ConfigError {
 
 /// Simulation configuration controlling temporal loop, output, and RNG.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SimulationConfig {
     /// Simulation start time as **local wall-clock time**.
     ///
@@ -153,14 +154,21 @@ fn default_max_consecutive_step_failures() -> u32 {
 
 impl SimulationConfig {
     /// Time resolution in seconds as `u32`, for consumers that require a
-    /// bounded seconds count (metrics calculators). Seconds counts outside
-    /// the `u32` range (negative, or beyond `u32::MAX`) fall back to 3600 —
-    /// the hourly default. Unreachable in practice for parsed configs:
-    /// `from_toml` validation rejects non-positive resolutions and
-    /// simulations never span centuries.
-    #[must_use]
-    pub fn time_res_secs_u32(&self) -> u32 {
-        u32::try_from(self.time_res.num_seconds()).unwrap_or(3600)
+    /// bounded seconds count (metrics calculators).
+    ///
+    /// # Errors
+    ///
+    /// A seconds count outside the `u32` range (negative, or beyond
+    /// `u32::MAX`) is an error naming the resolution: falling back to the
+    /// 3600 s default would silently rescale every derived metric.
+    pub fn time_res_secs_u32(&self) -> Result<u32, ConfigError> {
+        u32::try_from(self.time_res.num_seconds()).map_err(|_| {
+            ConfigError::Validation(format!(
+                "time_res {} s is outside the u32 seconds range the metrics \
+                 calculators require",
+                self.time_res.num_seconds()
+            ))
+        })
     }
 
     /// Parse and validate a `SimulationConfig` from a TOML string.
@@ -551,6 +559,50 @@ duration = 3600
         assert_eq!(
             cfg.output_path, round_tripped.output_path,
             "None OutputPath does not round-trip"
+        );
+    }
+
+    #[test]
+    fn simulation_config_rejects_unknown_key() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00+00:00"
+duration = 3600
+output_verboisty = 3
+"#;
+        let err = SimulationConfig::from_toml(toml)
+            .expect_err("an unknown key is a typed error, not a silently ignored one");
+        assert!(
+            err.to_string().contains("output_verboisty"),
+            "the error must name the key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn time_res_beyond_u32_seconds_is_an_error() {
+        let cfg = SimulationConfig {
+            start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                .expect("start time parses"),
+            duration: Duration::seconds(i64::from(u32::MAX) * 2),
+            time_res: Duration::seconds(i64::from(u32::MAX) + 1),
+            output_verbosity: 0,
+            output_path: None,
+            write_output: false,
+            output_format: OutputFormat::Csv,
+            output_chunk_size: 10_000,
+            setpoint_deadband_c: None,
+            master_seed: 0,
+            civil_timezone: None,
+            site_location: SiteLocationOverride::default(),
+            retain_batches: false,
+            rotation: RotationPolicy::None,
+            max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        };
+        let err = cfg
+            .time_res_secs_u32()
+            .expect_err("a resolution beyond u32 seconds is an error, not a 3600 s fallback");
+        assert!(
+            err.to_string().contains("time_res"),
+            "the error must name the resolution, got: {err}"
         );
     }
 }

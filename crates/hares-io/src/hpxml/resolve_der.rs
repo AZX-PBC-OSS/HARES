@@ -15,6 +15,9 @@ use crate::defaults::DefaultsStore;
 /// kBtu → kWh: 1 kBtu(IT) = 0.293_071_07 kWh exactly.
 const KBTU_TO_KWH: f64 = 0.293_071_07;
 
+/// SAE J1772 AC Level 2 maximum charging power (kW): 80 A at 240 V.
+const EV_AC_LEVEL_2_MAX_KW: f64 = 19.2;
+
 /// The array azimuth: `ArrayAzimuth`, or else the azimuth OS-HPXML derives
 /// from `ArrayOrientation` (`defaults.rb` `apply_pv_systems` through
 /// `get_azimuth_from_orientation`), recorded as a warning naming the array.
@@ -259,6 +262,20 @@ pub(super) fn resolve_ev(
                     "maximum charging power (kW) is required to size the EVSE; no silent default permitted",
             }
         })?;
+        // SAE J1772 AC Level 2 tops out at 19.2 kW; anything above is DC
+        // power (or a W/kW unit mixup) misread as an AC level, which would
+        // size an EVSE the vehicle can never draw.
+        if max_charging_power_kw > EV_AC_LEVEL_2_MAX_KW {
+            return Err(HpxmlError::InvalidField {
+                path: "ElectricVehicle/MaxChargingPower",
+                system_kind: "EV",
+                system_id: ev_id,
+                value_received: format!("{max_charging_power_kw} kW"),
+                reason: "exceeds the SAE J1772 AC Level 2 maximum of 19.2 kW; \
+                         a charging power above it is DC (or a unit mixup) and \
+                         cannot size an AC EVSE",
+            });
+        }
         let cfg = EvConfig {
             equipment_id: None,
             capacity_kwh,
@@ -433,6 +450,49 @@ mod tests {
             (cfg.max_charge_kw - 5.0).abs() < 1e-9,
             "RatedPowerOutput=5000 W must parse as max_charge_kw=5.0 kW, got {}",
             cfg.max_charge_kw
+        );
+    }
+
+    /// A charging power above the SAE J1772 AC Level 2 maximum is an error
+    /// naming the value and the kW unit: DC fast charge power read as an AC
+    /// level would silently size an EVSE the vehicle can never draw.
+    #[test]
+    fn ev_max_charging_power_above_level_2_is_rejected() {
+        let xml = r#"
+            <HPXML>
+              <Building>
+                <BuildingDetails>
+                  <Systems>
+                    <ElectricVehicles>
+                      <ElectricVehicle>
+                        <SystemIdentifier id="ev1"/>
+                        <BatteryCapacity>
+                          <Units>kWh</Units>
+                          <Value>80</Value>
+                        </BatteryCapacity>
+                        <MaxChargingPower>11500</MaxChargingPower>
+                      </ElectricVehicle>
+                    </ElectricVehicles>
+                  </Systems>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("XML must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("details must exist");
+        let mut specs = Vec::new();
+        let err = resolve_ev(details, &DefaultsStore::empty(), &mut specs)
+            .expect_err("a charging power above the AC Level 2 maximum is rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("11500") && message.contains("kW"),
+            "the error names the value and the kW unit, got: {message}"
+        );
+        assert!(
+            message.contains("19.2"),
+            "the error names the limit, got: {message}"
         );
     }
 }

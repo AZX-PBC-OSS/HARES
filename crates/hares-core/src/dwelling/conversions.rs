@@ -772,6 +772,7 @@ fn land_spec_parameters(
         if key.as_str() == hares_equipment::config::KEY_EQUIPMENT_ID {
             continue;
         }
+        reject_shadowed_wh_efficiency(type_name, landed, key, display_name)?;
         let reads =
             hares_equipment::typed_payload_reads(type_name, landed, key, value).map_err(|err| {
                 HaresError::Equipment(format!(
@@ -1267,6 +1268,7 @@ fn apply_typed_overrides(
     if let Some((source, wildcard)) = layers.wildcard {
         for (key, value) in wildcard {
             reject_reserved_key(source, key, equipment)?;
+            reject_shadowed_wh_efficiency(type_name, merged, key, equipment)?;
             if key == RESERVED_ZIP_OVERRIDE
                 || typed_reads(type_name, merged, key, value, equipment)?
             {
@@ -1276,7 +1278,35 @@ fn apply_typed_overrides(
     }
     for (key, value) in layers.own.into_iter().flatten() {
         reject_reserved_key(equipment, key, equipment)?;
+        reject_shadowed_wh_efficiency(type_name, merged, key, equipment)?;
         nested_insert(merged, key, value);
+    }
+    Ok(())
+}
+
+/// The gas water heater reads `conversion_efficiency` ahead of the EF/UEF
+/// test-procedure fields, so an override of those could never apply on a
+/// config that carries the conversion efficiency: it is rejected naming the
+/// field that shadows it instead of being accepted and silently ignored.
+fn reject_shadowed_wh_efficiency(
+    type_name: &str,
+    merged: &Map<String, Value>,
+    key: &str,
+    equipment: &str,
+) -> Result<()> {
+    if type_name != "Gas Water Heater" || (key != "energy_factor" && key != "uniform_energy_factor")
+    {
+        return Ok(());
+    }
+    if merged
+        .get("conversion_efficiency")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(HaresError::Equipment(format!(
+            "equipment '{equipment}': an override of '{key}' cannot apply while the \
+             config carries 'conversion_efficiency', which the gas water heater reads \
+             ahead of '{key}'; override 'conversion_efficiency' or remove it from the config"
+        )));
     }
     Ok(())
 }
@@ -4686,6 +4716,120 @@ mod tests {
                     "{key} = {value}"
                 );
             }
+        }
+    }
+
+    /// The gas water heater reads `conversion_efficiency` ahead of the
+    /// EF/UEF test-procedure fields, so an override of those could never
+    /// apply on a config that carries the conversion efficiency: it is
+    /// rejected naming `conversion_efficiency` instead of being accepted and
+    /// silently ignored.
+    #[test]
+    fn shadowed_energy_factor_override_is_rejected() {
+        let spec = typed_gas_water_heater_spec(Some(0.78));
+        for (layer, overrides) in [
+            (
+                "own",
+                json!({ "Gas Water Heater": { "energy_factor": 0.95 } }),
+            ),
+            ("wildcard", json!({ "all": { "energy_factor": 0.95 } })),
+            (
+                "own uef",
+                json!({ "Gas Water Heater": { "uniform_energy_factor": 0.95 } }),
+            ),
+        ] {
+            let err = merged_equipment_config(&spec, &overrides)
+                .expect_err("the shadowed override is rejected");
+            assert!(
+                err.to_string().contains("conversion_efficiency"),
+                "{layer}: the error names the field that shadows it, got: {err}"
+            );
+        }
+
+        // Without the conversion efficiency the same override applies: the
+        // EF field is the config's own then.
+        let spec = typed_gas_water_heater_spec(None);
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({ "Gas Water Heater": { "energy_factor": 0.95 } }),
+        )
+        .expect("an override of a field the config reads without a shadow applies");
+        let merged_data = match &merged.payload {
+            hares_equipment::ConfigPayload::Typed { data, .. } => data.clone(),
+            other => panic!("typed payload expected, got {other:?}"),
+        };
+        assert_eq!(
+            merged_data.get("energy_factor"),
+            Some(&json!(0.95)),
+            "the override landed on the payload"
+        );
+
+        // The spec-level channel (a caller-built spec's typed_overrides)
+        // rejects the same shadow the same way.
+        let mut spec = typed_gas_water_heater_spec(Some(0.78));
+        spec.typed_overrides
+            .insert("energy_factor".to_string(), json!(0.95));
+        let err = apply_spec_bag_to_typed_config(&mut spec)
+            .expect_err("the spec-level shadowed override is rejected");
+        assert!(
+            err.to_string().contains("conversion_efficiency"),
+            "the error names the field that shadows it, got: {err}"
+        );
+    }
+
+    fn typed_gas_water_heater_spec(conversion_efficiency: Option<f64>) -> hares_io::EquipmentSpec {
+        let cfg = hares_equipment::GasWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: None,
+            fuel_type: FuelType::Gas,
+            tank_volume_m3: Some(0.151),
+            tank_height_m: None,
+            energy_factor: Some(0.6),
+            uniform_energy_factor: None,
+            heating_capacity_w: Some(4_500.0),
+            ua_w_per_k: Some(2.5),
+            setpoint_c: Some(52.0),
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
+            pilot_power_w: None,
+            flue_loss_fraction: None,
+            skin_loss_fraction: None,
+            ignition_type: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            conversion_efficiency,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+            pilot_fraction_to_tank: None,
+            fan_power_w: None,
+        };
+        let typed = hares_equipment::EquipmentConfig::from_typed(
+            "Gas Water Heater".to_string(),
+            "Gas Water Heater".to_string(),
+            cfg,
+        )
+        .expect("the config is well-formed");
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "Gas Water Heater".to_string(),
+            fuel_type: FuelType::Gas,
+            parameters: serde_json::Map::new(),
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: Some(typed),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
         }
     }
 

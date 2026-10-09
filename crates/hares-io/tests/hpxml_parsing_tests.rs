@@ -883,6 +883,8 @@ fn water_heater_setpoint_equipment_resolution_stores_celsius() {
                 <HotWaterTemperature>125.0</HotWaterTemperature>
                 <FuelType>electricity</FuelType>
                 <WaterHeaterType>storage water heater</WaterHeaterType>
+                <EnergyFactor>0.95</EnergyFactor>
+                <TankVolume>50</TankVolume>
             </WaterHeatingSystem>
         </WaterHeating></Systems>"#,
     );
@@ -2383,7 +2385,7 @@ fn every_xsd_boolean_site_uses_the_xs_boolean_reader() {
             "<MechanicalVentilation><VentilationFans><VentilationFan><UsedForSeasonalCoolingLoadReduction>{v}</UsedForSeasonalCoolingLoadReduction><RatedFlowRate>72</RatedFlowRate><FanPower>30</FanPower></VentilationFan></VentilationFans></MechanicalVentilation>"
         ),
         11 => format!(
-            "<WaterHeating><WaterFixture><LowFlow>{v}</LowFlow></WaterFixture><WaterHeatingSystem><WaterHeaterType>storage water heater</WaterHeaterType><FuelType>electricity</FuelType><EnergyFactor>0.95</EnergyFactor></WaterHeatingSystem></WaterHeating>"
+            "<WaterHeating><WaterFixture><LowFlow>{v}</LowFlow></WaterFixture><WaterHeatingSystem><WaterHeaterType>storage water heater</WaterHeaterType><FuelType>electricity</FuelType><EnergyFactor>0.95</EnergyFactor><TankVolume>50</TankVolume></WaterHeatingSystem></WaterHeating>"
         ),
         _ => unreachable!(),
     };

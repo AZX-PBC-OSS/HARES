@@ -149,3 +149,33 @@ fn a_basement_lighting_schedule_that_cannot_be_copied_fails_the_build() {
         "the error names the copy and why it failed, got: {message}"
     );
 }
+
+/// A site UTC offset outside the range a fixed offset can represent is a
+/// construction error naming the value; it never silently becomes UTC.
+#[test]
+fn an_out_of_range_utc_offset_is_a_construction_error() {
+    let mut config = cz2a_config(project_root().join("defaults"));
+    config.sim_config.site_location.utc_offset_h = Some(30.0);
+    let err = DwellingBlueprint::from_config(config)
+        .err()
+        .expect("a 30 h UTC offset cannot become a fixed offset");
+    assert!(
+        err.to_string().contains("30"),
+        "the error names the value, got: {err}"
+    );
+}
+
+/// A non-finite site UTC offset is a construction error naming the value;
+/// it never rounds to zero and silently becomes UTC.
+#[test]
+fn a_non_finite_utc_offset_is_a_construction_error() {
+    let mut config = cz2a_config(project_root().join("defaults"));
+    config.sim_config.site_location.utc_offset_h = Some(f64::NAN);
+    let err = DwellingBlueprint::from_config(config)
+        .err()
+        .expect("a NaN UTC offset cannot become a fixed offset");
+    assert!(
+        err.to_string().contains("NaN"),
+        "the error names the value, got: {err}"
+    );
+}

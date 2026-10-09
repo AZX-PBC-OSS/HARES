@@ -111,15 +111,26 @@ impl DwellingBlueprint {
         building.site.elevation_m = Some(site_location.elevation_m);
         building.site.utc_offset_h = Some(site_location.utc_offset_h);
 
-        let tz_offset = FixedOffset::east_opt((site_location.utc_offset_h * 3600.0).round() as i32)
-            .unwrap_or_else(|| FixedOffset::east_opt(0).expect("UTC offset"));
-        let local_start = config
-            .sim_config
-            .start_time
-            .naive_local()
-            .and_local_timezone(tz_offset)
-            .single()
-            .unwrap_or_else(|| config.sim_config.start_time.with_timezone(&tz_offset));
+        // The offset is a physical site input: an offset the fixed-offset
+        // type cannot represent (beyond ±24 h) or a non-finite one (whose
+        // float→int cast would round to zero and silently become UTC) is a
+        // construction error naming the value.
+        let offset_hours = site_location.utc_offset_h;
+        let offset_secs = offset_hours * 3600.0;
+        if !offset_secs.is_finite() || offset_secs.abs() >= 24.0 * 3600.0 {
+            return Err(HaresError::Dwelling(format!(
+                "site UTC offset {offset_hours} h is not a finite offset within \
+                 ±24 h; the site's offset is a physical input and no UTC \
+                 fallback may stand in for it"
+            )));
+        }
+        let tz_offset = FixedOffset::east_opt(offset_secs.round() as i32)
+            .expect("the offset was checked finite and within ±24 h");
+        // A FixedOffset has no gaps or repeated hours, so a naive-local wall
+        // time converts to exactly one instant at that offset: the
+        // infallible construction (naive UTC + offset).
+        let naive_utc = config.sim_config.start_time.naive_local() - tz_offset;
+        let local_start = DateTime::<FixedOffset>::from_naive_utc_and_offset(naive_utc, tz_offset);
 
         let init_chrono = config
             .initialization_duration

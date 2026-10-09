@@ -432,7 +432,9 @@ fn gas_wh_fuel_not_electricity() {
             zone_type: None,
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
-            conversion_efficiency: None,
+            // Required at init (no default may stand in for it); the value
+            // is the burner fallback the config used to imply.
+            conversion_efficiency: Some(0.78),
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
             pilot_fraction_to_tank: None,
@@ -749,7 +751,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                     zone_type: None,
                     first_hour_rating_m3: None,
                     jacket_r_value_m2_k_w: None,
-                    conversion_efficiency: None,
+                    conversion_efficiency: Some(0.78),
                     fixture_delivery_temp_c: None,
                     hot_draw_temp_c: None,
                     pilot_fraction_to_tank: None,
@@ -816,7 +818,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                     zone_type: None,
                     first_hour_rating_m3: None,
                     jacket_r_value_m2_k_w: None,
-                    conversion_efficiency: None,
+                    conversion_efficiency: Some(0.78),
                     fixture_delivery_temp_c: None,
                     hot_draw_temp_c: None,
                     pilot_fraction_to_tank: None,

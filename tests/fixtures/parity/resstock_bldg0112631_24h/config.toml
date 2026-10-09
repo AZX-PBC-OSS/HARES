@@ -1,3 +1,5 @@
+bldg_id = 1
+
 [simulation]
 start_time = "2019-05-05T00:00:00-07:00"
 duration = 86400
@@ -5,8 +7,6 @@ time_res = 60
 output_verbosity = 3
 output_chunk_size = 1440
 master_seed = 0
-
-bldg_id = 2
 
 # The indoor temperature HARES starts this window from (its seeded draw
 # within half the deadband, master_seed 0), to which the reference

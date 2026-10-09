@@ -163,6 +163,9 @@ class TestTypedSpecBuilderConstructions:
                 name="Gas Water Heater",
                 autosize=False,
                 tank_volume_m3=0.3,
+                # Required at init (no efficiency default may stand in for
+                # the burner).
+                uniform_energy_factor=0.9,
                 heating_capacity_w=4000.0,
                 avg_water_draw_l_per_day=200.0,
                 zone_id=1,

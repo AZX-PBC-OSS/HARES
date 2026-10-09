@@ -428,7 +428,9 @@ fn compute_metrics_from_batches(
     );
 
     let schema = batches[0].schema();
-    let time_res_secs = sim_config.time_res_secs_u32();
+    let time_res_secs = sim_config.time_res_secs_u32().map_err(|err| {
+        HaresError::InvalidState(format!("metrics calculator time resolution: {err}"))
+    })?;
 
     // A calculator that cannot initialize is a failed computation, not
     // zeroed metrics: the run's numbers are either computed or the run

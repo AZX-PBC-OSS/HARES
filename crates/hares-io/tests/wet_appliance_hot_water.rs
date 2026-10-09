@@ -117,6 +117,8 @@ const OCCUPANCY_XML: &str = r#"<Building>
           <SystemIdentifier id="wh"/>
           <FuelType>electricity</FuelType>
           <WaterHeaterType>storage water heater</WaterHeaterType>
+          <EnergyFactor>0.95</EnergyFactor>
+          <TankVolume>50</TankVolume>
         </WaterHeatingSystem>
       </WaterHeating>
       <Appliances>

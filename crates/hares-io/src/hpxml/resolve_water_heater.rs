@@ -260,16 +260,25 @@ pub(super) fn resolve_water_heaters(
             heating_capacity_btu_hr,
             first_hour_rating_gal,
         };
-        let ua_result = match ua_from_energy_factor(&ua_inputs) {
-            Ok(result) => result,
-            Err(err) => {
-                tracing::warn!(
-                    water_heater_type = %wh_type,
-                    %err,
-                    "UA calculation failed; equipment model will use default"
-                );
-                None
-            }
+        // A UA calculation failure is a construction error naming the water
+        // heater: the tank's UA is a physical input, and the default the
+        // failure used to fall back to would silently re-rate the tank. An
+        // indirect tank is exempt: its water-side efficiency is the boiler's
+        // (the loop wiring carries it), so no EF→UA derivation applies and
+        // the tank model's own UA default stands.
+        let ua_result = if name == "Indirect Tank" {
+            None
+        } else {
+            ua_from_energy_factor(&ua_inputs).map_err(|err| {
+                super::HpxmlError::Parse(
+                    format!(
+                        "water heater '{}': UA calculation failed: {err}; the tank's UA \
+                         is a physical input and no default may stand in for it",
+                        element_id(wh).unwrap_or_else(|| "unknown".to_string())
+                    )
+                    .into(),
+                )
+            })?
         };
         let ua_w_per_k = ua_result.map(|r| r.ua_w_per_k);
 
@@ -2322,6 +2331,7 @@ mod tests {
                       <WaterHeaterType>storage water heater</WaterHeaterType>
                       <TankVolume>40</TankVolume>
                       <EnergyFactor>0.59</EnergyFactor>
+                      <HeatingCapacity>36000</HeatingCapacity>
 {ignition_elem}
                     </WaterHeatingSystem>
                   </WaterHeating>
@@ -2402,6 +2412,7 @@ mod tests {
                       <WaterHeaterType>storage water heater</WaterHeaterType>
                       <TankVolume>40</TankVolume>
                       <EnergyFactor>0.59</EnergyFactor>
+                      <HeatingCapacity>36000</HeatingCapacity>
                       {pilot_power_elem}
                     </WaterHeatingSystem>
                   </WaterHeating>
@@ -2490,6 +2501,7 @@ mod tests {
                       <WaterHeaterType>storage water heater</WaterHeaterType>
                       <TankVolume>40</TankVolume>
                       <EnergyFactor>0.59</EnergyFactor>
+                      <HeatingCapacity>36000</HeatingCapacity>
 {extension}
                     </WaterHeatingSystem>
                   </WaterHeating>
@@ -3073,5 +3085,50 @@ mod tests {
             .expect("xml");
             parse_avg_water_draw_and_bedrooms(&details, None).map(|(draw, _)| draw)
         });
+    }
+
+    /// A UA calculation failure fails the water heater's resolution naming
+    /// the water heater: a default UA would silently re-rate the tank.
+    #[test]
+    fn water_heater_ua_failure_is_an_error() {
+        // A gas storage WH whose UA derivation needs an efficiency and is
+        // given none: the derivation's own error names the cause.
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh_noua"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>storage water heater</WaterHeaterType>
+                      <TankVolume>40</TankVolume>
+                      <HeatingCapacity>36000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let building = building_for_test(&root);
+        let mut specs = Vec::new();
+        let err = resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect_err("a UA calculation failure fails the resolution");
+        assert!(
+            err.to_string().contains("wh_noua"),
+            "the error names the water heater, got: {err}"
+        );
     }
 }

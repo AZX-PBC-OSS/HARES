@@ -1215,8 +1215,11 @@ impl Dwelling {
         // numbers are either computed or the change is refused), it does
         // not zero the metrics behind a warning.
         if !self.retain_batches {
+            let time_res_secs = self.sim_config.time_res_secs_u32().map_err(|err| {
+                HaresError::InvalidState(format!("metrics calculator time resolution: {err}"))
+            })?;
             recorder
-                .enable_metrics(self.sim_config.time_res_secs_u32(), &self.sim_config)
+                .enable_metrics(time_res_secs, &self.sim_config)
                 .map_err(|err| {
                     HaresError::InvalidState(format!("metrics calculator init failed: {err}"))
                 })?;

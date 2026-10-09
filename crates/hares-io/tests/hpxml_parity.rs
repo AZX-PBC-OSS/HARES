@@ -1037,6 +1037,8 @@ fn propane_storage_water_heater_resolves_and_inits_as_propane() {
                 <WaterHeaterType>storage water heater</WaterHeaterType>
                 <Location>conditioned space</Location>
                 <HotWaterTemperature>125.0</HotWaterTemperature>
+                <EnergyFactor>0.59</EnergyFactor>
+                <HeatingCapacity>36000</HeatingCapacity>
             </WaterHeatingSystem>
         </WaterHeating></Systems>"#,
     );
@@ -1122,6 +1124,7 @@ fn hpwh_heating_capacity_populates_backup_element_power() {
                 <WaterHeaterType>heat pump water heater</WaterHeaterType>
                 <HotWaterTemperature>125</HotWaterTemperature>
                 <EnergyFactor>0.92</EnergyFactor>
+                <TankVolume>50</TankVolume>
                 <HeatingCapacity>4500</HeatingCapacity>
             </WaterHeatingSystem>
         </WaterHeating></Systems>"#,

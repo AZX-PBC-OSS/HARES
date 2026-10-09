@@ -136,6 +136,7 @@ fn default_max_consecutive_step_failures() -> u32 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticGeometryConfig {
     pub(crate) floor_area_m2: f64,
     pub(crate) zone_volume_m3: f64,
@@ -4979,5 +4980,43 @@ shgc = 0.7
                 );
             }
         }
+    }
+
+    /// `wall_area_m2` was a parsed-but-never-read geometry key kept "for
+    /// backward compatibility"; its removal means a geometry block that
+    /// still carries it is a typed error naming the key, not a silently
+    /// ignored one.
+    #[test]
+    fn synthetic_geometry_rejects_wall_area_m2() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 100.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = 10.0
+diurnal_amplitude_c = 10.0
+"#;
+        let err = toml::from_str::<SyntheticTomlConfig>(toml)
+            .expect_err("a removed geometry key is an error naming the key");
+        assert!(
+            err.to_string().contains("wall_area_m2"),
+            "the error names the key, got: {err}"
+        );
     }
 }

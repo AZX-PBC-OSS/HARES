@@ -1430,11 +1430,12 @@ mod tests {
         assert_eq!(typed.hours_in_operation, Some(8.0));
     }
 
-    /// Gas WH without HeatingCapacity: no usable numeric ua_w_per_k override
-    /// should be emitted. A serialized `null` is acceptable, but it must not
-    /// become a real UA value that overrides the equipment default.
+    /// A gas storage WH without HeatingCapacity: the EF→UA conversion cannot
+    /// run and the resolution fails naming the water heater: the tank's UA
+    /// is a physical input and the equipment model's built-in default must
+    /// never stand in for a failed derivation.
     #[test]
-    fn gas_wh_without_capacity_omits_ua_w_per_k() {
+    fn gas_wh_without_capacity_is_a_ua_error() {
         let xml = minimal_wh_xml(
             r#"<WaterHeating>
           <WaterHeatingSystem>
@@ -1446,21 +1447,13 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-            .expect("resolve_equipment");
-        let wh = specs
-            .iter()
-            .find(|s| s.name == "Gas Water Heater")
-            .expect("WH spec must be present");
-
-        // Without HeatingCapacity the gas EF→UA formula cannot be evaluated;
-        // ua_w_per_k must be absent so the equipment model uses its built-in default.
+        let err = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
+            .expect_err(
+                "a gas storage WH whose EF→UA conversion has no HeatingCapacity fails resolution",
+            );
         assert!(
-            wh.parameters
-                .get("ua_w_per_k")
-                .and_then(|v| v.as_f64())
-                .is_none(),
-            "gas WH without capacity must not produce a usable numeric ua_w_per_k override"
+            err.to_string().contains("UA calculation failed"),
+            "the error names the UA failure, got: {err}"
         );
     }
 
@@ -1794,7 +1787,9 @@ mod tests {
             r#"<CoolingSystem>
               <CoolingSystemType>room air conditioner</CoolingSystemType>
               <CoolingCapacity>12000</CoolingCapacity>
-              <SEER>10</SEER>
+              <AnnualCoolingEfficiency>
+                <Units>EER</Units><Value>10</Value>
+              </AnnualCoolingEfficiency>
             </CoolingSystem>
             <HVACControl>
               <SetpointTempCoolingSeason>75</SetpointTempCoolingSeason>
@@ -2522,6 +2517,8 @@ mod tests {
                 <FuelType>natural gas</FuelType>
                 <WaterHeaterType>storage water heater</WaterHeaterType>
                 <TankVolume>50</TankVolume>
+                <EnergyFactor>0.59</EnergyFactor>
+                <HeatingCapacity>36000</HeatingCapacity>
               </WaterHeatingSystem>
             </WaterHeating>"#,
         );
