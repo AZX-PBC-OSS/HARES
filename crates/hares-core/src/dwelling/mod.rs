@@ -12390,9 +12390,8 @@ occupancy = 1.0
     /// 70% convective). Source: E+ I/O Reference §Group-InternalGains,
     /// OtherEquipment object; E+ IDD V9-6-0-Energy+.idd N5 field default=0 but
     /// BESTEST IDF overrides to 0.3. This matches E+ v9.6 BESTEST test reference
-    /// value. The prior claim of 60% in audit documents was a misattribution
-    /// (the 60% figure refers to occupant sensible gain conventions, not
-    /// OtherEquipment); documented in docs/findings/consolidated.md §1.
+    /// value. The 60% figure refers to occupant sensible gain conventions,
+    /// not to `OtherEquipment`.
     #[test]
     fn bestest_600_internal_gains_radiant_fraction_matches_energyplus() {
         let base_path =

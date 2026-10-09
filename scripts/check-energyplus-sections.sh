@@ -16,10 +16,7 @@ TARGET_DIRS=("crates" "tests" "docs")
 # pinned to the provenance docs they exist for and every production
 # directory stays scanned.
 EXEMPT_PRUNE=(
-    -path 'docs/reviews'
-    -o -path 'docs/tickets'
-    -o -path 'docs/findings'
-    -o -path 'docs/eplus'
+    -path 'docs/eplus'
     -o -name vendors
 )
 FAILED=0

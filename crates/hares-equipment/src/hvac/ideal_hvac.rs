@@ -676,7 +676,7 @@ impl Equipment for IdealHvac {
             }
         };
 
-        // R3: Minimum capacity.
+        // Minimum capacity.
         // OCHRE: clamps to capacity_min in ideal mode (never delivers less than
         // minimum compressor speed). Non-ideal mode forces Deadband (Off).
         // E+ IdealLoadsAirSystem: no min capacity concept; but OCHRE's clamp
@@ -2670,7 +2670,7 @@ mod tests {
 
     #[test]
     fn r3_forced_deadband_in_non_ideal_mode() {
-        // R3 minimum capacity check forces Deadband in non-ideal mode.
+        // The minimum-capacity rule forces Deadband in non-ideal mode.
         // (Ideal mode clamps to min; non-ideal forces off.)
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
@@ -2691,8 +2691,9 @@ mod tests {
         assert_eq!(eq.thermostat_fsm.mode, ThermostatMode::Heating);
         let _heating_start = eq.thermostat_fsm.mode_start_at;
 
-        // Rated capacity delivers 10kW, above the 1kW min → no R3 trigger.
-        // To trigger R3 we'd need cap_ratio < 0.1; just test Deadband path below.
+        // Rated capacity delivers 10kW, above the 1kW min, so the
+        // minimum-capacity rule never triggers. To trigger it we'd need
+        // cap_ratio < 0.1; just test Deadband path below.
         let env60 = env(18.0, 60, 60);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -2710,7 +2711,7 @@ mod tests {
 
     #[test]
     fn r3_forced_deadband_respects_min_off_time_lockout_in_non_ideal() {
-        // R3 min capacity forces Deadband with correct mode_start_at timestamp
+        // The minimum-capacity rule forces Deadband with correct mode_start_at timestamp
         // in non-ideal mode. (Ideal mode clamps to min instead.)
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),

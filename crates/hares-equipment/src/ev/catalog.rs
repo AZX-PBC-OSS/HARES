@@ -116,7 +116,6 @@ pub struct VehicleSpec {
     /// Sourced from fueleconomy.gov combined kWh/100mi ÷ 100 for BEVs,
     /// fueleconomy.gov MPGe → 33.7/MPGe for PHEVs with no kWh/100mi data,
     /// and fueleconomy.gov combined kWh/100mi for PHEVs (electric-only).
-    /// See docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md References.
     pub fuel_economy_kwh_per_mi: f64,
     pub degradation_per_year: f64,
     pub vehicle_type: VehicleType,
@@ -308,7 +307,7 @@ static CATALOG: &[VehicleSpec] = &[
         id: VehicleId::NissanLeaf30,
         label: "Nissan Leaf S 30kWh",
         capacity_kwh: 27.5,
-        max_l2_power_kw: 3.3, // S trim standard OBC: 3.6 kW (3.3 kW net). 6.6 kW OBC is SV/SL trim or Quick Charge Package option. Source: Nissan Leaf specifications, docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 4.
+        max_l2_power_kw: 3.3, // S trim standard OBC: 3.6 kW (3.3 kW net). 6.6 kW OBC is SV/SL trim or Quick Charge Package option. Source: Nissan Leaf specifications.
         dcfc_power_kw: Some(50.0),
         chemistry: BatteryChemistry::Nmc,
         range_miles: 107.0,
@@ -1194,11 +1193,10 @@ mod tests {
         // Each value in the catalog must have a fueleconomy.gov source
         // documented in the inline comment. This test verifies that every
         // vehicle's stored fuel_economy_kwh_per_mi matches the EPA wall-to-wheels
-        // value cited in docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md
-        // and in the fueleconomy.gov inline source comments.
+        // value cited in the fueleconomy.gov inline source comments.
 
         // EPA data: fueleconomy.gov combined kWh/100mi for BEVs,
-        // puedeconomy.gov MPGe → 33.7/MPGe for plug-in hybrids using
+        // fueleconomy.gov MPGe → 33.7/MPGe for plug-in hybrids using
         // the EPA conversion of 33.7 kWh per gallon gasoline equivalent.
         let _epa_kwh_per_gallon: f64 = 33.7;
 
@@ -1255,7 +1253,7 @@ mod tests {
     #[test]
     fn wrangler_4xe_phev_all_electric_range_is_epa_21_mi() {
         // EPA all-electric range for the 2024–2025 Wrangler 4xe PHEV is 21 mi.
-        // Source: fueleconomy.gov; docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 5.
+        // Source: fueleconomy.gov.
         assert_eq!(
             VehicleId::Jeep4xe.spec().range_miles,
             21.0,
@@ -1267,8 +1265,7 @@ mod tests {
     fn mach_e_obc_power_is_11_kw() {
         // Ford Mustang Mach-E onboard charger AC input rating is 11 kW
         // (48A × 240V). Both SR LFP and ER NMC variants use the same OBC.
-        // Source: Wikipedia, EV-Database.org. Confirmed in
-        // docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 3.
+        // Source: Wikipedia, EV-Database.org.
         let sr = VehicleId::FordMacheSr.spec();
         let er = VehicleId::FordMacheEr.spec();
         assert_eq!(sr.max_l2_power_kw, 11.0, "Mach-E SR L2 AC power");
@@ -1280,8 +1277,7 @@ mod tests {
         // Nissan Leaf S 30kWh base trim came standard with a 3.3 kW (3.6 kW)
         // onboard charger. The 6.6 kW charger was standard only on SV and SL
         // trims, or as part of the Quick Charge Package option on the S trim.
-        // Source: Nissan Leaf specifications. Confirmed in
-        // docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 4.
+        // Source: Nissan Leaf specifications.
         let spec = VehicleId::NissanLeaf30.spec();
         assert_eq!(spec.max_l2_power_kw, 3.3, "Nissan Leaf S 30kWh L2 AC power");
     }
@@ -1291,8 +1287,7 @@ mod tests {
         // Toyota RAV4 Prime standard OBC is 6.6 kW for 2022+ model years
         // (all trims) and 2021 XSE. Only the 2021 SE base model had 3.3 kW.
         // 6.6 kW is the most representative default.
-        // Source: Toyota specifications, Wikipedia. Confirmed in
-        // docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 6.
+        // Source: Toyota specifications, Wikipedia.
         let spec = VehicleId::ToyotaRav4Prime.spec();
         assert_eq!(spec.max_l2_power_kw, 6.6, "Toyota RAV4 Prime L2 AC power");
     }

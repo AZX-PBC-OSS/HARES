@@ -1193,8 +1193,7 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
 - **Justification:** class (a). The capacitance scales the zone's
   thermal mass; a Denver site's air is about 17 percent thinner than
   the constant assumes. OCHRE's own infiltration code carries a TODO
-  against the same constant (docs/findings/air_density.md records the
-  investigation).
+  against the same constant.
 - **Measured impact:** a Denver site's capacitance is about 18 percent
   below the constant's (the standard pressure at 1.6 km elevation
   carries a density near 0.99 kg/m³ against 1.2041), so the golden
@@ -1223,9 +1222,7 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
 - **Justification:** class (a). EnergyPlus computes the full exterior
   long-wave balance for windows by iterating on the window's exterior
   surface temperature inside the surface heat balance loop; the
-  T_eff form is the same exchange on the RC network's terms
-  (docs/findings/bestest_rca.md, Root Cause #3, records the
-  investigation and its residual under-correction).
+  T_eff form is the same exchange on the RC network's terms.
 - **Measured impact:** clear-night attic and window cooling the
   free-float BESTEST cases see that OCHRE's windows cannot; the
   case-600/900 bands hold either way and the committed goldens are the

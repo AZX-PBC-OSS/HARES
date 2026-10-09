@@ -66,11 +66,10 @@ conditioned_oracle
 
 .shipwright
 
-docs/eplus/
+docs/eplus/*
+!docs/eplus/section-mapping.md
 docs/hpxml/
 
 .verify*
-
-docs/reviews/_logs/
 
 .workstrees/

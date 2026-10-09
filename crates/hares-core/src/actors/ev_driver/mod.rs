@@ -964,8 +964,8 @@ impl EvDriverActor {
     ///    `max_soc` under the band is the same geometry in the cap
     ///    dimension — the equipment halts charging at the cap while the
     ///    target reads high. Either way, standing down silently disables the
-    ///    backstop the ticket names ("at minimum the range-anxiety backstop
-    ///    charges an empty pack"). `None` target means no target to protect
+    ///    range-anxiety backstop, whose job at minimum is to charge an
+    ///    empty pack. `None` target means no target to protect
     ///    (outside the window, a rate-only plan, an idle hold) and the
     ///    override proceeds to the urgency gate.
     /// 3. An urgency gate, when today's trip is known: the override exists to
@@ -4642,9 +4642,8 @@ mod tests {
     /// it is being driven away from the band. "The band is already covered"
     /// is false on such a step, so the range-anxiety override — whose job is
     /// to top a short pack up to the band — must still fire. Standing down
-    /// silently disables the backstop the ticket names ("at minimum the
-    /// range-anxiety backstop charges an empty pack") on a pack below the
-    /// band.
+    /// silently disables the range-anxiety backstop, whose job at minimum
+    /// is to charge an empty pack, on a pack below the band.
     #[test]
     fn range_anxiety_must_fire_when_strategy_target_is_not_backed_by_charging() {
         let mut actor = make_plugged_in_actor(
@@ -5578,7 +5577,8 @@ mod tests {
 
     // ======= Test gap audit findings =======
 
-    // Finding 5: build_preferences never directly asserted
+    // The installed preferences are asserted directly, not only through
+    // their effect on the resolved action.
     #[test]
     fn build_preferences_tou_aware_installs_three_preferences() {
         let prefs = build_preferences(
@@ -5634,7 +5634,8 @@ mod tests {
         );
     }
 
-    // Finding 6: evaluate_charging path not proven
+    // The plugged-in path is proven end to end: a step updates the
+    // resolved action.
     #[test]
     fn evaluate_charging_updates_last_action() {
         let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
@@ -5660,7 +5661,7 @@ mod tests {
         );
     }
 
-    // Finding 7: Departure override label not pinned
+    // The departure override's resolved action label is pinned.
     #[test]
     fn ev_tou_with_departure_deadline_override_label_pinned() {
         use hares_types::{DayFilter, DepartureConstraint};
@@ -5696,7 +5697,7 @@ mod tests {
         );
     }
 
-    // Finding 8: SocTarget score-driven priority
+    // At a neutral price the SocTarget score alone drives the priority.
     #[test]
     fn tou_neutral_price_soc_target_drives_charging() {
         // Neutral price (between charge and discharge thresholds), no departure
@@ -5763,7 +5764,8 @@ mod tests {
         );
     }
 
-    // Finding 1 (integration): TouAware buffer_hours forces charge
+    // Integration: TouAware's buffer_hours forces charging against the
+    // price optimizer's preference.
     #[test]
     fn ev_tou_aware_buffer_hours_forces_charge() {
         use hares_types::{DayFilter, DepartureConstraint};
@@ -6932,8 +6934,7 @@ mod tests {
                     arrival_reconciliation_count += 1;
                     observed_actuals.push(actual);
                     let drift = (actor.estimated_soc - actual).abs();
-                    // Ticket tolerance is <1% drift; reconciliation is exact,
-                    // so 1e-6 is the meaningful bound.
+                    // Reconciliation is exact, so 1e-6 is the meaningful bound.
                     assert!(
                         drift < 1e-6,
                         "day {day}: after arrival reconciliation, estimated_soc ({}) should equal this day's actual SOC ({actual})",
@@ -7037,8 +7038,8 @@ mod tests {
         use hares_equipment::Equipment;
         use hares_equipment::config::EquipmentConfig;
         use hares_equipment::ev::EvConfig;
-        // Deliberately no `ready_soc`: the ticket's Equipment["EV"] override
-        // sets only `charging_strategy`, which is actor-side (fed through
+        // Deliberately no `ready_soc`: the override sets only
+        // `charging_strategy`, which is actor-side (fed through
         // `Ev::actor_seed()`) and never reaches the equipment's own config.
         let config = EquipmentConfig::from_typed(
             "EV1".to_string(),
@@ -7248,7 +7249,7 @@ mod tests {
         );
     }
 
-    // ======= Actor/equipment integration: the ticket's completion bar =======
+    // ======= Actor/equipment integration: the override and gate behaviours =======
 
     /// Test env at an exact minute of a given day (1-based) with a chosen
     /// outdoor temperature. The fixed-date helpers delegate here.
@@ -7391,7 +7392,7 @@ mod tests {
             .and_then(|next| (0..6).find(|&h| next[h] > 0.0))
     }
 
-    /// The ticket's completion bar, part 1: two `Nightly` overrides
+    /// Two `Nightly` overrides
     /// differing only in `off_peak_start_hour` must produce measurably
     /// different hourly charging profiles — each run charges only inside
     /// its own configured window, and the first charging hour after the
@@ -7502,7 +7503,7 @@ mod tests {
         }
     }
 
-    /// The ticket's completion bar, part 2: `LowSoc` differs from
+    /// `LowSoc` differs from
     /// `Immediate` — a different policy class (charge when SOC falls below
     /// a threshold, versus charge on plug-in).
     ///
@@ -7516,9 +7517,9 @@ mod tests {
     /// the 0.65 upper threshold (block, margin ≈ 0.075) and the second's
     /// (≈ 0.550) below the 0.60 lower threshold (open, margin ≈ 0.05), so
     /// one day's drive can never carry SOC from above the gate into the
-    /// anxiety band (0.60 ≫ 0.28 + 0.175). (The ticket's literal
-    /// `LowSoc 0.15` sits below the hardcoded anxiety band and remains
-    /// governed by the override — docs/tickets/132.)
+    /// anxiety band (0.60 ≫ 0.28 + 0.175). (A literal `LowSoc 0.15`
+    /// threshold sits below the hardcoded anxiety band, so the override
+    /// governs it.)
     #[test]
     fn low_soc_gate_delays_charging_beyond_immediate() {
         let days = 12;
@@ -7553,8 +7554,8 @@ mod tests {
 
         // LowSoc: zero charging energy on the first driving day — the
         // arrival SOC (≈ 0.725) is above the 0.65 gate, so the strategy
-        // holds instead of charging. Exactly the difference in policy
-        // class the ticket asks to be observable.
+        // holds instead of charging. Exactly the policy-class difference
+        // this comparison exists to observe.
         let first_day_total: f64 = low_soc[first_drive].iter().sum();
         assert!(
             first_day_total < 1e-9,

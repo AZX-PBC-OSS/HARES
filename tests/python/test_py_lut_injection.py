@@ -1,4 +1,4 @@
-"""Tests for PY-013: battery/EV LUT injection via Python bindings.
+"""Tests for battery/EV LUT injection via Python bindings.
 
 Verifies that charging curve LUTs (4D: soc × temp × c_rate × soh),
 OCV tables, and UNeg tables can be injected into Battery and EV equipment

@@ -39,7 +39,6 @@ if [ "$DOCUMENTED_HASH" != "$ACTUAL_HASH" ]; then
     echo "If the submodule was intentionally updated, update the hash in:"
     echo "  - docs/validation.md (OCHRE Reference section)"
     echo "  - docs/development.md (Key Reference Documentation table)"
-    echo "  - docs/findings/hvac/ochre_comparison.md (OCHRE Reference header)"
     echo "  - scripts/check-ochre-commit.sh (this script's help text)"
     FAILED=1
 fi

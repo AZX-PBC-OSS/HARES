@@ -534,7 +534,9 @@ impl HeatPumpWH {
         // When low_power_hpwh is explicitly true without UEF, use pure low-power.
         // When UEF is in [4.8, 5.0) but below 4.9, effective_low_power is false
         // but blending still occurs for smooth COP/capacity continuity.
-        // Source: docs/reviews/equipment-wh/equip-wh-03-hpwh-compressor-curves.md Finding 5.
+        // The cross-fade over UEF 4.8 to 5.0 is HARES's own choice, to avoid
+        // a step change in COP and capacity at OCHRE's low-power threshold
+        // of UEF 4.9 (vendors/OCHRE/ochre/Equipment/WaterHeater.py:444).
         let blend_factor = if c.cop_biquadratic_coeffs.is_none() {
             // Honour explicit low_power_hpwh override: when explicitly Some(false),
             // do not blend even if UEF would suggest it.

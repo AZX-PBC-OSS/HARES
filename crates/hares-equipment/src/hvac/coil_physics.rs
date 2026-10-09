@@ -288,10 +288,9 @@ pub(super) fn calculate_shr(
     // with high latent load and small bypass factor) the enthalpy-based ADP
     // calculation can produce t_adp > db_in_c, yielding non-physical
     // supply-air reheat without external energy. Clamp to db_in_c and treat
-    // as fully dry coil (SHR = 1.0) — matching the guard in
-    // coil_bypass_factor (line ~383) and EnergyPlus WaterCoils.cc:383.
+    // as fully dry coil (SHR = 1.0), matching the guard in
+    // `coil_bypass_factor` and EnergyPlus WaterCoils.cc:383.
     //
-    // Ref: docs/reviews/hvac-config/hvaccfg-09-coil-physics-twet-convergence.md
     let adp_exceeds_dbt = t_adp > db_in_c;
     if adp_exceeds_dbt {
         t_adp = db_in_c;
@@ -1280,10 +1279,8 @@ mod coil_psychrometric_tests {
     //
     // When the enthalpy-based ADP calculation produces t_adp > db_in_c
     // (possible with supersaturated entering air and a small d_h), the
-    // guard clamps t_adp to db_in_c and sets SHR = 1.0 — matching the
-    // guard in coil_bypass_factor (line ~383) and EnergyPlus WaterCoils.cc.
-    //
-    // Ref: docs/reviews/hvac-config/hvaccfg-09-coil-physics-twet-convergence.md Finding 3
+    // guard clamps t_adp to db_in_c and sets SHR = 1.0, matching the
+    // guard in `coil_bypass_factor` and EnergyPlus WaterCoils.cc.
     // ------------------------------------------------------------------
 
     /// Construct inputs that drive ADP above entering dry-bulb: supersaturated

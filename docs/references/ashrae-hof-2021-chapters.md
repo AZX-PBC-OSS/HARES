@@ -2,7 +2,7 @@
 
 The 2021 edition is the sole authoritative HOF edition for HARES psychrometric
 constants, molecular weights, film coefficient tables, and all other
-authoritative chapter citations (see T-0306).
+authoritative chapter citations.
 
 Source: <https://www.ashrae.org/technical-resources/ashrae-handbook/table-of-contents-2021-ashrae-handbook-fundamentals>
 
@@ -49,7 +49,7 @@ chapter citations that are known to be wrong for the claimed topic.
 | Geothermal, borehole, ground-source | 34 | — |
 | Water heating, WH tank, gas WH | 51 | — |
 
-## Known Citation Errors (Fixed in T-0311)
+## Corrected citations
 
 1. **TARP natural convection → Ch. 25**: Corrected to Ch. 4. Ch. 25 (2021) is
    "Heat, Air, and Moisture Control in Building Assemblies," not heat transfer
@@ -57,11 +57,10 @@ chapter citations that are known to be wrong for the claimed topic.
 
 2. **Below-grade residential → Ch. 18.31**: Corrected to Ch. 17. Ch. 18 is
    "Nonresidential Cooling and Heating Load Calculations"; residential
-   below-grade content belongs in Ch. 17 (see 042 and 027 ticket docs;
+   below-grade content belongs in Ch. 17 (see
    `crates/hares-core/src/dwelling/conversions.rs:170,307`;
    `crates/hares-io/src/hpxml/building.rs:755`).
 
 3. **Coil bypass factor → ASHRAE 2017 Ch. 18 Eq. 63**: The specific equation
    number could not be verified against the 2017 edition. The citation has been
-   updated to a descriptive reference (see
-   `docs/reviews/equipment-hvac/equip-hvac-04-ac-shr-latent-degradation.md:87`).
+   updated to a descriptive reference.

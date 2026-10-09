@@ -1,4 +1,4 @@
-"""PY-015: Final type stub audit for ochre_next public API."""
+"""Final type stub audit for the ochre_next public API."""
 
 from __future__ import annotations
 

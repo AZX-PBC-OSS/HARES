@@ -2646,10 +2646,9 @@ mod tests {
     }
 
     // ── Nullable-setpoint regression tests ──────────────────────────────
-    // These tests verify that missing setpoint values only skip
-    // comfort/unmet calculations, not envelope/HVAC/battery accumulation.
-    // See: docs/reviews/output/output-03-output-metrics-computation.md
-    // Finding 2.
+    // These tests pin the contract that a missing setpoint value skips
+    // only the comfort and unmet-hours accumulation, not the envelope,
+    // HVAC or battery accumulation.
 
     fn build_nullable_batch(columns: Vec<(&str, Vec<Option<f64>>)>) -> RecordBatch {
         let fields = columns
