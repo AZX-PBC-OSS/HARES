@@ -6,7 +6,6 @@ runs: test name, context, reproduction attempts, and status. CI should run
 with `--test-threads=1` attribution available so flakes are nameable.
 
 ## F-001: hares-io generator-defaults tests (status: unreproduced)
-
 - **Observed once (2026-09-11):**
   `defaults::tests::malformed_generator_efficiency_curve_returns_none` and
   `defaults::tests::generator_dir_ignores_csv_with_battery_header_columns`
@@ -27,6 +26,32 @@ with `--test-threads=1` attribution available so flakes are nameable.
 - **Next step on recurrence:** run the failing binary alone with
   `--test-threads=1` in a loop until it reproduces; capture the panic
   output; check for `/tmp` pressure, fd limits, or parallel-build artifacts.
+
+## F-002: tests/python TestSharedHttpClient construction-serialization tests (status: reproduced, pre-existing)
+
+- **Observed:** `test_the_first_burst_of_downloads_builds_one_client`
+  (and once its `test_every_burst_of_downloads_shares_one_client`
+  sibling) failed with `assert len(registered) == 1` (got 2) in a full
+  `uv run pytest tests/python` run, then passed on re-run. The suite
+  also fails the same assertions nearly every time run in isolation
+  (`pytest tests/python/test_resstock_data.py::TestSharedHttpClient`:
+  1-2 of 5 tests fail per run, 5 of 5 runs observed).
+- **Context:** pure-Python threading test: mocked clients behind a
+  start barrier across 16 worker threads, asserting a module-level
+  registry also collects unrelated exit callbacks (the observed second
+  entry is the `exit_cacert_ctx` teardown helper). The suite runs under
+  pytest-randomly, so the order changes every run and the failure
+  tracks the order, not the code.
+- **Not this branch:** the file is byte-identical to the row's base
+  commit (`git diff 7187e86a HEAD -- tests/python/` is empty) and no
+  `python/` change rides the branch; the branch's changes are Rust-only.
+- **Reproduction:** full suite: 1483 passed twice, 1 failed once across
+  three runs of the same tree. With `-p no:randomly` the full suite
+  passes.
+- **Next step on recurrence:** pin down which earlier test's import
+  chain registers the extra exit callback in the passing orders, and
+  make the assertion count only the registry entries the test itself
+  causes (snapshot the registry before the burst and assert the delta).
 
 ## Discipline
 
