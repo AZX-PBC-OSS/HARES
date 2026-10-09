@@ -193,13 +193,14 @@ fn flagged_at(period: &UnavailablePeriod, day_ordinal_of_row: u32, hour: u32) ->
     }
 }
 
-/// The per-row flags of a schedule: row `i` is flagged when its calendar hour
-/// (the row timestamp's day-of-year and hour-of-day, the local standard time
-/// the schedules read) falls in any period.
+/// The per-row flags of a schedule: row `i` is flagged when the row's
+/// 365-day-calendar day (`schedule_day_ordinal` of the row timestamp: the
+/// period dates live on the non-leap calendar the schedule rows are
+/// indexed by) and hour-of-day fall in any period.
 fn flagged_rows(schedule: &ScheduleTimeSeries, periods: &[UnavailablePeriod]) -> Vec<bool> {
     let mut flags = vec![false; schedule.len()];
     for (i, timestamp) in schedule.timestamps.iter().enumerate() {
-        let ordinal = timestamp.ordinal();
+        let ordinal = hares_types::schedule_day_ordinal(timestamp);
         let hour = timestamp.hour();
         flags[i] = periods
             .iter()

@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use chrono::TimeZone;
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::equipment::resolve_equipment;
 use hares_io::parse_hpxml;
@@ -556,6 +557,92 @@ fn period_flags_are_half_open_and_wrap_the_year_end() {
             in_window,
             "row {i} flagged state must match the half-open wrapped window"
         );
+    }
+}
+
+/// The period dates live on a non-leap calendar, so a leap-year schedule's
+/// rows must flag by their 365-day-calendar day: Mar 1 flags on Mar 1 (not
+/// on Feb 29's slot placement before it), and Dec 31 exists at all (its raw
+/// leap-year ordinal 366 is past the 365-day calendar's last day).
+#[test]
+fn leap_year_schedule_flags_mar_1_and_dec_31_on_their_own_days() {
+    // Hourly rows for five days of the 2024 leap year.
+    let days = [
+        (2, 28),
+        (2, 29),
+        (3, 1),
+        (12, 30),
+        (12, 31),
+    ];
+    let mut timestamps = Vec::new();
+    for (month, day) in days {
+        for hour in 0..24 {
+            timestamps.push(
+                chrono::FixedOffset::east_opt(0)
+                    .expect("UTC offset")
+                    .with_ymd_and_hms(2024, month, day, hour, 0, 0)
+                    .single()
+                    .expect("valid timestamp"),
+            );
+        }
+    }
+    let n = timestamps.len();
+    let mut schedule = hares_io::ScheduleTimeSeries {
+        timestamps,
+        column_names: vec!["hot_water_fixtures".to_string()],
+        columns: vec![vec![0.5; n]],
+        column_index: std::iter::once(("hot_water_fixtures".to_string(), 0)).collect(),
+        source_step_secs: 3600,
+        column_aggregations: vec![hares_io::ColumnAggregation::Mean],
+    };
+
+    let periods = vec![
+        hares_io::UnavailablePeriod {
+            kind: hares_io::UnavailableKind::Vacancy,
+            begin_month: 3,
+            begin_day: 1,
+            begin_hour: 0,
+            end_month: 3,
+            end_day: 1,
+            end_hour: 24,
+            natural_ventilation: hares_io::NaturalVentilation::RegularSchedule,
+        },
+        hares_io::UnavailablePeriod {
+            kind: hares_io::UnavailableKind::Vacancy,
+            begin_month: 12,
+            begin_day: 31,
+            begin_hour: 0,
+            end_month: 12,
+            end_day: 31,
+            end_hour: 24,
+            natural_ventilation: hares_io::NaturalVentilation::RegularSchedule,
+        },
+    ];
+    hares_io::apply_unavailable_periods(&mut schedule, &periods).expect("periods apply");
+
+    let column = &schedule.columns[0];
+    for (slot, &(month, day)) in days.iter().enumerate() {
+        let day_rows = &column[slot * 24..(slot + 1) * 24];
+        let zeroed = day_rows.iter().all(|v| *v == 0.0);
+        match (month, day) {
+            // The period's own days zero exactly.
+            (3, 1) | (12, 31) => assert!(
+                zeroed,
+                "the period must zero every hour of {month}/{day} (2024)"
+            ),
+            // Neighbouring days keep their values. Feb 29 shares Mar 1's
+            // schedule slot (the 365-day row lookup maps both to the same
+            // row), so its rows flag with Mar 1's.
+            (2, 28) | (12, 30) => assert!(
+                !zeroed,
+                "the period must leave every hour of {month}/{day} alone"
+            ),
+            (2, 29) => assert!(
+                zeroed,
+                "Feb 29 shares Mar 1's 365-day schedule slot, so a Mar 1 period flags it too"
+            ),
+            _ => unreachable!(),
+        }
     }
 }
 

@@ -156,6 +156,29 @@ impl TimeWindow {
     }
 }
 
+/// The day-of-year (1-based) a 365-day annual schedule's row for `date`'s
+/// step is indexed by.
+///
+/// The schedule columns and the unavailable-period dates live on a
+/// non-leap calendar (the generated timestamps use 2007), while a
+/// simulation's timestamps can fall in a leap year. In a leap year, dates
+/// after Feb 29 shift one day back so the row lookup lands on the row
+/// whose data the step reads, and Feb 29 itself shares the Mar 1 slot
+/// (both map to the same schedule row, so their flag state must agree).
+/// Every calendar-day comparison against a schedule row goes through
+/// this, so the mapping stays in one place.
+#[must_use]
+pub fn schedule_day_ordinal<T: Datelike>(date: &T) -> u32 {
+    let ordinal = date.ordinal();
+    let year = date.year();
+    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    if is_leap && ordinal > 60 {
+        ordinal - 1
+    } else {
+        ordinal
+    }
+}
+
 /// Canonical domain id of the schedule payload's slot in `EnvironmentState.domains`.
 pub const SCHEDULE_DOMAIN_ID: DomainId = DomainId(u16::MAX);
 

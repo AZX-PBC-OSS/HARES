@@ -519,13 +519,9 @@ impl EnvironmentManager {
         if let Some(tz) = self.civil_tz {
             let sim_time = clock.current_time();
             let civil = sim_time.with_timezone(&tz);
-            let mut doy0 = civil.ordinal0() as u64;
-            // Schedules are always 365-day annual data, so leap-year dates after
-            // Feb 29 must be adjusted to their non-leap ordinal to prevent the
-            // one-day schedule misalignment described in T-0032.
-            if is_leap_year(civil.year()) && doy0 > 59 {
-                doy0 -= 1;
-            }
+            // The schedule rows are 365-day annual data; the row lookup's
+            // day-of-year is the shared 365-day-calendar ordinal.
+            let doy0 = u64::from(hares_types::schedule_day_ordinal(&civil)) - 1;
             let h = civil.hour() as u64;
             let m = civil.minute() as u64;
             let s = civil.second() as u64;
@@ -539,12 +535,10 @@ impl EnvironmentManager {
         }
 
         // Fallback: derive the schedule row from the current sim time with
-        // the same leap-year doy0 adjustment as the DST path and compute_schedule_offset.
+        // the same 365-day-calendar ordinal as the DST path and
+        // compute_schedule_offset.
         let sim_time = clock.current_time();
-        let mut doy0 = sim_time.ordinal0() as u64;
-        if is_leap_year(sim_time.year()) && doy0 > 59 {
-            doy0 -= 1;
-        }
+        let doy0 = u64::from(hares_types::schedule_day_ordinal(&sim_time)) - 1;
         let h = sim_time.hour() as u64;
         let m = sim_time.minute() as u64;
         let s = sim_time.second() as u64;
@@ -1036,10 +1030,10 @@ fn compute_annual_offset(
 
 /// Compute offset into the schedule time series.
 /// Schedules from ResStock/BEopt are annual, indexed from Jan 1 in local time.
-/// ResStock/BEopt schedules are always 365-day non-leap-year data; the
-/// `ordinal0()`-based computation is adjusted for leap-year start times so that
-/// calendar dates after Feb 29 map to the same schedule rows as in a non-leap
-/// year, preventing the one-day schedule misalignment described in T-0032.
+/// ResStock/BEopt schedules are always 365-day non-leap-year data; the row
+/// lookup's day-of-year is the shared 365-day-calendar ordinal, whose
+/// leap-year rule keeps calendar dates after Feb 29 on the same schedule
+/// rows as in a non-leap year.
 #[cfg(test)]
 fn compute_schedule_offset(
     schedule: &ScheduleTimeSeries,
@@ -1049,14 +1043,7 @@ fn compute_schedule_offset(
     if step_secs == 0 || schedule.is_empty() {
         return 0;
     }
-    let mut doy0 = start_time.ordinal0() as u64;
-    // Schedules are always 365-day annual data. In a leap year, ordinal0()
-    // is +1 for dates after Feb 29 relative to their non-leap counterpart.
-    // Subtract 1 to restore the correct schedule row index.
-    let year = start_time.year();
-    if is_leap_year(year) && doy0 > 59 {
-        doy0 -= 1;
-    }
+    let doy0 = u64::from(hares_types::schedule_day_ordinal(&start_time)) - 1;
     let h = start_time.hour() as u64;
     let m = start_time.minute() as u64;
     let s = start_time.second() as u64;
@@ -1067,11 +1054,6 @@ fn compute_schedule_offset(
     // here is positive and the former debug re-check is deleted.
     let year_secs = schedule.len() as u64 * step_secs as u64;
     (seconds_into_year % year_secs / step_secs as u64) as usize
-}
-
-/// Return true if `year` is a leap year (29-day February per Gregorian calendar).
-fn is_leap_year(year: i32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 fn compute_mains_inputs(weather: &WeatherTimeSeries, step_secs: u32) -> (f64, f64) {
@@ -2540,10 +2522,7 @@ mod tests {
                 .expect("schedule domain payload");
 
             let sim_time = clock.current_time();
-            let mut doy0 = sim_time.ordinal0() as u64;
-            if is_leap_year(sim_time.year()) && doy0 > 59 {
-                doy0 -= 1;
-            }
+            let doy0 = u64::from(hares_types::schedule_day_ordinal(&sim_time)) - 1;
             let expected = (doy0 * 24 + sim_time.hour() as u64) as f64;
 
             assert!(
