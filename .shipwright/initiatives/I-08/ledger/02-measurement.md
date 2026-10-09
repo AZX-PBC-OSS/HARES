@@ -1987,3 +1987,110 @@ Verdict: CONFIRMED. Both legs of the triage rule fire on every appliance:
 every realised daily volume differs from the OpenStudio-HPXML volume by
 15.7 % to 208.6 % (bound 1 %), and every 15-minute-schedule home differs
 between 900 s and 3600 s by 39.1 % to 142.8 % (bound 1 %). B-17 runs.
+
+### The conditioned attic, 2026-10-08, the last two OD-56 candidates triaged (branch `row/attic-film-triage` on `d1727998`)
+
+The OD-56 row's two remaining candidates for the conditioned attic's
+winter cold bias each get the reference reading and one decisive probe.
+Baseline at the branch, both modes, all three scenarios: the six
+`conditioned_oracle` tests pass and reproduce the recorded oracle bounds
+exactly. Attic MAE, spring/summer/winter: dynamic 0.773/0.896/1.271,
+ideal 0.791/0.899/1.299. Attic mean: winter HARES 3.55 dynamic and 3.57
+ideal against OCHRE 4.77 and 4.82 (bias -1.22 and -1.25), summer HARES
+29.47 against OCHRE 28.98 and 28.96 (bias +0.49 and +0.51). Note the
+row's State carried the two modes' labels swapped: the 0.773 set is the
+dynamic mode's and the 0.791 set the ideal mode's; the values themselves
+match on both lists.
+
+Candidate 1, the interior film on the roof deck and the attic floor.
+
+The references. OS-HPXML v1.12.0 sets EnergyPlus's inside surface
+convection algorithm to TARP (`HPXMLtoOpenStudio/resources/simcontrols.rb:24-25`,
+the outside one to DOE-2 at `:21-22`) and builds its constructions with
+explicit air-film layers (`constructions.rb:405, :508, :607`; the roof's
+`AirFilmIndoorRoof` at `:18`, the attic floor's
+`AirFilmIndoorFloorAverage` at `:165`). EnergyPlus v24.2.0 evaluates the
+TARP interior model per surface face per step: the dispatch at
+`ConvectionCoefficients.cc:319-328`, `CalcASHRAETARPNatural` at
+`:1879-1925` (enhanced when the surface-air temperature difference and
+the face's signed cos of tilt share a sign, reduced otherwise,
+`:1910-1922`), the interior face taking the negative of the exterior cos
+at `:1938-1940`, and the Walton magnitudes at
+`ConvectionCoefficients.hh:409` (vertical, 1.31·ΔT^(1/3)), `:433`
+(enhanced, 9.482·ΔT^(1/3)/(7.238-|cos|)) and `:455` (reduced,
+1.810·ΔT^(1/3)/(1.382+|cos|)). OCHRE freezes the same TARP model once
+per boundary at the clamped ΔT of 12.9 K
+(`ochre/utils/envelope.py:342-402`, the clamp at `:374`, one value for
+both faces): the committed oracle fixtures carry the frozen interior
+films 0.5611 (attic floor, both faces) and 0.5363 (the deck's attic
+face), the formula's values 1.782 and 1.865 W/(m²·K), constant across
+the seasons' fixtures as a frozen film is.
+
+HARES. The A-matrix freezes the ASHRAE Simple values instead
+(`crates/hares-physics/src/film_coefficients.rs:444-460`: the attic
+floor 0.948 both faces, R 1.055; the deck's attic face 2.281, R 0.438),
+and the per-step TARP correction is wired but disabled
+(`crates/hares-core/src/dwelling/solver_builder.rs:1248-1252`). The
+frozen non-vertical baseline is the registered divergence D-031 (class
+(a) against OCHRE), pinned by
+`the_attic_floor_s_frozen_films_are_the_ashrae_simple_horizontal_values`.
+
+Probe 1 (freeze OCHRE's TARP form on the deck's attic face and the
+attic floor, `tarp_h_natural` at the clamped 12.9 K in place of the
+Simple values for those two boundaries only): winter attic mean 3.57 to
+3.71 (bias -1.25 to -1.11), MAE 1.299 to 1.138; summer mean 29.47 to
+29.30 (bias +0.51 to +0.34), MAE 0.899 to 0.563; spring MAE 0.791 to
+0.589. This reproduces the D-031 record (measured at `62ba224b`) and
+extends it to the summer case.
+
+Probe 2 (the per-step TARP model enabled on every interior face,
+`solver_builder.rs` `FilmCoefficientModel::PerStepTarp`): winter mean
+3.57 to 3.54 (MAE 1.299 to 1.324), summer mean 29.47 to 29.44 (MAE 0.899
+to 0.910), spring MAE 0.791 to 0.789; stable at the 60 s step. The
+correction fires on the deck (the winter roof heat gain -266.7 to
+-359.0 W against OCHRE's -231.2) and barely on the floor, and the attic
+moves 0.03 °C.
+
+Verdict: reference-equivalent for the bias, no defect. The films' total
+leverage on the winter bias is at most 0.14 °C (probe 1) and the
+OS-HPXML-literal per-step form moves it 0.03 °C the other way (probe
+2); neither explains the -1.25. The frozen-baseline divergence stays
+D-031's, class (a).
+
+Candidate 2, ground long-wave exchange.
+
+The references. EnergyPlus v24.2.0's outside-face long-wave has a ground
+view whose temperature is the outdoor dry-bulb:
+`HeatBalanceSurfaceManager.cc:9199` (`TGround =
+state.dataEnvrn->OutDryBulbTemp`), the ground share entering the
+surface's balance at `:9391-9394`, the view split
+`ViewFactorGroundIR = 1 - ViewFactorSkyIR` (`SolarShading.cc:10362`),
+the same form on windows (`DataSurfaces.cc:318-323`). OCHRE radiates
+only outdoor-facing surfaces (`ochre/Models/Envelope.py:186`, `:772`)
+and sends the non-sky share to the outdoor-air temperature
+(`Envelope.py:145-149`). HARES: the same four-component form with the
+ground share at the outdoor-air temperature
+(`crates/hares-envelope/src/longwave_radiation.rs:194-196`, pinned by
+`test_4component_matches_energyplus_reference`; the injections at
+`crates/hares-envelope/src/thermal_solver/longwave.rs:220-221` and
+`:299-304`), and ground-facing boundaries take no exterior long-wave at
+all (`solver_builder.rs:148-152`, `:1011`).
+
+Probe 3 (upper bound: the whole non-sky share at the EPW shallow ground
+temperature on every opaque exterior face, a term neither reference
+has): winter mean 3.55 to 3.64 (bias -1.22 to -1.13), MAE 1.271 to
+1.174; summer mean 29.47 to 29.26 (bias +0.49 to +0.28), MAE 0.896 to
+0.868; spring MAE 0.773 to 0.786. The term carries 0.1 to 0.2 °C of
+leverage on this scenario and would diverge from OS-HPXML, OCHRE and
+EnergyPlus at once.
+
+Verdict: reference-equivalent, no defect. No ground-temperature
+long-wave term exists on either side of the oracle; the D-018
+ground-temperature difference reaches the building by conduction, where
+D-018 owns it, class (a).
+
+Reading. Both remaining candidates are classed and neither establishes
+the winter cold bias: it stays open at -1.25 (ideal) and -1.22
+(dynamic) with its cause unestablished. The probes were temporary
+patches at this branch, each reverted after its run; the oracle bounds
+reproduce unchanged.

@@ -1395,11 +1395,17 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   TARP form in place of the ASHRAE Simple values moves the attic mean
   3.57 to 3.71 °C against OCHRE's 4.82 (the cold bias -1.25 to -1.11 °C),
   the attic MAE 1.30 to 1.14 °C, and the winter roof heat gain -277.7 to
-  -221.1 W against OCHRE's -239.6 W. The floor coupling's frozen films
-  therefore contribute at most about 0.14 °C of the conditioned-attic
-  winter cold bias and do not establish it; the record's residual stays
-  open with its cause unestablished. The committed goldens carry the
-  ASHRAE Simple baseline unchanged.
+  -221.1 W against OCHRE's -239.6 W; on the summer oracle the same move
+  is the attic mean 29.47 to 29.30 against OCHRE's 28.96 (the hot bias
+  +0.51 to +0.34 °C) with the MAE 0.899 to 0.563, and on the spring
+  oracle the MAE 0.791 to 0.589. Enabling the per-step TARP model
+  instead (the OS-HPXML-literal form, disabled in production) moves the
+  attic 0.03 °C and no further (the 2026-10-08 triage entry in
+  `.shipwright/initiatives/I-08/ledger/02-measurement.md`). The floor
+  coupling's frozen films therefore contribute at most about 0.14 °C of
+  the conditioned-attic winter cold bias and do not establish it; the
+  record's residual stays open with its cause unestablished. The
+  committed goldens carry the ASHRAE Simple baseline unchanged.
 - **Pinning tests:**
   `crates/hares-physics/src/film_coefficients.rs`
   (`the_attic_floor_s_frozen_films_are_the_ashrae_simple_horizontal_values`
