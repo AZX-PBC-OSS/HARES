@@ -773,6 +773,24 @@ impl CoolingCore {
                 )?
             };
 
+            // Fan-specific power is normalized to the TOP stage's airflow,
+            // sized after the stage table above is final: OCHRE's fan power
+            // per unit flow divides by `rated_flow_rate = max(flow_rate_list)`
+            // with the flow rates derived from the per-stage capacities
+            // (HVAC.py:126-150), so the declared fan power (HPXML
+            // FanPowerWatts, OCHRE's "Rated Auxiliary Power (W)") is the
+            // max-stage fan power. The heater's init applies the same rule
+            // to its side; without it the declared raw watts are dead input
+            // and the fan runs the per-m3s default.
+            if let Some(fan_power_w) = cfg.fan_power_w {
+                let rated_airflow_m3_s = self.hvac.config.airflow_m3_s_per_w * rated_cap;
+                self.hvac.config.fan_power_w_per_m3_s = if rated_airflow_m3_s > 0.0 {
+                    fan_power_w.max(0.0) / rated_airflow_m3_s
+                } else {
+                    0.0
+                };
+            }
+
             let speed_mode = cfg.cooling_speed_control_mode();
             self.hvac.config.speed_control_mode = speed_mode;
 

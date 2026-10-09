@@ -1376,6 +1376,60 @@ mod tests {
         );
     }
 
+    /// The declared fan power is the TOP stage's fan power, the same
+    /// normalization the heater's init applies: OCHRE's fan power per unit
+    /// flow divides by `rated_flow_rate = max(flow_rate_list)` with the
+    /// per-stage flows derived from the per-stage capacities
+    /// (HVAC.py:126-150), so a declared MSHP Cooler FanPowerWatts draws at
+    /// the top stage. A declared raw-watt fan power that never reached the
+    /// fan (a dead config field leaving the per-m3s default in place) is a
+    /// silently dropped input.
+    #[test]
+    fn mshp_cooler_fan_power_normalizes_to_the_top_stage() {
+        const FAN_POWER_W: f64 = 300.0;
+        const AIRFLOW_M3_S_PER_W: f64 = 4.0e-5;
+
+        let cfg = EquipmentConfig::from_typed(
+            "mshp_cooler_fan_norm".to_string(),
+            "MSHP Cooler".to_string(),
+            crate::HeatPumpCoolerConfig {
+                common: crate::HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    cooling_capacity_w: Some(10_000.0),
+                    cooling_eir: Some(0.30),
+                    stage_cooling_capacities_w: Some(vec![4_000.0, 6_000.0, 8_500.0, 12_000.0]),
+                    stage_cooling_eirs: Some(vec![0.34, 0.32, 0.31, 0.30]),
+                    number_of_speeds: 4,
+                    is_mini_split: true,
+                    fan_power_w: Some(FAN_POWER_W),
+                    airflow_m3_s_per_w: Some(AIRFLOW_M3_S_PER_W),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut eq = HpCooler::mshp_cooler(cfg.clone());
+        let e = cooling_env(30.0, 35.0);
+        eq.init(&cfg, &e).unwrap();
+
+        let top_cap_w = eq
+            .inner
+            .core
+            .hvac
+            .config
+            .cooling_capacities_w
+            .last()
+            .copied()
+            .unwrap();
+        let fan_power_per_m3_s = eq.inner.core.hvac.config.fan_power_w_per_m3_s;
+        let top_stage_fan_w = fan_power_per_m3_s * AIRFLOW_M3_S_PER_W * top_cap_w;
+        assert!(
+            (top_stage_fan_w - FAN_POWER_W).abs() < 1e-6,
+            "top-stage fan power = {top_stage_fan_w} W, expected the declared {FAN_POWER_W} W"
+        );
+    }
+
     /// Zone between heating and cooling setpoints -- deadband -- no electrical
     /// draw and no thermal load.
     #[test]

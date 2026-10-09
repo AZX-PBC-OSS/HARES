@@ -1430,8 +1430,9 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   data. The dispatch is capacity-proportional flow
   (`airflow_m3_s_for_capacity_w`, `staging.rs:466`) and the fan's
   specific power divides by the top stage's airflow, sized after the
-  stage table is final (the heater's init), so the top stage draws the
-  declared fan power, OCHRE's normalization. Reading the columns would
+  stage table is final (the heater's and the cooler's inits), so the top
+  stage draws the declared fan power, OCHRE's normalization. Reading the
+  columns would
   diverge from the reference's code: the MSHP Heater's CSV flow ratios
   (0.55556, 0.66667, 0.77778, 1.0) disagree per stage with its capacity
   ratios (0.4, 0.6, 0.8, 1.2), whose proportional flow the reference
@@ -1447,4 +1448,9 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   runs after it.
 - **Pinning tests:** `crates/hares-equipment/src/hvac/heat_pump/heater.rs`
   (`mshp_fan_power_normalizes_to_the_top_stage` fails when the fan sizing
-  reverts to the pre-expansion normalization).
+  reverts to the pre-expansion normalization), and the same pin on the
+  cooler's side,
+  `crates/hares-equipment/src/hvac/heat_pump/cooler.rs`
+  (`mshp_cooler_fan_power_normalizes_to_the_top_stage`), whose init applies
+  the identical normalization to the cooling stage table: a declared
+  cooler fan power that never reached the fan was a dropped input.
