@@ -1033,10 +1033,15 @@ fn inject_water_heater_schedule_columns(
         // or mains source field: its tempered fixture draw is not wired (a
         // separate gap), so only the appliance draw reaches it here.
         let supports_fixture_draw = spec.name.as_str() != "Heat Pump Water Heater";
+        // One density convention for every L to kg conversion on the draw
+        // paths: the drawn water's temperature, the water heater's hot
+        // supply temperature.
+        let rho_kg_per_l = water_density_kg_m3(water_heater_hot_supply_temp_c(spec)) / 1000.0;
         if let Some(col_idx) = draw_col {
             let raw_values = schedule.columns[col_idx].clone();
             let avg_daily_l = water_heater_avg_daily_draw_l(spec)?;
-            let kg_s_series: Vec<f64> = normalize_draw_profile(&raw_values, avg_daily_l);
+            let kg_s_series: Vec<f64> =
+                normalize_draw_profile(&raw_values, avg_daily_l, rho_kg_per_l);
 
             let col_name = format!(
                 "hot_water_draw_kg_s_{}_{}",
@@ -1060,24 +1065,22 @@ fn inject_water_heater_schedule_columns(
         // The wet appliances' untempered draw beside the tempered fixture
         // draw: each appliance's column normalized to its daily volume, in
         // mass at the drawn water's density (the water heater's hot supply
-        // temperature). OpenStudio-HPXML v1.12.0 draws the appliances'
-        // WaterUseEquipment with no target temperature schedule
-        // (hotwater_appliances.rb:483-497, 520-534): the full hot
-        // withdrawal, never mixed with cold mains.
+        // temperature), the same conversion the fixture draw runs.
         if washer_col.is_some() || dishwasher_col.is_some() {
-            let rho_kg_per_l = water_density_kg_m3(water_heater_hot_supply_temp_c(spec)) / 1000.0;
             let mut appliance_draw: Option<Vec<f64>> = None;
             if let Some(col_idx) = washer_col {
                 let series = normalize_draw_profile(
                     &schedule.columns[col_idx],
-                    washer_daily_l * rho_kg_per_l,
+                    washer_daily_l,
+                    rho_kg_per_l,
                 );
                 appliance_draw = Some(series);
             }
             if let Some(col_idx) = dishwasher_col {
                 let series = normalize_draw_profile(
                     &schedule.columns[col_idx],
-                    dishwasher_daily_l * rho_kg_per_l,
+                    dishwasher_daily_l,
+                    rho_kg_per_l,
                 );
                 appliance_draw = match appliance_draw {
                     Some(mut combined) => {
@@ -3177,15 +3180,20 @@ mod tests {
 
     #[test]
     fn water_heater_draw_fractions_normalized_to_kg_s() {
-        // Known fractions and avg_water_draw_l_per_day = 200.
+        // Known fractions and avg_water_draw_l_per_day = 200, converted to
+        // mass at the drawn water's density (the hot supply temperature,
+        // the helper spec's 51.67 C setpoint with no hot draw temperature).
         // normalize_draw_profile formula returns kg/s:
         //   mean_fraction = mean(fractions)
-        //   scale = (avg_daily_l / 1440) / mean_fraction
+        //   scale = (avg_daily_l * rho / 1440) / mean_fraction
         //   result_kg_s = fraction * scale / 60
+        use hares_physics::water_density_kg_m3;
+
         let fractions = vec![0.04, 0.08, 0.02, 0.06];
         let avg_daily_l = 200.0;
         let mean_frac: f64 = fractions.iter().sum::<f64>() / fractions.len() as f64; // 0.05
-        let scale = (avg_daily_l / 1440.0) / mean_frac;
+        let rho_kg_per_l = water_density_kg_m3(51.67) / 1000.0;
+        let scale = (avg_daily_l * rho_kg_per_l / 1440.0) / mean_frac;
 
         let mains = vec![12.0; 4];
         let mut schedule =
@@ -3233,6 +3241,77 @@ mod tests {
             expected_for_004 > 0.0,
             "expected meaningful SI mass flow, got {expected_for_004:.6e} kg/s"
         );
+    }
+
+    #[test]
+    fn fixture_draw_converts_to_mass_at_the_hot_supply_temperature() {
+        // One density convention for every L to kg conversion on the draw
+        // paths: the drawn water's temperature, the water heater's hot
+        // supply (its hot draw temperature here, 60 C), the same density
+        // the wet-appliance columns convert at. 200 L/day at 60 C is
+        // 200 x rho(60 C) kg/day, not 200 kg.
+        use hares_physics::water_density_kg_m3;
+
+        let fractions = vec![0.04, 0.08, 0.02, 0.06];
+        let avg_daily_l = 200.0;
+        let mains = vec![12.0; 4];
+        let mut schedule =
+            make_schedule_with_water_heater_columns("hot_water_fixtures", &fractions, &mains);
+        let mut specs = vec![make_water_heater_spec(
+            "Electric Resistance Water Heater",
+            avg_daily_l,
+        )];
+        {
+            let cfg = specs[0]
+                .typed_config
+                .as_ref()
+                .expect("typed config")
+                .typed::<ElectricResistanceWaterHeaterConfig>()
+                .expect("resistance config decodes");
+            let mut typed = cfg.clone();
+            typed.hot_draw_temp_c = Some(60.0);
+            specs[0].typed_config = Some(
+                EquipmentConfig::from_typed(
+                    "electric".to_string(),
+                    "Electric Resistance Water Heater".to_string(),
+                    typed,
+                )
+                .expect("typed config builds"),
+            );
+        }
+
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+        )
+        .expect("injection succeeds");
+
+        let draw_col_idx = specs[0]
+            .typed_config
+            .as_ref()
+            .and_then(|typed| typed.typed::<ElectricResistanceWaterHeaterConfig>().ok())
+            .and_then(|cfg| cfg.draw_flow_rate_source)
+            .and_then(|source| match source {
+                ScheduleSourceConfig::ColumnRef { col_idx, .. } => Some(col_idx),
+                _ => None,
+            })
+            .expect("typed draw_flow_rate_source must be present");
+
+        let mean_frac: f64 = fractions.iter().sum::<f64>() / fractions.len() as f64;
+        let rho_kg_per_l = water_density_kg_m3(60.0) / 1000.0;
+        let scale = (avg_daily_l * rho_kg_per_l / 1440.0) / mean_frac;
+        let resolved = &schedule.columns[draw_col_idx];
+        for (i, &frac) in fractions.iter().enumerate() {
+            let expected_kg_s = frac * scale / 60.0;
+            assert!(
+                (resolved[i] - expected_kg_s).abs() < 1e-10,
+                "timestep {i}: expected {expected_kg_s:.8e} kg/s at the hot supply density, got {:.8e}",
+                resolved[i]
+            );
+        }
     }
 
     #[test]
