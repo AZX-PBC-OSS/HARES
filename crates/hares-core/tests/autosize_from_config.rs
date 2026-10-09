@@ -203,7 +203,6 @@ fn build_minimal_dwelling(hpxml_xml: &str) -> Dwelling {
         overrides: None,
         bldg_id: 42,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 

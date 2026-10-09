@@ -37,7 +37,6 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
         overrides: None,
         bldg_id,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 

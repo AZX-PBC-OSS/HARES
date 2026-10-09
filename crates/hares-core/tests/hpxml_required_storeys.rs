@@ -54,7 +54,6 @@ fn ach50_infiltration_without_floors_above_grade_is_an_error() {
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
     let err = match Dwelling::from_config(config) {

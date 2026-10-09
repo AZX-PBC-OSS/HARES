@@ -242,10 +242,6 @@ pub struct DwellingConfig {
     pub overrides: Option<serde_json::Value>,
     pub bldg_id: i64,
     pub initialization_duration: Option<StdDuration>,
-    /// Per-column weather resampling overrides. `None` uses defaults
-    /// (PCHIP for continuous fields, ZOH for energy/wind).
-    /// Use `Some(ResampleOverrides::ochre_compat())` for OCHRE parity testing.
-    pub resample_overrides: Option<hares_io::ResampleOverrides>,
     /// HPXML data-quality patches from external metadata (e.g. ResStock).
     /// Fields supplement or correct HPXML-parsed data when the source
     /// document contains missing or invalid values.
@@ -2304,7 +2300,6 @@ impl Dwelling {
             overrides,
             bldg_id: 0,
             initialization_duration: Some(StdDuration::from_secs(7 * 24 * 3600)),
-            resample_overrides: None,
             patches: None,
         };
         Self::from_config(config)
@@ -2344,6 +2339,35 @@ impl Dwelling {
     ) -> Result<Self> {
         let toml_str = std::fs::read_to_string(path)
             .map_err(|err| HaresError::Io(format!("failed to read TOML config: {err}")))?;
+        // Removed keys are rejected before deserialising, from the removed-keys
+        // table every surface consults: the file's top level is the dwelling
+        // table, its [simulation] table a simulation config.
+        let table: toml::Table = toml::from_str(&toml_str)
+            .map_err(|err| HaresError::Io(format!("failed to parse TOML config: {err}")))?;
+        let sim_table = table
+            .get("simulation")
+            .and_then(|v| v.as_table())
+            .ok_or_else(|| HaresError::Io("TOML config has no [simulation] table".to_string()))?;
+        for (scope, keys, surface) in [
+            (
+                hares_io::KeyScope::DwellingTable,
+                table.keys().collect::<Vec<_>>(),
+                "the dwelling table",
+            ),
+            (
+                hares_io::KeyScope::SimulationConfig,
+                sim_table.keys().collect::<Vec<_>>(),
+                "the [simulation] table",
+            ),
+        ] {
+            for key in keys {
+                if let Some(replacement) = hares_io::removed_key(scope, key) {
+                    return Err(HaresError::Io(format!(
+                        "configuration key '{key}' was removed from {surface}: {replacement}"
+                    )));
+                }
+            }
+        }
         let mut config: SyntheticTomlConfig = toml::from_str(&toml_str)
             .map_err(|err| HaresError::Io(format!("failed to parse TOML config: {err}")))?;
         if let Some(write_output) = write_output_override {
@@ -2391,7 +2415,6 @@ impl Dwelling {
                 .simulation
                 .initialization_duration_s
                 .map(StdDuration::from_secs),
-            resample_overrides: None,
             patches: None,
         };
 
@@ -2494,7 +2517,7 @@ fn build_from_blueprint_inner(
         clock.civil_tz = bp.parsed_civil_tz;
     }
 
-    let mut environment = EnvironmentManager::new_with_resample(
+    let mut environment = EnvironmentManager::new_with_options(
         bp.weather,
         bp.schedule,
         &bp.building,
@@ -2502,7 +2525,6 @@ fn build_from_blueprint_inner(
         local_start,
         EnvironmentInitOptions {
             civil_timezone: config.sim_config.civil_timezone.as_deref(),
-            resample_overrides: config.resample_overrides.as_ref(),
             initial_rng: Some(rng.clone()),
             setpoint_deadband_c: config.sim_config.setpoint_deadband_c,
         },
@@ -12371,7 +12393,6 @@ occupancy = 1.0
                 .simulation
                 .initialization_duration_s
                 .map(StdDuration::from_secs),
-            resample_overrides: None,
             patches: None,
         };
 

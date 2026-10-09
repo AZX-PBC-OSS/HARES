@@ -22,8 +22,9 @@ pub mod weather;
 pub mod wsf;
 
 pub use config::{
-    ConfigError, DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES, MAX_VERBOSITY, OutputFormat,
-    RotationPolicy, SimulationConfig,
+    ConfigError, DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES, KeyScope, MAX_VERBOSITY, OutputFormat,
+    REMOVED_KEYS, RemovedKey, RotationPolicy, SimulationConfig, check_removed_toml_keys,
+    removed_key,
 };
 pub use defaults::{
     BiquadraticCoefficients, DefaultsCategory, DefaultsError, DefaultsStore, EquipmentDefaults,
@@ -88,9 +89,7 @@ pub use tmy3::parse_tmy3;
 pub use unavailable_periods::{
     NaturalVentilation, UnavailableKind, UnavailablePeriod, apply_unavailable_periods,
 };
-pub use weather::{
-    ResampleMethod, ResampleOverrides, WeatherField, WeatherMeta, WeatherTimeSeries,
-};
+pub use weather::{WeatherField, WeatherMeta, WeatherTimeSeries};
 pub use weather::{
     WeatherFormat, parse_weather, parse_weather_with_elevation, parse_weather_with_location,
 };

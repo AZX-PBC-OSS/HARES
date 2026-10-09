@@ -110,7 +110,6 @@ fn check_override_carries(
 #[derive(Debug, Clone, Default)]
 pub struct EnvironmentInitOptions<'a> {
     pub civil_timezone: Option<&'a str>,
-    pub resample_overrides: Option<&'a hares_io::ResampleOverrides>,
     pub initial_rng: Option<ChaCha8Rng>,
     pub setpoint_deadband_c: Option<f64>,
 }
@@ -201,7 +200,7 @@ impl EnvironmentManager {
         start_time: DateTime<FixedOffset>,
         civil_timezone: Option<&str>,
     ) -> Result<Self, EnvironmentManagerError> {
-        Self::new_with_resample(
+        Self::new_with_options(
             weather,
             schedule,
             building,
@@ -214,10 +213,9 @@ impl EnvironmentManager {
         )
     }
 
-    /// Like [`Self::new`] but with optional per-column weather resampling overrides.
-    ///
-    /// Pass `Some(ResampleOverrides::ochre_compat())` for OCHRE parity testing.
-    pub fn new_with_resample(
+    /// Like [`Self::new`] but with the full init options (initial RNG,
+    /// deadband).
+    pub fn new_with_options(
         weather: WeatherTimeSeries,
         schedule: ScheduleTimeSeries,
         building: &Building,
@@ -230,10 +228,7 @@ impl EnvironmentManager {
             return Err(EnvironmentManagerError::ZeroTimeResolution);
         }
 
-        let weather = match options.resample_overrides {
-            Some(ov) => weather.resample_with(step_secs, ov)?,
-            None => weather.resample(step_secs)?,
-        };
+        let weather = weather.resample(step_secs)?;
         if weather.is_empty() {
             return Err(EnvironmentManagerError::EmptyWeather);
         }

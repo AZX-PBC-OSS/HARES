@@ -52,7 +52,6 @@ fn cz4a_config(
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     }
 }
@@ -205,7 +204,6 @@ fn vacant_home_draws_no_appliance_hot_water() {
         overrides: None,
         bldg_id: 527060,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
     let mut dwelling = Dwelling::from_config(config).expect("vacant dwelling builds");

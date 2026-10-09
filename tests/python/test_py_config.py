@@ -3,7 +3,7 @@
 import pytest
 from typing import Any, cast
 
-from hares import SimulationConfig, DwellingConfig
+from hares import Dwelling, SimulationConfig, DwellingConfig
 
 
 class TestSimulationConfig:
@@ -162,40 +162,45 @@ class TestDwellingConfig:
         )
         assert cfg.initialization_duration == 3600
 
-    def test_resample_overrides_round_trips(self):
-        """Verify DwellingConfig with resample_overrides round-trips."""
-        cfg = DwellingConfig(
-            hpxml="path/to/building.xml",
-            schedule="path/to/schedules.csv",
-            weather="path/to/weather.epw",
-            resample_overrides={"dry_bulb": "zoh"},
-        )
-        assert cfg.resample_overrides is not None
-        assert cfg.resample_overrides.get("dry_bulb") == "zoh"
+    def test_removed_key_resample_overrides_names_the_adapter(self):
+        """The removed `resample_overrides` keyword errors with the
+        removed-keys table's message, which points at the Python adapter
+        that holds the weather now. The class is `TypeError`, the same
+        `DwellingConfig(...)` raises for an unexpected keyword."""
+        removed: dict[str, Any] = {
+            "hpxml": "path/to/building.xml",
+            "schedule": "path/to/schedules.csv",
+            "weather": "path/to/weather.epw",
+            "resample_overrides": {"dry_bulb": "zoh"},
+        }
+        with pytest.raises(TypeError, match="hares\\.adapters\\.ochre\\.hold_weather"):
+            DwellingConfig(**removed)
 
-    def test_resample_overrides_typo_raises_value_error(self):
-        """Regression guard: typo in resample method must raise ValueError,
-        not silently fall back to a default."""
-        with pytest.raises(ValueError, match="tringular"):
-            DwellingConfig(
-                hpxml="path/to/building.xml",
-                schedule="path/to/schedules.csv",
-                weather="path/to/weather.epw",
-                resample_overrides={"dry_bulb": "tringular"},
+    def test_removed_key_resample_overrides_on_from_hpxml_names_the_adapter(self):
+        """The same removed key on `Dwelling.from_hpxml` errors the same way:
+        the message names the adapter, before any input file is read."""
+        removed: dict[str, Any] = {
+            "resample_overrides": {"dry_bulb": "zoh"},
+        }
+        with pytest.raises(ValueError, match="hares\\.adapters\\.ochre\\.hold_weather"):
+            Dwelling.from_hpxml(
+                "path/to/building.xml",
+                "path/to/schedules.csv",
+                "path/to/weather.epw",
+                **removed,
             )
 
-    def test_resample_overrides_all_valid_methods_accepted(self):
-        """Regression guard: each valid method name must be accepted without error."""
-        valid_methods = ["zoh", "pchip", "pchip_cyclic", "linear", "circular_linear", "triangular"]
-        for method in valid_methods:
-            cfg = DwellingConfig(
-                hpxml="path/to/building.xml",
-                schedule="path/to/schedules.csv",
-                weather="path/to/weather.epw",
-                resample_overrides={"dry_bulb": method},
-            )
-            assert cfg.resample_overrides is not None
-            assert cfg.resample_overrides.get("dry_bulb") == method
+    def test_dwelling_config_unknown_keyword_is_type_error(self):
+        """Another unknown keyword on `DwellingConfig(...)` raises `TypeError`
+        naming it, as Python's own signature check would."""
+        unknown: dict[str, Any] = {
+            "hpxml": "path/to/building.xml",
+            "schedule": "path/to/schedules.csv",
+            "weather": "path/to/weather.epw",
+            "not_a_real_keyword": 1,
+        }
+        with pytest.raises(TypeError, match="not_a_real_keyword"):
+            DwellingConfig(**unknown)
 
     def test_non_finite_overrides_value_fails_loudly(self):
         """A NaN/±inf float inside a DwellingConfig `overrides` object

@@ -16,8 +16,7 @@ use hares_equipment::{
     ProtocolBridgeConfig, PvConfig, config::ConfigValue,
 };
 use hares_io::{
-    OutputFormat, ResampleOverrides, SimulationConfig, SiteLocationOverride,
-    output::metrics::MetricsCalculator,
+    OutputFormat, SimulationConfig, SiteLocationOverride, output::metrics::MetricsCalculator,
 };
 use hares_types::panic_hook::{self, PanicHookGuard};
 use hares_types::{BatteryChemistry, EvConnectionState, HaresError, SurfaceIrradiance};
@@ -68,7 +67,6 @@ use crate::py_telemetry::PyTelemetry;
 use crate::utils::extract_datetime;
 use crate::utils::extract_seconds;
 use crate::utils::finite_f64_optional;
-use crate::utils::parse_resample_method;
 use crate::utils::python_to_json_value;
 use crate::utils::validate_finite;
 
@@ -2350,7 +2348,6 @@ const KNOWN_KWARGS: &[&str] = &[
     "bldg_id",
     "initialization_duration",
     "defaults_path",
-    "resample_overrides",
     "overrides",
     "latitude",
     "longitude",
@@ -2433,6 +2430,16 @@ pub(crate) fn build_config(
         for key in k.keys() {
             let key_str: String = key.extract()?;
             if !KNOWN_KWARGS.contains(&key_str.as_str()) {
+                // A removed key errors with the removed-keys table's message
+                // (it names where the capability lives now), not the generic
+                // unknown-keyword refusal.
+                if let Some(replacement) =
+                    hares_io::removed_key(hares_io::KeyScope::DwellingTable, &key_str)
+                {
+                    return Err(PyValueError::new_err(format!(
+                        "configuration keyword '{key_str}' was removed: {replacement}"
+                    )));
+                }
                 return Err(PyValueError::new_err(format!(
                     "unknown keyword argument: '{key_str}'"
                 )));
@@ -2649,68 +2656,6 @@ pub(crate) fn build_config(
         .transpose()?
         .map(PathBuf::from);
 
-    let resample_overrides: Option<ResampleOverrides> = {
-        let raw: Option<std::collections::HashMap<String, String>> = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("resample_overrides").ok().flatten())
-            .map(|obj| obj.extract())
-            .transpose()?;
-        raw.map(|map| {
-            let mut overrides = ResampleOverrides::default();
-            const KNOWN_FIELDS: &[&str] = &[
-                "dry_bulb",
-                "dew_point",
-                "rel_humidity",
-                "pressure",
-                "infrared",
-                "ground_temp",
-                "opaque_sky_cover",
-                "ghi",
-                "dni",
-                "dhi",
-                "wind_speed",
-                "wind_dir",
-            ];
-            macro_rules! set_field {
-                ($($field:ident),*) => {
-                    $(
-                        if let Some(v) = map.get(stringify!($field)) {
-                            overrides.$field = Some(parse_resample_method(stringify!($field), v)?);
-                        }
-                    )*
-                };
-            }
-            set_field!(
-                dry_bulb,
-                dew_point,
-                rel_humidity,
-                pressure,
-                infrared,
-                ground_temp,
-                opaque_sky_cover,
-                ghi,
-                dni,
-                dhi,
-                wind_speed,
-                wind_dir
-            );
-            let unknown: Vec<&str> = map
-                .keys()
-                .filter(|k| !KNOWN_FIELDS.contains(&k.as_str()))
-                .map(String::as_str)
-                .collect();
-            if !unknown.is_empty() {
-                return Err(PyValueError::new_err(format!(
-                    "unknown resample_overrides field(s): {}; valid fields: {}",
-                    unknown.join(", "),
-                    KNOWN_FIELDS.join(", "),
-                )));
-            }
-            Ok(overrides)
-        })
-        .transpose()?
-    };
-
     let overrides: Option<serde_json::Value> = kwargs
         .as_ref()
         .and_then(|k| k.get_item("overrides").ok().flatten())
@@ -2735,7 +2680,6 @@ pub(crate) fn build_config(
         overrides,
         bldg_id,
         initialization_duration,
-        resample_overrides,
         patches: None,
     })
 }

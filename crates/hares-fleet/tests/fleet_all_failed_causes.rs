@@ -62,7 +62,6 @@ fn config_with_schedule_source(bldg_id: i64, schedule_path: Option<PathBuf>) -> 
         overrides: None,
         bldg_id,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     }
 }

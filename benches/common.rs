@@ -145,7 +145,6 @@ pub fn build_dwelling_config(
         overrides: None,
         bldg_id,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     }
 }

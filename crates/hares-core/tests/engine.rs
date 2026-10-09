@@ -168,7 +168,6 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 
@@ -215,7 +214,6 @@ fn run_with_zero_duration_reports_zero_step() {
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 
@@ -243,7 +241,6 @@ fn run_returns_err_for_missing_hpxml_path() {
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 
@@ -267,7 +264,6 @@ fn run_returns_err_for_missing_weather_path() {
         overrides: None,
         bldg_id: 2,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
     let weather_err = engine
@@ -297,7 +293,6 @@ fn run_with_streaming_output_computes_metrics() {
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 
@@ -362,7 +357,6 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 
@@ -408,7 +402,6 @@ fn run_with_zero_duration_flags_zero_step() {
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 
@@ -443,7 +436,6 @@ fn run_without_output_recorder_reports_metrics_unavailable() {
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 

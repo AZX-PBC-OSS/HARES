@@ -2351,7 +2351,6 @@ class DwellingConfig:
         defaults_path: str | None = ...,
         bldg_id: int | None = ...,
         initialization_duration: int | None = ...,
-        resample_overrides: dict[str, str] | None = ...,
         overrides: dict[str, Any] | None = ...,
     ) -> None: ...
     @property
@@ -2368,8 +2367,6 @@ class DwellingConfig:
     def bldg_id(self) -> int: ...
     @property
     def initialization_duration(self) -> int | None: ...
-    @property
-    def resample_overrides(self) -> dict[str, str] | None: ...
     @property
     def overrides(self) -> dict[str, Any] | None: ...
     def __repr__(self) -> str: ...
@@ -2644,7 +2641,6 @@ class DwellingBlueprint:
         civil_timezone: str | None = ...,
         setpoint_deadband_c: float | None = ...,
         initialization_duration: int | float | datetime.timedelta | None = ...,
-        resample_overrides: dict[str, str] | None = ...,
         overrides: dict[str, Any] | None = ...,
         config: SimulationConfig | None = ...,
     ) -> DwellingBlueprint: ...
@@ -2686,7 +2682,6 @@ class Dwelling:
         civil_timezone: str | None = ...,
         setpoint_deadband_c: float | None = ...,
         initialization_duration: int | float | datetime.timedelta | None = ...,
-        resample_overrides: dict[str, str] | None = ...,
         overrides: dict[str, Any] | None = ...,
         config: SimulationConfig | None = ...,
     ) -> Dwelling: ...

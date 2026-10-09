@@ -90,7 +90,6 @@ fn build_sample(sample: &str, month: u32) -> Dwelling {
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
     Dwelling::from_config(config)

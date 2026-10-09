@@ -42,18 +42,17 @@ DURATION_H_24 = 24
 # unseeded, its stochastic equipment makes the reference differ run to run.
 OCHRE_SEED = 42
 
-# ZOH resampling for all continuous weather fields -- matches OCHRE's pandas ffill().
-# Note: sky_temp is not overridable -- HARES always recomputes it from the
-# interpolated inputs (see ResampleOverrides::ochre_compat in hares-io).
-OCHRE_COMPAT_RESAMPLE: dict[str, str] = {
-    "dry_bulb": "zoh",
-    "dew_point": "zoh",
-    "rel_humidity": "zoh",
-    "pressure": "zoh",
-    "infrared": "zoh",
-    "ground_temp": "zoh",
-    "opaque_sky_cover": "zoh",
-}
+# OCHRE zero-order holds every weather field onto the run's grid (pandas
+# resample().ffill()). The engine has no per-field resampling overrides: the
+# HARES side reads the weather this package's adapter has already held
+# (hares.adapters.ochre.hold_weather), so the engine's own resampling
+# methods never enter the comparison.
+def _held_weather(output_dir: Path, time_res_s: int) -> str:
+    from hares.adapters.ochre import hold_weather
+
+    held = output_dir / f"weather_ochre_hold_{time_res_s}s.epw"
+    held.write_text(hold_weather(WEATHER, time_res_s), encoding="utf-8")
+    return str(held)
 
 
 # ---------------------------------------------------------------------------
@@ -135,14 +134,13 @@ def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
     dwelling = HaresDwelling.from_hpxml(
         HPXML,
         SCHEDULE,
-        WEATHER,
+        _held_weather(output_dir, TIME_RES_MIN * 60),
         start_time=START_HARES,
         time_res_s=TIME_RES_MIN * 60,
         duration_s=DURATION_H * 3600,
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
-        resample_overrides=OCHRE_COMPAT_RESAMPLE,
         write_output=True,
         output_path=str(output_dir / "hares_parity.csv"),
     )
@@ -164,14 +162,13 @@ def _run_hares_simulate_24h(output_dir: Path) -> dict[str, float]:
     dwelling = HaresDwelling.from_hpxml(
         HPXML,
         SCHEDULE,
-        WEATHER,
+        _held_weather(output_dir, TIME_RES_MIN * 60),
         start_time=START_HARES_24H,
         time_res_s=TIME_RES_MIN * 60,
         duration_s=DURATION_H_24 * 3600,
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
-        resample_overrides=OCHRE_COMPAT_RESAMPLE,
         write_output=True,
         output_path=str(output_dir / "hares_parity_24h.csv"),
     )

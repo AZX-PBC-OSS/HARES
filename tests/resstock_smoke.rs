@@ -205,7 +205,6 @@ mod tests {
             overrides: None,
             bldg_id: 100,
             initialization_duration: None,
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
             patches: None,
         };
 
@@ -395,7 +394,6 @@ mod tests {
             overrides: None,
             bldg_id: 200,
             initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
             patches: None,
         };
 
@@ -495,7 +493,6 @@ mod tests {
             overrides: None,
             bldg_id: 200,
             initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
             patches: None,
         }
     }

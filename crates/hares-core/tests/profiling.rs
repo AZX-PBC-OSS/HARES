@@ -56,7 +56,6 @@ fn load_cz2a_fixture() -> Dwelling {
         overrides: None,
         bldg_id,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 

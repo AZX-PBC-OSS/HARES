@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
 use hares_equipment::EquipmentConfig;
-use hares_io::{EquipmentSpec, ResampleMethod};
+use hares_io::EquipmentSpec;
 use hares_types::{DayFilter, FuelType};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -383,79 +383,4 @@ pub(crate) fn finite_f64_optional(d: &Bound<'_, PyDict>, key: &str) -> PyResult<
         validate_finite(x, key)?;
     }
     Ok(v)
-}
-
-/// Parse a resample method name string, returning a typed [`ResampleMethod`]
-/// or a `PyValueError` listing the valid methods.
-///
-/// Matching is case-sensitive. All `ResampleMethod` variant names and the
-/// HPXML 4.2 data dictionary use lowercase identifiers; case-sensitivity
-/// catches typos like `"Zoh"` that would otherwise go unnoticed.
-pub fn parse_resample_method(field: &str, value: &str) -> PyResult<ResampleMethod> {
-    match value {
-        "pchip" => Ok(ResampleMethod::Pchip),
-        "pchip_cyclic" => Ok(ResampleMethod::PchipCyclic),
-        "zoh" => Ok(ResampleMethod::Zoh),
-        "linear" => Ok(ResampleMethod::Linear),
-        "circular_linear" => Ok(ResampleMethod::CircularLinear),
-        "triangular" => Ok(ResampleMethod::Triangular),
-        other => Err(PyValueError::new_err(format!(
-            "unknown resample method '{other}' for field '{field}'; \
-             valid methods: zoh, pchip, pchip_cyclic, linear, circular_linear, triangular"
-        ))),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn all_valid_methods_parse_successfully() {
-        for method in &[
-            "pchip",
-            "pchip_cyclic",
-            "zoh",
-            "linear",
-            "circular_linear",
-            "triangular",
-        ] {
-            assert!(
-                parse_resample_method("test_field", method).is_ok(),
-                "valid method '{method}' should parse successfully"
-            );
-        }
-    }
-
-    #[test]
-    fn typo_returns_value_error_with_message() {
-        let result = parse_resample_method("dry_bulb", "tringular");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("tringular"),
-            "error message should contain the invalid name, got: {msg}"
-        );
-        assert!(
-            msg.contains("dry_bulb"),
-            "error message should contain the field name, got: {msg}"
-        );
-        assert!(
-            msg.contains("valid methods"),
-            "error message should list valid methods, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn empty_string_returns_value_error() {
-        let result = parse_resample_method("ghi", "");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn random_garbage_returns_value_error() {
-        let result = parse_resample_method("dni", "not_a_real_method");
-        assert!(result.is_err());
-    }
 }

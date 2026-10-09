@@ -127,7 +127,6 @@ fn dwelling_config(
         overrides,
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     }
 }
@@ -311,7 +310,6 @@ fn fixture_dwelling_config(
             overrides,
             bldg_id: 100,
             initialization_duration: None,
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
             patches: None,
         },
         tmp,
@@ -868,7 +866,6 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
         overrides: Some(overrides),
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
     let result = SimulationEngine::new().run(config).expect("engine.run");
@@ -998,7 +995,6 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
         overrides: Some(overrides),
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
     let result = SimulationEngine::new()
@@ -1826,7 +1822,6 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
         overrides: Some(overrides),
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -2195,7 +2190,6 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
         overrides: Some(overrides),
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -2411,7 +2405,6 @@ fn user_added_actor_resolves_its_equipment_binding_on_add() {
         overrides: Some(serde_json::json!({ "Battery": { "bms_mode": "\"Manual\"" } })),
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");

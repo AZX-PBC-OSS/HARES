@@ -277,7 +277,7 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     // directly from the sub-hourly data using the known timestep.
     let monthly_ground_temps = match compute_monthly_means_sub_hourly(&dry_bulb_c, &timestamps) {
         Some(monthly_avg) => doe2_ground_temp_from_monthly_avg(&monthly_avg),
-        None => doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year)?,
+        None => doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year, 1)?,
     };
 
     let mut ground_temp_c = Vec::with_capacity(n);

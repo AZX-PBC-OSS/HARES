@@ -288,10 +288,12 @@ pub fn parse_resstock_csv_str(
 
     // Compute monthly dry-bulb averages for ground temperature.
     let dry_bulb_all: Vec<f64> = raw_rows.iter().map(|r| r.dry_bulb_c).collect();
-    let monthly_avg = monthly_average_dry_bulb(&dry_bulb_all, is_leap_year).unwrap_or_else(|| {
-        let annual_avg = dry_bulb_all.iter().sum::<f64>() / dry_bulb_all.len() as f64;
-        [annual_avg; 12]
-    });
+    let records_per_hour = (3600.0 / source_step_secs as f64).round() as usize;
+    let monthly_avg = monthly_average_dry_bulb(&dry_bulb_all, is_leap_year, records_per_hour)
+        .unwrap_or_else(|| {
+            let annual_avg = dry_bulb_all.iter().sum::<f64>() / dry_bulb_all.len() as f64;
+            [annual_avg; 12]
+        });
     let monthly_ground_temps = doe2_ground_temp_from_monthly_avg(&monthly_avg);
 
     // Build output vectors.

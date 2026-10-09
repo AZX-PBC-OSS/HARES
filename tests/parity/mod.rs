@@ -503,7 +503,11 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     let dwelling_config = DwellingConfig {
         hpxml_path: fixture.building_xml.clone(),
         schedule_path: Some(fixture.schedule_csv.clone()),
-        weather_path: fixture.weather_epw.clone(),
+        // The weather the engine reads is the case's hourly file held at the
+        // case's step by the Python adapter's OCHRE hold (committed beside
+        // the source): the OCHRE comparison's zero-order hold now lives in
+        // the adapter, not in an engine override.
+        weather_path: fixture.weather_ochre_hold.clone(),
         sim_config,
         defaults_path: Some(defaults_path),
         // The fixture's `[overrides]` table (the battery fixtures declare
@@ -520,7 +524,6 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
             .initialization_duration_seconds
             .and_then(|seconds| u64::try_from(seconds).ok())
             .map(StdDuration::from_secs),
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
 

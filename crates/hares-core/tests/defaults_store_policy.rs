@@ -44,7 +44,6 @@ fn config_with_defaults(defaults: PathBuf) -> DwellingConfig {
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     }
 }

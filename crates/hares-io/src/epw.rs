@@ -194,7 +194,12 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     let _ = comments_2_line;
 
     let mut meta = parse_location_header(location_line)?;
-    ensure_hourly_data_period(data_period_line)?;
+    let records_per_hour = ensure_hourly_data_period(data_period_line)?;
+    // A sub-hourly file (N records per hour) is read in order at its own
+    // interval: source step 3600/N, the same half-interval label as the
+    // hourly convention, scaled.
+    meta.source_step_secs = 3600 / records_per_hour;
+    meta.midpoint_offset_secs = 1800 / records_per_hour;
     let epw_ground_temps = parse_ground_temperatures(ground_temp_line);
 
     let mut records = Vec::new();
@@ -342,24 +347,27 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         );
     }
 
-    if records.len() != EXPECTED_RECORDS_STANDARD && records.len() != EXPECTED_RECORDS_LEAP {
+    let expected_standard = EXPECTED_RECORDS_STANDARD * records_per_hour as usize;
+    let expected_leap = EXPECTED_RECORDS_LEAP * records_per_hour as usize;
+    if records.len() != expected_standard && records.len() != expected_leap {
         return Err(WeatherError::Validation(format!(
-            "EPW record count must be {EXPECTED_RECORDS_STANDARD} or {EXPECTED_RECORDS_LEAP}, got {}",
+            "EPW record count must be {expected_standard} or {expected_leap}, got {}",
             records.len()
         )));
     }
 
-    let is_leap_year = records.len() == EXPECTED_RECORDS_LEAP;
+    let is_leap_year = records.len() == expected_leap;
 
     // EnergyPlus WeatherManager.cc:2816-2827: if WFAllowsLeapYears is false,
     // Feb 29 data is discarded and February is treated as a 28-day month.
     if is_leap_year && !wf_allows_leap_years {
         warn!(
-            "EPW header declares Leap Year Observed = No, but file contains 8784 rows. Discarding Feb 29 data."
+            "EPW header declares Leap Year Observed = No, but file contains {} rows. Discarding Feb 29 data.",
+            EXPECTED_RECORDS_LEAP * records_per_hour as usize
         );
         // Retain only records that are NOT Feb 29.
-        let mut retained = Vec::with_capacity(EXPECTED_RECORDS_STANDARD);
-        let mut retained_dt = Vec::with_capacity(EXPECTED_RECORDS_STANDARD);
+        let mut retained = Vec::with_capacity(expected_standard);
+        let mut retained_dt = Vec::with_capacity(expected_standard);
         for (rec, dt) in records.into_iter().zip(record_datetimes) {
             if !(dt.0.month() == 2 && dt.0.day() == 29) {
                 retained.push(rec);
@@ -370,13 +378,13 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         record_datetimes = retained_dt;
     }
 
-    let is_leap_year = records.len() == EXPECTED_RECORDS_LEAP;
+    let is_leap_year = records.len() == expected_leap;
 
     // A leap-year file that claims leap observation must actually carry a
     // Feb 29 record; an 8784-record file without leap observation cannot
     // exist because the strip loop above removed Feb 29 when the header
     // said No.
-    if records.len() == EXPECTED_RECORDS_LEAP && wf_allows_leap_years {
+    if records.len() == expected_leap && wf_allows_leap_years {
         let has_feb29 = record_datetimes
             .iter()
             .any(|(date, _)| date.month() == 2 && date.day() == 29);
@@ -394,11 +402,21 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     meta.wf_allows_leap_years = wf_allows_leap_years;
 
     // Resolve monthly ground temperatures: prefer EPW header data, fall back to DOE-2 model.
+    // The fallback consumes one value per source hour, whatever the file's
+    // interval: a held (sub-hourly) file repeats each hourly record, and the
+    // model must not move because of the hold.
     let monthly_ground_temps = match epw_ground_temps {
         Some(gt) => gt,
         None => {
-            let dry_bulb: Vec<f64> = records.iter().map(|r| r.dry_bulb_c).collect();
-            doe2_ground_temp_monthly(&dry_bulb, is_leap_year)?
+            let mut hourly_dry_bulb: Vec<f64> = Vec::with_capacity(records.len());
+            let mut previous: Option<(chrono::NaiveDate, u32)> = None;
+            for (record, (date, hour)) in records.iter().zip(&record_datetimes) {
+                if previous != Some((*date, *hour)) {
+                    hourly_dry_bulb.push(record.dry_bulb_c);
+                    previous = Some((*date, *hour));
+                }
+            }
+            doe2_ground_temp_monthly(&hourly_dry_bulb, is_leap_year, 1)?
         }
     };
 
@@ -487,7 +505,7 @@ fn parse_holidays_daylight_header(line: &str) -> Result<bool, WeatherError> {
     }
 }
 
-fn ensure_hourly_data_period(line: &str) -> Result<(), WeatherError> {
+fn ensure_hourly_data_period(line: &str) -> Result<u32, WeatherError> {
     let fields: Vec<&str> = line.split(',').collect();
     if fields.len() < DATA_PERIOD_MIN_FIELDS {
         return Err(WeatherError::Parse(
@@ -501,13 +519,16 @@ fn ensure_hourly_data_period(line: &str) -> Result<(), WeatherError> {
     }
 
     let records_per_hour = parse_u32_field(fields[2], "records per hour")?;
-    if records_per_hour != 1 {
-        return Err(WeatherError::Validation(
-            "EPW downsampling not supported; source must be hourly".to_string(),
-        ));
+    // A held weather file (the Python adapter's OCHRE hold) writes N records
+    // per hour for N dividing 60: each hourly record held over the steps of
+    // its hour. The reader walks the records in order at the file's interval.
+    if records_per_hour == 0 || 60 % records_per_hour != 0 {
+        return Err(WeatherError::Validation(format!(
+            "EPW records per hour must divide 60 (one record per hour up to one per minute), got {records_per_hour}"
+        )));
     }
 
-    Ok(())
+    Ok(records_per_hour)
 }
 
 /// Parses the monthly ground temperatures from the GROUND TEMPERATURES header line.
@@ -616,21 +637,22 @@ pub fn monthly_day_counts(is_leap_year: bool) -> [usize; 12] {
 pub(crate) fn monthly_average_dry_bulb(
     dry_bulb_c: &[f64],
     is_leap_year: bool,
+    records_per_hour: usize,
 ) -> Option<[f64; 12]> {
     let day_counts = monthly_day_counts(is_leap_year);
-    let expected_hours = day_counts.iter().sum::<usize>() * 24;
-    if dry_bulb_c.len() != expected_hours {
+    let year_records = day_counts.iter().sum::<usize>() * 24 * records_per_hour;
+    if dry_bulb_c.len() != year_records {
         return None;
     }
 
     let mut monthly = [0.0_f64; 12];
     let mut offset = 0usize;
     for (month_idx, day_count) in day_counts.iter().enumerate() {
-        let hours = day_count * 24;
-        let month_slice = &dry_bulb_c[offset..offset + hours];
+        let records = day_count * 24 * records_per_hour;
+        let month_slice = &dry_bulb_c[offset..offset + records];
         let sum = month_slice.iter().sum::<f64>();
-        monthly[month_idx] = sum / hours as f64;
-        offset += hours;
+        monthly[month_idx] = sum / records as f64;
+        offset += records;
     }
 
     Some(monthly)
@@ -650,6 +672,7 @@ pub(crate) fn monthly_average_dry_bulb(
 pub(crate) fn doe2_ground_temp_monthly(
     dry_bulb_c: &[f64],
     is_leap_year: bool,
+    records_per_hour: usize,
 ) -> Result<[f64; 12], WeatherError> {
     if dry_bulb_c.is_empty() {
         return Err(WeatherError::Parse(
@@ -657,10 +680,11 @@ pub(crate) fn doe2_ground_temp_monthly(
         ));
     }
 
-    let monthly_avg = monthly_average_dry_bulb(dry_bulb_c, is_leap_year).unwrap_or_else(|| {
-        let annual_avg = dry_bulb_c.iter().sum::<f64>() / dry_bulb_c.len() as f64;
-        [annual_avg; 12]
-    });
+    let monthly_avg = monthly_average_dry_bulb(dry_bulb_c, is_leap_year, records_per_hour)
+        .unwrap_or_else(|| {
+            let annual_avg = dry_bulb_c.iter().sum::<f64>() / dry_bulb_c.len() as f64;
+            [annual_avg; 12]
+        });
     Ok(doe2_ground_temp_from_monthly_avg(&monthly_avg))
 }
 
@@ -1333,6 +1357,37 @@ mod tests {
         lines.join("\n")
     }
 
+    /// Repeats every data record `per_hour` times with the minute field at
+    /// each sub-interval's end, and rewrites the DATA PERIODS header to the
+    /// sub-hourly record count: test input in the shape the Python adapter's
+    /// OCHRE hold produces.
+    fn hold_epw_records(epw: &str, per_hour: u32) -> String {
+        let mut out = Vec::new();
+        for line in epw.lines() {
+            if line.starts_with("DATA PERIODS") {
+                let fields: Vec<&str> = line.split(',').collect();
+                let rewritten = format!(
+                    "DATA PERIODS,{},{},{}",
+                    fields[1],
+                    per_hour,
+                    fields[3..].join(",")
+                );
+                out.push(rewritten);
+            } else if line.contains(',') && !line.is_empty() && out.len() >= 8 {
+                let fields: Vec<&str> = line.split(',').collect();
+                for sub in 1..=per_hour {
+                    let mut held = fields.to_vec();
+                    let minute = (sub * (60 / per_hour)).to_string();
+                    held[4] = minute.as_str();
+                    out.push(held.join(","));
+                }
+            } else {
+                out.push(line.to_string());
+            }
+        }
+        out.join("\n")
+    }
+
     #[test]
     fn parses_real_tmy3_fixture() {
         let mut fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -1391,14 +1446,120 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_hourly_data_period() {
+    fn rejects_records_per_hour_that_do_not_divide_60() {
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
-        let epw = epw.replacen("DATA PERIODS,1,1", "DATA PERIODS,1,2", 1);
-        let err = parse_epw_str(&epw).expect_err("records-per-hour != 1 should fail");
-        assert!(
-            err.to_string()
-                .contains("EPW downsampling not supported; source must be hourly")
+        let epw = epw.replacen("DATA PERIODS,1,1", "DATA PERIODS,1,7", 1);
+        let err = parse_epw_str(&epw).expect_err("records per hour not dividing 60 should fail");
+        assert!(err.to_string().contains("must divide 60"));
+    }
+
+    #[test]
+    fn reads_a_held_subhourly_file_at_its_own_interval() {
+        // The Python adapter's OCHRE hold: each hourly record repeated four
+        // times (900 s interval), minute field at each sub-interval's end.
+        // The reader walks the records in order: source step 900 s, the
+        // half-interval offset 450 s, and the sub-hourly values pass through
+        // unchanged.
+        let epw = build_synthetic_epw(8760, |row, fields| {
+            if row % 2 == 0 {
+                fields[6] = "12.5".to_string();
+            } else {
+                fields[6] = "14.5".to_string();
+            }
+        });
+        let held = hold_epw_records(&epw, 4);
+        let parsed = parse_epw_str(&held).expect("the held file parses");
+        assert_eq!(parsed.meta.source_step_secs, 900);
+        assert_eq!(parsed.meta.midpoint_offset_secs, 450);
+        assert_eq!(parsed.len(), 8760 * 4);
+        // Each hour's four records carry the hour's value, in source order.
+        for hour in 0..12 {
+            let value = if hour % 2 == 0 { 12.5 } else { 14.5 };
+            for sub in 0..4 {
+                let got = parsed.dry_bulb_c[hour * 4 + sub];
+                assert!((got - value).abs() < 1e-12, "hour {hour} sub {sub}: {got}");
+            }
+        }
+    }
+
+    #[test]
+    fn subhourly_epw_header_fields_equal_hourly() {
+        // The committed held 900 s Denver file (the Python adapter's OCHRE
+        // hold of the oracles' shared weather) and its hourly source parse
+        // to equal header fields, and the held file's records are the
+        // source's, each repeated four times.
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_path = manifest.join("data/examples/USA_CO_Denver.epw");
+        let held_path = manifest.join("tests/fixtures/ochre_hold/USA_CO_Denver_900s.epw");
+        let source = parse_epw(&source_path).expect("the hourly source parses");
+        let held = parse_epw(&held_path).expect("the held file parses");
+
+        assert_eq!(held.meta.location, source.meta.location);
+        assert_eq!(held.meta.latitude, source.meta.latitude);
+        assert_eq!(held.meta.longitude, source.meta.longitude);
+        assert_eq!(held.meta.timezone_offset_h, source.meta.timezone_offset_h);
+        assert_eq!(held.meta.elevation_m, source.meta.elevation_m);
+        assert_eq!(held.meta.station_wmo, source.meta.station_wmo);
+        assert_eq!(
+            held.meta.wf_allows_leap_years,
+            source.meta.wf_allows_leap_years
         );
+        assert_eq!(held.meta.source_step_secs, 900);
+        assert_eq!(source.meta.source_step_secs, 3600);
+        assert_eq!(held.design_conditions, source.design_conditions);
+        assert_eq!(held.ground_temp_c.len(), source.ground_temp_c.len() * 4);
+        for (field_name, held_field, source_field) in [
+            ("dry_bulb_c", &held.dry_bulb_c, &source.dry_bulb_c),
+            ("dew_point_c", &held.dew_point_c, &source.dew_point_c),
+            (
+                "rel_humidity_pct",
+                &held.rel_humidity_pct,
+                &source.rel_humidity_pct,
+            ),
+            ("pressure_kpa", &held.pressure_kpa, &source.pressure_kpa),
+            ("ghi_w_m2", &held.ghi_w_m2, &source.ghi_w_m2),
+            ("dni_w_m2", &held.dni_w_m2, &source.dni_w_m2),
+            ("dhi_w_m2", &held.dhi_w_m2, &source.dhi_w_m2),
+            (
+                "wind_speed_m_s",
+                &held.wind_speed_m_s,
+                &source.wind_speed_m_s,
+            ),
+            ("wind_dir_deg", &held.wind_dir_deg, &source.wind_dir_deg),
+            (
+                "opaque_sky_cover",
+                &held.opaque_sky_cover,
+                &source.opaque_sky_cover,
+            ),
+            (
+                "horizontal_infrared_w_m2",
+                &held.horizontal_infrared_w_m2,
+                &source.horizontal_infrared_w_m2,
+            ),
+            (
+                "liquid_precip_m",
+                &held.liquid_precip_m,
+                &source.liquid_precip_m,
+            ),
+        ] {
+            assert_eq!(held_field.len(), source_field.len() * 4);
+            for (hour, &source_value) in source_field.iter().enumerate() {
+                for sub in 0..4 {
+                    let held_value = held_field[hour * 4 + sub];
+                    assert!(
+                        held_value == source_value,
+                        "{field_name} hour {hour} sub {sub}: held {held_value} != source {source_value}"
+                    );
+                }
+            }
+        }
+        // The ground temperature comes from the same header months, so the
+        // held file's per-record interpolation repeats the source's values.
+        for (hour, &source_value) in source.ground_temp_c.iter().enumerate() {
+            for sub in 0..4 {
+                assert_eq!(held.ground_temp_c[hour * 4 + sub], source_value);
+            }
+        }
     }
 
     #[test]
@@ -1618,7 +1779,7 @@ mod tests {
             -6.0, -4.0, 0.0, 5.0, 10.0, 15.0, 18.0, 17.0, 12.0, 6.0, 0.0, -4.0,
         ];
         let dry_bulb = build_hourly_from_monthly(&monthly_means, false, 12.0);
-        let monthly_ground = doe2_ground_temp_monthly(&dry_bulb, false)
+        let monthly_ground = doe2_ground_temp_monthly(&dry_bulb, false, 1)
             .expect("DOE-2 ground temp should succeed with valid dry-bulb data");
 
         let min_ground = monthly_ground.iter().copied().fold(f64::INFINITY, f64::min);
@@ -1644,7 +1805,7 @@ mod tests {
             -5.0, -3.0, 2.0, 7.0, 12.0, 16.0, 20.0, 19.0, 14.0, 8.0, 2.0, -2.0,
         ];
         let dry_bulb = build_hourly_from_monthly(&monthly_means, false, 0.0);
-        let got = doe2_ground_temp_monthly(&dry_bulb, false)
+        let got = doe2_ground_temp_monthly(&dry_bulb, false, 1)
             .expect("DOE-2 ground temp should succeed with valid dry-bulb data");
 
         let t_avg = monthly_means.iter().sum::<f64>() / 12.0;
@@ -1926,7 +2087,7 @@ mod tests {
     /// return an error, not silently substitute a default temperature.
     #[test]
     fn doe2_ground_temp_empty_dry_bulb_returns_err() {
-        let result = doe2_ground_temp_monthly(&[], false);
+        let result = doe2_ground_temp_monthly(&[], false, 1);
         assert!(
             result.is_err(),
             "empty dry-bulb should return Err, not silently substitute a default"

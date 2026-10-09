@@ -82,7 +82,11 @@ mod tests {
         DwellingConfig {
             hpxml_path: examples_dir().join("BEopt_example.xml"),
             schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
-            weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            // The OCHRE reference's zero-order hold of the weather, prepared
+            // by the Python adapter's hold_weather and committed: this test
+            // compares against OCHRE output, so it reads the held file
+            // instead of asking the engine for an override.
+            weather_path: project_root().join("tests/fixtures/ochre_hold/USA_CO_Denver_60s.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
                 start_time,
@@ -104,7 +108,6 @@ mod tests {
             overrides: None,
             bldg_id: 1,
             initialization_duration: None,
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
             patches: None,
         }
     }

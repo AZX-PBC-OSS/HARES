@@ -57,6 +57,79 @@ pub enum ConfigError {
     Validation(String),
 }
 
+/// The table (or keyword surface) a removed configuration key belonged to.
+///
+/// A key is removed from one table, not everywhere: a key that is valid in
+/// one table and removed in another is never rejected where it is valid.
+/// Serialised into the input schema's `removed_keys` (the machine-readable
+/// input schema work).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyScope {
+    /// A `SimulationConfig` table (TOML, synthetic TOML `[simulation]`) or keyword.
+    SimulationConfig,
+    /// The top level of a synthetic TOML file; a `DwellingConfig` field.
+    DwellingTable,
+    /// A keyword only the Python constructors and functions ever accepted.
+    PythonKeyword,
+    /// An equipment override key, synthetic TOML equipment key or Python equipment keyword.
+    EquipmentConfig,
+    /// A parameter of a registry actor (`Dwelling.add_actor_by_name` params).
+    ActorParameter,
+    /// A `ControlSignal` field: Python constructor keyword, HELICS signal body
+    /// key, gym action key.
+    ControlSignal,
+    /// A name `to_observation_vec` or the gym's observation layout resolves.
+    Observation,
+}
+
+/// A configuration key that once parsed and now errors, naming its replacement.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct RemovedKey {
+    pub scope: KeyScope,
+    pub key: &'static str,
+    pub replacement: &'static str,
+}
+
+/// Every configuration key a surface must reject, in table order.
+///
+/// Each row's `replacement` is the error text a surface raises for the key:
+/// it names where the capability lives now, or that nothing replaces it.
+pub static REMOVED_KEYS: &[RemovedKey] = &[RemovedKey {
+    scope: KeyScope::DwellingTable,
+    key: "resample_overrides",
+    replacement: "the engine has no per-field weather resampling overrides; \
+                      for OCHRE comparisons hold the weather with the Python adapter \
+                      (`hares.adapters.ochre.hold_weather`) and pass the held file \
+                      as the weather input",
+}];
+
+/// The replacement text of the removed key matching `scope` and `key`, if any.
+#[must_use]
+pub fn removed_key(scope: KeyScope, key: &str) -> Option<&'static str> {
+    REMOVED_KEYS
+        .iter()
+        .find(|removed| removed.scope == scope && removed.key == key)
+        .map(|removed| removed.replacement)
+}
+
+/// Reject the removed keys among a TOML table's top-level keys before the
+/// table deserialises. `document` names the surface in the error.
+pub fn check_removed_toml_keys(
+    table: &toml::Table,
+    scope: KeyScope,
+    document: &str,
+) -> Result<(), ConfigError> {
+    for key in table.keys() {
+        if let Some(replacement) = removed_key(scope, key) {
+            return Err(ConfigError::Validation(format!(
+                "configuration key '{key}' was removed from {document}: {replacement}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Simulation configuration controlling temporal loop, output, and RNG.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -173,6 +246,8 @@ impl SimulationConfig {
 
     /// Parse and validate a `SimulationConfig` from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, ConfigError> {
+        let table: toml::Table = toml::from_str(s)?;
+        check_removed_toml_keys(&table, KeyScope::SimulationConfig, "the simulation config")?;
         let cfg: SimulationConfig = toml::from_str(s)?;
 
         let duration_secs = cfg.duration.num_seconds();
@@ -257,6 +332,47 @@ mod duration_seconds {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_key_is_scoped() {
+        // The removed key names the Python adapter that holds the weather
+        // now, and is removed from the dwelling table only: the same key in
+        // another scope stays valid (it was never a key there).
+        let replacement = removed_key(KeyScope::DwellingTable, "resample_overrides")
+            .expect("the dwelling table's resample_overrides is a removed key");
+        assert!(
+            replacement.contains("hares.adapters.ochre.hold_weather"),
+            "the replacement must point at the Python adapter: {replacement}"
+        );
+        assert!(
+            removed_key(KeyScope::SimulationConfig, "resample_overrides").is_none(),
+            "the key is removed from the dwelling table, not the simulation config"
+        );
+    }
+
+    #[test]
+    fn removed_key_rejects_the_dwelling_table_only() {
+        // The dwelling-table surface rejects the key before deserialising;
+        // a SimulationConfig table never carried it, so that scope stays
+        // silent (the scoped rule, not a blanket ban).
+        let table: toml::Table =
+            toml::from_str("resample_overrides = { dry_bulb = \"zoh\" }").expect("parse table");
+        let err = check_removed_toml_keys(&table, KeyScope::DwellingTable, "the dwelling table")
+            .expect_err("the removed key is an error");
+        let message = err.to_string();
+        assert!(
+            message.contains("resample_overrides")
+                && message.contains("hares.adapters.ochre.hold_weather"),
+            "the error names the key and the adapter: {message}"
+        );
+        let sim_table: toml::Table = toml::from_str("duration = 3600").expect("parse table");
+        check_removed_toml_keys(
+            &sim_table,
+            KeyScope::SimulationConfig,
+            "the simulation config",
+        )
+        .expect("no removed keys in the simulation config scope");
+    }
 
     #[test]
     fn minimal_config_applies_defaults() {

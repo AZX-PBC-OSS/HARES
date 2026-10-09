@@ -47,7 +47,6 @@ fn dwelling(case: &Case) -> Dwelling {
         overrides: None,
         bldg_id: 1,
         initialization_duration: Some(std::time::Duration::from_secs(7 * 86_400)),
-        resample_overrides: None,
         patches: None,
     })
     .unwrap_or_else(|err| panic!("assemble {}: {err}", case.fixture))

@@ -42,7 +42,6 @@ fn pv_dwelling() -> Dwelling {
         overrides: None,
         bldg_id: 42,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
     Dwelling::from_config(config).expect("dwelling builds")

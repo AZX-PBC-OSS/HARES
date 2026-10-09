@@ -544,7 +544,6 @@ fn resumable_dwelling_config(case: &ResumeCase, output_dir: &Path, run: &str) ->
         overrides: None,
         bldg_id: 176_227,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     }
 }
@@ -825,7 +824,6 @@ fn the_boiler_fluid_publish_marker_survives_a_checkpoint_restore() {
         overrides: None,
         bldg_id: 2,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 

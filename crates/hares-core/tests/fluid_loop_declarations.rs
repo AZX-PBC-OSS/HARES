@@ -69,7 +69,6 @@ fn dwelling_config(
         overrides: None,
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     }
 }

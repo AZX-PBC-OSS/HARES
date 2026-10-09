@@ -403,7 +403,6 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
         overrides: Some(overrides),
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
     let result = SimulationEngine::new()
@@ -487,7 +486,6 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
         overrides: Some(overrides),
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
     let err = SimulationEngine::new()
@@ -618,7 +616,6 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
         overrides: Some(overrides),
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
     let err = SimulationEngine::new()
@@ -686,7 +683,6 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
         overrides: None,
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     };
 

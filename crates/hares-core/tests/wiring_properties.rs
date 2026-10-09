@@ -141,7 +141,6 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 
@@ -180,7 +179,6 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
     let dwelling = hares_core::Dwelling::from_config(config2).expect("dwelling builds");
@@ -317,7 +315,6 @@ fn indoor_zone_has_exactly_one_beam_receiving_floor_on_ochre_base() {
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 
@@ -450,7 +447,6 @@ fn attic_floor_never_takes_the_exterior_sky_exposed_path() {
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
 

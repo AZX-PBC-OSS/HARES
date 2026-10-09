@@ -5,13 +5,13 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_core::DwellingConfig;
-use hares_io::{OutputFormat, ResampleOverrides, SimulationConfig};
-use pyo3::exceptions::PyValueError;
+use hares_io::{OutputFormat, SimulationConfig};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use crate::utils::parse_datetime_str;
 use crate::utils::python_to_json_value;
-use crate::utils::{parse_datetime_str, parse_resample_method};
 
 const DEFAULT_START: &str = "2019-01-01T00:00:00Z";
 const DEFAULT_DURATION_S: i64 = 24 * 60 * 60;
@@ -576,29 +576,13 @@ pub struct PyDwellingConfig {
     defaults_path: Option<String>,
     bldg_id: i64,
     initialization_duration: Option<i64>,
-    resample_overrides: Option<std::collections::HashMap<String, String>>,
     overrides: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
-
-const VALID_RESAMPLE_KEYS: &[&str] = &[
-    "dry_bulb",
-    "dew_point",
-    "rel_humidity",
-    "pressure",
-    "infrared",
-    "ground_temp",
-    "opaque_sky_cover",
-    "ghi",
-    "dni",
-    "dhi",
-    "wind_speed",
-    "wind_dir",
-];
 
 #[pymethods]
 impl PyDwellingConfig {
     #[new]
-    #[pyo3(signature = (hpxml, schedule, weather, config=None, defaults_path=None, bldg_id=None, initialization_duration=None, resample_overrides=None, overrides=None))]
+    #[pyo3(signature = (hpxml, schedule, weather, config=None, defaults_path=None, bldg_id=None, initialization_duration=None, overrides=None, **unexpected))]
     // PyO3 #[new] with kwargs maps 1:1 to Python kwargs; builder adds no value here.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -609,36 +593,30 @@ impl PyDwellingConfig {
         defaults_path: Option<String>,
         bldg_id: Option<i64>,
         initialization_duration: Option<i64>,
-        resample_overrides: Option<Bound<'_, PyDict>>,
         overrides: Option<Bound<'_, PyDict>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let parsed_resample = if let Some(dict) = resample_overrides {
-            let mut map = std::collections::HashMap::new();
-            for key in dict.keys() {
-                let key_str = key.extract::<String>()?;
-                if !VALID_RESAMPLE_KEYS.contains(&key_str.as_str()) {
-                    return Err(PyValueError::new_err(format!(
-                        "invalid resample key '{}'. Valid keys are: {}",
-                        key_str,
-                        VALID_RESAMPLE_KEYS.join(", ")
+        // Every unexpected keyword is either a removed key this surface once
+        // carried (the removed-keys table's message names where the
+        // capability lives now) or a typo Python itself would refuse. The
+        // first offending keyword is named, as Python's own check does.
+        if let Some(unexpected) = unexpected {
+            let keys = unexpected.keys();
+            if keys.len() > 0 {
+                let key = keys.get_item(0)?;
+                let key_str: String = key.extract()?;
+                if let Some(replacement) =
+                    hares_io::removed_key(hares_io::KeyScope::DwellingTable, &key_str)
+                {
+                    return Err(PyTypeError::new_err(format!(
+                        "configuration keyword '{key_str}' was removed: {replacement}"
                     )));
                 }
-                let value = dict.get_item(&key)?.ok_or_else(|| {
-                    PyValueError::new_err(format!(
-                        "missing value for resample override key: {}",
-                        key_str
-                    ))
-                })?;
-                let value_str = value.extract::<String>()?;
-                // Validate through the shared helper; discard the typed return
-                // since the constructor stores raw strings for later conversion.
-                parse_resample_method(&key_str, &value_str)?;
-                map.insert(key_str, value_str);
+                return Err(PyTypeError::new_err(format!(
+                    "DwellingConfig.__new__() got an unexpected keyword argument '{key_str}'"
+                )));
             }
-            if map.is_empty() { None } else { Some(map) }
-        } else {
-            None
-        };
+        }
 
         let parsed_overrides = if let Some(dict) = overrides {
             let mut map = std::collections::HashMap::new();
@@ -674,7 +652,6 @@ impl PyDwellingConfig {
             defaults_path,
             bldg_id: bldg_id.unwrap_or(0),
             initialization_duration,
-            resample_overrides: parsed_resample,
             overrides: parsed_overrides,
         })
     }
@@ -712,19 +689,6 @@ impl PyDwellingConfig {
     #[getter]
     pub fn initialization_duration(&self) -> Option<i64> {
         self.initialization_duration
-    }
-
-    #[getter]
-    pub fn resample_overrides(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
-        if let Some(ref map) = self.resample_overrides {
-            let dict = PyDict::new(py);
-            for (k, v) in map {
-                dict.set_item(k, v)?;
-            }
-            Ok(Some(dict.into()))
-        } else {
-            Ok(None)
-        }
     }
 
     #[getter]
@@ -781,38 +745,6 @@ impl PyDwellingConfig {
             },
         };
 
-        let resample_overrides: Option<ResampleOverrides> = self
-            .resample_overrides
-            .as_ref()
-            .map(|map| -> PyResult<ResampleOverrides> {
-                let mut overrides = ResampleOverrides::default();
-                macro_rules! set_resample {
-                    ($($field:ident),*) => {
-                        $(
-                            if let Some(v) = map.get(stringify!($field)) {
-                                overrides.$field = Some(parse_resample_method(stringify!($field), v)?);
-                            }
-                        )*
-                    };
-                }
-                set_resample!(
-                    dry_bulb,
-                    dew_point,
-                    rel_humidity,
-                    pressure,
-                    infrared,
-                    ground_temp,
-                    opaque_sky_cover,
-                    ghi,
-                    dni,
-                    dhi,
-                    wind_speed,
-                    wind_dir
-                );
-                Ok(overrides)
-            })
-            .transpose()?;
-
         let overrides_value = self.overrides.as_ref().map(|map| {
             let mut obj = serde_json::Map::new();
             for (key, value) in map {
@@ -832,7 +764,6 @@ impl PyDwellingConfig {
             initialization_duration: self
                 .initialization_duration
                 .map(|d| StdDuration::from_secs(d as u64)),
-            resample_overrides,
             patches: None,
         })
     }

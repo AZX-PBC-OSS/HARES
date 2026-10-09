@@ -101,8 +101,24 @@ impl ParityFixture {
         self.root.join("schedule.csv")
     }
 
-    fn weather_epw(&self) -> PathBuf {
-        self.root.join("weather.epw")
+    fn weather_ochre_hold(&self) -> PathBuf {
+        self.root
+            .join(format!("weather_ochre_hold_{}s.epw", self.time_res_s()))
+    }
+
+    /// The fixture's step, from its config: the held weather file's interval
+    /// is the run's step, so the environment resample is a no-op.
+    fn time_res_s(&self) -> i64 {
+        let config_contents =
+            fs::read_to_string(self.config_toml()).expect("fixture config.toml must be readable");
+        let config = toml::from_str::<FixtureConfig>(&config_contents)
+            .expect("fixture config.toml must parse");
+        config
+            .simulation
+            .as_ref()
+            .and_then(|sim| sim.get("time_res"))
+            .and_then(|v| v.as_integer())
+            .expect("fixture config.toml must state [simulation] time_res")
     }
 
     fn reference_output_parquet(&self) -> PathBuf {
@@ -684,7 +700,12 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: fixture.building_xml(),
         schedule_path: Some(fixture.schedule_csv()),
-        weather_path: fixture.weather_epw(),
+        // These tests compare against OCHRE reference output, so the weather
+        // is the fixture's hourly file held at the fixture's step by the
+        // Python adapter's OCHRE hold (committed beside the source): the
+        // comparison's zero-order hold lives in the adapter, not in an
+        // engine override.
+        weather_path: fixture.weather_ochre_hold(),
         sim_config,
         defaults_path: Some(defaults_path),
         // The fixture's `[overrides]` table, verbatim: the battery
@@ -698,7 +719,6 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
             .initialization_duration_seconds
             .and_then(|seconds| u64::try_from(seconds).ok())
             .map(StdDuration::from_secs),
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     }
 }

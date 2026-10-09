@@ -62,7 +62,6 @@ fn ochre_dwelling(hpxml_name: &str, output_dir: &tempfile::TempDir) -> Dwelling 
         overrides,
         bldg_id: 100,
         initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         patches: None,
     })
     .unwrap_or_else(|err| panic!("assemble {hpxml_name}: {err}"))

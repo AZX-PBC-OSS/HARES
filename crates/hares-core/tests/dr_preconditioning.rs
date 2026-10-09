@@ -109,7 +109,6 @@ fn build(home: &Home) -> Dwelling {
         overrides: None,
         bldg_id: 3,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
     let dwelling = Dwelling::from_config(config);

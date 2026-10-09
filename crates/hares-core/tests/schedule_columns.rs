@@ -164,7 +164,6 @@ fn built_consumer_shape_home() -> (Dwelling, tempfile::TempDir) {
         overrides: Some(overrides_json),
         bldg_id: home["bldg_id"].as_integer().expect("bldg id"),
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
     let dwelling = Dwelling::from_config(config).expect("dwelling builds from the golden inputs");
@@ -320,7 +319,6 @@ fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
         overrides: None,
         bldg_id: 176_775,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds from bldg0176775");

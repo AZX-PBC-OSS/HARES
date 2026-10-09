@@ -262,7 +262,6 @@ impl Fleet {
                         initialization_duration: Some(std::time::Duration::from_secs(
                             7 * 24 * 3600,
                         )),
-                        resample_overrides: None,
                         patches: Some(hares_io::HpxmlDataPatches::from_resstock_characteristics(
                             &building.characteristics,
                         )),
@@ -1335,7 +1334,6 @@ mod tests {
                 overrides: None,
                 bldg_id: idx as i64 + 1,
                 initialization_duration: None,
-                resample_overrides: None,
                 patches: None,
             })
             .collect()
@@ -1352,7 +1350,6 @@ mod tests {
                 overrides: None,
                 bldg_id: idx as i64 + 1,
                 initialization_duration: None,
-                resample_overrides: None,
                 patches: None,
             })
             .collect()
@@ -2407,7 +2404,6 @@ mod tests {
             overrides: None,
             bldg_id: 1,
             initialization_duration: None,
-            resample_overrides: None,
             patches: None,
         };
         let fleet = Fleet::from_buildings(vec![config]);
@@ -2428,7 +2424,6 @@ mod tests {
             overrides: None,
             bldg_id,
             initialization_duration: None,
-            resample_overrides: None,
             patches: None,
         };
         let fleet = Fleet::from_buildings(vec![config(1), config(2)])

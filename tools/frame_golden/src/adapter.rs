@@ -188,7 +188,6 @@ fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         overrides: Some(home.overrides.clone()),
         bldg_id: home.bldg_id,
         initialization_duration: initialization_duration(home.initialization_duration_s),
-        resample_overrides: None,
         patches: None,
     };
 
@@ -295,7 +294,6 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
                 overrides: Some(home.overrides.clone()),
                 bldg_id: home.bldg_id,
                 initialization_duration: initialization_duration(home.initialization_duration_s),
-                resample_overrides: None,
                 patches: None,
             }
         })

@@ -203,7 +203,6 @@ fn dwelling_config(hpxml_xml: &str) -> (DwellingConfig, tempfile::TempDir) {
         overrides: None,
         bldg_id: 7,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     };
     (config, dir)

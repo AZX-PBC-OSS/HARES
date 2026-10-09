@@ -66,7 +66,6 @@ fn generated_schedule_config(schedule_path: Option<PathBuf>) -> DwellingConfig {
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
-        resample_overrides: None,
         patches: None,
     }
 }
