@@ -113,13 +113,14 @@ uv pip install -e ".[rl]"       # Gymnasium RL environments
 ## Usage example
 
 ```python
-from hares import Dwelling, ControlSignal
+from hares import Dwelling, ControlSignal, SimulationConfig
 
 dw = Dwelling.from_hpxml(
     hpxml="path/to/building.xml",
     schedule="path/to/schedules.csv",
     weather="path/to/weather.epw",
-    defaults_path="path/to/HARES/defaults",
+    config=SimulationConfig(),
+    defaults="path/to/HARES/defaults",
 )
 dw.initialize()
 
@@ -134,12 +135,12 @@ for ts in dw.timesteps():
     obs = dw.step()
 ```
 
-`defaults_path` names the directory holding the default schedule profiles
+`defaults` names the directory holding the default schedule profiles
 (`Default Schedule Parameters.csv`), normally the repository's `defaults/`.
 An equipment whose load has no column in the schedule file and no HPXML
 schedule fractions takes its default profile from there. Without
-`defaults_path` there are no default profiles, so such an equipment fails
-construction, naming itself and `defaults_path`; a schedule file that
+`defaults` there are no default profiles, so such an equipment fails
+construction, naming itself and the defaults path; a schedule file that
 names every column the building's equipment needs builds without one. A
 schedule generated from the HPXML (`schedule=None`) always needs it.
 

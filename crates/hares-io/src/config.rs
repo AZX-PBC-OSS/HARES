@@ -131,6 +131,18 @@ pub static REMOVED_KEYS: &[RemovedKey] = &[
     },
     RemovedKey {
         scope: KeyScope::PythonKeyword,
+        key: "duration_s",
+        replacement: "pass the simulation length as `SimulationConfig.duration` \
+                      in the typed `config`",
+    },
+    RemovedKey {
+        scope: KeyScope::PythonKeyword,
+        key: "time_res_s",
+        replacement: "pass the step length as `SimulationConfig.time_res` \
+                      in the typed `config`",
+    },
+    RemovedKey {
+        scope: KeyScope::PythonKeyword,
         key: "latitude",
         replacement: "pass site_location = SiteLocationOverride(latitude_deg=...)",
     },
@@ -153,6 +165,11 @@ pub static REMOVED_KEYS: &[RemovedKey] = &[
         scope: KeyScope::PythonKeyword,
         key: "output_to_parquet",
         replacement: "pass output_format = \"parquet\"",
+    },
+    RemovedKey {
+        scope: KeyScope::PythonKeyword,
+        key: "hpxml_dir",
+        replacement: "pass the unpacked buildings directory as the `buildings_dir` argument",
     },
 ];
 

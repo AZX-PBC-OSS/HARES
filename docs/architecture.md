@@ -622,7 +622,7 @@ graph TD
 
 | Method | Description |
 |--------|-------------|
-| `PyDwelling.from_hpxml(hpxml, schedule, weather, **kwargs)` | Construct dwelling from file paths |
+| `PyDwelling.from_hpxml(hpxml, schedule, weather, *, config, ...)` | Construct dwelling from file paths and one typed config |
 | `PyDwelling.simulate()` | Run full simulation horizon, return Polars DataFrame |
 | `PyDwelling.step()` | Advance one timestep, return telemetry dict |
 | `PyDwelling.apply_control(name, signal)` | Queue control signal for next step |

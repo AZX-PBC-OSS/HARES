@@ -7,7 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from hares import DwellingConfig, SimulationConfig
-from hares import Fleet as PyFleet
+from hares import Fleet as PyFleet, SimulationConfig
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
@@ -206,7 +206,7 @@ def test_from_resstock_accepts_enum(tmp_path: Path) -> None:
     pq.write_table(table, metadata)
     _write_extracted_building(tmp_path, 12345)
 
-    from hares import ResStockVersion
+    from hares import ResStockVersion, SimulationConfig
 
     fleet = PyFleet.from_resstock(
         str(metadata),
@@ -290,8 +290,9 @@ def test_from_resstock_accepts_a_defaults_path(tmp_path: Path) -> None:
     assert len(fleet) == 1
 
 
-def test_from_resstock_hpxml_dir_keyword_is_removed(tmp_path: Path) -> None:
-    """The parameter is buildings_dir; the old hpxml_dir keyword is gone."""
+def test_from_resstock_hpxml_dir_names_buildings_dir(tmp_path: Path) -> None:
+    """The parameter is buildings_dir; the old hpxml_dir keyword errors
+    with the removed-keys table's message, which names the replacement."""
     metadata = tmp_path / "metadata.parquet"
     table = pa.table(
         {
@@ -305,10 +306,9 @@ def test_from_resstock_hpxml_dir_keyword_is_removed(tmp_path: Path) -> None:
     _write_extracted_building(tmp_path, 12345)
 
     # The static surface no longer carries the removed keyword, so the call
-    # goes through getattr on purpose. The replacement name is asserted once
-    # the removed-keyword machinery lands.
+    # goes through getattr on purpose.
     legacy_from_resstock = getattr(PyFleet, "from_resstock")
-    with pytest.raises(TypeError, match="hpxml_dir"):
+    with pytest.raises(TypeError, match="buildings_dir"):
         legacy_from_resstock(
             str(metadata),
             hpxml_dir=str(tmp_path),
@@ -346,7 +346,7 @@ def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
 @pytest.mark.slow
 def test_simulate_resolution_enum_works(tmp_path: Path) -> None:
     """Verify simulate(resolution=AggregationResolution.Hourly) works."""
-    from hares import AggregationResolution
+    from hares import AggregationResolution, SimulationConfig
 
     fleet = _build_simulatable_fleet(tmp_path, 1)
     results = fleet.simulate(resolution=AggregationResolution.Hourly)
@@ -480,19 +480,19 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
     battery_overrides = {"Battery": {"bms_mode": '"Manual"'}}
 
     config1 = DwellingConfig(
+        config=sim_config,
         hpxml=str(fixture_dir / "base.xml"),
         schedule=schedule,
         weather=weather,
-        config=sim_config,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=1,
     )
     config2 = DwellingConfig(
+        config=sim_config,
         hpxml=str(fixture_dir / "base-battery.xml"),
         schedule=schedule,
         weather=weather,
-        config=sim_config,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         overrides=battery_overrides,
         bldg_id=2,
     )

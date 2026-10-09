@@ -22,6 +22,7 @@ use crate::py_config::{MAX_CHRONO_SECONDS, PyDwellingConfig};
 use crate::py_control::PyControlSignal;
 use crate::py_enums::{PyAggregationResolution, PyResStockVersion};
 use crate::py_telemetry::PyTelemetry;
+use crate::utils::check_unexpected_kwargs;
 
 fn parse_resstock_version(s: &str) -> PyResult<IoResStockVersion> {
     let normalized: String = s
@@ -127,7 +128,7 @@ impl PyFleet {
     /// Unresolved weather only warns and leaves the dwelling an empty
     /// weather path for now; a later row tightens this to an error.
     #[classmethod]
-    #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, duration_s=None, defaults_path=None))]
+    #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, duration_s=None, defaults_path=None, **unexpected))]
     #[allow(clippy::too_many_arguments)]
     pub fn from_resstock(
         _cls: &Bound<'_, PyType>,
@@ -138,7 +139,9 @@ impl PyFleet {
         resstock_version: Option<Bound<'_, PyAny>>,
         duration_s: Option<i64>,
         defaults_path: Option<String>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        check_unexpected_kwargs("from_resstock", unexpected)?;
         let parsed_filter = filter
             .map(dict_to_filter)
             .transpose()?

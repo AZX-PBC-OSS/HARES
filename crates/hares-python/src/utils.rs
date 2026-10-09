@@ -4,10 +4,76 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
 use hares_equipment::EquipmentConfig;
 use hares_io::EquipmentSpec;
 use hares_types::{DayFilter, FuelType};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use serde_json::{Map, Value, json};
+
+/// The `SimulationConfig` field names: a keyword spelling one of these,
+/// passed beside a typed `config`, names the config it belongs in.
+const SIM_CONFIG_FIELD_KEYWORDS: &[&str] = &[
+    "start_time",
+    "duration",
+    "time_res",
+    "output_verbosity",
+    "output_path",
+    "write_output",
+    "output_format",
+    "output_chunk_size",
+    "setpoint_deadband_c",
+    "master_seed",
+    "retain_batches",
+    "civil_timezone",
+    "rotation",
+    "site_location",
+    "max_consecutive_step_failures",
+];
+
+/// The error for one keyword a surface's signature does not carry, in the
+/// removed-key order: a key of the removed-keys table (any keyword scope)
+/// errors with its replacement-naming message; a `SimulationConfig` field
+/// name names the typed config it belongs in; anything else is Python's
+/// own unexpected-keyword refusal.
+pub(crate) fn unexpected_keyword_error(surface: &str, key: &str) -> PyErr {
+    for scope in [
+        hares_io::KeyScope::DwellingTable,
+        hares_io::KeyScope::SimulationConfig,
+        hares_io::KeyScope::PythonKeyword,
+    ] {
+        if let Some(replacement) = hares_io::removed_key(scope, key) {
+            return PyTypeError::new_err(format!(
+                "configuration keyword '{key}' was removed: {replacement}"
+            ));
+        }
+    }
+    if SIM_CONFIG_FIELD_KEYWORDS.contains(&key) {
+        return PyTypeError::new_err(format!(
+            "{surface}() got an unexpected keyword argument '{key}': \
+             the field lives on the typed config: config=SimulationConfig({key}=...)"
+        ));
+    }
+    PyTypeError::new_err(format!(
+        "{surface}() got an unexpected keyword argument '{key}'"
+    ))
+}
+
+/// Check a surface's `**unexpected` keywords: the first offending keyword
+/// is named, as Python's own check does.
+pub(crate) fn check_unexpected_kwargs(
+    surface: &str,
+    unexpected: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let Some(unexpected) = unexpected else {
+        return Ok(());
+    };
+    let keys = unexpected.keys();
+    if keys.len() == 0 {
+        return Ok(());
+    }
+    let key = keys.get_item(0)?;
+    let key_str: String = key.extract()?;
+    Err(unexpected_keyword_error(surface, &key_str))
+}
 
 /// The one Python→JSON boundary converter — shared by every free-form
 /// Value channel into the dwelling build (equipment `overrides`, the
