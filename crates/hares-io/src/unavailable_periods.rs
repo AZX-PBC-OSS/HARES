@@ -213,13 +213,20 @@ fn flagged_rows(schedule: &ScheduleTimeSeries, periods: &[UnavailablePeriod]) ->
 /// applies to, on the period's flagged steps, at the schedule's own
 /// resolution. The schedule columns that carry setpoints or temperatures
 /// have no table row and are left alone.
+///
+/// Returns the columns as they were before the zeroing (`None` when no
+/// period ran): OpenStudio-HPXML computes every peak and design level from
+/// these pre-period schedules and zeroes the columns after, so the caller
+/// hands the snapshot to `inject_schedule_into_specs_with_pre_period` and
+/// a period removes volume instead of spreading it over the remaining days.
 pub fn apply_unavailable_periods(
     schedule: &mut ScheduleTimeSeries,
     periods: &[UnavailablePeriod],
-) -> Result<(), HaresError> {
+) -> Result<Option<Vec<Vec<f64>>>, HaresError> {
     if periods.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
+    let pre_period_columns = schedule.columns.clone();
     let flags = flagged_rows(schedule, periods);
     for period in periods {
         let count = flags.iter().filter(|f| **f).count();
@@ -266,7 +273,7 @@ pub fn apply_unavailable_periods(
             .collect::<Vec<_>>(),
         "unavailable periods applied to the schedule columns",
     );
-    Ok(())
+    Ok(Some(pre_period_columns))
 }
 
 /// Parse `SoftwareInfo/extension/UnavailablePeriods` with OpenStudio-HPXML's

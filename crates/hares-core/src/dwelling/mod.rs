@@ -2667,14 +2667,18 @@ fn build_from_blueprint_inner(
     // apply to, at the schedule's own resolution and before any injection, so
     // the event windows, the design levels and the water heater's draw all
     // read the zeroed columns. The hot-water appliance columns zero through
-    // their paired energy-use column's table row.
-    hares_io::apply_unavailable_periods(
+    // their paired energy-use column's table row. The pre-period columns the
+    // call returns hand the injection the basis OpenStudio-HPXML computes
+    // its peaks from, so the period removes volume instead of spreading it
+    // over the remaining days.
+    let pre_period_columns = hares_io::apply_unavailable_periods(
         environment.schedule_mut(),
         &bp.building.unavailable_periods,
     )?;
-    hares_io::inject_schedule_into_specs(
+    hares_io::inject_schedule_into_specs_with_pre_period(
         &mut equipment_specs,
         environment.schedule_mut(),
+        pre_period_columns.as_deref(),
         bp.defaults_path.as_deref(),
         &defaults,
         &mut schedule_warnings,

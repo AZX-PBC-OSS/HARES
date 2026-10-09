@@ -90,6 +90,37 @@ pub fn normalize_draw_profile(
     raw_fractions.iter().map(|&f| f * scale / 60.0).collect()
 }
 
+/// [`normalize_draw_profile`] with the mean stated explicitly instead of
+/// taken from the input: the caller passes the PRE-period column's mean
+/// while the shape comes from the post-period (zeroed) column, so an
+/// unavailable period removes the volume its days carried instead of
+/// spreading it over the remaining days (OpenStudio-HPXML computes every
+/// peak from the pre-period schedule and zeroes the columns after,
+/// `schedules.rb:1051-1052`).
+pub fn normalize_draw_profile_at_mean(
+    raw_fractions: &[f64],
+    mean_raw_fractions: f64,
+    avg_daily_consumption_l: f64,
+    rho_kg_per_l: f64,
+) -> Vec<f64> {
+    if raw_fractions.is_empty() {
+        return Vec::new();
+    }
+
+    if avg_daily_consumption_l <= 0.0 {
+        return vec![0.0; raw_fractions.len()];
+    }
+
+    if mean_raw_fractions <= 0.0 {
+        return vec![0.0; raw_fractions.len()];
+    }
+
+    let annual_mean_l_per_min = avg_daily_consumption_l / MINUTES_PER_DAY;
+    let scale = annual_mean_l_per_min * rho_kg_per_l / mean_raw_fractions;
+
+    raw_fractions.iter().map(|&f| f * scale / 60.0).collect()
+}
+
 /// Water fixture efficiency for a low-flow vs standard fixture set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixtureEfficiency {

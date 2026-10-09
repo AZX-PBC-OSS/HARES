@@ -762,6 +762,90 @@ fn leap_year_schedule_flags_mar_1_and_dec_31_on_their_own_days() {
     }
 }
 
+/// A half-year vacancy must REMOVE the volume the period's days carried,
+/// not spread it over the active days: OpenStudio-HPXML computes every
+/// peak from the pre-period schedule (SchedulesFile deep-copies
+/// `@schedules` and `set_unavailable_periods` edits only the copy the
+/// model reads, schedules.rb:1051-1052), so the active days' daily volume
+/// stays exactly what the no-period run drew, at every step's shape.
+#[test]
+fn half_year_vacancy_removes_volume_instead_of_redistributing_it() {
+    let defaults = repo_defaults();
+    let building = hares_io::hpxml::parse_hpxml_str(&occupied_bldg0527060()).expect("parses");
+    let mut specs =
+        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("equipment resolves");
+    assert!(
+        spec_f64(
+            wet_appliance_spec(&specs, "Clothes Washer"),
+            "daily_hot_water_m3"
+        ) > 0.0
+    );
+
+    let periods = vec![hares_io::UnavailablePeriod {
+        kind: hares_io::UnavailableKind::Vacancy,
+        begin_month: 1,
+        begin_day: 1,
+        begin_hour: 0,
+        end_month: 6,
+        end_day: 30,
+        end_hour: 24,
+        natural_ventilation: hares_io::NaturalVentilation::RegularSchedule,
+    }];
+
+    // The no-period run sets the daily volume the active days must keep.
+    let mut baseline_schedule = synthetic_schedule_8760_rows();
+    let mut baseline_specs =
+        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("equipment resolves");
+    hares_io::inject_schedule_into_specs(
+        &mut baseline_specs,
+        &mut baseline_schedule,
+        Some(&project_root().join("defaults")),
+        &defaults,
+        &mut Vec::new(),
+    )
+    .expect("baseline injection succeeds");
+
+    let mut schedule = synthetic_schedule_8760_rows();
+    let pre_period_columns =
+        hares_io::apply_unavailable_periods(&mut schedule, &periods).expect("periods apply");
+    hares_io::inject_schedule_into_specs_with_pre_period(
+        &mut specs,
+        &mut schedule,
+        pre_period_columns.as_deref(),
+        Some(&project_root().join("defaults")),
+        &defaults,
+        &mut Vec::new(),
+    )
+    .expect("injection succeeds");
+
+    let daily_kg = |schedule: &hares_io::ScheduleTimeSeries, prefix: &str, day: usize| {
+        let col_idx = schedule
+            .column_names
+            .iter()
+            .position(|name| name.starts_with(prefix))
+            .unwrap_or_else(|| panic!("a {prefix} column exists"));
+        let rows = &schedule.columns[col_idx][day * 24..(day + 1) * 24];
+        rows.iter().sum::<f64>() * 3600.0
+    };
+
+    for prefix in ["appliance_hot_water_draw_kg_s_", "hot_water_draw_kg_s_"] {
+        // A vacancy day draws nothing.
+        let vacancy_day = daily_kg(&schedule, prefix, 30);
+        assert!(
+            vacancy_day == 0.0,
+            "{prefix}: the vacancy day must draw zero, got {vacancy_day}"
+        );
+        // An active day's volume is unchanged from the no-period run.
+        let baseline_day = daily_kg(&baseline_schedule, prefix, 300);
+        let active_day = daily_kg(&schedule, prefix, 300);
+        assert!(
+            (active_day - baseline_day).abs() <= 1e-9 * baseline_day.abs(),
+            "{prefix}: the active day's volume must be unchanged (no-period run {baseline_day} kg, \
+             vacancy run {active_day} kg): the vacancy removes volume, it does not spread it"
+        );
+    }
+}
+
 fn occupied_bldg0527060() -> String {
     let xml = std::fs::read_to_string(fixture(
         "tests/fixtures/resstock/2025.1/bldg0527060/home.xml",
@@ -789,12 +873,12 @@ fn generated_schedule_7d() -> hares_io::ScheduleTimeSeries {
 fn synthetic_schedule_8760_rows() -> hares_io::ScheduleTimeSeries {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut csv = String::from(
-        "occupants,clothes_washer,dishwasher,hot_water_clothes_washer,hot_water_dishwasher,hot_water_fixtures\n",
+        "occupants,clothes_washer,dishwasher,clothes_dryer,cooking_range,refrigerator,plug_loads_other,plug_loads_tv,ceiling_fan,lighting_interior,hot_water_clothes_washer,hot_water_dishwasher,hot_water_fixtures\n",
     );
     // A full year of hourly rows: index-based schedules are validated as
     // annual data.
     for _ in 0..8760 {
-        csv.push_str("1.0,0.5,0.5,0.5,0.5,0.5\n");
+        csv.push_str("1.0,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5\n");
     }
     let path = dir.path().join("schedule.csv");
     std::fs::write(&path, &csv).expect("write schedule");

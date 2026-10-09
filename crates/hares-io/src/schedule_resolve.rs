@@ -23,7 +23,7 @@ use tracing::warn;
 
 use crate::EquipmentSpec;
 use crate::defaults::DefaultsStore;
-use crate::draw_profile::normalize_draw_profile;
+use crate::draw_profile::normalize_draw_profile_at_mean;
 use crate::hpxml::{MICROWAVE_DEFAULT_ANNUAL_KWH, build_spec};
 use crate::schedule::{
     ColumnAggregation, ScheduleFormatFamily, ScheduleTimeSeries, resolve_occupancy_column,
@@ -662,6 +662,32 @@ pub fn inject_schedule_into_specs(
     defaults: &DefaultsStore,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
+    inject_schedule_into_specs_with_pre_period(
+        specs,
+        schedule,
+        None,
+        defaults_path,
+        defaults,
+        warnings,
+    )
+}
+
+/// [`inject_schedule_into_specs`] with the schedule's pre-period columns:
+/// the columns as loaded, before [`apply_unavailable_periods`] zeroed the
+/// periods' steps (`apply_unavailable_periods` returns them). The draw and
+/// power normalizations take their mean from the pre-period column and
+/// their shape from the zeroed one, OpenStudio-HPXML's shape: the peak
+/// comes from the pre-period schedule (`schedules.rb:1051-1052`) and the
+/// zeroing removes the period's volume instead of spreading it over the
+/// remaining days. `None` when no period ran.
+pub fn inject_schedule_into_specs_with_pre_period(
+    specs: &mut Vec<EquipmentSpec>,
+    schedule: &mut ScheduleTimeSeries,
+    pre_period_columns: Option<&[Vec<f64>]>,
+    defaults_path: Option<&Path>,
+    defaults: &DefaultsStore,
+    warnings: &mut Vec<Warning>,
+) -> Result<(), HaresError> {
     let mut csv_col_map: HashMap<String, usize> = schedule
         .column_names
         .iter()
@@ -756,7 +782,14 @@ pub fn inject_schedule_into_specs(
 
         match mapping.category {
             ScheduleCategory::Power => {
-                inject_power_schedule(spec, mapping, &csv_col_map, schedule, &profiles)?;
+                inject_power_schedule(
+                    spec,
+                    mapping,
+                    &csv_col_map,
+                    schedule,
+                    &profiles,
+                    pre_period_columns,
+                )?;
             }
             ScheduleCategory::EventWindow => {
                 inject_event_schedule(spec, mapping, &csv_col_map, schedule)?;
@@ -775,7 +808,7 @@ pub fn inject_schedule_into_specs(
     // When neither a schedule CSV column nor HPXML-derived setpoints are
     // present, the unit takes OS-HPXML's manual-thermostat default
     // (68 °F heating, 78 °F cooling), recorded as a warning naming it.
-    inject_setpoint_schedules(specs, &csv_col_map, schedule, warnings)?;
+    inject_setpoint_schedules(specs, &csv_col_map, schedule, pre_period_columns, warnings)?;
     Ok(())
 }
 
@@ -889,6 +922,7 @@ fn inject_setpoint_schedules(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
+    pre_period_columns: Option<&[Vec<f64>]>,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
     // Store only the column index -- the equipment resolves the value each
@@ -896,7 +930,7 @@ fn inject_setpoint_schedules(
     let heating_col = csv_col_map.get("heating_setpoint").copied();
     let cooling_col = csv_col_map.get("cooling_setpoint").copied();
 
-    inject_water_heater_schedule_columns(specs, csv_col_map, schedule)?;
+    inject_water_heater_schedule_columns(specs, csv_col_map, schedule, pre_period_columns)?;
 
     for spec in specs.iter_mut() {
         if HEATING_EQUIPMENT.contains(&spec.name.as_str()) {
@@ -982,6 +1016,7 @@ fn inject_water_heater_schedule_columns(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
+    pre_period_columns: Option<&[Vec<f64>]>,
 ) -> Result<(), HaresError> {
     let draw_col = first_present_column(csv_col_map, &["hot_water_fixtures"]);
     let mains_col = first_present_column(csv_col_map, &["hot_water_mains_temperature"]);
@@ -1040,8 +1075,12 @@ fn inject_water_heater_schedule_columns(
         if let Some(col_idx) = draw_col {
             let raw_values = schedule.columns[col_idx].clone();
             let avg_daily_l = water_heater_avg_daily_draw_l(spec)?;
+            // The normalization's mean comes from the pre-period column
+            // (the peak OpenStudio-HPXML computes), the shape from the
+            // zeroed one: the period removes volume.
+            let mean = column_mean(pre_period_columns, col_idx, &raw_values);
             let kg_s_series: Vec<f64> =
-                normalize_draw_profile(&raw_values, avg_daily_l, rho_kg_per_l);
+                normalize_draw_profile_at_mean(&raw_values, mean, avg_daily_l, rho_kg_per_l);
 
             let col_name = format!(
                 "hot_water_draw_kg_s_{}_{}",
@@ -1069,16 +1108,20 @@ fn inject_water_heater_schedule_columns(
         if washer_col.is_some() || dishwasher_col.is_some() {
             let mut appliance_draw: Option<Vec<f64>> = None;
             if let Some(col_idx) = washer_col {
-                let series = normalize_draw_profile(
+                let mean = column_mean(pre_period_columns, col_idx, &schedule.columns[col_idx]);
+                let series = normalize_draw_profile_at_mean(
                     &schedule.columns[col_idx],
+                    mean,
                     washer_daily_l,
                     rho_kg_per_l,
                 );
                 appliance_draw = Some(series);
             }
             if let Some(col_idx) = dishwasher_col {
-                let series = normalize_draw_profile(
+                let mean = column_mean(pre_period_columns, col_idx, &schedule.columns[col_idx]);
+                let series = normalize_draw_profile_at_mean(
                     &schedule.columns[col_idx],
+                    mean,
                     dishwasher_daily_l,
                     rho_kg_per_l,
                 );
@@ -1338,12 +1381,31 @@ fn first_present_column(csv_col_map: &HashMap<String, usize>, names: &[&str]) ->
         .find_map(|name| csv_col_map.get(*name).copied())
 }
 
+/// The mean a normalization scales against: the pre-period column's mean
+/// when the snapshot covers the column (the peak OpenStudio-HPXML
+/// computes), else the live column's own mean (no period ran, or the
+/// column was never zeroed and the two agree).
+fn column_mean(
+    pre_period_columns: Option<&[Vec<f64>]>,
+    col_idx: usize,
+    live_column: &[f64],
+) -> f64 {
+    let column: &[f64] = pre_period_columns
+        .and_then(|pre| pre.get(col_idx))
+        .map_or(live_column, |pre: &Vec<f64>| pre.as_slice());
+    if column.is_empty() {
+        return 0.0;
+    }
+    column.iter().sum::<f64>() / column.len() as f64
+}
+
 fn inject_power_schedule(
     spec: &mut EquipmentSpec,
     mapping: &ColumnMapping,
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
     profiles: &DefaultProfiles,
+    pre_period_columns: Option<&[Vec<f64>]>,
 ) -> Result<(), HaresError> {
     // Skip if equipment already has power schedule source keys.
     if spec.parameters.keys().any(|k| {
@@ -1364,8 +1426,10 @@ fn inject_power_schedule(
             return Ok(());
         }
 
-        let mean_fraction: f64 =
-            fraction_series.iter().copied().sum::<f64>() / fraction_series.len() as f64;
+        // The design level's mean comes from the pre-period column
+        // (OpenStudio-HPXML's calc_design_level_from_daily_kwh reads the
+        // pre-period schedules), the column's shape from the zeroed one.
+        let mean_fraction: f64 = column_mean(pre_period_columns, col_idx, &fraction_series);
 
         let max_kw = resolve_max_kw(
             spec,
