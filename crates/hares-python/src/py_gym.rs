@@ -10,9 +10,6 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 
-#[cfg(feature = "observe")]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
 use crate::py_control::PyControlSignal;
 use crate::py_dwelling::{FATAL_DWELLING_PREFIX, PyDwelling};
 
@@ -176,13 +173,72 @@ fn build_control_signal(
     Ok(signal)
 }
 
-/// Cumulative count of action values that exceeded declared bounds and were clipped.
-#[cfg(feature = "observe")]
-static ACTIONS_CLIPPED: AtomicU64 = AtomicU64::new(0);
+/// The declared bounds of one action field, the table the gym's action
+/// space is built from and every clip path clamps to.
+fn field_bounds(field: &str) -> (f64, f64) {
+    match field.to_lowercase().as_str() {
+        "soc"
+        | "target_soc"
+        | "min_soc"
+        | "max_soc"
+        | "fraction"
+        | "load_fraction"
+        | "on_fraction"
+        | "duty_cycle"
+        | "target_rh"
+        | "min_rh"
+        | "max_rh"
+        | "connected"
+        | "enabled"
+        | "solar_only_charging" => (0.0, 1.0),
+        "setpoint_c" | "heat_c" | "cool_c" | "heating_setpoint_c" | "cooling_setpoint_c" => {
+            (-50.0, 80.0)
+        }
+        _ => (-1.0e6, 1.0e6),
+    }
+}
 
-/// Throttle gate so the clipping warning is emitted once per process lifetime.
-#[cfg(feature = "observe")]
-static ACTIONS_CLIPPED_WARNED: AtomicBool = AtomicBool::new(false);
+/// Clamp each action value to its column's bounds pair and count the clamped
+/// values. The counting is unconditional: a run's health carries the clamp
+/// count in every build profile.
+fn clamp_action(action: &[f64], action_bounds: &[(f64, f64)]) -> (Vec<f64>, u64) {
+    let mut clamped_count: u64 = 0;
+    let values = action
+        .iter()
+        .zip(action_bounds)
+        .map(|(&raw, &(low, high))| {
+            let clipped = raw.clamp(low, high);
+            if clipped != raw {
+                clamped_count += 1;
+            }
+            clipped
+        })
+        .collect();
+    (values, clamped_count)
+}
+
+/// The bounds of each layout column: a `deadband_c` column is held to the
+/// band range of its target's thermostat class in `dwelling`, every other
+/// column to the field's declared table bounds.
+fn resolve_action_bounds(
+    dwelling: &PyDwelling,
+    action_layout: &[(String, String)],
+) -> Result<Vec<(f64, f64)>, String> {
+    action_layout
+        .iter()
+        .map(|(equipment, field)| {
+            if field.eq_ignore_ascii_case("deadband_c") {
+                dwelling.band_range_of(equipment)?.ok_or_else(|| {
+                    format!(
+                        "equipment {equipment:?} has no thermostat band for a deadband_c action"
+                    )
+                })
+            } else {
+                Ok(field_bounds(field))
+            }
+        })
+        .collect()
+}
 
 /// One finite `(low, high)` pair with `low <= high` per layout column, so
 /// clipping to it is defined.
@@ -263,13 +319,15 @@ fn check_signals_accepted(
 /// Values are clipped to `action_bounds` (one `(low, high)` per layout column,
 /// resolved once by the environment from the field and, for a deadband, the
 /// target's thermostat class), grouped by equipment, and converted to typed
-/// signals using `signal_type_by_equipment`.
+/// signals using `signal_type_by_equipment`. Returns the signals with the
+/// number of clamped values, which the caller records on the acting
+/// dwelling's run health.
 fn map_action_to_signals(
     action: &[f64],
     action_layout: &[(String, String)],
     signal_type_by_equipment: &HashMap<String, String>,
     action_bounds: &[(f64, f64)],
-) -> Result<Vec<(String, ControlSignal)>, String> {
+) -> Result<(Vec<(String, ControlSignal)>, u64), String> {
     if action.len() != action_layout.len() {
         return Err(format!(
             "action length ({}) must match action_layout length ({})",
@@ -279,9 +337,6 @@ fn map_action_to_signals(
     }
     validate_action_bounds(action_layout, action_bounds)?;
 
-    let mut field_values: HashMap<String, HashMap<String, f64>> = HashMap::new();
-    #[cfg(feature = "observe")]
-    let mut clipped_count: u64 = 0;
     for (idx, (equipment, field)) in action_layout.iter().enumerate() {
         let raw_value = action[idx];
         if !raw_value.is_finite() {
@@ -289,53 +344,33 @@ fn map_action_to_signals(
                 "action value at index {idx} for {equipment}.{field} is not finite: {raw_value}",
             ));
         }
-        let (low, high) = action_bounds[idx];
-        let clipped = raw_value.clamp(low, high);
-        if clipped != raw_value {
-            #[cfg(feature = "observe")]
-            {
-                clipped_count += 1;
-            }
-        }
+    }
 
-        #[cfg(feature = "observe")]
-        {
-            let sig_kind = signal_type_by_equipment
-                .get(equipment.as_str())
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            tracing::trace!(
-                action_index = idx,
-                equipment = equipment.as_str(),
-                field = field.as_str(),
-                raw_value = raw_value,
-                clipped_value = clipped,
-                signal_variant = sig_kind.as_str(),
-                "batch_step action mapping",
-            );
-        }
+    let (clipped_values, clamped_count) = clamp_action(action, action_bounds);
 
+    #[cfg(feature = "observe")]
+    for (idx, (equipment, field)) in action_layout.iter().enumerate() {
+        let sig_kind = signal_type_by_equipment
+            .get(equipment.as_str())
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        tracing::trace!(
+            action_index = idx,
+            equipment = equipment.as_str(),
+            field = field.as_str(),
+            raw_value = action[idx],
+            clipped_value = clipped_values[idx],
+            signal_variant = sig_kind.as_str(),
+            "batch_step action mapping",
+        );
+    }
+
+    let mut field_values: HashMap<String, HashMap<String, f64>> = HashMap::new();
+    for (idx, (equipment, field)) in action_layout.iter().enumerate() {
         field_values
             .entry(equipment.clone())
             .or_default()
-            .insert(field.clone(), clipped);
-    }
-
-    #[cfg(feature = "observe")]
-    {
-        if clipped_count > 0 {
-            ACTIONS_CLIPPED.fetch_add(clipped_count, Ordering::Relaxed);
-            if ACTIONS_CLIPPED_WARNED
-                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                tracing::warn!(
-                    actions_clipped_this_call = clipped_count,
-                    total_actions_clipped = ACTIONS_CLIPPED.load(Ordering::Relaxed),
-                    "Action values exceeded declared bounds and were clipped; the RL agent is exploring outside the declared action space. Subsequent clipping events will be suppressed."
-                );
-            }
-        }
+            .insert(field.clone(), clipped_values[idx]);
     }
 
     let consumed: usize = field_values.values().map(|m| m.len()).sum();
@@ -355,7 +390,7 @@ fn map_action_to_signals(
         signals.push((equipment.clone(), signal));
     }
 
-    Ok(signals)
+    Ok((signals, clamped_count))
 }
 
 /// Reject a signal holding a NaN or infinite value: a NaN action survives
@@ -485,7 +520,7 @@ pub fn batch_step_py(
         }
         check_deadband_bounds(dwelling_ref, &action_layout, &action_bounds)
             .map_err(PyValueError::new_err)?;
-        let signals = map_action_to_signals(
+        let (signals, clamped_count) = map_action_to_signals(
             action,
             &action_layout,
             &signal_type_by_equipment,
@@ -493,9 +528,15 @@ pub fn batch_step_py(
         )
         .map_err(PyValueError::new_err)?;
         check_signals_accepted(dwelling_ref, &signals).map_err(PyValueError::new_err)?;
-        mapped.push((dwelling_ref, signals));
+        mapped.push((dwelling_ref, signals, clamped_count));
     }
-    for (dwelling_ref, signals) in mapped {
+    for (dwelling_ref, signals, clamped_count) in mapped {
+        // The clamp count is the acting dwelling's own, recorded on its run
+        // health in every build, immediately before its signals apply; a
+        // refused call above reaches no dwelling and records nothing.
+        dwelling_ref
+            .record_clamped_actions(clamped_count)
+            .map_err(PyValueError::new_err)?;
         for (equipment, signal) in &signals {
             let py_signal = PyControlSignal {
                 signal: signal.clone(),
@@ -626,9 +667,160 @@ pub fn batch_step_py(
     Ok(out)
 }
 
+/// Clamp an action vector for one dwelling and record the clamped count on
+/// its run health, in every build. The single-dwelling gym path clips
+/// through here so its counts land in the same place the batch path's do,
+/// and builds its signals from the returned values.
+#[pyfunction(name = "clip_action")]
+#[pyo3(signature = (dwelling, action, action_layout))]
+pub fn clip_action_py(
+    dwelling: &PyDwelling,
+    action: Vec<f64>,
+    action_layout: Vec<(String, String)>,
+) -> PyResult<Vec<f64>> {
+    if action.len() != action_layout.len() {
+        return Err(PyValueError::new_err(format!(
+            "action length ({}) must match action_layout length ({})",
+            action.len(),
+            action_layout.len(),
+        )));
+    }
+    let action_bounds =
+        resolve_action_bounds(dwelling, &action_layout).map_err(PyValueError::new_err)?;
+    let (values, clamped_count) = clamp_action(&action, &action_bounds);
+    dwelling.record_clamped_actions(clamped_count)?;
+    Ok(values)
+}
+
+/// The declared bounds of one action field, so the gym's Python-side table
+/// can be pinned against this one.
+#[pyfunction(name = "field_bounds")]
+#[pyo3(signature = (field))]
+pub fn field_bounds_py(field: &str) -> (f64, f64) {
+    field_bounds(field)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stepable base.xml dwelling for the batch health tests.
+    fn base_dwelling(py: Python<'_>) -> Py<PyDwelling> {
+        use std::path::PathBuf;
+
+        let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        root.push("../..");
+        let kwargs = PyDict::new(py);
+        kwargs
+            .set_item("start_time", "2019-01-01T00:00:00")
+            .unwrap();
+        kwargs.set_item("duration_s", 600_i64).unwrap();
+        kwargs.set_item("time_res_s", 60_i64).unwrap();
+        kwargs
+            .set_item(
+                "defaults_path",
+                root.join("defaults").to_string_lossy().into_owned(),
+            )
+            .unwrap();
+        kwargs.set_item("write_output", false).unwrap();
+        let mut dwelling = PyDwelling::from_hpxml(
+            &py.get_type::<PyDwelling>(),
+            root.join("tests/fixtures/hpxml/ochre_samples/base.xml")
+                .to_string_lossy()
+                .into_owned(),
+            Some(
+                root.join("data/examples/BEopt_example_schedule.csv")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            root.join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+                .to_string_lossy()
+                .into_owned(),
+            Some(&kwargs),
+        )
+        .expect("base.xml must load");
+        dwelling.initialize().expect("initialize must succeed");
+        Py::new(py, dwelling).expect("the dwelling wraps")
+    }
+
+    /// Each dwelling's run health records its own action's clamps: the first
+    /// row's 100.0 is above the 80.0 bound and counts, the second row's 20.0
+    /// is inside and does not. In every build.
+    #[test]
+    fn batch_step_records_clamped_actions() {
+        Python::attach(|py| {
+            let first = base_dwelling(py);
+            let second = base_dwelling(py);
+            let layout = vec![("Gas Furnace".to_string(), "heating_setpoint_c".to_string())];
+            let mut signal_types = HashMap::new();
+            signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
+
+            batch_step_py(
+                py,
+                vec![first.clone_ref(py), second.clone_ref(py)],
+                vec![vec![100.0], vec![20.0]],
+                vec!["total_power_kw".to_string()],
+                layout,
+                signal_types,
+                vec![(-50.0, 80.0)],
+            )
+            .expect("the batch step must run");
+
+            let first_clamped = first
+                .bind(py)
+                .borrow()
+                .acquire_string()
+                .expect("not poisoned")
+                .health()
+                .clamped_actions;
+            let second_clamped = second
+                .bind(py)
+                .borrow()
+                .acquire_string()
+                .expect("not poisoned")
+                .health()
+                .clamped_actions;
+            assert_eq!(first_clamped, 1, "the 100.0 action is one clamped value");
+            assert_eq!(second_clamped, 0, "the in-bounds action clamps nothing");
+        });
+    }
+
+    /// The single-dwelling clip path returns the clamped values and records
+    /// the count on the dwelling's run health, in every build.
+    #[test]
+    fn clip_action_records_and_returns_clamped_values() {
+        Python::attach(|py| {
+            let dwelling = base_dwelling(py);
+            let bound_dwelling = base_dwelling(py);
+            let layout = vec![("Gas Furnace".to_string(), "heating_setpoint_c".to_string())];
+
+            let bound_ref = bound_dwelling.bind(py).borrow();
+            let values =
+                clip_action_py(&bound_ref, vec![100.0], layout.clone()).expect("the clip must run");
+            assert_eq!(values, vec![80.0]);
+            let clamped = bound_dwelling
+                .bind(py)
+                .borrow()
+                .acquire_string()
+                .expect("not poisoned")
+                .health()
+                .clamped_actions;
+            assert_eq!(clamped, 1, "the clip records one clamped value");
+
+            let dwelling_ref = dwelling.bind(py).borrow();
+            let untouched =
+                clip_action_py(&dwelling_ref, vec![20.0], layout).expect("the clip must run");
+            assert_eq!(untouched, vec![20.0]);
+            let untouched_clamped = dwelling
+                .bind(py)
+                .borrow()
+                .acquire_string()
+                .expect("not poisoned")
+                .health()
+                .clamped_actions;
+            assert_eq!(untouched_clamped, 0, "an in-bounds action clamps nothing");
+        });
+    }
 
     fn therm_layout() -> (Vec<(String, String)>, HashMap<String, String>) {
         let layout = vec![
@@ -674,7 +866,8 @@ mod tests {
             .map(|eq| (eq.to_string(), "ThermalSetpoint".to_string()))
             .collect();
         let action = vec![30.0, 21.0, 30.0, 50.0];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
+        let (signals, _clamped_count) =
+            map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         let band_of = |name: &str| match signals.iter().find(|(eq, _)| eq == name) {
             Some((_, ControlSignal::ThermalSetpoint { deadband_c, .. })) => *deadband_c,
             other => panic!("{other:?}"),
@@ -909,7 +1102,8 @@ mod tests {
     fn map_single_equipment_thermal_action() {
         let (layout, sig_map) = therm_layout();
         let action = vec![21.0, 26.0];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
+        let (signals, _clamped_count) =
+            map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].0, "HVAC");
         assert_eq!(
@@ -926,7 +1120,8 @@ mod tests {
     fn map_action_clips_to_bounds() {
         let (layout, sig_map) = therm_layout();
         let action = vec![-100.0, 200.0];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
+        let (signals, _clamped_count) =
+            map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(
             signals[0].1,
             ControlSignal::ThermalSetpoint {
@@ -955,7 +1150,8 @@ mod tests {
         sig_map.insert("HVAC".to_string(), "ThermalSetpoint".to_string());
         sig_map.insert("Battery".to_string(), "PowerSetpoint".to_string());
         let action = vec![22.0, -1.5];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
+        let (signals, _clamped_count) =
+            map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(signals.len(), 2);
         let hvac_sig = signals.iter().find(|(eq, _)| eq == "HVAC").unwrap();
         assert_eq!(
@@ -1057,7 +1253,8 @@ mod tests {
         let mut sig_map = HashMap::new();
         sig_map.insert("EV".to_string(), "SOCTarget".to_string());
         let action = vec![0.8, 0.1, 0.95];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
+        let (signals, _clamped_count) =
+            map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(signals.len(), 1);
         assert_eq!(
             signals[0].1,
@@ -1078,7 +1275,8 @@ mod tests {
         let mut sig_map = HashMap::new();
         sig_map.insert("HPWH".to_string(), "DutyCycle".to_string());
         let action = vec![0.6, 600.0];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
+        let (signals, _clamped_count) =
+            map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(signals.len(), 1);
         assert_eq!(
             signals[0].1,
@@ -1096,7 +1294,8 @@ mod tests {
         let mut sig_map = HashMap::new();
         sig_map.insert("Dehumidifier".to_string(), "HumiditySetpoint".to_string());
         let action = vec![0.5];
-        let signals = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
+        let (signals, _clamped_count) =
+            map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(
             signals[0].1,
             ControlSignal::HumiditySetpoint {

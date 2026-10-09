@@ -2833,3 +2833,11 @@ def batch_step(
     signal_type_by_equipment: dict[str, str],
     action_bounds: list[tuple[float, float]],
 ) -> list[dict[str, Any]]: ...
+
+def clip_action(
+    dwelling: Dwelling,
+    action: list[float],
+    action_layout: list[tuple[str, str]],
+) -> list[float]: ...
+
+def field_bounds(field: str) -> tuple[float, float]: ...

@@ -169,6 +169,16 @@ name; a unit that names none fails when the dwelling is built.
   `hpwh_winter_cop_under_the_vapour_conserving_blend_against_the_rh_average`
   test in `hares-equipment`).
 
+## Reinforcement learning
+
+The `hares.rl` package wraps the engine in Gymnasium environments
+(`DwellingGymEnv` for one dwelling, `VecDwellingGymEnv` for a fleet stepped
+through the extension's `batch_step`). Both paths clamp every action value
+to the declared bounds of its column before the value reaches the dwelling,
+and the clamped values are counted on the acting dwelling's run health in
+every build: `health().clamped_actions` accumulates them over the run,
+alongside the other run-total counters.
+
 ## Troubleshooting
 
 **`maturin develop` fails with linker errors**

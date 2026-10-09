@@ -2153,6 +2153,13 @@ impl PyDwelling {
         })
     }
 
+    /// Adds to the dwelling's run-total clamped-actions counter, the health
+    /// record the batch and single-dwelling clip paths share.
+    pub(crate) fn record_clamped_actions(&self, count: u64) -> PyResult<()> {
+        let mut dwelling = self.acquire()?;
+        dwelling.record_clamped_actions(count).map_err(to_py_err)
+    }
+
     /// GIL-free variant that preserves [`HaresError`] for proper Python exception mapping
     /// via [`to_py_err`].
     fn acquire_hares(&self) -> Result<MutexGuard<'_, Dwelling>, HaresError> {

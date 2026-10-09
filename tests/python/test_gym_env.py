@@ -20,6 +20,7 @@ from hares._hares import SimulationConfig
 from hares.rl.gym_env import (
     DwellingGymEnv,
     GymDwellingConfig,
+    field_bounds,
     observation_field_bounds,
     sorted_action_layout,
     telemetry_to_observation,
@@ -1508,3 +1509,42 @@ def test_vec_gym_time_res_s_negative_raises():
             episode_length=timedelta(minutes=5),
             time_res_s=-30.0,
         )
+
+
+# ---------------------------------------------------------------------------
+# Action bounds: the engine's table is the canonical one, the Python-side
+# table pins it, and clamped actions are counted in every build.
+# ---------------------------------------------------------------------------
+
+
+def test_python_action_bounds_match_the_engine():
+    """For every field the Python-side table names, it returns the same
+    bounds as the extension's table, and the two fall through to the same
+    broad bounds for a field neither names."""
+    from hares._hares import field_bounds as rust_field_bounds
+
+    named = (
+        "soc",
+        "target_soc",
+        "min_soc",
+        "max_soc",
+        "fraction",
+        "load_fraction",
+        "on_fraction",
+        "duty_cycle",
+        "target_rh",
+        "min_rh",
+        "max_rh",
+        "connected",
+        "enabled",
+        "solar_only_charging",
+        "setpoint_c",
+        "heat_c",
+        "cool_c",
+        "heating_setpoint_c",
+        "cooling_setpoint_c",
+    )
+    for field in (*named, "HEAT_C", "mystery_field"):
+        python = field_bounds(field)
+        engine = rust_field_bounds(field)
+        assert python == engine, f"{field}: python {python}, engine {engine}"

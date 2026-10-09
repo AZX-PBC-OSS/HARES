@@ -16,6 +16,7 @@ from hares._hares import (
     ControlSignal as PyControlSignal,
     Dwelling as PyDwelling,
     SimulationConfig,
+    clip_action,
 )
 
 if TYPE_CHECKING:
@@ -476,10 +477,17 @@ class DwellingGymEnv(_GYM_BASE):
         return np.ascontiguousarray(obs, dtype=np.float64)
 
     def _apply_action(self, action: np.ndarray) -> None:
-        action = np.clip(action, self._action_low_arr, self._action_high_arr)
+        # The extension clamps each value to the declared bounds and counts
+        # the clamped values on the dwelling's run health, in every build:
+        # the same record the batch path's steps carry.
+        values = clip_action(
+            self._dwelling,
+            [float(value) for value in action],
+            self._action_layout,
+        )
         action_values: dict[str, dict[str, float]] = {}
-        for idx, (equipment, field) in enumerate(self._action_layout):
-            action_values.setdefault(equipment, {})[field] = float(action[idx])
+        for (equipment, field), value in zip(self._action_layout, values, strict=True):
+            action_values.setdefault(equipment, {})[field] = value
 
         for equipment in sorted(action_values):
             signal = build_control_signal(
