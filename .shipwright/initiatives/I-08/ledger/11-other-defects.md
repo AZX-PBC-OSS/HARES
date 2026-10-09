@@ -257,6 +257,71 @@ is not on the DE-trace path, so the B0 check and the consumer-shaped golden
 are unaffected. `12-inputs.md` IN-3 later makes site 3's accepted field
 set the `DescribeFields` lists.
 
+**State:** FIXED for sites 1 to 5 and 7 to 9 (2026-10-09, commit
+`24f4dafe`, branch `row/r31-od2`, cut from `56ae417e`), site 6 still open
+in row 94e. Verified site by site at that head first: two sites had
+already landed through earlier rows and are recorded rather than
+re-errored:
+
+- Site 1: the outer structs end in the flattened `RejectUnknownKeys`
+  field and the three permissive tests are rewritten to expect the
+  rejection (`heat_pump_heater_rejects_unknown_fields`,
+  `heat_pump_config_rejects_unknown_fields`,
+  `toml_heat_pump_config_rejects_unknown_fields`).
+- Site 3: the non-object payload, the `"all"`/`"*"` pair and the
+  unconvertible override value are all typed errors
+  (`override_layers_resolve_one_wildcard`,
+  `a_parameter_value_no_config_holds_is_rejected`,
+  `zip_override_non_object_is_hard_error`); the kind-holding check lives
+  in `equipment_config_from_spec` and rejects any parameter a load reads
+  under a value no config value holds, naming the equipment and the key,
+  so resolver machinery keys stay exempt exactly where no load reads
+  them; `validate_wildcard_override` rejects a wildcard key read by no
+  equipment of the dwelling at the assembly boundary. The census is
+  covered by the fixture corpus: every checked-in HPXML fixture builds
+  (`every_fixture_builds_every_equipment`), so no resolver-emitted key
+  is dropped.
+
+Sites 2, 4, 5, 7, 8 and 9 landed in the commit, each through its RED
+test first; the behavioral REDs at the parent were
+`simulation_config_rejects_unknown_key`, `water_heater_ua_failure_is_an_error`,
+`shadowed_energy_factor_override_is_rejected`,
+`gas_water_heater_without_efficiency_is_an_error`,
+`ev_max_charging_power_above_level_2_is_rejected`,
+`an_out_of_range_utc_offset_is_a_construction_error`,
+`a_non_finite_utc_offset_is_a_construction_error` and
+`synthetic_geometry_rejects_wall_area_m2`; the signature-demanding
+`time_res_beyond_u32_seconds_is_an_error`,
+`hvac_builder_missing_input_names_the_element` and
+`hvac_typed_config_rebuild_error_fails_construction` were RED as
+compile failures (the typed APIs they demand did not exist);
+`missing_capacity_is_pending_only_when_autosizing` was GREEN at the
+parent and stands as the pin that the pending mapping survives the
+builder signature change. Dispositions on the literal acceptance list:
+`constant_setpoint_override_applies` belongs to site 6 and row 94e and
+is not in this commit; site 4's `duct_dse_error_fails_construction` had
+already landed (the duct DSE parameters propagate their error at
+`dwelling/mod.rs`'s autosizing call) and site 4's
+`hvac_typed_config_rebuild_error_fails_construction` is asserted at the
+rebuild level, whose dispatch now forwards the builder's own named
+error instead of the generic rebuild message. Findings made on the way,
+all fixed in the commit: a `serde_json` map cannot carry a NaN (the
+`json!` macro maps it to `null`), so the `from_typed` non-finite walk
+is unreachable through a parameter map and the four builders'
+`.ok()?` swallows are removed on signature grounds with the reachable
+builder errors asserted at the rebuild; an indirect tank's category
+fell into the gas-storage UA derivation it must not run (the boiler
+carries the water-side efficiency), and the tank is exempt by name;
+the strict config exposed the twelve parity fixtures' `bldg_id` key
+sitting inside the `[simulation]` table, where nothing ever read it
+(moved to the top level at the effective value 1, so the committed
+references hold); and the Python gas-water-heater builder test states
+its `uniform_energy_factor` now the construction without one fails.
+Gate counts: 7586 nextest tests green with all features, 1519 pytest
+green, pyright 0, clippy and `fmt --check` clean; the goldens bitwise
+in both feature sets (`compare-all` seven manifests identical, `-F
+dst` `full_year_900s_dst` identical); no golden moved.
+
 ## OD-3: indirect water-heater loop wiring fails silently
 
 **Kind:** fix. Fixes V46.
