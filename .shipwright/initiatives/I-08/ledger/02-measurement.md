@@ -2258,3 +2258,29 @@ interval-end reading step for step), which changes the reference side
 of the comparison and is outside this entry's rule; (c) park the row.
 The working tree keeps the full implementation, uncommitted, with the
 block green except the three cases above.
+
+### The frozen row plan's per-step column access, 2026-10-09 (branch `row/r37-or2`, engine `084294dd` on `b17ed658`)
+
+Criterion, `cargo bench -p hares-core --bench output_row_plan` (20
+samples, 1 s warm-up, 5 s measurement, this host, WSL2):
+
+- `per_step_hash_lookup`: the step path's before mechanism, one step's
+  worth of output work on the verbosity-2 schema of a six-equipment
+  two-zone model: the row fill, then 28 column-name lookups against the
+  freeze-time name-to-position map (the totals, the weather and setpoint
+  context columns, and every envelope gain name, hits and misses alike),
+  writing the hits. Median about 390 ns per step (first run 389.5 ns,
+  range 383.8 to 391.1; a rerun under load 490.7 ns).
+- `frozen_row_plan_write`: the after mechanism, the same one step's
+  worth: the frozen plan's `begin_row` (fill, validity clear, local
+  timestamp) and the same hit slots written by index. Median about
+  4.4 ns per step (first run 4.38 ns, range 4.33 to 4.41; a rerun under
+  load 6.18 ns).
+
+The per-step column access drops about 89x (the ratio held on every
+rerun, about 80x under load). The lookups cost under 1 percent of a
+full-year 900 s run's wall (about 14 ms of the 1.5 s full-year baseline
+wall), so the end-to-end effect sits inside noise; the per-step win
+compounds with the reporting work that follows on this path. The goldens
+are bitwise after the change (compare-all 7 manifests identical,
+`full_year_900s_dst` identical), so no value moved.
