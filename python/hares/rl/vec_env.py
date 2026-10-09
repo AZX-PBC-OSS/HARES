@@ -8,13 +8,13 @@ import logging
 import math
 import multiprocessing
 import secrets
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import warnings
 
 import numpy as np
 
 from hares._hares import Dwelling as PyDwelling
-from hares._hares import batch_step as rust_batch_step
+from hares._hares import batch_step as _extension_batch_step
 
 try:
     from gymnasium import spaces
@@ -35,6 +35,9 @@ from .gym_env import (
     validated_observation_fields,
 )
 
+if TYPE_CHECKING:
+    from ochre_next._hares_types import StepResult
+
 __all__ = [
     "RewardContext",
     "VecDwellingGymEnv",
@@ -48,7 +51,26 @@ __all__ = [
     "telemetry_to_observation",
 ]
 
+# The extension's batch entrypoint, held as an Optional module global so
+# step() has two branches to serve and a caller can force the pure-Python
+# one. The extension always registers it (a module without it fails to
+# import), so this never reads None unless forced.
+rust_batch_step: Callable[..., list[dict[str, Any]]] | None = _extension_batch_step
+
 _warned_initial_nan: bool = False
+
+
+def _reward_context(step_data: StepResult, dwelling: PyDwelling) -> RewardContext:
+    """The ``RewardContext`` both step paths reward on: the step dict and the
+    dwelling's post-step telemetry, built once so the batch path and a single
+    dwelling's step hand ``reward_fn`` identical contexts."""
+    telemetry = dwelling.telemetry()
+    return RewardContext(
+        step=step_data,
+        telemetry_zone=telemetry.zone(),
+        telemetry_equipment=telemetry.equipment(),
+        total_power_kw=float(telemetry.total_power_kw),
+    )
 
 
 class VecDwellingGymEnv:
@@ -222,14 +244,33 @@ class VecDwellingGymEnv:
             infos[idx]["initial_observation_mask"] = ~np.isfinite(obs[idx])
         return obs.astype(np.float64, copy=False), infos
 
+    def _apply_actions(self, dwelling: PyDwelling, action: np.ndarray) -> None:
+        """Clip one dwelling's action row to the layout's per-column bounds
+        and apply it as control signals, equipment by sorted name: the same
+        clip-and-dispatch the extension's ``batch_step`` runs."""
+        clipped = np.clip(action, self._action_low, self._action_high)
+        action_values: dict[str, dict[str, float]] = {}
+        for col, (equipment, field) in enumerate(self._action_layout):
+            action_values.setdefault(equipment, {})[field] = float(clipped[col])
+        for equipment in sorted(action_values):
+            dwelling.apply_control(
+                equipment,
+                build_control_signal(
+                    self._signal_type_by_equipment[equipment],
+                    action_values[equipment],
+                ),
+            )
+
     def step(self, actions: np.ndarray):
         """Advance every dwelling one timestep.
 
         Each entry of ``infos`` carries ``"warning_count"`` (float, always
         present) and ``"warnings"`` (list[str], present only when the count is
         non-zero) — the warnings drained from that dwelling during the step
-        (e.g. control signals rejected at dispatch time). Actions are
-        clipped to the declared bounds by the extension's ``batch_step``.
+        (e.g. control signals rejected at dispatch time). Both step paths clip
+        actions to the declared bounds and call ``reward_fn`` per environment
+        on the same ``RewardContext`` built from the step dict and the
+        dwelling's telemetry: one reward contract.
         """
         arr = np.asarray(actions, dtype=np.float64)
         arr = np.ascontiguousarray(arr)
@@ -237,20 +278,57 @@ class VecDwellingGymEnv:
         if arr.shape != expected:
             raise ValueError(f"expected actions shape {expected}, got {arr.shape}")
 
-        actions_list = arr.tolist()
-        raw = rust_batch_step(
-            self._dwellings,
-            actions_list,
-            self._observation_fields,
-            self._action_layout,
-            self._signal_type_by_equipment,
-            self._action_bounds,
-        )
-        obs = np.asarray([row["obs"] for row in raw], dtype=np.float64)
-        rewards = np.asarray([float(row["reward"]) for row in raw], dtype=np.float64)
-        dones = np.asarray([bool(row["terminated"]) for row in raw], dtype=np.bool_)
-        truncs = np.asarray([bool(row["truncated"]) for row in raw], dtype=np.bool_)
-        infos = [dict(row.get("info", {})) for row in raw]
+        obs_rows: list[Any] = []
+        rewards: list[float] = []
+        dones: list[bool] = []
+        truncs: list[bool] = []
+        infos: list[dict[str, Any]] = []
+        if rust_batch_step is not None:
+            actions_list = arr.tolist()
+            raw = rust_batch_step(
+                self._dwellings,
+                actions_list,
+                self._observation_fields,
+                self._action_layout,
+                self._signal_type_by_equipment,
+                self._action_bounds,
+            )
+            for dwelling, row in zip(self._dwellings, raw, strict=True):
+                step_data = row["step"]
+                if step_data is None:
+                    # A failed step terminates the episode and carries no
+                    # step dict to build a context from; its reward stays
+                    # the 0.0 a failed step has always reported.
+                    rewards.append(0.0)
+                else:
+                    rewards.append(
+                        float(self._reward_fn(_reward_context(step_data, dwelling)))
+                    )
+                obs_rows.append(row["obs"])
+                dones.append(bool(row["terminated"]))
+                truncs.append(bool(row["truncated"]))
+                infos.append(dict(row.get("info", {})))
+        else:
+            for dwelling, action_row in zip(self._dwellings, arr, strict=True):
+                self._apply_actions(dwelling, action_row)
+                step_data = dwelling.step()
+                telemetry = dwelling.telemetry()
+                obs_rows.append(
+                    telemetry_to_observation(telemetry, self._observation_fields)
+                )
+                rewards.append(float(self._reward_fn(_reward_context(step_data, dwelling))))
+                dones.append(False)
+                truncs.append(False)
+                warning_count, warning_messages = drain_step_warnings(dwelling)
+                info: dict[str, Any] = {"step": step_data, "warning_count": warning_count}
+                if warning_messages:
+                    info["warnings"] = warning_messages
+                infos.append(info)
+
+        obs = np.asarray(obs_rows, dtype=np.float64)
+        reward_arr = np.asarray(rewards, dtype=np.float64)
+        done_arr = np.asarray(dones, dtype=np.bool_)
+        trunc_arr = np.asarray(truncs, dtype=np.bool_)
 
         if self._verify_observation_equivalence:
             for i, dwelling in enumerate(self._dwellings):
@@ -280,12 +358,12 @@ class VecDwellingGymEnv:
 
         self._steps_elapsed += 1
         auto_trunc = self._steps_elapsed >= self._max_steps
-        truncs = np.logical_or(truncs, auto_trunc)
+        trunc_arr = np.logical_or(trunc_arr, auto_trunc)
         for idx, trunc in enumerate(auto_trunc.tolist()):
             if trunc:
                 infos[idx]["truncated"] = True
 
-        return obs, rewards, dones, truncs, infos
+        return obs, reward_arr, done_arr, trunc_arr, infos
 
     @property
     def unwrapped(self) -> "VecDwellingGymEnv":

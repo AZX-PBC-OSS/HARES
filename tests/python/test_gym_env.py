@@ -20,6 +20,7 @@ from hares._hares import SimulationConfig
 from hares.rl.gym_env import (
     DwellingGymEnv,
     GymDwellingConfig,
+    RewardContext,
     field_bounds,
     observation_field_bounds,
     sorted_action_layout,
@@ -68,14 +69,14 @@ def _make_env(episode_length: timedelta = timedelta(minutes=5)) -> DwellingGymEn
     )
 
 
-def _make_dwelling(seed: int = 0) -> PyDwelling:
+def _make_dwelling(seed: int = 0, duration_s: int = 600) -> PyDwelling:
     return PyDwelling.from_hpxml(
         hpxml=HPXML,
         schedule=SCHEDULE,
         weather=WEATHER,
         defaults_path=str(HARES_DEFAULTS),
         start_time="2019-01-01T00:00:00",
-        duration_s=600,
+        duration_s=duration_s,
         time_res_s=60,
         master_seed=seed,
         write_output=False,
@@ -430,6 +431,49 @@ def test_gym_step_refuses_a_non_finite_action():
     env = _make_env()
     with pytest.raises(ValueError, match="not finite"):
         env.step(np.array([float("nan")], dtype=np.float64))
+
+
+def test_rust_and_python_paths_give_identical_rewards(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """One reward contract: over a fixed action sequence, the same two
+    dwellings stepped by the extension's batch_step and stepped from Python
+    (batch_step forced off) give equal rewards per environment and step,
+    exactly, for a reward_fn that reads the zone telemetry and
+    total_power_kw."""
+    import hares.rl.vec_env as vec_env_module
+
+    def zone_power_reward(ctx: RewardContext) -> float:
+        zone_temps = ctx["telemetry_zone"]["temperature_c"]
+        return ctx["total_power_kw"] - 0.01 * float(zone_temps[0])
+
+    envs: list[VecDwellingGymEnv] = []
+    for _ in range(2):
+        # 1800 s of sim time: the 20 fixed steps all land inside the run.
+        dwellings = [_make_dwelling(seed=i, duration_s=1800) for i in range(2)]
+        env = VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=zone_power_reward,
+            episode_length=timedelta(minutes=20),
+        )
+        env.reset(seed=7)
+        envs.append(env)
+    batch_env, python_env = envs
+
+    rng = np.random.default_rng(3)
+    action_sequence = [np.asarray(a) for a in rng.uniform(-10.0, 30.0, size=(20, 2, 1))]
+    batch_rewards = [batch_env.step(actions)[1] for actions in action_sequence]
+
+    monkeypatch.setattr(vec_env_module, "rust_batch_step", None)
+    python_rewards = [python_env.step(actions)[1] for actions in action_sequence]
+
+    for step_idx, (batch, python) in enumerate(zip(batch_rewards, python_rewards, strict=True)):
+        assert batch.tobytes() == python.tobytes(), (
+            f"the batch and Python paths disagree on the reward_fn's rewards "
+            f"at step {step_idx}: {batch} vs {python}"
+        )
 
 
 def test_vec_gym_out_of_bounds_actions_no_nan():

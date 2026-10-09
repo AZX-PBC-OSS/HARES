@@ -509,7 +509,7 @@ class TestBatchStep:
         assert len(results) == 1
         r = results[0]
         assert "obs" in r
-        assert "reward" in r
+        assert "step" in r
         assert "terminated" in r
         assert "truncated" in r
         assert "info" in r

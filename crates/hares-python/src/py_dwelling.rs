@@ -627,6 +627,43 @@ fn protocol_bridge_config_from_py(
 /// boundaries.
 pub(crate) const FATAL_DWELLING_PREFIX: &str = "[FATAL_DWELLING] ";
 
+/// The per-zone temperature keys a step dict carries, in the step's zone
+/// order: "Temperature - Indoor (C)" for zone 0, "Temperature - Zone_N (C)"
+/// beyond it.
+pub(crate) fn zone_keys_for_step(step: &hares_core::StepResult) -> Vec<String> {
+    step.zone_temperatures_c
+        .iter()
+        .map(|(zone_id, _)| {
+            if zone_id.0 == 0 {
+                "Temperature - Indoor (C)".to_string()
+            } else {
+                format!("Temperature - Zone_{} (C)", zone_id.0)
+            }
+        })
+        .collect()
+}
+
+/// The dict `PyDwelling.step()` returns, built from one step result and the
+/// zone keys [`zone_keys_for_step`] names: the one conversion both
+/// `PyDwelling.step()` and every `batch_step` row go through, so both paths
+/// hand Python the same step dict.
+pub(crate) fn step_result_to_py_dict(
+    py: Python<'_>,
+    step: &hares_core::StepResult,
+    zone_keys: &[String],
+) -> PyResult<Py<PyAny>> {
+    let out = PyDict::new(py);
+    out.set_item("timestamp", chrono_to_py_datetime(py, step.timestamp)?)?;
+    out.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
+    out.set_item("hvac_heating_w", step.hvac_heating_w)?;
+    out.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
+    out.set_item("gas_power_w", step.gas_power_w)?;
+    for ((_zone_id, temp_c), key) in step.zone_temperatures_c.iter().zip(zone_keys.iter()) {
+        out.set_item(key, *temp_c)?;
+    }
+    Ok(out.unbind().into())
+}
+
 #[pyclass(name = "Dwelling")]
 pub struct PyDwelling {
     pub(crate) dwelling: Mutex<Dwelling>,
@@ -860,34 +897,14 @@ impl PyDwelling {
         }
 
         if self.zone_keys.is_none() {
-            let keys: Vec<String> = step
-                .zone_temperatures_c
-                .iter()
-                .map(|(zone_id, _)| {
-                    if zone_id.0 == 0 {
-                        "Temperature - Indoor (C)".to_string()
-                    } else {
-                        format!("Temperature - Zone_{} (C)", zone_id.0)
-                    }
-                })
-                .collect();
-            self.zone_keys = Some(keys);
+            self.zone_keys = Some(zone_keys_for_step(&step));
         }
 
-        let out = PyDict::new(py);
-        out.set_item("timestamp", chrono_to_py_datetime(py, step.timestamp)?)?;
-        out.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
-        out.set_item("hvac_heating_w", step.hvac_heating_w)?;
-        out.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
-        out.set_item("gas_power_w", step.gas_power_w)?;
         let zone_keys = self
             .zone_keys
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("zone keys not initialized"))?;
-        for ((_zone_id, temp_c), key) in step.zone_temperatures_c.iter().zip(zone_keys.iter()) {
-            out.set_item(key, *temp_c)?;
-        }
-        Ok(out.unbind().into())
+        step_result_to_py_dict(py, &step, zone_keys)
     }
 
     #[pyo3(signature = (name, signal, priority=None))]

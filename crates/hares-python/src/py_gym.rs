@@ -11,13 +11,19 @@ use pyo3::types::PyDict;
 use rayon::prelude::*;
 
 use crate::py_control::PyControlSignal;
-use crate::py_dwelling::{FATAL_DWELLING_PREFIX, PyDwelling};
+use crate::py_dwelling::{
+    FATAL_DWELLING_PREFIX, PyDwelling, step_result_to_py_dict, zone_keys_for_step,
+};
 
 /// One batched RL step result.
 #[derive(Debug, Clone)]
 struct StepResult {
     obs: Vec<f64>,
-    reward: f64,
+    /// The step dict `PyDwelling.step()` returns, so the caller's
+    /// `reward_fn` sees the same context on the batch path as on a single
+    /// dwelling's step. `None` when the step failed: a failed step carries
+    /// no step dict.
+    step: Option<hares_core::StepResult>,
     terminated: bool,
     truncated: bool,
     info: HashMap<String, f64>,
@@ -489,7 +495,11 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// releases the GIL so Rayon threads can step dwellings in true parallel.
 /// The GIL is only re-acquired afterwards for Python dict construction.
 ///
-/// Each result's `info` dict always carries `"warning_count"` (float), the
+/// Each result dict carries `"step"`, the same dict `Dwelling.step()`
+/// returns (both go through one conversion), so the caller's `reward_fn`
+/// sees the same context on the batch path as on a single dwelling's step;
+/// a failed step carries `"step": None`. Its `info` dict always carries
+/// `"warning_count"` (float), the
 /// number of warnings the dwelling accumulated during the step (e.g. control
 /// signals rejected at dispatch time). When non-zero, `"warnings"`
 /// (list of str) holds the drained messages; they are consumed here, so a
@@ -628,14 +638,13 @@ pub fn batch_step_py(
                                     (dwelling.observation().unwrap_or_default(), Some(e))
                                 }
                             };
-                        let reward = -step.net_electric_power_kw;
                         info.insert(
                             "net_electric_power_kw".to_string(),
                             step.net_electric_power_kw,
                         );
                         StepResult {
                             obs,
-                            reward,
+                            step: Some(step),
                             terminated: false,
                             truncated: false,
                             info,
@@ -651,7 +660,7 @@ pub fn batch_step_py(
                         }
                         StepResult {
                             obs: Vec::new(),
-                            reward: 0.0,
+                            step: None,
                             terminated: true,
                             truncated: false,
                             info,
@@ -669,7 +678,13 @@ pub fn batch_step_py(
     for item in results {
         let d = PyDict::new(py);
         d.set_item("obs", item.obs)?;
-        d.set_item("reward", item.reward)?;
+        match item.step {
+            Some(step) => {
+                let zone_keys = zone_keys_for_step(&step);
+                d.set_item("step", step_result_to_py_dict(py, &step, &zone_keys)?)?;
+            }
+            None => d.set_item("step", py.None())?,
+        }
         d.set_item("terminated", item.terminated)?;
         d.set_item("truncated", item.truncated)?;
         let info_dict = PyDict::new(py);

@@ -161,6 +161,27 @@ def test_batch_step_with_no_actions_steps_every_dwelling():
     assert len(results) == 1
 
 
+def test_batch_step_rows_carry_no_reward_key():
+    """A row carries the step dict, never a Rust-computed reward: the reward
+    is the environment's ``reward_fn`` decision, on one contract for both
+    step paths."""
+    from ochre_next._hares import batch_step
+
+    dwelling = make_dwelling(duration_s=600)
+    dwelling.take_warnings()
+    results = batch_step(
+        [dwelling],
+        [[21.0]],
+        _OBS_FIELDS,
+        [("Gas Furnace", "heat_c")],
+        {"Gas Furnace": "ThermalSetpoint"},
+        _SETPOINT_BOUNDS,
+    )
+    row = results[0]
+    assert "reward" not in row
+    assert "step" in row
+
+
 def test_batch_step_info_reports_zero_warnings_on_clean_step():
     """A clean step surfaces warning_count == 0 and omits the messages list."""
     from hares._hares import batch_step
