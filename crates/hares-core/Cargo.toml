@@ -119,3 +119,8 @@ name = "rl_episode"
 path = "../../benches/rl_episode.rs"
 harness = false
 
+[[bench]]
+name = "output_row_plan"
+path = "../../benches/output_row_plan.rs"
+harness = false
+

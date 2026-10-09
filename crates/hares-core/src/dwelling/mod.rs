@@ -41,7 +41,8 @@ use hares_control::{
 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
 use hares_envelope::EnvelopeDiagnostics;
 use hares_envelope::{
-    ElectricalSolver, FluidSolver, FluidSolverConfig, HumiditySolver, ThermalSolver,
+    ElectricalSolver, EnvelopeComponentGains, FluidSolver, FluidSolverConfig, HumiditySolver,
+    ThermalSolver,
 };
 use hares_equipment::{
     ActorSeed, BatteryLutType, Equipment, EquipmentConfig, EquipmentRegistry, OcvTable,
@@ -116,9 +117,10 @@ use crate::observer_capture;
 use roster::RosterCaches;
 
 use conversions::{
-    apply_humidity_update_to_zones, apply_thermal_update_to_zones, chrono_to_std_duration,
-    default_output_path, duration_to_u32_secs, merged_equipment_config, required_datetime,
-    required_duration, required_path, validate_equipment_override_keys, validate_wildcard_override,
+    apply_humidity_update_to_zones, apply_thermal_update_to_zones, build_output_column_index,
+    chrono_to_std_duration, default_output_path, duration_to_u32_secs, merged_equipment_config,
+    required_datetime, required_duration, required_path, validate_equipment_override_keys,
+    validate_wildcard_override,
 };
 #[cfg(any(feature = "profiling", test))]
 use hares_types::alloc_count::thread_allocations;
@@ -596,7 +598,10 @@ fn is_schema_known_equipment(column_index: &HashMap<String, usize>, name: &str) 
         && !is_reserved_output_column_name(&membership_column)
 }
 
-fn build_equipment_column_map(
+/// Resolves the per-equipment column positions of the row plan's producer
+/// bindings, against the freeze-time column index of the schema the plan
+/// freezes from. Runs once per plan build, never per step.
+fn plan_equipment_columns(
     equipment: &[&dyn Equipment],
     column_index: &HashMap<String, usize>,
     verbosity: u8,
@@ -644,7 +649,7 @@ fn build_equipment_column_map(
                 if !in_schema {
                     return Ok(None);
                 }
-                resolve_col(col_name, column_index, &name, verbosity >= min_verbosity)
+                resolve_against_index(col_name, column_index, &name, verbosity >= min_verbosity)
             };
             // Shared predicate with build_schema: the schema emits a
             // "{name} Gas Power (therms/hour)" column iff this returns true,
@@ -743,7 +748,7 @@ fn build_equipment_column_map(
             // fail the invariant and silently undercount the
             // aggregate in release builds).
             let duct_losses =
-                resolve_col(HVAC_DUCT_LOSSES_COL, column_index, &name, verbosity >= 5)?;
+                resolve_against_index(HVAC_DUCT_LOSSES_COL, column_index, &name, verbosity >= 5)?;
 
             // V8 per-equipment telemetry diagnostic columns.
             let (v8_state_columns, v8_flow_columns) = if verbosity >= 8 {
@@ -864,13 +869,14 @@ fn build_actor_column_map(
         .collect()
 }
 
-/// Resolves a column name in the output column index map.
-///
-/// Schema drift for a column the schema owes the equipment (`expected`) is
-/// a typed error in every build profile; a missing column that was never
-/// demanded resolves to `None` by design ("missing values, never
-/// misattributed ones").
-fn resolve_col(
+type V8Columns = Vec<(&'static str, usize)>;
+
+/// Resolves one column name against the freeze-time column index. Schema
+/// drift for a column the schema owes the equipment (`expected`) is a typed
+/// error in every build profile; a missing column that was never demanded
+/// resolves to `None` by design ("missing values, never misattributed
+/// ones"). Private to the row plan's construction.
+fn resolve_against_index(
     col_name: &str,
     column_index: &HashMap<String, usize>,
     equipment_name: &str,
@@ -881,7 +887,7 @@ fn resolve_col(
         None if expected => {
             tracing::warn!(
                 column_name = %col_name,
-                equipment_name = equipment_name,
+                equipment_name = %equipment_name,
                 "output column index not resolved; data will not be emitted for this column"
             );
             Err(HaresError::InvariantViolation {
@@ -897,7 +903,206 @@ fn resolve_col(
     }
 }
 
-type V8Columns = Vec<(&'static str, usize)>;
+/// The dwelling-level output columns of the frozen row plan: every column
+/// name the step path used to look up, resolved once at freeze to its
+/// producer slot. `record_step` writes by these indices only.
+#[derive(Debug, Default)]
+struct DwellingColumns {
+    total_electric: Option<usize>,
+    total_gas: Option<usize>,
+    total_reactive: Option<usize>,
+    /// The old-style indoor temperature column, fed from the first zone's
+    /// temperature for schemas that still carry it.
+    indoor_temp_fallback: Option<usize>,
+    outdoor_dry_bulb: Option<usize>,
+    ground_temp: Option<usize>,
+    mains_temp: Option<usize>,
+    /// Position of the first HVAC or water-heater equipment, whose
+    /// telemetry feeds the setpoint chain columns.
+    first_hvac: Option<usize>,
+    scheduled_heating_setpoint: Option<usize>,
+    scheduled_cooling_setpoint: Option<usize>,
+    runtime_heating_setpoint: Option<usize>,
+    runtime_cooling_setpoint: Option<usize>,
+    /// Envelope and gain columns, each bound to the gain term that feeds
+    /// it: the value extractors are frozen with the indices, so the step
+    /// path neither builds a name table nor looks a name up.
+    envelope: Vec<EnvelopeColumn>,
+}
+
+/// One frozen envelope column: the gain term that produces its value and
+/// the slot it writes.
+type EnvelopeColumn = (fn(&EnvelopeComponentGains) -> f64, Option<usize>);
+
+/// The gain terms the envelope columns read, as (column name, extractor)
+/// pairs in a fixed order. Frozen once into [`DwellingColumns::envelope`]
+/// with each name's resolved slot.
+type EnvelopeTerm = (&'static str, fn(&EnvelopeComponentGains) -> f64);
+
+#[cfg_attr(not(feature = "observe"), allow(unused_mut))]
+fn envelope_column_terms() -> Vec<EnvelopeTerm> {
+    let mut terms: Vec<EnvelopeTerm> = vec![
+        // Transmitted (through-glass) flux only, the OCHRE column
+        // definition (Envelope.py:1160); the inward-flowing absorbed
+        // share is part of `window_solar_w`, not this term.
+        ("Window Transmitted Solar Gain (W)", |g| {
+            g.window_through_glass_w
+        }),
+        ("Infiltration Heat Gain - Indoor (W)", |g| g.infiltration_w),
+        ("Forced Ventilation Heat Gain - Indoor (W)", |g| {
+            g.ventilation_w
+        }),
+        ("Natural Ventilation Heat Gain - Indoor (W)", |g| {
+            g.natural_ventilation_w
+        }),
+        // Net sensible = direct heat injections on zone air, matching
+        // OCHRE's "Net Sensible Heat Gain - {zone} (W)" (zone heat input:
+        // occupancy, HVAC, equipment, infiltration, ventilation, window
+        // solar). Opaque envelope conduction reaches the zone through the
+        // A-matrix surface coupling rather than a direct injection, so it
+        // is reported per boundary below instead of here. The gross
+        // exterior solar + LWR absorption (`opaque_solar_lwr_w`) is a
+        // boundary condition on the exterior RC nodes, not a zone input,
+        // and is excluded entirely.
+        ("Net Sensible Heat Gain - Indoor (W)", |g| {
+            g.window_solar_w
+                + g.infiltration_w
+                + g.ventilation_w
+                + g.natural_ventilation_w
+                + g.internal_gain_w
+                + g.jacket_loss_w
+                + g.duct_loss_w
+                + g.hvac_heating_w.max(0.0)
+                + g.hvac_cooling_w
+        }),
+        ("Internal Heat Gain - Indoor (W)", |g| g.internal_gain_w),
+        ("Interior LWR Exchange - Indoor (W)", |g| g.interior_lwr_w),
+        // Net conduction from the opaque envelope into the zone (wall +
+        // floor + roof interior surfaces) — the inside-face convection
+        // term of the zone air heat balance (EnergyPlus ERM 26.1 —
+        // "Inside Heat Balance": Interior Convection), aggregated from
+        // the three per-boundary terms below. The gross exterior solar +
+        // LWR absorption is an outside-face balance driver
+        // (EnergyPlus ERM 26.1 — "Outside Surface Heat Balance"): most of
+        // it re-leaves via exterior convection and sky exchange, so it is
+        // not a load on the conditioned zone.
+        ("Opaque Surface Heat Gain - Indoor (W)", |g| {
+            g.wall_heat_gain_w + g.floor_heat_gain_w + g.roof_heat_gain_w
+        }),
+        ("Duct Loss Heat Gain - Indoor (W)", |g| g.duct_loss_w),
+        ("Roof Heat Gain - Indoor (W)", |g| g.roof_heat_gain_w),
+        ("Floor Heat Gain - Indoor (W)", |g| g.floor_heat_gain_w),
+        ("Wall Heat Gain - Indoor (W)", |g| g.wall_heat_gain_w),
+        ("Window Heat Gain - Indoor (W)", |g| g.window_heat_gain_w),
+        ("Internal Mass Heat Gain - Indoor (W)", |g| {
+            g.internal_mass_heat_gain_w
+        }),
+        ("HVAC Heating Delivered (W)", |g| g.hvac_heating_w),
+        ("HVAC Cooling Delivered (W)", |g| g.hvac_cooling_w.abs()),
+        // Complete zone air heat-balance residual (E+ Output:Diagnostics
+        // analogue): C_zone·ΔT/dt − Σ(all gain terms). Small in a correct
+        // model; O(kW) values mean a mis-wired or mislabeled gain — the
+        // I-02 defect class made visible in every output file.
+        ("Zone Air Heat Balance Residual (W)", |g| {
+            g.zone_air_balance_residual_w
+        }),
+    ];
+    #[cfg(feature = "observe")]
+    terms.extend([
+        (
+            "Natural Ventilation Cw (-)",
+            (|g: &EnvelopeComponentGains| g.natural_ventilation_cw)
+                as fn(&EnvelopeComponentGains) -> f64,
+        ),
+        (
+            "Natural Ventilation Wind Angle (deg)",
+            (|g: &EnvelopeComponentGains| g.natural_ventilation_wind_angle_deg)
+                as fn(&EnvelopeComponentGains) -> f64,
+        ),
+        (
+            "Natural Ventilation Q_Stack (m\u{b3}/s)",
+            (|g: &EnvelopeComponentGains| g.natural_ventilation_q_stack_m3_s)
+                as fn(&EnvelopeComponentGains) -> f64,
+        ),
+        (
+            "Natural Ventilation Q_Wind (m\u{b3}/s)",
+            (|g: &EnvelopeComponentGains| g.natural_ventilation_q_wind_m3_s)
+                as fn(&EnvelopeComponentGains) -> f64,
+        ),
+        (
+            "Natural Ventilation Cd",
+            (|g: &EnvelopeComponentGains| g.natural_ventilation_cd_used)
+                as fn(&EnvelopeComponentGains) -> f64,
+        ),
+    ]);
+    terms
+}
+
+/// Resolves the dwelling-level columns of the row plan against the
+/// freeze-time column index. Runs once per plan build, never per step.
+fn build_dwelling_columns(
+    column_index: &HashMap<String, usize>,
+    first_hvac: Option<usize>,
+) -> DwellingColumns {
+    let resolve = |col_name: &str| column_index.get(col_name).copied();
+    DwellingColumns {
+        total_electric: resolve("Total Electric Power (kW)"),
+        total_gas: resolve("Total Gas Power (therms/hour)"),
+        total_reactive: resolve("Total Reactive Power (kVAR)"),
+        indoor_temp_fallback: resolve("Indoor Temperature (C)"),
+        outdoor_dry_bulb: resolve("Outdoor Dry Bulb (C)"),
+        ground_temp: resolve("Temperature - Ground (C)"),
+        mains_temp: resolve("Hot Water Mains Temperature (C)"),
+        first_hvac,
+        scheduled_heating_setpoint: resolve(SCHEDULED_HEATING_SETPOINT_COL),
+        scheduled_cooling_setpoint: resolve(SCHEDULED_COOLING_SETPOINT_COL),
+        runtime_heating_setpoint: resolve(RUNTIME_HEATING_SETPOINT_COL),
+        runtime_cooling_setpoint: resolve(RUNTIME_COOLING_SETPOINT_COL),
+        envelope: envelope_column_terms()
+            .into_iter()
+            .map(|(name, term)| (term, column_index.get(name).copied()))
+            .collect(),
+    }
+}
+/// The row plan's producer bindings: everything `record_step` writes,
+/// resolved once at freeze against the schema the plan freezes from.
+#[derive(Debug, Default)]
+struct OutputRowBindings {
+    dwelling: DwellingColumns,
+    /// Output columns of each equipment, in equipment-vector order.
+    equipment: Vec<EquipmentColumns>,
+    /// End-use aggregate electric-power column of each equipment, in
+    /// equipment-vector order.
+    end_use_aggregates: Vec<Option<usize>>,
+    /// Telemetry key to output column of each actor, in actor order.
+    actors: Vec<Vec<(String, usize)>>,
+}
+
+/// Constructs the row plan's producer bindings from the frozen schema: the
+/// dwelling-level columns, the per-equipment columns (an expected variable
+/// the schema cannot place is a typed drift error), the end-use aggregates
+/// and the actor columns. The name-to-column index lives only in this
+/// construction, so nothing downstream of it can look a column name up.
+fn build_output_row_bindings(
+    schema: &Schema,
+    equipment: &[&dyn Equipment],
+    actors: &[&dyn Actor],
+    verbosity: u8,
+) -> Result<OutputRowBindings> {
+    let column_index = build_output_column_index(schema);
+    let first_hvac = equipment
+        .iter()
+        .position(|eq| is_hvac_or_wh(&eq.descriptor().name));
+    Ok(OutputRowBindings {
+        dwelling: build_dwelling_columns(&column_index, first_hvac),
+        equipment: plan_equipment_columns(equipment, &column_index, verbosity)?,
+        end_use_aggregates: build_end_use_aggregate_indices(
+            &equipment_descriptor_specs(equipment),
+            &column_index,
+        ),
+        actors: build_actor_column_map(actors, &column_index),
+    })
+}
 
 /// Resolves v8 per-equipment telemetry diagnostic columns for the given
 /// equipment instance, as (state columns, flow columns) of
@@ -6236,81 +6441,75 @@ impl Dwelling {
         Ok(())
     }
 
-    fn record_step(&mut self, step: &StepResult) -> Result<()> {
-        self.roster.record_scratch.fill(0.0);
-        let row = &mut self.roster.record_scratch;
+    /// Fingerprints the frozen output state for the rejected-roster-change
+    /// assertions: the recorder schema's column names, the row plan's slots
+    /// and projections, and the bindings' shapes.
+    #[cfg(test)]
+    fn frozen_output_fingerprint(&self) -> String {
+        let schema: Vec<String> = self
+            .recorder
+            .as_ref()
+            .map(|r| {
+                r.schema()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let projections: Vec<Vec<usize>> = (0..self.roster.row_plan.projection_count())
+            .map(|i| self.roster.row_plan.projection(i).to_vec())
+            .collect();
+        format!(
+            "{schema:?}|{}|{projections:?}|{:?}|{:?}|{}",
+            self.roster.row_plan.slots(),
+            self.roster
+                .bindings
+                .end_use_aggregates
+                .iter()
+                .map(|slot| slot.map(|s| s.to_string()))
+                .collect::<Vec<_>>(),
+            self.roster
+                .bindings
+                .actors
+                .iter()
+                .map(|actor| actor.len())
+                .collect::<Vec<_>>(),
+            self.roster.bindings.equipment.len(),
+        )
+    }
 
-        if let Some(&idx) = self
-            .roster
-            .output_column_index
-            .get("Total Electric Power (kW)")
-        {
+    fn record_step(&mut self, step: &StepResult) -> Result<()> {
+        // Begin the row the frozen plan built: zeroed, validity cleared,
+        // local timestamp stamped. Every write below is by precomputed
+        // index; the step path never looks a column name up.
+        self.roster.row_plan.begin_row(step.timestamp.timestamp());
+        let row = self.roster.row_plan.row_mut();
+        let dwelling_columns = &self.roster.bindings.dwelling;
+
+        if let Some(idx) = dwelling_columns.total_electric {
             row[idx] = step.net_electric_power_kw;
         }
-        if let Some(&idx) = self
-            .roster
-            .output_column_index
-            .get("Total Gas Power (therms/hour)")
-        {
+        if let Some(idx) = dwelling_columns.total_gas {
             let gas_w = self.ports.fuel.get(hares_types::FuelType::Gas);
             row[idx] = gas_w / GAS_THERMS_PER_HOUR_TO_W;
         }
-        if let Some(&idx) = self
-            .roster
-            .output_column_index
-            .get("Total Reactive Power (kVAR)")
-        {
+        if let Some(idx) = dwelling_columns.total_reactive {
             row[idx] = self.electrical_solver.net_reactive_kvar();
         }
 
-        // Per-equipment columns via pre-resolved index map. The state
-        // columns (mode, setpoint, SOC, schedule) read the committed state;
-        // the flow and telemetry columns read what the equipment delivered
-        // this step, which for a failed-and-rolled-back step is nothing.
+        // Per-equipment columns via the frozen plan's producer bindings. The
+        // state columns (mode, setpoint, SOC, schedule) read the committed
+        // state; the flow and telemetry columns read what the equipment
+        // delivered this step, which for a failed-and-rolled-back step is
+        // nothing.
         for (eq_idx, (eq, cols)) in self
             .equipment
             .iter()
-            .zip(&self.roster.equipment_column_map)
+            .zip(&self.roster.bindings.equipment)
             .enumerate()
         {
             let co = eq.core_output();
-            #[cfg(debug_assertions)]
-            {
-                let desc = eq.descriptor();
-                let name = &desc.name;
-                let v = self.output_verbosity;
-                let is_hvac = is_hvac_or_wh(name);
-                let is_cooling = is_cooling_equipment(name);
-                let is_hp_heater = is_heat_pump_heater(name);
-                // The type-gated verbosity-7 invariants demand PER-EQUIPMENT
-                // telemetry columns, which exist only for equipment the
-                // schema was built from. A mid-run add after the schema froze
-                // is schema-unknown (empty column map by design — missing
-                // values, never misattributed ones), so demanding its
-                // per-equipment columns here would panic the debug build for a
-                // documented contract, not a drift. The one exception is the
-                // global `HVAC Duct Losses (W)` aggregate below: it resolves
-                // for ANY equipment (every equipment's duct telemetry
-                // accumulates into one slot), so its demand stays ungated.
-                let schema_known =
-                    is_schema_known_equipment(&self.roster.output_column_index, name);
-                // Telemetry-based columns: assert index is Some when expected.
-                if schema_known && is_hp_heater && v >= 7 {
-                    debug_assert!(cols.defrost_state.is_some());
-                    debug_assert!(cols.er_power.is_some());
-                }
-                if schema_known && is_cooling && v >= 7 {
-                    debug_assert!(cols.shr.is_some());
-                    debug_assert!(cols.latent_gains.is_some());
-                }
-                if schema_known && is_hvac && v >= 7 {
-                    debug_assert!(cols.fan_power.is_some());
-                    debug_assert!(cols.runtime_fraction.is_some());
-                }
-                if v >= 5 {
-                    debug_assert!(cols.duct_losses.is_some());
-                }
-            }
             if let Some(idx) = cols.mode {
                 row[idx] = co.state.operating_mode.map_or(0.0, |m| m.as_code());
             }
@@ -6416,7 +6615,8 @@ impl Dwelling {
         // "HVAC Heating End Use Electric Power (kW)").
         for (eq_idx, &agg_idx_opt) in self
             .roster
-            .end_use_aggregate_indices
+            .bindings
+            .end_use_aggregates
             .iter()
             .take(self.equipment.len())
             .enumerate()
@@ -6433,8 +6633,9 @@ impl Dwelling {
         }
 
         // Actor telemetry columns: pre-resolved column indices avoid
-        // per-timestep format!() allocation (parallel to equipment_column_map).
-        for (actor, pre_resolved) in self.actors.iter().zip(&self.roster.actor_column_map) {
+        // per-timestep format!() allocation (parallel to the plan's
+        // equipment bindings).
+        for (actor, pre_resolved) in self.actors.iter().zip(&self.roster.bindings.actors) {
             if let Some(tel) = actor.telemetry() {
                 for (key, column_idx) in pre_resolved {
                     if let Some(value) = tel.get(key) {
@@ -6451,148 +6652,41 @@ impl Dwelling {
             }
         }
         // Fallback for old-style column name
-        if let Some(&idx) = self
-            .roster
-            .output_column_index
-            .get("Indoor Temperature (C)")
+        if let Some(idx) = dwelling_columns.indoor_temp_fallback
             && let Some(&(_, temp_c)) = self.roster.zone_temp_scratch.first()
         {
             row[idx] = temp_c;
         }
 
-        if let Some(&idx) = self.roster.output_column_index.get("Outdoor Dry Bulb (C)") {
+        if let Some(idx) = dwelling_columns.outdoor_dry_bulb {
             row[idx] = self.latest_env.weather.outdoor_temp_c;
         }
 
-        // Envelope, boundary, and HVAC thermal gains from the thermal solver.
+        // Envelope, boundary, and HVAC thermal gains from the thermal
+        // solver, written through the plan's frozen gain terms and column
+        // indices.
         let gains = self.thermal_solver.component_gains();
-        // Net sensible = direct heat injections on zone air, matching OCHRE's
-        // "Net Sensible Heat Gain - {zone} (W)" (zone heat input: occupancy,
-        // HVAC, equipment, infiltration, ventilation, window solar). Opaque
-        // envelope conduction reaches the zone through the A-matrix surface
-        // coupling rather than a direct injection, so it is reported per
-        // boundary below instead of here. The gross exterior solar + LWR
-        // absorption (`opaque_solar_lwr_w`) is a boundary condition on the
-        // exterior RC nodes, not a zone input, and is excluded entirely.
-        let net_sensible_indoor_w = gains.window_solar_w
-            + gains.infiltration_w
-            + gains.ventilation_w
-            + gains.natural_ventilation_w
-            + gains.internal_gain_w
-            + gains.jacket_loss_w
-            + gains.duct_loss_w
-            // interior_lwr_w is excluded: it reports Σ|q_i|/2 (gross exchange
-            // activity), not a net gain. By conservation, Σ q_i ≈ 0, so the
-            // net contribution was always ~0 anyway.
-            + gains.hvac_heating_w.max(0.0)
-            + gains.hvac_cooling_w;
-        let envelope_cols: &[(&str, f64)] = &[
-            // Transmitted (through-glass) flux only, the OCHRE column
-            // definition (Envelope.py:1160); the inward-flowing absorbed
-            // share is part of `window_solar_w`, not this column.
-            (
-                "Window Transmitted Solar Gain (W)",
-                gains.window_through_glass_w,
-            ),
-            ("Infiltration Heat Gain - Indoor (W)", gains.infiltration_w),
-            (
-                "Forced Ventilation Heat Gain - Indoor (W)",
-                gains.ventilation_w,
-            ),
-            (
-                "Natural Ventilation Heat Gain - Indoor (W)",
-                gains.natural_ventilation_w,
-            ),
-            #[cfg(feature = "observe")]
-            ("Natural Ventilation Cw (-)", gains.natural_ventilation_cw),
-            #[cfg(feature = "observe")]
-            (
-                "Natural Ventilation Wind Angle (deg)",
-                gains.natural_ventilation_wind_angle_deg,
-            ),
-            #[cfg(feature = "observe")]
-            (
-                "Natural Ventilation Q_Stack (m\u{b3}/s)",
-                gains.natural_ventilation_q_stack_m3_s,
-            ),
-            #[cfg(feature = "observe")]
-            (
-                "Natural Ventilation Q_Wind (m\u{b3}/s)",
-                gains.natural_ventilation_q_wind_m3_s,
-            ),
-            #[cfg(feature = "observe")]
-            ("Natural Ventilation Cd", gains.natural_ventilation_cd_used),
-            ("Net Sensible Heat Gain - Indoor (W)", net_sensible_indoor_w),
-            ("Internal Heat Gain - Indoor (W)", gains.internal_gain_w),
-            ("Interior LWR Exchange - Indoor (W)", gains.interior_lwr_w),
-            // Net conduction from the opaque envelope into the zone (wall +
-            // floor + roof interior surfaces) — the inside-face convection
-            // term of the zone air heat balance (EnergyPlus ERM 26.1 —
-            // "Inside Heat Balance": Interior Convection), aggregated from
-            // the three per-boundary columns below. The gross exterior
-            // solar + LWR absorption is an outside-face balance driver
-            // (EnergyPlus ERM 26.1 — "Outside Surface Heat Balance"): most
-            // of it re-leaves via exterior convection and sky exchange, so
-            // it is not a load on the conditioned zone.
-            (
-                "Opaque Surface Heat Gain - Indoor (W)",
-                gains.wall_heat_gain_w + gains.floor_heat_gain_w + gains.roof_heat_gain_w,
-            ),
-            ("Duct Loss Heat Gain - Indoor (W)", gains.duct_loss_w),
-            ("Roof Heat Gain - Indoor (W)", gains.roof_heat_gain_w),
-            ("Floor Heat Gain - Indoor (W)", gains.floor_heat_gain_w),
-            ("Wall Heat Gain - Indoor (W)", gains.wall_heat_gain_w),
-            ("Window Heat Gain - Indoor (W)", gains.window_heat_gain_w),
-            (
-                "Internal Mass Heat Gain - Indoor (W)",
-                gains.internal_mass_heat_gain_w,
-            ),
-            ("HVAC Heating Delivered (W)", gains.hvac_heating_w),
-            ("HVAC Cooling Delivered (W)", gains.hvac_cooling_w.abs()),
-            // Complete zone air heat-balance residual (E+ Output:Diagnostics
-            // analogue): C_zone·ΔT/dt − Σ(all gain terms). Small in a correct
-            // model; O(kW) values mean a mis-wired or mislabeled gain — the
-            // I-02 defect class made visible in every output file.
-            (
-                "Zone Air Heat Balance Residual (W)",
-                gains.zone_air_balance_residual_w,
-            ),
-        ];
-        for &(col_name, value) in envelope_cols {
-            if let Some(&idx) = self.roster.output_column_index.get(col_name) {
-                row[idx] = value;
+        for &(term, idx) in &dwelling_columns.envelope {
+            if let Some(idx) = idx {
+                row[idx] = term(gains);
             }
         }
 
-        if let Some(&idx) = self
-            .roster
-            .output_column_index
-            .get("Temperature - Ground (C)")
-        {
+        if let Some(idx) = dwelling_columns.ground_temp {
             row[idx] = self.latest_env.weather.ground_temp_c;
         }
-        if let Some(&idx) = self
-            .roster
-            .output_column_index
-            .get("Hot Water Mains Temperature (C)")
-        {
+        if let Some(idx) = dwelling_columns.mains_temp {
             row[idx] = self.latest_env.weather.mains_temp_c;
         }
 
         // Setpoint chain: dwelling-level context columns for control auditing.
         // Read from the first HVAC equipment that publishes these keys; setpoint
         // reconciliation writes them to all HVAC equipment telemetry, so any
-        // one carries the correct value.
-        if let Some(first_hvac) = self
-            .equipment
-            .iter()
-            .find(|eq| is_hvac_or_wh(&eq.descriptor().name))
-        {
-            if let Some(&idx) = self
-                .roster
-                .output_column_index
-                .get(SCHEDULED_HEATING_SETPOINT_COL)
-            {
+        // one carries the correct value. The equipment position is frozen
+        // with the plan (every roster change rebuilds it).
+        if let Some(first_hvac_pos) = dwelling_columns.first_hvac {
+            let first_hvac = &self.equipment[first_hvac_pos];
+            if let Some(idx) = dwelling_columns.scheduled_heating_setpoint {
                 // allowed: setpoint telemetry keys are populated by HVAC equipment
                 // reconcile logic after the first timestep. Before that, get() returns
                 // None — 0.0 is the safe pre-init sentinel for output-column display.
@@ -6601,33 +6695,21 @@ impl Dwelling {
                     .get(tk::SCHEDULE_HEATING_SETPOINT_C)
                     .unwrap_or(0.0);
             }
-            if let Some(&idx) = self
-                .roster
-                .output_column_index
-                .get(SCHEDULED_COOLING_SETPOINT_COL)
-            {
+            if let Some(idx) = dwelling_columns.scheduled_cooling_setpoint {
                 // allowed: see SCHEDULED_HEATING_SETPOINT_COL comment above.
                 row[idx] = first_hvac
                     .telemetry()
                     .get(tk::SCHEDULE_COOLING_SETPOINT_C)
                     .unwrap_or(0.0);
             }
-            if let Some(&idx) = self
-                .roster
-                .output_column_index
-                .get(RUNTIME_HEATING_SETPOINT_COL)
-            {
+            if let Some(idx) = dwelling_columns.runtime_heating_setpoint {
                 // allowed: see SCHEDULED_HEATING_SETPOINT_COL comment above.
                 row[idx] = first_hvac
                     .telemetry()
                     .get(tk::RUNTIME_HEATING_SETPOINT_C)
                     .unwrap_or(0.0);
             }
-            if let Some(&idx) = self
-                .roster
-                .output_column_index
-                .get(RUNTIME_COOLING_SETPOINT_COL)
-            {
+            if let Some(idx) = dwelling_columns.runtime_cooling_setpoint {
                 // allowed: see SCHEDULED_HEATING_SETPOINT_COL comment above.
                 row[idx] = first_hvac
                     .telemetry()
@@ -7956,12 +8038,16 @@ fn cfg_gated_helper() {
         dwelling.active_equipment_ids = equipment.iter().map(|eq| eq.descriptor().id).collect();
         dwelling.roster.hvac_thermal_consistency =
             build_hvac_thermal_consistency(&dwelling.ports, &equipment);
-        dwelling.roster.equipment_column_map = build_equipment_column_map(
-            &equipment,
-            &dwelling.roster.output_column_index,
-            dwelling.output_verbosity,
-        )
-        .expect("test helper: test-equipment column map must resolve");
+        // The freeze-time column index, rebuilt from the recorder's frozen
+        // schema (empty when output is off, exactly as the plan builder sees
+        // it); the bindings' equipment half follows the test's roster.
+        let column_index = dwelling
+            .recorder
+            .as_ref()
+            .map_or_else(HashMap::new, |r| build_output_column_index(r.schema()));
+        dwelling.roster.bindings.equipment =
+            plan_equipment_columns(&equipment, &column_index, dwelling.output_verbosity)
+                .expect("test helper: test-equipment column map must resolve");
         dwelling
             .solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
@@ -15485,11 +15571,11 @@ occupancy = 0.0
     }
 
     /// A dwelling whose every roster plan fails: one row is already
-    /// recorded, so the schema is frozen, and the frozen column index
-    /// carries "Battery"'s Electric Power and Mode columns but not the SOC
-    /// column its end-use class demands at verbosity 3 (the drift
-    /// `build_equipment_column_map_errors_on_schema_drift_for_known_equipment`
-    /// pins). The returned directory owns the recorder's file.
+    /// recorded, so the schema is frozen with the output file, and the
+    /// frozen schema carries "Battery"'s Electric Power and Mode columns
+    /// but not the SOC column its end-use class demands at verbosity 3 (the
+    /// drift `row_plan_rejects_unplaceable_expected_variable` pins). The
+    /// returned directory owns the recorder's file.
     fn dwelling_whose_roster_plans_drift() -> (Dwelling, tempfile::TempDir) {
         let mut dwelling = bestest_dwelling();
         let mut battery = TestEquipment::new("Battery", ControlCapabilities::empty());
@@ -15497,8 +15583,19 @@ occupancy = 0.0
         replace_equipment_for_test(&mut dwelling, vec![Box::new(battery)]);
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let schema = hares_io::build_schema(&[], 0, &[]);
-        let value_count = schema.fields().len() - 1;
+        let schema = arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("Time", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "Battery Electric Power (kW)",
+                arrow::datatypes::DataType::Float64,
+                true,
+            ),
+            arrow::datatypes::Field::new(
+                "Battery Mode (-)",
+                arrow::datatypes::DataType::Float64,
+                true,
+            ),
+        ]);
         let mut recorder = StreamingRecorder::new(
             schema,
             10,
@@ -15509,15 +15606,11 @@ occupancy = 0.0
         )
         .expect("recorder");
         recorder
-            .push_row("2023-01-01T00:00:00", &vec![0.0; value_count])
+            .push_row("2023-01-01T00:00:00", &[0.0, 0.0])
             .expect("push row");
         dwelling.recorder = Some(recorder);
         dwelling.write_output = true;
         dwelling.output_verbosity = 3;
-        let column_index = &mut dwelling.roster.output_column_index;
-        column_index.clear();
-        column_index.insert("Battery Electric Power (kW)".to_string(), 0);
-        column_index.insert("Battery Mode (-)".to_string(), 1);
         (dwelling, tmp)
     }
 
@@ -15601,7 +15694,7 @@ occupancy = 0.0
             .map(|e| e.descriptor().name.clone())
             .collect();
         let loop_type_before = dwelling.fluid_solver.loop_fluid_type(LoopId(7));
-        let column_index_before = dwelling.roster.output_column_index.clone();
+        let row_plan_before = dwelling.frozen_output_fingerprint();
 
         let glycol = boiler_on_loop("Boiler-Glycol", 7, FluidType::Glycol, dwelling.latest_env());
         let err = dwelling
@@ -15627,7 +15720,8 @@ occupancy = 0.0
             "a rejected post-step add must not perturb the frozen fluid-loop map"
         );
         assert_eq!(
-            dwelling.roster.output_column_index, column_index_before,
+            dwelling.frozen_output_fingerprint(),
+            row_plan_before,
             "a rejected post-step add must not perturb the frozen output schema"
         );
     }
@@ -15935,19 +16029,16 @@ occupancy = 0.0
         telemetry_names.sort();
         let mut auto_names: Vec<&String> = dwelling.auto_registered_actor_names.iter().collect();
         auto_names.sort();
-        let mut column_index: Vec<(&String, &usize)> =
-            dwelling.roster.output_column_index.iter().collect();
-        column_index.sort();
         format!(
             "{equipment:?}|{:?}|{auto_names:?}|{:?}|{}|{}|{core_ids:?}|{telemetry_names:?}|\
-             {:?}|{column_index:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{}",
+             {:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{}",
             actor_names(dwelling),
             dwelling.scheduler.plan(),
             dwelling.next_equipment_id,
             dwelling.next_ev_driver_stream,
             dwelling.warnings.to_vec(),
-            dwelling.roster.output_value_count,
-            dwelling.roster.record_scratch.len(),
+            dwelling.frozen_output_fingerprint(),
+            dwelling.roster.zone_temp_scratch.len(),
             dwelling.roster.equipment_execution_order,
             dwelling.roster.equipment_ids,
             dwelling.ports,
@@ -18670,26 +18761,35 @@ occupancy = 0.0
 
     // ── Telemetry-to-Column Mapping Tests ──
 
-    /// The `in_schema` scoping of the `expected` predicate does not silence
-    /// the drift check: for equipment the schema KNOWS (membership = the
-    /// schema's unconditional `{name} Electric Power (kW)` column), a
-    /// missing applicable column at its verbosity is a typed error in every
-    /// build. Only schema-unknown equipment (added after the schema froze,
-    /// carrying no columns by design) are exempt.
+    /// A schema the row plan freezes from that omits a column the schema
+    /// KNOWS it owes (membership = the schema's unconditional
+    /// `{name} Electric Power (kW)` column) is a typed error at freeze, in
+    /// every build. Only schema-unknown equipment (added after the schema
+    /// froze, carrying no columns by design) are exempt.
     #[test]
-    fn build_equipment_column_map_errors_on_schema_drift_for_known_equipment() {
+    fn row_plan_rejects_unplaceable_expected_variable() {
         let mut eq = TestEquipment::new("Battery", ControlCapabilities::empty());
         eq.descriptor.end_use = EndUse::BATTERY;
         eq.descriptor.fuel = FuelType::Electric;
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        // A schema-known equipment: the index carries its membership column
+        // A schema-known equipment: the schema carries its membership column
         // (Electric Power, emitted unconditionally at verbosity ≥ 1) and its
         // Mode column, but not the SOC column its name class demands at
         // verbosity 3 — drift for a known equipment must stay loud.
-        let mut column_index = HashMap::new();
-        column_index.insert("Battery Electric Power (kW)".to_string(), 0usize);
-        column_index.insert("Battery Mode (-)".to_string(), 1usize);
-        let err = build_equipment_column_map(&equipment_refs(&equipment), &column_index, 3)
+        let schema = arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("Time", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "Battery Electric Power (kW)",
+                arrow::datatypes::DataType::Float64,
+                true,
+            ),
+            arrow::datatypes::Field::new(
+                "Battery Mode (-)",
+                arrow::datatypes::DataType::Float64,
+                true,
+            ),
+        ]);
+        let err = build_output_row_bindings(&schema, &equipment_refs(&equipment), &[], 3)
             .expect_err("schema drift for a known equipment must be a typed error");
         assert!(
             matches!(&err, HaresError::InvariantViolation { check_name, .. }
@@ -18699,24 +18799,113 @@ occupancy = 0.0
         );
     }
 
+    /// In one run whose row plan holds a `Named` single-column selection
+    /// and a `Verbosity(8)` selection, the named projection is the
+    /// verbosity projection's slot for the same variable, and the values
+    /// the projection reads over the run equal the recorded frame's column
+    /// on bits: one union row is written, and both projections read it.
+    #[test]
+    fn single_column_projection_bitwise_equals_full_verbosity_column() {
+        use arrow::array::Float64Array;
+
+        let mut dwelling = bestest_dwelling();
+        let equipment = equipment_refs(&dwelling.equipment);
+        let actors: Vec<&dyn Actor> = dwelling.actors.iter().map(AsRef::as_ref).collect();
+        // The schema at full verbosity for this dwelling, built exactly as
+        // the freeze builds it.
+        let specs = equipment_descriptor_specs(&equipment);
+        let schema = hares_io::build_schema(&specs, 8, &dwelling.zone_names());
+        let schema = enrich_schema_with_telemetry_units(schema, &equipment);
+        let schema = extend_schema_with_actor_columns(&schema, &actors);
+        let column_name = "Total Electric Power (kW)";
+        let selections = [
+            hares_io::Selection::Named(vec![column_name.to_string()]),
+            hares_io::Selection::Verbosity(8),
+        ];
+        let row_plan =
+            hares_io::RowPlan::build(&selections, &hares_io::SchemaSurface::new(&schema))
+                .expect("plan builds");
+        let bindings =
+            build_output_row_bindings(&schema, &equipment, &actors, 8).expect("bindings resolve");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = StreamingRecorder::new(
+            schema,
+            10,
+            hares_io::OutputFormat::Csv,
+            &tmp.path().join("single_column.csv"),
+            true,
+            hares_io::RotationPolicy::None,
+        )
+        .expect("recorder");
+        dwelling.recorder = Some(recorder);
+        dwelling.write_output = true;
+        dwelling.output_verbosity = 8;
+        dwelling.roster.row_plan = row_plan;
+        dwelling.roster.bindings = bindings;
+
+        // The named projection is the single slot the verbosity projection
+        // also carries.
+        let named_slot = dwelling.roster.row_plan.projection(0)[0];
+        assert!(dwelling.roster.row_plan.projection(1).contains(&named_slot));
+
+        let mut projected: Vec<u64> = Vec::new();
+        for _ in 0..24 {
+            dwelling.run_timestep(true).expect("dwelling steps");
+            projected.push(dwelling.roster.row_plan.row()[named_slot].to_bits());
+        }
+
+        let batches: Vec<_> = dwelling
+            .recorder
+            .as_ref()
+            .expect("recorder with retained batches")
+            .flushed_batches()
+            .to_vec();
+        assert!(!batches.is_empty(), "rows were flushed during the run");
+        let mut recorded: Vec<u64> = Vec::new();
+        for batch in &batches {
+            // Schema column 0 is the timestamp; value columns follow.
+            let column = batch.column(named_slot + 1);
+            let values = column
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("float64 column");
+            for i in 0..values.len() {
+                recorded.push(values.value(i).to_bits());
+            }
+        }
+        assert_eq!(
+            recorded,
+            projected[..recorded.len()],
+            "every flushed row's column equals the projection's read of the \
+             same step, on bits"
+        );
+    }
+
     /// An equipment whose name shadows a reserved aggregate column ("Total")
-    /// must claim NOTHING from a column index that carries the aggregate —
+    /// must claim NOTHING from a schema that carries the aggregate —
     /// not even the column that exists under its own name. Claiming it would
     /// make record_step's later per-equipment write silently replace the
     /// dwelling's total; and treating the aggregate's presence as membership
-    /// would panic on the absent Mode column. Both faces are pinned here:
-    /// no claim, no panic.
+    /// would fail the plan on the absent Mode column. Both faces are pinned
+    /// here: no claim, no panic.
     #[test]
     fn column_map_claims_nothing_for_an_equipment_name_shadowing_the_aggregate_column() {
         let eq = TestEquipment::new("Total", ControlCapabilities::empty());
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        // The index carries only the level-0 aggregate — the exact state a
+        // The schema carries only the level-0 aggregate — the exact state a
         // frozen schema presents to a mid-run equipment named "Total".
-        let mut column_index = HashMap::new();
-        column_index.insert("Total Electric Power (kW)".to_string(), 0usize);
-        let col_map = build_equipment_column_map(&equipment_refs(&equipment), &column_index, 3)
+        let schema = arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("Time", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "Total Electric Power (kW)",
+                arrow::datatypes::DataType::Float64,
+                true,
+            ),
+        ]);
+        let bindings = build_output_row_bindings(&schema, &equipment_refs(&equipment), &[], 3)
             .expect("reserved-aggregate shadowing must not error");
-        let cols = &col_map[0];
+        let cols = &bindings.equipment[0];
         assert!(
             cols.electric_power.is_none(),
             "an equipment named 'Total' must not claim the aggregate \
@@ -18732,7 +18921,7 @@ occupancy = 0.0
     /// At verbosity 7, all per-equipment column indices for applicable equipment
     /// types are resolved to `Some`.
     #[test]
-    fn build_equipment_column_map_v7_all_columns_resolved_for_applicable_equipment() {
+    fn plan_equipment_columns_v7_all_columns_resolved_for_applicable_equipment() {
         let specs = vec![
             hares_io::EquipmentSpec {
                 instance_name: None,
@@ -18769,7 +18958,7 @@ occupancy = 0.0
         eq2.descriptor.end_use = EndUse::BATTERY;
         eq2.descriptor.fuel = FuelType::Electric;
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
-        let col_map = build_equipment_column_map(&equipment_refs(&equipment), &column_index, 7)
+        let col_map = plan_equipment_columns(&equipment_refs(&equipment), &column_index, 7)
             .expect("column map resolves");
 
         let ashp = &col_map[0];
@@ -18802,7 +18991,7 @@ occupancy = 0.0
 
     /// For every `FuelType` variant, the schema emits a
     /// `"{name} Gas Power (therms/hour)"` column if and only if
-    /// `build_equipment_column_map` resolves it. Both sites share
+    /// `plan_equipment_columns` resolves it. Both sites share
     /// `hares_io::fuel_reports_gas_power_column`; this test guards against the
     /// predicate being forked again (previously Wood/Coal/WoodPellet equipment
     /// got a schema column that was never populated).
@@ -18834,7 +19023,7 @@ occupancy = 0.0
             let mut eq = TestEquipment::new(name, ControlCapabilities::empty());
             eq.descriptor.fuel = fuel;
             let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-            let col_map = build_equipment_column_map(&equipment_refs(&equipment), &column_index, 1)
+            let col_map = plan_equipment_columns(&equipment_refs(&equipment), &column_index, 1)
                 .expect("column map resolves");
             let resolved_gas_col = col_map[0].gas_power.is_some();
 
@@ -18853,12 +19042,12 @@ occupancy = 0.0
 
     /// At verbosity 0, per-equipment columns are not in the schema.
     #[test]
-    fn build_equipment_column_map_v0_all_per_equipment_columns_none() {
+    fn plan_equipment_columns_v0_all_per_equipment_columns_none() {
         let schema = hares_io::build_schema(&[], 0, &[]);
         let column_index = build_output_column_index(&schema);
         let eq = TestEquipment::new("ASHP Heater", ControlCapabilities::empty());
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let col_map = build_equipment_column_map(&equipment_refs(&equipment), &column_index, 0)
+        let col_map = plan_equipment_columns(&equipment_refs(&equipment), &column_index, 0)
             .expect("column map resolves");
         let cols = &col_map[0];
         assert!(cols.electric_power.is_none());
@@ -18898,7 +19087,7 @@ occupancy = 0.0
         eq.descriptor.end_use = EndUse::HVAC_HEATING;
         eq.descriptor.fuel = FuelType::Gas;
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let col_map = build_equipment_column_map(&equipment_refs(&equipment), &column_index, 5)
+        let col_map = plan_equipment_columns(&equipment_refs(&equipment), &column_index, 5)
             .expect("column map resolves");
         let cols = &col_map[0];
         assert!(
@@ -18917,7 +19106,7 @@ occupancy = 0.0
         eq_v4.descriptor.fuel = FuelType::Gas;
         let equipment_v4: Vec<Box<dyn Equipment>> = vec![Box::new(eq_v4)];
         let col_map_v4 =
-            build_equipment_column_map(&equipment_refs(&equipment_v4), &column_index_v4, 4)
+            plan_equipment_columns(&equipment_refs(&equipment_v4), &column_index_v4, 4)
                 .expect("column map resolves");
         assert!(col_map_v4[0].reactive_power.is_none());
         assert!(col_map_v4[0].power_factor.is_none());
@@ -19042,7 +19231,7 @@ occupancy = 0.0
         let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
 
         // Build the expected column set from the schema and the
-        // equipment column map logic. We can't call build_equipment_column_map
+        // equipment column map logic. We can't call plan_equipment_columns
         // directly because it requires Box<dyn Equipment> instances, so we
         // verify against the column names in the schema instead.
         //

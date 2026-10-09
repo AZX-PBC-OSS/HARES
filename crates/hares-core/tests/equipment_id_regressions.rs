@@ -1203,10 +1203,10 @@ fn midrun_equipment_removal_keeps_output_columns_aligned() {
 /// columns the frozen schema never allocated: the added equipment gets an
 /// empty column map (its values read as missing — the documented contract),
 /// the dwelling keeps stepping, and the schema-known equipment keep their
-/// own columns. Before the `in_schema` predicate, `build_equipment_column_map`
-/// demanded every applicable column for EVERY equipment and panicked in
-/// debug builds the moment a post-recording add re-derived the map — the
-/// CI python-test failure this pins (add_ev mid-simulation).
+/// own columns. Before the `in_schema` predicate, the row plan's equipment
+/// column bindings demanded every applicable column for EVERY equipment and
+/// panicked in debug builds the moment a post-recording add re-derived the
+/// map — the CI python-test failure this pins (add_ev mid-simulation).
 #[test]
 fn midrun_equipment_add_with_recording_gets_empty_map_not_panic() {
     let tmp = tempfile::tempdir().expect("temp dir");

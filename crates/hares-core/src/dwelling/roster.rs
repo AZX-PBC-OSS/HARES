@@ -15,7 +15,7 @@ use arrow::datatypes::Schema;
 use chrono_tz::Tz;
 use hares_control::DispatchTarget;
 use hares_equipment::Equipment;
-use hares_io::{StreamingRecorder, build_schema};
+use hares_io::{RowPlan, SchemaSurface, Selection, StreamingRecorder, build_schema};
 use hares_tariff::{ElectricTariff, TariffEvaluator};
 use hares_types::{
     AmbientLocation, CoreOutput, CustomAccumulator, EndUse, EquipmentId, FluidType, HaresError,
@@ -30,10 +30,9 @@ use crate::scheduler::{ActorSlot, ExecutionPhase};
 
 use super::conversions::build_output_column_index;
 use super::{
-    ActorPricing, ActorSeedState, Dwelling, EquipmentColumns, Result, ZoneColumnCaches,
-    actor_equipment, build_actor_column_map, build_actors_from_seeds,
-    build_end_use_aggregate_indices, build_equipment_column_map, build_hvac_thermal_consistency,
-    build_zone_column_caches, compute_equipment_dispatch_targets,
+    ActorPricing, ActorSeedState, Dwelling, OutputRowBindings, Result, ZoneColumnCaches,
+    actor_equipment, build_actors_from_seeds, build_hvac_thermal_consistency,
+    build_output_row_bindings, build_zone_column_caches, compute_equipment_dispatch_targets,
     compute_equipment_execution_order, describe_target, enrich_schema_with_telemetry_units,
     equipment_descriptor_specs, extend_schema_with_actor_columns, target_lost,
     validate_equipment_stage, validate_equipment_zones, zone_display_name,
@@ -57,19 +56,15 @@ pub(super) struct RosterCaches {
     pub(super) zones: ZoneColumnCaches,
     /// Zone temperatures for the step result, reused every step.
     pub(super) zone_temp_scratch: Vec<(ZoneId, f64)>,
-    /// Output column name to position; empty when output is disabled.
-    pub(super) output_column_index: HashMap<String, usize>,
-    /// Number of value columns the recorder expects (schema minus timestamp).
-    pub(super) output_value_count: usize,
-    /// Output columns of each equipment, in equipment-vector order.
-    pub(super) equipment_column_map: Vec<EquipmentColumns>,
-    /// End-use aggregate electric-power column of each equipment, in
-    /// equipment-vector order.
-    pub(super) end_use_aggregate_indices: Vec<Option<usize>>,
-    /// Telemetry key to output column of each actor, in actor order.
-    pub(super) actor_column_map: Vec<Vec<(String, usize)>>,
-    /// Row buffer for `record_step`, reused every step.
-    pub(super) record_scratch: Vec<f64>,
+    /// The frozen output row plan: the reused row `record_step` fills, its
+    /// validity bitset and local timestamp, and each selection's projection.
+    /// Empty until assembly installs the first plan; every write on the step
+    /// path goes through its precomputed indices.
+    pub(super) row_plan: RowPlan,
+    /// The row plan's producer bindings, resolved at freeze: the
+    /// dwelling-level columns, the per-equipment columns, the end-use
+    /// aggregates and the actor columns.
+    pub(super) bindings: OutputRowBindings,
 }
 
 /// The port-slot tables and fluid loop-type map, re-derived from the
@@ -87,25 +82,21 @@ enum OutputCachesPlan {
     /// Output disabled: nothing to plan or install.
     Disabled,
     /// No rows recorded yet: the schema is rebuilt from the prospective
-    /// roster, with a recorder created for it.
+    /// roster, with the row plan, its producer bindings and a recorder
+    /// created for it.
     FreshSchema {
         recorder: Box<StreamingRecorder>,
-        output_column_index: HashMap<String, usize>,
-        equipment_column_map: Vec<EquipmentColumns>,
-        end_use_aggregate_indices: Vec<Option<usize>>,
-        actor_column_map: Vec<Vec<(String, usize)>>,
+        row_plan: RowPlan,
+        bindings: OutputRowBindings,
     },
-    /// Rows already recorded: the schema and column index are frozen with
-    /// the output file; only the positional maps into them follow the
-    /// prospective roster. The maps resolve columns by name against the
-    /// frozen index, so surviving entities keep their own columns and
-    /// entities added after recording began get none: missing values,
-    /// never values written into another entity's columns.
-    FrozenUpdate {
-        equipment_column_map: Vec<EquipmentColumns>,
-        end_use_aggregate_indices: Vec<Option<usize>>,
-        actor_column_map: Vec<Vec<(String, usize)>>,
-    },
+    /// Rows already recorded: the schema and the row plan are frozen with
+    /// the output file; only the producer bindings follow the prospective
+    /// roster. The bindings resolve columns by name against the frozen
+    /// schema (rebuilt here, at freeze time, never stored), so surviving
+    /// entities keep their own columns and entities added after recording
+    /// began get none: missing values, never values written into another
+    /// entity's columns.
+    FrozenUpdate { bindings: OutputRowBindings },
 }
 
 /// Everything [`Dwelling::plan_roster_caches`] derives from a prospective
@@ -1056,7 +1047,7 @@ impl Dwelling {
         Ok(())
     }
 
-    fn zone_names(&self) -> Vec<(ZoneId, String)> {
+    pub(super) fn zone_names(&self) -> Vec<(ZoneId, String)> {
         let indoor_zone = self.thermal_solver.config().indoor_zone_id;
         self.latest_env
             .zones
@@ -1127,35 +1118,38 @@ impl Dwelling {
         {
             self.plan_fresh_schema(equipment, actors)?
         } else {
-            let column_index = &self.roster.output_column_index;
+            let schema = self
+                .recorder
+                .as_ref()
+                .expect("a roster change with rows recorded has a recorder")
+                .schema();
             OutputCachesPlan::FrozenUpdate {
-                equipment_column_map: build_equipment_column_map(
+                bindings: build_output_row_bindings(
+                    schema,
                     equipment,
-                    column_index,
+                    actors,
                     self.output_verbosity,
                 )?,
-                end_use_aggregate_indices: build_end_use_aggregate_indices(
-                    &equipment_descriptor_specs(equipment),
-                    column_index,
-                ),
-                actor_column_map: build_actor_column_map(actors, column_index),
             }
         };
 
+        // The freeze-time column index of the schema the zone columns
+        // resolve against, rebuilt here (this is the plan builder; the step
+        // path never sees one).
         let column_index = match &output {
-            OutputCachesPlan::FreshSchema {
-                output_column_index,
-                ..
-            } => output_column_index,
-            OutputCachesPlan::Disabled | OutputCachesPlan::FrozenUpdate { .. } => {
-                &self.roster.output_column_index
+            OutputCachesPlan::FreshSchema { recorder, .. } => {
+                build_output_column_index(recorder.schema())
             }
+            OutputCachesPlan::Disabled | OutputCachesPlan::FrozenUpdate { .. } => self
+                .recorder
+                .as_ref()
+                .map_or_else(HashMap::new, |r| build_output_column_index(r.schema())),
         };
         let zones = build_zone_column_caches(
             &self.latest_env.zones,
             self.environment.zone_types(),
             self.thermal_solver.config().indoor_zone_id,
-            column_index,
+            &column_index,
         );
 
         let joining_core_outputs = equipment
@@ -1181,9 +1175,9 @@ impl Dwelling {
         })
     }
 
-    /// The output schema rebuilt for the prospective roster, its column
-    /// maps, and a recorder created for it. Creating the recorder is the
-    /// plan's last fallible step.
+    /// The output schema rebuilt for the prospective roster, the row plan
+    /// and producer bindings frozen from it, and a recorder created for the
+    /// schema. Creating the recorder is the plan's last fallible step.
     fn plan_fresh_schema(
         &self,
         equipment: &[&dyn Equipment],
@@ -1195,12 +1189,15 @@ impl Dwelling {
         // columns carry no declared-unit metadata to validate against.
         let schema = enrich_schema_with_telemetry_units(schema, equipment);
         let schema = extend_schema_with_actor_columns(&schema, actors);
-        let output_column_index = build_output_column_index(&schema);
-        let equipment_column_map =
-            build_equipment_column_map(equipment, &output_column_index, self.output_verbosity)?;
-        let end_use_aggregate_indices =
-            build_end_use_aggregate_indices(&specs, &output_column_index);
-        let actor_column_map = build_actor_column_map(actors, &output_column_index);
+        // The run's one selection: the verbosity the configuration carries,
+        // materialized by the schema the plan freezes from. The report
+        // configuration (named and pattern selections per report) arrives
+        // with the destinations entry.
+        let selections = [Selection::Verbosity(self.output_verbosity)];
+        let row_plan = RowPlan::build(&selections, &SchemaSurface::new(&schema))
+            .map_err(|err| HaresError::Dwelling(err.to_string()))?;
+        let bindings =
+            build_output_row_bindings(&schema, equipment, actors, self.output_verbosity)?;
         let mut recorder = StreamingRecorder::new(
             schema,
             self.output_chunk_size,
@@ -1226,10 +1223,8 @@ impl Dwelling {
         }
         Ok(OutputCachesPlan::FreshSchema {
             recorder: Box::new(recorder),
-            output_column_index,
-            equipment_column_map,
-            end_use_aggregate_indices,
-            actor_column_map,
+            row_plan,
+            bindings,
         })
     }
 
@@ -1316,32 +1311,17 @@ impl Dwelling {
 
         match plan.output {
             OutputCachesPlan::Disabled => {}
-            OutputCachesPlan::FrozenUpdate {
-                equipment_column_map,
-                end_use_aggregate_indices,
-                actor_column_map,
-            } => {
-                self.roster.equipment_column_map = equipment_column_map;
-                self.roster.end_use_aggregate_indices = end_use_aggregate_indices;
-                self.roster.actor_column_map = actor_column_map;
+            OutputCachesPlan::FrozenUpdate { bindings } => {
+                self.roster.bindings = bindings;
             }
             OutputCachesPlan::FreshSchema {
                 recorder,
-                output_column_index,
-                equipment_column_map,
-                end_use_aggregate_indices,
-                actor_column_map,
+                row_plan,
+                bindings,
             } => {
-                self.roster.output_value_count = recorder.schema().fields().len() - 1;
-                self.roster.output_column_index = output_column_index;
-                self.roster.equipment_column_map = equipment_column_map;
-                self.roster.end_use_aggregate_indices = end_use_aggregate_indices;
-                self.roster.actor_column_map = actor_column_map;
-                self.roster.record_scratch.clear();
-                self.roster
-                    .record_scratch
-                    .resize(self.roster.output_value_count, 0.0);
                 self.recorder = Some(*recorder);
+                self.roster.row_plan = row_plan;
+                self.roster.bindings = bindings;
                 #[cfg(feature = "observe")]
                 self.log_output_keys_without_columns();
             }
@@ -1356,7 +1336,7 @@ impl Dwelling {
     #[cfg(feature = "observe")]
     fn log_output_keys_without_columns(&self) {
         let mut covered: HashSet<&str> = HashSet::new();
-        for cols in &self.roster.equipment_column_map {
+        for cols in &self.roster.bindings.equipment {
             for &(key, _idx) in cols.v8_state_columns.iter().chain(&cols.v8_flow_columns) {
                 covered.insert(key);
             }
@@ -1377,8 +1357,10 @@ impl Dwelling {
         }
         if self
             .roster
-            .output_column_index
-            .contains_key(hares_io::SCHEDULED_HEATING_SETPOINT_COL)
+            .bindings
+            .dwelling
+            .scheduled_heating_setpoint
+            .is_some()
         {
             covered.insert(tk::SCHEDULE_HEATING_SETPOINT_C);
             covered.insert(tk::SCHEDULE_COOLING_SETPOINT_C);

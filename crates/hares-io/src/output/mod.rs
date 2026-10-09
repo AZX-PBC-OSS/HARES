@@ -6,6 +6,7 @@
 
 pub mod columns;
 pub mod metrics;
+pub mod report;
 pub mod writer;
 
 use std::path::PathBuf;
@@ -32,6 +33,7 @@ pub use metrics::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,
     SimulationMetrics,
 };
+pub use report::{Frequency, RowPlan, RowPlanError, SchemaSurface, Selection, VariableSurface};
 pub use writer::{OutputError, StreamingRecorder};
 
 /// Summary returned by [`StreamingRecorder::finish`].

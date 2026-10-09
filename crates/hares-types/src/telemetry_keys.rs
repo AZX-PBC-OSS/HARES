@@ -9,9 +9,9 @@
 //! Each key carries a `scope:` annotation in its doc comment:
 //!
 //! - `scope: output` — the key's value is placed into an output column via
-//!   `record_step()` / `build_equipment_column_map()` (including new per-equipment
-//!   telemetry columns added at verbosity 8). These keys have a defined output
-//!   column contract.
+//!   `record_step()` / the row plan's per-equipment column bindings (including
+//!   new per-equipment telemetry columns added at verbosity 8). These keys
+//!   have a defined output column contract.
 //! - `scope: internal` — the key is used only for inter-equipment communication,
 //!   control logic, and state bookkeeping. Its value is never directly emitted
 //!   to a named output column (actor pass-through columns are a separate mechanism).
@@ -949,9 +949,9 @@ pub fn observation_field_bounds(key: &str) -> (f64, f64) {
 /// All telemetry keys that are marked `scope: output`.
 ///
 /// These keys have a defined output column contract: their value is placed into
-/// an output column by `record_step()` and the column is resolved via
-/// `build_equipment_column_map()`. Tests use this list to verify that every
-/// output-scoped key has an actual column mapping.
+/// an output column by `record_step()` and the column is resolved at the row
+/// plan's freeze into its per-equipment column bindings. Tests use this list to
+/// verify that every output-scoped key has an actual column mapping.
 pub const OUTPUT_SCOPE_KEYS: &[&str] = &[
     // HVAC component power — per-equipment columns at v7
     FAN_KW,
