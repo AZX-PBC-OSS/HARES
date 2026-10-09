@@ -556,6 +556,47 @@ battery).
 
 **Commit:** `fix: a battery with no declared control is a construction error`
 
+**State:** FIXED (2026-10-09, commit `01370038`, branch `row/r32-od8`).
+Assembly fails with `HaresError::Equipment` naming the battery, its
+SystemIdentifier and the input document when a stationary battery's merged
+config carries no `bms_mode` (`validate_battery_controls`, run beside the
+override validations before any equipment is constructed). A declared
+`Manual` builds and seeds no auto actor; a registered `BatteryManagement`
+actor stays the control for a battery joined to a built dwelling. Every
+caller migrated: the three parity battery fixtures declare
+`bms_mode = '"Manual"'` through the parity harness's new `[overrides]`
+table (merged with the `[ev]` section's override; a key both claim is a
+fixture-authoring error), and the two fixture-loading regression suites
+read the same table; the fleet test's battery dwelling declares `Manual`;
+the tariff integration declares self-consumption, its extraction helpers
+now read the parallel-list equipment telemetry they never read before, and
+the four battery assertions run unconditionally and hold (off-peak charge
+share 100%, peak discharge share 41%, SOC range 0.508 over the week).
+`TestBillingSummary` runs the June 28 start for 7 d and its summary arrives
+through `finalize_billing`, whose four plausibility checks hold
+unconditionally. Two entries' premises adjusted to the engine's measured
+behaviour, neither silent: the monthly billing cycle closes on the start's
+day-of-month anniversary (`compute_period_end`), not the calendar month, so
+a 7-day run crosses no boundary on its own (the "crosses the July 1
+boundary" premise does not hold as written); and the fourth battery guard
+cannot become a charge-spike assertion because no declared control charges
+at 21:00-23:00 (self-consumption charges only from PV surplus, which July
+evenings have none of; the TOU mode falls back to self-consumption at
+seeding because no tariff exists at build, and the tariff-attached
+rebuild's take-over keeps the predecessor's mode), so that guard became an
+unconditional assertion of the declared control's actual window behaviour:
+the battery answers the post-peak load. The blueprint-level `validate()` is
+the inputs row's surface (not yet landed); the assembly check is the one it
+will report. RED first: `battery_without_declared_control_is_a_construction_error`
+failed on the unfixed tree with the build succeeding. Documentation added
+at `docs/equipment/battery.md` ("Declaring a Control"). Goldens bitwise
+identical, all 8 manifests (7 default + 1 dst; no golden carries a
+battery); nextest --all-features 7578/7578; pytest 1371 passed (3 failures
+and 1 error pre-existing on the base commit: the helics wheel checks, the
+ResStock download ctrl-C, the ochre_units pint import); pyright 3 errors,
+all pre-existing import resolution (pint, matplotlib), 0 new; fmt and
+clippy --all-features --all-targets -D warnings clean.
+
 **Dependencies:** OD-2 (strict overrides, so a misspelled `bms_mode` key is
 already an error). Consumer effect: the TRAP 2 case becomes a refusal in
 `08-consumer.md` CN-1; the DE-trace premises declare no stationary battery,
