@@ -123,6 +123,9 @@ const OCCUPANCY_XML: &str = r#"<Building>
         <ClothesWasher>
           <SystemIdentifier id="cw"/>
           <RatedAnnualkWh>284.0</RatedAnnualkWh>
+          <LabelElectricRate>0.12</LabelElectricRate>
+          <LabelGasRate>1.09</LabelGasRate>
+          <LabelAnnualGasCost>27.0</LabelAnnualGasCost>
           <LabelUsage>6.0</LabelUsage>
           <Capacity>4.2</Capacity>
           <extension>
@@ -133,6 +136,9 @@ const OCCUPANCY_XML: &str = r#"<Building>
         <Dishwasher>
           <SystemIdentifier id="dw"/>
           <RatedAnnualkWh>307.0</RatedAnnualkWh>
+          <LabelElectricRate>0.12</LabelElectricRate>
+          <LabelGasRate>1.09</LabelGasRate>
+          <LabelAnnualGasCost>33.12</LabelAnnualGasCost>
           <PlaceSettingCapacity>12</PlaceSettingCapacity>
           <LabelUsage>4.0</LabelUsage>
           <extension>
@@ -951,6 +957,83 @@ fn multi_water_heater_homes_apportion_the_wet_appliance_draw() {
         (total_l - expected_l).abs() <= 1e-6 * expected_l,
         "the systems' shares must sum to the appliances' daily volume: \
          {total_l} L against {expected_l} L"
+    );
+}
+
+/// The ERI version the HPXML names selects the asset cycles branch when
+/// `NumberofResidents` is absent: 2019A through 2022CE use the older
+/// `164 + 46.5 nbeds` / `88.4 + 34.9 nbeds` cycles, `latest` the Addendum
+/// 81 equations, and an unknown version is a validation error naming it.
+#[test]
+fn eri_version_selects_the_asset_cycles_branch() {
+    let xml = std::fs::read_to_string(fixture(
+        "tests/fixtures/resstock/2025.1/bldg0527060/home.xml",
+    ))
+    .expect("home.xml readable");
+    // The asset branch reads no residents.
+    let xml = xml.replace("<NumberofResidents>0.0</NumberofResidents>", "");
+    let with_version = |version: &str| {
+        xml.replace(
+            "<extension>",
+            &format!("<extension><ERICalculation><Version>{version}</Version></ERICalculation>"),
+        )
+    };
+    let washer_gal = |version: &str| {
+        let building = hares_io::hpxml::parse_hpxml_str(&with_version(version)).expect("parses");
+        let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
+            .expect("equipment resolves");
+        spec_f64(
+            wet_appliance_spec(&specs, "Clothes Washer"),
+            "daily_hot_water_m3",
+        )
+    };
+
+    // The older branch's cycles (164 + 46.5 nbeds) and the Addendum 81's
+    // (apartment unit: 213.9 + 27.5 nbeds; the sample is an apartment)
+    // differ, so the volumes differ: the gpd is proportional to the
+    // cycles, everything else shared.
+    let older = washer_gal("2019A");
+    let latest = washer_gal("latest");
+    let nbeds = 1.0_f64;
+    let cycles_ratio = (164.0 + 46.5 * nbeds) / (213.9 + 27.5 * nbeds);
+    assert!(
+        (older / latest - cycles_ratio).abs() < 1e-6,
+        "the 2019A asset branch must use the 164 + 46.5 nbeds cycles: \
+         {older} against latest's {latest} (expected ratio {cycles_ratio})"
+    );
+
+    // An unknown version fails the resolve naming the value.
+    let building = hares_io::hpxml::parse_hpxml_str(&with_version("1999Z")).expect("parses");
+    let err = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
+        .expect_err("an unknown ERI version must fail the resolve");
+    assert!(
+        err.to_string().contains("1999Z"),
+        "the error must name the version, got: {err}"
+    );
+}
+
+/// The all-or-nothing label default: a provided RatedAnnualkWh with a
+/// missing label field is a validation error (defaults.rb:4207 defaults
+/// the whole set together), not a mix of the provided and defaulted
+/// values.
+#[test]
+fn washer_with_rated_kwh_requires_the_whole_label_set() {
+    let xml = format!(
+        r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">{OCCUPANCY_XML}</HPXML>"#
+    );
+    // The full label set resolves.
+    let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("the full label set parses");
+    resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
+        .expect("a washer with the whole label set resolves");
+
+    // A missing field fails the resolve naming it.
+    let partial = xml.replacen("<LabelGasRate>1.09</LabelGasRate>", "", 1);
+    let building = hares_io::hpxml::parse_hpxml_str(&partial).expect("parses");
+    let err = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
+        .expect_err("a washer with RatedAnnualkWh but no LabelGasRate must fail the resolve");
+    assert!(
+        err.to_string().contains("LabelGasRate"),
+        "the error must name the missing label field, got: {err}"
     );
 }
 

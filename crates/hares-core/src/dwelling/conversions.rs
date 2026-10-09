@@ -1650,6 +1650,7 @@ mod tests {
             },
             unavailable_periods: Vec::new(),
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         }
     }
 

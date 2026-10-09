@@ -263,6 +263,7 @@ fn minimal_building() -> hares_io::Building {
         unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
+        eri_calculation_version: None,
     }
 }
 
@@ -705,6 +706,7 @@ fn leap_year_dec31_reads_correct_weather_row() {
             unavailable_periods: Vec::new(),
             details_xml,
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         }
     };
 
@@ -924,6 +926,7 @@ fn wall_missing_azimuth_constructs_with_warning() {
         unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
+        eri_calculation_version: None,
     };
 
     let start = ts(0);
@@ -1036,6 +1039,7 @@ fn roof_missing_azimuth_constructs_successfully() {
         unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
+        eri_calculation_version: None,
     };
 
     let start = ts(0);
@@ -1144,6 +1148,7 @@ fn window_missing_azimuth_returns_error() {
         unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
+        eri_calculation_version: None,
     };
 
     let start = ts(0);

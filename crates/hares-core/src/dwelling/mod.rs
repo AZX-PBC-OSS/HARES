@@ -12743,6 +12743,7 @@ occupancy = 1.0
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         };
 
         // Build ZoneMap from building zones (same logic as from_preparsed()).

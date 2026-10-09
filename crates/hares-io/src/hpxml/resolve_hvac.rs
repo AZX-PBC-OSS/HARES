@@ -3986,6 +3986,7 @@ mod tests {
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         }
     }
 

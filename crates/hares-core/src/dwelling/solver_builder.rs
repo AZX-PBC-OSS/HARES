@@ -1935,6 +1935,7 @@ mod tests {
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         }
     }
 
@@ -3356,6 +3357,7 @@ mod tests {
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         };
 
         let boundary_inputs = vec![BoundaryInput {
@@ -3570,6 +3572,7 @@ mod tests {
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         };
 
         let boundary_inputs = vec![BoundaryInput {
@@ -3812,6 +3815,7 @@ mod tests {
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         };
 
         // Production resolves an attic exterior zone to ExteriorTarget::Zone
@@ -4055,6 +4059,7 @@ mod tests {
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         };
 
         let (r_glass, r_film_int, r_film_ext) =
@@ -4350,6 +4355,7 @@ mod tests {
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         };
 
         // r_glass and film resistances from the E+ Step 1 polynomial for U=1.8.
@@ -4623,6 +4629,7 @@ mod tests {
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         };
 
         // NFRC conditions: moderate wind (2 m/s), moderate ΔT.
@@ -4886,6 +4893,7 @@ mod tests {
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         };
 
         // High wind (15 m/s) — boundary_input still carries E+ polynomial values.

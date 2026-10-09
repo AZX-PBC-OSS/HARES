@@ -1548,6 +1548,7 @@ pub(crate) fn build_synthetic_building(
         unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
+        eri_calculation_version: None,
     };
 
     // Post-construction debug assertions: verify ranges hold in the built object

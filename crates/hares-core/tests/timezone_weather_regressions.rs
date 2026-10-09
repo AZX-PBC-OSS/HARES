@@ -105,6 +105,7 @@ fn minimal_building() -> hares_io::Building {
         climate_zone_iecc: None,
         details_xml,
         parse_warnings: Vec::new(),
+        eri_calculation_version: None,
         unavailable_periods: Vec::new(),
     }
 }

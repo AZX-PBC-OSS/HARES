@@ -1255,6 +1255,7 @@ mod tests {
             unavailable_periods: Vec::new(),
             details_xml: details,
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         }
     }
 
@@ -2780,6 +2781,7 @@ mod tests {
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         };
 
         // Conditioned zone is at index 0 → zone_id 1

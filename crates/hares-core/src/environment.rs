@@ -1609,6 +1609,7 @@ mod tests {
             unavailable_periods: Vec::new(),
             details_xml,
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         }
     }
 

@@ -13,8 +13,8 @@ use super::building::{Building, XmlNode, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec, build_typed_spec, canonical_instance_namer};
 use super::resolve_pool::resolve_pool_and_spa_loads;
 use super::wet_appliance::{
-    ClothesWasherInputs, DishwasherInputs, OccupancyInputs, calc_clothes_washer_energy_gpd,
-    calc_dishwasher_energy_gpd,
+    ClothesWasherInputs, DishwasherInputs, EriVersion, OccupancyInputs,
+    calc_clothes_washer_energy_gpd, calc_dishwasher_energy_gpd,
 };
 use super::xml_helpers::{
     capitalize, child_bool, child_f64, child_load_kwh, child_load_therms, child_text, element_id,
@@ -172,7 +172,174 @@ fn wet_appliance_occupancy_inputs(details: &XmlNode) -> OccupancyInputs {
         n_occ,
         nbeds,
         is_apartment,
+        eri_version: EriVersion::latest(),
     }
+}
+
+/// The ERI version the wet appliance equations branch on: the HPXML
+/// `SoftwareInfo/extension/ERICalculation/Version`, `latest` when the HPXML
+/// carries none (OpenStudio-HPXML `defaults.rb:31-34`). An unknown
+/// spelling is a validation error naming it.
+fn wet_appliance_eri_version(building: &Building) -> Result<EriVersion, HpxmlError> {
+    match &building.eri_calculation_version {
+        None => Ok(EriVersion::latest()),
+        Some(raw) => EriVersion::parse(raw.trim()),
+    }
+}
+
+/// The clothes washer's label inputs under OpenStudio-HPXML's
+/// all-or-nothing default rule (`resources/defaults.rb:4207-4230`): the
+/// whole set defaults together when `RatedAnnualkWh` is absent (the
+/// version's `get_clothes_washer_values`), and a provided
+/// `RatedAnnualkWh` means none of the label fields is defaulted — every
+/// one the algebra reads must be on the HPXML, the input combination the
+/// reference's own algebra would otherwise crash on.
+fn washer_label_inputs(
+    node: &XmlNode,
+    eri_version: EriVersion,
+) -> Result<WasherLabelInputs, HpxmlError> {
+    let system_id = element_id(node).unwrap_or_else(|| "unknown".to_string());
+    let require = |name: &'static str| -> Result<f64, HpxmlError> {
+        child_f64(node, name).ok_or_else(|| {
+            HpxmlError::Parse(
+                format!(
+                    "Clothes Washer `{system_id}`: the HPXML provides RatedAnnualkWh, so \
+                     no other label field is defaulted (defaults.rb:4207 defaults the \
+                     whole set together): {name} is required"
+                )
+                .into(),
+            )
+        })
+    };
+    if child_f64(node, "RatedAnnualkWh").is_none() {
+        let modern = matches!(eri_version, EriVersion::Y2019To2022 | EriVersion::Latest);
+        return Ok(if modern {
+            WasherLabelInputs {
+                rated_annual_kwh: 400.0,
+                capacity_ft3: 3.0,
+                label_usage: 6.0,
+                label_electric_rate: 0.12,
+                label_gas_rate: 1.09,
+                label_annual_gas_cost: 27.0,
+            }
+        } else {
+            // get_clothes_washer_values, pre-2019A set.
+            WasherLabelInputs {
+                rated_annual_kwh: 704.0,
+                capacity_ft3: 2.874,
+                label_usage: 999.0,
+                label_electric_rate: 0.08,
+                label_gas_rate: 0.58,
+                label_annual_gas_cost: 23.0,
+            }
+        });
+    }
+    Ok(WasherLabelInputs {
+        rated_annual_kwh: require("RatedAnnualkWh")?,
+        capacity_ft3: require("Capacity")?,
+        label_usage: require("LabelUsage")?,
+        label_electric_rate: require("LabelElectricRate")?,
+        label_gas_rate: require("LabelGasRate")?,
+        label_annual_gas_cost: require("LabelAnnualGasCost")?,
+    })
+}
+
+/// The clothes washer's label inputs.
+struct WasherLabelInputs {
+    rated_annual_kwh: f64,
+    capacity_ft3: f64,
+    label_usage: f64,
+    label_electric_rate: f64,
+    label_gas_rate: f64,
+    label_annual_gas_cost: f64,
+}
+
+/// The dishwasher's label inputs under OpenStudio-HPXML's all-or-nothing
+/// default rule (`resources/defaults.rb:4305-4319`): the whole set defaults
+/// together when `PlaceSettingCapacity` is absent (the version's
+/// `get_dishwasher_values`), and a provided `PlaceSettingCapacity` means no
+/// label field is defaulted. With the place count on the HPXML, the rated
+/// annual kWh falls back to 215 / EnergyFactor (the reference's
+/// `calc_dishwasher_annual_kwh_from_ef`); neither present is the missing
+/// input the reference's own algebra would crash on.
+fn dishwasher_label_inputs(
+    node: &XmlNode,
+    eri_version: EriVersion,
+) -> Result<DishwasherLabelInputs, HpxmlError> {
+    let system_id = element_id(node).unwrap_or_else(|| "unknown".to_string());
+    let energy_factor = child_f64(node, "EnergyFactor");
+    if child_f64(node, "PlaceSettingCapacity").is_none() {
+        let modern = matches!(eri_version, EriVersion::Y2019To2022 | EriVersion::Latest);
+        return Ok(if modern {
+            DishwasherLabelInputs {
+                rated_annual_kwh: 467.0,
+                place_setting_capacity: 12.0,
+                energy_factor,
+                label_usage: 4.0,
+                label_electric_rate: 0.12,
+                label_gas_rate: 1.09,
+                label_annual_gas_cost: 33.12,
+            }
+        } else {
+            // get_dishwasher_values, pre-2019A set: the label fields are
+            // unused.
+            DishwasherLabelInputs {
+                rated_annual_kwh: 467.0,
+                place_setting_capacity: 12.0,
+                energy_factor,
+                label_usage: 999.0,
+                label_electric_rate: 999.0,
+                label_gas_rate: 999.0,
+                label_annual_gas_cost: 999.0,
+            }
+        });
+    }
+    let require = |name: &'static str| -> Result<f64, HpxmlError> {
+        child_f64(node, name).ok_or_else(|| {
+            HpxmlError::Parse(
+                format!(
+                    "Dishwasher `{system_id}`: the HPXML provides PlaceSettingCapacity, so \
+                     no other label field is defaulted (defaults.rb:4305 defaults the \
+                     whole set together): {name} is required"
+                )
+                .into(),
+            )
+        })
+    };
+    let rated_annual_kwh = match child_f64(node, "RatedAnnualkWh") {
+        Some(rated) => rated,
+        None if energy_factor.is_some() => 215.0 / energy_factor.expect("checked above"),
+        None => {
+            return Err(HpxmlError::Parse(
+                format!(
+                    "Dishwasher `{system_id}`: with PlaceSettingCapacity present, either \
+                     RatedAnnualkWh or EnergyFactor is required (the reference derives \
+                     the rated value as 215 / EnergyFactor) and neither is on the HPXML"
+                )
+                .into(),
+            ));
+        }
+    };
+    Ok(DishwasherLabelInputs {
+        rated_annual_kwh,
+        place_setting_capacity: require("PlaceSettingCapacity")?,
+        energy_factor,
+        label_usage: require("LabelUsage")?,
+        label_electric_rate: require("LabelElectricRate")?,
+        label_gas_rate: require("LabelGasRate")?,
+        label_annual_gas_cost: require("LabelAnnualGasCost")?,
+    })
+}
+
+/// The dishwasher's label inputs.
+struct DishwasherLabelInputs {
+    rated_annual_kwh: f64,
+    place_setting_capacity: f64,
+    energy_factor: Option<f64>,
+    label_usage: f64,
+    label_electric_rate: f64,
+    label_gas_rate: f64,
+    label_annual_gas_cost: f64,
 }
 
 pub(super) fn resolve_scheduled_loads(
@@ -181,6 +348,11 @@ pub(super) fn resolve_scheduled_loads(
     specs: &mut Vec<EquipmentSpec>,
 ) -> std::result::Result<(), HpxmlError> {
     let details = &building.details_xml;
+    // The wet appliances' shared occupancy and ERI-version inputs, resolved
+    // once: the ERI version comes from the HPXML header and can fail the
+    // parse, so it is read before any spec is built.
+    let mut occupancy_inputs = wet_appliance_occupancy_inputs(details);
+    occupancy_inputs.eri_version = wet_appliance_eri_version(building)?;
 
     // Occupancy
     if let Some(occupancy) = details.path(&["BuildingSummary", "BuildingOccupancy"]) {
@@ -344,26 +516,22 @@ pub(super) fn resolve_scheduled_loads(
                         // (hotwater_appliances.rb:824-888): the adjusted annual
                         // energy and the daily hot-water volume, from the
                         // cycles-per-year rule (operational in residents,
-                        // Addendum 81 asset otherwise), the label algebra and
-                        // the rated value.
+                        // the version's asset form otherwise), the label
+                        // algebra and the rated value.
                         let adjusted = child_load_kwh(node).or_else(|| {
                             node.child("extension")
                                 .and_then(|ext| child_f64(ext, "AdjustedAnnualkWh"))
                         });
+                        let washer_label = washer_label_inputs(node, occupancy_inputs.eri_version)?;
                         let inputs = ClothesWasherInputs {
-                            rated_annual_kwh: child_f64(node, "RatedAnnualkWh").unwrap_or(400.0),
-                            capacity_ft3: child_f64(node, "Capacity").unwrap_or(3.0),
-                            label_usage: params
-                                .get("label_usage_cycles_per_week")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(6.0),
-                            label_electric_rate: child_f64(node, "LabelElectricRate")
-                                .unwrap_or(0.12),
-                            label_gas_rate: child_f64(node, "LabelGasRate").unwrap_or(1.09),
-                            label_annual_gas_cost: child_f64(node, "LabelAnnualGasCost")
-                                .unwrap_or(27.0),
+                            rated_annual_kwh: washer_label.rated_annual_kwh,
+                            capacity_ft3: washer_label.capacity_ft3,
+                            label_usage: washer_label.label_usage,
+                            label_electric_rate: washer_label.label_electric_rate,
+                            label_gas_rate: washer_label.label_gas_rate,
+                            label_annual_gas_cost: washer_label.label_annual_gas_cost,
                             usage_multiplier: usage_multiplier_of(node),
-                            occupancy: wet_appliance_occupancy_inputs(details),
+                            occupancy: occupancy_inputs,
                         };
                         let (annual_kwh, gpd) = calc_clothes_washer_energy_gpd(&inputs, adjusted);
                         insert_wet_appliance_apportionment(node, "ClothesWasher", &mut params)?;
@@ -482,29 +650,24 @@ pub(super) fn resolve_scheduled_loads(
                         // (hotwater_appliances.rb:607-675): the adjusted annual
                         // energy and the daily hot-water volume, from the
                         // cycles-per-year rule (operational in residents,
-                        // Addendum 81 asset otherwise), the label algebra and
-                        // the rated value.
+                        // the version's asset form otherwise), the label
+                        // algebra and the rated value.
                         let adjusted = child_load_kwh(node).or_else(|| {
                             node.child("extension")
                                 .and_then(|ext| child_f64(ext, "AdjustedAnnualkWh"))
                         });
+                        let dishwasher_label =
+                            dishwasher_label_inputs(node, occupancy_inputs.eri_version)?;
                         let inputs = DishwasherInputs {
-                            rated_annual_kwh: child_f64(node, "RatedAnnualkWh").unwrap_or(467.0),
-                            place_setting_capacity: params
-                                .get("place_setting_capacity")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(12.0),
-                            label_usage: params
-                                .get("label_usage_cycles_per_week")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(4.0),
-                            label_electric_rate: child_f64(node, "LabelElectricRate")
-                                .unwrap_or(0.12),
-                            label_gas_rate: child_f64(node, "LabelGasRate").unwrap_or(1.09),
-                            label_annual_gas_cost: child_f64(node, "LabelAnnualGasCost")
-                                .unwrap_or(33.12),
+                            rated_annual_kwh: dishwasher_label.rated_annual_kwh,
+                            place_setting_capacity: dishwasher_label.place_setting_capacity,
+                            energy_factor: dishwasher_label.energy_factor,
+                            label_usage: dishwasher_label.label_usage,
+                            label_electric_rate: dishwasher_label.label_electric_rate,
+                            label_gas_rate: dishwasher_label.label_gas_rate,
+                            label_annual_gas_cost: dishwasher_label.label_annual_gas_cost,
                             usage_multiplier: usage_multiplier_of(node),
-                            occupancy: wet_appliance_occupancy_inputs(details),
+                            occupancy: occupancy_inputs,
                         };
                         let (annual_kwh, gpd) = calc_dishwasher_energy_gpd(&inputs, adjusted);
                         insert_wet_appliance_apportionment(node, "Dishwasher", &mut params)?;
@@ -2998,6 +3161,7 @@ mod tests {
             unavailable_periods: Vec::new(),
             details_xml: details,
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         }
     }
 

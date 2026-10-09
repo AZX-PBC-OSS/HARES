@@ -338,6 +338,11 @@ pub struct Building {
     /// steps zero the schedule columns their `unavailable_periods.csv` rows
     /// apply to (`crates/hares-io/src/unavailable_periods.rs`).
     pub unavailable_periods: Vec<crate::unavailable_periods::UnavailablePeriod>,
+    /// `SoftwareInfo/extension/ERICalculation/Version`: the ANSI/RESNET/ICC
+    /// 301 version the wet appliance equations branch on
+    /// (`crates/hares-io/src/hpxml/wet_appliance.rs`), `None` when the HPXML
+    /// carries none (OpenStudio-HPXML then uses its latest equations).
+    pub eri_calculation_version: Option<String>,
     /// Schema warnings the parse raised (for example the HPXML 3.x
     /// deprecated-`EnergyFactor` notice), carried to the run instead of
     /// living only as `tracing` lines.
@@ -1342,6 +1347,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             .and_then(|iecc| super::xml_helpers::child_text(iecc, "ClimateZone"))
             .filter(|zone| !zone.is_empty()),
         unavailable_periods: crate::unavailable_periods::parse_unavailable_periods(root)?,
+        eri_calculation_version: root
+            .path(&["SoftwareInfo", "extension", "ERICalculation", "Version"])
+            .map(|version| version.text.trim().to_string())
+            .filter(|text| !text.is_empty()),
         details_xml: details.clone(),
         parse_warnings,
     })
