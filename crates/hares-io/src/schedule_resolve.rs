@@ -3379,6 +3379,42 @@ mod tests {
     }
 
     #[test]
+    fn hot_supply_temperature_honors_the_gas_water_heater_config() {
+        // The gas water heater's typed config carries the hot draw
+        // temperature and the setpoint like the electric resistance one:
+        // the drawn water's temperature is the hot draw temperature when
+        // set, else the setpoint, else the reference default setpoint.
+        let gas_config_at = |hot_draw_temp_c: Option<f64>, setpoint_c: Option<f64>| {
+            let spec = make_water_heater_spec("Gas Water Heater", 200.0);
+            let cfg = spec
+                .typed_config
+                .as_ref()
+                .expect("typed config")
+                .typed::<GasWaterHeaterConfig>()
+                .expect("gas config decodes")
+                .clone();
+            let mut typed = cfg;
+            typed.hot_draw_temp_c = hot_draw_temp_c;
+            typed.setpoint_c = setpoint_c;
+            let spec = EquipmentSpec {
+                typed_config: Some(
+                    EquipmentConfig::from_typed(
+                        "gas".to_string(),
+                        "Gas Water Heater".to_string(),
+                        typed,
+                    )
+                    .expect("typed config builds"),
+                ),
+                ..spec
+            };
+            super::water_heater_hot_supply_temp_c(&spec)
+        };
+        assert_eq!(gas_config_at(Some(60.0), Some(49.0)), 60.0);
+        assert_eq!(gas_config_at(None, Some(49.0)), 49.0);
+        assert_eq!(gas_config_at(None, None), super::DEFAULT_SUPPLY_TEMP_C);
+    }
+
+    #[test]
     fn tankless_without_avg_water_draw_returns_err() {
         let mut schedule = make_schedule_with_water_heater_columns(
             "hot_water_fixtures",
