@@ -367,3 +367,45 @@ fn efficiency_lookup_falls_back_to_closest_when_no_exact_match() {
         params2.efficiency_value
     );
 }
+
+#[test]
+fn mshp_heater_rows_match_ochre_capacity_ratios_and_cops() {
+    // The shipped `MSHP Heater` rows are OCHRE's
+    // `ochre/defaults/HVAC Multispeed Parameters.csv` rows verbatim: capacity
+    // ratios 0.4/0.6/0.8/1.2 of rated (the top stage exceeds rated) with the
+    // per-stage COPs declining with speed. OCHRE applies the row to every
+    // mini-split whose input declares no stage list and raises when the rated
+    // efficiency has no row (HVAC.py:774-786), so the row is the reference's
+    // no-input default stage table. A previous state of this file renormalized
+    // the ratios to a 1.0 top (0.33333/0.5/0.66667/1.0), which no reference
+    // does.
+    let store = DefaultsStore::load(&defaults_dir()).expect("load defaults");
+    let expected_cops: Vec<(&str, [f64; 4])> = vec![
+        ("8.2", [4.19929, 3.36672, 3.08195, 2.79114]),
+        ("9.2", [5.14266, 3.96, 3.53, 3.11]),
+        ("9.5", [5.14266, 4.12161, 3.77355, 3.41917]),
+        ("13.0", [7.893351479, 6.282661747, 5.758473142, 5.2460162]),
+        ("13.3", [7.74616, 6.20218, 5.68075, 5.15429]),
+        ("14.0", [8.399982335, 6.724045293, 6.159368877, 5.590475552]),
+    ];
+    for (hspf, cops) in expected_cops {
+        let row = store
+            .hvac_multispeed_parameters("MSHP Heater", "HSPF", 4, hspf.parse::<f64>().unwrap())
+            .unwrap_or_else(|| panic!("MSHP Heater {hspf} HSPF row must exist"));
+        assert!(
+            row.capacity_ratios
+                .iter()
+                .zip([0.4, 0.6, 0.8, 1.2])
+                .all(|(a, e)| (a - e).abs() < 1e-5),
+            "MSHP Heater {hspf} HSPF capacity ratios {:?} must be OCHRE's [0.4, 0.6, 0.8, 1.2]",
+            row.capacity_ratios
+        );
+        for (i, (a, e)) in row.cops.iter().zip(cops).enumerate() {
+            assert!(
+                (a - e).abs() < 1e-6,
+                "MSHP Heater {hspf} HSPF COP {} = {a}, expected {e}",
+                i + 1
+            );
+        }
+    }
+}

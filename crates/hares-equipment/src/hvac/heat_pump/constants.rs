@@ -80,6 +80,16 @@ pub const MSHP_PAN_HEATER_DEFAULT_TEMP_C: f64 = 0.0;
 /// Pan heater rated power for MSHP condensate management (kW).
 /// Per OCHRE MinisplitAHSPHeater class attribute (HVAC.py:1482).
 pub const MSHP_PAN_HEATER_DEFAULT_KW: f64 = 0.150;
+/// Schema-default minimum compressor output fraction (a declared HPXML
+/// `MinimumCapacity` overrides it).
+pub const DEFAULT_MIN_COMPRESSOR_FRACTION: f64 = 0.25;
+/// MSHP default stage table's capacity ratios, OCHRE
+/// `defaults/HVAC Multispeed Parameters.csv` `MSHP Heater` rows: the top
+/// stage exceeds rated (Capacity Ratio 4 = 1.2) and the per-stage COPs
+/// decline with speed. OCHRE applies this table to every mini-split whose
+/// input declares no stage list and raises when the rated efficiency has no
+/// CSV row (HVAC.py:774-786).
+pub const MSHP_DEFAULT_STAGE_RATIOS: [f64; 4] = [0.4, 0.6, 0.8, 1.2];
 
 pub const HEATER_TELEMETRY_CAPACITY: usize = 58;
 

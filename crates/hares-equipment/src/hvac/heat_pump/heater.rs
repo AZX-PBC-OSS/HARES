@@ -29,9 +29,10 @@ use super::constants::{
     DEFAULT_BACKUP_CAPACITY_W, DEFAULT_BACKUP_EIR, DEFAULT_ER_HARD_LOCKOUT_TIME_S,
     DEFAULT_ER_LOCKOUT_TEMP_C, DEFAULT_ER_SETPOINT_DEADBAND_OFFSET,
     DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER, DEFAULT_HEATING_CAPACITY_W, DEFAULT_HEATING_EIR,
-    DEFAULT_HP_LOCKOUT_HYSTERESIS_C, DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_MIN_ER_CYCLE_TIME_S,
-    DEFROST_CAPACITY_UNIT_FACTOR, DEFROST_EIR_CURVE_TEMP_MIN_C, MAX_OAT_SUPPLEMENTAL_C,
-    MSHP_PAN_HEATER_DEFAULT_KW, MSHP_PAN_HEATER_DEFAULT_TEMP_C,
+    DEFAULT_HP_LOCKOUT_HYSTERESIS_C, DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_MIN_COMPRESSOR_FRACTION,
+    DEFAULT_MIN_ER_CYCLE_TIME_S, DEFROST_CAPACITY_UNIT_FACTOR, DEFROST_EIR_CURVE_TEMP_MIN_C,
+    MAX_OAT_SUPPLEMENTAL_C, MSHP_DEFAULT_STAGE_RATIOS, MSHP_PAN_HEATER_DEFAULT_KW,
+    MSHP_PAN_HEATER_DEFAULT_TEMP_C,
 };
 use super::defrost::{
     DefrostConfig, DefrostControl, DefrostCycleTracker, DefrostInputs, DefrostStrategy,
@@ -879,33 +880,41 @@ impl HeatPumpHeaterCore {
                 let base_eir = self.hvac.config.eir_by_stage[0];
                 let min_frac = cfg.common.min_compressor_fraction;
                 let n: usize = 4;
-                // Evenly-spaced stages from min_frac to 1.0:
-                //   stage[i] = rated * (min_frac + (1 - min_frac) * i / (n - 1))
-                // For min_frac=0.25, n=4: [0.25, 0.50, 0.75, 1.00] (original behavior).
-                // EnergyPlus sets minimum compressor capacity via the ratio of
-                // Speed 1 to Speed N `Gross Rated Heating Capacity` in
-                // `Coil:Heating:DX:MultiSpeed` — no single "minimum fraction" field.
-                self.hvac.config.heating_capacities_w = (0..n)
-                    .map(|i| base_cap * (min_frac + (1.0 - min_frac) * i as f64 / (n - 1) as f64))
-                    .collect();
+                // The default stage table is OCHRE's `MSHP Heater` row
+                // (MSHP_DEFAULT_STAGE_RATIOS): the top stage exceeds rated and
+                // the CSV's per-stage COP columns are adopted at the resolve
+                // layer for HPXML inputs. EnergyPlus's Coil:Heating:DX:MultiSpeed
+                // takes explicit stage capacities and has no spacing default.
+                // A declared min_compressor_fraction (HPXML MinimumCapacity)
+                // keeps the even family from that fraction as the explicit
+                // override.
+                let ratios: Vec<f64> = if min_frac == DEFAULT_MIN_COMPRESSOR_FRACTION {
+                    MSHP_DEFAULT_STAGE_RATIOS.to_vec()
+                } else {
+                    (0..n)
+                        .map(|i| min_frac + (1.0 - min_frac) * i as f64 / (n - 1) as f64)
+                        .collect()
+                };
+                self.hvac.config.heating_capacities_w =
+                    ratios.iter().map(|r| base_cap * r).collect();
                 if cfg.common.stage_heating_eirs.is_none() {
                     let benefit = cfg.common.eir_part_load_benefit.unwrap_or(0.0);
-                    // eir[i] = rated_eir * (1 - benefit * (1 - frac[i]))
-                    // At minimum speed (frac = min_frac), EIR is reduced by benefit * (1 - min_frac).
-                    // benefit=0 yields constant EIR (original behavior).
-                    // Inverter compressors typically see 10–20% COP improvement at minimum speed
-                    // due to reduced pressure ratio (AHRI 210/240 variable-speed test procedure).
-                    self.hvac.config.eir_by_stage = (0..n)
-                        .map(|i| {
-                            let frac = min_frac + (1.0 - min_frac) * i as f64 / (n - 1) as f64;
-                            base_eir * (1.0 - benefit * (1.0 - frac))
-                        })
+                    let top_ratio = ratios[ratios.len() - 1];
+                    // eir[i] = rated_eir * (1 - benefit * (1 - frac[i])), with
+                    // frac[i] the stage's fraction of the top stage.
+                    // benefit=0 yields constant EIR. Inverter compressors
+                    // typically see 10-20% COP improvement at minimum speed due
+                    // to reduced pressure ratio (AHRI 210/240 variable-speed
+                    // test procedure).
+                    self.hvac.config.eir_by_stage = ratios
+                        .iter()
+                        .map(|r| base_eir * (1.0 - benefit * (1.0 - r / top_ratio)))
                         .collect();
                 }
                 tracing::debug!(
                     n_stages = n,
-                    min_fraction = min_frac,
-                    "MSHP generating {n} speed stages from min_fraction={min_frac:.2} to rated"
+                    top_ratio = ratios[ratios.len() - 1],
+                    "MSHP stage table from default ratios or the declared minimum fraction"
                 );
             }
             self.hvac.config.duct_dse = 1.0;
@@ -2759,6 +2768,7 @@ mod tests {
         telemetry_keys as tk,
     };
 
+    use super::super::constants::MSHP_DEFAULT_STAGE_RATIOS;
     use super::{ASHPHeater, GshpHeater, MinisplitHeater, SpeedControlMode};
     use crate::hvac::ThermostatMode;
     use crate::hvac::heating_config::HvacSetpointConfig;
@@ -2933,13 +2943,13 @@ mod tests {
     }
 
     #[test]
-    fn mshp_speed_stages_hardcoded_at_25_50_75_100pct() {
-        // MSHP stage generation hardcodes 0.25/0.50/0.75/1.00 of rated.
-        // OCHRE "HVAC Multispeed Parameters.csv" uses Capacity Ratio 1 = 0.40 for
-        // MSHP Heater — a 15 percentage-point divergence at the minimum stage.
-        // This test pins the current behavior.
-        // After min_compressor_fraction is added with default 0.25,
-        // this test must still pass (backward-compatible default).
+    fn mshp_default_stages_follow_ochre_stage_table() {
+        // With no stage list and no declared minimum, the MSHP's default stage
+        // table is OCHRE's "HVAC Multispeed Parameters.csv" `MSHP Heater` row:
+        // capacity ratios 0.40/0.60/0.80/1.20 of rated, the top stage exceeding
+        // rated (HVAC.py:774-786 applies the row to every mini-split; a missing
+        // row raises). The per-stage COP columns are adopted at the resolve
+        // layer; this fallback layer has no CSV access and keeps the flat EIR.
         const RATED_W: f64 = 10_000.0;
 
         let typed = mshp_typed_config(RATED_W);
@@ -2956,28 +2966,29 @@ mod tests {
         let stages = &eq.core.hvac.config.heating_capacities_w;
         assert_eq!(stages.len(), 4, "MSHP must generate exactly 4 speed stages");
 
-        // Current hardcoded fractions: [0.25, 0.50, 0.75, 1.00].
-        // OCHRE diverges at stage 1: Capacity Ratio 1 = 0.40, not 0.25.
-        let expected = [RATED_W * 0.25, RATED_W * 0.50, RATED_W * 0.75, RATED_W];
+        let expected: Vec<f64> = MSHP_DEFAULT_STAGE_RATIOS
+            .iter()
+            .map(|r| RATED_W * r)
+            .collect();
         for (i, (&actual, &exp)) in stages.iter().zip(expected.iter()).enumerate() {
             assert!(
                 (actual - exp).abs() < 1.0,
                 "stage {} capacity = {:.1} W, expected {:.1} W \
-                 (hardcoded {:.0}% of rated). OCHRE uses {:.0}% for stage 1.",
+                 (OCHRE MSHP Heater Capacity Ratio {} = {:.2} of rated)",
                 i + 1,
                 actual,
                 exp,
-                expected[i] / RATED_W * 100.0,
-                40.0,
+                i + 1,
+                MSHP_DEFAULT_STAGE_RATIOS[i],
             );
         }
     }
 
     #[test]
     fn mshp_eir_identical_across_all_stages() {
-        // eir_by_stage = vec![base_eir; 4] — no part-load EIR benefit.
-        // OCHRE loads per-stage COP from CSV (COP 1 ≠ COP 4 for MSHP Heater).
-        // This test pins the current flat-EIR behavior.
+        // The fallback layer's default EIRs are flat (no part-load benefit);
+        // the OCHRE CSV's per-stage COP columns are adopted at the resolve
+        // layer, which owns the CSV lookup for HPXML inputs.
         const RATED_W: f64 = 10_000.0;
         const BASE_EIR: f64 = 0.25;
 
@@ -3006,8 +3017,9 @@ mod tests {
 
     #[test]
     fn mshp_min_compressor_fraction_30_produces_correct_stages() {
-        // min_compressor_fraction = 0.30 with 4 stages produces
-        // [0.30, 0.5333, 0.7667, 1.00] of rated capacity.
+        // A declared min_compressor_fraction (HPXML MinimumCapacity) keeps the
+        // even family from that fraction as the explicit override: 0.30 with 4
+        // stages produces [0.30, 0.5333, 0.7667, 1.00] of rated capacity.
         // stage[i] = rated * (min_frac + (1 - min_frac) * i / (n - 1))
         const RATED_W: f64 = 10_000.0;
 
@@ -3051,10 +3063,11 @@ mod tests {
 
     #[test]
     fn mshp_eir_part_load_benefit_reduces_low_speed_eir() {
-        // eir_part_load_benefit = 0.15: eir[i] = rated_eir * (1 - 0.15 * (1 - frac[i])).
-        // At minimum speed (frac = 0.25 with default min_compressor_fraction):
-        //   eir[0] = 0.25 * (1 - 0.15 * 0.75) = 0.25 * 0.8875 = 0.221875
-        // At rated speed (frac = 1.0): eir[3] = 0.25 (unchanged).
+        // eir_part_load_benefit = 0.15: eir[i] = rated_eir * (1 - 0.15 * (1 - frac[i])),
+        // with frac[i] the stage's fraction of the top stage. With the OCHRE
+        // default stage table the first stage sits at 0.40/1.20 of the top:
+        //   eir[0] = 0.25 * (1 - 0.15 * (1 - 0.4/1.2)) = 0.25 * 0.9 = 0.225
+        // At the top stage (frac = 1.0): eir[3] = 0.25 (unchanged).
         const RATED_W: f64 = 10_000.0;
         const BASE_EIR: f64 = 0.25;
         const BENEFIT: f64 = 0.15;
@@ -3089,8 +3102,8 @@ mod tests {
             eirs[3],
             BASE_EIR,
         );
-        // Verify the formula explicitly at stage 1 (frac = 0.25):
-        let frac_0 = 0.25_f64;
+        // Verify the formula explicitly at stage 1 (frac = 0.4/1.2):
+        let frac_0 = MSHP_DEFAULT_STAGE_RATIOS[0] / MSHP_DEFAULT_STAGE_RATIOS[3];
         let expected_eir_0 = BASE_EIR * (1.0 - BENEFIT * (1.0 - frac_0));
         assert!(
             (eirs[0] - expected_eir_0).abs() < 1e-9,

@@ -971,40 +971,67 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
 
 - **Quantity:** the speed stages (per-stage capacity and EIR) a
   mini-split heat pump heater gets when its input declares no stage list.
-- **Reference behavior:** OCHRE sizes an MSHP's stages from its
-  multispeed equipment database (`ochre/defaults/HVAC Multispeed
-  Parameters.csv`, the `MSHP Heater` rows): capacity ratios 0.40, 0.60,
-  0.80 and 1.20 of rated with a per-stage COP declining with speed
-  (5.14, 3.96, 3.77 and 3.42 at 9.5 HSPF). The rows are per-product
-  calibrations (their "Received From" column names the calibrated
-  building or BEopt), and the top stage exceeds rated.
-- **HARES behavior:** with no explicit `stage_heating_capacities_w`, an
-  MSHP generates four evenly spaced stages from
-  `min_compressor_fraction` (default 0.25) to 1.0 of rated:
-  0.25, 0.50, 0.75 and 1.00. The stage EIRs are flat at the rated EIR
-  (`eir_part_load_benefit` defaults to 0) unless the input provides
-  `stage_heating_eirs`, which are never overwritten.
-- **Justification:** the class is not established. EnergyPlus's
-  `Coil:Heating:DX:MultiSpeed` takes explicit stage capacities and has
-  no default spacing rule, so neither reference is an authority for the
-  no-input case: OCHRE's rows are product calibrations (one tops above
-  rated), HARES's even spacing is its own disclosed default. The
-  biquadratic temperature curves are a different mechanism and keep the
-  OCHRE CSV columns (D-014). The gap is a candidate cause beside the
-  mini-split fixture's open peak-power question in `tests/parity/mod.rs`
-  (the reference's peak draw sits near its 0.40-rated first stage);
-  the cause there is not yet established either.
-- **Measured impact:** the mini-split parity fixture
-  (`cz5a_minisplit_gas_wh`, a 36 kW MSHP with no stage list) runs with
-  HARES's 9/18/27/36 kW stages against OCHRE's 14.4/21.6/28.8/43.2 kW
-  ones, inside its parity bands; no golden fixture carries a mini-split
-  at all.
-- **Pinning tests:** `crates/hares-equipment/src/hvac/heat_pump/heater.rs`
-  (`mshp_speed_stages_hardcoded_at_25_50_75_100pct`,
+- **Reference behavior:** OCHRE's no-input MSHP is definite: every
+  mini-split is 4-speed (`ochre/utils/hpxml.py:866-868`, "MSHP always
+  variable speed"), and the stage table comes from the multispeed CSV row
+  keyed on equipment name, rated efficiency and speed count, raised when
+  the row is missing (`ochre/Equipment/HVAC.py:774-786`): capacity ratios
+  0.40, 0.60, 0.80 and 1.20 of rated with per-stage COPs declining with
+  speed (at 9.2 HSPF: 5.14, 3.96, 3.53 and 3.11). The rows are per-product
+  calibrations (their "Received From" column names the calibrated building
+  or BEopt) but they are OCHRE's shipped default for every mini-split of
+  that efficiency: provenance, not applicability. The first stage's ratio
+  is the minimum modulating load: below it the unit runs speed 1 at a part
+  load ratio (`HVAC.py:1005-1008`); the separate `capacity_min` defaults
+  to 0 W (`HVAC.py:103`) and HPXML `MinimumCapacity` is never read.
+  Dispatch modulates continuously between adjacent stages with interpolated
+  per-stage EIRs (`HVAC.py:1005-1018`, `1029-1054`). EnergyPlus's
+  `Coil:Heating:DX:MultiSpeed` takes two to four explicit stage capacities
+  and COPs with no spacing default and linearly interpolates between
+  consecutive speeds to meet the load (Engineering Reference, coils.tex,
+  "Coil:Heating:DX:MultiSpeed"): it supports the modulation mechanism and is
+  silent on the no-input table.
+- **HARES behavior (since this fix):** the resolve layer applies the
+  shipped `defaults/HVAC Multispeed Parameters.csv` for every multi-speed
+  lookup, and the `MSHP Heater` rows are restored to OCHRE's exact values:
+  they had been renormalized to a 1.0 top (0.33333, 0.5, 0.66667, 1.0,
+  commit `6debdf13`), capping the unit at rated where the reference's top
+  stage delivers 1.2 times rated. The heater's no-stage fallback generates
+  OCHRE's ratios instead of the even family it generated before
+  (0.25, 0.50, 0.75, 1.00 at a flat EIR); the fallback keeps a flat EIR
+  (it has no CSV access; the resolve layer owns the per-stage COPs), and
+  `eir_part_load_benefit` or explicit `stage_heating_eirs` still win. A
+  declared `min_compressor_fraction` (HPXML `MinimumCapacity`) keeps the
+  even family from that fraction as the explicit override. The biquadratic
+  temperature curves are a different mechanism and keep the OCHRE CSV
+  columns (D-014). The `MSHP Cooler` and `ASHP Heater` rows carry the same
+  renormalization and are out of scope here: their stage tables are their
+  own quantities.
+- **Justification:** class (b) at the data layer and the fallback. The
+  reference answers the no-input case (the CSV row, raise on miss) and
+  EnergyPlus declares stages explicitly; HARES's renormalized ratios and
+  even-spacing family matched neither. The modulation model is not the
+  gap: HARES's variable-speed ideal path interpolates stages the way
+  OCHRE's ideal capacity does.
+- **Measured impact:** no checked-in HPXML fixture or golden carries a
+  mini-split, so every golden compares bitwise. The mini-split parity
+  fixture (`cz5a_minisplit_gas_wh`, HeatingCapacity 36000 Btu/h = 10.55 kW,
+  HSPF 9.2, no stage list) now resolves to OCHRE's exact stage table
+  (4.22, 6.33, 8.44 and 12.66 kW at EIRs 0.1945, 0.2525, 0.2833 and
+  0.3215); before the fix it ran the renormalized ratios (3.52, 5.28,
+  7.03 and 10.55 kW). Its parity metrics are unchanged within bands: the
+  reference window's outdoor temperature (-19.4 °C) sits below the 0 °F
+  compressor lockout both sides default to, so the window never operates
+  the compressor and the stage table has no vote there; the peak residual
+  is the ER dispatch difference established in `tests/parity/mod.rs`.
+- **Pinning tests:** `crates/hares-io/tests/hvac_csv_tests.rs`
+  (`mshp_heater_rows_match_ochre_capacity_ratios_and_cops`),
+  `crates/hares-equipment/src/hvac/heat_pump/heater.rs`
+  (`mshp_default_stages_follow_ochre_stage_table`,
   `mshp_eir_identical_across_all_stages`,
   `mshp_stage_heating_eirs_preserved_when_is_mini_split`). The first two
-  fail when the default stages revert to the OCHRE CSV's ratios or its
-  per-stage COPs.
+  fail when the shipped CSV's ratios revert to the renormalized values or
+  the fallback reverts to the even spacing.
 
 ## D-021: The HPWH's low-power compressor class is a continuous UEF transition
 

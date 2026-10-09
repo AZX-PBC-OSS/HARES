@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::core_config::default_one;
+use super::heat_pump::constants::DEFAULT_MIN_COMPRESSOR_FRACTION;
 use super::heat_pump::defrost::DefrostConfig;
 use super::heating_config::{DuctConfig, HvacSetpointConfig};
 
 fn default_min_compressor_fraction() -> f64 {
-    0.25
+    DEFAULT_MIN_COMPRESSOR_FRACTION
 }
 use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
