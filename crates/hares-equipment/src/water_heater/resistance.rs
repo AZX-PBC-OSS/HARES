@@ -1016,75 +1016,48 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::TANK_AVG_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Volume-weighted average tank temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::UPPER_ELEMENT_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Upper element electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::LOWER_ELEMENT_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Lower element electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total electric draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELEMENT_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Heating element electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Total electric draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
-            unit: "kg/s".to_string(),
-            description: "Domestic hot water draw flow rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::UNMET_LOAD_W.to_string(),
-            unit: "W".to_string(),
-            description: "Unmet fixture load when tank below delivery temp".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: tk::OUTLET_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Hot water outlet temperature delivered to fixture".to_string(),
-        },
+        TelemetryField::temp_c(
+            tk::TANK_AVG_TEMP_C,
+            "Volume-weighted average tank temperature",
+        ),
+        TelemetryField::power_w(tk::UPPER_ELEMENT_POWER_W, "Upper element electric power"),
+        TelemetryField::power_w(tk::LOWER_ELEMENT_POWER_W, "Lower element electric power"),
+        TelemetryField::power_kw(tk::ELECTRIC_KW, "Total electric draw"),
+        TelemetryField::power_kw(tk::ELEMENT_KW, "Heating element electric power"),
+        TelemetryField::power_w(tk::ELECTRIC_POWER_W, "Total electric draw"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::flow_mean(
+            tk::DRAW_FLOW_RATE_KG_S,
+            hares_types::Unit::KilogramPerSecond,
+            "Domestic hot water draw flow rate",
+        ),
+        TelemetryField::power_w(
+            tk::UNMET_LOAD_W,
+            "Unmet fixture load when tank below delivery temp",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "0=Off, 1=Heating",
+        ),
+        TelemetryField::temp_c(
+            tk::OUTLET_TEMP_C,
+            "Hot water outlet temperature delivered to fixture",
+        ),
     ];
     for i in 0..n_nodes {
-        fields.push(TelemetryField {
-            name: tk::tank_node_key(i),
-            unit: "C".to_string(),
-            description: format!("Tank node {i} temperature"),
-        });
+        fields.push(TelemetryField::temp_c_owned(
+            tk::tank_node_key(i),
+            format!("Tank node {i} temperature"),
+        ));
     }
-    fields.push(TelemetryField {
-        name: tk::SKIN_LOSS_W.to_string(),
-        unit: "W".to_string(),
-        description: "Tank jacket (skin) heat loss to the surrounding zone or ambient location"
-            .to_string(),
-    });
+    fields.push(TelemetryField::power_w(
+        tk::SKIN_LOSS_W,
+        "Tank jacket (skin) heat loss to the surrounding zone or ambient location",
+    ));
     fields
 }
 

@@ -1025,108 +1025,78 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::TANK_AVG_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Volume-weighted average tank temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::BURNER_EFFICIENCY.to_string(),
-            unit: "fraction".to_string(),
-            description: "Resolved burner efficiency (conversion_efficiency, EF, or UEF-derived)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::BURNER_EFFICIENCY_SOURCE.to_string(),
-            unit: "enum".to_string(),
-            description: "0=Default, 1=ConversionEfficiency, 2=EnergyFactor, 3=UniformEnergyFactor"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::BURNER_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas burner thermal input power".to_string(),
-        },
-        TelemetryField {
-            name: tk::PILOT_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Pilot light fuel input power (continuous)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Total fuel consumption rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::PILOT_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Pilot light fuel input power".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total fuel consumption rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::FLUE_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Heat loss to flue (excluded from zone thermal gains)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FAN_ELECTRIC_W.to_string(),
-            unit: "W".to_string(),
-            description: "Auxiliary electric fan draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
-            unit: "kg/s".to_string(),
-            description: "Domestic hot water draw flow rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::UNMET_LOAD_W.to_string(),
-            unit: "W".to_string(),
-            description: "Unmet fixture load when tank below delivery temp".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: tk::OUTLET_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Hot water outlet temperature delivered to fixture".to_string(),
-        },
+        TelemetryField::temp_c(
+            tk::TANK_AVG_TEMP_C,
+            "Volume-weighted average tank temperature",
+        ),
+        TelemetryField::ratio_fraction(
+            tk::BURNER_EFFICIENCY,
+            "Resolved burner efficiency (conversion_efficiency, EF, or UEF-derived)",
+        ),
+        TelemetryField::code_code(
+            tk::BURNER_EFFICIENCY_SOURCE,
+            &[
+                "Default",
+                "ConversionEfficiency",
+                "EnergyFactor",
+                "UniformEnergyFactor",
+            ],
+            "0=Default, 1=ConversionEfficiency, 2=EnergyFactor, 3=UniformEnergyFactor",
+        ),
+        TelemetryField::power_w(tk::BURNER_POWER_W, "Gas burner thermal input power"),
+        TelemetryField::power_w(
+            tk::PILOT_POWER_W,
+            "Pilot light fuel input power (continuous)",
+        ),
+        TelemetryField::power_w(tk::FUEL_INPUT_W, "Total fuel consumption rate"),
+        TelemetryField::power_kw(tk::PILOT_KW, "Pilot light fuel input power"),
+        TelemetryField::power_kw(tk::FUEL_INPUT_KW, "Total fuel consumption rate"),
+        TelemetryField::power_w(
+            tk::FLUE_LOSS_W,
+            "Heat loss to flue (excluded from zone thermal gains)",
+        ),
+        TelemetryField::power_w(tk::FAN_ELECTRIC_W, "Auxiliary electric fan draw"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::flow_mean(
+            tk::DRAW_FLOW_RATE_KG_S,
+            hares_types::Unit::KilogramPerSecond,
+            "Domestic hot water draw flow rate",
+        ),
+        TelemetryField::power_w(
+            tk::UNMET_LOAD_W,
+            "Unmet fixture load when tank below delivery temp",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "0=Off, 1=Heating",
+        ),
+        TelemetryField::temp_c(
+            tk::OUTLET_TEMP_C,
+            "Hot water outlet temperature delivered to fixture",
+        ),
     ];
     for i in 0..n_nodes {
-        fields.push(TelemetryField {
-            name: tk::tank_node_key(i),
-            unit: "C".to_string(),
-            description: format!("Tank node {i} temperature"),
-        });
+        fields.push(TelemetryField::temp_c_owned(
+            tk::tank_node_key(i),
+            format!("Tank node {i} temperature"),
+        ));
     }
-    fields.push(TelemetryField {
-        name: tk::SKIN_LOSS_W.to_string(),
-        unit: "W".to_string(),
-        description:
-            "Tank jacket (skin) and pilot heat loss to the surrounding zone or ambient location"
-                .to_string(),
-    });
-    fields.push(TelemetryField {
-        name: tk::PILOT_HEAT_TO_WATER_W.to_string(),
-        unit: "W".to_string(),
-        description: "Pilot thermal power routed to tank water".to_string(),
-    });
-    fields.push(TelemetryField {
-        name: tk::PILOT_HEAT_TO_AMBIENT_W.to_string(),
-        unit: "W".to_string(),
-        description: "Pilot thermal power routed to ambient zone".to_string(),
-    });
+    fields.push(TelemetryField::power_w(
+        tk::SKIN_LOSS_W,
+        "Tank jacket (skin) and pilot heat loss to the surrounding zone or ambient location",
+    ));
+    fields.push(TelemetryField::power_w(
+        tk::PILOT_HEAT_TO_WATER_W,
+        "Pilot thermal power routed to tank water",
+    ));
+    fields.push(TelemetryField::power_w(
+        tk::PILOT_HEAT_TO_AMBIENT_W,
+        "Pilot thermal power routed to ambient zone",
+    ));
     fields
 }
 

@@ -22,6 +22,7 @@ use std::sync::Arc;
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, OperatingMode, Telemetry,
+    TelemetryField,
 };
 
 use crate::actor::{Actor, ActorTarget};
@@ -56,17 +57,31 @@ pub struct SafetyMonitor {
 }
 
 impl SafetyMonitor {
+    /// The declared telemetry: two 0/1 alarm flags, the per-step signals
+    /// count, and the minimum zone temperature seen this step.
+    pub const OUTPUT_VARIABLES: &'static [TelemetryField] = &[
+        TelemetryField::state_flag(
+            "freeze_alarm",
+            "1 when any zone is below the freeze protection threshold",
+        ),
+        TelemetryField::state_flag(
+            "over_temp_alarm",
+            "1 when any zone is above the over-temperature threshold",
+        ),
+        TelemetryField::step_count(
+            "safety_signals_count",
+            "Safety signals dispatched this step",
+        ),
+        TelemetryField::temp_c("min_zone_temp_c", "Minimum zone temperature seen this step"),
+    ];
+
     /// Creates a new safety monitor with default thresholds.
     ///
     /// Default target is `DispatchTarget::ByEndUse(EndUse::HVAC_HEATING)`.
     /// Default freeze protection threshold is 5°C.
     /// Default over-temperature threshold is 50°C.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(4);
-        telemetry.insert("freeze_alarm", 0.0);
-        telemetry.insert("over_temp_alarm", 0.0);
-        telemetry.insert("safety_signals_count", 0.0);
-        telemetry.insert("min_zone_temp_c", 0.0);
+        let telemetry = Telemetry::from_fields(Self::OUTPUT_VARIABLES);
         Self {
             name: Arc::from(name),
             target: ActorTarget {
@@ -139,6 +154,10 @@ impl SafetyMonitor {
 impl Actor for SafetyMonitor {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn output_variables(&self) -> &[TelemetryField] {
+        Self::OUTPUT_VARIABLES
     }
 
     fn telemetry(&self) -> Option<&Telemetry> {

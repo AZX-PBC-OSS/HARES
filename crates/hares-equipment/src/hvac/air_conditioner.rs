@@ -922,50 +922,46 @@ impl CoolingCore {
             self.descriptor.telemetry_fields = telemetry_fields();
             for (i, shr) in self.stage_shrs.iter().enumerate() {
                 self.telemetry.insert(format!("cooler_shr_stage_{i}"), *shr);
-                self.descriptor.telemetry_fields.push(TelemetryField {
-                    name: format!("cooler_shr_stage_{i}"),
-                    unit: "-".to_string(),
-                    description: format!(
+                self.descriptor.telemetry_fields.push(TelemetryField::ratio_owned(
+                    format!("cooler_shr_stage_{i}"),
+                    format!(
                         "Rated sensible heat ratio applied to cooling speed stage {i} (diagnostic)"
                     ),
-                });
+                ));
             }
             for (i, ao) in self.coil_ao_by_stage.iter().enumerate() {
                 self.telemetry.insert(format!("cooler_ao_stage_{i}"), *ao);
-                self.descriptor.telemetry_fields.push(TelemetryField {
-                    name: format!("cooler_ao_stage_{i}"),
-                    unit: "kg/s".to_string(),
-                    description: format!(
+                self.descriptor.telemetry_fields.push(TelemetryField::quantity_owned(
+                    format!("cooler_ao_stage_{i}"),
+                    hares_types::Unit::KilogramPerSecond,
+                    hares_types::AcrossHomes::Sum,
+                    hares_types::Aggregation::Mean,
+                    hares_types::Sampling::IntervalMean,
+                    format!(
                         "Coil Ao factor (apparent UA/cp) for cooling speed stage {i} (diagnostic)"
                     ),
-                });
+                ));
             }
             self.telemetry
                 .insert("latent_degradation_active".to_string(), 0.0);
-            self.descriptor.telemetry_fields.push(TelemetryField {
-                name: "latent_degradation_active".to_string(),
-                unit: "-".to_string(),
-                description: "1.0 if Henderson-Rengarajan latent degradation is active this step"
-                    .to_string(),
-            });
+            self.descriptor.telemetry_fields.push(TelemetryField::ratio(
+                "latent_degradation_active",
+                "1.0 if Henderson-Rengarajan latent degradation is active this step",
+            ));
             self.telemetry
                 .insert("shr_before_degradation".to_string(), self.rated_shr);
-            self.descriptor.telemetry_fields.push(TelemetryField {
-                name: "shr_before_degradation".to_string(),
-                unit: "-".to_string(),
-                description: "Steady-state SHR before Henderson-Rengarajan latent degradation"
-                    .to_string(),
-            });
+            self.descriptor.telemetry_fields.push(TelemetryField::ratio(
+                "shr_before_degradation",
+                "Steady-state SHR before Henderson-Rengarajan latent degradation",
+            ));
             // AHRI full-load SHR baseline for latent degradation model.
             self.telemetry
                 .insert("rated_shr".to_string(), self.rated_shr);
-            self.descriptor.telemetry_fields.push(TelemetryField {
-                name: "rated_shr".to_string(),
-                unit: "-".to_string(),
-                description: "Rated sensible heat ratio at AHRI full-load conditions \
-                             (baseline for latent degradation model)"
-                    .to_string(),
-            });
+            self.descriptor.telemetry_fields.push(TelemetryField::ratio(
+                "rated_shr",
+                "Rated sensible heat ratio at AHRI full-load conditions \
+                             (baseline for latent degradation model)",
+            ));
             let rated_cap_w = self
                 .hvac
                 .config
@@ -976,13 +972,13 @@ impl CoolingCore {
             let rated_latent_w = rated_cap_w * (1.0 - self.rated_shr);
             self.telemetry
                 .insert("rated_latent_w".to_string(), rated_latent_w);
-            self.descriptor.telemetry_fields.push(TelemetryField {
-                name: "rated_latent_w".to_string(),
-                unit: "W".to_string(),
-                description: "Rated latent capacity (W) at AHRI full-load conditions \
-                             (baseline for Henderson-Rengarajan latent degradation model)"
-                    .to_string(),
-            });
+            self.descriptor
+                .telemetry_fields
+                .push(TelemetryField::power_w(
+                    "rated_latent_w",
+                    "Rated latent capacity (W) at AHRI full-load conditions \
+                             (baseline for Henderson-Rengarajan latent degradation model)",
+                ));
         }
         self.core_output = CoreOutput::default();
 
@@ -2450,7 +2446,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|field| field.name.as_str())
+            .map(|field| field.name.as_ref())
             .collect();
         assert!(telemetry_names.contains(&tk::ELECTRIC_KW));
         assert!(telemetry_names.contains(&tk::SENSIBLE_COOLING_W));

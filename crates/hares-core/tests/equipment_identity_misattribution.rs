@@ -99,11 +99,7 @@ impl InertProbe {
                 stage: hares_types::ExecutionStage::Independent,
                 control_capabilities: ControlCapabilities::empty(),
                 core_capabilities: CoreCapabilities::empty(),
-                telemetry_fields: vec![TelemetryField {
-                    name: "probe".to_string(),
-                    unit: "-".to_string(),
-                    description: "identity probe".to_string(),
-                }],
+                telemetry_fields: vec![TelemetryField::ratio("probe", "identity probe")],
                 zone_type: None,
             },
             telemetry: Telemetry::with_capacity(1),

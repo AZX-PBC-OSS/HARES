@@ -1048,159 +1048,114 @@ fn gas_furnace_default_telemetry() -> Telemetry {
 
 fn setpoint_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active heating setpoint from thermostat schedule".to_string(),
-        },
-        TelemetryField {
-            name: tk::COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active cooling setpoint from thermostat schedule".to_string(),
-        },
-        TelemetryField {
-            name: tk::SCHEDULE_HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Schedule-stage heating setpoint (before runtime override)".to_string(),
-        },
-        TelemetryField {
-            name: tk::SCHEDULE_COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Schedule-stage cooling setpoint (before runtime override)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Runtime override heating setpoint (0.0 when no override active)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Runtime override cooling setpoint (0.0 when no override active)"
-                .to_string(),
-        },
+        TelemetryField::temp_c(
+            tk::HEATING_SETPOINT_C,
+            "Active heating setpoint from thermostat schedule",
+        ),
+        TelemetryField::temp_c(
+            tk::COOLING_SETPOINT_C,
+            "Active cooling setpoint from thermostat schedule",
+        ),
+        TelemetryField::temp_c(
+            tk::SCHEDULE_HEATING_SETPOINT_C,
+            "Schedule-stage heating setpoint (before runtime override)",
+        ),
+        TelemetryField::temp_c(
+            tk::SCHEDULE_COOLING_SETPOINT_C,
+            "Schedule-stage cooling setpoint (before runtime override)",
+        ),
+        TelemetryField::temp_c(
+            tk::RUNTIME_HEATING_SETPOINT_C,
+            "Runtime override heating setpoint (0.0 when no override active)",
+        ),
+        TelemetryField::temp_c(
+            tk::RUNTIME_COOLING_SETPOINT_C,
+            "Runtime override cooling setpoint (0.0 when no override active)",
+        ),
     ]
 }
 
 fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::FAN_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Electric furnace fan electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Electric furnace active power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Delivered sensible heat to conditioned zone after duct DSE".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: tk::SUPPLY_AIR_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Configured furnace supply-air temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Runtime fraction (duty cycle / PLR) [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::MAIN_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Main power (total_input - fan) per OCHRE HVAC.py:575".to_string(),
-        },
-        TelemetryField {
-            name: tk::DUCT_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::SPEED_INDEX.to_string(),
-            unit: "-".to_string(),
-            description: "Active heating speed stage index (0-based)".to_string(),
-        },
-        TelemetryField {
-            name: tk::SPEED_FRAC.to_string(),
-            unit: "-".to_string(),
-            description: "Interpolation weight between speed stages [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "-".to_string(),
-            description: "Heating load fraction this timestep [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_FACTOR.to_string(),
-            unit: "-".to_string(),
-            description: "Part-load factor for cycling degradation (PLF)".to_string(),
-        },
-        TelemetryField {
-            name: tk::STARTUP_MULTIPLIER.to_string(),
-            unit: "-".to_string(),
-            description: "Capacity ramp multiplier on startup (1.0 for furnace)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DUTY_CYCLE.to_string(),
-            unit: "-".to_string(),
-            description: "Thermostat on/off fraction this timestep [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::TIME_AT_CURRENT_SPEED_S.to_string(),
-            unit: "s".to_string(),
-            description: "Seconds since the last speed-stage change".to_string(),
-        },
-        TelemetryField {
-            name: tk::MODE_DURATION_S.to_string(),
-            unit: "s".to_string(),
-            description: "Seconds since the last thermostat mode change".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
+        TelemetryField::power_kw(tk::FAN_KW, "Electric furnace fan electric power"),
+        TelemetryField::power_kw(tk::ELECTRIC_KW, "Electric furnace active power draw"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Delivered sensible heat to conditioned zone after duct DSE",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode code: 0=Off, 1=Heating",
+        ),
+        TelemetryField::temp_c(
+            tk::SUPPLY_AIR_TEMP_C,
+            "Configured furnace supply-air temperature",
+        ),
+        TelemetryField::ratio(
+            tk::RUNTIME_FRACTION,
+            "Runtime fraction (duty cycle / PLR) [0..1]",
+        ),
+        TelemetryField::power_kw(
+            tk::MAIN_POWER_KW,
+            "Main power (total_input - fan) per OCHRE HVAC.py:575",
+        ),
+        TelemetryField::power_w(
+            tk::DUCT_LOSS_W,
+            "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)",
+        ),
+        TelemetryField::code_code(
+            tk::SPEED_INDEX,
+            &["0", "1", "2", "3"],
+            "Active heating speed stage index (0-based)",
+        ),
+        TelemetryField::ratio(
+            tk::SPEED_FRAC,
+            "Interpolation weight between speed stages [0..1]",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_RATIO,
+            "Heating load fraction this timestep [0..1]",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_FACTOR,
+            "Part-load factor for cycling degradation (PLF)",
+        ),
+        TelemetryField::ratio(
+            tk::STARTUP_MULTIPLIER,
+            "Capacity ramp multiplier on startup (1.0 for furnace)",
+        ),
+        TelemetryField::ratio(
+            tk::DUTY_CYCLE,
+            "Thermostat on/off fraction this timestep [0..1]",
+        ),
+        TelemetryField::timer_s(
+            tk::TIME_AT_CURRENT_SPEED_S,
+            "Seconds since the last speed-stage change",
+        ),
+        TelemetryField::timer_s(
+            tk::MODE_DURATION_S,
+            "Seconds since the last thermostat mode change",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
     ];
     fields.extend(setpoint_telemetry_fields());
     fields
@@ -1208,128 +1163,92 @@ fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
 
 fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::FAN_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Gas furnace fan-only electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total electric power draw (fan-only for gas furnace)".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Fuel input power derived from delivered capacity and fuel efficiency"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Delivered sensible heat to conditioned zone after duct DSE".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: tk::SUPPLY_AIR_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Configured furnace supply-air temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::SPEED_INDEX.to_string(),
-            unit: "-".to_string(),
-            description: "Active heating speed stage index (0-based)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Runtime fraction (duty cycle / PLR) [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::MAIN_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Main power (gas input in kW) per OCHRE HVAC.py:575".to_string(),
-        },
-        TelemetryField {
-            name: tk::DUCT_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::SPEED_FRAC.to_string(),
-            unit: "-".to_string(),
-            description: "Interpolation weight between speed stages [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "-".to_string(),
-            description: "Heating load fraction this timestep [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_FACTOR.to_string(),
-            unit: "-".to_string(),
-            description: "Part-load factor for cycling degradation (PLF)".to_string(),
-        },
-        TelemetryField {
-            name: tk::STARTUP_MULTIPLIER.to_string(),
-            unit: "-".to_string(),
-            description: "Capacity ramp multiplier on startup (1.0 for furnace)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DUTY_CYCLE.to_string(),
-            unit: "-".to_string(),
-            description: "Thermostat on/off fraction this timestep [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::TIME_AT_CURRENT_SPEED_S.to_string(),
-            unit: "s".to_string(),
-            description: "Seconds since the last speed-stage change".to_string(),
-        },
-        TelemetryField {
-            name: tk::MODE_DURATION_S.to_string(),
-            unit: "s".to_string(),
-            description: "Seconds since the last thermostat mode change".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
+        TelemetryField::power_kw(tk::FAN_KW, "Gas furnace fan-only electric power"),
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Total electric power draw (fan-only for gas furnace)",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::power_w(
+            tk::FUEL_INPUT_W,
+            "Fuel input power derived from delivered capacity and fuel efficiency",
+        ),
+        TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Delivered sensible heat to conditioned zone after duct DSE",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode code: 0=Off, 1=Heating",
+        ),
+        TelemetryField::temp_c(
+            tk::SUPPLY_AIR_TEMP_C,
+            "Configured furnace supply-air temperature",
+        ),
+        TelemetryField::code_code(
+            tk::SPEED_INDEX,
+            &["0", "1", "2", "3"],
+            "Active heating speed stage index (0-based)",
+        ),
+        TelemetryField::ratio(
+            tk::RUNTIME_FRACTION,
+            "Runtime fraction (duty cycle / PLR) [0..1]",
+        ),
+        TelemetryField::power_kw(
+            tk::MAIN_POWER_KW,
+            "Main power (gas input in kW) per OCHRE HVAC.py:575",
+        ),
+        TelemetryField::power_w(
+            tk::DUCT_LOSS_W,
+            "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)",
+        ),
+        TelemetryField::ratio(
+            tk::SPEED_FRAC,
+            "Interpolation weight between speed stages [0..1]",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_RATIO,
+            "Heating load fraction this timestep [0..1]",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_FACTOR,
+            "Part-load factor for cycling degradation (PLF)",
+        ),
+        TelemetryField::ratio(
+            tk::STARTUP_MULTIPLIER,
+            "Capacity ramp multiplier on startup (1.0 for furnace)",
+        ),
+        TelemetryField::ratio(
+            tk::DUTY_CYCLE,
+            "Thermostat on/off fraction this timestep [0..1]",
+        ),
+        TelemetryField::timer_s(
+            tk::TIME_AT_CURRENT_SPEED_S,
+            "Seconds since the last speed-stage change",
+        ),
+        TelemetryField::timer_s(
+            tk::MODE_DURATION_S,
+            "Seconds since the last thermostat mode change",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
     ];
     fields.extend(setpoint_telemetry_fields());
     fields

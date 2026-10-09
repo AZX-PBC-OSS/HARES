@@ -15,7 +15,10 @@ use arrow::datatypes::Schema;
 use chrono_tz::Tz;
 use hares_control::DispatchTarget;
 use hares_equipment::Equipment;
-use hares_io::{RowPlan, SchemaSurface, Selection, StreamingRecorder, build_schema};
+use hares_io::{
+    Catalogue, CatalogueInput, RowPlan, SchemaSurface, Selection, StreamingRecorder,
+    build_catalogue, build_schema as build_schema_from_catalogue,
+};
 use hares_tariff::{ElectricTariff, TariffEvaluator};
 use hares_types::{
     AmbientLocation, CoreOutput, CustomAccumulator, EndUse, EquipmentId, FluidType, HaresError,
@@ -34,10 +37,8 @@ use super::{
     actor_equipment, build_actors_from_seeds, build_hvac_thermal_consistency,
     build_output_row_bindings, build_zone_column_caches, compute_equipment_dispatch_targets,
     compute_equipment_execution_order, describe_target, enrich_schema_with_telemetry_units,
-    equipment_descriptor_specs, extend_schema_with_actor_columns, target_lost,
-    validate_equipment_stage, validate_equipment_zones, zone_display_name,
+    target_lost, validate_equipment_stage, validate_equipment_zones, zone_display_name,
 };
-
 /// The values the per-step path reads that derive from the equipment and
 /// actor rosters. Replaced only by [`Dwelling::install_roster_caches`];
 /// empty until assembly installs the first plan.
@@ -65,6 +66,10 @@ pub(super) struct RosterCaches {
     /// dwelling-level columns, the per-equipment columns, the end-use
     /// aggregates and the actor columns.
     pub(super) bindings: OutputRowBindings,
+    /// The output variable catalogue of the current roster: every variable
+    /// the model can produce, declared once, typed. Readable from build on,
+    /// before the first step.
+    pub(super) catalogue: Arc<Catalogue>,
 }
 
 /// The port-slot tables and fluid loop-type map, re-derived from the
@@ -117,6 +122,8 @@ struct RosterPlan {
     hvac_thermal_consistency: Vec<Vec<usize>>,
     zones: ZoneColumnCaches,
     output: OutputCachesPlan,
+    /// The catalogue built from the prospective roster's declarations.
+    catalogue: Arc<Catalogue>,
 }
 
 /// The actor roster a roster change commits: which live actors stay (by
@@ -211,6 +218,39 @@ impl Dwelling {
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
         Ok(())
+    }
+
+    /// The dwelling's output variable catalogue: every variable the built
+    /// model can produce, declared once, typed, with its source. Readable
+    /// from build on, before the first step; rebuilt on every equipment or
+    /// actor roster change.
+    ///
+    /// The catalogue does not depend on the selected reports: an output
+    /// verbosity filters the catalogue's variables to the schema's columns,
+    /// it never changes what the model can produce.
+    #[must_use]
+    pub fn catalogue(&self) -> Arc<Catalogue> {
+        Arc::clone(&self.roster.catalogue)
+    }
+
+    /// The recorded output schema's column names, in order (the `Time`
+    /// label first, then one column per catalogue variable emitted at the
+    /// configured output verbosity). `None` while output is disabled.
+    #[must_use]
+    pub fn output_column_names(&self) -> Option<Vec<String>> {
+        self.recorder.as_ref().map(|r| {
+            r.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect()
+        })
+    }
+
+    /// The configured output verbosity: the catalogue's schema filter.
+    #[must_use]
+    pub fn output_verbosity(&self) -> u8 {
+        self.output_verbosity
     }
 
     /// Creates and adds an actor from the registry using the provided config.
@@ -1062,6 +1102,97 @@ impl Dwelling {
             .collect()
     }
 
+    /// The catalogue input for a prospective roster: every equipment's
+    /// base name, instance override, id, fuel and typed telemetry
+    /// declarations; the zone display names; every actor's registered name
+    /// and typed declarations.
+    fn catalogue_input(
+        equipment: &[&dyn Equipment],
+        actors: &[&dyn Actor],
+        zones: Vec<(ZoneId, String)>,
+    ) -> CatalogueInput {
+        let equipment_input = equipment
+            .iter()
+            .map(|eq| {
+                let desc = eq.descriptor();
+                hares_io::CatalogueEquipment {
+                    name: desc.name.clone(),
+                    instance_name: None,
+                    id: desc.id,
+                    fuel: desc.fuel,
+                    telemetry: desc.telemetry_fields.clone(),
+                }
+            })
+            .collect();
+        let actor_input = actors
+            .iter()
+            .map(|a| hares_io::CatalogueActor {
+                name: Arc::from(a.name()),
+                output_variables: a.output_variables().to_vec(),
+            })
+            .collect();
+        CatalogueInput {
+            equipment: equipment_input,
+            zones,
+            actors: actor_input,
+        }
+    }
+
+    /// Rejects an actor whose telemetry is not built (and sealed) from its
+    /// declarations, or whose telemetry holds a key the declarations omit,
+    /// naming the actor and the key. Runs at every registration and
+    /// auto-registration, so no per-step check is needed.
+    fn validate_actor_telemetry(actor: &dyn Actor) -> Result<()> {
+        let declared: std::collections::HashSet<&str> = actor
+            .output_variables()
+            .iter()
+            .map(|f| f.name.as_ref())
+            .collect();
+        match actor.telemetry() {
+            None => {
+                if declared.is_empty() {
+                    Ok(())
+                } else {
+                    Err(HaresError::Control(format!(
+                        "actor '{}' declares {} output variables but exposes no telemetry map; \
+                         build it with Telemetry::from_fields(declared)",
+                        actor.name(),
+                        declared.len(),
+                    )))
+                }
+            }
+            Some(telemetry) => {
+                let name = actor.name();
+                if !telemetry.is_sealed() {
+                    return Err(HaresError::Control(format!(
+                        "actor '{name}' telemetry is not sealed: build it with \
+                         Telemetry::from_fields(declared) so its keys are its declarations"
+                    )));
+                }
+                let sealed = telemetry
+                    .sealed_keys()
+                    .expect("a sealed telemetry map has its key set");
+                for key in sealed {
+                    if !declared.contains(key.as_str()) {
+                        return Err(HaresError::Control(format!(
+                            "actor '{name}' telemetry holds undeclared key '{key}'; \
+                             declare it in output_variables or drop it"
+                        )));
+                    }
+                }
+                for key in &declared {
+                    if !sealed.contains(*key) {
+                        return Err(HaresError::Control(format!(
+                            "actor '{name}' declares output variable '{key}' but its \
+                             telemetry does not hold it"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Derives every roster cache from the prospective `equipment` and
     /// `actors` without touching `self`. Every fallible decision of a
     /// roster change happens here: an actor that cannot act on the
@@ -1108,6 +1239,24 @@ impl Dwelling {
         let ports = pre_step.as_ref().map_or(&self.ports, |p| &p.ports);
         let hvac_thermal_consistency = build_hvac_thermal_consistency(ports, equipment);
 
+        // An actor whose telemetry is not built from its declarations, or
+        // whose telemetry holds a key the declarations omit, is rejected at
+        // registration: no per-step check is needed.
+        for &actor in actors {
+            Self::validate_actor_telemetry(actor)?;
+        }
+
+        // The catalogue merges every source's typed declarations. Built at
+        // every plan point (assembly, and again on an equipment mutation or
+        // actor registration), readable from build on, before the first
+        // step; a duplicate name or a contradicting aggregation fails the
+        // change here.
+        let catalogue = Arc::new(
+            build_catalogue(&Self::catalogue_input(equipment, actors, self.zone_names())).map_err(
+                |err| HaresError::InvalidState(format!("output variable catalogue: {err}")),
+            )?,
+        );
+
         let output = if !self.write_output {
             OutputCachesPlan::Disabled
         } else if self
@@ -1116,7 +1265,7 @@ impl Dwelling {
             .map_or(0, StreamingRecorder::total_rows)
             == 0
         {
-            self.plan_fresh_schema(equipment, actors)?
+            self.plan_fresh_schema(equipment, actors, &catalogue)?
         } else {
             let schema = self
                 .recorder
@@ -1172,23 +1321,25 @@ impl Dwelling {
             hvac_thermal_consistency,
             zones,
             output,
+            catalogue,
         })
     }
 
-    /// The output schema rebuilt for the prospective roster, the row plan
-    /// and producer bindings frozen from it, and a recorder created for the
-    /// schema. Creating the recorder is the plan's last fallible step.
+    /// The output schema rebuilt for the prospective roster from its
+    /// catalogue, the row plan and producer bindings frozen from it, and a
+    /// recorder created for the schema. Creating the recorder is the plan's
+    /// last fallible step.
     fn plan_fresh_schema(
         &self,
         equipment: &[&dyn Equipment],
         actors: &[&dyn Actor],
+        catalogue: &Catalogue,
     ) -> Result<OutputCachesPlan> {
-        let specs = equipment_descriptor_specs(equipment);
-        let schema: Schema = build_schema(&specs, self.output_verbosity, &self.zone_names());
-        // Enriched before the actor columns are appended: actor telemetry
-        // columns carry no declared-unit metadata to validate against.
-        let schema = enrich_schema_with_telemetry_units(schema, equipment);
-        let schema = extend_schema_with_actor_columns(&schema, actors);
+        let schema: Schema = build_schema_from_catalogue(catalogue, self.output_verbosity);
+        // Enriched with the catalogue's units before the plan freezes: every
+        // schema column's unit is the catalogue declaration's symbol, and the
+        // catalogue's actor block already built the actor columns.
+        let schema = enrich_schema_with_telemetry_units(schema, equipment, catalogue);
         // The run's one selection: the verbosity the configuration carries,
         // materialized by the schema the plan freezes from. The report
         // configuration (named and pattern selections per report) arrives
@@ -1237,6 +1388,7 @@ impl Dwelling {
     /// before calling this.
     fn install_roster_caches(&mut self, plan: RosterPlan) {
         self.equipment_id_by_name = plan.equipment_id_by_name;
+        self.roster.catalogue = plan.catalogue;
         self.active_equipment_ids = plan.active_equipment_ids;
         // Every actor's equipment binding goes stale on any identity change
         // (a replacement receives a new never-reused id, and an actor

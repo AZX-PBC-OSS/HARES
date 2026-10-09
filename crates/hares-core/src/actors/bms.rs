@@ -11,7 +11,7 @@ use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
     BmsAction, BmsMode, BmsScheduleWindow, ControlCapabilities, ControlSignal, EnvironmentState,
-    EquipmentId, GridExportRule, HaresError, StormWatchTrigger, Telemetry,
+    EquipmentId, GridExportRule, HaresError, StormWatchTrigger, Telemetry, TelemetryField,
 };
 
 use crate::{Actor, ActorTarget};
@@ -86,6 +86,35 @@ impl BatteryManagementActor {
         )
     }
 
+    /// The declared telemetry: the action code, the battery's SOC, the
+    /// grid states the decision read, and the PV staleness pair.
+    pub const OUTPUT_VARIABLES: &'static [TelemetryField] = &[
+        TelemetryField::code_code(
+            "bms_action",
+            &["0", "1", "2", "3"],
+            "The last action's code (see bms_action_code); -1 before the first decision",
+        ),
+        TelemetryField::ratio("soc", "The battery SOC the last decision read"),
+        TelemetryField::power_kw("pv_kw", "The PV generation the last decision read"),
+        TelemetryField::power_kw("load_kw", "The dwelling load the last decision read"),
+        TelemetryField::power_kw(
+            "bms_pv_stale_kw",
+            "The stale (prior-step) PV estimate the decision used",
+        ),
+        TelemetryField::power_kw(
+            "bms_pv_actual_kw",
+            "The actual PV generation observed after the step",
+        ),
+        TelemetryField::state_flag(
+            "bms_toggled",
+            "1 when the last decision flipped the battery's direction",
+        ),
+        TelemetryField::state_flag(
+            "bms_dwell_blocked",
+            "1 when the min-dwell rule blocked a direction flip",
+        ),
+    ];
+
     pub fn with_name(name: &str, battery_name: &str, params: BmsParams) -> Self {
         let BmsParams {
             bms_mode,
@@ -96,7 +125,6 @@ impl BatteryManagementActor {
             steps_per_day,
             min_dwell_steps,
         } = params;
-        let mut telemetry = Telemetry::with_capacity(8);
         // Why: soc = 0.0 as init sentinel means "no SOC reading yet" — the
         // BMS reads SOC from equipment_core on the first decide() call and
         // overwrites this. A true 0% SOC is physically possible only for a
@@ -104,14 +132,7 @@ impl BatteryManagementActor {
         // fires only when equipment_core lacks the battery entry, which
         // means the battery is unregistered — 0.0 as "unavailable" is safe
         // because the BMS enters idle:no_soc mode and never dispatches.
-        telemetry.insert("bms_action", -1.0);
-        telemetry.insert("soc", 0.0);
-        telemetry.insert("pv_kw", 0.0);
-        telemetry.insert("load_kw", 0.0);
-        telemetry.insert("bms_pv_stale_kw", 0.0);
-        telemetry.insert("bms_pv_actual_kw", 0.0);
-        telemetry.insert("bms_toggled", 0.0);
-        telemetry.insert("bms_dwell_blocked", 0.0);
+        let telemetry = Telemetry::from_fields(Self::OUTPUT_VARIABLES);
         Self {
             name: name.to_string(),
             battery: ActorTarget {
@@ -1026,6 +1047,10 @@ struct BmsSnapshot {
 impl Actor for BatteryManagementActor {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn output_variables(&self) -> &[TelemetryField] {
+        Self::OUTPUT_VARIABLES
     }
 
     fn telemetry(&self) -> Option<&Telemetry> {

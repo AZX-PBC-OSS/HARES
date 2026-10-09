@@ -16,7 +16,7 @@ use hares_core::actors::{
 };
 use hares_types::{
     BmsMode, ChargingStrategy, DRLevel, EnvironmentState, GridExportRule, PlugInPolicy,
-    ScheduleSource,
+    ScheduleSource, TelemetryField,
 };
 use rand::SeedableRng;
 
@@ -31,6 +31,9 @@ struct SpyActor {
 impl Actor for SpyActor {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn output_variables(&self) -> &[TelemetryField] {
+        &[]
     }
 
     fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {}

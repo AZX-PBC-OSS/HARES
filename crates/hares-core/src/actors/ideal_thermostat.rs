@@ -25,6 +25,7 @@ use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_equipment::hvac::ThermalSetpoints;
 use hares_types::{
     ControlCapabilities, ControlSignal, EnvironmentState, EquipmentId, HaresError, Telemetry,
+    TelemetryField,
 };
 use serde::{Deserialize, Serialize};
 
@@ -158,18 +159,35 @@ pub struct IdealThermostat {
 }
 
 impl IdealThermostat {
+    /// The declared telemetry: the resolved setpoints and the inversion
+    /// flag.
+    pub const OUTPUT_VARIABLES: &'static [TelemetryField] = &[
+        TelemetryField::temp_c(
+            "heating_setpoint_c",
+            "The heating setpoint the thermostat dispatched",
+        ),
+        TelemetryField::temp_c(
+            "cooling_setpoint_c",
+            "The cooling setpoint the thermostat dispatched",
+        ),
+        TelemetryField::temp_c(
+            "deadband_c",
+            "The deadband between the dispatched setpoints",
+        ),
+        TelemetryField::state_flag(
+            "setpoint_inversion_rejected",
+            "1 when a setpoint inversion was rejected",
+        ),
+    ];
+
     /// Creates a new IdealThermostat actor targeting the named equipment.
     pub fn new(target_name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(4);
         // Why: telemetry map stores f64 only (not Option<f64>). Sentinels use 0.0
         // for "unset/no-override" because OverrideState tracks actual setpoint
         // state with Option<f64> — the telemetry values are an output display
         // layer. Consumers that need to distinguish "0.0°C override" from
         // "no override" should read `override_state()` directly.
-        telemetry.insert("heating_setpoint_c", 0.0);
-        telemetry.insert("cooling_setpoint_c", 0.0);
-        telemetry.insert("deadband_c", 0.0);
-        telemetry.insert("setpoint_inversion_rejected", 0.0);
+        let telemetry = Telemetry::from_fields(Self::OUTPUT_VARIABLES);
         Self {
             name: format!("IdealThermostat({})", target_name),
             unit: ActorTarget {
@@ -289,6 +307,10 @@ impl IdealThermostat {
 impl Actor for IdealThermostat {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn output_variables(&self) -> &[TelemetryField] {
+        Self::OUTPUT_VARIABLES
     }
 
     fn dispatch_targets(&self) -> &[ActorTarget] {

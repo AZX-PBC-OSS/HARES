@@ -1015,56 +1015,34 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total electrical power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FAN_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Total fan electrical power consumption".to_string(),
-        },
-        TelemetryField {
-            name: tk::VENT_SUPPLY_FAN_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Supply-side fan electrical power".to_string(),
-        },
-        TelemetryField {
-            name: tk::VENT_EXHAUST_FAN_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Exhaust-side fan electrical power".to_string(),
-        },
-        TelemetryField {
-            name: tk::SENSIBLE_RECOVERY_W.to_string(),
-            unit: "W".to_string(),
-            description: "Sensible heat recovered by HRV/ERV".to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_RECOVERY_W.to_string(),
-            unit: "W".to_string(),
-            description: "Latent heat recovered by ERV".to_string(),
-        },
-        TelemetryField {
-            name: tk::SUPPLY_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Supply air temperature after recovery".to_string(),
-        },
-        TelemetryField {
-            name: tk::BYPASS_ACTIVE.to_string(),
-            unit: "-".to_string(),
-            description: "Bypass mode active (1 = bypassing recovery)".to_string(),
-        },
-        TelemetryField {
-            name: tk::VENT_DEFROST_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Continuous defrost fraction for HRV/ERV recovery derating".to_string(),
-        },
+        TelemetryField::power_kw(tk::ELECTRIC_KW, "Total electrical power draw"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::power_w(tk::FAN_POWER_W, "Total fan electrical power consumption"),
+        TelemetryField::power_w(
+            tk::VENT_SUPPLY_FAN_POWER_W,
+            "Supply-side fan electrical power",
+        ),
+        TelemetryField::power_w(
+            tk::VENT_EXHAUST_FAN_POWER_W,
+            "Exhaust-side fan electrical power",
+        ),
+        TelemetryField::power_w(
+            tk::SENSIBLE_RECOVERY_W,
+            "Sensible heat recovered by HRV/ERV",
+        ),
+        TelemetryField::power_w(tk::LATENT_RECOVERY_W, "Latent heat recovered by ERV"),
+        TelemetryField::temp_c(tk::SUPPLY_TEMP_C, "Supply air temperature after recovery"),
+        TelemetryField::state_flag(
+            tk::BYPASS_ACTIVE,
+            "Bypass mode active (1 = bypassing recovery)",
+        ),
+        TelemetryField::ratio(
+            tk::VENT_DEFROST_FRACTION,
+            "Continuous defrost fraction for HRV/ERV recovery derating",
+        ),
     ]
 }
 

@@ -1483,83 +1483,71 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::DC_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total PV DC output power before inverter efficiency and curtailment"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::AC_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total PV AC output power after inverter efficiency and curtailment"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Signed bus reactive power (positive = inductive/absorbing, \
+        TelemetryField::power_kw(
+            tk::DC_POWER_KW,
+            "Total PV DC output power before inverter efficiency and curtailment",
+        ),
+        TelemetryField::power_kw(
+            tk::AC_POWER_KW,
+            "Total PV AC output power after inverter efficiency and curtailment",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Signed bus reactive power (positive = inductive/absorbing, \
                 negative = supplying). Baseline: -|P|·tan(acos(pf)) at the configured \
                 displacement power factor; override: commanded ReactiveSetpoint /
-                PowerSetpoint.reactive_power_kvar, passed through as-commanded."
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::CELL_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Capacity-weighted average PV cell temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::IRRADIANCE_W_M2.to_string(),
-            unit: "W/m2".to_string(),
-            description: "Capacity-weighted average incident irradiance on PV arrays".to_string(),
-        },
-        TelemetryField {
-            name: tk::INVERTER_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "Inverter efficiency applied to DC power".to_string(),
-        },
-        TelemetryField {
-            name: tk::CURTAILMENT_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Power curtailed by active PowerLimit signal".to_string(),
-        },
-        TelemetryField {
-            name: tk::INVERTER_CLIPPING_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Power lost to inverter AC capacity clipping (DC/AC ratio > 1)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::SOILING_RATIO.to_string(),
-            unit: "-".to_string(),
-            description: "PV soiling ratio (1.0 = clean, < 1.0 = soiled). Kimber model."
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::SHADING_FACTOR.to_string(),
-            unit: "-".to_string(),
-            description: "PV shading factor (1.0 = unshaded, 0.0 = fully shaded)".to_string(),
-        },
-        TelemetryField {
-            name: tk::PV_LUT_INTERP_METHOD.to_string(),
-            unit: "-".to_string(),
-            description: "PV LUT interpolation method: 0.0 = multilinear, 1.0 = nearest-neighbor"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::PV_LUT_NN_FALLBACK_COUNT.to_string(),
-            unit: "count".to_string(),
-            description: "Cumulative count of nearest-neighbor fallbacks in PV LUT interpolation"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::Q_SOURCE.to_string(),
-            unit: "-".to_string(),
-            description: "Reactive-power source: 0.0 = none, 1.0 = reactive_setpoint, \
-                 2.0 = power_factor, 3.0 = power_setpoint"
-                .to_string(),
-        },
+                PowerSetpoint.reactive_power_kvar, passed through as-commanded.",
+        ),
+        TelemetryField::temp_c(
+            tk::CELL_TEMP_C,
+            "Capacity-weighted average PV cell temperature",
+        ),
+        TelemetryField::flow_mean(
+            tk::IRRADIANCE_W_M2,
+            hares_types::Unit::WattPerSquareMeter,
+            "Capacity-weighted average incident irradiance on PV arrays",
+        ),
+        TelemetryField::ratio(
+            tk::INVERTER_EFFICIENCY,
+            "Inverter efficiency applied to DC power",
+        ),
+        TelemetryField::power_kw(
+            tk::CURTAILMENT_KW,
+            "Power curtailed by active PowerLimit signal",
+        ),
+        TelemetryField::power_kw(
+            tk::INVERTER_CLIPPING_KW,
+            "Power lost to inverter AC capacity clipping (DC/AC ratio > 1)",
+        ),
+        TelemetryField::ratio(
+            tk::SOILING_RATIO,
+            "PV soiling ratio (1.0 = clean, < 1.0 = soiled). Kimber model.",
+        ),
+        TelemetryField::ratio(
+            tk::SHADING_FACTOR,
+            "PV shading factor (1.0 = unshaded, 0.0 = fully shaded)",
+        ),
+        TelemetryField::code_code(
+            tk::PV_LUT_INTERP_METHOD,
+            &["multilinear", "nearest"],
+            "PV LUT interpolation method: 0.0 = multilinear, 1.0 = nearest-neighbor",
+        ),
+        TelemetryField::running_total(
+            tk::PV_LUT_NN_FALLBACK_COUNT,
+            hares_types::Unit::Count,
+            "Cumulative count of nearest-neighbor fallbacks in PV LUT interpolation",
+        ),
+        TelemetryField::code_code(
+            tk::Q_SOURCE,
+            &[
+                "none",
+                "reactive_setpoint",
+                "power_factor",
+                "power_setpoint",
+            ],
+            "Reactive-power source: 0.0 = none, 1.0 = reactive_setpoint, \
+                 2.0 = power_factor, 3.0 = power_setpoint",
+        ),
     ]
 }
 
@@ -3555,7 +3543,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         assert!(field_names.contains(&tk::INVERTER_CLIPPING_KW));
         assert!(field_names.contains(&tk::REACTIVE_POWER_KVAR));
@@ -3806,7 +3794,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         assert!(
             field_names.contains(&tk::SHADING_FACTOR),

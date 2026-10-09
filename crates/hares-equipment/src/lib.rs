@@ -619,11 +619,7 @@ mod tests {
                     stage: ExecutionStage::Independent,
                     control_capabilities,
                     core_capabilities: CoreCapabilities::empty(),
-                    telemetry_fields: vec![TelemetryField {
-                        name: "x".to_string(),
-                        unit: "-".to_string(),
-                        description: "mock value".to_string(),
-                    }],
+                    telemetry_fields: vec![TelemetryField::ratio("x", "mock value")],
                     zone_type: None,
                 },
                 ports: vec![PortDeclaration::electrical()],

@@ -986,93 +986,55 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::WATER_REMOVAL_L_DAY.to_string(),
-            unit: "L/day".to_string(),
-            description: "Water removed from air at current conditions".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Compressor + fan electric power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total electric draw (kW, for dwelling power aggregation)".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging), compressor pf 0.96"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_REMOVAL_W.to_string(),
-            unit: "W".to_string(),
-            description: "Latent cooling removed from zone air".to_string(),
-        },
-        TelemetryField {
-            name: tk::SENSIBLE_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Sensible heat gain dumped back to zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::MOISTURE_MASS_FLOW_KG_S.to_string(),
-            unit: "kg/s".to_string(),
-            description: "Moisture mass removal rate (negative = dehumidification)".to_string(),
-        },
-        TelemetryField {
-            name: tk::TARGET_RH.to_string(),
-            unit: "fraction".to_string(),
-            description: "Active RH setpoint target".to_string(),
-        },
-        TelemetryField {
-            name: tk::MIN_RH.to_string(),
-            unit: "fraction".to_string(),
-            description: "Deadband lower bound".to_string(),
-        },
-        TelemetryField {
-            name: tk::MAX_RH.to_string(),
-            unit: "fraction".to_string(),
-            description: "Deadband upper bound".to_string(),
-        },
-        TelemetryField {
-            name: tk::IS_ON.to_string(),
-            unit: "bool".to_string(),
-            description: "1 when compressor/fan are on, else 0".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "fraction".to_string(),
-            description: "Part-load ratio: fraction of rated capacity needed".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_FACTOR.to_string(),
-            unit: "fraction".to_string(),
-            description: "Part-load factor: cycling efficiency correction (PLF_MIN ≤ PLF ≤ 1.0)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "fraction".to_string(),
-            description: "Runtime fraction: PLR / PLF".to_string(),
-        },
-        TelemetryField {
-            name: tk::PARASITIC_ELECTRIC_W.to_string(),
-            unit: "W".to_string(),
-            description: "Actual off-cycle parasitic electric draw (standby electronics, controls, crankcase heater); scaled by the off-cycle fraction and zero during grid outage".to_string(),
-        },
-        TelemetryField {
-            name: tk::TEMPERATURE_LOCKOUT.to_string(),
-            unit: "bool".to_string(),
-            description: "1.0 when the dehumidifier is locked out by inlet air temperature limits; 0.0 otherwise".to_string(),
-        },
-        TelemetryField {
-            name: tk::INLET_AIR_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Inlet air dry-bulb temperature at the dehumidifier inlet".to_string(),
-        },
+        TelemetryField::flow_mean(
+            tk::WATER_REMOVAL_L_DAY,
+            hares_types::Unit::LitrePerDay,
+            "Water removed from air at current conditions",
+        ),
+        TelemetryField::power_w(tk::ELECTRIC_POWER_W, "Compressor + fan electric power draw"),
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Total electric draw (kW, for dwelling power aggregation)",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging), compressor pf 0.96",
+        ),
+        TelemetryField::power_w(tk::LATENT_REMOVAL_W, "Latent cooling removed from zone air"),
+        TelemetryField::power_w(
+            tk::SENSIBLE_GAIN_W,
+            "Sensible heat gain dumped back to zone",
+        ),
+        TelemetryField::flow_mean(
+            tk::MOISTURE_MASS_FLOW_KG_S,
+            hares_types::Unit::KilogramPerSecond,
+            "Moisture mass removal rate (negative = dehumidification)",
+        ),
+        TelemetryField::ratio_fraction(tk::TARGET_RH, "Active RH setpoint target"),
+        TelemetryField::ratio_fraction(tk::MIN_RH, "Deadband lower bound"),
+        TelemetryField::ratio_fraction(tk::MAX_RH, "Deadband upper bound"),
+        TelemetryField::boolean(tk::IS_ON, "1 when compressor/fan are on, else 0"),
+        TelemetryField::ratio_fraction(
+            tk::PART_LOAD_RATIO,
+            "Part-load ratio: fraction of rated capacity needed",
+        ),
+        TelemetryField::ratio_fraction(
+            tk::PART_LOAD_FACTOR,
+            "Part-load factor: cycling efficiency correction (PLF_MIN ≤ PLF ≤ 1.0)",
+        ),
+        TelemetryField::ratio_fraction(tk::RUNTIME_FRACTION, "Runtime fraction: PLR / PLF"),
+        TelemetryField::power_w(
+            tk::PARASITIC_ELECTRIC_W,
+            "Actual off-cycle parasitic electric draw (standby electronics, controls, crankcase heater); scaled by the off-cycle fraction and zero during grid outage",
+        ),
+        TelemetryField::boolean(
+            tk::TEMPERATURE_LOCKOUT,
+            "1.0 when the dehumidifier is locked out by inlet air temperature limits; 0.0 otherwise",
+        ),
+        TelemetryField::temp_c(
+            tk::INLET_AIR_TEMP_C,
+            "Inlet air dry-bulb temperature at the dehumidifier inlet",
+        ),
     ]
 }
 

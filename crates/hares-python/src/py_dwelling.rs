@@ -3532,9 +3532,14 @@ mod profiling_summary_tests {
         name: &'static str,
     }
 
+    use hares_types::TelemetryField;
+
     impl Actor for ProbeActor {
         fn name(&self) -> &str {
             self.name
+        }
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
         }
 
         fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {}

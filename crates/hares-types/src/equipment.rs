@@ -1838,12 +1838,11 @@ bitflags! {
 }
 
 /// Describes one telemetry channel exposed by an equipment model.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TelemetryField {
-    pub name: String,
-    pub unit: String,
-    pub description: String,
-}
+///
+/// Declared in `crate::output` with the typed output-variable model the
+/// catalogue is built from; re-exported here because the descriptor is the
+/// equipment-facing declaration surface.
+pub use crate::output::TelemetryField;
 
 macro_rules! impl_id_type {
     ($name:ident, $inner:ty) => {
@@ -1914,11 +1913,10 @@ mod tests {
             control_capabilities: ControlCapabilities::POWER_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT,
             core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_SOC,
-            telemetry_fields: vec![TelemetryField {
-                name: "electric_kw".to_string(),
-                unit: "kW".to_string(),
-                description: "Active electrical power".to_string(),
-            }],
+            telemetry_fields: vec![TelemetryField::power_kw(
+                "electric_kw",
+                "Active electrical power",
+            )],
             zone_type: None,
         };
 

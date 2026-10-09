@@ -14,7 +14,7 @@ use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_core::{Actor, Dwelling, DwellingConfig, SimStatus, SimulationEngine, StepResult};
 use hares_io::{OutputFormat, SimulationConfig};
-use hares_types::{ControlSignal, DRLevel, EndUse, OperatingMode};
+use hares_types::{ControlSignal, DRLevel, EndUse, OperatingMode, TelemetryField};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 
@@ -71,6 +71,9 @@ impl EmitOnceActor {
 impl Actor for EmitOnceActor {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn output_variables(&self) -> &[TelemetryField] {
+        &[]
     }
 
     fn decide(&mut self, _env: &hares_types::EnvironmentState, out: &mut Vec<DispatchRequest>) {

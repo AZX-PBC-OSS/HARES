@@ -36,7 +36,7 @@ use std::sync::Arc;
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
     ControlSignal, DutyCycleComponent, EnvironmentState, EvConnectionState, OperatingMode,
-    ProtocolId,
+    ProtocolId, TelemetryField,
 };
 
 use crate::py_enums::{
@@ -100,6 +100,9 @@ impl PyActorWrapper {
 impl hares_core::Actor for PyActorWrapper {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn output_variables(&self) -> &[TelemetryField] {
+        &[]
     }
 
     fn healthy(&self) -> bool {

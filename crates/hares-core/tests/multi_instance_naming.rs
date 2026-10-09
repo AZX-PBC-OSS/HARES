@@ -91,11 +91,10 @@ impl TelemetryRecordSpy {
             } else {
                 CoreCapabilities::ELECTRIC
             },
-            telemetry_fields: vec![TelemetryField {
-                name: tk::AC_POWER_KW.to_string(),
-                unit: "kW".to_string(),
-                description: "recorded curtailment fraction".to_string(),
-            }],
+            telemetry_fields: vec![TelemetryField::power_kw(
+                tk::AC_POWER_KW,
+                "recorded curtailment fraction",
+            )],
             zone_type: None,
         };
         let mut telemetry = Telemetry::with_capacity(1);

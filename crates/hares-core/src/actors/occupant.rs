@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EvConnectionState, HaresError,
-    OperatingMode, Telemetry,
+    OperatingMode, Telemetry, TelemetryField,
 };
 
 use crate::{Actor, ActorTarget};
@@ -153,14 +153,30 @@ pub struct Occupant {
 }
 
 impl Occupant {
+    /// The declared telemetry: presence state, the step's dispatch count,
+    /// the running presence-change total and the step index.
+    pub const OUTPUT_VARIABLES: &'static [TelemetryField] = &[
+        TelemetryField::state_flag("away", "1 when the occupant's current presence is Away"),
+        TelemetryField::state_flag(
+            "transition",
+            "1 on the step the occupant's presence changed",
+        ),
+        TelemetryField::step_count("signals_count", "Dispatch requests emitted this step"),
+        TelemetryField::running_total(
+            "presence_changes",
+            hares_types::Unit::Count,
+            "Cumulative presence changes since init",
+        ),
+        TelemetryField::running_total(
+            "current_step",
+            hares_types::Unit::Count,
+            "The step index the actor last decided at",
+        ),
+    ];
+
     /// Creates a new Occupant actor with the given name.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(5);
-        telemetry.insert("away", 0.0);
-        telemetry.insert("transition", 0.0);
-        telemetry.insert("signals_count", 0.0);
-        telemetry.insert("presence_changes", 0.0);
-        telemetry.insert("current_step", 0.0);
+        let telemetry = Telemetry::from_fields(Self::OUTPUT_VARIABLES);
         Self {
             name: Arc::from(name),
             presence_schedule: vec![Presence::Home],
@@ -450,6 +466,10 @@ struct OccupantSnapshot {
 impl Actor for Occupant {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn output_variables(&self) -> &[TelemetryField] {
+        Self::OUTPUT_VARIABLES
     }
 
     fn telemetry(&self) -> Option<&Telemetry> {

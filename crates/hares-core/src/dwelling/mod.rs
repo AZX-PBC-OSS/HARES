@@ -61,9 +61,9 @@ use hares_io::{
     SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
     SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, ScheduleTimeSeries,
     SimulationConfig, StreamingRecorder, WeatherTimeSeries, end_use_electric_power_column,
-    equipment_name_to_end_use, extract_unit_from_name, has_soc, is_cooling_equipment, is_ev,
-    is_heat_pump_heater, is_hvac_or_wh, is_pv, is_reserved_output_column_name, parse_hpxml,
-    parse_schedule_csv, parse_weather,
+    equipment_name_to_end_use, has_soc, is_cooling_equipment, is_ev, is_heat_pump_heater,
+    is_hvac_or_wh, is_pv, is_reserved_output_column_name, parse_hpxml, parse_schedule_csv,
+    parse_weather,
 };
 
 use hares_physics::constants::{
@@ -506,22 +506,28 @@ enum RecordedValue {
     Flow,
 }
 
-/// Enriches the output schema's Arrow field metadata with unit declarations
-/// from equipment `TelemetryField` descriptors, closing the round-trip gap
-/// between equipment-declared units and the column-suffix-derived units used
-/// by the aggregation pipeline.
+/// Enriches the catalogue-derived output schema's Arrow field metadata with
+/// unit declarations from equipment `TelemetryField` descriptors, closing
+/// the round-trip gap between equipment-declared units and the columns the
+/// aggregation pipeline reads.
 ///
-/// For every schema column whose name starts with an equipment instance name,
-/// the column's unit (extracted from the name suffix) is verified against the
-/// corresponding equipment's `telemetry_fields`. When the unit is found in the
-/// equipment's declared fields, the field's metadata is enriched with a
-/// `"unit_source"` key set to `"telemetry_field"` to indicate the unit has been
-/// validated against the authoritative equipment telemetry declaration.
+/// For every schema column whose name starts with an equipment instance
+/// name, the column's unit (the catalogue declaration's `Unit::symbol()`)
+/// is verified against the corresponding equipment's `telemetry_fields`.
+/// When the unit is found in the equipment's declared fields, the field's
+/// metadata is enriched with a `"unit_source"` key set to
+/// `"telemetry_field"` to indicate the unit has been validated against the
+/// authoritative equipment telemetry declaration.
 ///
 /// Columns whose unit is not recognized by the owning equipment's telemetry
-/// fields keep their suffix-derived metadata and emit a `tracing::warn!`.
-fn enrich_schema_with_telemetry_units(schema: Schema, equipment: &[&dyn Equipment]) -> Schema {
-    // Compute instance-qualified names matching build_schema's convention.
+/// fields keep their catalogue-derived metadata and emit a
+/// `tracing::warn!`.
+fn enrich_schema_with_telemetry_units(
+    schema: Schema,
+    equipment: &[&dyn Equipment],
+    catalogue: &hares_io::Catalogue,
+) -> Schema {
+    // Compute instance-qualified names matching the catalogue's convention.
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for eq in equipment {
         *counts.entry(eq.descriptor().name.as_str()).or_default() += 1;
@@ -542,15 +548,15 @@ fn enrich_schema_with_telemetry_units(schema: Schema, equipment: &[&dyn Equipmen
             let units: HashSet<String> = desc
                 .telemetry_fields
                 .iter()
-                .map(|tf| tf.unit.clone())
+                .map(|tf| tf.unit.symbol().to_string())
                 .collect();
             (name, units)
         })
         .collect();
 
     // For each schema field that belongs to a known equipment instance,
-    // verify the column's unit against the equipment's declared telemetry
-    // field units and enrich metadata.
+    // verify the column's catalogue unit against the equipment's declared
+    // telemetry field units and enrich metadata.
     let fields: Vec<std::sync::Arc<Field>> = schema
         .fields()
         .iter()
@@ -560,17 +566,20 @@ fn enrich_schema_with_telemetry_units(schema: Schema, equipment: &[&dyn Equipmen
 
             // Check if this column name starts with a known instance name
             // followed by a space (to avoid false prefix matches).
-            if let Some((_name, units)) = instance_units.iter().find(|(name, _)| {
+            let owner = instance_units.iter().find(|(name, _)| {
                 col_name.as_bytes().starts_with(name.as_bytes())
                     && (col_name.len() == name.len() || col_name.as_bytes()[name.len()] == b' ')
-            }) && let Some(col_unit) = extract_unit_from_name(col_name)
+            });
+            if let Some((_name, units)) = owner
+                && let Some(def) = catalogue.resolve(col_name)
+                && def.unit != hares_types::Unit::None
             {
-                if units.contains(col_unit) {
+                if units.contains(def.unit.symbol()) {
                     metadata.insert("unit_source".to_string(), "telemetry_field".to_string());
                 } else {
                     tracing::warn!(
                         column = col_name,
-                        unit = col_unit,
+                        unit = def.unit.symbol(),
                         "column unit not found in equipment telemetry fields"
                     );
                 }
@@ -1165,31 +1174,6 @@ fn resolve_v8_columns(
         }
     }
     (state, flow)
-}
-
-fn extend_schema_with_actor_columns(
-    schema: &arrow::datatypes::Schema,
-    actors: &[&dyn Actor],
-) -> arrow::datatypes::Schema {
-    use arrow::datatypes::{DataType, Field};
-    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
-    for actor in actors {
-        if let Some(tel) = actor.telemetry() {
-            // Telemetry is a HashMap whose iteration order varies per
-            // process (RandomState). Sort the keys so the output schema —
-            // and therefore DataFrame column order — is deterministic
-            // across runs (fixed-seed reproducibility requirement).
-            let mut keys: Vec<&String> = tel.0.keys().collect();
-            keys.sort();
-            for key in keys {
-                let col_name = format!("actor:{}:{}", actor.name(), key);
-                if !fields.iter().any(|f| f.name() == &col_name) {
-                    fields.push(Field::new(&col_name, DataType::Float64, true));
-                }
-            }
-        }
-    }
-    arrow::datatypes::Schema::new_with_metadata(fields, schema.metadata().clone())
 }
 
 /// Pre-resolved zone column indices for record_step, avoiding per-step format!() allocations.
@@ -5752,6 +5736,39 @@ impl Dwelling {
             }
         }
 
+        // Actor telemetry latches (always on): an actor's telemetry is
+        // built and sealed from its declarations, so a non-finite write or
+        // an undeclared key (set or insert) is a wiring fault; ANY latch
+        // fails the step with InvariantViolation naming the actor and the
+        // key.
+        for actor in &self.actors {
+            let Some(tel) = actor.telemetry() else {
+                continue;
+            };
+            if let Some((key, value)) = tel.non_finite_latch() {
+                return Err(HaresError::InvariantViolation {
+                    check_name: format!(
+                        "actor_telemetry: non-finite value {value} rejected for key '{key}' \
+                         on actor '{}'",
+                        actor.name()
+                    ),
+                    value: *value,
+                    tolerance: 0.0,
+                });
+            }
+            if let Some(key) = tel.unknown_key_latch() {
+                return Err(HaresError::InvariantViolation {
+                    check_name: format!(
+                        "actor_telemetry: key '{key}' is not declared on actor '{}' \
+                         (declare it in output_variables)",
+                        actor.name()
+                    ),
+                    value: 0.0,
+                    tolerance: 0.0,
+                });
+            }
+        }
+
         // Health counters: once per timestep, after the equipment step
         // loops complete, drain each equipment's health counters into the
         // run total. Failed-and-rolled-back equipment are skipped for the
@@ -8121,21 +8138,9 @@ fn cfg_gated_helper() {
                     control_capabilities: capabilities,
                     core_capabilities: CoreCapabilities::empty(),
                     telemetry_fields: vec![
-                        TelemetryField {
-                            name: tk::LAST_POWER_KW.to_string(),
-                            unit: "kW".to_string(),
-                            description: "last applied power".to_string(),
-                        },
-                        TelemetryField {
-                            name: tk::LAST_SOC_TARGET.to_string(),
-                            unit: "fraction".to_string(),
-                            description: "last applied SOC target".to_string(),
-                        },
-                        TelemetryField {
-                            name: "last_dr_level".to_string(),
-                            unit: "enum".to_string(),
-                            description: "last applied DR level".to_string(),
-                        },
+                        TelemetryField::power_kw(tk::LAST_POWER_KW, "last applied power"),
+                        TelemetryField::ratio(tk::LAST_SOC_TARGET, "last applied SOC target"),
+                        TelemetryField::ratio("last_dr_level", "last applied DR level"),
                     ],
                     zone_type: None,
                 },
@@ -8273,16 +8278,8 @@ fn cfg_gated_helper() {
                     control_capabilities: ControlCapabilities::empty(),
                     core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::REACTIVE,
                     telemetry_fields: vec![
-                        TelemetryField {
-                            name: "active_power_kw".to_string(),
-                            unit: "kW".to_string(),
-                            description: "active electrical power".to_string(),
-                        },
-                        TelemetryField {
-                            name: "reactive_power_kvar".to_string(),
-                            unit: "kVAR".to_string(),
-                            description: "reactive electrical power".to_string(),
-                        },
+                        TelemetryField::power_kw("active_power_kw", "active electrical power"),
+                        TelemetryField::ratio("reactive_power_kvar", "reactive electrical power"),
                     ],
                     zone_type: None,
                 },
@@ -8624,11 +8621,10 @@ fn cfg_gated_helper() {
                     stage: ExecutionStage::Independent,
                     control_capabilities: ControlCapabilities::empty(),
                     core_capabilities: CoreCapabilities::ELECTRIC,
-                    telemetry_fields: vec![TelemetryField {
-                        name: "power_kw".to_string(),
-                        unit: "kW".to_string(),
-                        description: "electrical power".to_string(),
-                    }],
+                    telemetry_fields: vec![TelemetryField::power_kw(
+                        "power_kw",
+                        "electrical power",
+                    )],
                     zone_type: None,
                 },
                 telemetry: Telemetry::with_capacity(1),
@@ -8978,11 +8974,10 @@ fn cfg_gated_helper() {
                     stage: ExecutionStage::Thermal,
                     control_capabilities: ControlCapabilities::empty(),
                     core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::THERMAL,
-                    telemetry_fields: vec![TelemetryField {
-                        name: "thermal_output_w".to_string(),
-                        unit: "W".to_string(),
-                        description: "thermal output".to_string(),
-                    }],
+                    telemetry_fields: vec![TelemetryField::power_w(
+                        "thermal_output_w",
+                        "thermal output",
+                    )],
                     zone_type: None,
                 },
                 telemetry: Telemetry::with_capacity(1),
@@ -9102,11 +9097,10 @@ fn cfg_gated_helper() {
                     stage: ExecutionStage::Thermal,
                     control_capabilities: ControlCapabilities::empty(),
                     core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::THERMAL,
-                    telemetry_fields: vec![TelemetryField {
-                        name: "thermal_output_w".to_string(),
-                        unit: "W".to_string(),
-                        description: "thermal output".to_string(),
-                    }],
+                    telemetry_fields: vec![TelemetryField::power_w(
+                        "thermal_output_w",
+                        "thermal output",
+                    )],
                     zone_type: None,
                 },
                 telemetry: Telemetry::with_capacity(1),
@@ -9221,11 +9215,10 @@ fn cfg_gated_helper() {
                     stage: ExecutionStage::Thermal,
                     control_capabilities: ControlCapabilities::empty(),
                     core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::THERMAL,
-                    telemetry_fields: vec![TelemetryField {
-                        name: "thermal_output_w".to_string(),
-                        unit: "W".to_string(),
-                        description: "thermal output".to_string(),
-                    }],
+                    telemetry_fields: vec![TelemetryField::power_w(
+                        "thermal_output_w",
+                        "thermal output",
+                    )],
                     zone_type: None,
                 },
                 telemetry: Telemetry::with_capacity(1),
@@ -10165,11 +10158,10 @@ occupancy = 1.0
                     control_capabilities: ControlCapabilities::IDEAL_CAPACITY
                         | ControlCapabilities::THERMAL_SETPOINT,
                     core_capabilities: CoreCapabilities::empty(),
-                    telemetry_fields: vec![TelemetryField {
-                        name: tk::IDEAL_CAPACITY_W.to_string(),
-                        unit: "W".to_string(),
-                        description: "ideal capacity from solver".to_string(),
-                    }],
+                    telemetry_fields: vec![TelemetryField::power_w(
+                        tk::IDEAL_CAPACITY_W,
+                        "ideal capacity from solver",
+                    )],
                     zone_type: None,
                 },
                 telemetry: Telemetry::with_capacity(1),
@@ -11560,6 +11552,10 @@ occupancy = 1.0
         fn name(&self) -> &str {
             &self.name
         }
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
+        }
+
         fn decide(
             &mut self,
             _env: &hares_types::EnvironmentState,
@@ -11577,9 +11573,16 @@ occupancy = 1.0
         telemetry: Telemetry,
     }
     impl StatefulStubActor {
+        /// The declared telemetry: the checkpointed counter.
+        pub const OUTPUT_VARIABLES: &'static [TelemetryField] = &[TelemetryField::step_count(
+            "counter",
+            "The checkpointed counter's value",
+        )];
+
         fn new(name: &str, counter: u32) -> Self {
-            let mut telemetry = Telemetry::default();
-            telemetry.insert("counter", counter as f64);
+            let telemetry = Telemetry::from_fields(Self::OUTPUT_VARIABLES);
+            let mut telemetry = telemetry;
+            telemetry.set("counter", counter as f64);
             Self {
                 name: name.to_string(),
                 counter,
@@ -11590,6 +11593,9 @@ occupancy = 1.0
     impl crate::Actor for StatefulStubActor {
         fn name(&self) -> &str {
             &self.name
+        }
+        fn output_variables(&self) -> &[TelemetryField] {
+            Self::OUTPUT_VARIABLES
         }
         fn telemetry(&self) -> Option<&Telemetry> {
             Some(&self.telemetry)
@@ -11624,6 +11630,10 @@ occupancy = 1.0
         fn name(&self) -> &str {
             &self.name
         }
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
+        }
+
         fn healthy(&self) -> bool {
             false
         }
@@ -12560,7 +12570,7 @@ occupancy = 1.0
             },
         ];
         let zone_types = vec![ZoneType::Conditioned, ZoneType::Attic];
-        let schema = hares_io::build_schema(
+        let schema = hares_io::build_schema_for_specs(
             &[],
             2,
             &[
@@ -12597,7 +12607,7 @@ occupancy = 1.0
             volume_m3: 200.0,
         }];
         let zone_types = vec![ZoneType::Conditioned];
-        let schema = hares_io::build_schema(&[], 6, &[(ZoneId(1), "Indoor".to_string())]);
+        let schema = hares_io::build_schema_for_specs(&[], 6, &[(ZoneId(1), "Indoor".to_string())]);
         let column_index = build_output_column_index(&schema);
         let caches = build_zone_column_caches(&zones, &zone_types, ZoneId(1), &column_index);
 
@@ -12656,10 +12666,6 @@ occupancy = 1.0
         use crate::actors::Occupant;
         use crate::actors::Presence;
 
-        // Build a schema with 2 zones at verbosity 0 (minimum columns).
-        let schema = hares_io::build_schema(&[], 0, &[]);
-        let base_fields = schema.fields().len();
-
         // Create an actor with telemetry keys.
         let schedule = vec![Presence::Home, Presence::Home];
         let mut actor = Occupant::new("Occupant").with_presence_schedule(schedule);
@@ -12670,17 +12676,31 @@ occupancy = 1.0
         actor.decide(&env, &mut out);
 
         let actors: Vec<Box<dyn Actor>> = vec![Box::new(actor)];
-        let extended = extend_schema_with_actor_columns(
-            &schema,
-            &actors.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
-        );
+        // The catalogue merges the actor's declarations: the schema at
+        // verbosity 0 (minimum columns) carries the actor columns.
+        let actor_refs: Vec<&dyn Actor> = actors.iter().map(AsRef::as_ref).collect();
+        let input = hares_io::CatalogueInput {
+            equipment: Vec::new(),
+            zones: Vec::new(),
+            actors: actor_refs
+                .iter()
+                .map(|a| hares_io::CatalogueActor {
+                    name: std::sync::Arc::from(a.name()),
+                    output_variables: a.output_variables().to_vec(),
+                })
+                .collect(),
+        };
+        let catalogue = hares_io::build_catalogue(&input).expect("the actor catalogue builds");
+        let extended = hares_io::build_schema(&catalogue, 0);
         let extended_fields = extended.fields().len();
 
-        // Schema must gain columns (one per actor telemetry key).
+        // Schema must gain columns (one per actor telemetry key) beside
+        // Time and the verbosity-0 dwelling statics (the three totals and
+        // the two context temperatures).
         let n_actor_keys = 5; // away, transition, signals_count, presence_changes, current_step
         assert_eq!(
             extended_fields,
-            base_fields + n_actor_keys,
+            6 + n_actor_keys,
             "schema must include actor telemetry columns"
         );
 
@@ -13579,6 +13599,10 @@ occupancy = 1.0
         fn name(&self) -> &str {
             &self.name
         }
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
+        }
+
         fn decide(
             &mut self,
             _env: &hares_types::EnvironmentState,
@@ -13655,9 +13679,16 @@ occupancy = 1.0
         telemetry: Telemetry,
     }
     impl DrainingStateActor {
+        /// The declared telemetry: the checkpointed counter.
+        pub const OUTPUT_VARIABLES: &'static [TelemetryField] = &[TelemetryField::step_count(
+            "counter",
+            "The checkpointed counter's value",
+        )];
+
         fn new(name: &str, counter: u32) -> Self {
-            let mut telemetry = Telemetry::default();
-            telemetry.insert("counter", counter as f64);
+            let telemetry = Telemetry::from_fields(Self::OUTPUT_VARIABLES);
+            let mut telemetry = telemetry;
+            telemetry.set("counter", counter as f64);
             Self {
                 name: name.to_string(),
                 counter,
@@ -13668,6 +13699,9 @@ occupancy = 1.0
     impl crate::Actor for DrainingStateActor {
         fn name(&self) -> &str {
             &self.name
+        }
+        fn output_variables(&self) -> &[TelemetryField] {
+            Self::OUTPUT_VARIABLES
         }
         fn telemetry(&self) -> Option<&Telemetry> {
             Some(&self.telemetry)
@@ -15857,6 +15891,10 @@ occupancy = 0.0
         fn name(&self) -> &str {
             &self.name
         }
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
+        }
+
         fn dispatch_targets(&self) -> &[crate::ActorTarget] {
             &self.target
         }
@@ -17206,6 +17244,10 @@ latent_gain_fraction = 0.08
         fn name(&self) -> &str {
             "Undeclared"
         }
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
+        }
+
         fn dispatch_targets(&self) -> &[crate::ActorTarget] {
             &self.target
         }
@@ -17280,6 +17322,10 @@ latent_gain_fraction = 0.08
             fn name(&self) -> &str {
                 "Undeclared"
             }
+            fn output_variables(&self) -> &[TelemetryField] {
+                &[]
+            }
+
             fn dispatch_targets(&self) -> &[crate::ActorTarget] {
                 &self.0
             }
@@ -18823,11 +18869,11 @@ occupancy = 0.0
         let equipment = equipment_refs(&dwelling.equipment);
         let actors: Vec<&dyn Actor> = dwelling.actors.iter().map(AsRef::as_ref).collect();
         // The schema at full verbosity for this dwelling, built exactly as
-        // the freeze builds it.
-        let specs = equipment_descriptor_specs(&equipment);
-        let schema = hares_io::build_schema(&specs, 8, &dwelling.zone_names());
-        let schema = enrich_schema_with_telemetry_units(schema, &equipment);
-        let schema = extend_schema_with_actor_columns(&schema, &actors);
+        // the freeze builds it: from the dwelling's catalogue, whose actor
+        // block already carries the actor columns.
+        let catalogue = dwelling.catalogue();
+        let schema = hares_io::build_schema(&catalogue, 8);
+        let schema = enrich_schema_with_telemetry_units(schema, &equipment, &catalogue);
         let column_name = "Total Electric Power (kW)";
         let selections = [
             hares_io::Selection::Named(vec![column_name.to_string()]),
@@ -18906,11 +18952,11 @@ occupancy = 0.0
         let equipment = equipment_refs(&dwelling.equipment);
         let actors: Vec<&dyn Actor> = dwelling.actors.iter().map(AsRef::as_ref).collect();
         // The schema at verbosity 2 for this dwelling, built exactly as the
-        // freeze builds it.
-        let specs = equipment_descriptor_specs(&equipment);
-        let schema = hares_io::build_schema(&specs, 2, &dwelling.zone_names());
-        let schema = enrich_schema_with_telemetry_units(schema, &equipment);
-        let schema = extend_schema_with_actor_columns(&schema, &actors);
+        // freeze builds it: from the dwelling's catalogue, whose actor
+        // block already carries the actor columns.
+        let catalogue = dwelling.catalogue();
+        let schema = hares_io::build_schema(&catalogue, 2);
+        let schema = enrich_schema_with_telemetry_units(schema, &equipment, &catalogue);
         // The golden column indices: every value column's position by name,
         // the map the freeze resolved against.
         let golden_columns = build_output_column_index(&schema);
@@ -19011,10 +19057,9 @@ occupancy = 0.0
         let mut dwelling = bestest_dwelling();
         let equipment = equipment_refs(&dwelling.equipment);
         let actors: Vec<&dyn Actor> = dwelling.actors.iter().map(AsRef::as_ref).collect();
-        let specs = equipment_descriptor_specs(&equipment);
-        let schema = hares_io::build_schema(&specs, 0, &dwelling.zone_names());
-        let schema = enrich_schema_with_telemetry_units(schema, &equipment);
-        let schema = extend_schema_with_actor_columns(&schema, &actors);
+        let catalogue = dwelling.catalogue();
+        let schema = hares_io::build_schema(&catalogue, 0);
+        let schema = enrich_schema_with_telemetry_units(schema, &equipment, &catalogue);
         let row_plan = hares_io::RowPlan::build(
             &[hares_io::Selection::Verbosity(0)],
             &hares_io::SchemaSurface::new(&schema),
@@ -19184,7 +19229,7 @@ occupancy = 0.0
                 primary_role: None,
             },
         ];
-        let schema = hares_io::build_schema(&specs, 7, &[]);
+        let schema = hares_io::build_schema_for_specs(&specs, 7, &[]);
         let column_index = build_output_column_index(&schema);
 
         let mut eq1 = TestEquipment::new("ASHP Heater", ControlCapabilities::empty());
@@ -19251,7 +19296,7 @@ occupancy = 0.0
                 related_hvac_idref: None,
                 primary_role: None,
             }];
-            let schema = hares_io::build_schema(&specs, 1, &[]);
+            let schema = hares_io::build_schema_for_specs(&specs, 1, &[]);
             let column_index = build_output_column_index(&schema);
             let schema_has_gas_col =
                 column_index.contains_key(&format!("{name} {GAS_POWER_SUFFIX}"));
@@ -19279,7 +19324,7 @@ occupancy = 0.0
     /// At verbosity 0, per-equipment columns are not in the schema.
     #[test]
     fn plan_equipment_columns_v0_all_per_equipment_columns_none() {
-        let schema = hares_io::build_schema(&[], 0, &[]);
+        let schema = hares_io::build_schema_for_specs(&[], 0, &[]);
         let column_index = build_output_column_index(&schema);
         let eq = TestEquipment::new("ASHP Heater", ControlCapabilities::empty());
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
@@ -19317,7 +19362,7 @@ occupancy = 0.0
             related_hvac_idref: None,
             primary_role: None,
         }];
-        let schema = hares_io::build_schema(&specs, 5, &[]);
+        let schema = hares_io::build_schema_for_specs(&specs, 5, &[]);
         let column_index = build_output_column_index(&schema);
         let mut eq = TestEquipment::new("Gas Furnace", ControlCapabilities::empty());
         eq.descriptor.end_use = EndUse::HVAC_HEATING;
@@ -19335,7 +19380,7 @@ occupancy = 0.0
             "gas furnace blower emits Q — power factor column must resolve"
         );
         // Below verbosity 5 the columns are absent for all equipment.
-        let schema_v4 = hares_io::build_schema(&specs, 4, &[]);
+        let schema_v4 = hares_io::build_schema_for_specs(&specs, 4, &[]);
         let column_index_v4 = build_output_column_index(&schema_v4);
         let mut eq_v4 = TestEquipment::new("Gas Furnace", ControlCapabilities::empty());
         eq_v4.descriptor.end_use = EndUse::HVAC_HEATING;
@@ -19363,7 +19408,7 @@ occupancy = 0.0
             related_hvac_idref: None,
             primary_role: None,
         }];
-        let schema = hares_io::build_schema(&specs, 1, &[]);
+        let schema = hares_io::build_schema_for_specs(&specs, 1, &[]);
         let column_index = build_output_column_index(&schema);
         assert!(column_index.contains_key("ASHP Heater Electric Power (kW)"));
         assert!(!column_index.contains_key("ASHP Heater Electrix Power (kW)"));
@@ -19384,7 +19429,7 @@ occupancy = 0.0
             related_hvac_idref: None,
             primary_role: None,
         }];
-        let schema = hares_io::build_schema(&specs, 7, &[]);
+        let schema = hares_io::build_schema_for_specs(&specs, 7, &[]);
         let column_index = build_output_column_index(&schema);
         let name = "Air Conditioner";
         assert!(column_index.contains_key(&format!("{name} {ELECTRIC_POWER_SUFFIX}")));
@@ -19403,10 +19448,10 @@ occupancy = 0.0
     /// `HVAC_DUCT_LOSSES_COL` constant resolves in the schema at v5+.
     #[test]
     fn duct_losses_column_uses_shared_constant() {
-        let schema_v5 = hares_io::build_schema(&[], 5, &[]);
+        let schema_v5 = hares_io::build_schema_for_specs(&[], 5, &[]);
         let col_idx_v5 = build_output_column_index(&schema_v5);
         assert!(col_idx_v5.contains_key(HVAC_DUCT_LOSSES_COL));
-        let schema_v4 = hares_io::build_schema(&[], 4, &[]);
+        let schema_v4 = hares_io::build_schema_for_specs(&[], 4, &[]);
         let col_idx_v4 = build_output_column_index(&schema_v4);
         assert!(!col_idx_v4.contains_key(HVAC_DUCT_LOSSES_COL));
     }
@@ -19463,7 +19508,7 @@ occupancy = 0.0
                 primary_role: None,
             },
         ];
-        let schema = hares_io::build_schema(&specs, 8, &[]);
+        let schema = hares_io::build_schema_for_specs(&specs, 8, &[]);
         let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
 
         // Build the expected column set from the schema and the
@@ -19587,30 +19632,44 @@ occupancy = 0.0
         );
     }
 
+    /// A catalogue built from live equipment descriptors, for the enrich
+    /// tests.
+    fn catalogue_from_equipment(equipment: &[Box<dyn Equipment>]) -> hares_io::Catalogue {
+        let input = hares_io::CatalogueInput {
+            equipment: equipment_refs(equipment)
+                .iter()
+                .map(|eq| {
+                    let d = eq.descriptor();
+                    hares_io::CatalogueEquipment {
+                        name: d.name.clone(),
+                        instance_name: None,
+                        id: d.id,
+                        fuel: d.fuel,
+                        telemetry: d.telemetry_fields.clone(),
+                    }
+                })
+                .collect(),
+            zones: Vec::new(),
+            actors: Vec::new(),
+        };
+        hares_io::build_catalogue(&input).expect("the test catalogue builds")
+    }
+
     #[test]
     fn enrich_schema_telemetry_units_tags_matching_column_with_unit_source() {
         let mut eq = TestEquipment::new("TestEq", ControlCapabilities::empty());
-        eq.descriptor.telemetry_fields.push(TelemetryField {
-            name: "test_reactive".to_string(),
-            unit: "kVAR".to_string(),
-            description: "test reactive power".to_string(),
-        });
+        eq.descriptor
+            .telemetry_fields
+            .push(TelemetryField::power_kvar(
+                "test_reactive",
+                "test reactive power",
+            ));
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
 
-        let specs = vec![hares_io::EquipmentSpec {
-            instance_name: Some("TestEq".to_string()),
-            name: "TestEq".to_string(),
-            fuel_type: FuelType::Electric,
-            parameters: Map::new(),
-            zip_params: None,
-            typed_overrides: serde_json::Map::new(),
-            typed_config: None,
-            system_id: None,
-            related_hvac_idref: None,
-            primary_role: None,
-        }];
-        let schema = hares_io::build_schema(&specs, 5, &[]);
-        let enriched = enrich_schema_with_telemetry_units(schema, &equipment_refs(&equipment));
+        let catalogue = catalogue_from_equipment(&equipment);
+        let schema = hares_io::build_schema(&catalogue, 5);
+        let enriched =
+            enrich_schema_with_telemetry_units(schema, &equipment_refs(&equipment), &catalogue);
         let reactive_col = enriched
             .fields()
             .iter()
@@ -19625,31 +19684,18 @@ occupancy = 0.0
             "reactive power column with matching declared telemetry field unit should carry unit_source"
         );
     }
-
     #[test]
     fn enrich_schema_telemetry_units_sets_no_unit_source_when_unit_absent_from_descriptor() {
         let mut eq = TestEquipment::new("TestEq", ControlCapabilities::empty());
-        eq.descriptor.telemetry_fields.push(TelemetryField {
-            name: "test_kw".to_string(),
-            unit: "kW".to_string(),
-            description: "test active power".to_string(),
-        });
+        eq.descriptor
+            .telemetry_fields
+            .push(TelemetryField::power_kw("test_kw", "test active power"));
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
 
-        let specs = vec![hares_io::EquipmentSpec {
-            instance_name: Some("TestEq".to_string()),
-            name: "TestEq".to_string(),
-            fuel_type: FuelType::Electric,
-            parameters: Map::new(),
-            zip_params: None,
-            typed_overrides: serde_json::Map::new(),
-            typed_config: None,
-            system_id: None,
-            related_hvac_idref: None,
-            primary_role: None,
-        }];
-        let schema = hares_io::build_schema(&specs, 5, &[]);
-        let enriched = enrich_schema_with_telemetry_units(schema, &equipment_refs(&equipment));
+        let catalogue = catalogue_from_equipment(&equipment);
+        let schema = hares_io::build_schema(&catalogue, 5);
+        let enriched =
+            enrich_schema_with_telemetry_units(schema, &equipment_refs(&equipment), &catalogue);
         let reactive_col = enriched
             .fields()
             .iter()
@@ -19660,7 +19706,6 @@ occupancy = 0.0
             "reactive power column should not get unit_source when equipment declares no kVAR field"
         );
     }
-
     /// Interest-filtering state must stay per-equipment: `prev_equipment_modes`
     /// is `EquipmentId`-keyed and `equipment_mode_changed` attributes a mode
     /// change to the actor's target equipment by comparing against this map.

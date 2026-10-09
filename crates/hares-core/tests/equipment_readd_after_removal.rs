@@ -98,11 +98,7 @@ impl GuardedProbe {
                 stage: ExecutionStage::Independent,
                 control_capabilities: ControlCapabilities::empty(),
                 core_capabilities: CoreCapabilities::empty(),
-                telemetry_fields: vec![TelemetryField {
-                    name: "probe".to_string(),
-                    unit: "-".to_string(),
-                    description: "re-registration probe".to_string(),
-                }],
+                telemetry_fields: vec![TelemetryField::ratio("probe", "re-registration probe")],
                 zone_type: None,
             },
             telemetry: Telemetry::with_capacity(1),

@@ -744,54 +744,37 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::TANK_AVG_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Volume-weighted average tank temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Electric power (always 0 for indirect tank)".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "HX heat transfer power".to_string(),
-        },
-        TelemetryField {
-            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
-            unit: "kg/s".to_string(),
-            description: "Total DHW draw flow rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::UNMET_LOAD_W.to_string(),
-            unit: "W".to_string(),
-            description: "Unmet DHW load".to_string(),
-        },
-        TelemetryField {
-            name: tk::OUTLET_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "DHW outlet temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::SKIN_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Tank jacket thermal loss to the surrounding zone or ambient location"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "".to_string(),
-            description: "Operating mode (1=heating, 0=off)".to_string(),
-        },
+        TelemetryField::temp_c(
+            tk::TANK_AVG_TEMP_C,
+            "Volume-weighted average tank temperature",
+        ),
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Electric power (always 0 for indirect tank)",
+        ),
+        TelemetryField::power_w(tk::ELECTRIC_POWER_W, "HX heat transfer power"),
+        TelemetryField::flow_mean(
+            tk::DRAW_FLOW_RATE_KG_S,
+            hares_types::Unit::KilogramPerSecond,
+            "Total DHW draw flow rate",
+        ),
+        TelemetryField::power_w(tk::UNMET_LOAD_W, "Unmet DHW load"),
+        TelemetryField::temp_c(tk::OUTLET_TEMP_C, "DHW outlet temperature"),
+        TelemetryField::power_w(
+            tk::SKIN_LOSS_W,
+            "Tank jacket thermal loss to the surrounding zone or ambient location",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode (1=heating, 0=off)",
+        ),
     ];
     for i in 0..n_nodes {
-        fields.push(TelemetryField {
-            name: format!("tank_node_{i}_temp_c"),
-            unit: "C".to_string(),
-            description: format!("Tank node {i} temperature"),
-        });
+        fields.push(TelemetryField::temp_c_owned(
+            format!("tank_node_{i}_temp_c"),
+            format!("Tank node {i} temperature"),
+        ));
     }
     fields
 }

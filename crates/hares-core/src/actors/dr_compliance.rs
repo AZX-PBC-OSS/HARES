@@ -48,7 +48,7 @@ use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EnvironmentState, HaresError, OperatingMode,
-    Telemetry, ThermostatAxes, ThermostatAxis,
+    Telemetry, TelemetryField, ThermostatAxes, ThermostatAxis,
 };
 
 use crate::{Actor, ActorEquipment, ActorTarget};
@@ -433,27 +433,65 @@ pub struct DrCompliance {
 }
 
 impl DrCompliance {
+    /// The declared telemetry: the DR state machine's level and outcome,
+    /// the per-step signal counts, the freeze guard, and the demand
+    /// response event's parameters.
+    pub const OUTPUT_VARIABLES: &'static [TelemetryField] = &[
+        TelemetryField::code_code(
+            "dr_level",
+            &["0", "1", "2", "3", "4"],
+            "Demand response level (0=Normal, 1=Moderate, 2=High, 3=Critical, 4=GridEmergency)",
+        ),
+        TelemetryField::state_flag(
+            "dr_active",
+            "1 when a demand response event is active this step",
+        ),
+        TelemetryField::state_flag(
+            "dr_complied",
+            "1 when the actor complied with the active event",
+        ),
+        TelemetryField::step_count("signals_count", "Dispatch requests emitted this step"),
+        TelemetryField::step_count("signals_rejected", "Dispatch requests rejected this step"),
+        TelemetryField::state_flag(
+            "dr_freeze_guard",
+            "1 when the freeze guard overrode the event's setpoints",
+        ),
+        TelemetryField::step_count(
+            "clear_signals_dispatched_count",
+            "Clear-signal dispatches emitted this step",
+        ),
+        TelemetryField::step_count(
+            "targets_configured",
+            "Dispatch targets configured this step",
+        ),
+        TelemetryField::ratio(
+            "effective_compliance_rate",
+            "The compliance rate the actor actually applied",
+        ),
+        TelemetryField::code_code(
+            "demand_response_level",
+            &["0", "1", "2", "3", "4"],
+            "The dispatched event's demand response level (0=Normal, 1=Moderate, 2=High, 3=Critical, 4=GridEmergency)",
+        ),
+        TelemetryField::timer_s(
+            "demand_response_duration_s",
+            "The dispatched event's duration in seconds",
+        ),
+        TelemetryField::state_flag(
+            "preconditioning_unserved",
+            "1 when a preconditioning setpoint went unserved",
+        ),
+    ];
+
     /// Creates a new DR compliance actor with the default compliance model.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(12);
         // Why: telemetry initialises count and flag fields to 0.0 for
         // "not yet occurred / not active." demand_response_duration_s = 0.0
         // means "no DemandResponse action with a duration was dispatched
         // this step" — the constructor validates duration > 0 and the
         // decide() invariant prevents zero-duration dispatches, so 0.0
         // cannot collide with a legitimate output value.
-        telemetry.insert("dr_level", 0.0);
-        telemetry.insert("dr_active", 0.0);
-        telemetry.insert("dr_complied", 0.0);
-        telemetry.insert("signals_count", 0.0);
-        telemetry.insert("signals_rejected", 0.0);
-        telemetry.insert("dr_freeze_guard", 0.0);
-        telemetry.insert("clear_signals_dispatched_count", 0.0);
-        telemetry.insert("targets_configured", 0.0);
-        telemetry.insert("effective_compliance_rate", 0.0);
-        telemetry.insert("demand_response_level", 0.0);
-        telemetry.insert("demand_response_duration_s", 0.0);
-        telemetry.insert("preconditioning_unserved", 0.0);
+        let telemetry = Telemetry::from_fields(Self::OUTPUT_VARIABLES);
         Self {
             name: Arc::from(name),
             model: Box::new(AlwaysComply),
@@ -826,6 +864,10 @@ impl DrCompliance {
 impl Actor for DrCompliance {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn output_variables(&self) -> &[TelemetryField] {
+        Self::OUTPUT_VARIABLES
     }
 
     fn telemetry(&self) -> Option<&Telemetry> {

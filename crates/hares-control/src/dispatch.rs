@@ -101,17 +101,8 @@ impl From<&ControlSignal> for PriorityTier {
 /// Control dispatch target. Routing logic is implemented in `hares-core`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DispatchTarget {
-    ByName(#[serde(serialize_with = "ser_arc_str", deserialize_with = "de_arc_str")] Arc<str>),
+    ByName(Arc<str>),
     ByEndUse(EndUse),
-}
-
-fn ser_arc_str<S: serde::Serializer>(val: &Arc<str>, ser: S) -> Result<S::Ok, S::Error> {
-    ser.serialize_str(val)
-}
-
-fn de_arc_str<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Arc<str>, D::Error> {
-    let s: String = serde::Deserialize::deserialize(de)?;
-    Ok(Arc::from(s))
 }
 
 impl DispatchTarget {

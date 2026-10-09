@@ -1,0 +1,242 @@
+[
+  {
+    "arrow_type": "Utf8",
+    "name": "Time",
+    "nullable": false
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Total Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Total Gas Power (therms/hour)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Total Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Outdoor Dry Bulb (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Temperature - Indoor (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:safety_monitor:freeze_alarm",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:safety_monitor:min_zone_temp_c",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:safety_monitor:over_temp_alarm",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:safety_monitor:safety_signals_count",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:IdealThermostat(Ideal HVAC):cooling_setpoint_c",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:IdealThermostat(Ideal HVAC):deadband_c",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:IdealThermostat(Ideal HVAC):heating_setpoint_c",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:IdealThermostat(Ideal HVAC):setpoint_inversion_rejected",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:bms_action",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:bms_dwell_blocked",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:bms_pv_actual_kw",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:bms_pv_stale_kw",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:bms_toggled",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:load_kw",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:pv_kw",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:soc",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:clear_signals_dispatched_count",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:demand_response_duration_s",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:demand_response_level",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:dr_active",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:dr_complied",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:dr_freeze_guard",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:dr_level",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:effective_compliance_rate",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:preconditioning_unserved",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:signals_count",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:signals_rejected",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:targets_configured",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:occupant:away",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:occupant:current_step",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:occupant:presence_changes",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:occupant:signals_count",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:occupant:transition",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:charge_kw",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:discharge_min_soc",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:drive_cancelled",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:needed_charge_hours",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:phase",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:plugged_in",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:range_anxiety_active",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:soc",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:soc_gate_charging_allowed",
+    "nullable": true
+  }
+]

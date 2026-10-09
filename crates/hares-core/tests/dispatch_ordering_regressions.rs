@@ -114,11 +114,7 @@ impl StubPowerEquipment {
             stage: ExecutionStage::Independent,
             control_capabilities: ControlCapabilities::CURTAILMENT_PERCENT,
             core_capabilities: CoreCapabilities::ELECTRIC,
-            telemetry_fields: vec![TelemetryField {
-                name: tk::AC_POWER_KW.to_string(),
-                unit: "kW".to_string(),
-                description: "stub AC output".to_string(),
-            }],
+            telemetry_fields: vec![TelemetryField::power_kw(tk::AC_POWER_KW, "stub AC output")],
             zone_type: None,
         };
         let mut telemetry = Telemetry::with_capacity(1);
@@ -244,6 +240,9 @@ impl OneShotActor {
 impl Actor for OneShotActor {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn output_variables(&self) -> &[TelemetryField] {
+        &[]
     }
 
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {

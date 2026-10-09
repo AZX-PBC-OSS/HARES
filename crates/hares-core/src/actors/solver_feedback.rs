@@ -16,7 +16,7 @@
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_envelope::ThermalSolver;
 use hares_equipment::Equipment;
-use hares_types::{ControlSignal, EnvironmentState, ZoneId};
+use hares_types::{ControlSignal, EnvironmentState, TelemetryField, ZoneId};
 
 use crate::Actor;
 
@@ -149,6 +149,10 @@ impl Default for SolverFeedbackActor {
 impl Actor for SolverFeedbackActor {
     fn name(&self) -> &str {
         "SolverFeedbackActor"
+    }
+
+    fn output_variables(&self) -> &[TelemetryField] {
+        &[]
     }
 
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {

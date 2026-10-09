@@ -1722,71 +1722,43 @@ fn default_wet_appliance_telemetry() -> Telemetry {
 
 fn event_load_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::ACTIVE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Active electrical power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::SENSIBLE_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Sensible thermal gain to assigned zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Latent thermal gain to assigned zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas fuel consumption rate converted to watts".to_string(),
-        },
-        TelemetryField {
-            name: tk::STATE.to_string(),
-            unit: "-".to_string(),
-            description: "State machine phase (0=Idle,1=Active,2=Cooldown)".to_string(),
-        },
+        TelemetryField::power_kw(tk::ACTIVE_POWER_KW, "Active electrical power draw"),
+        TelemetryField::power_kvar(tk::REACTIVE_POWER_KVAR, "Reactive power draw"),
+        TelemetryField::power_w(
+            tk::SENSIBLE_GAIN_W,
+            "Sensible thermal gain to assigned zone",
+        ),
+        TelemetryField::power_w(tk::LATENT_GAIN_W, "Latent thermal gain to assigned zone"),
+        TelemetryField::power_w(
+            tk::FUEL_INPUT_W,
+            "Gas fuel consumption rate converted to watts",
+        ),
+        TelemetryField::code_code(
+            tk::STATE,
+            &["Idle", "Active", "Cooldown"],
+            "State machine phase (0=Idle,1=Active,2=Cooldown)",
+        ),
     ]
 }
 
 fn wet_appliance_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::ACTIVE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Active electrical power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::SENSIBLE_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Sensible thermal gain to assigned zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Latent thermal gain to assigned zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas fuel consumption rate converted to watts".to_string(),
-        },
-        TelemetryField {
-            name: tk::CYCLE_PHASE.to_string(),
-            unit: "-".to_string(),
-            description: "Cycle phase (0=Idle,1..N=phase index + 1)".to_string(),
-        },
+        TelemetryField::power_kw(tk::ACTIVE_POWER_KW, "Active electrical power draw"),
+        TelemetryField::power_kvar(tk::REACTIVE_POWER_KVAR, "Reactive power draw"),
+        TelemetryField::power_w(
+            tk::SENSIBLE_GAIN_W,
+            "Sensible thermal gain to assigned zone",
+        ),
+        TelemetryField::power_w(tk::LATENT_GAIN_W, "Latent thermal gain to assigned zone"),
+        TelemetryField::power_w(
+            tk::FUEL_INPUT_W,
+            "Gas fuel consumption rate converted to watts",
+        ),
+        TelemetryField::code_code(
+            tk::CYCLE_PHASE,
+            &["Idle"],
+            "Cycle phase (0=Idle,1..N=phase index + 1)",
+        ),
     ]
 }
 

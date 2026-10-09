@@ -926,8 +926,8 @@ impl PyTelemetryField {
     }
 
     #[getter]
-    fn unit(&self) -> &str {
-        &self.inner.unit
+    fn unit(&self) -> String {
+        self.inner.unit.symbol().to_string()
     }
 
     #[getter]
@@ -936,7 +936,11 @@ impl PyTelemetryField {
     }
 
     fn __repr__(&self) -> String {
-        format!("TelemetryField({} ({}))", self.inner.name, self.inner.unit)
+        format!(
+            "TelemetryField({} ({}))",
+            self.inner.name,
+            self.inner.unit.symbol()
+        )
     }
 }
 

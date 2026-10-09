@@ -2066,131 +2066,104 @@ fn default_telemetry() -> Telemetry {
 
 fn battery_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::SOC.to_string(),
-            unit: "-".to_string(),
-            description: "State of charge [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::ACTIVE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Grid-side active power (positive=consuming, negative=generating)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::OHMIC_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Ohmic heat dissipation from internal resistance".to_string(),
-        },
-        TelemetryField {
-            name: tk::STANDBY_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Parasitic standby power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::CELL_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Cell temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::CYCLE_COUNT.to_string(),
-            unit: "-".to_string(),
-            description: "Equivalent full cycles from rainflow counting".to_string(),
-        },
-        TelemetryField {
-            name: tk::HEATER_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Cell heater power draw (active when cells are cold and charge requested)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::DISCHARGE_DERATE.to_string(),
-            unit: "-".to_string(),
-            description: "Temperature-dependent discharge power derating factor [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::CAPACITY_DERATE.to_string(),
-            unit: "-".to_string(),
-            description:
-                "Temperature-dependent capacity and power derating factor (Arrhenius or piecewise)"
-                    .to_string(),
-        },
-        TelemetryField {
-            name: tk::CAPACITY_FADE_PCT.to_string(),
-            unit: "%".to_string(),
-            description: "Cumulative capacity degradation (updated once per day at midnight; "
-                .to_string()
-                + "reflects the previous day's cumulative degradation between updates)",
-        },
-        TelemetryField {
-            name: tk::TERMINAL_VOLTAGE_V.to_string(),
-            unit: "V".to_string(),
-            description: "Pack terminal voltage (Voc ± IR drop)".to_string(),
-        },
-        TelemetryField {
-            name: tk::CURRENT_A.to_string(),
-            unit: "A".to_string(),
-            description: "Pack current (positive=charging, negative=discharging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 4=Standby, 5=Charging, 6=Discharging"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::N_SERIES.to_string(),
-            unit: "-".to_string(),
-            description: "Pack series cell count".to_string(),
-        },
-        TelemetryField {
-            name: tk::N_PARALLEL.to_string(),
-            unit: "-".to_string(),
-            description: "Pack parallel cell count".to_string(),
-        },
-        TelemetryField {
-            name: tk::AH_CELL.to_string(),
-            unit: "Ah".to_string(),
-            description: "Per-cell capacity from config (NaN when not provided)".to_string(),
-        },
-        TelemetryField {
-            name: tk::V_CELL.to_string(),
-            unit: "V".to_string(),
-            description: "Per-cell nominal voltage from config (NaN when not provided)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DERIVATION_SOURCE.to_string(),
-            unit: "enum".to_string(),
-            description: "Topology derivation source: 0=defaults, 1=explicit, 2=cell_parameters, 3=mixed"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::IMPLIED_CAPACITY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "Pack capacity implied by integer topology (n_parallel * ah_cell * n_series * v_cell / 1000)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::DECLARED_CAPACITY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "Declared pack capacity from config".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive=absorbing vars, negative=supplying)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DR_POWER_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Demand response power scaling factor [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::DR_LEVEL.to_string(),
-            unit: "code".to_string(),
-            description: "Demand response level (0=Normal, 1=Moderate, 2=High, 3=Critical, 4=GridEmergency)"
-                .to_string(),
-        },
+        TelemetryField::ratio(tk::SOC, "State of charge [0..1]"),
+        TelemetryField::power_kw(
+            tk::ACTIVE_POWER_KW,
+            "Grid-side active power (positive=consuming, negative=generating)",
+        ),
+        TelemetryField::power_w(
+            tk::OHMIC_LOSS_W,
+            "Ohmic heat dissipation from internal resistance",
+        ),
+        TelemetryField::power_w(tk::STANDBY_POWER_W, "Parasitic standby power draw"),
+        TelemetryField::temp_c(tk::CELL_TEMP_C, "Cell temperature"),
+        TelemetryField::running_total(
+            tk::CYCLE_COUNT,
+            hares_types::Unit::Dimensionless,
+            "Equivalent full cycles from rainflow counting",
+        ),
+        TelemetryField::power_w(
+            tk::HEATER_POWER_W,
+            "Cell heater power draw (active when cells are cold and charge requested)",
+        ),
+        TelemetryField::ratio(
+            tk::DISCHARGE_DERATE,
+            "Temperature-dependent discharge power derating factor [0..1]",
+        ),
+        TelemetryField::ratio(
+            tk::CAPACITY_DERATE,
+            "Temperature-dependent capacity and power derating factor (Arrhenius or piecewise)",
+        ),
+        TelemetryField::ratio_percent(
+            tk::CAPACITY_FADE_PCT,
+            concat!(
+                "Cumulative capacity degradation (updated once per day at midnight; ",
+                "reflects the previous day's cumulative degradation between updates)"
+            ),
+        ),
+        TelemetryField::flow_mean(
+            tk::TERMINAL_VOLTAGE_V,
+            hares_types::Unit::Volt,
+            "Pack terminal voltage (Voc ± IR drop)",
+        ),
+        TelemetryField::flow_sum(
+            tk::CURRENT_A,
+            hares_types::Unit::Ampere,
+            "Pack current (positive=charging, negative=discharging)",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode code: 0=Off, 4=Standby, 5=Charging, 6=Discharging",
+        ),
+        TelemetryField::constant_sum(
+            tk::N_SERIES,
+            hares_types::Unit::Dimensionless,
+            "Pack series cell count",
+        ),
+        TelemetryField::constant_sum(
+            tk::N_PARALLEL,
+            hares_types::Unit::Dimensionless,
+            "Pack parallel cell count",
+        ),
+        TelemetryField::constant_sum(
+            tk::AH_CELL,
+            hares_types::Unit::AmpereHour,
+            "Per-cell capacity from config (NaN when not provided)",
+        ),
+        TelemetryField::flow_mean(
+            tk::V_CELL,
+            hares_types::Unit::Volt,
+            "Per-cell nominal voltage from config (NaN when not provided)",
+        ),
+        TelemetryField::code_code(
+            tk::DERIVATION_SOURCE,
+            &["defaults", "explicit", "cell_parameters", "mixed"],
+            "Topology derivation source: 0=defaults, 1=explicit, 2=cell_parameters, 3=mixed",
+        ),
+        TelemetryField::constant_sum(
+            tk::IMPLIED_CAPACITY_KWH,
+            hares_types::Unit::KilowattHour,
+            "Pack capacity implied by integer topology (n_parallel * ah_cell * n_series * v_cell / 1000)",
+        ),
+        TelemetryField::constant_sum(
+            tk::DECLARED_CAPACITY_KWH,
+            hares_types::Unit::KilowattHour,
+            "Declared pack capacity from config",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive=absorbing vars, negative=supplying)",
+        ),
+        TelemetryField::ratio(
+            tk::DR_POWER_FRACTION,
+            "Demand response power scaling factor [0..1]",
+        ),
+        TelemetryField::code_code(
+            tk::DR_LEVEL,
+            &["Normal", "Moderate", "High", "Critical", "GridEmergency"],
+            "Demand response level (0=Normal, 1=Moderate, 2=High, 3=Critical, 4=GridEmergency)",
+        ),
     ]
 }
 
@@ -2403,7 +2376,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         assert!(field_names.contains(&tk::SOC));
         assert!(field_names.contains(&tk::ACTIVE_POWER_KW));

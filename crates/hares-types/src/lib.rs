@@ -13,6 +13,7 @@ pub mod error;
 pub mod fluid;
 pub mod health;
 pub(crate) mod mode_flow_guard;
+pub mod output;
 pub mod panic_hook;
 pub mod ports;
 pub mod rng;
@@ -33,6 +34,7 @@ pub use equipment::*;
 pub use error::*;
 pub use fluid::*;
 pub use health::*;
+pub use output::*;
 pub use warning::*;
 
 // `mode_flow_guard` itself stays crate-private: the consistency checks are

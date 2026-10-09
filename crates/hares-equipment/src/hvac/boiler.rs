@@ -1323,104 +1323,67 @@ fn gas_boiler_default_telemetry() -> Telemetry {
 
 fn setpoint_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active heating setpoint from thermostat schedule".to_string(),
-        },
-        TelemetryField {
-            name: tk::COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active cooling setpoint from thermostat schedule".to_string(),
-        },
+        TelemetryField::temp_c(
+            tk::HEATING_SETPOINT_C,
+            "Active heating setpoint from thermostat schedule",
+        ),
+        TelemetryField::temp_c(
+            tk::COOLING_SETPOINT_C,
+            "Active cooling setpoint from thermostat schedule",
+        ),
     ]
 }
 
 fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Electric boiler active power draw (element + circulation pump)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::PUMP_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Hydronic circulation pump electric draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Fraction of the step the element runs (equals the part-load ratio)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "-".to_string(),
-            description: "Delivered capacity as a fraction of rated".to_string(),
-        },
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Thermal output transferred to hydronic loop".to_string(),
-        },
-        TelemetryField {
-            name: tk::BOILER_CP_USED_J_KG_K.to_string(),
-            unit: "J/(kg*K)".to_string(),
-            description: "Effective specific heat used in supply temperature calculation"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::SUPPLY_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Fluid supply temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::RETURN_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Fluid return temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Electric boiler active power draw (element + circulation pump)",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::power_kw(tk::PUMP_POWER_KW, "Hydronic circulation pump electric draw"),
+        TelemetryField::ratio(
+            tk::RUNTIME_FRACTION,
+            "Fraction of the step the element runs (equals the part-load ratio)",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_RATIO,
+            "Delivered capacity as a fraction of rated",
+        ),
+        TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Thermal output transferred to hydronic loop",
+        ),
+        TelemetryField::flow_mean(
+            tk::BOILER_CP_USED_J_KG_K,
+            hares_types::Unit::JoulePerKilogramKelvin,
+            "Effective specific heat used in supply temperature calculation",
+        ),
+        TelemetryField::temp_c(tk::SUPPLY_TEMP_C, "Fluid supply temperature"),
+        TelemetryField::temp_c(tk::RETURN_TEMP_C, "Fluid return temperature"),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode code: 0=Off, 1=Heating",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
     ];
     fields.extend(setpoint_telemetry_fields());
     fields
@@ -1428,98 +1391,62 @@ fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
 
 fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Gas boiler auxiliary electrical draw (pump/fan)".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas boiler fuel input power".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Fraction of the step the burner runs (equals the part-load ratio)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "-".to_string(),
-            description: "Delivered capacity as a fraction of rated".to_string(),
-        },
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Thermal output transferred to hydronic loop".to_string(),
-        },
-        TelemetryField {
-            name: tk::JACKET_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Jacket heat loss to zone (fuel_input - thermal_output)".to_string(),
-        },
-        TelemetryField {
-            name: tk::EIR.to_string(),
-            unit: "-".to_string(),
-            description: "Instantaneous energy-input ratio after polynomial adjustment".to_string(),
-        },
-        TelemetryField {
-            name: tk::BOILER_CP_USED_J_KG_K.to_string(),
-            unit: "J/(kg*K)".to_string(),
-            description: "Effective specific heat used in supply temperature calculation"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::SUPPLY_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Fluid supply temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::RETURN_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Fluid return temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Gas boiler auxiliary electrical draw (pump/fan)",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::power_w(tk::FUEL_INPUT_W, "Gas boiler fuel input power"),
+        TelemetryField::ratio(
+            tk::RUNTIME_FRACTION,
+            "Fraction of the step the burner runs (equals the part-load ratio)",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_RATIO,
+            "Delivered capacity as a fraction of rated",
+        ),
+        TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Thermal output transferred to hydronic loop",
+        ),
+        TelemetryField::power_w(
+            tk::JACKET_LOSS_W,
+            "Jacket heat loss to zone (fuel_input - thermal_output)",
+        ),
+        TelemetryField::ratio(
+            tk::EIR,
+            "Instantaneous energy-input ratio after polynomial adjustment",
+        ),
+        TelemetryField::flow_mean(
+            tk::BOILER_CP_USED_J_KG_K,
+            hares_types::Unit::JoulePerKilogramKelvin,
+            "Effective specific heat used in supply temperature calculation",
+        ),
+        TelemetryField::temp_c(tk::SUPPLY_TEMP_C, "Fluid supply temperature"),
+        TelemetryField::temp_c(tk::RETURN_TEMP_C, "Fluid return temperature"),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode code: 0=Off, 1=Heating",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
     ];
     fields.extend(setpoint_telemetry_fields());
     fields

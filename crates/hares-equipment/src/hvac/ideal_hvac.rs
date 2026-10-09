@@ -1053,135 +1053,86 @@ fn ideal_hvac_default_telemetry() -> Telemetry {
 
 fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Thermal power delivered to zone (positive=heating, negative=cooling)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode: 0=Off, 1=Heating, 2=Cooling".to_string(),
-        },
-        TelemetryField {
-            name: tk::IDEAL_CAPACITY_W.to_string(),
-            unit: "W".to_string(),
-            description: "Ideal capacity from solver (positive=heating, negative=cooling)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::IDEAL_CAPACITY_DEGRADED.to_string(),
-            unit: "bool".to_string(),
-            description: "1.0 if capacity is degraded (fallback after consecutive solver failures)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::CURRENT_TARGET_C.to_string(),
-            unit: "C".to_string(),
-            description: "Current setpoint target temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::FAN_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Fan electrical consumption".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging); Ideal HVAC is unity pf"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::COIL_SENSIBLE_COOLING_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gross sensible cooling at the coil (positive magnitude, non-zero only during cooling); distinguishes coil output from fan waste heat".to_string(),
-        },
-        TelemetryField {
-            name: tk::FAN_HEAT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Supply fan waste heat added to the zone (positive); per E+ I/O Ref: fan motor heat in the supply air stream".to_string(),
-        },
-        TelemetryField {
-            name: tk::HVAC_HEATING_CAPACITY_W.to_string(),
-            unit: "W".to_string(),
-            description: "Rated heating capacity".to_string(),
-        },
-        TelemetryField {
-            name: tk::HVAC_COOLING_CAPACITY_W.to_string(),
-            unit: "W".to_string(),
-            description: "Rated cooling capacity".to_string(),
-        },
-        TelemetryField {
-            name: tk::CAP_RATIO.to_string(),
-            unit: "ratio".to_string(),
-            description: "Biquadratic capacity correction factor (1.0 = rated)".to_string(),
-        },
-        TelemetryField {
-            name: tk::EIR_RATIO.to_string(),
-            unit: "ratio".to_string(),
-            description: "Biquadratic EIR correction factor (1.0 = rated)".to_string(),
-        },
-        TelemetryField {
-            name: tk::HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active heating setpoint temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active cooling setpoint temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::SCHEDULE_HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Schedule-stage heating setpoint (before runtime override)".to_string(),
-        },
-        TelemetryField {
-            name: tk::SCHEDULE_COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Schedule-stage cooling setpoint (before runtime override)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Runtime override heating setpoint (0.0 when no override active)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Runtime override cooling setpoint (0.0 when no override active)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
+        TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Thermal power delivered to zone (positive=heating, negative=cooling)",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode: 0=Off, 1=Heating, 2=Cooling",
+        ),
+        TelemetryField::power_w(
+            tk::IDEAL_CAPACITY_W,
+            "Ideal capacity from solver (positive=heating, negative=cooling)",
+        ),
+        TelemetryField::boolean(
+            tk::IDEAL_CAPACITY_DEGRADED,
+            "1.0 if capacity is degraded (fallback after consecutive solver failures)",
+        ),
+        TelemetryField::temp_c(tk::CURRENT_TARGET_C, "Current setpoint target temperature"),
+        TelemetryField::power_kw(tk::FAN_KW, "Fan electrical consumption"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging); Ideal HVAC is unity pf",
+        ),
+        TelemetryField::power_w(
+            tk::COIL_SENSIBLE_COOLING_W,
+            "Gross sensible cooling at the coil (positive magnitude, non-zero only during cooling); distinguishes coil output from fan waste heat",
+        ),
+        TelemetryField::power_w(
+            tk::FAN_HEAT_W,
+            "Supply fan waste heat added to the zone (positive); per E+ I/O Ref: fan motor heat in the supply air stream",
+        ),
+        TelemetryField::power_w(tk::HVAC_HEATING_CAPACITY_W, "Rated heating capacity"),
+        TelemetryField::power_w(tk::HVAC_COOLING_CAPACITY_W, "Rated cooling capacity"),
+        TelemetryField::ratio_fraction(
+            tk::CAP_RATIO,
+            "Biquadratic capacity correction factor (1.0 = rated)",
+        ),
+        TelemetryField::ratio_fraction(
+            tk::EIR_RATIO,
+            "Biquadratic EIR correction factor (1.0 = rated)",
+        ),
+        TelemetryField::temp_c(
+            tk::HEATING_SETPOINT_C,
+            "Active heating setpoint temperature",
+        ),
+        TelemetryField::temp_c(
+            tk::COOLING_SETPOINT_C,
+            "Active cooling setpoint temperature",
+        ),
+        TelemetryField::temp_c(
+            tk::SCHEDULE_HEATING_SETPOINT_C,
+            "Schedule-stage heating setpoint (before runtime override)",
+        ),
+        TelemetryField::temp_c(
+            tk::SCHEDULE_COOLING_SETPOINT_C,
+            "Schedule-stage cooling setpoint (before runtime override)",
+        ),
+        TelemetryField::temp_c(
+            tk::RUNTIME_HEATING_SETPOINT_C,
+            "Runtime override heating setpoint (0.0 when no override active)",
+        ),
+        TelemetryField::temp_c(
+            tk::RUNTIME_COOLING_SETPOINT_C,
+            "Runtime override cooling setpoint (0.0 when no override active)",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
     ]
 }
 

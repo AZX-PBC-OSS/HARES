@@ -18,7 +18,7 @@ use std::sync::Arc;
 use hares_control::{DispatchRequest, DispatchTarget};
 use hares_types::{
     ControlCapabilities, EnvironmentState, EquipmentDescriptor, EquipmentId, HaresError, Telemetry,
-    ThermostatAxes, ZoneId,
+    TelemetryField, ThermostatAxes, ZoneId,
 };
 
 /// What an actor reads about one equipment when its bindings resolve.
@@ -224,6 +224,14 @@ pub trait Actor: Send + Sync + 'static {
         _out: &mut Vec<DispatchRequest>,
     ) {
     }
+
+    /// Declares every telemetry key the actor publishes, typed: the
+    /// catalogue builds the actor's `actor:{name}:{key}` columns from this,
+    /// the actor's `Telemetry` is built and sealed from it
+    /// (`Telemetry::from_fields`), and registration rejects an actor whose
+    /// telemetry holds a key these declarations omit. Required: an actor
+    /// that publishes nothing declares nothing.
+    fn output_variables(&self) -> &[TelemetryField];
 
     /// Returns a reference to the actor's telemetry, or `None` if the actor
     /// has no observable internal state.
@@ -575,6 +583,10 @@ mod tests {
     impl Actor for TestActor {
         fn name(&self) -> &str {
             &self.name
+        }
+
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
         }
 
         fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {

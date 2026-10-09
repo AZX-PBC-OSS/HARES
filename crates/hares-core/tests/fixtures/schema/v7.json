@@ -1,0 +1,3552 @@
+[
+  {
+    "arrow_type": "Utf8",
+    "name": "Time",
+    "nullable": false
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Total Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Total Gas Power (therms/hour)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Total Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Outdoor Dry Bulb (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Temperature - Indoor (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Basement Lighting Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Battery Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ceiling Fan Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Dryer Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Washer Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Cooking Range Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dishwasher Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ERV Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EV Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Vehicle Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EventBasedLoad Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Exterior Lighting Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Freezer Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Garage Lighting Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Gas Power (therms/hour)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fireplace Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fireplace Gas Power (therms/hour)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fuel Cell Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fuel Cell Gas Power (therms/hour)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Gas Power (therms/hour)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Generator Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Generator Gas Power (therms/hour)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Grill Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Grill Gas Power (therms/hour)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Lighting Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Lighting Gas Power (therms/hour)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Gas Power (therms/hour)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Gas Power (therms/hour)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HPWH Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HRV Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ideal HVAC Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indoor Lighting Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Lighting Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MELs Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Microwave Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Other Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "PV #1 Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Plug Loads Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Pump Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Protocol Bridge Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Refrigerator Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Scheduled EV Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Pump Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "TV Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ventilation Fan Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Well Pump Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Television Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HVAC Cooling End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HVAC Heating End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Other End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Battery End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ceiling Fan End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Cooking End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ventilation End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EV End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Water Heating End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Lighting End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Refrigeration End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Generator End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Plug Loads End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "PV End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Pump End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Pump End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Temperature - Attic (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Temperature - Basement (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Unmet HVAC Load (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Temperature - Ground (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Basement Lighting Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Battery Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Battery SOC (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ceiling Fan Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Dryer Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Washer Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Cooking Range Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dishwasher Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ERV Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EV Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EV SOC (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Vehicle Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Vehicle SOC (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EventBasedLoad Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Exterior Lighting Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Freezer Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Garage Lighting Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fireplace Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fuel Cell Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Generator Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Grill Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Lighting Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HPWH Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HRV Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ideal HVAC Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indoor Lighting Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Lighting Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MELs Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Microwave Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Other Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "PV #1 Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Plug Loads Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Pump Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Protocol Bridge Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Refrigerator Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Scheduled EV Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Pump Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "TV Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ventilation Fan Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Well Pump Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Television Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Basement Lighting Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Battery Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ceiling Fan Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Dryer Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Washer Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Cooking Range Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dishwasher Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ERV Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EV Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Vehicle Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EventBasedLoad Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Exterior Lighting Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Freezer Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Garage Lighting Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fireplace Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fuel Cell Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Generator Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Grill Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Lighting Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HPWH Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HRV Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ideal HVAC Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indoor Lighting Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Lighting Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MELs Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Microwave Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Other Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "PV #1 Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Plug Loads Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Pump Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Protocol Bridge Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Refrigerator Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Scheduled EV Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Pump Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "TV Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ventilation Fan Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Well Pump Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Television Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Energy (kWh)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HVAC Heating Delivered (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HVAC Cooling Delivered (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Basement Lighting Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Basement Lighting Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Battery Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Battery Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ceiling Fan Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ceiling Fan Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Dryer Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Dryer Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Washer Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Washer Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Cooking Range Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Cooking Range Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dishwasher Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dishwasher Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ERV Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ERV Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EV Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EV Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Vehicle Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Vehicle Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EventBasedLoad Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EventBasedLoad Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Exterior Lighting Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Exterior Lighting Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Freezer Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Freezer Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Garage Lighting Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Garage Lighting Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fireplace Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fireplace Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fuel Cell Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fuel Cell Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Generator Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Generator Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Grill Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Grill Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Lighting Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Lighting Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HPWH Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HPWH Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HRV Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HRV Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ideal HVAC Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ideal HVAC Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indoor Lighting Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indoor Lighting Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Lighting Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Lighting Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MELs Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MELs Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Microwave Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Microwave Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Other Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Other Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "PV #1 Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "PV #1 Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Plug Loads Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Plug Loads Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Pump Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Pump Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Protocol Bridge Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Protocol Bridge Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Refrigerator Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Refrigerator Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Scheduled EV Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Scheduled EV Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Pump Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Pump Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "TV Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "TV Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ventilation Fan Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ventilation Fan Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Well Pump Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Well Pump Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Television Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Television Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Reactive Power (kVAR)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Power Factor (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Net Sensible Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HVAC Duct Losses (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Window Transmitted Solar Gain (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Infiltration Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Forced Ventilation Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Natural Ventilation Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Natural Ventilation Cw (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Natural Ventilation Wind Angle (deg)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Internal Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Interior LWR Exchange - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Opaque Surface Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Duct Loss Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Roof Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Floor Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Wall Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Window Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Internal Mass Heat Gain - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Zone Air Heat Balance Residual (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Infiltration Heat Gain - Attic (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Interior LWR Exchange - Attic (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Infiltration Heat Gain - Basement (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Interior LWR Exchange - Basement (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HVAC Heating Delivered - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HVAC Cooling Delivered - Indoor (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HVAC Heating Delivered - Attic (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HVAC Cooling Delivered - Attic (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HVAC Heating Delivered - Basement (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HVAC Cooling Delivered - Basement (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler SHR (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Latent Gains (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Cooler COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Defrost State (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater ER Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ASHP Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner SHR (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Latent Gains (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Air Conditioner COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Basement Lighting Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Battery Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ceiling Fan Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Dryer Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Clothes Washer Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Cooking Range Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier SHR (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Latent Gains (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dehumidifier COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Dishwasher Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "ERV Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EV Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Baseboard COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Boiler COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Furnace COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Resistance Water Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Electric Vehicle Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "EventBasedLoad Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Exterior Lighting Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Freezer Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler SHR (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Latent Gains (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Cooler COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Garage Lighting Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Boiler COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fireplace Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Fuel Cell Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Furnace COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Generator Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Grill Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Lighting Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Tankless Water Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Gas Water Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HPWH Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HRV Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Defrost State (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater ER Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Heat Pump Water Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ideal HVAC Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indoor Lighting Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Lighting Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MELs Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler SHR (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Latent Gains (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Cooler COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Defrost State (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater ER Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "MSHP Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Microwave Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Other Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "PV #1 Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Plug Loads Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #1 COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Pump Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Protocol Bridge Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Refrigerator Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Resistance Water Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC SHR (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Latent Gains (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Room AC COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Scheduled EV Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Spa Pump Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "TV Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Tankless Water Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ventilation Fan Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler SHR (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Latent Gains (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Cooler COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Well Pump Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Television Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Pool Heater #2 COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Hot Water Mains Temperature (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Scheduled Heating Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Scheduled Cooling Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Runtime Heating Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Runtime Cooling Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:safety_monitor:freeze_alarm",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:safety_monitor:min_zone_temp_c",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:safety_monitor:over_temp_alarm",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:safety_monitor:safety_signals_count",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:IdealThermostat(Ideal HVAC):cooling_setpoint_c",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:IdealThermostat(Ideal HVAC):deadband_c",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:IdealThermostat(Ideal HVAC):heating_setpoint_c",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:IdealThermostat(Ideal HVAC):setpoint_inversion_rejected",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:bms_action",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:bms_dwell_blocked",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:bms_pv_actual_kw",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:bms_pv_stale_kw",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:bms_toggled",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:load_kw",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:pv_kw",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:BatteryManagementActor:Battery:soc",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:clear_signals_dispatched_count",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:demand_response_duration_s",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:demand_response_level",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:dr_active",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:dr_complied",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:dr_freeze_guard",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:dr_level",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:effective_compliance_rate",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:preconditioning_unserved",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:signals_count",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:signals_rejected",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:dr_compliance:targets_configured",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:occupant:away",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:occupant:current_step",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:occupant:presence_changes",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:occupant:signals_count",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:occupant:transition",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:charge_kw",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:discharge_min_soc",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:drive_cancelled",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:needed_charge_hours",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:phase",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:plugged_in",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:range_anxiety_active",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:soc",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "actor:ev_driver:soc_gate_charging_allowed",
+    "nullable": true
+  }
+]

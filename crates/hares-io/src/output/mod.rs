@@ -4,6 +4,7 @@
 //! rows up to a configurable chunk size and flushes to disk, keeping peak
 //! memory proportional to the chunk size rather than simulation length.
 
+pub mod catalogue;
 pub mod columns;
 pub mod metrics;
 pub mod report;
@@ -11,6 +12,11 @@ pub mod writer;
 
 use std::path::PathBuf;
 
+pub use catalogue::{
+    Catalogue, CatalogueActor, CatalogueEquipment, CatalogueError, CatalogueInput,
+    EquipmentColumnFamilies, VariableDef, VariableSource, build_catalogue, build_schema,
+    build_schema_for_specs,
+};
 pub use columns::{
     CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
     DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
@@ -22,12 +28,11 @@ pub use columns::{
     RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL, RUNTIME_FRACTION_SUFFIX,
     RUNTIME_HEATING_SETPOINT_COL, SCHEDULE_SUFFIX, SCHEDULED_COOLING_SETPOINT_COL,
     SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX, SOC_SUFFIX, SPEED_SUFFIX,
-    SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, build_schema, display_name_to_end_use_key,
-    end_use_display_name, end_use_electric_power_column, equipment_name_to_end_use,
-    expected_columns_at_verbosity, extract_unit_from_name, fuel_reports_gas_power_column, has_soc,
-    is_compressor_equipment, is_cooling_equipment, is_ev, is_heat_pump_heater, is_hvac_or_wh,
-    is_pv, is_reserved_output_column_name, parse_end_use_electric_power_column,
-    parse_end_use_electric_power_column_key,
+    SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, display_name_to_end_use_key, end_use_display_name,
+    end_use_electric_power_column, equipment_name_to_end_use, expected_columns_at_verbosity,
+    fuel_reports_gas_power_column, has_soc, is_compressor_equipment, is_cooling_equipment, is_ev,
+    is_heat_pump_heater, is_hvac_or_wh, is_pv, is_reserved_output_column_name,
+    parse_end_use_electric_power_column, parse_end_use_electric_power_column_key,
 };
 pub use metrics::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,

@@ -781,32 +781,20 @@ fn default_telemetry() -> Telemetry {
 
 fn scheduled_load_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "ZIP-adjusted active electrical power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "ZIP-adjusted reactive electrical power".to_string(),
-        },
-        TelemetryField {
-            name: tk::TOTAL_SENSIBLE_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Total sensible thermal gain (convective + radiant) to assigned zone"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Latent thermal gain to assigned zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas fuel consumption rate converted to watts".to_string(),
-        },
+        TelemetryField::power_kw(tk::ELECTRIC_KW, "ZIP-adjusted active electrical power draw"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "ZIP-adjusted reactive electrical power",
+        ),
+        TelemetryField::power_w(
+            tk::TOTAL_SENSIBLE_GAIN_W,
+            "Total sensible thermal gain (convective + radiant) to assigned zone",
+        ),
+        TelemetryField::power_w(tk::LATENT_GAIN_W, "Latent thermal gain to assigned zone"),
+        TelemetryField::power_w(
+            tk::FUEL_INPUT_W,
+            "Gas fuel consumption rate converted to watts",
+        ),
     ]
 }
 

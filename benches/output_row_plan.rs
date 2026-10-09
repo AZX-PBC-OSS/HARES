@@ -16,7 +16,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use hares_io::{RowPlan, SchemaSurface, Selection, build_schema};
+use hares_io::{RowPlan, SchemaSurface, Selection, build_schema_for_specs};
 use hares_types::ZoneId;
 
 /// The column names the step path touches every step at verbosity 2: the
@@ -80,7 +80,7 @@ fn bench_output_row_plan(c: &mut Criterion) {
         (ZoneId(1), "Indoor".to_string()),
         (ZoneId(2), "Attic".to_string()),
     ];
-    let schema = build_schema(&specs, 2, &zones);
+    let schema = build_schema_for_specs(&specs, 2, &zones);
     // The name-to-position map the step path looked up, as the freeze-time
     // builder derives it from the schema.
     let column_index: HashMap<String, usize> = schema

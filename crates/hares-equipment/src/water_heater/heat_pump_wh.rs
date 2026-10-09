@@ -1504,97 +1504,63 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::TANK_AVG_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Volume-weighted average tank temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::COP.to_string(),
-            unit: "-".to_string(),
-            description: "Instantaneous heat-pump COP".to_string(),
-        },
-        TelemetryField {
-            name: tk::CAP_MULT.to_string(),
-            unit: "-".to_string(),
-            description: "Capacity curve multiplier (function of wet-bulb and tank temperature)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total electrical power draw (compressor + backup + fan + parasitic)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging), blended pf on total draw"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::COMPRESSOR_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Heat pump compressor electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELEMENT_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Backup resistance element electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::COMPRESSOR_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Compressor electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::BACKUP_ELEMENT_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Backup resistance element power".to_string(),
-        },
-        TelemetryField {
-            name: tk::ZONE_HEAT_EXTRACTION_W.to_string(),
-            unit: "W".to_string(),
-            description: "Heat extracted from surrounding zone air".to_string(),
-        },
-        TelemetryField {
-            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
-            unit: "kg/s".to_string(),
-            description: "Domestic hot water draw flow rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "0=Off, 1=HP, 2=Backup, 3=HP+Backup".to_string(),
-        },
-        TelemetryField {
-            name: tk::WALL_SENSIBLE_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description:
-                "Sensible heat directed to interior wall surfaces (wall_heat_fraction share)"
-                    .to_string(),
-        },
-        TelemetryField {
-            name: tk::UNMET_LOAD_W.to_string(),
-            unit: "W".to_string(),
-            description:
-                "Unmet fixture load: heat not delivered because outlet temp < fixture setpoint"
-                    .to_string(),
-        },
+        TelemetryField::temp_c(
+            tk::TANK_AVG_TEMP_C,
+            "Volume-weighted average tank temperature",
+        ),
+        TelemetryField::ratio(tk::COP, "Instantaneous heat-pump COP"),
+        TelemetryField::ratio(
+            tk::CAP_MULT,
+            "Capacity curve multiplier (function of wet-bulb and tank temperature)",
+        ),
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Total electrical power draw (compressor + backup + fan + parasitic)",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging), blended pf on total draw",
+        ),
+        TelemetryField::power_kw(tk::COMPRESSOR_KW, "Heat pump compressor electric power"),
+        TelemetryField::power_kw(tk::ELEMENT_KW, "Backup resistance element electric power"),
+        TelemetryField::power_w(tk::COMPRESSOR_POWER_W, "Compressor electric power"),
+        TelemetryField::power_w(
+            tk::BACKUP_ELEMENT_POWER_W,
+            "Backup resistance element power",
+        ),
+        TelemetryField::power_w(
+            tk::ZONE_HEAT_EXTRACTION_W,
+            "Heat extracted from surrounding zone air",
+        ),
+        TelemetryField::flow_mean(
+            tk::DRAW_FLOW_RATE_KG_S,
+            hares_types::Unit::KilogramPerSecond,
+            "Domestic hot water draw flow rate",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "0=Off, 1=HP, 2=Backup, 3=HP+Backup",
+        ),
+        TelemetryField::power_w(
+            tk::WALL_SENSIBLE_GAIN_W,
+            "Sensible heat directed to interior wall surfaces (wall_heat_fraction share)",
+        ),
+        TelemetryField::power_w(
+            tk::UNMET_LOAD_W,
+            "Unmet fixture load: heat not delivered because outlet temp < fixture setpoint",
+        ),
     ];
     for i in 0..n_nodes {
-        fields.push(TelemetryField {
-            name: tk::tank_node_key(i),
-            unit: "C".to_string(),
-            description: format!("Tank node {i} temperature"),
-        });
+        fields.push(TelemetryField::temp_c_owned(
+            tk::tank_node_key(i),
+            format!("Tank node {i} temperature"),
+        ));
     }
-    fields.push(TelemetryField {
-        name: tk::SKIN_LOSS_W.to_string(),
-        unit: "W".to_string(),
-        description: "Tank jacket (skin) heat loss to the surrounding zone or ambient location"
-            .to_string(),
-    });
+    fields.push(TelemetryField::power_w(
+        tk::SKIN_LOSS_W,
+        "Tank jacket (skin) heat loss to the surrounding zone or ambient location",
+    ));
     fields
 }
 

@@ -60,7 +60,7 @@ use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
     ChargingStrategy, ControlCapabilities, ControlSignal, EnvironmentState, EquipmentId,
-    EvConnectionState, HaresError, PlugInPolicy, ScheduleSource, Telemetry,
+    EvConnectionState, HaresError, PlugInPolicy, ScheduleSource, Telemetry, TelemetryField,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -355,6 +355,41 @@ pub struct EvDriverActor {
 use efficiency::temp_efficiency_multiplier;
 
 impl EvDriverActor {
+    /// The declared telemetry: the driver's state of charge, the dispatch
+    /// phase code, charging power, plug state and the strategy's gates.
+    pub const OUTPUT_VARIABLES: &'static [TelemetryField] = &[
+        TelemetryField::ratio("soc", "The driver's perceived battery state of charge"),
+        TelemetryField::code_code(
+            "phase",
+            &["0", "1", "2", "3"],
+            "The driver's dispatch phase code",
+        ),
+        TelemetryField::power_kw("charge_kw", "Grid-side charging power (positive = load)"),
+        TelemetryField::state_flag("plugged_in", "1 while the vehicle is plugged in"),
+        TelemetryField::state_flag(
+            "soc_gate_charging_allowed",
+            "1 when the SOC gate allows charging",
+        ),
+        TelemetryField::running_total(
+            "needed_charge_hours",
+            hares_types::Unit::Count,
+            "Hours of charging still needed for the next departure",
+        ),
+        TelemetryField::ratio(
+            "discharge_min_soc",
+            "The discharge floor of the active strategy (0.0 when none)",
+        ),
+        TelemetryField::state_flag(
+            "range_anxiety_active",
+            "1 while the perceived SOC sits below the range-anxiety band",
+        ),
+        TelemetryField::state_flag(
+            "drive_cancelled",
+            "1 when the driver cancelled a planned drive",
+        ),
+    ];
+
+    /// Builds a driver actor with its own RNG stream.
     /// Takes over the decision state (its RNG stream and position, the
     /// strategy's gate latches and the sticky estimate failure included)
     /// and telemetry of the driver this one is rebuilt to replace with new
@@ -403,29 +438,13 @@ impl EvDriverActor {
             "EV driver daily-miles distribution"
         );
 
-        let mut telemetry = Telemetry::with_capacity(9);
         // Why: discharge_min_soc = 0.0 means "no discharge floor active" —
         // the field is populated per-step from min_soc on dispatched
         // PowerSetpoint signals. Only V2G/V2H strategies set a non-zero
         // floor. A discharge floor of 0% SOC (= allow full discharge) is
         // physically redundant (all strategies allow full discharge by
         // default), so 0.0 cannot collide with a meaningful constraint.
-        telemetry.insert("soc", 1.0);
-        telemetry.insert("phase", 0.0);
-        telemetry.insert("charge_kw", 0.0);
-        telemetry.insert("plugged_in", 1.0);
-        telemetry.insert("soc_gate_charging_allowed", 1.0);
-        telemetry.insert("needed_charge_hours", 0.0);
-        telemetry.insert("discharge_min_soc", 0.0);
-        // 1.0 while the driver's perceived SOC sits below the range-anxiety
-        // band (tomorrow's trip plus the safety buffer): the driver is short
-        // and will override their usual charging pattern once time to the
-        // next departure runs short, whether or not the urgency gate has
-        // fired yet on this step. Predictive state for evaluators: a managed
-        // charging program can read which drivers its strategy is leaving
-        // short before the out-of-pattern charge lands in the profile.
-        telemetry.insert("range_anxiety_active", 0.0);
-        telemetry.insert("drive_cancelled", 0.0);
+        let telemetry = Telemetry::from_fields(Self::OUTPUT_VARIABLES);
 
         Self {
             name: Arc::from(name),
@@ -1223,6 +1242,10 @@ struct EvDriverSnapshot {
 impl Actor for EvDriverActor {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn output_variables(&self) -> &[TelemetryField] {
+        Self::OUTPUT_VARIABLES
     }
 
     fn healthy(&self) -> bool {
@@ -6479,6 +6502,9 @@ mod tests {
         impl Actor for NoStateActor {
             fn name(&self) -> &str {
                 "none"
+            }
+            fn output_variables(&self) -> &[TelemetryField] {
+                &[]
             }
             fn decide(&mut self, _: &EnvironmentState, _: &mut Vec<DispatchRequest>) {}
         }

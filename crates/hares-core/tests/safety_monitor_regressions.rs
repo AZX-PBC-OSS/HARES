@@ -16,7 +16,7 @@ use hares_equipment::{Equipment, EquipmentConfig};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreOutput, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortDeclaration, PortSlots,
-    Telemetry,
+    Telemetry, TelemetryField,
 };
 
 // ---------------------------------------------------------------------------
@@ -188,6 +188,9 @@ impl GridOffActor {
 impl Actor for GridOffActor {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn output_variables(&self) -> &[TelemetryField] {
+        &[]
     }
 
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {

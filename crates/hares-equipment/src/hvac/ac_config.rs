@@ -75,249 +75,179 @@ pub(super) fn default_telemetry() -> Telemetry {
 
 pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total cooling electric power: compressor + fan + crankcase".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging), per component: compressor pf 0.96, fan pf 0.87, crankcase resistive Q=0"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::SENSIBLE_COOLING_W.to_string(),
-            unit: "W".to_string(),
-            description: "Delivered sensible cooling magnitude".to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_COOLING_W.to_string(),
-            unit: "W".to_string(),
-            description: "Delivered latent cooling magnitude".to_string(),
-        },
-        TelemetryField {
-            name: tk::COIL_SENSIBLE_COOLING_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gross sensible cooling at the coil (positive magnitude, pre-DSE); distinguishes coil output from fan waste heat".to_string(),
-        },
-        TelemetryField {
-            name: tk::COIL_LATENT_COOLING_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gross latent cooling at the coil (pre-DSE)".to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_GAINS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Pre-DSE gross latent cooling scaled by space_fraction; matches OCHRE HVAC.py:595 Latent Gains column".to_string(),
-        },
-        TelemetryField {
-            name: tk::FAN_HEAT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Supply fan waste heat added to the zone (positive); per E+ I/O Ref: fan motor heat in the supply air stream".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
-        TelemetryField {
-            name: tk::SHR.to_string(),
-            unit: "-".to_string(),
-            description: "Sensible heat ratio".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 2=Cooling".to_string(),
-        },
-        TelemetryField {
-            name: tk::SPEED_INDEX.to_string(),
-            unit: "-".to_string(),
-            description: "Active compressor speed stage index (0-based)".to_string(),
-        },
-        TelemetryField {
-            name: tk::COP.to_string(),
-            unit: "-".to_string(),
-            description: "Coefficient of performance (AHRI: excludes fan)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Runtime fraction (PLR/PLF) [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::COMPRESSOR_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Compressor-only electric power (space_fraction-scaled)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FAN_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Supply fan electric power (space_fraction-scaled)".to_string(),
-        },
-        TelemetryField {
-            name: tk::CRANKCASE_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Crankcase heater electric power (space_fraction-scaled, resistive Q=0)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::MAIN_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Main (compressor-only) power per OCHRE HVAC.py:575: total_input - fan".to_string(),
-        },
-        TelemetryField {
-            name: tk::DUCT_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)".to_string(),
-        },
-        TelemetryField {
-            name: tk::SUPPLY_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Supply air temperature leaving the coil".to_string(),
-        },
-        TelemetryField {
-            name: tk::APPARATUS_DEW_POINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Apparatus dew point temperature at the coil".to_string(),
-        },
-        TelemetryField {
-            name: tk::BYPASS_FACTOR.to_string(),
-            unit: "-".to_string(),
-            description: "Coil bypass factor (fraction of air bypassing the coil)".to_string(),
-        },
-        TelemetryField {
-            name: tk::MAX_CAPACITY_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "External max-capacity fraction control [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active heating setpoint temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active cooling setpoint temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::SCHEDULE_HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Schedule-stage heating setpoint (before runtime override)".to_string(),
-        },
-        TelemetryField {
-            name: tk::SCHEDULE_COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Schedule-stage cooling setpoint (before runtime override)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Runtime override heating setpoint (0.0 when no override active)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Runtime override cooling setpoint (0.0 when no override active)".to_string(),
-        },
-        TelemetryField {
-            name: tk::SPEED_FRAC.to_string(),
-            unit: "-".to_string(),
-            description: "Interpolation weight between speed stages [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC.to_string(),
-            unit: "-".to_string(),
-            description: "speed_frac recorded when high-side curve index clamped to last valid stage; 0 means no clamping this step"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "-".to_string(),
-            description: "Cycling fraction at lowest speed stage [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_FACTOR.to_string(),
-            unit: "-".to_string(),
-            description: "EIR degradation correction from cycling (PLF)".to_string(),
-        },
-        TelemetryField {
-            name: tk::STARTUP_MULTIPLIER.to_string(),
-            unit: "-".to_string(),
-            description: "Capacity ramp multiplier on compressor restart (Winkler 2009)".to_string(),
-        },
-        TelemetryField {
-            name: tk::TIME_SINCE_START_MIN.to_string(),
-            unit: "min".to_string(),
-            description: "Elapsed time since compressor startup; preserved across off-steps, reset on off→on transition".to_string(),
-        },
-        TelemetryField {
-            name: tk::STARTUP_TIMER_RESET_COUNT.to_string(),
-            unit: "count".to_string(),
-            description: "Cumulative startup-timer resets (off→on transitions) since init; difference consecutive rows for resets per hour".to_string(),
-        },
-        TelemetryField {
-            name: tk::DUTY_CYCLE.to_string(),
-            unit: "-".to_string(),
-            description: "Thermostat on/off fraction this timestep [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::TIME_AT_CURRENT_SPEED_S.to_string(),
-            unit: "s".to_string(),
-            description: "Seconds since the last speed-stage change".to_string(),
-        },
-        TelemetryField {
-            name: tk::MODE_DURATION_S.to_string(),
-            unit: "s".to_string(),
-            description: "Seconds since the last thermostat mode change".to_string(),
-        },
-        TelemetryField {
-            name: tk::MIN_ON_TIME_S.to_string(),
-            unit: "s".to_string(),
-            description: "Minimum compressor on-time for short-cycle protection".to_string(),
-        },
-        TelemetryField {
-            name: tk::MIN_OFF_TIME_S.to_string(),
-            unit: "s".to_string(),
-            description: "Minimum compressor off-time for short-cycle protection".to_string(),
-        },
-        TelemetryField {
-            name: tk::COOLING_OAT_LOCKOUT.to_string(),
-            unit: "-".to_string(),
-            description: "1.0 when cooling compressor is locked out by minimum outdoor temperature; 0.0 otherwise".to_string(),
-        },
-        TelemetryField {
-            name: tk::PUMP_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Ground-loop circulation pump electrical power (GSHP only; zero for air-source)".to_string(),
-        },
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Total cooling electric power: compressor + fan + crankcase",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging), per component: compressor pf 0.96, fan pf 0.87, crankcase resistive Q=0",
+        ),
+        TelemetryField::power_w(
+            tk::SENSIBLE_COOLING_W,
+            "Delivered sensible cooling magnitude",
+        ),
+        TelemetryField::power_w(tk::LATENT_COOLING_W, "Delivered latent cooling magnitude"),
+        TelemetryField::power_w(
+            tk::COIL_SENSIBLE_COOLING_W,
+            "Gross sensible cooling at the coil (positive magnitude, pre-DSE); distinguishes coil output from fan waste heat",
+        ),
+        TelemetryField::power_w(
+            tk::COIL_LATENT_COOLING_W,
+            "Gross latent cooling at the coil (pre-DSE)",
+        ),
+        TelemetryField::power_w(
+            tk::LATENT_GAINS_W,
+            "Pre-DSE gross latent cooling scaled by space_fraction; matches OCHRE HVAC.py:595 Latent Gains column",
+        ),
+        TelemetryField::power_w(
+            tk::FAN_HEAT_W,
+            "Supply fan waste heat added to the zone (positive); per E+ I/O Ref: fan motor heat in the supply air stream",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
+        TelemetryField::ratio(tk::SHR, "Sensible heat ratio"),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode code: 0=Off, 2=Cooling",
+        ),
+        TelemetryField::code_code(
+            tk::SPEED_INDEX,
+            &["0", "1", "2", "3"],
+            "Active compressor speed stage index (0-based)",
+        ),
+        TelemetryField::ratio(tk::COP, "Coefficient of performance (AHRI: excludes fan)"),
+        TelemetryField::ratio(tk::RUNTIME_FRACTION, "Runtime fraction (PLR/PLF) [0..1]"),
+        TelemetryField::power_kw(
+            tk::COMPRESSOR_KW,
+            "Compressor-only electric power (space_fraction-scaled)",
+        ),
+        TelemetryField::power_kw(
+            tk::FAN_KW,
+            "Supply fan electric power (space_fraction-scaled)",
+        ),
+        TelemetryField::power_kw(
+            tk::CRANKCASE_KW,
+            "Crankcase heater electric power (space_fraction-scaled, resistive Q=0)",
+        ),
+        TelemetryField::power_kw(
+            tk::MAIN_POWER_KW,
+            "Main (compressor-only) power per OCHRE HVAC.py:575: total_input - fan",
+        ),
+        TelemetryField::power_w(
+            tk::DUCT_LOSS_W,
+            "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)",
+        ),
+        TelemetryField::temp_c(tk::SUPPLY_TEMP_C, "Supply air temperature leaving the coil"),
+        TelemetryField::temp_c(
+            tk::APPARATUS_DEW_POINT_C,
+            "Apparatus dew point temperature at the coil",
+        ),
+        TelemetryField::ratio(
+            tk::BYPASS_FACTOR,
+            "Coil bypass factor (fraction of air bypassing the coil)",
+        ),
+        TelemetryField::ratio(
+            tk::MAX_CAPACITY_FRACTION,
+            "External max-capacity fraction control [0..1]",
+        ),
+        TelemetryField::temp_c(
+            tk::HEATING_SETPOINT_C,
+            "Active heating setpoint temperature",
+        ),
+        TelemetryField::temp_c(
+            tk::COOLING_SETPOINT_C,
+            "Active cooling setpoint temperature",
+        ),
+        TelemetryField::temp_c(
+            tk::SCHEDULE_HEATING_SETPOINT_C,
+            "Schedule-stage heating setpoint (before runtime override)",
+        ),
+        TelemetryField::temp_c(
+            tk::SCHEDULE_COOLING_SETPOINT_C,
+            "Schedule-stage cooling setpoint (before runtime override)",
+        ),
+        TelemetryField::temp_c(
+            tk::RUNTIME_HEATING_SETPOINT_C,
+            "Runtime override heating setpoint (0.0 when no override active)",
+        ),
+        TelemetryField::temp_c(
+            tk::RUNTIME_COOLING_SETPOINT_C,
+            "Runtime override cooling setpoint (0.0 when no override active)",
+        ),
+        TelemetryField::ratio(
+            tk::SPEED_FRAC,
+            "Interpolation weight between speed stages [0..1]",
+        ),
+        TelemetryField::ratio(
+            tk::HIGH_SIDE_CURVE_CLAMPED_SPEED_FRAC,
+            "speed_frac recorded when high-side curve index clamped to last valid stage; 0 means no clamping this step",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_RATIO,
+            "Cycling fraction at lowest speed stage [0..1]",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_FACTOR,
+            "EIR degradation correction from cycling (PLF)",
+        ),
+        TelemetryField::ratio(
+            tk::STARTUP_MULTIPLIER,
+            "Capacity ramp multiplier on compressor restart (Winkler 2009)",
+        ),
+        TelemetryField::timer_min(
+            tk::TIME_SINCE_START_MIN,
+            "Elapsed time since compressor startup; preserved across off-steps, reset on off→on transition",
+        ),
+        TelemetryField::running_total(
+            tk::STARTUP_TIMER_RESET_COUNT,
+            hares_types::Unit::Count,
+            "Cumulative startup-timer resets (off→on transitions) since init; difference consecutive rows for resets per hour",
+        ),
+        TelemetryField::ratio(
+            tk::DUTY_CYCLE,
+            "Thermostat on/off fraction this timestep [0..1]",
+        ),
+        TelemetryField::timer_s(
+            tk::TIME_AT_CURRENT_SPEED_S,
+            "Seconds since the last speed-stage change",
+        ),
+        TelemetryField::timer_s(
+            tk::MODE_DURATION_S,
+            "Seconds since the last thermostat mode change",
+        ),
+        TelemetryField::constant_mean(
+            tk::MIN_ON_TIME_S,
+            hares_types::Unit::Second,
+            "Minimum compressor on-time for short-cycle protection",
+        ),
+        TelemetryField::constant_mean(
+            tk::MIN_OFF_TIME_S,
+            hares_types::Unit::Second,
+            "Minimum compressor off-time for short-cycle protection",
+        ),
+        TelemetryField::state_flag(
+            tk::COOLING_OAT_LOCKOUT,
+            "1.0 when cooling compressor is locked out by minimum outdoor temperature; 0.0 otherwise",
+        ),
+        TelemetryField::power_kw(
+            tk::PUMP_POWER_KW,
+            "Ground-loop circulation pump electrical power (GSHP only; zero for air-source)",
+        ),
     ]
 }
 

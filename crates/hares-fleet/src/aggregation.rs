@@ -723,6 +723,7 @@ mod tests {
         GridInteractionMetrics, PeakPowerKw, Reliability, RollingPeakKw, SimulationCoverage,
         SimulationMetrics, TotalEnergyKwh,
     };
+    use hares_types::Unit;
 
     /// Every unit spelling the fleet's output can carry maps to both
     /// aggregation tables. This replaced the gated startup scan
@@ -756,6 +757,76 @@ mod tests {
                 "unit '{unit}' missing from FleetAggregation mapping table"
             );
         }
+    }
+
+    /// The catalogue's canonical symbols leave the fleet's rules unchanged:
+    /// for every unit spelling of the census (the telemetry declarations'
+    /// units and the parenthesised units in the column names), the fleet's
+    /// over-time and across-homes rules for the spelling and for its
+    /// `Unit::symbol()` are equal. Spellings of one unit therefore merge
+    /// without moving a fleet number.
+    #[test]
+    fn fleet_unit_rules_unchanged_by_canonical_symbols() {
+        // Every spelling -> the Unit variant it merges into.
+        let census: &[(&str, Unit)] = &[
+            ("", Unit::None),
+            ("-", Unit::Dimensionless),
+            ("C", Unit::Celsius),
+            ("°C", Unit::Celsius),
+            ("W", Unit::Watt),
+            ("kW", Unit::Kilowatt),
+            ("kWh", Unit::KilowattHour),
+            ("kVAR", Unit::VoltAmpereReactive),
+            ("therms/hour", Unit::ThermPerHour),
+            ("W/m2", Unit::WattPerSquareMeter),
+            ("s", Unit::Second),
+            ("min", Unit::Minute),
+            ("deg", Unit::Degree),
+            ("V", Unit::Volt),
+            ("A", Unit::Ampere),
+            ("Ah", Unit::AmpereHour),
+            ("J/(kg*K)", Unit::JoulePerKilogramKelvin),
+            ("kWh/mi", Unit::KilowattHourPerMile),
+            ("kg/s", Unit::KilogramPerSecond),
+            ("L/day", Unit::LitrePerDay),
+            ("count", Unit::Count),
+            ("bytes", Unit::Byte),
+            ("%", Unit::Percent),
+            ("fraction", Unit::Fraction),
+            ("ratio", Unit::Fraction),
+            ("code", Unit::Code),
+            ("index", Unit::Code),
+            ("enum", Unit::Enum),
+            ("bool", Unit::Boolean),
+        ];
+        for (spelling, unit) in census {
+            let symbol = unit.symbol();
+            let over_time = column_aggregation_for_unit(spelling);
+            let over_time_canonical = column_aggregation_for_unit(symbol);
+            let across = fleet_aggregation_for_unit(spelling);
+            let across_canonical = fleet_aggregation_for_unit(symbol);
+            assert_eq!(
+                over_time, over_time_canonical,
+                "spelling '{spelling}' and its canonical symbol '{symbol}' must agree over time"
+            );
+            assert_eq!(
+                across, across_canonical,
+                "spelling '{spelling}' and its canonical symbol '{symbol}' must agree across homes"
+            );
+        }
+        // The enum/code split the entry pins: the fleet averages enum
+        // columns and sums code ones (the None fallback resolves to Mean
+        // over time and WeightedSum across homes for code, and to Mean /
+        // WeightedMean for enum).
+        assert_eq!(
+            fleet_aggregation_for_unit("enum"),
+            Some(FleetAggregation::WeightedMean)
+        );
+        assert_eq!(
+            fleet_aggregation_for_unit("code"),
+            fleet_aggregation_for_unit("index"),
+            "code and index spellings agree"
+        );
     }
 
     fn sample_metrics(energy: f64, peak: f64) -> SimulationMetrics {

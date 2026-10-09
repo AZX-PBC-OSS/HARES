@@ -1884,7 +1884,7 @@ mod tests {
             related_hvac_idref: None,
             primary_role: None,
         }];
-        let schema = crate::output::build_schema(&specs, 1, &[]);
+        let schema = crate::output::build_schema_for_specs(&specs, 1, &[]);
         let result = MetricsCalculator::new(&schema, 3600, &test_config(None));
         assert!(
             result.is_ok(),

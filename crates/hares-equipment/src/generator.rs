@@ -2081,126 +2081,88 @@ fn default_telemetry(has_chp: bool, is_fuel_cell: bool) -> Telemetry {
 
 fn generator_telemetry_fields(has_chp: bool, is_fuel_cell: bool) -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::ELECTRIC_OUTPUT_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Electrical generation output (gross, before parasitic deduction)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::PARASITIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Parasitic electrical load deduction (auxiliary pumps, fans, controls)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Fuel input power (P_electric / eta)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_IDLE_W.to_string(),
-            unit: "W".to_string(),
-            description: "Idle fuel consumption floor (no-load fuel rate)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_LOAD_W.to_string(),
-            unit: "W".to_string(),
-            description: "Load-dependent fuel consumption before idle floor".to_string(),
-        },
-        TelemetryField {
-            name: tk::ETA_ELECTRIC.to_string(),
-            unit: "-".to_string(),
-            description: "Effective electrical efficiency at current load [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::RAMP_LIMITED.to_string(),
-            unit: "-".to_string(),
-            description: "1.0 when this step's power change was clamped by ramp-rate limit"
-                .to_string(),
-        },
+        TelemetryField::power_kw(
+            tk::ELECTRIC_OUTPUT_KW,
+            "Electrical generation output (gross, before parasitic deduction)",
+        ),
+        TelemetryField::power_kw(
+            tk::PARASITIC_KW,
+            "Parasitic electrical load deduction (auxiliary pumps, fans, controls)",
+        ),
+        TelemetryField::power_w(tk::FUEL_INPUT_W, "Fuel input power (P_electric / eta)"),
+        TelemetryField::power_w(
+            tk::FUEL_IDLE_W,
+            "Idle fuel consumption floor (no-load fuel rate)",
+        ),
+        TelemetryField::power_w(
+            tk::FUEL_LOAD_W,
+            "Load-dependent fuel consumption before idle floor",
+        ),
+        TelemetryField::ratio(
+            tk::ETA_ELECTRIC,
+            "Effective electrical efficiency at current load [0..1]",
+        ),
+        TelemetryField::state_flag(
+            tk::RAMP_LIMITED,
+            "1.0 when this step's power change was clamped by ramp-rate limit",
+        ),
     ];
     if has_chp {
-        fields.push(TelemetryField {
-            name: tk::THERMAL_AVAILABLE_W.to_string(),
-            unit: "W".to_string(),
-            description: "Uncapped CHP thermal recovery available before heat_rec_ratio scaling"
-                .to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description:
-                "Total CHP thermal recovery output delivered to loop (after heat_rec_ratio)"
-                    .to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::THERMAL_POWER_DELIVERED_W.to_string(),
-            unit: "W".to_string(),
-            description:
-                "Sum of thermal_power_w written to fluid port contributions (cross-validates against THERMAL_OUTPUT_W)"
-                    .to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::HEAT_REC_RATIO.to_string(),
-            unit: "-".to_string(),
-            description:
-                "Heat recovery ratio: fraction of available thermal delivered to loop [0..1]"
-                    .to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::LOOP_RETURN_TEMP_C.to_string(),
-            unit: "°C".to_string(),
-            description: "Fluid loop return temperature at time of heat recovery computation"
-                .to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::FLUE_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Residual flue loss (P_fuel - P_electric - Q_thermal)".to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::JACKET_WATER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Jacket water heat recovery (P_fuel * eta_jacket_water)".to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::LUBE_OIL_W.to_string(),
-            unit: "W".to_string(),
-            description: "Lube oil heat recovery (P_fuel * eta_lube_oil)".to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::EXHAUST_WATER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Exhaust heat recovery (P_fuel * eta_exhaust)".to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::SUPPLY_TEMP_JACKET_C.to_string(),
-            unit: "°C".to_string(),
-            description: "Jacket water supply temperature for recovery".to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::SUPPLY_TEMP_EXHAUST_C.to_string(),
-            unit: "°C".to_string(),
-            description: "Exhaust HX supply temperature for recovery".to_string(),
-        });
+        fields.push(TelemetryField::power_w(
+            tk::THERMAL_AVAILABLE_W,
+            "Uncapped CHP thermal recovery available before heat_rec_ratio scaling",
+        ));
+        fields.push(TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Total CHP thermal recovery output delivered to loop (after heat_rec_ratio)",
+        ));
+        fields.push(TelemetryField::power_w(tk::THERMAL_POWER_DELIVERED_W, "Sum of thermal_power_w written to fluid port contributions (cross-validates against THERMAL_OUTPUT_W)"));
+        fields.push(TelemetryField::ratio(
+            tk::HEAT_REC_RATIO,
+            "Heat recovery ratio: fraction of available thermal delivered to loop [0..1]",
+        ));
+        fields.push(TelemetryField::temp_c(
+            tk::LOOP_RETURN_TEMP_C,
+            "Fluid loop return temperature at time of heat recovery computation",
+        ));
+        fields.push(TelemetryField::power_w(
+            tk::FLUE_LOSS_W,
+            "Residual flue loss (P_fuel - P_electric - Q_thermal)",
+        ));
+        fields.push(TelemetryField::power_w(
+            tk::JACKET_WATER_W,
+            "Jacket water heat recovery (P_fuel * eta_jacket_water)",
+        ));
+        fields.push(TelemetryField::power_w(
+            tk::LUBE_OIL_W,
+            "Lube oil heat recovery (P_fuel * eta_lube_oil)",
+        ));
+        fields.push(TelemetryField::power_w(
+            tk::EXHAUST_WATER_W,
+            "Exhaust heat recovery (P_fuel * eta_exhaust)",
+        ));
+        fields.push(TelemetryField::temp_c(
+            tk::SUPPLY_TEMP_JACKET_C,
+            "Jacket water supply temperature for recovery",
+        ));
+        fields.push(TelemetryField::temp_c(
+            tk::SUPPLY_TEMP_EXHAUST_C,
+            "Exhaust HX supply temperature for recovery",
+        ));
     }
     if is_fuel_cell {
-        fields.push(TelemetryField {
-            name: tk::FUEL_CELL_DC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "DC stack electrical output before inverter".to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::FUEL_CELL_INVERTER_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Power lost in DC-to-AC inverter conversion".to_string(),
-        });
-        fields.push(TelemetryField {
-            name: tk::FUEL_CELL_STACK_HEAT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Stack cooling heat removed by stack cooler".to_string(),
-        });
+        fields.push(TelemetryField::power_kw(
+            tk::FUEL_CELL_DC_KW,
+            "DC stack electrical output before inverter",
+        ));
+        fields.push(TelemetryField::power_w(
+            tk::FUEL_CELL_INVERTER_LOSS_W,
+            "Power lost in DC-to-AC inverter conversion",
+        ));
+        fields.push(TelemetryField::power_w(
+            tk::FUEL_CELL_STACK_HEAT_W,
+            "Stack cooling heat removed by stack cooler",
+        ));
     }
     fields
 }
@@ -2598,7 +2560,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         for expected in &[
             tk::ELECTRIC_OUTPUT_KW,
@@ -4083,7 +4045,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         assert!(
             names.contains(&tk::SUPPLY_TEMP_JACKET_C),
@@ -4436,7 +4398,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         assert!(names.contains(&tk::THERMAL_OUTPUT_W));
         assert!(names.contains(&tk::FLUE_LOSS_W));
@@ -4449,7 +4411,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         assert!(!names.contains(&tk::THERMAL_OUTPUT_W));
         assert!(!names.contains(&tk::FLUE_LOSS_W));
@@ -4895,7 +4857,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         assert!(
             names_no_chp.contains(&tk::FUEL_INPUT_W),
@@ -4922,7 +4884,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         assert!(names_chp.contains(&tk::FUEL_INPUT_W));
         assert!(
@@ -5487,7 +5449,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         for expected in &[
             tk::FUEL_CELL_DC_KW,
@@ -5854,7 +5816,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         for expected in &[
             tk::THERMAL_AVAILABLE_W,
@@ -6175,7 +6137,7 @@ mod tests {
             .descriptor()
             .telemetry_fields
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.as_ref())
             .collect();
         assert!(
             names.contains(&tk::THERMAL_POWER_DELIVERED_W),

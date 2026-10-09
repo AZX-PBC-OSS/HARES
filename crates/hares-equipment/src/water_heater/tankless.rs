@@ -752,42 +752,27 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::OUTLET_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Delivered outlet water temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Instantaneous thermal output".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Input fuel/electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::PARASITIC_ELECTRIC_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas ignition controller standby electric draw (gas units only)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
-            unit: "kg/s".to_string(),
-            description: "Domestic hot water draw flow rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "0=Off, 1=Heating".to_string(),
-        },
+        TelemetryField::temp_c(tk::OUTLET_TEMP_C, "Delivered outlet water temperature"),
+        TelemetryField::power_w(tk::THERMAL_OUTPUT_W, "Instantaneous thermal output"),
+        TelemetryField::power_w(tk::FUEL_INPUT_W, "Input fuel/electric power"),
+        TelemetryField::power_w(
+            tk::PARASITIC_ELECTRIC_W,
+            "Gas ignition controller standby electric draw (gas units only)",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::flow_mean(
+            tk::DRAW_FLOW_RATE_KG_S,
+            hares_types::Unit::KilogramPerSecond,
+            "Domestic hot water draw flow rate",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "0=Off, 1=Heating",
+        ),
     ]
 }
 

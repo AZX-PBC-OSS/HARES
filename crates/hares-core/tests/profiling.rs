@@ -16,7 +16,7 @@ use chrono::Duration;
 use hares_control::DispatchRequest;
 use hares_core::{Actor, Dwelling, DwellingConfig};
 use hares_io::SimulationConfig;
-use hares_types::EnvironmentState;
+use hares_types::{EnvironmentState, TelemetryField};
 
 /// Loads the cz2a fixture at hourly resolution for 96 steps.
 fn load_cz2a_fixture() -> Dwelling {
@@ -102,6 +102,9 @@ struct ProbeActor {
 impl Actor for ProbeActor {
     fn name(&self) -> &str {
         self.name
+    }
+    fn output_variables(&self) -> &[TelemetryField] {
+        &[]
     }
 
     fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {}

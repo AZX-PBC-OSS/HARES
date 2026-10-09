@@ -374,38 +374,36 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::PROTOCOL_ID.to_string(),
-            unit: "-".to_string(),
-            description: "ProtocolId of the most recent ProtocolNative dispatch".to_string(),
-        },
-        TelemetryField {
-            name: tk::PAYLOAD_SIZE_BYTES.to_string(),
-            unit: "bytes".to_string(),
-            description: "Size in bytes of the most recent ProtocolNative payload".to_string(),
-        },
-        TelemetryField {
-            name: tk::DISPATCH_COUNT.to_string(),
-            unit: "-".to_string(),
-            description: "Cumulative count of ProtocolNative dispatch events".to_string(),
-        },
-        TelemetryField {
-            name: tk::PARSED_COMMAND_COUNT.to_string(),
-            unit: "-".to_string(),
-            description: "Number of EquipmentCommands parsed from the most recent payload"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::PARSE_ERROR_COUNT.to_string(),
-            unit: "-".to_string(),
-            description: "Cumulative count of handler parse failures".to_string(),
-        },
-        TelemetryField {
-            name: tk::TOTAL_COMMANDS_PARSED.to_string(),
-            unit: "-".to_string(),
-            description: "Cumulative count of equipment commands parsed across all payloads"
-                .to_string(),
-        },
+        TelemetryField::code_code(
+            tk::PROTOCOL_ID,
+            &["0", "1", "2", "3"],
+            "ProtocolId of the most recent ProtocolNative dispatch",
+        ),
+        TelemetryField::running_total(
+            tk::PAYLOAD_SIZE_BYTES,
+            hares_types::Unit::Byte,
+            "Size in bytes of the most recent ProtocolNative payload",
+        ),
+        TelemetryField::running_total(
+            tk::DISPATCH_COUNT,
+            hares_types::Unit::Dimensionless,
+            "Cumulative count of ProtocolNative dispatch events",
+        ),
+        TelemetryField::running_total(
+            tk::PARSED_COMMAND_COUNT,
+            hares_types::Unit::Dimensionless,
+            "Number of EquipmentCommands parsed from the most recent payload",
+        ),
+        TelemetryField::running_total(
+            tk::PARSE_ERROR_COUNT,
+            hares_types::Unit::Dimensionless,
+            "Cumulative count of handler parse failures",
+        ),
+        TelemetryField::running_total(
+            tk::TOTAL_COMMANDS_PARSED,
+            hares_types::Unit::Dimensionless,
+            "Cumulative count of equipment commands parsed across all payloads",
+        ),
     ]
 }
 

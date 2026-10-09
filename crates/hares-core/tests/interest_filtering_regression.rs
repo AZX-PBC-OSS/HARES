@@ -160,6 +160,9 @@ impl Actor for CountingActor {
     fn name(&self) -> &str {
         &self.name
     }
+    fn output_variables(&self) -> &[TelemetryField] {
+        &[]
+    }
 
     fn interests(&self) -> &[ActorInterest] {
         &self.interests
@@ -640,11 +643,7 @@ impl ModeProbeEquipment {
                 stage: ExecutionStage::Independent,
                 control_capabilities: ControlCapabilities::empty(),
                 core_capabilities: CoreCapabilities::HAS_MODE,
-                telemetry_fields: vec![TelemetryField {
-                    name: "probe".to_string(),
-                    unit: "-".to_string(),
-                    description: "mode probe".to_string(),
-                }],
+                telemetry_fields: vec![TelemetryField::ratio("probe", "mode probe")],
                 zone_type: None,
             },
             telemetry: Telemetry::with_capacity(1),

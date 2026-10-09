@@ -3,50 +3,7 @@
 //! Column naming follows OCHRE conventions: `"{Name} {Metric} ({Unit})"`.
 //! Multi-instance equipment includes an instance qualifier: `"Battery #1 SOC (-)"`.
 
-use arrow::datatypes::{DataType, Field, Schema};
-
-use crate::hpxml::EquipmentSpec;
-use crate::hpxml::equipment::canonical_instance_namer;
 use hares_types::{EndUse, FuelType, ZoneId};
-
-/// Extracts the unit string from a column name's parenthesized suffix.
-///
-/// Column names follow the OCHRE convention `"{Name} {Metric} ({Unit})"`.
-/// Returns the content between the last `(` and `)`, or `None` if the name
-/// has no parenthesized suffix.
-///
-/// # Examples
-/// - `"Total Electric Power (kW)"` → `Some("kW")`
-/// - `"Temperature - Indoor (C)"` → `Some("C")`
-/// - `"Battery SOC (-)"` → `Some("-")`
-/// - `"Time"` → `None`
-pub fn extract_unit_from_name(name: &str) -> Option<&str> {
-    let start = name.rfind('(')?;
-    let end = name.get(start..)?.find(')')?;
-    if end > 1 {
-        Some(&name[start + 1..start + end])
-    } else {
-        None
-    }
-}
-
-/// Creates an Arrow `Field` with unit metadata attached.
-///
-/// Extracts the unit from the column name's parenthesized suffix via
-/// [`extract_unit_from_name`] and stores it in the field's metadata map
-/// under the `"unit"` key. Fields without a parenthesized suffix (e.g.
-/// `"Time"`) are created with empty metadata.
-fn field_with_unit(name: impl AsRef<str>, data_type: DataType, nullable: bool) -> Field {
-    let name = name.as_ref();
-    let field = Field::new(name, data_type, nullable);
-    if let Some(unit) = extract_unit_from_name(name) {
-        let mut metadata = std::collections::HashMap::new();
-        metadata.insert("unit".to_string(), unit.to_string());
-        field.with_metadata(metadata)
-    } else {
-        field
-    }
-}
 
 /// Timestamp column included at every verbosity level.
 const TIMESTAMP_COL: &str = "Time";
@@ -411,524 +368,6 @@ fn end_use_from_key(key: &str) -> Option<EndUse> {
     }
 }
 
-/// Builds an Arrow schema for the output based on equipment list, zone names,
-/// and verbosity.
-///
-/// The schema always includes a timestamp column, followed by columns
-/// appropriate for the requested verbosity level.
-pub fn build_schema(
-    equipment_list: &[EquipmentSpec],
-    verbosity: u8,
-    zone_names: &[(ZoneId, String)],
-) -> Schema {
-    let mut fields = vec![field_with_unit(TIMESTAMP_COL, DataType::Utf8, false)];
-
-    // Level 0: total power
-    for &col in LEVEL_0_COLUMNS {
-        fields.push(field_with_unit(col, DataType::Float64, true));
-    }
-
-    // Always-present context columns: outdoor temp and primary indoor zone temp.
-    // These appear at every verbosity level so any output file is self-contained
-    // enough to correlate equipment behavior with conditions.
-    fields.push(field_with_unit(OUTDOOR_TEMP_COL, DataType::Float64, true));
-    fields.push(field_with_unit(
-        format!("{ZONE_TEMP_PREFIX} Indoor {ZONE_TEMP_UNIT}"),
-        DataType::Float64,
-        true,
-    ));
-
-    // Compute instance-qualified names once for all verbosity levels that need them.
-    let mut names = if verbosity >= 1 && !equipment_list.is_empty() {
-        instance_qualified_names(equipment_list)
-    } else {
-        Vec::new()
-    };
-    // Reserved-namespace filter: a name whose per-equipment column would be
-    // a reserved aggregate column (an equipment literally named "Total")
-    // gets NO per-equipment columns at any verbosity — emitting one would
-    // duplicate the aggregate's field name, and a name-keyed column index
-    // collapses duplicates, leaving the advertised aggregate column as the
-    // one never written. `is_reserved_output_column_name` documents the
-    // contract; the equipment's values are missing, never misattributed.
-    names.retain(|(name, _)| {
-        let member = format!("{name} {ELECTRIC_POWER_SUFFIX}");
-        let shadowed = is_reserved_output_column_name(&member);
-        if shadowed {
-            tracing::warn!(
-                equipment = %name,
-                column = %member,
-                "equipment name shadows a reserved aggregate output column; no \
-                 per-equipment output columns are emitted for it (its values are \
-                 missing, never misattributed)"
-            );
-        }
-        !shadowed
-    });
-
-    if verbosity >= 1 {
-        for (name, fuel) in &names {
-            fields.push(field_with_unit(
-                format!("{name} {ELECTRIC_POWER_SUFFIX}"),
-                DataType::Float64,
-                true,
-            ));
-            if fuel_reports_gas_power_column(*fuel) {
-                fields.push(field_with_unit(
-                    format!("{name} {GAS_POWER_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-        }
-
-        // Per-EndUse aggregate electric power columns.
-        // One column per EndUse category that has at least one equipment,
-        // summing all equipment contributions so metrics aggregation keys
-        // on EndUse category rather than equipment instance name.
-        //
-        // Aggregate columns use end_use_electric_power_column() for a
-        // stable, guaranteed-unique namespace (e.g. "HVAC Heating End Use
-        // Electric Power (kW)").  This avoids collisions with per-equipment
-        // columns whose equipment name may match the end-use display name.
-        let mut seen_end_uses: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
-        for spec in equipment_list {
-            let end_use = equipment_name_to_end_use(&spec.name);
-            if seen_end_uses.insert(end_use_display_name(&end_use).to_string()) {
-                fields.push(field_with_unit(
-                    end_use_electric_power_column(&end_use),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-        }
-    }
-
-    if verbosity >= 2 {
-        // Per-zone temperature columns for non-Indoor zones.
-        // Indoor temperature is always present as a context column at every
-        // verbosity level (added above). Attic and other structural zones
-        // are emitted only when present in the zone_names list, eliminating
-        // all-null columns for simulations without those zones.
-        for (_zone_id, zone_name) in zone_names {
-            if zone_name != "Indoor" {
-                fields.push(field_with_unit(
-                    format!("{ZONE_TEMP_PREFIX} {zone_name} {ZONE_TEMP_UNIT}"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-        }
-        fields.push(field_with_unit(
-            ZONE_UNMET_LOAD_COL,
-            DataType::Float64,
-            true,
-        ));
-        // Temperature - Ground (C) is always emitted (not zone-conditional):
-        // it is populated from weather.ground_temp_c which is valid for
-        // every simulation, regardless of zone configuration. OCHRE convention
-        // includes it unconditionally alongside Outdoor Dry Bulb.
-        fields.push(field_with_unit(GROUND_TEMP_COL, DataType::Float64, true));
-    }
-
-    if verbosity >= 3 {
-        for (name, _fuel) in &names {
-            fields.push(field_with_unit(
-                format!("{name} {MODE_SUFFIX}"),
-                DataType::Float64,
-                true,
-            ));
-            if is_hvac_or_wh(name) {
-                fields.push(field_with_unit(
-                    format!("{name} {SETPOINT_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-            if has_soc(name) {
-                fields.push(field_with_unit(
-                    format!("{name} {SOC_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-        }
-    }
-
-    if verbosity >= 4 {
-        for (name, _fuel) in &names {
-            fields.push(field_with_unit(
-                format!("{name} {ENERGY_SUFFIX}"),
-                DataType::Float64,
-                true,
-            ));
-        }
-        // HVAC thermal delivery columns (OCHRE convention, verbosity 4).
-        fields.push(field_with_unit(
-            "HVAC Heating Delivered (W)",
-            DataType::Float64,
-            true,
-        ));
-        fields.push(field_with_unit(
-            "HVAC Cooling Delivered (W)",
-            DataType::Float64,
-            true,
-        ));
-    }
-
-    if verbosity >= 5 {
-        // Reactive-power and power-factor columns mirror the unconditional
-        // "{name} Electric Power (kW)" column above rather than gating on
-        // fuel type: gas-fueled equipment with electric parasitics (gas
-        // furnace blower at pf 0.87, gas boiler pump at 0.84, gas WH draft
-        // fan at 0.87, gas tankless electronics) emits reactive power too.
-        // Equipment that reports `CoreFlows::reactive_power_kvar = None`
-        // fills the column with 0.0 and power factor 1.0.
-        for (name, _fuel) in &names {
-            fields.push(field_with_unit(
-                format!("{name} {REACTIVE_POWER_SUFFIX}"),
-                DataType::Float64,
-                true,
-            ));
-            fields.push(field_with_unit(
-                format!("{name} {POWER_FACTOR_SUFFIX}"),
-                DataType::Float64,
-                true,
-            ));
-        }
-        fields.push(field_with_unit(
-            NET_SENSIBLE_HEAT_GAIN_COL,
-            DataType::Float64,
-            true,
-        ));
-        // OCHRE HVAC.py:588: duct losses at verbosity 5.
-        // Computed as gross_capacity_w * (1 - dse) per ASHRAE 152.
-        fields.push(field_with_unit(
-            HVAC_DUCT_LOSSES_COL,
-            DataType::Float64,
-            true,
-        ));
-    }
-
-    if verbosity >= 6 {
-        // Level 6: component loads per boundary.
-        // Note: Energy (kWh) columns are already added at verbosity 4.
-        // Indoor zone envelope breakdown — always present.
-        for label in &[
-            "Window Transmitted Solar Gain (W)",
-            "Infiltration Heat Gain - Indoor (W)",
-            "Forced Ventilation Heat Gain - Indoor (W)",
-            "Natural Ventilation Heat Gain - Indoor (W)",
-        ] {
-            fields.push(field_with_unit(*label, DataType::Float64, true));
-        }
-        #[cfg(feature = "observe")]
-        for label in &[
-            "Natural Ventilation Cw (-)",
-            "Natural Ventilation Wind Angle (deg)",
-        ] {
-            fields.push(field_with_unit(*label, DataType::Float64, true));
-        }
-        for label in &[
-            "Internal Heat Gain - Indoor (W)",
-            "Interior LWR Exchange - Indoor (W)",
-            "Opaque Surface Heat Gain - Indoor (W)",
-            "Duct Loss Heat Gain - Indoor (W)",
-            "Roof Heat Gain - Indoor (W)",
-            "Floor Heat Gain - Indoor (W)",
-            "Wall Heat Gain - Indoor (W)",
-            "Window Heat Gain - Indoor (W)",
-            "Internal Mass Heat Gain - Indoor (W)",
-            // Complete zone air heat-balance residual
-            // (C_zone·ΔT/dt − Σ(all gain terms)). The E+
-            // Output:Diagnostics analogue — small in a correct model, O(kW)
-            // when a gain is mis-wired or a boundary-condition flux leaks
-            // into zone-load terms.
-            "Zone Air Heat Balance Residual (W)",
-        ] {
-            fields.push(field_with_unit(*label, DataType::Float64, true));
-        }
-        // Non-Indoor zone envelope breakdown — conditional on zone presence.
-        // Eliminates all-null columns (see review Finding 3) for simulations
-        // without attic or other structural zones.
-        for (_zone_id, zone_name) in zone_names {
-            if zone_name != "Indoor" {
-                fields.push(field_with_unit(
-                    format!("Infiltration Heat Gain - {zone_name} (W)"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("Interior LWR Exchange - {zone_name} (W)"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-        }
-        // Per-zone HVAC thermal attribution columns.
-        // Enables diagnosing how much heating/cooling went to each zone
-        // (conditioned, basement, duct) in multi-zone buildings.
-        for (_zone_id, zone_name) in zone_names {
-            fields.push(field_with_unit(
-                format!("HVAC Heating Delivered - {zone_name} (W)"),
-                DataType::Float64,
-                true,
-            ));
-            fields.push(field_with_unit(
-                format!("HVAC Cooling Delivered - {zone_name} (W)"),
-                DataType::Float64,
-                true,
-            ));
-        }
-    }
-
-    if verbosity >= 7 {
-        // Level 7: schedule inputs and detailed equipment modes.
-        for (name, _fuel) in &names {
-            fields.push(field_with_unit(
-                format!("{name} {SCHEDULE_SUFFIX}"),
-                DataType::Float64,
-                true,
-            ));
-            if is_heat_pump_heater(name) {
-                fields.push(field_with_unit(
-                    format!("{name} {DEFROST_STATE_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                // OCHRE HVAC.py:1464-1467: ER Power column for ASHP heaters at v7.
-                // Reports backup electric resistance power during ER-only or HP+ER modes.
-                fields.push(field_with_unit(
-                    format!("{name} {ER_POWER_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-            // OCHRE HVAC.py:590-599: per-equipment HVAC performance columns at v7.
-            if is_hvac_or_wh(name) {
-                // SHR and Latent Gains are cooling-only (OCHRE HVAC.py:595-596).
-                if is_cooling_equipment(name) {
-                    fields.push(field_with_unit(
-                        format!("{name} {SHR_SUFFIX}"),
-                        DataType::Float64,
-                        true,
-                    ));
-                    fields.push(field_with_unit(
-                        format!("{name} {LATENT_GAINS_SUFFIX}"),
-                        DataType::Float64,
-                        true,
-                    ));
-                }
-                fields.push(field_with_unit(
-                    format!("{name} {SPEED_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                // OCHRE HVAC.py:575: main_power = total_input - fan.
-                fields.push(field_with_unit(
-                    format!("{name} {MAIN_POWER_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {FAN_POWER_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {RUNTIME_FRACTION_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                // Promoted from v8: OCHRE emits Capacity and COP at v7 (HVAC.py:584,598).
-                fields.push(field_with_unit(
-                    format!("{name} {CAPACITY_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {COP_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-        }
-        fields.push(field_with_unit(
-            HOT_WATER_MAINS_TEMP_COL,
-            DataType::Float64,
-            true,
-        ));
-        // Setpoint chain: dwelling-level context columns for control auditing.
-        // Each column reflects a stage in the setpoint resolution pipeline
-        // (schedule → runtime override), enabling diagnosis of DR/override
-        // behaviour without tracing per-equipment telemetry.
-        fields.push(field_with_unit(
-            SCHEDULED_HEATING_SETPOINT_COL,
-            DataType::Float64,
-            true,
-        ));
-        fields.push(field_with_unit(
-            SCHEDULED_COOLING_SETPOINT_COL,
-            DataType::Float64,
-            true,
-        ));
-        fields.push(field_with_unit(
-            RUNTIME_HEATING_SETPOINT_COL,
-            DataType::Float64,
-            true,
-        ));
-        fields.push(field_with_unit(
-            RUNTIME_COOLING_SETPOINT_COL,
-            DataType::Float64,
-            true,
-        ));
-    }
-
-    if verbosity >= 8 {
-        // Level 8: per-equipment telemetry diagnostic columns.
-        // Equipment temperatures, compressor power, PV/EV diagnostics — these
-        // keys are not in CoreOutput and remain telemetry-only below v8.
-        for (name, _fuel) in &names {
-            if is_hvac_or_wh(name) {
-                fields.push(field_with_unit(
-                    format!("{name} {SUPPLY_TEMP_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {RETURN_TEMP_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {COMPRESSOR_POWER_W_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {COMPRESSOR_POWER_KW_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {FAN_ELECTRIC_POWER_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {FAN_POWER_W_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {MIN_ON_TIME_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {MIN_OFF_TIME_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-            if is_heat_pump_heater(name) {
-                fields.push(field_with_unit(
-                    format!("{name} {SUPPLY_AIR_TEMP_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {PAN_HEATER_POWER_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {HP_CAPACITY_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {ER_CAPACITY_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-            if is_pv(name) {
-                fields.push(field_with_unit(
-                    format!("{name} {PV_DC_POWER_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {PV_IRRADIANCE_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-            if is_ev(name) {
-                fields.push(field_with_unit(
-                    format!("{name} {EV_CONNECTION_STATE_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-                fields.push(field_with_unit(
-                    format!("{name} {EV_CHARGING_LEVEL_SUFFIX}"),
-                    DataType::Float64,
-                    true,
-                ));
-            }
-        }
-    }
-
-    #[cfg(feature = "observe")]
-    {
-        let zone_temp_count = fields
-            .iter()
-            .filter(|f| {
-                f.name().starts_with("Temperature - ")
-                    && f.name().ends_with("(C)")
-                    && !f.name().starts_with("Temperature - Indoor")
-                    && f.name() != GROUND_TEMP_COL
-            })
-            .count();
-        let zone_inf_lwr_count = fields
-            .iter()
-            .filter(|f| {
-                f.name().starts_with("Infiltration Heat Gain - ")
-                    && !f.name().starts_with("Infiltration Heat Gain - Indoor")
-            })
-            .count();
-        let any_attic = zone_names.iter().any(|(_, n)| n == "Attic");
-        tracing::info!(
-            verbosity,
-            zone_count = zone_names.len(),
-            zone_temp_columns = zone_temp_count,
-            zone_infiltration_lwr_columns = zone_inf_lwr_count,
-            attic_present = any_attic,
-            "output schema constructed"
-        );
-    }
-
-    let mut metadata = std::collections::HashMap::new();
-    metadata.insert("hares_verbosity".to_string(), verbosity.to_string());
-    metadata.insert("hares_mode_map".to_string(), mode_ordinal_json());
-
-    let basement_lighting_created = equipment_list.iter().any(|s| s.name == "Basement Lighting");
-    metadata.insert(
-        "basement_lighting_created".to_string(),
-        basement_lighting_created.to_string(),
-    );
-
-    let garage_lighting_created = equipment_list.iter().any(|s| s.name == "Garage Lighting");
-    metadata.insert(
-        "garage_lighting_created".to_string(),
-        garage_lighting_created.to_string(),
-    );
-
-    Schema::new_with_metadata(fields, metadata)
-}
-
 /// Whether `name` is a **reserved** output column — one the schema emits
 /// independently of any equipment instance, whose name nevertheless sits
 /// verbatim in the per-equipment `{name} {suffix}` namespace.
@@ -1001,92 +440,36 @@ pub fn expected_columns_at_verbosity(
     cols
 }
 
-/// JSON encoding of the `OperatingMode` → ordinal mapping, embedded as
-/// Parquet custom metadata so output files are self-describing.
-///
-/// Ordinal values:
-///   Off=0, Heating=1, Cooling=2, Defrost=3, Standby=4, Charging=5,
-///   Discharging=6, HeatingHP=7, HeatingER=8, HeatingHPAndER=9,
-///   HeatPumpWH=10, BackupElement=11, On=12
-fn mode_ordinal_json() -> String {
-    serde_json::to_string(&MODE_ORDINALS).expect("static map serialises")
-}
-
-const MODE_ORDINALS: &[(&str, u8)] = &[
-    ("Off", 0),
-    ("Heating", 1),
-    ("Cooling", 2),
-    ("Defrost", 3),
-    ("Standby", 4),
-    ("Charging", 5),
-    ("Discharging", 6),
-    ("HeatingHP", 7),
-    ("HeatingER", 8),
-    ("HeatingHPAndER", 9),
-    ("HeatPumpWH", 10),
-    ("BackupElement", 11),
-    ("On", 12),
-];
-
-/// Every `OperatingMode` variant must have a corresponding entry in
-/// `MODE_ORDINALS` so that Parquet output files remain self-describing.
-///
-/// Uses `strum::EnumIter` to enumerate variants directly from the enum
-/// definition, eliminating the manually-maintained parallel list that was the
-/// root cause of the original drift.
-///
-/// Verified by the `mode_ordinals_cover_all_variants` unit test below
-/// (the construction-path call was removed); it is not part of the hot path.
+/// Every `OperatingMode` variant must have a corresponding entry in the
+/// catalogue's mode labels so that Parquet output files remain
+/// self-describing. The catalogue's schema metadata derives the ordinal map
+/// from the labels' order; this test pins the order against the enum
+/// itself.
 #[cfg(test)]
 mod mode_ordinals_tests {
     use hares_types::OperatingMode;
     use strum::IntoEnumIterator;
 
-    use super::MODE_ORDINALS;
-
     #[test]
-    fn mode_ordinals_cover_all_variants() {
+    fn mode_labels_cover_all_variants_in_ordinal_order() {
+        let labels = hares_types::MODE_LABELS;
+        assert_eq!(
+            labels.len(),
+            OperatingMode::iter().count(),
+            "MODE_LABELS entry count must match OperatingMode variant count"
+        );
         for mode in OperatingMode::iter() {
             let ordinal = mode as u8;
-            assert!(
-                MODE_ORDINALS.iter().any(|(_, o)| *o == ordinal),
-                "MODE_ORDINALS is missing entry for OperatingMode variant {mode:?}; \
-                 Parquet metadata will not be self-describing for files \
-                 containing this mode"
+            let label = labels.get(ordinal as usize).unwrap_or_else(|| {
+                panic!("MODE_LABELS is missing entry for OperatingMode variant {mode:?}")
+            });
+            assert_eq!(
+                *label,
+                format!("{mode:?}"),
+                "MODE_LABELS[{ordinal}] must be the variant's name"
             );
         }
     }
-}
-
-/// Generates instance-qualified names for multi-instance equipment.
-///
-/// If an equipment name appears more than once, instances are numbered:
-/// `"Battery #1"`, `"Battery #2"`. Single instances keep the bare name.
-fn instance_qualified_names(specs: &[EquipmentSpec]) -> Vec<(String, FuelType)> {
-    use std::collections::HashMap;
-
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for spec in specs {
-        *counts.entry(&spec.name).or_insert(0) += 1;
-    }
-
-    let mut indices: HashMap<&str, usize> = HashMap::new();
-    let mut result = Vec::with_capacity(specs.len());
-    for spec in specs {
-        if let Some(ref instance_name) = spec.instance_name {
-            result.push((instance_name.clone(), spec.fuel_type));
-        } else {
-            let total = counts.get(spec.name.as_str()).copied().unwrap_or(1);
-            if total > 1 {
-                let idx = indices.entry(&spec.name).or_insert(0);
-                *idx += 1;
-                result.push((canonical_instance_namer(&spec.name, *idx), spec.fuel_type));
-            } else {
-                result.push((spec.name.clone(), spec.fuel_type));
-            }
-        }
-    }
-    result
 }
 
 pub fn is_hvac_or_wh(name: &str) -> bool {
@@ -1165,6 +548,8 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
+    use crate::hpxml::EquipmentSpec;
+    use crate::output::catalogue::build_schema_for_specs;
 
     fn make_spec(name: &str, fuel: FuelType) -> EquipmentSpec {
         EquipmentSpec {
@@ -1183,7 +568,7 @@ mod tests {
 
     #[test]
     fn verbosity_0_has_timestamp_total_power_and_context_columns() {
-        let schema = build_schema(&[], 0, &[]);
+        let schema = build_schema_for_specs(&[], 0, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(
             names,
@@ -1211,7 +596,7 @@ mod tests {
             make_spec("ASHP Heater", FuelType::Electric),
             make_spec("Gas Furnace", FuelType::Gas),
         ];
-        let schema = build_schema(&specs, 1, &[]);
+        let schema = build_schema_for_specs(&specs, 1, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"ASHP Heater Electric Power (kW)"));
         assert!(names.contains(&"Gas Furnace Electric Power (kW)"));
@@ -1225,7 +610,7 @@ mod tests {
         // power column for these fuels, not just natural gas/propane/oil.
         for fuel in [FuelType::Wood, FuelType::Coal, FuelType::WoodPellet] {
             let specs = vec![make_spec("Gas Boiler", fuel)];
-            let schema = build_schema(&specs, 1, &[]);
+            let schema = build_schema_for_specs(&specs, 1, &[]);
             let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
             assert!(
                 names.contains(&"Gas Boiler Gas Power (therms/hour)"),
@@ -1241,7 +626,7 @@ mod tests {
             make_spec("Battery", FuelType::Electric),
             make_spec("Battery", FuelType::Electric),
         ];
-        let schema = build_schema(&specs, 1, &[]);
+        let schema = build_schema_for_specs(&specs, 1, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"Battery #1 Electric Power (kW)"));
         assert!(names.contains(&"Battery #2 Electric Power (kW)"));
@@ -1253,7 +638,7 @@ mod tests {
             (ZoneId(1), "Indoor".to_string()),
             (ZoneId(2), "Attic".to_string()),
         ];
-        let schema = build_schema(&[], 2, &zone_names);
+        let schema = build_schema_for_specs(&[], 2, &zone_names);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"Temperature - Attic (C)"));
         assert!(names.contains(&"Unmet HVAC Load (C)"));
@@ -1262,7 +647,7 @@ mod tests {
 
     #[test]
     fn verbosity_2_skips_attic_temp_when_no_attic_zone() {
-        let schema = build_schema(&[], 2, &[]);
+        let schema = build_schema_for_specs(&[], 2, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(!names.contains(&"Temperature - Attic (C)"));
         assert!(names.contains(&"Unmet HVAC Load (C)"));
@@ -1271,14 +656,14 @@ mod tests {
 
     #[test]
     fn verbosity_5_adds_net_sensible_heat_gain_column() {
-        let schema = build_schema(&[], 5, &[]);
+        let schema = build_schema_for_specs(&[], 5, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"Net Sensible Heat Gain - Indoor (W)"));
     }
 
     #[test]
     fn verbosity_7_adds_hot_water_mains_temperature_column() {
-        let schema = build_schema(&[], 7, &[]);
+        let schema = build_schema_for_specs(&[], 7, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"Hot Water Mains Temperature (C)"));
         // Setpoint chain columns are dwelling-level, independent of equipment list.
@@ -1291,7 +676,7 @@ mod tests {
     #[test]
     fn all_verbosity_levels_include_outdoor_temp_and_indoor_temp() {
         for v in 0..=8u8 {
-            let schema = build_schema(&[], v, &[]);
+            let schema = build_schema_for_specs(&[], v, &[]);
             let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
             assert!(
                 names.contains(&"Outdoor Dry Bulb (C)"),
@@ -1310,7 +695,7 @@ mod tests {
             make_spec("ASHP Heater", FuelType::Electric),
             make_spec("Battery", FuelType::Electric),
         ];
-        let schema = build_schema(&specs, 3, &[]);
+        let schema = build_schema_for_specs(&specs, 3, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"ASHP Heater Mode (-)"));
         assert!(names.contains(&"ASHP Heater Setpoint (C)"));
@@ -1320,7 +705,7 @@ mod tests {
 
     #[test]
     fn schema_metadata_includes_mode_map() {
-        let schema = build_schema(&[], 0, &[]);
+        let schema = build_schema_for_specs(&[], 0, &[]);
         let meta = schema.metadata();
         assert!(meta.contains_key("hares_mode_map"));
         let json: serde_json::Value =
@@ -1335,14 +720,14 @@ mod tests {
             make_spec("Indoor Lighting", FuelType::Electric),
             make_spec("Basement Lighting", FuelType::Electric),
         ];
-        let schema = build_schema(&specs, 1, &[]);
+        let schema = build_schema_for_specs(&specs, 1, &[]);
         let meta = schema.metadata();
         assert_eq!(
             meta.get("basement_lighting_created").map(|s| s.as_str()),
             Some("true"),
         );
 
-        let schema_no_basement = build_schema(&[], 0, &[]);
+        let schema_no_basement = build_schema_for_specs(&[], 0, &[]);
         let meta_no = schema_no_basement.metadata();
         assert_eq!(
             meta_no.get("basement_lighting_created").map(|s| s.as_str()),
@@ -1356,14 +741,14 @@ mod tests {
             make_spec("Indoor Lighting", FuelType::Electric),
             make_spec("Garage Lighting", FuelType::Electric),
         ];
-        let schema = build_schema(&specs, 1, &[]);
+        let schema = build_schema_for_specs(&specs, 1, &[]);
         let meta = schema.metadata();
         assert_eq!(
             meta.get("garage_lighting_created").map(|s| s.as_str()),
             Some("true"),
         );
 
-        let schema_no_garage = build_schema(&[], 0, &[]);
+        let schema_no_garage = build_schema_for_specs(&[], 0, &[]);
         let meta_no = schema_no_garage.metadata();
         assert_eq!(
             meta_no.get("garage_lighting_created").map(|s| s.as_str()),
@@ -1379,48 +764,44 @@ mod tests {
         assert_eq!(OperatingMode::On.as_code(), 12.0);
     }
 
-    /// Asserts that `MODE_ORDINALS` has one entry for every `OperatingMode`
-    /// variant. Adding a new variant without updating `MODE_ORDINALS` causes
-    /// this test to fail, guarding against future drift.
-    ///
-    /// Uses `strum::EnumIter` to enumerate variants directly from the enum
-    /// definition. There is no manually-maintained parallel list that could
-    /// drift out of sync.
+    /// The catalogue's mode labels carry the ordinal map: one label per
+    /// `OperatingMode` variant, in ordinal order, and `OperatingMode::On`
+    /// round-trips through `as_code()` at the last ordinal.
     #[test]
     fn test_mode_ordinals_covers_all_variants() {
+        let mode_labels = hares_types::MODE_LABELS;
         assert_eq!(
-            MODE_ORDINALS.len(),
+            mode_labels.len(),
             OperatingMode::iter().count(),
-            "MODE_ORDINALS entry count must match OperatingMode variant count"
+            "MODE_LABELS entry count must match OperatingMode variant count"
         );
         for mode in OperatingMode::iter() {
             let ordinal = mode as u8;
             let name = format!("{mode:?}");
-            let found = MODE_ORDINALS
-                .iter()
-                .any(|(n, o)| *o == ordinal && *n == name);
-            assert!(
-                found,
-                "MODE_ORDINALS missing entry for {name} (ordinal {ordinal})"
+            assert_eq!(
+                mode_labels.get(ordinal as usize).copied(),
+                Some(name.as_str()),
+                "MODE_LABELS missing or wrong at {name} (ordinal {ordinal})"
             );
         }
     }
 
-    /// `OperatingMode::On` round-trips through `as_code()` and the metadata
-    /// entry `("On", 12)` exists in `MODE_ORDINALS`.
+    /// `OperatingMode::On` round-trips through `as_code()` and the mode
+    /// labels' last entry is `"On"`.
     #[test]
     fn test_on_mode_roundtrips() {
         assert_eq!(OperatingMode::On.as_code(), 12.0);
-        let entry = MODE_ORDINALS
-            .iter()
-            .find(|(name, _)| *name == "On")
-            .expect("On entry must exist in MODE_ORDINALS");
-        assert_eq!(entry, &("On", 12));
+        let mode_labels = hares_types::MODE_LABELS;
+        assert_eq!(
+            mode_labels.last(),
+            Some(&"On"),
+            "the mode labels' last entry must be 'On' at ordinal 12"
+        );
     }
 
     #[test]
     fn expected_columns_at_verbosity_0_is_subset_of_schema() {
-        let schema = build_schema(&[], 0, &[]);
+        let schema = build_schema_for_specs(&[], 0, &[]);
         let schema_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         for col in expected_columns_at_verbosity(0, &[]) {
             assert!(
@@ -1436,8 +817,9 @@ mod tests {
     /// OCHRE HVAC.py:595-596.
     #[test]
     fn cooling_equipment_gets_shr_and_latent_gains_at_v7_heating_does_not() {
-        let cool = build_schema(&[make_spec("Air Conditioner", FuelType::Electric)], 7, &[]);
-        let heat = build_schema(&[make_spec("Gas Furnace", FuelType::Gas)], 7, &[]);
+        let cool =
+            build_schema_for_specs(&[make_spec("Air Conditioner", FuelType::Electric)], 7, &[]);
+        let heat = build_schema_for_specs(&[make_spec("Gas Furnace", FuelType::Gas)], 7, &[]);
         let cool_names: Vec<&str> = cool.fields().iter().map(|f| f.name().as_str()).collect();
         let heat_names: Vec<&str> = heat.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(cool_names.contains(&"Air Conditioner SHR (-)"));
@@ -1451,8 +833,8 @@ mod tests {
     /// OCHRE HVAC.py:592-599.
     #[test]
     fn hvac_equipment_gets_performance_columns_non_hvac_does_not() {
-        let hvac = build_schema(&[make_spec("Gas Furnace", FuelType::Gas)], 7, &[]);
-        let non = build_schema(&[make_spec("Battery", FuelType::Electric)], 7, &[]);
+        let hvac = build_schema_for_specs(&[make_spec("Gas Furnace", FuelType::Gas)], 7, &[]);
+        let non = build_schema_for_specs(&[make_spec("Battery", FuelType::Electric)], 7, &[]);
         let hvac_names: Vec<&str> = hvac.fields().iter().map(|f| f.name().as_str()).collect();
         let non_names: Vec<&str> = non.fields().iter().map(|f| f.name().as_str()).collect();
         let hvac_only = [
@@ -1478,8 +860,8 @@ mod tests {
     #[test]
     fn capacity_and_cop_promoted_to_v7_not_duplicated_at_v8() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
-        let s7 = build_schema(&specs, 7, &[]);
-        let s8 = build_schema(&specs, 8, &[]);
+        let s7 = build_schema_for_specs(&specs, 7, &[]);
+        let s8 = build_schema_for_specs(&specs, 8, &[]);
         let n7: Vec<&str> = s7.fields().iter().map(|f| f.name().as_str()).collect();
         let n8: Vec<&str> = s8.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(n7.contains(&"Air Conditioner Capacity (W)"));
@@ -1494,7 +876,7 @@ mod tests {
     /// HVAC Duct Losses column present at v5 (OCHRE HVAC.py:588).
     #[test]
     fn hvac_duct_losses_column_present_at_verbosity_5() {
-        let schema = build_schema(&[], 5, &[]);
+        let schema = build_schema_for_specs(&[], 5, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
             names.contains(&"HVAC Duct Losses (W)"),
@@ -1510,8 +892,8 @@ mod tests {
     fn test_attic_columns_conditional() {
         // Without attic zone: no attic-specific columns.
         let no_attic = vec![(ZoneId(1), "Indoor".to_string())];
-        let s2 = build_schema(&[], 2, &no_attic);
-        let s6 = build_schema(&[], 6, &no_attic);
+        let s2 = build_schema_for_specs(&[], 2, &no_attic);
+        let s6 = build_schema_for_specs(&[], 6, &no_attic);
         let n2: Vec<&str> = s2.fields().iter().map(|f| f.name().as_str()).collect();
         let n6: Vec<&str> = s6.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
@@ -1532,8 +914,8 @@ mod tests {
             (ZoneId(1), "Indoor".to_string()),
             (ZoneId(2), "Attic".to_string()),
         ];
-        let s2 = build_schema(&[], 2, &with_attic);
-        let s6 = build_schema(&[], 6, &with_attic);
+        let s2 = build_schema_for_specs(&[], 2, &with_attic);
+        let s6 = build_schema_for_specs(&[], 6, &with_attic);
         let n2: Vec<&str> = s2.fields().iter().map(|f| f.name().as_str()).collect();
         let n6: Vec<&str> = s6.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
@@ -1556,8 +938,8 @@ mod tests {
     fn test_ground_columns_conditional() {
         // Without ground/basement zone: no per-zone columns for that zone.
         let no_basement = vec![(ZoneId(1), "Indoor".to_string())];
-        let s2 = build_schema(&[], 2, &no_basement);
-        let s6 = build_schema(&[], 6, &no_basement);
+        let s2 = build_schema_for_specs(&[], 2, &no_basement);
+        let s6 = build_schema_for_specs(&[], 6, &no_basement);
         let n2: Vec<&str> = s2.fields().iter().map(|f| f.name().as_str()).collect();
         let n6: Vec<&str> = s6.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
@@ -1579,8 +961,8 @@ mod tests {
             (ZoneId(1), "Indoor".to_string()),
             (ZoneId(2), "Zone_2".to_string()),
         ];
-        let s2 = build_schema(&[], 2, &with_basement);
-        let s6 = build_schema(&[], 6, &with_basement);
+        let s2 = build_schema_for_specs(&[], 2, &with_basement);
+        let s6 = build_schema_for_specs(&[], 6, &with_basement);
         let n2: Vec<&str> = s2.fields().iter().map(|f| f.name().as_str()).collect();
         let n6: Vec<&str> = s6.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
@@ -1603,7 +985,7 @@ mod tests {
     fn indoor_only_building_produces_no_non_indoor_zone_columns() {
         let zone_names = vec![(ZoneId(1), "Indoor".to_string())];
         for v in 2..=8u8 {
-            let schema = build_schema(&[], v, &zone_names);
+            let schema = build_schema_for_specs(&[], v, &zone_names);
             let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
             assert!(
                 !names.contains(&"Temperature - Attic (C)"),
@@ -1648,7 +1030,7 @@ mod tests {
             (ZoneId(2), "Basement".to_string()),
             (ZoneId(3), "Attic".to_string()),
         ];
-        let schema = build_schema(&[], 6, &zone_names);
+        let schema = build_schema_for_specs(&[], 6, &zone_names);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
             names.contains(&"HVAC Heating Delivered - Indoor (W)"),
@@ -1671,7 +1053,7 @@ mod tests {
             (ZoneId(1), "Indoor".to_string()),
             (ZoneId(2), "Basement".to_string()),
         ];
-        let schema = build_schema(&[], 6, &zone_names);
+        let schema = build_schema_for_specs(&[], 6, &zone_names);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
             names.contains(&"HVAC Cooling Delivered - Indoor (W)"),
@@ -1688,7 +1070,7 @@ mod tests {
     fn per_zone_hvac_columns_not_present_below_verbosity_6() {
         let zone_names = vec![(ZoneId(1), "Indoor".to_string())];
         for v in 0..=5u8 {
-            let schema = build_schema(&[], v, &zone_names);
+            let schema = build_schema_for_specs(&[], v, &zone_names);
             let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
             assert!(
                 !names
@@ -1709,7 +1091,7 @@ mod tests {
     #[test]
     fn single_zone_produces_one_pair_of_per_zone_hvac_columns() {
         let zone_names = vec![(ZoneId(1), "Indoor".to_string())];
-        let schema = build_schema(&[], 6, &zone_names);
+        let schema = build_schema_for_specs(&[], 6, &zone_names);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"HVAC Heating Delivered - Indoor (W)"));
         assert!(names.contains(&"HVAC Cooling Delivered - Indoor (W)"));
@@ -1728,7 +1110,7 @@ mod tests {
             make_spec("Gas Furnace", FuelType::Gas),
             make_spec("Electric Baseboard", FuelType::Electric),
         ];
-        let schema = build_schema(&specs, 1, &[]);
+        let schema = build_schema_for_specs(&specs, 1, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         // Per-equipment columns still present.
         assert!(names.contains(&"ASHP Heater Electric Power (kW)"));
@@ -1748,8 +1130,8 @@ mod tests {
     #[test]
     fn aggregate_columns_only_at_verbosity_1_and_above() {
         let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-        let s0 = build_schema(&specs, 0, &[]);
-        let s1 = build_schema(&specs, 1, &[]);
+        let s0 = build_schema_for_specs(&specs, 0, &[]);
+        let s1 = build_schema_for_specs(&specs, 1, &[]);
         let n0: Vec<&str> = s0.fields().iter().map(|f| f.name().as_str()).collect();
         let n1: Vec<&str> = s1.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(!n0.contains(&"HVAC Heating End Use Electric Power (kW)"));
@@ -1766,7 +1148,7 @@ mod tests {
             make_spec("Battery", FuelType::Electric),
             make_spec("PV", FuelType::Electric),
         ];
-        let schema = build_schema(&specs, 1, &[]);
+        let schema = build_schema_for_specs(&specs, 1, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"HVAC Heating End Use Electric Power (kW)"));
         assert!(names.contains(&"HVAC Cooling End Use Electric Power (kW)"));
@@ -2043,7 +1425,7 @@ mod tests {
     #[test]
     fn build_schema_emits_no_per_equipment_columns_for_a_name_shadowing_an_aggregate() {
         let specs = vec![make_spec("Total", FuelType::Electric)];
-        let schema = build_schema(&specs, 8, &[]);
+        let schema = build_schema_for_specs(&specs, 8, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(
             names
@@ -2122,7 +1504,7 @@ mod tests {
             make_spec("Battery", FuelType::Electric),
             make_spec("PV", FuelType::Electric),
         ];
-        let schema = build_schema(&specs, 1, &[]);
+        let schema = build_schema_for_specs(&specs, 1, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         // Aggregate columns use the "End Use" suffix.
         assert!(
@@ -2206,7 +1588,7 @@ mod tests {
     #[test]
     fn hvac_equipment_gets_v8_telemetry_columns() {
         let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-        let schema = build_schema(&specs, 8, &[]);
+        let schema = build_schema_for_specs(&specs, 8, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"ASHP Heater Supply Temperature (C)"));
         assert!(names.contains(&"ASHP Heater Return Temperature (C)"));
@@ -2225,7 +1607,7 @@ mod tests {
     #[test]
     fn pv_equipment_gets_v8_telemetry_columns() {
         let specs = vec![make_spec("PV", FuelType::Electric)];
-        let schema = build_schema(&specs, 8, &[]);
+        let schema = build_schema_for_specs(&specs, 8, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"PV DC Power (kW)"));
         assert!(names.contains(&"PV Irradiance (W/m2)"));
@@ -2235,7 +1617,7 @@ mod tests {
     #[test]
     fn ev_equipment_gets_v8_telemetry_columns() {
         let specs = vec![make_spec("EV", FuelType::Electric)];
-        let schema = build_schema(&specs, 8, &[]);
+        let schema = build_schema_for_specs(&specs, 8, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"EV Connection State (-)"));
         assert!(names.contains(&"EV Charging Level (-)"));
@@ -2245,8 +1627,8 @@ mod tests {
     #[test]
     fn non_diagnostic_equipment_has_no_v8_telemetry_columns() {
         let specs = vec![make_spec("Battery", FuelType::Electric)];
-        let s7 = build_schema(&specs, 7, &[]);
-        let s8 = build_schema(&specs, 8, &[]);
+        let s7 = build_schema_for_specs(&specs, 7, &[]);
+        let s8 = build_schema_for_specs(&specs, 8, &[]);
         let n7: Vec<&str> = s7.fields().iter().map(|f| f.name().as_str()).collect();
         let n8: Vec<&str> = s8.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(!n7.contains(&"Battery Supply Temperature (C)"));
@@ -2272,35 +1654,15 @@ mod tests {
         assert!(!is_compressor_equipment("Battery"));
     }
 
-    /// `extract_unit_from_name` extracts the unit string from a column name's
-    /// parenthesized suffix.
-    #[test]
-    fn extract_unit_from_column_name() {
-        assert_eq!(
-            extract_unit_from_name("Total Electric Power (kW)"),
-            Some("kW")
-        );
-        assert_eq!(
-            extract_unit_from_name("Temperature - Indoor (C)"),
-            Some("C")
-        );
-        assert_eq!(extract_unit_from_name("Battery SOC (-)"), Some("-"));
-        assert_eq!(
-            extract_unit_from_name("Total Gas Power (therms/hour)"),
-            Some("therms/hour")
-        );
-        assert_eq!(extract_unit_from_name("PV Irradiance (W/m2)"), Some("W/m2"));
-        assert_eq!(extract_unit_from_name("Time"), None);
-        assert_eq!(extract_unit_from_name("NoUnit"), None);
-    }
-
     /// Output schema columns carry unit metadata on their Arrow fields, verified
     /// against independent hand-written expected units rather than recomputing
-    /// the expected value from the same extraction function.
+    /// the expected value from the same extraction function. The metadata
+    /// comes from the catalogue's `Unit::symbol()` (the pre-catalogue schema
+    /// parsed it back out of the column name).
     #[test]
     fn output_schema_columns_carry_unit_metadata() {
         let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-        let schema = build_schema(&specs, 3, &[]);
+        let schema = build_schema_for_specs(&specs, 3, &[]);
         let expected_units: &[(&str, &str)] = &[
             ("Total Electric Power (kW)", "kW"),
             ("Total Gas Power (therms/hour)", "therms/hour"),
