@@ -108,6 +108,12 @@ pub struct ElectricBoiler {
     /// publish; the count reaches the run's health through
     /// `take_health_counts`).
     fluid_payload_absences: u64,
+    /// Whether this run already warned on a late absent payload: the
+    /// first one carries the detail, the rest are counted silently in
+    /// the run's health (the once-per-run warning pattern), so a payload
+    /// starved for the rest of a year does not flood the run's warning
+    /// log and tracing with a line per step.
+    fluid_absence_warned: bool,
     /// Warnings raised since the last drain (the late absent-payload
     /// degradations; they reach the run's warning log through
     /// `drain_warnings`).
@@ -154,6 +160,10 @@ pub struct GasBoiler {
     /// Absent-payload steps since the last health drain (after the first
     /// publish).
     fluid_payload_absences: u64,
+    /// Whether this run already warned on a late absent payload: the
+    /// first one carries the detail, the rest are counted silently in
+    /// the run's health (the once-per-run warning pattern).
+    fluid_absence_warned: bool,
     /// Warnings raised since the last drain (the late absent-payload
     /// degradations).
     warnings: Vec<Warning>,
@@ -237,6 +247,7 @@ impl ElectricBoiler {
             dr_level: DRLevel::Normal,
             fluid_payload_seen: false,
             fluid_payload_absences: 0,
+            fluid_absence_warned: false,
             warnings: Vec::new(),
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
@@ -312,6 +323,7 @@ impl Equipment for ElectricBoiler {
         self.run_time_s = 0.0;
         self.fluid_payload_seen = false;
         self.fluid_payload_absences = 0;
+        self.fluid_absence_warned = false;
         self.warnings.clear();
         self.telemetry = electric_boiler_default_telemetry();
         register_ebm_telemetry_keys(&mut self.telemetry);
@@ -390,24 +402,31 @@ impl Equipment for ElectricBoiler {
                 // return temperature covers the step. Before the first
                 // publish that is the escape's whole contract (the first
                 // step runs before the envelope's first resolve); after
-                // it, the absence is a degradation: logged, and counted in
-                // the run's health.
+                // it, the absence is a degradation: counted in the run's
+                // health, and warned once per run with the detail (the
+                // once-per-run pattern keeps a payload starved for the
+                // rest of a run from flooding the warning log and the
+                // tracing with a line per step).
                 if payload_was_seen {
                     self.fluid_payload_absences += 1;
-                    let message = format!(
-                        "Electric Boiler '{}': the fluid domain published no payload \
-                         this step; the return temperature of loop {loop_id:?} reads \
-                         from the configured return temperature until the fluid \
-                         domain publishes again",
-                        self.descriptor.name
-                    );
-                    tracing::warn!(
-                        equipment = %self.descriptor.name,
-                        loop_id = ?loop_id,
-                        "{message}"
-                    );
-                    self.warnings
-                        .push(Warning::new(self.descriptor.name.clone(), message));
+                    if !self.fluid_absence_warned {
+                        self.fluid_absence_warned = true;
+                        let message = format!(
+                            "Electric Boiler '{}': the fluid domain published no payload \
+                             this step; the return temperature of loop {loop_id:?} reads \
+                             from the configured return temperature until the fluid \
+                             domain publishes again; further absent-payload steps are \
+                             counted silently in the run health's fluid_payload_absences",
+                            self.descriptor.name
+                        );
+                        tracing::warn!(
+                            equipment = %self.descriptor.name,
+                            loop_id = ?loop_id,
+                            "{message}"
+                        );
+                        self.warnings
+                            .push(Warning::new(self.descriptor.name.clone(), message));
+                    }
                 }
                 self.default_return_temp_c
             }
@@ -708,6 +727,7 @@ impl GasBoiler {
             dr_level: DRLevel::Normal,
             fluid_payload_seen: false,
             fluid_payload_absences: 0,
+            fluid_absence_warned: false,
             warnings: Vec::new(),
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
@@ -811,6 +831,7 @@ impl Equipment for GasBoiler {
         self.run_time_s = 0.0;
         self.fluid_payload_seen = false;
         self.fluid_payload_absences = 0;
+        self.fluid_absence_warned = false;
         self.warnings.clear();
         self.telemetry = gas_boiler_default_telemetry();
         register_ebm_telemetry_keys(&mut self.telemetry);
@@ -878,24 +899,31 @@ impl Equipment for GasBoiler {
                 // return temperature covers the step. Before the first
                 // publish that is the escape's whole contract (the first
                 // step runs before the envelope's first resolve); after
-                // it, the absence is a degradation: logged, and counted in
-                // the run's health.
+                // it, the absence is a degradation: counted in the run's
+                // health, and warned once per run with the detail (the
+                // once-per-run pattern keeps a payload starved for the
+                // rest of a run from flooding the warning log and the
+                // tracing with a line per step).
                 if payload_was_seen {
                     self.fluid_payload_absences += 1;
-                    let message = format!(
-                        "Gas Boiler '{}': the fluid domain published no payload \
-                         this step; the return temperature of loop {loop_id:?} reads \
-                         from the configured return temperature until the fluid \
-                         domain publishes again",
-                        self.descriptor.name
-                    );
-                    tracing::warn!(
-                        equipment = %self.descriptor.name,
-                        loop_id = ?loop_id,
-                        "{message}"
-                    );
-                    self.warnings
-                        .push(Warning::new(self.descriptor.name.clone(), message));
+                    if !self.fluid_absence_warned {
+                        self.fluid_absence_warned = true;
+                        let message = format!(
+                            "Gas Boiler '{}': the fluid domain published no payload \
+                             this step; the return temperature of loop {loop_id:?} reads \
+                             from the configured return temperature until the fluid \
+                             domain publishes again; further absent-payload steps are \
+                             counted silently in the run health's fluid_payload_absences",
+                            self.descriptor.name
+                        );
+                        tracing::warn!(
+                            equipment = %self.descriptor.name,
+                            loop_id = ?loop_id,
+                            "{message}"
+                        );
+                        self.warnings
+                            .push(Warning::new(self.descriptor.name.clone(), message));
+                    }
                 }
                 self.default_return_temp_c
             }
@@ -2104,6 +2132,74 @@ mod tests {
         // The count is take-semantics: a clean step reports none.
         let counts = Equipment::take_health_counts(&mut eq);
         assert_eq!(counts.fluid_payload_absences, 0);
+    }
+
+    /// A run whose payload stays absent warns once and counts every
+    /// absent step: the first absence carries the detail, the rest are
+    /// counted silently in the run's health, so a payload starved for a
+    /// year of steps cannot flood the run's warning log with a line per
+    /// step.
+    #[test]
+    fn repeated_absent_payloads_warn_once_and_count_every_step() {
+        let cfg = gb_config(10_000.0, 0.95);
+        let mut eq = GasBoiler::new(cfg.clone());
+        let mut env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.hvac.runtime.duty_cycle = 0.5;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
+
+        let payload = DomainUpdate {
+            domain_id: FLUID,
+            zone_temperatures_c: vec![],
+            custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
+                loop_id: LoopId(1),
+                fluid_type: FluidType::Water,
+                heating_power_w: 0.0,
+                cooling_power_w: 0.0,
+                net_power_w: 0.0,
+                mean_supply_temp_c: 45.0,
+                mean_return_temp_c: 40.0,
+            }]),
+        };
+
+        // The fluid domain publishes once; the marker flips true.
+        env.domains.fluid.set_from(&payload);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("the published payload decodes");
+
+        // Ten absent-payload steps: every one counted, exactly one warned.
+        env.domains.fluid.clear();
+        for _ in 0..10 {
+            eq.step(&env, Duration::from_secs(60), &mut ports)
+                .expect("the absent payload degrades to the configured return temp");
+        }
+        let counts = Equipment::take_health_counts(&mut eq);
+        assert_eq!(
+            counts.fluid_payload_absences, 10,
+            "every absent-payload step is counted in the run's health"
+        );
+        let mut warnings = Vec::new();
+        eq.drain_warnings(&mut warnings);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the absent payload warns once per run, not once per step: {warnings:?}"
+        );
+        assert!(
+            warnings[0]
+                .message
+                .contains("counted silently in the run health's fluid_payload_absences"),
+            "the warning names where the silent counts surface: {:?}",
+            warnings[0].message
+        );
     }
 
     #[test]

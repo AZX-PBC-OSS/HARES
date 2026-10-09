@@ -1390,7 +1390,7 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   two frozen forms disagree by up to 2x (the reduced horizontal: 0.948
   against 1.782), and the correction only ever adds conductance, so the
   winter ceiling under an attic keeps the reduced static value where
-  OCHRE carries the larger frozen TARP value. The static film is the
+  OCHRE carries the larger frozen value. The static film is the
   A-matrix's linearization baseline, and the ASHRAE Simple table is a
   defensible baseline: it is EnergyPlus's own default inside convection
   algorithm when none is set (`DataHeatBalance.hh:613`,
@@ -1481,3 +1481,54 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   (`mshp_cooler_fan_power_normalizes_to_the_top_stage`), whose init applies
   the identical normalization to the cooling stage table: a declared
   cooler fan power that never reached the fan was a dropped input.
+
+## D-033: The HPXML "other" location family is one adiabatic zone
+
+- **Quantity:** the thermal treatment of HPXML locations naming another
+  unit or an unmodelled heated space: the "other" label family ("other
+  housing unit", "other heated space", and the rest).
+- **Reference behavior:** OS-HPXML v1.12.0 splits the family by label.
+  "Other housing unit" is one of `HPXML::conditioned_locations`
+  (hpxml.rb:12311-12316), so a surface facing it joins the one
+  conditioned space via `geometry.rb` `get_space_from_location`
+  (:1704-1716), and a skylight over such a surface seats there too (the
+  skylight rule reads the parent surface's conditioned-ness).
+  "Other heated space" is not a conditioned location: equipment placed
+  there reads a scheduled-space blend of the indoor and outdoor dry-bulb
+  (`geometry.rb` `get_temperature_scheduled_space_values`, D-027's
+  moisture treatment), its own unmodelled zone's state, not the
+  conditioned space's. OCHRE keeps no such split: every multifamily
+  label in the family is an adiabatic same-zone boundary
+  (`ochre/utils/hpxml.py:78`), rewritten to match its non-Adjacent
+  neighbor (`hpxml.py:96-97`).
+- **HARES behavior:** HARES follows OCHRE. `parse_zone_label` sends every
+  label containing "other" to `ZoneType::Adjacent` (the OCHRE adiabatic
+  reading), and `rewrite_adjacent_zone_pair` merges the Adjacent side of
+  a boundary into its non-Adjacent neighbor, so a wall to "other heated
+  space" acts as same-zone thermal mass and a surface to "other housing
+  unit" is treated conditioned only when its neighbor on the boundary is
+  (the rewrite landing it there, as the multifamily fixture's party
+  walls do). The skylight's conditioned-seating rule consequently reads
+  the REWRITTEN adjacency: its comment lists only the labels the OS-HPXML
+  list holds that survive the rewrite as conditioned, and no Adjacent
+  survives to it (the parse_boundaries invariant).
+- **Justification:** class (a) against OS-HPXML, taken deliberately:
+  OCHRE's single adiabatic zone for the family is its simplification of
+  OS-HPXML's per-label split, and OCHRE is the parity reference; HARES
+  reproduces its zone model (as D-015 reproduces its conditioned-space
+  merge) instead of the OS-HPXML rule OCHRE declines. The two labels'
+  outcomes differ (a skylight over "other heated space" seats conditioned
+  in HARES when the surface's other side is the conditioned space, where
+  OS-HPXML's rule refuses it); re-aligning to the per-label split would
+  move the multifamily physics and is not taken. Registered so the
+  conflation of the two references' vocabularies is on the ledger, not
+  only in site comments.
+- **Measured impact:** committed inputs carry the family
+  (`base-bldgtype-multifamily.xml`'s party walls name "other housing
+  unit"; resstock homes name it and "other heated space", the fleet's
+  bldg0000004/6/7 among them), and the committed goldens carry the
+  resulting physics unchanged.
+- **Pinning tests:** `crates/hares-io/src/hpxml/building.rs`'s rewrite
+  tests (the "other housing unit" adjacency pair collapsing to its
+  neighbor, the both-sides case to conditioned) pin the OCHRE rewrite
+  the treatment stands on.

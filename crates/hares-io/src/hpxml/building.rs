@@ -1889,11 +1889,24 @@ fn skylight_interior_zone(
     };
     match deciding.interior_zone {
         // The conditioned locations ("conditioned space", "basement -
-        // conditioned", "crawlspace - conditioned", "other housing unit";
-        // hpxml.rb `conditioned_locations` :12311-12316) merge into the one
-        // conditioned space here: geometry.rb seats the skylight's parent
-        // surface in the conditioned space, never in the named location.
-        Some(ZoneType::Conditioned) | Some(ZoneType::Adjacent) => Ok(Some(ZoneType::Conditioned)),
+        // conditioned", "crawlspace - conditioned"; hpxml.rb
+        // `conditioned_locations` :12311-12316, less its "other housing
+        // unit" member: that label parses as an Adjacent zone here, the
+        // OCHRE adiabatic reading, and the rewrite removes every Adjacent
+        // before the skylights parse; the label family's treatment is
+        // registered as docs/alignment/DIVERGENCES.md D-033) merge into
+        // the one conditioned space here: geometry.rb seats the skylight's
+        // parent surface in the conditioned space, never in the named
+        // location.
+        Some(ZoneType::Conditioned) => Ok(Some(ZoneType::Conditioned)),
+        // The rewrite stage removes every Adjacent adjacency before the
+        // skylights parse (the parse_boundaries invariant); a parent
+        // surface still carrying one is that stage's bug, not an input
+        // case.
+        Some(ZoneType::Adjacent) => unreachable!(
+            "skylight '{skylight_id}': its parent surface's interior adjacency \
+             is Adjacent after the rewrite stage, which removes every Adjacent"
+        ),
         _ => Err(HpxmlError::Parse(
             format!(
                 "skylight '{skylight_id}': not connected to conditioned space; if \

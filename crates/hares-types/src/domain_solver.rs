@@ -185,14 +185,21 @@ impl DomainSlots {
             .set_from(source);
     }
 
-    /// Marks every slot unwritten. The step's environment update calls
-    /// this before its writers run, so a reader between the clear and a
-    /// slot's write sees `None` where the drained `Vec` held no entry.
+    /// Marks every slot unwritten except the fluid slot. The step's
+    /// environment update calls this before its writers run, so a reader
+    /// between the clear and a slot's write sees `None` where the drained
+    /// `Vec` held no entry.
+    ///
+    /// The fluid slot keeps its last published payload: its consumer (the
+    /// boiler's loop return read) steps in the equipment phase, before the
+    /// fluid solver's resolve writes the slot later in the same step, so
+    /// the newest state the equipment phase can read is the previous
+    /// step's publish. The slot still reads as absent before the first
+    /// publish and after a publish that carried no payload.
     pub fn clear_step(&mut self) {
         self.thermal.clear();
         self.humidity.clear();
         self.electrical.clear();
-        self.fluid.clear();
         self.schedule.clear();
         self.mains_water.clear();
         for slot in &mut self.custom {

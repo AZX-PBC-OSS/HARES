@@ -37,11 +37,28 @@ fn tankless_parasitic_power_w(n_bedrooms: f64) -> f64 {
 /// Resolve a bedroom count, trying multiple sources in priority order:
 /// 1. The provided `n_bedrooms` (from HPXML)
 /// 2. The `data_patches.number_of_bedrooms` field
-/// 3. Default of 2.0 (RESNET 301 implicit)
-fn resolve_bedroom_count(n_bedrooms: Option<f64>, data_patches: Option<&HpxmlDataPatches>) -> f64 {
+///
+/// The field is required input: OCHRE reads it with a direct index and
+/// fails on absence (hpxml.py:263, `construction["NumberofBedrooms"]`; the
+/// OS-HPXML defaults apply no default either, defaults.rb `apply_water_heaters`
+/// reads it directly, :3303), so an unavailable count is a typed error naming
+/// the field, never a substituted count (the same rule
+/// [`extract_bedroom_count`] applies).
+fn resolve_bedroom_count(
+    n_bedrooms: Option<f64>,
+    data_patches: Option<&HpxmlDataPatches>,
+) -> std::result::Result<f64, super::HpxmlError> {
     n_bedrooms
         .or_else(|| data_patches.and_then(|p| p.number_of_bedrooms))
-        .unwrap_or(2.0)
+        .ok_or_else(|| super::HpxmlError::MissingField {
+            path: "BuildingSummary/BuildingConstruction/NumberofBedrooms",
+            system_kind: "BuildingConstruction",
+            system_id: "Building".to_string(),
+            reason: "the water heater tank volume, first-hour rating and hot-water \
+                     draw are sized by the bedroom count; OCHRE reads the field \
+                     with a direct index and fails on absence (hpxml.py:263), so \
+                     no count may be substituted for it",
+        })
 }
 
 /// Resolve the numeric `zone_id` (1-indexed) corresponding to an HPXML
@@ -358,7 +375,7 @@ pub(super) fn resolve_water_heaters(
                     heating_capacity_w,
                     setpoint_c,
                     parasitic_power_w: (fuel == FuelType::Gas)
-                        .then(|| tankless_parasitic_power_w(n_bedrooms.expect("n_bedrooms always Some; parse_avg_water_draw_and_bedrooms resolves via HPXML/data_patches/default"))),
+                        .then(|| tankless_parasitic_power_w(n_bedrooms.expect("n_bedrooms always Some; parse_avg_water_draw_and_bedrooms resolves the count from the HPXML or errors"))),
                     performance_adjustment: Some(perf_adj),
                     inlet_temp_c: None,
                     draw_flow_rate_kg_s: None,
@@ -611,8 +628,10 @@ pub(super) fn resolve_water_heaters(
 /// `<WaterHeating>/<WaterFixture>/<LowFlow>`, the `<WaterFixturesUsageMultiplier>` extension,
 /// and `<HotWaterDistribution>` to compute the OCHRE/ANSI-RESNET 301 draw estimate.
 ///
-/// A missing bedroom count falls back to [`resolve_bedroom_count`], so both
-/// outputs are always present.
+/// A missing bedroom count is [`super::HpxmlError::MissingField`] naming the
+/// field (via [`resolve_bedroom_count`], the same rule
+/// [`extract_bedroom_count`] applies): the draw and the water-heater sizing
+/// inputs are required, not defaulted.
 fn parse_avg_water_draw_and_bedrooms(
     details: &XmlNode,
     data_patches: Option<&HpxmlDataPatches>,
@@ -626,7 +645,7 @@ fn parse_avg_water_draw_and_bedrooms(
         .and_then(|n| parse_trimmed_f64(&n.text))
     {
         Some(v) => v,
-        None => resolve_bedroom_count(None, data_patches),
+        None => resolve_bedroom_count(None, data_patches)?,
     };
 
     // Adjust bedroom count by occupancy and house type (OCHRE hpxml.py:789-797),
@@ -1761,13 +1780,14 @@ mod tests {
     }
 
     #[test]
-    fn gas_tankless_parasitic_power_defaults_to_two_bedrooms() {
+    fn gas_tankless_parasitic_power_uses_the_stated_bedroom_count() {
         let xml = r#"
             <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
               <Building>
                 <BuildingDetails>
                   <BuildingSummary>
                     <BuildingConstruction>
+                      <NumberofBedrooms>2</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
                       <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
                       <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -1821,7 +1841,64 @@ mod tests {
         assert_eq!(
             cfg.parasitic_power_w,
             Some(expected_w),
-            "gas tankless parasitic default (2 bedrooms) must be {expected_w} W"
+            "gas tankless parasitic at the stated 2 bedrooms must be {expected_w} W"
+        );
+    }
+
+    /// A tankless water heater with no stated bedroom count fails the
+    /// resolve naming the field: the RESNET 301 on-time table is indexed
+    /// by the bedroom count and the field is required input (OCHRE reads
+    /// it with a direct index, hpxml.py:263); no count is substituted for
+    /// it.
+    #[test]
+    fn gas_tankless_without_a_bedroom_count_errors_naming_the_field() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <HotWaterDistribution>
+                      <SystemType>
+                        <Standard>
+                          <PipingLength units="ft">30</PipingLength>
+                        </Standard>
+                      </SystemType>
+                    </HotWaterDistribution>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <EnergyFactor>0.91</EnergyFactor>
+                      <HeatingCapacity>45000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let building = building_for_test(&root);
+
+        let mut specs = Vec::new();
+        let err = resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect_err("an absent NumberofBedrooms must fail the water-heater resolve");
+        assert!(
+            err.to_string().contains("NumberofBedrooms"),
+            "the error names the required field: {err}"
         );
     }
 

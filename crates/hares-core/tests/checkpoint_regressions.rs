@@ -16,7 +16,6 @@ use hares_equipment::scheduled_load::ScheduledLoad;
 use hares_equipment::{Equipment, EquipmentConfig};
 use hares_io::OutputFormat;
 use hares_types::EndUse;
-
 /// Write a minimal synthetic-TOML dwelling (no equipment, just envelope).
 fn write_minimal_toml(path: &Path) {
     let content = r#"building_id = 9001
@@ -781,4 +780,104 @@ fn assert_resume_equals_continuous(
 
     let tail = continuous_frame.slice(k, RESUME_TOTAL_STEPS - k);
     assert_frames_bitwise_equal(&tail, &resumed_frame);
+}
+
+/// The gas boiler's fluid-domain first-publish marker survives a checkpoint
+/// restore, so the absent-payload escape stays bounded after a resume.
+///
+/// The scenario: a boiler home runs past the fluid domain's first publish
+/// (the boiler reads the published payload from the next step on), then
+/// checkpoints. A freshly built dwelling's fluid slot has published nothing,
+/// so the resumed run's first step reads an absent payload: the restored
+/// marker must make that absence a warned, counted degradation, not a silent
+/// one. Restoring `false` in place of the decoded marker fails this test:
+/// the resumed run would treat every absence as a pre-publish one and stay
+/// silent forever.
+#[test]
+fn the_boiler_fluid_publish_marker_survives_a_checkpoint_restore() {
+    let bldg_dir = repo_root().join("tests/fixtures/resstock/2025.1/bldg0000002");
+    let config = DwellingConfig {
+        hpxml_path: bldg_dir.join("home.xml"),
+        schedule_path: Some(bldg_dir.join("in.schedules.csv")),
+        weather_path: repo_root().join("tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"),
+        defaults_path: Some(repo_root().join("defaults")),
+        sim_config: SimulationConfig {
+            start_time: FixedOffset::west_opt(5 * 3600)
+                .expect("valid offset")
+                .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid start time"),
+            duration: Duration::hours(6),
+            time_res: Duration::hours(1),
+            output_verbosity: 2,
+            output_path: None,
+            write_output: false,
+            output_format: OutputFormat::Csv,
+            output_chunk_size: 1024,
+            setpoint_deadband_c: None,
+            master_seed: 0,
+            civil_timezone: None,
+            site_location: hares_io::SiteLocationOverride::default(),
+            retain_batches: false,
+            rotation: hares_io::RotationPolicy::None,
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        },
+        overrides: None,
+        bldg_id: 2,
+        initialization_duration: None,
+        resample_overrides: None,
+        patches: None,
+    };
+
+    // Run past the fluid domain's first publish: the solver publishes at the
+    // end of step 0 and the boiler reads that payload from step 1 on, so by
+    // the checkpoint the marker is true.
+    let mut dwelling_a = Dwelling::from_config(config.clone()).expect("build dwelling A");
+    for _ in 0..3 {
+        dwelling_a.step().expect("step in dwelling A");
+    }
+    assert!(
+        dwelling_a.take_warnings().is_empty(),
+        "the pre-publish first step stays silent and the published payload \
+         follows, so the interrupted run raises no absence warning"
+    );
+    assert_eq!(
+        dwelling_a.health().fluid_payload_absences,
+        0,
+        "no absence is counted while the payload is present at every read"
+    );
+    assert!(
+        dwelling_a
+            .latest_env()
+            .domains
+            .fluid
+            .get()
+            .and_then(|update| update.custom_payload.as_ref())
+            .is_some(),
+        "the fluid domain must have published by the checkpoint; if this \
+         fails the publish/read ordering changed and the marker below may \
+         no longer be true"
+    );
+    let checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
+
+    let mut resumed = Dwelling::from_config(config).expect("build resumed dwelling");
+    resumed
+        .load_checkpoint(checkpoint)
+        .expect("load checkpoint");
+
+    // The first post-restore step: the fresh environment's fluid slot has
+    // published nothing, the restored marker is true, so the absence warns
+    // and counts.
+    resumed.step().expect("first post-restore step");
+
+    let warnings = resumed.take_warnings();
+    assert!(
+        warnings.len() == 1 && warnings[0].contains("the fluid domain published no payload"),
+        "the resumed run must warn on the starved payload exactly once: {warnings:?}"
+    );
+    assert_eq!(
+        resumed.health().fluid_payload_absences,
+        1,
+        "the resumed run must count the starved payload in the run's health"
+    );
 }

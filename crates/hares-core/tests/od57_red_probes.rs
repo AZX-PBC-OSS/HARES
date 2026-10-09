@@ -423,3 +423,47 @@ fn red_probe_bedroom_count_without_numberofbedrooms() {
         "the error names the required field: {err}"
     );
 }
+
+/// A blueprint-only build (a storage water heater, no Appliances section)
+/// with no NumberofBedrooms fails the equipment resolve naming the field:
+/// the water-heater resolve sizes the hot-water draw and the tank by the
+/// bedroom count, and OCHRE reads the field with a direct index and fails
+/// on absence (hpxml.py:263; no OS-HPXML default exists either,
+/// defaults.rb:3303). Before the strictness the water-heater side
+/// substituted 2.0 whenever no appliance ran the same read first, so the
+/// resolve "succeeded" with the substituted sizing.
+#[test]
+fn red_probe_blueprint_only_bedroom_count_without_numberofbedrooms() {
+    use hares_io::defaults::DefaultsStore;
+
+    let base =
+        std::fs::read_to_string(project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"))
+            .expect("the base fixture reads");
+    let no_bedrooms = base.replace("<NumberofBedrooms>3</NumberofBedrooms>\n          ", "");
+    assert_ne!(
+        no_bedrooms, base,
+        "the fixture's NumberofBedrooms line must match"
+    );
+    let start = no_bedrooms
+        .find("      <Appliances>")
+        .expect("the fixture has Appliances");
+    let end = no_bedrooms
+        .find("      </Appliances>")
+        .expect("the fixture closes Appliances")
+        + "      </Appliances>".len();
+    let blueprint_only = format!("{}{}", &no_bedrooms[..start], &no_bedrooms[end..]);
+    assert!(
+        !blueprint_only.contains("<Appliances>"),
+        "the probe's fixture variant must carry no Appliances"
+    );
+    let building = parse_hpxml_str(&blueprint_only).expect("the parse itself succeeds");
+
+    let mut warnings = Vec::new();
+    let err =
+        hares_io::hpxml::resolve_equipment(&building, &DefaultsStore::empty(), None, &mut warnings)
+            .expect_err("a blueprint-only build without NumberofBedrooms must fail the resolve");
+    assert!(
+        err.to_string().contains("NumberofBedrooms"),
+        "the error names the required field: {err}"
+    );
+}

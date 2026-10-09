@@ -706,7 +706,15 @@ class TestSharedHttpClient:
 
         assert len(built) == 1
         assert received == built * 16
-        assert len(registered) == 1
+        # The shared client is the only registration of the module's own;
+        # the environment's lazy ones (certifi's exit hook, taken through
+        # the patched register inside the first get()) count nothing here.
+        closers = [
+            entry
+            for entry in registered
+            if getattr(entry, "__self__", None) in built
+        ]
+        assert len(closers) == 1
 
     @pytest.mark.parametrize("stage", ["reading", "tls-handshake", "connecting"])
     def test_aborting_the_client_ends_a_download_at_any_stage(
