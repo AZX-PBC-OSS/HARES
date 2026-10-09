@@ -108,6 +108,21 @@ pub fn loop_id_from_config(config: &EquipmentConfig, keys: &[&str]) -> Option<Lo
     Some(LoopId(raw as u16))
 }
 
+/// The typed config's loop id, or the init error naming the equipment.
+///
+/// Every resolved loop-side equipment carries the loop id its wiring or loop
+/// allocation assigned; an equipment whose config names none cannot declare
+/// its hydronic loop, and loop 0 is the unassigned sentinel, not a loop.
+pub fn require_loop_id(loop_id: Option<u16>, kind: &str, name: &str) -> crate::Result<LoopId> {
+    loop_id.map(LoopId).ok_or_else(|| {
+        HaresError::Equipment(format!(
+            "{kind} '{name}': its config carries no fluid loop id. Every resolved \
+             loop-side equipment carries the loop id its wiring or loop allocation \
+             assigned, and an equipment without one cannot declare its hydronic loop"
+        ))
+    })
+}
+
 pub fn lookup_zone(
     env: &EnvironmentState,
     zone_id: ZoneId,

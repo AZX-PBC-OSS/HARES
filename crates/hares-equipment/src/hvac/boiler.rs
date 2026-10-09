@@ -23,7 +23,7 @@ use super::{
     helpers::{
         apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
         apply_simple_mode_override_in_control, lookup_zone, loop_id_from_config, outage_forces_off,
-        register_ebm_telemetry_keys, served_zone_ports, step_equivalent_battery,
+        register_ebm_telemetry_keys, require_loop_id, served_zone_ports, step_equivalent_battery,
         update_heating_control, write_ebm_telemetry, zone_id_from_config,
     },
 };
@@ -343,7 +343,9 @@ impl Equipment for ElectricBoiler {
         let electric_kw = element_kw + pump_kw;
 
         let loop_id = bound_loop_id(self.loop_id, "Electric Boiler", &self.descriptor.name)?;
-        let return_temp_c = loop_return_temp_c(env, loop_id).unwrap_or(self.default_return_temp_c);
+        let return_temp_c =
+            loop_return_temp_c(env, loop_id, "Electric Boiler", &self.descriptor.name)?
+                .unwrap_or(self.default_return_temp_c);
         let cp_used = cp_j_kg_k(self.fluid_type);
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
             return_temp_c + thermal_output_w / (self.flow_rate_kg_s * cp_used)
@@ -776,7 +778,8 @@ impl Equipment for GasBoiler {
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * plr * sf;
         let loop_id = bound_loop_id(self.loop_id, "Gas Boiler", &self.descriptor.name)?;
-        let return_temp_c = loop_return_temp_c(env, loop_id).unwrap_or(self.default_return_temp_c);
+        let return_temp_c = loop_return_temp_c(env, loop_id, "Gas Boiler", &self.descriptor.name)?
+            .unwrap_or(self.default_return_temp_c);
         // Condensing EIR polynomial uses zone air temperature (OCHRE HVAC.py:651:
         // t_in = self.zone.temperature), not return water temperature.
         let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
@@ -1065,17 +1068,6 @@ fn declared_fluid_port(loop_id: Option<LoopId>) -> PortDeclaration {
     }
 }
 
-/// The typed config's loop id, or the construction error naming the boiler.
-fn require_loop_id(loop_id: Option<u16>, kind: &str, name: &str) -> crate::Result<LoopId> {
-    loop_id.map(LoopId).ok_or_else(|| {
-        HaresError::Equipment(format!(
-            "{kind} '{name}': its config carries no fluid loop id. Every resolved \
-             boiler carries the loop id its wiring or loop allocation assigned, and \
-             a boiler without one cannot declare its hydronic loop"
-        ))
-    })
-}
-
 /// The loop `init` bound; stepping a boiler whose init did not bind one is
 /// an error rather than a step on a stand-in loop.
 fn bound_loop_id(loop_id: Option<LoopId>, kind: &str, name: &str) -> crate::Result<LoopId> {
@@ -1086,13 +1078,44 @@ fn bound_loop_id(loop_id: Option<LoopId>, kind: &str, name: &str) -> crate::Resu
     })
 }
 
-fn loop_return_temp_c(env: &EnvironmentState, loop_id: LoopId) -> Option<f64> {
-    let payload = env.domains.fluid.get()?.custom_payload.as_ref()?;
-    let states = FluidDomainPayload::decode(payload).ok()?;
+/// The bound loop's mean return temperature from the fluid domain's payload,
+/// or `None` when the fluid domain has not written a payload yet (the first
+/// step, before the envelope's first resolve; the boiler's configured return
+/// temperature covers it). A payload that does not decode, or a decoded
+/// payload that does not carry the bound loop, is an error naming the boiler
+/// and the loop: corrupt fluid state is not the absence of fluid state.
+fn loop_return_temp_c(
+    env: &EnvironmentState,
+    loop_id: LoopId,
+    kind: &str,
+    name: &str,
+) -> crate::Result<Option<f64>> {
+    let Some(payload) = env
+        .domains
+        .fluid
+        .get()
+        .and_then(|d| d.custom_payload.as_ref())
+    else {
+        return Ok(None);
+    };
+    let states = FluidDomainPayload::decode(payload).map_err(|err| {
+        HaresError::Equipment(format!(
+            "{kind} '{name}': the fluid domain's payload does not decode, so the \
+             return temperature of loop {loop_id:?} cannot be read: {err}; corrupt \
+             fluid state is not the absence of fluid state"
+        ))
+    })?;
     states
         .into_iter()
         .find(|state| state.loop_id == loop_id)
-        .map(|state| state.mean_return_temp_c)
+        .map(|state| Some(state.mean_return_temp_c))
+        .ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{kind} '{name}': the decoded fluid state carries no loop \
+                 {loop_id:?}; the fluid domain must carry a state for every \
+                 declared loop"
+            ))
+        })
 }
 
 fn electric_boiler_default_telemetry() -> Telemetry {
@@ -1759,6 +1782,69 @@ mod tests {
         assert!(
             (observed_eir - expected_eir).abs() < 1e-3,
             "condensing EIR at PLR=0.5, t_zone=18°C: observed={observed_eir}, expected={expected_eir}"
+        );
+    }
+
+    /// A fluid payload that does not decode fails the step naming the boiler
+    /// and the loop: corrupt fluid state is not the absence of fluid state
+    /// (whose first step runs on the configured return temperature).
+    #[test]
+    fn a_fluid_payload_that_does_not_decode_fails_the_step() {
+        let cfg = gb_config(10_000.0, 0.95);
+        let mut eq = GasBoiler::new(cfg.clone());
+        let mut env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.hvac.runtime.duty_cycle = 0.5;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
+
+        env.domains.fluid.set_from(&DomainUpdate {
+            domain_id: FLUID,
+            zone_temperatures_c: vec![],
+            // A length that is not a multiple of the 7-wide state row: the
+            // decode cannot read it.
+            custom_payload: Some(vec![1.0, 0.0, 2.0]),
+        });
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        let err = eq
+            .step(&env, Duration::from_secs(60), &mut ports)
+            .expect_err("a corrupt fluid payload must fail the step");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("Gas Boiler") && shown.contains("does not decode"),
+            "the error names the boiler and the unreadable payload: {shown}"
+        );
+
+        // A decoded payload that does not carry the bound loop fails the
+        // same way: a bound loop the fluid domain does not carry is a wiring
+        // defect, not a step on the configured return temperature.
+        env.domains.fluid.set_from(&DomainUpdate {
+            domain_id: FLUID,
+            zone_temperatures_c: vec![],
+            custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
+                loop_id: LoopId(2),
+                fluid_type: FluidType::Water,
+                heating_power_w: 0.0,
+                cooling_power_w: 0.0,
+                net_power_w: 0.0,
+                mean_supply_temp_c: 45.0,
+                mean_return_temp_c: 40.0,
+            }]),
+        });
+        let err = eq
+            .step(&env, Duration::from_secs(60), &mut ports)
+            .expect_err("a missing loop state must fail the step");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("LoopId(1)") && shown.contains("no loop"),
+            "the error names the missing loop: {shown}"
         );
     }
 

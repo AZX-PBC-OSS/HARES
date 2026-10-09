@@ -1421,14 +1421,11 @@ fn parse_boundaries(
     // from AttachedToWall), so an exterior adjacency the door does not state
     // is derived from the wall, never defaulted to Outdoor. An attached
     // wall the boundary list does not hold is an error naming both ids.
-    // A subsurface (door) inherits the zones of the wall it is attached to:
-    // OS-HPXML gives a subsurface its parent surface's outside boundary
-    // condition (hpxml.rb subsurface handling, `OutsideBoundaryCondition`
-    // from AttachedToWall), so an exterior adjacency the door does not state
-    // is derived from the wall, never defaulted to Outdoor. An attached
-    // wall the boundary list does not hold is an error naming both ids.
     // The derivation is recorded as a parse warning naming the door and the
     // wall it was taken from.
+    // Windows and skylights inherit the same way, from their own parse pass
+    // (their boundary entries join the list after this block); see
+    // `inherit_subsurface_interior_zone`.
     if let Some(doors) = enclosure.child("Doors") {
         for door in doors.children_named("Door") {
             let Some(wall_id) = door
@@ -1481,6 +1478,55 @@ fn parse_boundaries(
     }
 
     Ok((out, pitch_absent_ids))
+}
+
+/// A subsurface's interior zone when it states none: its attached parent
+/// surface's interior zone. OS-HPXML seats a subsurface in its parent
+/// surface's space (`geometry.rb` `set_surface_interior` takes the
+/// subsurface's space from `window.wall`'s interior adjacency, :1470-1476,
+/// applied to windows, skylights and doors at :510-523, :555-559,
+/// :602-606). An `AttachedToWall` idref that matches no parsed boundary is
+/// an error naming both ids.
+pub(crate) fn inherit_subsurface_interior_zone(
+    boundaries: &[Boundary],
+    subsurface_kind: &'static str,
+    subsurface_id: &str,
+    attached_id: Option<&str>,
+    interior_zone: Option<ZoneType>,
+) -> Result<Option<ZoneType>, HpxmlError> {
+    let Some(wall_id) = attached_id else {
+        return Ok(interior_zone);
+    };
+    if interior_zone.is_some() {
+        return Ok(interior_zone);
+    }
+    let Some(wall) = boundaries.iter().find(|bd| bd.id == wall_id) else {
+        return Err(HpxmlError::Parse(
+            format!(
+                "{subsurface_kind} '{subsurface_id}': its AttachedToWall idref \
+                 '{wall_id}' matches no parsed boundary, so the subsurface's \
+                 interior zone cannot be derived from it"
+            )
+            .into(),
+        ));
+    };
+    if wall.interior_zone.is_none() {
+        return Err(HpxmlError::Parse(
+            format!(
+                "{subsurface_kind} '{subsurface_id}': neither it nor its attached \
+                 surface '{wall_id}' names an interior adjacency; no zone may be \
+                 substituted for a location the input does not name"
+            )
+            .into(),
+        ));
+    }
+    tracing::debug!(
+        subsurface = %subsurface_id,
+        surface = %wall_id,
+        "subsurface interior zone derived from its attached surface (the \
+         subsurface's parent surface's space, as OS-HPXML does)"
+    );
+    Ok(wall.interior_zone.clone())
 }
 
 fn parse_windows(
@@ -1561,20 +1607,6 @@ fn parse_windows(
             .child("AttachedToWall")
             .and_then(|n| n.attrs.get("idref").cloned());
 
-        windows.push(Window {
-            id: id.clone(),
-            area_m2,
-            azimuth_deg,
-            u_factor_w_m2_k,
-            shgc,
-            interior_shading_fraction,
-            winter_shading_fraction,
-            fraction_operable,
-            exterior_shading_summer,
-            exterior_shading_winter,
-            attached_to_wall_id,
-        });
-
         let window_interior = parse_zone_ref(window.child("InteriorAdjacentTo"));
         let window_exterior = parse_zone_ref(window.child("ExteriorAdjacentTo"))
             .or_else(|| infer_exterior_zone(&BoundaryType::Window));
@@ -1595,6 +1627,30 @@ fn parse_windows(
 
         let (window_interior, window_exterior) =
             rewrite_adjacent_zone_pair(window_interior, window_exterior);
+
+        // The subsurface's interior zone derives from its attached wall when
+        // it states none (the OS-HPXML subsurface rule).
+        let window_interior = inherit_subsurface_interior_zone(
+            boundaries,
+            "Window",
+            &id,
+            attached_to_wall_id.as_deref(),
+            window_interior,
+        )?;
+
+        windows.push(Window {
+            id: id.clone(),
+            area_m2,
+            azimuth_deg,
+            u_factor_w_m2_k,
+            shgc,
+            interior_shading_fraction,
+            winter_shading_fraction,
+            fraction_operable,
+            exterior_shading_summer,
+            exterior_shading_winter,
+            attached_to_wall_id,
+        });
 
         boundaries.push(Boundary {
             id,
@@ -1710,20 +1766,6 @@ fn parse_skylights(
             .child("AttachedToWall")
             .and_then(|n| n.attrs.get("idref").cloned());
 
-        skylights.push(Window {
-            id: id.clone(),
-            area_m2,
-            azimuth_deg,
-            u_factor_w_m2_k,
-            shgc,
-            interior_shading_fraction,
-            winter_shading_fraction,
-            fraction_operable,
-            exterior_shading_summer,
-            exterior_shading_winter,
-            attached_to_wall_id,
-        });
-
         let skylight_interior = parse_zone_ref(skylight.child("InteriorAdjacentTo"));
         let skylight_exterior = parse_zone_ref(skylight.child("ExteriorAdjacentTo"))
             .or_else(|| infer_exterior_zone(&BoundaryType::Skylight));
@@ -1744,6 +1786,30 @@ fn parse_skylights(
 
         let (skylight_interior, skylight_exterior) =
             rewrite_adjacent_zone_pair(skylight_interior, skylight_exterior);
+
+        // The subsurface's interior zone derives from its attached roof when
+        // it states none (the OS-HPXML subsurface rule).
+        let skylight_interior = inherit_subsurface_interior_zone(
+            boundaries,
+            "Skylight",
+            &id,
+            attached_to_wall_id.as_deref(),
+            skylight_interior,
+        )?;
+
+        skylights.push(Window {
+            id: id.clone(),
+            area_m2,
+            azimuth_deg,
+            u_factor_w_m2_k,
+            shgc,
+            interior_shading_fraction,
+            winter_shading_fraction,
+            fraction_operable,
+            exterior_shading_summer,
+            exterior_shading_winter,
+            attached_to_wall_id,
+        });
 
         // Skylight tilt defaults to 0° (horizontal, roof-mounted).
         // Per IECC 2021 Table R402.1.2, skylights have different U-factor
@@ -3807,6 +3873,48 @@ mod tests {
         assert!(
             shown.contains("<HPXML>") && shown.contains("`schemaVersion`"),
             "the error must name the element and the attribute: {shown}"
+        );
+    }
+
+    /// A subsurface (window) that states no interior adjacency derives it
+    /// from its attached wall (the OS-HPXML subsurface rule), so a wall it
+    /// names but the boundary list does not hold fails the parse naming
+    /// both ids.
+    #[test]
+    fn window_interior_zone_derives_from_its_attached_wall() {
+        let base = include_str!("../../../../tests/fixtures/hpxml/ochre_samples/base.xml");
+
+        // The attached wall the list holds: the window's boundary carries the
+        // wall's interior zone without stating one itself.
+        let parsed = crate::hpxml::parse_hpxml_str(base).expect("the base fixture parses");
+        let wall = parsed
+            .boundaries
+            .iter()
+            .find(|bd| bd.id == "Wall1")
+            .expect("the base fixture declares Wall1");
+        let window = parsed
+            .boundaries
+            .iter()
+            .find(|bd| bd.id == "Window1")
+            .expect("the base fixture declares Window1");
+        assert_eq!(window.interior_zone, wall.interior_zone);
+        assert!(
+            window.interior_zone.is_some(),
+            "the window inherits the wall's stated interior zone"
+        );
+
+        // The attached wall the list does not hold: the derivation cannot
+        // run, and no zone is substituted for it.
+        let dangling = base.replace(
+            "<AttachedToWall idref='Wall1'/>\n          </Window>",
+            "<AttachedToWall idref='WallN'/>\n          </Window>",
+        );
+        let err = crate::hpxml::parse_hpxml_str(&dangling)
+            .expect_err("a dangling AttachedToWall must fail the parse");
+        let shown = format!("{err}");
+        assert!(
+            shown.contains("Window1") && shown.contains("WallN"),
+            "the error names the window and the missing wall: {shown}"
         );
     }
 

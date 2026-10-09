@@ -883,7 +883,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 fan_power_w: None,
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 fuel_type: FuelType::Gas,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -920,7 +920,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 energy_factor: None,
@@ -954,7 +954,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             TanklessWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 fuel_type: FuelType::Electric,
                 energy_factor: Some(0.95),
                 uniform_energy_factor: None,
@@ -978,7 +978,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             TanklessWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 fuel_type: FuelType::Gas,
                 energy_factor: Some(0.82),
                 uniform_energy_factor: None,
@@ -1002,7 +1002,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             HeatPumpWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 cop: Some(2.5),
@@ -1048,7 +1048,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             IndirectTankConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                boiler_loop_id: None,
+                boiler_loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 ua_w_per_k: None,
@@ -1225,7 +1225,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 capacity_min_kw: Some(0.0),
                 grid_import_limit_kw: Some(0.0),
                 export_limit_kw: Some(0.0),
-                loop_id: None,
+                loop_id: Some(1),
                 flow_rate_kg_s: None,
                 supply_temp_c: None,
                 return_temp_c: None,

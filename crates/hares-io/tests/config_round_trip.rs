@@ -618,7 +618,7 @@ fn sample_ventilation_config() -> VentilationConfig {
 }
 
 fn sample_env() -> EnvironmentState {
-    EnvironmentState {
+    let mut env = EnvironmentState {
         ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
@@ -673,9 +673,16 @@ fn sample_env() -> EnvironmentState {
         time_res: chrono::Duration::minutes(1),
         price_signal: Default::default(),
         electrical: Default::default(),
-    }
+    };
+    // A schedule payload the sources' column reads resolve against: a
+    // configured source's read failure is corrupt input, not the absence of
+    // a source, so the smoke env carries the payload the samples' configs
+    // declare columns into.
+    let mut schedule_update = hares_types::DomainUpdate::empty(hares_types::SCHEDULE_DOMAIN_ID);
+    schedule_update.custom_payload = Some(vec![0.5; 8]);
+    env.domains.schedule.set_from(&schedule_update);
+    env
 }
-
 fn assert_round_trip<T>(cfg: T)
 where
     T: EquipmentTypedConfig + PartialEq + Clone + std::fmt::Debug,

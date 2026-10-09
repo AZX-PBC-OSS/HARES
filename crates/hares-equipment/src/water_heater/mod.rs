@@ -472,7 +472,7 @@ mod tests {
             crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 energy_factor: None,
@@ -828,7 +828,9 @@ mod dhw_integration_tests {
             crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                // The loop id the loop allocator would assign: a water
+                // heater's supply loop is stated input, never the sentinel.
+                loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 energy_factor: None,

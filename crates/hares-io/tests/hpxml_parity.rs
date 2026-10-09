@@ -1052,7 +1052,24 @@ fn propane_storage_water_heater_resolves_and_inits_as_propane() {
     assert_eq!(typed_cfg.fuel_type, FuelType::Propane);
 
     let env = make_env(20.0, 10.0);
-    let eq = init_equipment(wh, &env);
+    // The resolved spec's loop id is assigned at dwelling assembly (the loop
+    // allocator); init requires it, so the test carries the id the allocator
+    // would assign before init.
+    let with_loop = GasWaterHeaterConfig {
+        loop_id: Some(1),
+        ..typed_cfg
+    };
+    let looped = hares_equipment::EquipmentConfig::from_typed(
+        wh.name.clone(),
+        "Gas Water Heater".to_string(),
+        with_loop,
+    )
+    .expect("the looped config builds");
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry
+        .create(&wh.name, looped.clone())
+        .expect("equipment should create");
+    eq.init(&looped, &env).expect("equipment should init");
     assert_eq!(eq.descriptor().fuel, FuelType::Propane);
 }
 

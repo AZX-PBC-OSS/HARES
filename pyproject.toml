@@ -93,7 +93,7 @@ typeCheckingMode = "standard"
 # The lowest supported Python (requires-python), so an import that exists
 # only in a later release fails the check instead of the 3.12 test run.
 pythonVersion = "3.12"
-include = ["python", "scripts", "tests", "typings"]
+include = ["python", "scripts", "tests", "typings", "notebooks"]
 exclude = ["tests/fixtures"]
 
 [[tool.pyright.executionEnvironments]]
@@ -148,6 +148,12 @@ extraPaths = ["vendors/OCHRE", "scripts"]
 # the shared tests/python helper modules.
 [[tool.pyright.executionEnvironments]]
 root = "scripts"
+extraPaths = ["vendors/OCHRE", "tests/python"]
+
+# The notebook resolves the vendored reference the same way its runtime does
+# (the vendored OCHRE on the import path) and shares the tests' helper modules.
+[[tool.pyright.executionEnvironments]]
+root = "notebooks"
 extraPaths = ["vendors/OCHRE", "tests/python"]
 
 [tool.pytest.ini_options]

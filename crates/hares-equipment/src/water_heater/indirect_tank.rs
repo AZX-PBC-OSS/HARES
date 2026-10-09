@@ -114,6 +114,8 @@ impl IndirectTank {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let siting = Siting::from_constructor_config(&config);
+        // Pre-init placeholder: init requires the config's boiler loop id
+        // (the allocator's assignment) and re-declares the ports from it.
         let boiler_loop_id =
             crate::hvac::helpers::loop_id_from_config(&config, &["boiler_loop_id", "loop_id"])
                 .unwrap_or_default();
@@ -234,7 +236,11 @@ impl IndirectTank {
         self.siting.resolve(config, c.zone_type.as_deref())?;
         self.descriptor.zone = self.siting.zone();
         self.descriptor.zone_type = c.zone_type.clone();
-        self.boiler_loop_id = c.boiler_loop_id.map(LoopId).unwrap_or(self.boiler_loop_id);
+        // The loop id is stated input (its wiring's or the loop allocator's
+        // assignment): an init without one cannot declare the boiler's
+        // hydronic loop, and loop 0 is the unassigned sentinel, not a loop.
+        self.boiler_loop_id =
+            crate::hvac::helpers::require_loop_id(c.boiler_loop_id, "Indirect Tank", &config.name)?;
         self.ports = siting::storage_ports(&[], &self.siting, self.boiler_loop_id);
 
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
@@ -888,6 +894,39 @@ mod control_domain_tests {
             .expect("typed config")
     }
 
+    /// A typed config stripped of its boiler loop id fails init naming the
+    /// equipment: the loop id is stated input (its wiring's or the loop
+    /// allocator's assignment), loop 0 is the unassigned sentinel and not a
+    /// loop, and no stand-in loop is stepped on. The pre-fix code accepted
+    /// the absent id silently (`unwrap_or_default()`).
+    #[test]
+    fn init_without_a_loop_id_fails_naming_the_equipment() {
+        let stripped = {
+            let mut cfg = crate::config::EquipmentConfig::from_typed(
+                "IHWH".to_string(),
+                "Indirect Tank".to_string(),
+                IndirectTankConfig {
+                    boiler_loop_id: None,
+                    ..config()
+                        .typed::<IndirectTankConfig>()
+                        .expect("the test config reads as its type")
+                },
+            )
+            .expect("the loop-less config builds");
+            cfg.name = "IHWH".to_string();
+            cfg
+        };
+        let mut eq = IndirectTank::new(stripped.clone());
+        let err = eq
+            .init(&stripped, &env())
+            .expect_err("a config with no loop id must fail init");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("Indirect Tank") && shown.contains("no fluid loop id"),
+            "the error names the equipment and the missing loop id: {shown}"
+        );
+    }
+
     #[test]
     fn thermal_setpoint_band_follows_the_shared_contract() {
         let cfg = config();
@@ -1138,7 +1177,7 @@ mod tests {
             crate::IndirectTankConfig {
                 equipment_id: None,
                 zone_id: None,
-                boiler_loop_id: None,
+                boiler_loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 ua_w_per_k: None,

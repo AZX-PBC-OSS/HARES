@@ -113,6 +113,9 @@ def _building_resolver(
         )
     else:
         mo.stop(True, mo.callout(mo.md("Select a building source."), kind="neutral"))
+        # mo.stop raises; the raise tells the type checker the branch ends here,
+        # so the variables the branches bind are never read unbound.
+        raise AssertionError("unreachable: mo.stop raises")
 
     return bldg_hpxml, bldg_schedule, bldg_weather, bldg_label
 
@@ -358,15 +361,15 @@ def _run_simulation(
 ):
     mo.stop(not run_btn.value)
 
+    from typing import Any, cast
+
     from ochre_next import (
-        Dwelling,
+        EV,
         PV,
         Battery,
-        EV,
-        ControlSignal,
-        BmsMode,
-        VehicleId,
+        Dwelling,
         EvArchetypeId,
+        VehicleId,
     )
 
     _SEASON_DATES: dict[str, str] = {
@@ -423,7 +426,7 @@ def _run_simulation(
             dw.initialize()
 
             # --- PV ---
-            pv_info: dict[str, object] = {}
+            pv_info: dict[str, float | str | bool] = {}
             if pv_mode_val == "auto":
                 candidates = dw.pv_candidates()
                 if candidates:
@@ -525,18 +528,18 @@ def _run_simulation(
             with mo.status.spinner(title="Running OCHRE comparison..."):
                 if vendor_ochre not in sys.path:
                     sys.path.insert(0, vendor_ochre)
-                from ochre import Dwelling as OchreDwelling  # type: ignore[import-not-found]
+                from ochre import Dwelling as OchreDwelling
 
                 _ochre_equip: dict[str, dict] = {}
                 if pv_info.get("enabled"):
-                    _pv_kw = pv_info["kw"]
-                    _pv_az_hpxml = pv_info.get("azimuth", 180)
+                    _pv_kw = float(pv_info["kw"])
+                    _pv_az_hpxml = float(pv_info.get("azimuth", 180))
                     _ochre_az = (_pv_az_hpxml - 180) % 360
                     if _ochre_az > 180:
                         _ochre_az -= 360
                     _ochre_equip["PV"] = {
                         "capacity": _pv_kw,
-                        "tilt": pv_info.get("tilt", 26),
+                        "tilt": float(pv_info.get("tilt", 26)),
                         "azimuth": _ochre_az,
                         "inverter_capacity": _pv_kw / 1.2,
                     }
@@ -561,7 +564,10 @@ def _run_simulation(
                     save_results=False,
                     Equipment=_ochre_equip,
                 )
-                _pdf, _, _ = _ochre_dw.simulate()
+                # The vendored OCHRE is untyped source: its simulate() returns
+                # (DataFrame, ..., ...); the cast names that for the checker.
+                _sim = cast(Any, _ochre_dw.simulate())
+                _pdf = _sim[0]
                 ochre_df = pl.from_pandas(_pdf.reset_index())
 
         sim_meta = {
@@ -1047,8 +1053,8 @@ def _visualizations(
 
 
 @app.cell
-def _show_results(results_tabs):
-    results_tabs
+def _show_results(mo, results_tabs):
+    mo.output.replace(results_tabs)
 
 
 if __name__ == "__main__":

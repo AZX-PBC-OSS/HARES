@@ -275,12 +275,13 @@ impl TanklessWH {
         self.inlet_temp_c = if let Some(inlet_temp_c) = c.inlet_temp_c {
             inlet_temp_c
         } else if let Some(source_cfg) = c.mains_temp_c_source.clone() {
+            // A configured source's read failure is corrupt input, not the
+            // absence of a source: the error names the heater, the same
+            // contract the storage heaters' step reads follow.
             let mut source = source_cfg.into_runtime();
-            source
-                .value_at(env)
-                .ok()
-                .filter(|v| v.is_finite())
-                .unwrap_or(super::require_mains_temp_c(env, "Tankless Water Heater")?)
+            source.value_at(env).map_err(|err| {
+                HaresError::Equipment(format!("Tankless Water Heater '{}': {err}", config.name))
+            })?
         } else {
             super::require_mains_temp_c(env, "Tankless Water Heater")?
         };
@@ -936,7 +937,7 @@ mod tests {
         TanklessWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             fuel_type: FuelType::Gas,
             energy_factor: Some(0.8),
             uniform_energy_factor: None,

@@ -225,6 +225,8 @@ impl HeatPumpWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let siting = Siting::from_constructor_config(&config);
+        // Pre-init placeholder: init requires the config's loop id (the
+        // allocator's assignment) and re-declares the ports from it.
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -396,7 +398,14 @@ impl HeatPumpWH {
         self.siting.resolve(config, c.zone_type.as_deref())?;
         self.descriptor.zone = self.siting.zone();
         self.descriptor.zone_type = c.zone_type.clone();
-        self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
+        // The loop id is stated input (its wiring's or the loop allocator's
+        // assignment): an init without one cannot declare the supply loop,
+        // and loop 0 is the unassigned sentinel, not a loop.
+        self.loop_id = crate::hvac::helpers::require_loop_id(
+            c.loop_id,
+            "Heat Pump Water Heater",
+            &config.name,
+        )?;
         self.ports =
             siting::storage_ports(&[PortDeclaration::electrical()], &self.siting, self.loop_id);
 
@@ -1716,6 +1725,32 @@ mod tests {
         equipment_config(base_typed_config())
     }
 
+    /// A typed config stripped of its loop id fails init naming the
+    /// equipment: the loop id is stated input (its wiring's or the loop
+    /// allocator's assignment), loop 0 is the unassigned sentinel and not a
+    /// loop, and no stand-in loop is stepped on. The pre-fix code accepted
+    /// the absent id silently (`unwrap_or_default()`).
+    #[test]
+    fn init_without_a_loop_id_fails_naming_the_equipment() {
+        let mut cfg = base_typed_config();
+        cfg.loop_id = None;
+        let config = crate::config::EquipmentConfig::from_typed(
+            "HPWH".to_string(),
+            "Heat Pump Water Heater".to_string(),
+            cfg,
+        )
+        .expect("the loop-less config builds");
+        let mut eq = HeatPumpWH::new(config.clone());
+        let err = eq
+            .init(&config, &env(21.0))
+            .expect_err("a config with no loop id must fail init");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("Heat Pump Water Heater") && shown.contains("no fluid loop id"),
+            "the error names the equipment and the missing loop id: {shown}"
+        );
+    }
+
     #[test]
     fn thermal_setpoint_band_follows_the_shared_contract() {
         let mut eq = HeatPumpWH::new(config());
@@ -1797,7 +1832,7 @@ mod tests {
         let typed = HeatPumpWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             cop: Some(2.5),
@@ -1887,7 +1922,7 @@ mod tests {
         let typed = HeatPumpWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             cop: None,
@@ -1943,7 +1978,7 @@ mod tests {
         let typed = HeatPumpWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             cop: None,

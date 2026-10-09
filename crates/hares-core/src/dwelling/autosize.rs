@@ -27,8 +27,9 @@
 //! 3. Heating capacity [W] is computed as the power needed to recover the
 //!    FHR deficit (FHR − usable tank volume) at the design temperature rise
 //!    (setpoint − mains temperature).
-//! 4. When inputs are insufficient, conservative defaults are used:
-//!    50 gal tank, 4500 W element capacity.
+//! 4. A zero-bedroom home (a studio) sizes from the 50 gal default tank; an
+//!    unavailable bedroom count, an out-of-range mains temperature or a
+//!    non-positive capacity are input defects that fail the autosizing.
 
 use hares_envelope::ThermalSolver;
 use hares_envelope::thermal_solver::SiteLocation;
@@ -97,11 +98,6 @@ const DEFAULT_TANK_VOLUME_GAL: f64 = 50.0;
 /// Typical residential electric water heater: 4500 W at 240 V.
 /// ASHRAE 90.2-2018 Table 7.5.1.
 const DEFAULT_ELEMENT_CAPACITY_W: f64 = 4_500.0;
-
-/// Default mains cold-water temperature [°C] for sizing when unavailable.
-/// Mild-climate fallback; tropical sites should supply their actual mains
-/// temperature (typically 25–35 °C).
-const DEFAULT_MAINS_TEMP_C: f64 = 25.0;
 
 /// Default hot water setpoint [°C] for sizing when not specified.
 /// ASHRAE 90.2-2018 §7.5: storage water heater setpoint 125 °F (51.67 °C).
@@ -641,8 +637,9 @@ pub fn autosize_equipment_capacities(
 ///    FHR deficit at the design temperature rise:
 ///    `capacity_w = max(0, FHR_gph − usable_vol_gal) × W.E.F × ΔT_°C`
 ///    where `W.E.F = 8.33 × 1.8 / 3.412 ≈ 4.395`.
-/// 4. When bedroom count or mains temperature are unavailable, conservative
-///    defaults are used (50 gal tank, 4500 W element) with a `warn!`.
+/// 4. A zero-bedroom home (a studio) sizes from the 50 gal default tank; an
+///    unavailable bedroom count, an out-of-range mains temperature or a
+///    non-positive capacity fail the autosizing naming the input.
 ///
 /// DOE 10 CFR Part 430 Subpart B Appendix E §2.4: FHR = V_draw + recovery;
 /// V_draw ≈ usable_fraction × tank_volume.
@@ -652,27 +649,27 @@ pub fn autosize_equipment_capacities(
 /// * `specs` - Equipment specs (mutated in place; only storage WH specs
 ///   with `autosize_water_heater = true` are processed).
 /// * `n_bedrooms` - Number of bedrooms for sizing (from HPXML or data patches).
-///   `None` triggers the conservative default path.
+///   `None` is an error: the count is required input.
 /// * `mains_temp_c` - Mains cold-water supply temperature [°C] for temperature
-///   rise computation.
+///   rise computation; outside (0, 50) °C is an error.
 pub fn autosize_water_heater_capacities(
     specs: &mut [EquipmentSpec],
     n_bedrooms: Option<f64>,
     mains_temp_c: f64,
 ) -> hares_types::Result<()> {
-    // Validate mains temperature — clamp or use default if unreasonable.
-    // Upper bound allows tropical cold-water temperatures up to 50 °C.
-    let mains_temp_c = if mains_temp_c.is_finite() && mains_temp_c > 0.0 && mains_temp_c < 50.0 {
-        mains_temp_c
-    } else {
-        tracing::warn!(
-            mains_temp_c,
-            "water heater autosizing: mains temperature unreasonable; \
-             using default {} °C",
-            DEFAULT_MAINS_TEMP_C
-        );
-        DEFAULT_MAINS_TEMP_C
-    };
+    // The mains temperature is the weather's (EnergyPlus derives it from the
+    // EPW; OS-HPXML reads EnergyPlus's "Site Mains Water Temperature", the
+    // mains_temp_sensor of measure.rb:484). No static default exists to
+    // substitute, so a value outside cold water's range is an input defect:
+    // sizing the temperature rise from a stand-in would size every water
+    // heater the home has wrong.
+    if !mains_temp_c.is_finite() || mains_temp_c <= 0.0 || mains_temp_c >= 50.0 {
+        return Err(hares_types::HaresError::Dwelling(format!(
+            "water heater autosizing: the mains temperature {mains_temp_c} °C is \
+             outside cold water's range (0, 50) °C; the value comes from the \
+             weather and no temperature may be substituted for it"
+        )));
+    }
 
     for spec in specs.iter_mut() {
         let needs_autosize = spec
@@ -695,15 +692,20 @@ pub fn autosize_water_heater_capacities(
         // Temperature rise: setpoint − mains.
         let delta_t_c = (setpoint_c - mains_temp_c).max(1.0);
 
-        // Resolve bedroom count.
-        let n_bedrooms = n_bedrooms.unwrap_or_else(|| {
-            tracing::warn!(
-                equipment = %spec.name,
-                "water heater autosizing: bedroom count unavailable; \
-                 using conservative defaults"
-            );
-            0.0
-        });
+        // Resolve bedroom count. NumberofBedrooms is required input (the
+        // HPXML schema requires it; OS-HPXML applies no default,
+        // defaults.rb apply_water_heaters reads it directly, :3303), so an
+        // unavailable count is an input defect: sizing the tank and the FHR
+        // from a stand-in count would size the water heater wrong.
+        let n_bedrooms = n_bedrooms.ok_or_else(|| {
+            hares_types::HaresError::Dwelling(format!(
+                "water heater autosizing for '{}': no bedroom count is available \
+                 (no HPXML NumberofBedrooms and no data patch); the tank volume \
+                 and the first-hour rating are sized by it and none may be \
+                 substituted",
+                spec.name
+            ))
+        })?;
 
         // A negative bedroom count is invalid input (a studio's zero is
         // valid and sizes from defaults; the unavailable case already warns
@@ -838,37 +840,19 @@ pub fn autosize_water_heater_capacities(
                 )));
             }
         } else {
-            // Autosizing computed zero or negative capacity — fall back to a
-            // minimum safe default so the simulation can still run.
-            tracing::warn!(
-                equipment = %spec.name,
-                fhr_gph,
-                tank_volume_gal,
-                delta_t_c,
-                factor,
-                "water heater autosizing: computed capacity is zero — \
-                 falling back to default element capacity {} W and {} gal tank. \
-                 Check bedroom count, setpoint, and mains temperature",
-                DEFAULT_ELEMENT_CAPACITY_W,
-                DEFAULT_TANK_VOLUME_GAL
-            );
-
-            // Remove consumed params and autosize flag so the spec is not
-            // re-processed on subsequent builds.
-            spec.parameters.remove("autosize_water_heater_factor");
-            spec.parameters.remove("autosize_water_heater_min_w");
-            spec.parameters.remove("autosize_water_heater_max_w");
-
-            let fallback_vol_m3 = hares_physics::units::volume_gal_to_m3(DEFAULT_TANK_VOLUME_GAL);
-            spec.parameters.insert(
-                "heating_capacity_w".to_string(),
-                json!(DEFAULT_ELEMENT_CAPACITY_W),
-            );
-            if !spec.parameters.contains_key("tank_volume_m3") {
-                spec.parameters
-                    .insert("tank_volume_m3".to_string(), json!(fallback_vol_m3));
-            }
-            spec.parameters.remove("autosize_water_heater");
+            // A non-positive computed capacity is an input defect: the
+            // capacity is the sizing factor's product (the FHR's, the tank
+            // volume's and the rise's are positive by construction), so a
+            // non-positive factor drove it. No standard substitutes a
+            // stand-in capacity for one the input sized to nothing.
+            return Err(hares_types::HaresError::Dwelling(format!(
+                "water heater autosizing for '{}': the computed capacity \
+                 {sized_capacity_w} W is not positive (FHR {fhr_gph} GPH, tank \
+                 {tank_volume_gal} gal, rise {delta_t_c:.2} °C, sizing factor \
+                 {factor}); a non-positive sizing factor sizes nothing and no \
+                 capacity may be substituted for it",
+                spec.name
+            )));
         }
 
         // Rebuild typed config from the (now updated) parameters so
@@ -3173,66 +3157,84 @@ mod tests {
     }
 
     #[test]
-    fn wh_autosize_unreasonable_mains_temp_uses_default() {
-        // A mains temp of 60 °C is unreasonable for cold water; the
-        // autosizer should fall back to the default (25 °C) and produce a
-        // reasonable capacity.
+    fn wh_autosize_unreasonable_mains_temp_errors() {
+        // A mains temp of 60 °C is not cold water: the value is the weather's
+        // (EnergyPlus's Site Mains Water Temperature; OS-HPXML applies no
+        // static default), so a value outside the range is an input defect
+        // and no temperature is substituted for it.
         let mut specs = vec![wh_spec("Gas Water Heater", FuelType::Gas, &[])];
-        autosize_water_heater_capacities(&mut specs, Some(3.0), 60.0).unwrap();
-
-        let result = &specs[0];
-        let capacity_w = result
-            .parameters
-            .get("heating_capacity_w")
-            .and_then(|v| v.as_f64())
-            .expect("capacity must be set");
-
-        // With 25 °C default mains and 51.67 °C setpoint: ΔT = 26.67 °C
-        // 3 BR → FHR = 48, tank = 50 gal
-        // usable = 35 gal, deficit = 13 gal
-        // capacity = 13 × 4.395 × 26.67 ≈ 1524 W
-        let expected = (48.0 - 0.7 * 50.0)
-            * WATER_ENERGY_FACTOR
-            * (DEFAULT_WH_SETPOINT_C - DEFAULT_MAINS_TEMP_C);
+        let err = autosize_water_heater_capacities(&mut specs, Some(3.0), 60.0)
+            .expect_err("an unreasonable mains temperature must fail the autosizing");
+        let shown = err.to_string();
         assert!(
-            (capacity_w - expected).abs() < 1e-3,
-            "with unreasonable mains temp 60 °C, should fall back to 25 °C \
-             and produce {expected:.2} W, got {capacity_w:.2} W"
+            shown.contains("mains temperature") && shown.contains("60"),
+            "the error names the input and its value: {shown}"
         );
-        assert!(capacity_w > 0.0, "capacity must be positive");
+
+        // Zero and non-finite temperatures fail the same way: the weather's
+        // value is either present and sane or the input is defective.
+        for temp in [0.0, -5.0, f64::NAN, f64::INFINITY] {
+            let mut specs = vec![wh_spec("Gas Water Heater", FuelType::Gas, &[])];
+            let err = autosize_water_heater_capacities(&mut specs, Some(3.0), temp)
+                .expect_err("an out-of-range mains temperature must fail the autosizing");
+            assert!(
+                err.to_string().contains("mains temperature"),
+                "the error names the input: {}",
+                err
+            );
+        }
     }
 
     #[test]
-    fn wh_autosize_none_bedrooms_uses_conservative_defaults() {
-        // When n_bedrooms is None, the autosizer must use conservative
-        // defaults without panicking.
+    fn wh_autosize_missing_bedrooms_errors() {
+        // NumberofBedrooms is required input (the HPXML schema requires it;
+        // OS-HPXML applies no default), so an unavailable count fails the
+        // autosizing naming the equipment: no tank volume or FHR is sized
+        // from a stand-in count.
         let mut specs = vec![wh_spec(
             "Electric Resistance Water Heater",
             FuelType::Electric,
             &[],
         )];
-        autosize_water_heater_capacities(&mut specs, None, 10.0).unwrap();
-
-        let result = &specs[0];
-        let capacity_w = result
-            .parameters
-            .get("heating_capacity_w")
-            .and_then(|v| v.as_f64())
-            .expect("capacity must be set even with None bedrooms");
-        let volume_m3 = result
-            .parameters
-            .get("tank_volume_m3")
-            .and_then(|v| v.as_f64())
-            .expect("volume must be set even with None bedrooms");
-
-        let expected_vol_m3 = hares_physics::units::volume_gal_to_m3(DEFAULT_TANK_VOLUME_GAL);
+        let err = autosize_water_heater_capacities(&mut specs, None, 10.0)
+            .expect_err("an unavailable bedroom count must fail the autosizing");
+        let shown = err.to_string();
         assert!(
-            (volume_m3 - expected_vol_m3).abs() < 1e-6,
-            "None-bedroom volume should be default 50 gal"
+            shown.contains("Electric Resistance Water Heater") && shown.contains("bedroom count"),
+            "the error names the equipment and the missing input: {shown}"
         );
+    }
+
+    #[test]
+    fn wh_autosize_non_positive_capacity_errors() {
+        // A non-positive sizing factor sizes nothing: the computed capacity
+        // is the factor's product and everything else in it is positive by
+        // construction. The pre-fix code substituted the 4500 W element
+        // default and a 50 gal tank behind a warning.
+        let mut specs = vec![wh_spec(
+            "Electric Resistance Water Heater",
+            FuelType::Electric,
+            &[("autosize_water_heater_factor", json!(0.0))],
+        )];
+        let err = autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0)
+            .expect_err("a non-positive computed capacity must fail the autosizing");
+        let shown = err.to_string();
         assert!(
-            capacity_w > 0.0 && capacity_w.is_finite(),
-            "None-bedroom capacity must be positive"
+            shown.contains("Electric Resistance Water Heater") && shown.contains("not positive"),
+            "the error names the equipment and the capacity: {shown}"
+        );
+
+        // A negative factor fails the same way.
+        let mut specs = vec![wh_spec(
+            "Electric Resistance Water Heater",
+            FuelType::Electric,
+            &[("autosize_water_heater_factor", json!(-1.5))],
+        )];
+        let err = autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0)
+            .expect_err("a negative sizing factor must fail the autosizing");
+        assert!(
+            err.to_string().contains("not positive"),
+            "the error names the capacity: {err}"
         );
     }
 

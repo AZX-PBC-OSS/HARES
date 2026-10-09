@@ -2464,6 +2464,44 @@ mod tests {
     // EfficiencyModel unit tests
     // =======================================================================
 
+    /// A generator whose config names no fuel fails init naming the input:
+    /// the constructor's pre-init placeholder (Gas until init binds the
+    /// stated fuel) never survives init, so no generator runs as Gas
+    /// because its config named none.
+    #[test]
+    fn init_without_a_stated_fuel_fails_naming_the_input() {
+        let mut cfg = gen_config(&[]);
+        let typed = cfg
+            .typed::<GeneratorConfig>()
+            .expect("the test config reads as its type");
+        cfg = EquipmentConfig::from_typed(
+            cfg.name.clone(),
+            cfg.ochre_class.clone(),
+            GeneratorConfig {
+                fuel_type: None,
+                ..typed
+            },
+        )
+        .expect("the fuel-less config builds");
+        let mut generator = Generator::new(cfg.clone(), GeneratorKind::GasGenerator);
+        let err = generator
+            .init(&cfg, &base_env())
+            .expect_err("a config naming no fuel must fail init");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("fuel_type") && shown.contains("Generator"),
+            "the error names the input and the equipment: {shown}"
+        );
+        assert!(
+            shown.contains("never a Gas fallback"),
+            "the error states the no-Gas-fallback rule: {shown}"
+        );
+        assert!(
+            !shown.contains("its config carries no"),
+            "the error is the fuel error, not another: {shown}"
+        );
+    }
+
     #[test]
     fn constant_efficiency_returns_rated_at_all_loads() {
         let model = EfficiencyModel::Constant { rated: 0.30 };

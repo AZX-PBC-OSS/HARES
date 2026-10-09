@@ -412,6 +412,11 @@ pub(crate) fn zone_type_to_label(
 /// Fallback: type-only matching via `position()`. Used when the boundary ID is
 /// absent or the boundary is not tracked in `attached_wall_ids` (e.g. roofs,
 /// floors, auto-generated interior walls).
+///
+/// An absent zone type is an error naming the boundary: a subsurface's
+/// interior zone derives from its attached surface at parse (the OS-HPXML
+/// subsurface rule), so a boundary reaching here with none names neither its
+/// adjacency nor an attached surface, and no zone may be substituted for it.
 pub(crate) fn find_zone_idx(
     building: &Building,
     boundary_id: Option<&str>,
@@ -421,17 +426,14 @@ pub(crate) fn find_zone_idx(
     if n_zones == 0 {
         return Ok(0);
     }
-    let target = match zone_type {
-        Some(zt) => zt,
-        None => {
-            let bid = boundary_id.unwrap_or("<unknown>");
-            tracing::warn!(
-                boundary_id = %bid,
-                "Boundary has no interior zone type; falling back to zone index 0"
-            );
-            return Ok(0);
-        }
-    };
+    let target = zone_type.ok_or_else(|| {
+        let bid = boundary_id.unwrap_or("<unknown>");
+        HaresError::Dwelling(format!(
+            "boundary '{bid}': no interior zone; the boundary names neither its \
+             interior adjacency nor a wall to derive it from, and no zone may \
+             be substituted for a location the input does not name"
+        ))
+    })?;
 
     // Adjacent zones are rewritten to the non-Adjacent side's type during
     // HPXML parsing (building.rs:rewrite_adjacent_zone_pair). If an Adjacent
@@ -3486,13 +3488,13 @@ mod tests {
         );
     }
 
-    /// `find_zone_idx` returns Ok(0) with a warning when zone_type is None.
-    /// Doors and windows in HPXML legitimately lack explicit interior_zone
-    /// elements; they inherit from parent walls. The warning alerts operators
-    /// to boundaries missing zone assignments, but wiring proceeds with zone 0
-    /// as a fallback rather than failing.
+    /// `find_zone_idx` errors when zone_type is None: a boundary that names
+    /// no interior zone (and no attached surface to derive one from) has no
+    /// zone to belong to, and zone 0 must not be substituted for it. Doors
+    /// and windows in HPXML legitimately lack explicit interior adjacency;
+    /// the parser derives theirs from their attached surface.
     #[test]
-    fn find_zone_idx_none_zone_type_returns_zero() {
+    fn find_zone_idx_none_zone_type_errors() {
         let zone = Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(50.0),
@@ -3506,7 +3508,13 @@ mod tests {
             hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
-        assert_eq!(find_zone_idx(&building, Some("Door1"), None, 1).unwrap(), 0);
+        let err = find_zone_idx(&building, Some("Door1"), None, 1)
+            .expect_err("a boundary with no interior zone type must fail the build");
+        let text = err.to_string();
+        assert!(
+            text.contains("Door1") && text.contains("no interior zone"),
+            "the error names the boundary and the missing adjacency: {text}"
+        );
     }
 
     /// `find_zone_idx` returns Err when the zone type exists nowhere in the
@@ -3533,9 +3541,10 @@ mod tests {
         );
     }
 
-    /// `boundary_zone_index` returns Ok(0) with a warning when zone_type is None.
+    /// `boundary_zone_index` (the wrapper the solver wiring calls) errors
+    /// when zone_type is None, the same rule `find_zone_idx` applies.
     #[test]
-    fn boundary_zone_index_none_zone_type_returns_zero() {
+    fn boundary_zone_index_none_zone_type_errors() {
         let zone = Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(50.0),
@@ -3549,9 +3558,12 @@ mod tests {
             hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
-        assert_eq!(
-            super::boundary_zone_index(&building, Some("Door1"), None, 1).unwrap(),
-            0
+        let err = super::boundary_zone_index(&building, Some("Door1"), None, 1)
+            .expect_err("a boundary with no interior zone type must fail the build");
+        let text = err.to_string();
+        assert!(
+            text.contains("Door1") && text.contains("no interior zone"),
+            "the error names the boundary and the missing adjacency: {text}"
         );
     }
 

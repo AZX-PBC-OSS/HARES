@@ -84,7 +84,7 @@ fn resistance_config(
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             energy_factor: None,
@@ -129,7 +129,7 @@ fn gas_config(
             fan_power_w: None,
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             fuel_type: FuelType::Gas,
             tank_volume_m3: None,
             tank_height_m: None,
@@ -178,7 +178,7 @@ fn tankless_config(
         TanklessWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             fuel_type,
             energy_factor: Some(1.0),
             uniform_energy_factor: None,
@@ -210,6 +210,110 @@ fn step_wh(wh: &mut dyn Equipment, env: &EnvironmentState, ports: &mut PortSlots
 }
 
 // ── Test 1: resistance_wh_heats_to_setpoint ──────────────────────────────────
+
+/// A loop-side water heater whose typed config carries no loop id fails
+/// init naming the equipment: the loop id is stated input (its wiring's or
+/// the loop allocator's assignment), loop 0 is the unassigned sentinel and
+/// not a loop, and no stand-in loop is stepped on. The pre-fix code
+/// accepted the absent id silently (`unwrap_or_default()`).
+#[test]
+fn init_without_a_loop_id_fails_naming_the_equipment() {
+    let env = make_env(21.0);
+
+    let gas_cfg = EquipmentConfig::from_typed(
+        "GWH".to_string(),
+        "Gas Water Heater".to_string(),
+        GasWaterHeaterConfig {
+            loop_id: None,
+            ..gas_config(52.0, 2.0, 45.0, 0.0)
+                .typed::<GasWaterHeaterConfig>()
+                .expect("the test gas config reads as its type")
+        },
+    )
+    .expect("the loop-less gas config builds");
+    let mut gas = GasWH::new(gas_cfg.clone());
+    let err = gas
+        .init(&gas_cfg, &env)
+        .expect_err("a gas WH with no loop id must fail init");
+    let shown = err.to_string();
+    assert!(
+        shown.contains("Gas Water Heater") && shown.contains("no fluid loop id"),
+        "the error names the equipment and the missing loop id: {shown}"
+    );
+
+    let resistance_cfg = EquipmentConfig::from_typed(
+        "RWH".to_string(),
+        "Resistance Water Heater".to_string(),
+        ElectricResistanceWaterHeaterConfig {
+            loop_id: None,
+            ..resistance_config(52.0, 2.0, 40.0, 0.0)
+                .typed::<ElectricResistanceWaterHeaterConfig>()
+                .expect("the test resistance config reads as its type")
+        },
+    )
+    .expect("the loop-less resistance config builds");
+    let mut resistance = ResistanceWH::new(resistance_cfg.clone());
+    let err = resistance
+        .init(&resistance_cfg, &env)
+        .expect_err("a resistance WH with no loop id must fail init");
+    let shown = err.to_string();
+    assert!(
+        shown.contains("Electric Resistance Water Heater") && shown.contains("no fluid loop id"),
+        "the error names the equipment and the missing loop id: {shown}"
+    );
+
+    // The heat pump water heater and the indirect tank take the same rule
+    // (their inits call the shared require_loop_id); their in-src tests pin
+    // their own classes.
+}
+
+/// A mains-temperature source whose read fails at init fails construction
+/// naming the heater: corrupt schedule data is not the absence of a source.
+/// The pre-fix code swallowed the read's error (`value_at().ok()`) and
+/// silently substituted the weather's mains temperature.
+#[test]
+fn init_mains_source_read_failure_fails_naming_the_equipment() {
+    let env = make_env(21.0);
+    // No stated inlet temperature and a column source instead: the env
+    // carries no schedule payload, so the source's read cannot resolve.
+    let cfg = tankless_config(
+        FuelType::Gas,
+        50.0,
+        0.0,
+        0.0,
+        None,
+        Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 0,
+            boundary: BoundaryPolicy::default(),
+        }),
+    )
+    .typed::<TanklessWaterHeaterConfig>()
+    .map(|typed| {
+        EquipmentConfig::from_typed(
+            "TWH".to_string(),
+            "Tankless Water Heater".to_string(),
+            TanklessWaterHeaterConfig {
+                inlet_temp_c: None,
+                ..typed
+            },
+        )
+        .expect("the source-driven config builds")
+    })
+    .expect("the test config reads as its type");
+    let mut twh = TanklessWH::new(cfg.clone());
+    let err = twh
+        .init(&cfg, &env)
+        .expect_err("a source read failure at init must fail construction");
+    let shown = err.to_string();
+    assert!(
+        shown.contains("Tankless Water Heater"),
+        "the error names the equipment: {shown}"
+    );
+    assert!(
+        shown.contains("schedule"),
+        "the error carries the source's cause: {shown}"
+    );
+}
 
 /// A cold tank heats measurably toward setpoint over multiple 1-minute steps.
 ///
@@ -534,7 +638,7 @@ fn energy_conservation_over_draw_cycle() {
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             energy_factor: None,
@@ -696,7 +800,7 @@ fn max_tank_temp_safety_limit() {
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             energy_factor: None,
@@ -920,7 +1024,7 @@ fn resistance_config_with_ramp(
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             energy_factor: None,
@@ -1183,7 +1287,7 @@ fn tmv_reduces_draw_volume_for_hot_tank() {
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             energy_factor: None,
@@ -1249,7 +1353,7 @@ fn tmv_unmet_load_when_tank_cold() {
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             energy_factor: None,

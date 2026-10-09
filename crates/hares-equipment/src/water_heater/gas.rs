@@ -161,6 +161,8 @@ impl GasWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let siting = Siting::from_constructor_config(&config);
+        // Pre-init placeholder: init requires the config's loop id (the
+        // allocator's assignment) and re-declares the ports from it.
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -304,7 +306,11 @@ impl GasWH {
         self.siting.resolve(config, c.zone_type.as_deref())?;
         self.descriptor.zone = self.siting.zone();
         self.descriptor.zone_type = c.zone_type.clone();
-        self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
+        // The loop id is stated input (its wiring's or the loop allocator's
+        // assignment): an init without one cannot declare the supply loop,
+        // and loop 0 is the unassigned sentinel, not a loop.
+        self.loop_id =
+            crate::hvac::helpers::require_loop_id(c.loop_id, "Gas Water Heater", &config.name)?;
         self.ports = siting::storage_ports(&GAS_LEADING_PORTS, &self.siting, self.loop_id);
 
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
