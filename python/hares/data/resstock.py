@@ -875,9 +875,15 @@ def _weight_column(df: pl.DataFrame) -> str | None:
 
     ResStock metadata parquets name the weight column ``in.sample_weight`` (or
     a close variant); it is the per-building population multiplier used to
-    re-weight individual simulations up to the national stock.
+    re-weight individual simulations up to the national stock. The 2025.1
+    baseline parquet names it exactly ``weight`` among ``calc.weighted.*``
+    aggregate columns, so that exact name is accepted too: an exact match
+    cannot mistake the aggregates for the weight.
     """
-    return next((c for c in df.columns if "sample_weight" in c.lower()), None)
+    sample = next((c for c in df.columns if "sample_weight" in c.lower()), None)
+    if sample is not None:
+        return sample
+    return "weight" if "weight" in df.columns else None
 
 
 def _missing_weight_column_error(metadata_path: str | Path, df: pl.DataFrame) -> ResStockMetadataError:

@@ -184,6 +184,24 @@ def test_single_building_weight_check_precedes_any_download(tmp_path: Path):
     assert excinfo.type.__name__ == "ResStockMetadataError"
 
 
+def test_bare_weight_column_is_recognized(tmp_path: Path):
+    """The shipped 2025.1 metadata parquet names its weight column exactly
+    ``weight`` (no ``sample_weight`` variant) among ``calc.weighted.*``
+    aggregate columns: the lookup reads it, and the aggregates, whose names
+    contain ``weighted``, are never mistaken for it."""
+    meta = _write_parquet(
+        tmp_path / "shipped.parquet",
+        {
+            "bldg_id": [1, 2],
+            "weight": [2.5, 3.5],
+            "calc.weighted.electricity.total.energy_consumption..tbtu": [0.1, 0.2],
+        },
+    )
+
+    assert _lookup_sample_weight(meta, 1) == 2.5
+    assert _lookup_sample_weight(meta, 2) == 3.5
+
+
 def test_single_building_without_metadata_warns_and_is_unweighted(tmp_path: Path):
     """A building fetched with neither sample_weight nor metadata_path keeps
     the documented unweighted value 1.0 and its UserWarning: the caller
