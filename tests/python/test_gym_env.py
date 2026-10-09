@@ -463,7 +463,14 @@ def test_rust_and_python_paths_give_identical_rewards(
     batch_env, python_env = envs
 
     rng = np.random.default_rng(3)
-    action_sequence = [np.asarray(a) for a in rng.uniform(-10.0, 30.0, size=(20, 2, 1))]
+    # The heat_c bounds are (-50, 80): the range reaches past them, so the
+    # pin exercises the clip path, not just in-bounds actions.
+    action_sequence = [np.asarray(a) for a in rng.uniform(-90.0, 130.0, size=(20, 2, 1))]
+    low, high = batch_env._action_bounds[0]
+    clipped_actions = [
+        actions for actions in action_sequence if np.any(actions < low) or np.any(actions > high)
+    ]
+    assert clipped_actions, "the pin must exercise actions that clip to the declared bounds"
     batch_rewards = [batch_env.step(actions)[1] for actions in action_sequence]
 
     monkeypatch.setattr(vec_env_module, "rust_batch_step", None)
@@ -474,6 +481,94 @@ def test_rust_and_python_paths_give_identical_rewards(
             f"the batch and Python paths disagree on the reward_fn's rewards "
             f"at step {step_idx}: {batch} vs {python}"
         )
+
+
+def test_vec_env_rejects_a_non_callable_reward_fn_at_construction():
+    """A reward_fn that is not callable fails at construction, naming the
+    field, before any dwelling is initialized or advanced."""
+    with pytest.raises(TypeError, match="reward_fn"):
+        VecDwellingGymEnv(
+            dwellings=[_make_dwelling()],
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=cast(Any, None),
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_both_step_paths_build_the_same_info_shape(monkeypatch: pytest.MonkeyPatch):
+    """One info shape: on a clean step, both paths carry "step" (the step
+    dict the reward reads) and the same keys, so an RL caller reads one
+    surface whichever path stepped the fleet."""
+    import hares.rl.vec_env as vec_env_module
+
+    envs: list[VecDwellingGymEnv] = []
+    for _ in range(2):
+        dwellings = [_make_dwelling(seed=i) for i in range(2)]
+        # The fixture's construction notices are not a step's warnings.
+        for dwelling in dwellings:
+            dwelling.take_warnings()
+        env = VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            episode_length=timedelta(minutes=5),
+        )
+        env.reset(seed=7)
+        envs.append(env)
+    batch_env, python_env = envs
+
+    actions = np.full((2, 1), 21.0, dtype=np.float64)
+    _, _, _, _, batch_infos = batch_env.step(actions)
+    monkeypatch.setattr(vec_env_module, "rust_batch_step", None)
+    _, _, _, _, python_infos = python_env.step(actions)
+
+    for batch_info, python_info in zip(batch_infos, python_infos, strict=True):
+        assert set(batch_info) == set(python_info), (
+            f"the batch and Python paths must build the same info shape: "
+            f"{sorted(batch_info)} vs {sorted(python_info)}"
+        )
+        assert "step" in batch_info
+        assert "net_electric_power_kw" in batch_info["step"]
+        assert "warning_count" in batch_info
+
+
+def test_a_failed_env_keeps_the_batch_rectangular():
+    """One env failing mid-run returns the batch: the failed env's row
+    carries its last observation, reward 0.0 and terminated, next to the
+    living env's step, instead of a ragged obs list that never assembles."""
+    dwellings = [
+        _make_dwelling(seed=0, duration_s=600),
+        _make_dwelling(seed=1, duration_s=120),
+    ]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=20),
+    )
+    env.reset(seed=7)
+    actions = np.zeros((2, 1), dtype=np.float64)
+
+    # The short home's sim holds two steps of 60 s; both homes step them.
+    env.step(actions)
+    prev_obs, _, _, _, _ = env.step(actions)
+
+    # The third step fails the short home (past its end) while the living
+    # home steps on.
+    obs, rewards, dones, _truncs, infos = env.step(actions)
+
+    assert obs.shape == (2, len(_OBS_FIELDS))
+    assert obs[1].tobytes() == prev_obs[1].tobytes(), (
+        "the failed env's row must carry its last observation: the failed "
+        "step changed nothing"
+    )
+    assert rewards[1] == 0.0
+    assert dones[1]
+    assert not dones[0]
+    assert infos[1]["error"] == 1.0
 
 
 def test_vec_gym_out_of_bounds_actions_no_nan():

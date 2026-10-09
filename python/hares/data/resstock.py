@@ -862,10 +862,11 @@ def _fetch_weather_for_station(
 class ResStockMetadataError(ValueError):
     """A ResStock metadata parquet cannot answer a sample-weight lookup.
 
-    Raised when the parquet has no recognisable weight column or the
-    requested building is absent from it, naming the parquet and the columns
-    searched or the missing building: a caller that asked for the lookup
-    asked for this error, not for a default.
+    Raised when the parquet has no recognisable weight column, the
+    requested building is absent from it, or a building id appears more
+    than once in it, naming the parquet and the columns searched, the
+    missing building or the duplicated ids: a caller that asked for the
+    lookup asked for this error, not for a default.
     """
 
 
@@ -892,10 +893,11 @@ def _lookup_sample_weight(metadata_path: str | Path, bldg_id: int) -> float:
     """Return *bldg_id*'s sample weight from a metadata parquet.
 
     Raises ``ResStockMetadataError`` when the parquet has no recognisable
-    weight column or the building is not present in it: a caller that passed
-    *metadata_path* asked for the lookup, so a failed lookup is an error, not
-    a default. Uses the same column-detection logic as the fleet path so
-    the single-building and fleet weights are guaranteed to agree.
+    weight column, the building is not present in it, or its id appears
+    more than once in it: a caller that passed *metadata_path* asked for
+    the lookup, so a failed lookup is an error, not a default. Uses the
+    same column-detection logic as the fleet path so the single-building
+    and fleet weights are guaranteed to agree.
     """
     import polars as pl
 
@@ -908,6 +910,11 @@ def _lookup_sample_weight(metadata_path: str | Path, bldg_id: int) -> float:
     if matched.height == 0:
         raise ResStockMetadataError(
             f"building {bldg_id} not found in ResStock metadata parquet {metadata_path}"
+        )
+    if matched.height > 1:
+        raise ResStockMetadataError(
+            f"building {bldg_id} appears {matched.height} times in ResStock "
+            f"metadata parquet {metadata_path}; building ids must be unique"
         )
     return float(matched[weight_col][0])
 
@@ -979,6 +986,10 @@ def fetch_resstock_building(
     """
     base_cache = cache_dir if cache_dir is not None else _default_cache_dir()
     cfg = _version_config(version)
+    # The weight resolves before anything is fetched, so a metadata parquet
+    # that cannot answer the lookup fails the fetch before it reaches the
+    # network, the same fail-fast order the fleet path keeps.
+    resolved_weight = _resolve_sample_weight(bldg_id, metadata_path, sample_weight)
     bldg_dir = _building_cache_dir(base_cache, version, bldg_id)
     hpxml_path = bldg_dir / "home.xml"
     schedule_path = bldg_dir / "in.schedules.csv"
@@ -1020,8 +1031,6 @@ def fetch_resstock_building(
             version,
             weather_format=weather_format,
         )
-
-    resolved_weight = _resolve_sample_weight(bldg_id, metadata_path, sample_weight)
 
     return ResStockBuilding(
         bldg_id=bldg_id,
@@ -1161,6 +1170,14 @@ def fetch_resstock_fleet(
         raise _missing_weight_column_error(metadata_path, df)
 
     id_col = _bldg_id_col(df)
+
+    duplicated = df.filter(pl.col(id_col).is_duplicated())
+    if duplicated.height > 0:
+        dup_ids = sorted({int(i) for i in duplicated[id_col].to_list()})
+        raise ResStockMetadataError(
+            f"building ids {dup_ids} appear more than once in ResStock "
+            f"metadata parquet {metadata_path}; building ids must be unique"
+        )
 
     if bldg_ids is not None:
         ids_in_metadata = {int(i) for i in df[id_col].to_list()}

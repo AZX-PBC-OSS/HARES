@@ -121,6 +121,69 @@ def test_fleet_requested_ids_absent_from_metadata_are_named(tmp_path: Path):
     assert excinfo.type.__name__ == "ResStockMetadataError"
 
 
+def test_duplicate_bldg_id_is_named_by_the_single_lookup(tmp_path: Path):
+    """A metadata parquet whose building ids repeat cannot say which row's
+    weight is the building's: the single lookup is an error naming the id
+    and the parquet, not the first row's weight silently winning."""
+    meta = _write_parquet(
+        tmp_path / "duplicate.parquet",
+        {
+            "bldg_id": [1, 2, 1],
+            "in.state": ["CO", "CO", "CO"],
+            # The rows disagree, so first-row and last-row reads disagree too.
+            "in.sample_weight": [2.5, 3.5, 9.5],
+        },
+    )
+
+    with pytest.raises(ValueError, match="building 1") as excinfo:
+        _lookup_sample_weight(meta, 1)
+
+    message = str(excinfo.value)
+    assert str(meta) in message, f"the error must name the parquet: {message}"
+    assert "not found" not in message
+    assert excinfo.type.__name__ == "ResStockMetadataError"
+
+
+def test_fleet_duplicate_bldg_ids_are_named(tmp_path: Path):
+    """A fleet fetch from a metadata whose building ids repeat is an error
+    up front, naming the duplicated ids and the parquet, fetching nothing:
+    the fleet's weight dict cannot take the last row's weight silently."""
+    meta = _write_parquet(
+        tmp_path / "duplicate.parquet",
+        {
+            "bldg_id": [1, 2, 1, 2],
+            "in.state": ["CO", "CO", "CO", "CO"],
+            "in.sample_weight": [2.5, 3.5, 9.5, 7.5],
+        },
+    )
+
+    with (
+        mock.patch("hares.data.resstock._download_file", side_effect=_refuse_download),
+        pytest.raises(ValueError, match="appear more than once") as excinfo,
+    ):
+        fetch_resstock_fleet(meta, cache_dir=tmp_path)
+
+    message = str(excinfo.value)
+    assert "[1, 2]" in message, f"the error must name every duplicated id: {message}"
+    assert str(meta) in message, f"the error must name the parquet: {message}"
+    assert excinfo.type.__name__ == "ResStockMetadataError"
+
+
+def test_single_building_weight_check_precedes_any_download(tmp_path: Path):
+    """The single-building path refuses a metadata with no weight column
+    before it reaches the network, the same fail-fast order the fleet path
+    keeps."""
+    meta = _unweighted_metadata(tmp_path / "metadata.parquet", [1])
+
+    with (
+        mock.patch("hares.data.resstock._download_file", side_effect=_refuse_download),
+        pytest.raises(ValueError, match="sample-weight") as excinfo,
+    ):
+        fetch_resstock_building(1, version="2024.2", cache_dir=tmp_path, metadata_path=meta)
+
+    assert excinfo.type.__name__ == "ResStockMetadataError"
+
+
 def test_single_building_without_metadata_warns_and_is_unweighted(tmp_path: Path):
     """A building fetched with neither sample_weight nor metadata_path keeps
     the documented unweighted value 1.0 and its UserWarning: the caller

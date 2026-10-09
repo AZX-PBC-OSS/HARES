@@ -31,7 +31,6 @@ from .gym_env import (
     sorted_action_layout,
     telemetry_to_observation,
     validate_episode_length,
-    validate_reward_fn,
     validated_observation_fields,
 )
 
@@ -79,14 +78,17 @@ class VecDwellingGymEnv:
         dwellings: Sequence[PyDwelling],
         observation_fields: Sequence[str],
         action_space_config: Mapping[str, Sequence[str]],
-        reward_fn: Callable[[RewardContext], float] | None,
+        reward_fn: Callable[[RewardContext], float],
         episode_length: timedelta,
         time_res_s: float | None = None,
         field_bounds_overrides: Mapping[str, tuple[float, float]] | None = None,
         verify_observation_equivalence: bool = False,
     ) -> None:
         self._observation_fields = validated_observation_fields(observation_fields)
-        validate_reward_fn(reward_fn)
+        if not callable(reward_fn):
+            raise TypeError(
+                f"reward_fn must be callable, got {type(reward_fn).__name__}"
+            )
         validate_episode_length(episode_length)
 
         start_method = multiprocessing.get_start_method(allow_none=True)
@@ -264,13 +266,15 @@ class VecDwellingGymEnv:
     def step(self, actions: np.ndarray):
         """Advance every dwelling one timestep.
 
-        Each entry of ``infos`` carries ``"warning_count"`` (float, always
-        present) and ``"warnings"`` (list[str], present only when the count is
-        non-zero) — the warnings drained from that dwelling during the step
-        (e.g. control signals rejected at dispatch time). Both step paths clip
-        actions to the declared bounds and call ``reward_fn`` per environment
-        on the same ``RewardContext`` built from the step dict and the
-        dwelling's telemetry: one reward contract.
+        Each entry of ``infos`` carries the same shape on both step paths:
+        ``"step"`` (the step dict the reward reads, ``None`` when that
+        dwelling's step failed), ``"warning_count"`` (float, always
+        present) and ``"warnings"`` (list[str], present only when the count
+        is non-zero, the warnings drained from that dwelling during the
+        step, e.g. control signals rejected at dispatch time). Both step
+        paths clip actions to the declared bounds and call ``reward_fn``
+        per environment on the same ``RewardContext`` built from the step
+        dict and the dwelling's telemetry: one reward contract.
         """
         arr = np.asarray(actions, dtype=np.float64)
         arr = np.ascontiguousarray(arr)
@@ -307,7 +311,9 @@ class VecDwellingGymEnv:
                 obs_rows.append(row["obs"])
                 dones.append(bool(row["terminated"]))
                 truncs.append(bool(row["truncated"]))
-                infos.append(dict(row.get("info", {})))
+                info = dict(row.get("info", {}))
+                info["step"] = step_data
+                infos.append(info)
         else:
             for dwelling, action_row in zip(self._dwellings, arr, strict=True):
                 self._apply_actions(dwelling, action_row)

@@ -161,11 +161,49 @@ def test_batch_step_with_no_actions_steps_every_dwelling():
     assert len(results) == 1
 
 
+def test_a_failed_row_carries_the_last_observation():
+    """A failed step's row carries the dwelling's last observation, the same
+    width as a living row's: the batch stays rectangular and the failed
+    step's reward contract stays reachable in a multi-dwelling fleet."""
+    from hares._hares import batch_step
+
+    short, living = make_dwelling(duration_s=120), make_dwelling(duration_s=600)
+    args = (
+        _OBS_FIELDS,
+        [("Gas Furnace", "heat_c")],
+        {"Gas Furnace": "ThermalSetpoint"},
+        _SETPOINT_BOUNDS,
+    )
+    actions = [[21.0], [21.0]]
+
+    # The short home's sim holds two steps of 60 s; both homes step them.
+    batch_step([short, living], actions, *args)
+    second = batch_step([short, living], actions, *args)
+    assert second[0]["step"] is not None
+
+    # The third step fails the short home (past its end) while the living
+    # home steps on.
+    third = batch_step([short, living], actions, *args)
+    failed, ok = third
+    assert failed["step"] is None
+    assert failed["terminated"] is True
+    assert ok["step"] is not None
+    assert ok["terminated"] is False
+    assert len(failed["obs"]) == len(_OBS_FIELDS), (
+        "the failed row's obs must be the last observation, not an empty list"
+    )
+    assert len(ok["obs"]) == len(_OBS_FIELDS)
+    assert failed["obs"] == second[0]["obs"], (
+        "the failed row's obs must be the dwelling's last observation: the "
+        "failed step changed nothing"
+    )
+
+
 def test_batch_step_rows_carry_no_reward_key():
     """A row carries the step dict, never a Rust-computed reward: the reward
     is the environment's ``reward_fn`` decision, on one contract for both
     step paths."""
-    from ochre_next._hares import batch_step
+    from hares._hares import batch_step
 
     dwelling = make_dwelling(duration_s=600)
     dwelling.take_warnings()

@@ -498,7 +498,10 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// Each result dict carries `"step"`, the same dict `Dwelling.step()`
 /// returns (both go through one conversion), so the caller's `reward_fn`
 /// sees the same context on the batch path as on a single dwelling's step;
-/// a failed step carries `"step": None`. Its `info` dict always carries
+/// a failed step carries `"step": None` and `"obs"` holds the dwelling's
+/// last observation (the failed step changed nothing, so the telemetry on
+/// hand is that state), keeping the batch a rectangular obs matrix. Its
+/// `info` dict always carries
 /// `"warning_count"` (float), the
 /// number of warnings the dwelling accumulated during the step (e.g. control
 /// signals rejected at dispatch time). When non-zero, `"warnings"`
@@ -638,10 +641,6 @@ pub fn batch_step_py(
                                     (dwelling.observation().unwrap_or_default(), Some(e))
                                 }
                             };
-                        info.insert(
-                            "net_electric_power_kw".to_string(),
-                            step.net_electric_power_kw,
-                        );
                         StepResult {
                             obs,
                             step: Some(step),
@@ -658,8 +657,24 @@ pub fn batch_step_py(
                         if is_fatal {
                             info.insert("dwelling_fatal".to_string(), 1.0);
                         }
+                        // A failed row carries the dwelling's last
+                        // observation: the failed step changed nothing, so
+                        // the telemetry on hand is the last known state, and
+                        // the batch stays rectangular (one obs row per
+                        // dwelling, the same width as the living rows). A
+                        // dwelling whose telemetry cannot answer the fields
+                        // gets a NaN row of the right width; the step error
+                        // stays the headline in `error_msg` and the
+                        // observation failure is flagged in `info`.
+                        let obs = match observation_for_fields(dwelling, &observation_fields) {
+                            Ok(o) => o,
+                            Err(_) => {
+                                info.insert("observation_error".to_string(), 1.0);
+                                vec![f64::NAN; observation_fields.len()]
+                            }
+                        };
                         StepResult {
-                            obs: Vec::new(),
+                            obs,
                             step: None,
                             terminated: true,
                             truncated: false,
