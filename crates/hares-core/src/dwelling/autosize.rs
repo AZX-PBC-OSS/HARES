@@ -856,8 +856,14 @@ pub fn autosize_water_heater_capacities(
         }
 
         // Rebuild typed config from the (now updated) parameters so
-        // downstream consumers see the autosized capacity and volume.
-        spec.typed_config = rebuild_wh_typed_config(&spec.name, &spec.parameters);
+        // downstream consumers see the autosized capacity and volume. A
+        // rebuild that fails is an error naming the water heater: silently
+        // leaving the raw spec in place would run autosized parameters
+        // through placeholder-capacity equipment.
+        spec.typed_config = Some(
+            rebuild_wh_typed_config(&spec.name, &spec.parameters)
+                .map_err(|e| hares_types::HaresError::Dwelling(format!("autosize rebuild: {e}")))?,
+        );
     }
     Ok(())
 }
@@ -3237,6 +3243,35 @@ mod tests {
         assert!(
             err.to_string().contains("not positive"),
             "the error names the capacity: {err}"
+        );
+    }
+
+    /// A water heater whose typed rebuild fails is an error naming the
+    /// water heater; the rebuild never silently downgrades the spec to its
+    /// raw parameters, where the autosized capacity would run through
+    /// placeholder equipment (the same rule the HVAC rebuild keeps).
+    #[test]
+    fn a_wh_typed_rebuild_failure_is_an_error_not_a_downgrade() {
+        // A spec whose name no rebuild builder matches: the dispatch's
+        // unrecognized-name error. The typed config is present before the
+        // autosizing runs, so a silent downgrade would be visible as a
+        // cleared field.
+        let mut spec = wh_spec("Storage Water Heater", FuelType::Gas, &[]);
+        spec.typed_config = Some(hares_equipment::EquipmentConfig::with_payload(
+            "Storage Water Heater".to_string(),
+            "Gas Water Heater".to_string(),
+            hares_equipment::ConfigPayload::Typed {
+                type_name: "GasWaterHeaterConfig".to_string(),
+                version: 1,
+                data: serde_json::json!({}),
+            },
+        ));
+
+        let err = autosize_water_heater_capacities(&mut [spec], Some(3.0), 10.0)
+            .expect_err("a water heater whose typed rebuild fails must error, not downgrade");
+        assert!(
+            err.to_string().contains("Storage Water Heater"),
+            "the error names the water heater, got: {err}"
         );
     }
 

@@ -179,3 +179,22 @@ fn a_non_finite_utc_offset_is_a_construction_error() {
         "the error names the value, got: {err}"
     );
 }
+
+/// An offset that pre-rounding sits inside ±24 h but rounds to exactly
+/// 86 400 s (the boundary `FixedOffset::east_opt` rejects) is a
+/// construction error naming the value; it never reaches the type's
+/// constructor and panics there.
+#[test]
+fn an_offset_that_rounds_to_24_hours_is_a_construction_error() {
+    let mut config = cz2a_config(project_root().join("defaults"));
+    // 23.9999 h is 86 399.64 s: inside the pre-rounding guard, and exactly
+    // 86 400 s once rounded.
+    config.sim_config.site_location.utc_offset_h = Some(23.9999);
+    let err = DwellingBlueprint::from_config(config)
+        .err()
+        .expect("an offset rounding to 86 400 s cannot become a fixed offset");
+    assert!(
+        err.to_string().contains("23.9999"),
+        "the error names the value, got: {err}"
+    );
+}

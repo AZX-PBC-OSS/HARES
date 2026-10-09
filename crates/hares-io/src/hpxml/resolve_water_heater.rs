@@ -916,6 +916,18 @@ fn wh_category(wh_type: &str, fuel: FuelType) -> WhCategory {
         ("heat pump water heater", FuelType::Electric) => WhCategory::HeatPump,
         ("instantaneous water heater", _) => WhCategory::Instantaneous,
         (_, FuelType::Electric) => WhCategory::StorageElectric,
+        // The remaining classes canonical_water_heater_name maps to a
+        // canonical name are storage-tank UA categories, not unrecognized
+        // combinations: a non-electric storage tank (the Gas Water Heater
+        // class) and the two indirect-tank combi types (the Indirect Tank
+        // class). Naming them before the catch-all keeps the catch-all's
+        // warning off every file those canonical names resolve; only an
+        // input no canonical name matches warns.
+        ("storage water heater", _) => WhCategory::StorageGas,
+        (
+            "space-heating boiler with storage tank" | "space-heating boiler with tankless coil",
+            _,
+        ) => WhCategory::StorageGas,
         (other_type, other_fuel) => {
             tracing::warn!(
                 wh_type = other_type,
@@ -1049,7 +1061,15 @@ fn param_fuel(params: &Map<String, Value>) -> FuelType {
         .unwrap_or(FuelType::Gas)
 }
 
-fn try_build_gas_wh_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+/// Build a `GasWaterHeaterConfig` typed config.
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
+fn try_build_gas_wh_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Result<EquipmentConfig, super::HpxmlError> {
     let cfg = GasWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
@@ -1085,13 +1105,22 @@ fn try_build_gas_wh_config(name: &str, params: &Map<String, Value>) -> Option<Eq
         pilot_fraction_to_tank: param_f64(params, "pilot_fraction_to_tank"),
         fan_power_w: param_f64(params, "fan_power_w"),
     };
-    EquipmentConfig::from_typed(name.to_string(), "Gas Water Heater".to_string(), cfg).ok()
+    Ok(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Gas Water Heater".to_string(),
+        cfg,
+    )?)
 }
 
+/// Build an `ElectricResistanceWaterHeaterConfig` typed config.
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
 fn try_build_elec_res_wh_config(
     name: &str,
     params: &Map<String, Value>,
-) -> Option<EquipmentConfig> {
+) -> Result<EquipmentConfig, super::HpxmlError> {
     let cfg = ElectricResistanceWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
@@ -1124,15 +1153,22 @@ fn try_build_elec_res_wh_config(
         fixture_delivery_temp_c: param_f64(params, "fixture_delivery_temp_c"),
         hot_draw_temp_c: param_f64(params, "hot_draw_temp_c"),
     };
-    EquipmentConfig::from_typed(
+    Ok(EquipmentConfig::from_typed(
         name.to_string(),
         "Electric Resistance Water Heater".to_string(),
         cfg,
-    )
-    .ok()
+    )?)
 }
 
-fn try_build_hpwh_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+/// Build a `HeatPumpWaterHeaterConfig` typed config.
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
+fn try_build_hpwh_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Result<EquipmentConfig, super::HpxmlError> {
     let cfg = HeatPumpWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
@@ -1177,13 +1213,22 @@ fn try_build_hpwh_config(name: &str, params: &Map<String, Value>) -> Option<Equi
         low_power_hpwh: params.get("low_power_hpwh").and_then(Value::as_bool),
         uniform_energy_factor: param_f64(params, "uniform_energy_factor"),
     };
-    EquipmentConfig::from_typed(name.to_string(), "Heat Pump Water Heater".to_string(), cfg).ok()
+    Ok(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Heat Pump Water Heater".to_string(),
+        cfg,
+    )?)
 }
 
+/// Build a `TanklessWaterHeaterConfig` typed config.
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
 fn try_build_tankless_wh_config(
     name: &str,
     params: &Map<String, Value>,
-) -> Option<EquipmentConfig> {
+) -> Result<EquipmentConfig, super::HpxmlError> {
     let cfg = TanklessWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
@@ -1205,13 +1250,22 @@ fn try_build_tankless_wh_config(
         min_flow_kg_s: None,
         min_flow_gpm: None,
     };
-    EquipmentConfig::from_typed(name.to_string(), "Tankless Water Heater".to_string(), cfg).ok()
+    Ok(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Tankless Water Heater".to_string(),
+        cfg,
+    )?)
 }
 
+/// Build an `IndirectTankConfig` typed config.
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
 fn try_build_indirect_tank_config(
     name: &str,
     params: &Map<String, Value>,
-) -> Option<EquipmentConfig> {
+) -> Result<EquipmentConfig, super::HpxmlError> {
     let cfg = IndirectTankConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
@@ -1238,28 +1292,39 @@ fn try_build_indirect_tank_config(
         hot_draw_temp_c: param_f64(params, "hot_draw_temp_c"),
         boiler_loop_flow_rate_kg_s: param_f64(params, "boiler_loop_flow_rate_kg_s"),
     };
-    EquipmentConfig::from_typed(name.to_string(), "Indirect Tank".to_string(), cfg).ok()
+    Ok(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Indirect Tank".to_string(),
+        cfg,
+    )?)
 }
 
 /// Rebuild a water heater equipment typed config using updated parameters.
 ///
 /// Called after autosizing to replace placeholder capacities and volumes
 /// with computed values. Matches on the canonical equipment name to select
-/// the correct config builder.
-pub fn rebuild_wh_typed_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+/// the correct config builder. A builder failure is an error naming the
+/// water heater and the failure: a rebuild that silently left the raw spec
+/// (placeholder capacities and volumes) in place would run autosized
+/// numbers through un-autosized equipment.
+///
+/// # Errors
+///
+/// The matched builder's own error, or the unrecognized-name error.
+pub fn rebuild_wh_typed_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Result<EquipmentConfig, super::HpxmlError> {
     match name {
         "Gas Water Heater" => try_build_gas_wh_config(name, params),
         "Electric Resistance Water Heater" => try_build_elec_res_wh_config(name, params),
         "Heat Pump Water Heater" => try_build_hpwh_config(name, params),
         "Tankless Water Heater" => try_build_tankless_wh_config(name, params),
         "Indirect Tank" => try_build_indirect_tank_config(name, params),
-        other => {
-            tracing::warn!(
-                canonical_name = other,
-                "rebuild_wh_typed_config called with unrecognized WH name; returning None"
-            );
-            None
-        }
+        other => Err(super::HpxmlError::Parse(
+            format!("rebuild_wh_typed_config called with unrecognized water heater name '{other}'")
+                .into(),
+        )),
     }
 }
 
@@ -1275,6 +1340,50 @@ mod tests {
     use crate::defaults::DefaultsStore;
 
     use super::super::building::{Building, Site, SiteType, Zone, ZoneType};
+
+    use std::io::Write as IoWrite;
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::fmt::MakeWriter;
+
+    /// A tracing writer capturing formatted events into a shared buffer,
+    /// so a pin can assert on the warnings the resolver emits.
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for LogBuf {
+        type Writer = LogBufGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogBufGuard(self.0.clone())
+        }
+    }
+
+    struct LogBufGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl IoWrite for LogBufGuard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer mutex").write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.lock().expect("log buffer mutex").flush()
+        }
+    }
+
+    /// Run `f` under a WARN-level capturing subscriber and return the
+    /// captured log text.
+    fn captured_warnings(f: impl FnOnce()) -> String {
+        let buf = LogBuf::default();
+        let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(buf.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let captured = buf.0.lock().expect("log buffer mutex").clone();
+        String::from_utf8(captured).expect("log buffer is utf8")
+    }
 
     /// Build a minimal [`Building`] wrapping the details node from a parsed HPXML.
     /// Used by tests that only exercise water-heater parsing and do not provide
@@ -1372,7 +1481,7 @@ mod tests {
                 serde_json::Value::Number(serde_json::Number::from(3_u16)),
             );
             let cfg = rebuild_wh_typed_config(name, &params)
-                .unwrap_or_else(|| panic!("{name} rebuilds from params"));
+                .unwrap_or_else(|e| panic!("{name} rebuilds from params: {e}"));
             let loop_id = match name {
                 "Indirect Tank" => {
                     cfg.typed::<IndirectTankConfig>()
@@ -1422,7 +1531,7 @@ mod tests {
         ] {
             let params = serde_json::Map::new();
             let cfg = rebuild_wh_typed_config(name, &params)
-                .unwrap_or_else(|| panic!("{name} rebuilds from params"));
+                .unwrap_or_else(|e| panic!("{name} rebuilds from params: {e}"));
             let loop_id = match name {
                 "Indirect Tank" => {
                     cfg.typed::<IndirectTankConfig>()
@@ -1456,6 +1565,148 @@ mod tests {
                 "{name} rebuild with no {key} param leaves the loop id unset"
             );
         }
+    }
+
+    /// A rebuild error is the builder's own named error or the dispatch's
+    /// unrecognized-name error: the dispatch's former `None` (which
+    /// silently downgraded the spec to its raw parameters) is gone, and a
+    /// rebuild that fails construction names the water heater.
+    #[test]
+    fn wh_typed_config_rebuild_error_fails_construction() {
+        // The unknown-name error names the name (the dispatch's own arm).
+        let err = rebuild_wh_typed_config("Not A Water Heater", &Map::new())
+            .expect_err("an unrecognized name is an error naming it");
+        assert!(
+            err.to_string().contains("Not A Water Heater"),
+            "the error names the water heater, got: {err}"
+        );
+    }
+
+    /// Every type/fuel combination `canonical_water_heater_name` accepts
+    /// resolves to its UA category without the unrecognized-combination
+    /// warning: the named arms cover the known classes, so the catch-all's
+    /// warning only fires for genuinely unrecognized input. The indirect
+    /// tank (both combi types) is the class that previously warned on
+    /// every file that resolved it.
+    #[test]
+    fn wh_category_warns_only_on_genuinely_unrecognized_combinations() {
+        let recognized: &[(&str, FuelType, WhCategory)] = &[
+            (
+                "heat pump water heater",
+                FuelType::Electric,
+                WhCategory::HeatPump,
+            ),
+            (
+                "instantaneous water heater",
+                FuelType::Electric,
+                WhCategory::Instantaneous,
+            ),
+            (
+                "instantaneous water heater",
+                FuelType::Propane,
+                WhCategory::Instantaneous,
+            ),
+            (
+                "storage water heater",
+                FuelType::Electric,
+                WhCategory::StorageElectric,
+            ),
+            (
+                "storage water heater",
+                FuelType::Gas,
+                WhCategory::StorageGas,
+            ),
+            (
+                "space-heating boiler with storage tank",
+                FuelType::Gas,
+                WhCategory::StorageGas,
+            ),
+            (
+                "space-heating boiler with tankless coil",
+                FuelType::Gas,
+                WhCategory::StorageGas,
+            ),
+        ];
+        for (wh_type, fuel, expected) in recognized {
+            let category = captured_warnings(|| {
+                let resolved = wh_category(wh_type, *fuel);
+                assert_eq!(
+                    resolved, *expected,
+                    "{wh_type}/{fuel:?} resolves to its named category"
+                );
+            });
+            assert!(
+                !category.contains("Unrecognized water heater type/fuel"),
+                "{wh_type}/{fuel:?} is a recognized combination and must not warn, got: {category}"
+            );
+        }
+
+        let unknown = captured_warnings(|| {
+            let category = wh_category("solar thermal", FuelType::Gas);
+            assert_eq!(
+                category,
+                WhCategory::StorageGas,
+                "genuinely unrecognized combinations keep the StorageGas default"
+            );
+        });
+        assert!(
+            unknown.contains("Unrecognized water heater type/fuel"),
+            "a genuinely unrecognized combination still warns, got: {unknown}"
+        );
+    }
+
+    /// Resolving an indirect-tank file warns nothing about its type/fuel
+    /// combination: the class is a recognized combination, and the
+    /// catch-all's warning never reaches an indirect-tank file.
+    #[test]
+    fn indirect_tank_file_emits_no_unrecognized_combination_warning() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>space-heating boiler with storage tank</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <TankVolume>40</TankVolume>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let building = building_for_test(&root);
+
+        let mut specs = Vec::new();
+        let log = captured_warnings(|| {
+            resolve_water_heaters(
+                &building,
+                &DefaultsStore::empty(),
+                &mut specs,
+                None,
+                &mut Vec::new(),
+            )
+            .expect("combi boiler with storage tank must resolve successfully");
+        });
+        assert!(
+            !log.contains("Unrecognized water heater type/fuel"),
+            "an indirect-tank file must not warn about its type/fuel combination, got: {log}"
+        );
+        assert!(
+            specs.iter().any(|s| s.name == "Indirect Tank"),
+            "the file still resolves to the Indirect Tank spec"
+        );
     }
 
     #[test]

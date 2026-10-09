@@ -112,20 +112,25 @@ impl DwellingBlueprint {
         building.site.utc_offset_h = Some(site_location.utc_offset_h);
 
         // The offset is a physical site input: an offset the fixed-offset
-        // type cannot represent (beyond ±24 h) or a non-finite one (whose
-        // float→int cast would round to zero and silently become UTC) is a
-        // construction error naming the value.
+        // type cannot represent or a non-finite one (whose float→int cast
+        // would round to zero and silently become UTC) is a construction
+        // error naming the value. The representability check reads the
+        // rounded whole seconds, the value FixedOffset::east_opt consumes:
+        // a pre-rounding guard would let an offset inside ±24 h whose
+        // seconds round to exactly ±86 400 through to the type's own
+        // rejection.
         let offset_hours = site_location.utc_offset_h;
         let offset_secs = offset_hours * 3600.0;
-        if !offset_secs.is_finite() || offset_secs.abs() >= 24.0 * 3600.0 {
+        let secs = offset_secs.round() as i32;
+        if !offset_secs.is_finite() || secs.abs() >= 86_400 {
             return Err(HaresError::Dwelling(format!(
                 "site UTC offset {offset_hours} h is not a finite offset within \
                  ±24 h; the site's offset is a physical input and no UTC \
                  fallback may stand in for it"
             )));
         }
-        let tz_offset = FixedOffset::east_opt(offset_secs.round() as i32)
-            .expect("the offset was checked finite and within ±24 h");
+        let tz_offset = FixedOffset::east_opt(secs)
+            .expect("the offset was checked finite and within ±24 h after rounding");
         // A FixedOffset has no gaps or repeated hours, so a naive-local wall
         // time converts to exactly one instant at that offset: the
         // infallible construction (naive UTC + offset).
