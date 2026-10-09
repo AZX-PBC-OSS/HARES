@@ -213,9 +213,8 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             &["identity", "equipment", "user"],
             "Biquadratic curve provenance: 0=identity, 1=equipment-type default, 2=user-supplied",
         ),
-        TelemetryField::code_enum(
+        TelemetryField::state_flag(
             tk::DEFROST_CYCLE_STATE,
-            &["Accumulating", "Defrosting"],
             "Defrost cycle state: 0=Accumulating, 1=Defrosting",
         ),
         TelemetryField::timer_s(

@@ -514,14 +514,23 @@ enum RecordedValue {
 /// For every schema column whose name starts with an equipment instance
 /// name, the column's unit (the catalogue declaration's `Unit::symbol()`)
 /// is verified against the corresponding equipment's `telemetry_fields`.
-/// When the unit is found in the equipment's declared fields, the field's
-/// metadata is enriched with a `"unit_source"` key set to
-/// `"telemetry_field"` to indicate the unit has been validated against the
-/// authoritative equipment telemetry declaration.
+/// For a column the catalogue maps to a telemetry key
+/// ([`Catalogue::telemetry_key`]), the check is per field: the equipment's
+/// declared field for that key must carry the column's unit; a mismatch
+/// warns and the column goes unvalidated (the assembly check makes this
+/// unreachable for a catalogue built from the same equipment; it is the
+/// net for a schema built against a different declaration set). For a
+/// column with no telemetry key (the core-output columns, read from
+/// `CoreOutput`), the unit is checked against the equipment's declared
+/// unit set. When the unit is found, the field's metadata is enriched with
+/// a `"unit_source"` key set to `"telemetry_field"` to indicate the unit
+/// has been validated against the authoritative equipment telemetry
+/// declaration.
 ///
-/// Columns whose unit is not recognized by the owning equipment's telemetry
-/// fields keep their catalogue-derived metadata and emit a
-/// `tracing::warn!`.
+/// A telemetry-keyed column whose owning equipment does not declare its
+/// key (the per-capability column exists for the name family; the
+/// equipment never claimed the channel) keeps its catalogue-derived
+/// metadata unannotated and does not warn.
 fn enrich_schema_with_telemetry_units(
     schema: Schema,
     equipment: &[&dyn Equipment],
@@ -533,7 +542,11 @@ fn enrich_schema_with_telemetry_units(
         *counts.entry(eq.descriptor().name.as_str()).or_default() += 1;
     }
     let mut indices: HashMap<&str, usize> = HashMap::new();
-    let instance_units: Vec<(String, HashSet<String>)> = equipment
+    let instance_units: Vec<(
+        String,
+        HashSet<String>,
+        HashMap<&str, &hares_types::TelemetryField>,
+    )> = equipment
         .iter()
         .map(|eq| {
             let desc = eq.descriptor();
@@ -550,7 +563,12 @@ fn enrich_schema_with_telemetry_units(
                 .iter()
                 .map(|tf| tf.unit.symbol().to_string())
                 .collect();
-            (name, units)
+            let by_key: HashMap<&str, &hares_types::TelemetryField> = desc
+                .telemetry_fields
+                .iter()
+                .map(|tf| (tf.name.as_ref(), tf))
+                .collect();
+            (name, units, by_key)
         })
         .collect();
 
@@ -566,22 +584,49 @@ fn enrich_schema_with_telemetry_units(
 
             // Check if this column name starts with a known instance name
             // followed by a space (to avoid false prefix matches).
-            let owner = instance_units.iter().find(|(name, _)| {
+            let owner = instance_units.iter().find(|(name, _, _)| {
                 col_name.as_bytes().starts_with(name.as_bytes())
                     && (col_name.len() == name.len() || col_name.as_bytes()[name.len()] == b' ')
             });
-            if let Some((_name, units)) = owner
+            if let Some((_name, units, by_key)) = owner
                 && let Some(def) = catalogue.resolve(col_name)
                 && def.unit != hares_types::Unit::None
             {
-                if units.contains(def.unit.symbol()) {
-                    metadata.insert("unit_source".to_string(), "telemetry_field".to_string());
-                } else {
-                    tracing::warn!(
-                        column = col_name,
-                        unit = def.unit.symbol(),
-                        "column unit not found in equipment telemetry fields"
-                    );
+                // A telemetry-keyed column checks its key's declared field
+                // (per field, per key); a keyless column (the core-output
+                // ones) falls back to the whole-descriptor unit set.
+                let keyed = catalogue.telemetry_key(col_name).map(|key| by_key.get(key));
+                match keyed {
+                    Some(Some(field)) => {
+                        if field.unit == def.unit {
+                            metadata
+                                .insert("unit_source".to_string(), "telemetry_field".to_string());
+                        } else {
+                            tracing::warn!(
+                                column = col_name,
+                                unit = def.unit.symbol(),
+                                declared = field.unit.symbol(),
+                                "column unit disagrees with the equipment's declared \
+                                 telemetry field for its key"
+                            );
+                        }
+                    }
+                    // The per-capability column exists for the name family;
+                    // the owner never declared the channel: keep the
+                    // catalogue-derived metadata unannotated.
+                    Some(None) => {}
+                    None => {
+                        if units.contains(def.unit.symbol()) {
+                            metadata
+                                .insert("unit_source".to_string(), "telemetry_field".to_string());
+                        } else {
+                            tracing::warn!(
+                                column = col_name,
+                                unit = def.unit.symbol(),
+                                "column unit not found in equipment telemetry fields"
+                            );
+                        }
+                    }
                 }
             }
 
@@ -1026,21 +1071,6 @@ fn envelope_column_terms() -> Vec<EnvelopeTerm> {
         (
             "Natural Ventilation Wind Angle (deg)",
             (|g: &EnvelopeComponentGains| g.natural_ventilation_wind_angle_deg)
-                as fn(&EnvelopeComponentGains) -> f64,
-        ),
-        (
-            "Natural Ventilation Q_Stack (m\u{b3}/s)",
-            (|g: &EnvelopeComponentGains| g.natural_ventilation_q_stack_m3_s)
-                as fn(&EnvelopeComponentGains) -> f64,
-        ),
-        (
-            "Natural Ventilation Q_Wind (m\u{b3}/s)",
-            (|g: &EnvelopeComponentGains| g.natural_ventilation_q_wind_m3_s)
-                as fn(&EnvelopeComponentGains) -> f64,
-        ),
-        (
-            "Natural Ventilation Cd",
-            (|g: &EnvelopeComponentGains| g.natural_ventilation_cd_used)
                 as fn(&EnvelopeComponentGains) -> f64,
         ),
     ]);
@@ -19705,6 +19735,111 @@ occupancy = 0.0
             reactive_col.metadata().get("unit_source").is_none(),
             "reactive power column should not get unit_source when equipment declares no kVAR field"
         );
+    }
+
+    /// The enrichment's per-field check is unmasked: a column whose
+    /// telemetry key the owning equipment declares with a DIFFERENT unit
+    /// must not validate on the equipment's other declared units (the
+    /// whole-set membership that let the EV columns' dimensionless metadata
+    /// pass against `code` declarations). The agreeing field validates; the
+    /// disagreeing one warns and leaves the column unannotated.
+    #[test]
+    fn enrich_unit_source_follows_the_key_field_not_the_unit_set() {
+        // The EV name puts the name family's telemetry-derived columns in
+        // the catalogue; the specs path carries no equipment declarations,
+        // so the columns hold the static per-capability table's `code`
+        // declaration.
+        let specs = [hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "EV".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: serde_json::Map::new(),
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }];
+        let zones = vec![(ZoneId(1), "Indoor".to_string())];
+        let input = hares_io::CatalogueInput {
+            equipment: specs
+                .iter()
+                .enumerate()
+                .map(|(i, s)| hares_io::CatalogueEquipment {
+                    name: s.name.clone(),
+                    instance_name: None,
+                    id: EquipmentId(u32::try_from(i + 1).expect("equipment count")),
+                    fuel: s.fuel_type,
+                    telemetry: Vec::new(),
+                })
+                .collect(),
+            zones,
+            actors: Vec::new(),
+        };
+        let catalogue = hares_io::build_catalogue(&input).expect("the specs catalogue builds");
+        let schema = hares_io::build_schema(&catalogue, 8);
+
+        let make = |unit_declaration: TelemetryField| -> Vec<Box<dyn Equipment>> {
+            make_multiple(vec![unit_declaration])
+        };
+
+        // The agreeing declaration validates the column.
+        let agreeing = make(TelemetryField::code_code(
+            "connection_state",
+            hares_types::EV_CONNECTION_STATE_LABELS,
+            "the declaration the column mirrors",
+        ));
+        let enriched = enrich_schema_with_telemetry_units(
+            schema.clone(),
+            &equipment_refs(&agreeing),
+            &catalogue,
+        );
+        let col = enriched
+            .fields()
+            .iter()
+            .find(|f| f.name() == "EV Connection State (-)")
+            .expect("the schema carries the EV column at verbosity 8");
+        assert_eq!(
+            col.metadata().get("unit_source").map(String::as_str),
+            Some("telemetry_field"),
+            "the declared field for the column's key agrees and validates it"
+        );
+
+        // The disagreeing declaration must not validate on the unit SET:
+        // the equipment also declares an unrelated code-unit field, so the
+        // whole-set membership finds the column's unit and would annotate
+        // the column despite the key field's disagreement (the trap the EV
+        // columns' dimensionless metadata fell into).
+        let disagreeing = make_multiple(vec![
+            TelemetryField::ratio(
+                "connection_state",
+                "drifts from the column's code declaration",
+            ),
+            TelemetryField::code_code(
+                "phase",
+                hares_types::EV_CHARGING_LEVEL_LABELS,
+                "an unrelated code field puts code in the unit set",
+            ),
+        ]);
+        let enriched =
+            enrich_schema_with_telemetry_units(schema, &equipment_refs(&disagreeing), &catalogue);
+        let col = enriched
+            .fields()
+            .iter()
+            .find(|f| f.name() == "EV Connection State (-)")
+            .expect("the schema carries the EV column at verbosity 8");
+        assert!(
+            col.metadata().get("unit_source").is_none(),
+            "a per-field unit disagreement must leave the column unvalidated, whatever the \
+             equipment's other declared units are"
+        );
+    }
+
+    fn make_multiple(declarations: Vec<TelemetryField>) -> Vec<Box<dyn Equipment>> {
+        let mut eq = TestEquipment::new("EV", ControlCapabilities::empty());
+        eq.descriptor.telemetry_fields = declarations;
+        vec![Box::new(eq)]
     }
     /// Interest-filtering state must stay per-equipment: `prev_equipment_modes`
     /// is `EquipmentId`-keyed and `equipment_mode_changed` attributes a mode

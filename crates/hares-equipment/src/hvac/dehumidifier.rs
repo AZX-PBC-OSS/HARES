@@ -1014,15 +1014,15 @@ fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField::ratio_fraction(tk::MIN_RH, "Deadband lower bound"),
         TelemetryField::ratio_fraction(tk::MAX_RH, "Deadband upper bound"),
         TelemetryField::boolean(tk::IS_ON, "1 when compressor/fan are on, else 0"),
-        TelemetryField::ratio_fraction(
+        TelemetryField::ratio(
             tk::PART_LOAD_RATIO,
             "Part-load ratio: fraction of rated capacity needed",
         ),
-        TelemetryField::ratio_fraction(
+        TelemetryField::ratio(
             tk::PART_LOAD_FACTOR,
             "Part-load factor: cycling efficiency correction (PLF_MIN ≤ PLF ≤ 1.0)",
         ),
-        TelemetryField::ratio_fraction(tk::RUNTIME_FRACTION, "Runtime fraction: PLR / PLF"),
+        TelemetryField::ratio(tk::RUNTIME_FRACTION, "Runtime fraction: PLR / PLF"),
         TelemetryField::power_w(
             tk::PARASITIC_ELECTRIC_W,
             "Actual off-cycle parasitic electric draw (standby electronics, controls, crankcase heater); scaled by the off-cycle fraction and zero during grid outage",

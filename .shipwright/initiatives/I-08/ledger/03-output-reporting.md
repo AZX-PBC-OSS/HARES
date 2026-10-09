@@ -314,6 +314,87 @@ canonical symbol) where the name-parsed metadata carried `"-"`, and
 `Natural Ventilation Cd` carries `unit: ""` where it carried no unit key;
 no column name, Arrow type, nullability or order moved.
 
+Independent review round at tip `40181e0a`, four findings fixed on this
+branch. (1) HIGH: the metadata change above did not exist in the shipped
+pipeline. `build_schema` took the static per-capability table's symbol,
+so the ten EV-family `Connection State (-)` and `Charging Level (-)`
+columns (five EV-name-matching classes in the all-classes fixture, not
+the two the original text claimed) still carried `-`; the schema
+enrichment never wrote the unit key (only `unit_source`) and its unit
+check compared against the equipment's whole declared-unit set, so the
+dimensionless metadata validated against the equipment's other
+dimensionless fields and the mismatch warning never fired. Fixed with
+one authority: the equipment declarations are the authority and the
+static tables mirror them; the EV per-capability table entries declare
+`Unit::Code`, the columns carry `code` end to end (the catalogue's
+declaration and the schema field metadata; a new test pins both), the
+enrichment checks the declared field for the column's own telemetry key
+(the catalogue exposes `telemetry_key`) and warns on a per-field
+disagreement instead of passing on set membership (a test pins the
+unmasking), and the kinds pin is regenerated from the corrected
+pipeline, twice, byte-identical: ten unit fields `-` to `code`, nothing
+else moves, and the `v0..8.json` schema pins are byte-unchanged. The
+`Natural Ventilation Cd` half of the original claim was false: the
+column does not exist. `record_step`'s observe-gated gain table writes
+`Natural Ventilation Cd`, `Natural Ventilation Q_Stack (m³/s)` and
+`Natural Ventilation Q_Wind (m³/s)` into columns no schema surface ever
+carried: the names are absent from the pre-catalogue column lists, from
+the pins, and from the catalogue, so the writes have been dead since
+they landed (the write loop's `if let Some(&idx)` falls through). The
+ledger's rule decides: an observable the engine produces is declared, a
+dead write is deleted. These are dead writes, deleted: no output schema
+ever carried the columns, no consumer reads them from frames, and the
+quantities stay observable where they are actually consumed (the
+solver's own tests and the observe surface's phase dump read the solver
+gains directly, not output columns). Declaring them would move the
+schema (three observe-gated columns at verbosity 6 and above) and add a
+unit (`m³/s`) absent from the reviewed unit census, which the row's
+one-authority decision does not ask for. The pin test's observe-only
+column list drops the three names and keeps the two the pins carry.
+(2) HIGH: `CatalogueEquipment.telemetry` was a dead input:
+`build_catalogue` never read it, so the duplicate-name and
+kind-contradiction checks could not fire for equipment-vs-equipment or
+equipment-vs-static conflicts, and the EV columns' code against
+dimensionless contradiction was silent. `build_catalogue` now merges
+every equipment's declarations into one channel table (one telemetry
+key, one declaration): two equipment declaring the same key with
+different properties fail assembly naming both, and a
+telemetry-derived column whose declaration contradicts the merged
+declaration of the key it reads fails assembly naming both; new tests
+cover both conflicts. The census the merge forced, resolved to the
+declarations and the column surface the reviewed pins carry: the
+dehumidifier's `runtime_fraction`, `part_load_ratio` and
+`part_load_factor` and the ideal HVAC's `cap_ratio` and `eir_ratio`
+declared the `fraction` unit where every other declaring equipment and
+the static column surface use the dimensionless `-`, aligned to the
+`ratio` constructor; the heat pump heater's `defrost_cycle_state`
+declared a code enum aggregated by `Mode` where the reviewed
+`Defrost State (-)` column is a `State` averaged, aligned to the
+`state_flag` constructor; the EV's `connection_state` and
+`charging_level` labels aligned to the shared reviewed label constants.
+(3) MEDIUM: the actor columns' fleet aggregation moved undeclared. The
+catalogue's schema writes the declared unit into every actor column's
+metadata, so `FleetAggregation::for_column` resolves the unit table
+where the metadata-less pre-catalogue actor columns fell through the
+suffix parse to the WeightedSum fallback: temperature and dimensionless
+actor columns moved WeightedSum to WeightedMean, count and code columns
+stay on the unknown-unit WeightedSum fallback. The fleet goldens cannot
+see it (their aggregate products digest zero columns), so the movement
+is declared here and in the commit body, and
+`fleet_aggregation_for_actor_columns_is_pinned_under_catalogue_metadata`
+pins the rule. (4) LOW: the strays emptied for deletion (the session's
+tooling cannot unlink; the fold completes it): the empty
+`crates/hares-core/tests/debug_catalogue.rs` placeholder and the
+duplicate `tests/fixtures/schema/` pin copy, which
+`schema_pins_are_present_and_wellformed` read instead of the canonical
+crate copies; the test now reads the canonical copies. Gates after the
+fixes: fmt clean; clippy `-D warnings` clean (default, dst, observe,
+all-features); nextest --all-features 7607/7607; pytest 1523 passed /
+0 failed; pyright 0 errors; the eight goldens bitwise identical through
+`frame_golden compare-all` in both profiles (values and schemas
+unchanged: the unit movement is field metadata, which the goldens do
+not compare).
+
 ## OR-2: the row plan replaces per-step column lookup
 
 **Kind:** initiative work.

@@ -10,7 +10,7 @@ use serde_json::Value;
 #[test]
 fn schema_pins_are_present_and_wellformed() {
     for verbosity in 0..=8u8 {
-        let path = format!("../../tests/fixtures/schema/v{verbosity}.json");
+        let path = format!("tests/fixtures/schema/v{verbosity}.json");
         let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("schema pin missing at {path}: {err}"));
         let fields: Vec<Value> = serde_json::from_str(&raw)

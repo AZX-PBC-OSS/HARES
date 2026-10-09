@@ -829,6 +829,54 @@ mod tests {
         );
     }
 
+    /// The catalogue writes each actor column's declared unit into the
+    /// field metadata, so `FleetAggregation::for_column` resolves the unit
+    /// table where the pre-catalogue schema (metadata-less actor columns)
+    /// fell through to the suffix parse. That movement is declared in the
+    /// row's ledger and its commit body; this pins the rule the movement
+    /// landed on. `actor:*` names carry no parenthesised unit suffix, so
+    /// the metadata-less shape resolves through the unrecognized-suffix
+    /// fallback (WeightedSum, with the drift warning); the catalogue's
+    /// metadata resolves temperature and dimensionless to WeightedMean and
+    /// leaves count and code on the unknown-unit fallback (WeightedSum)
+    /// until the unit-keyed rules fold by kind.
+    #[test]
+    fn fleet_aggregation_for_actor_columns_is_pinned_under_catalogue_metadata() {
+        let field = |name: &str, unit: Option<&str>| {
+            let mut f = Field::new(name, DataType::Float64, true);
+            if let Some(unit) = unit {
+                f = f.with_metadata([("unit".to_string(), unit.to_string())].into());
+            }
+            f
+        };
+        let actor = |name: &str, unit: Option<&str>| {
+            FleetAggregation::for_column(&field(&format!("actor:test:{name}"), unit))
+        };
+
+        // The pre-catalogue shape: no unit metadata, no suffix to parse.
+        assert_eq!(
+            actor("min_zone_temp_c", None),
+            FleetAggregation::WeightedSum
+        );
+        // The catalogue's metadata: the declared unit rules.
+        assert_eq!(
+            actor("min_zone_temp_c", Some("C")),
+            FleetAggregation::WeightedMean
+        );
+        assert_eq!(actor("soc", Some("-")), FleetAggregation::WeightedMean);
+        assert_eq!(
+            actor("charge_kw", Some("kW")),
+            FleetAggregation::WeightedSum
+        );
+        // count and code: the unknown-unit fallback (WeightedSum) until the
+        // unit-keyed rules fold by kind.
+        assert_eq!(
+            actor("signals_count", Some("count")),
+            FleetAggregation::WeightedSum
+        );
+        assert_eq!(actor("phase", Some("code")), FleetAggregation::WeightedSum);
+    }
+
     fn sample_metrics(energy: f64, peak: f64) -> SimulationMetrics {
         SimulationMetrics {
             total_energy_kwh: TotalEnergyKwh {

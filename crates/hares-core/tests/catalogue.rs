@@ -25,13 +25,12 @@ use rand::SeedableRng;
 use serde_json::Value;
 
 /// The observe-gated dwelling columns, tagged in the pins and filtered on
-/// both sides by the active feature set.
+/// both sides by the active feature set. (The `Q_Stack`, `Q_Wind` and `Cd`
+/// natural-ventilation diagnostics were ghost writes into columns the
+/// index never carried; the writes are deleted, not declared.)
 const OBSERVE_ONLY_COLUMNS: &[&str] = &[
     "Natural Ventilation Cw (-)",
     "Natural Ventilation Wind Angle (deg)",
-    "Natural Ventilation Q_Stack (m³/s)",
-    "Natural Ventilation Q_Wind (m³/s)",
-    "Natural Ventilation Cd",
 ];
 
 fn spec(name: &str, fuel: FuelType, instance_name: Option<String>) -> EquipmentSpec {
@@ -518,8 +517,7 @@ fn write_kinds_pin() {
         .iter()
         .map(|def| {
             let entry = kind_entry(def.name.as_ref(), def);
-            let line = serde_json::to_string(&entry).expect("an entry serialises");
-            line
+            serde_json::to_string(&entry).expect("an entry serialises")
         })
         .collect();
     let body = entries.join(",\n");
@@ -612,6 +610,118 @@ fn static_tables_are_statics() {
         }
         other => panic!("Speed (-) must be an Enum, got {other:?}"),
     }
+}
+
+/// The EV Connection State and Charging Level columns carry the equipment
+/// declarations' `code` unit end to end: the catalogue's declaration and
+/// the schema field metadata at every verbosity that emits them. The
+/// declarations are the authority; the static per-capability table mirrors
+/// them.
+#[test]
+fn ev_code_columns_carry_the_declared_code_unit_end_to_end() {
+    let catalogue = all_classes_catalogue();
+    let mut column_count = 0;
+    for def in catalogue.variables() {
+        if def.name.ends_with("Connection State (-)") || def.name.ends_with("Charging Level (-)") {
+            column_count += 1;
+            assert_eq!(
+                def.unit,
+                Unit::Code,
+                "'{}': the EV column's catalogue declaration must be Unit::Code (the equipment \
+                 declarations' canonical symbol), got {}",
+                def.name,
+                def.unit.symbol()
+            );
+        }
+    }
+    assert_eq!(
+        column_count, 10,
+        "the all-classes fixture's five EV-family classes carry two code columns each"
+    );
+
+    // The schema field metadata carries the same symbol at the verbosity
+    // that emits the columns.
+    let schema = hares_io::build_schema(&catalogue, 8);
+    for field in schema.fields() {
+        let name = field.name().as_str();
+        if name.ends_with("Connection State (-)") || name.ends_with("Charging Level (-)") {
+            assert_eq!(
+                field.metadata().get("unit").map(String::as_str),
+                Some("code"),
+                "'{name}': the schema field metadata must carry the declared unit"
+            );
+        }
+    }
+}
+
+/// Two equipment declaring the same telemetry key with contradicting
+/// properties is an assembly error naming both.
+#[test]
+fn contradicting_equipment_declarations_fail_assembly() {
+    let input = CatalogueInput {
+        equipment: vec![
+            CatalogueEquipment {
+                name: "EV".to_string(),
+                instance_name: None,
+                id: EquipmentId(1),
+                fuel: FuelType::Electric,
+                telemetry: vec![TelemetryField::code_code(
+                    "connection_state",
+                    hares_types::EV_CONNECTION_STATE_LABELS,
+                    "Connection state",
+                )],
+            },
+            CatalogueEquipment {
+                name: "Electric Vehicle".to_string(),
+                instance_name: None,
+                id: EquipmentId(2),
+                fuel: FuelType::Electric,
+                telemetry: vec![TelemetryField::ratio(
+                    "connection_state",
+                    "the same key, declared dimensionless",
+                )],
+            },
+        ],
+        zones: Vec::new(),
+        actors: Vec::new(),
+    };
+    let err = build_catalogue(&input).expect_err("a contradicted channel is an assembly error");
+    let message = err.to_string();
+    assert!(
+        message.contains("connection_state")
+            && message.contains("equipment:1 (EV)")
+            && message.contains("equipment:2 (Electric Vehicle)"),
+        "the error names the key and both declaring equipment: {message}"
+    );
+}
+
+/// A static telemetry-derived column whose declaration contradicts the
+/// merged declaration of the key it reads is an assembly error naming
+/// both the column and the declaring equipment.
+#[test]
+fn static_column_contradicting_a_declared_channel_fails_assembly() {
+    let input = CatalogueInput {
+        equipment: vec![CatalogueEquipment {
+            name: "EV".to_string(),
+            instance_name: None,
+            id: EquipmentId(1),
+            fuel: FuelType::Electric,
+            telemetry: vec![TelemetryField::ratio(
+                "connection_state",
+                "the equipment drifts from the static table's declaration",
+            )],
+        }],
+        zones: Vec::new(),
+        actors: Vec::new(),
+    };
+    let err = build_catalogue(&input).expect_err("a contradicted column is an assembly error");
+    let message = err.to_string();
+    assert!(
+        message.contains("connection_state")
+            && message.contains("EV Connection State (-)")
+            && message.contains("equipment:1 (EV)"),
+        "the error names the key, the static column and the equipment: {message}"
+    );
 }
 
 /// An actor whose sealed telemetry is `set` on an undeclared key in its

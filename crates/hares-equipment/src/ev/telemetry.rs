@@ -1,5 +1,7 @@
 use hares_types::telemetry_keys as tk;
-use hares_types::{ChargingLevel, Telemetry, TelemetryField};
+use hares_types::{
+    ChargingLevel, EV_CHARGING_LEVEL_LABELS, EV_CONNECTION_STATE_LABELS, Telemetry, TelemetryField,
+};
 
 use super::config::{DEFAULT_CAPACITY_KWH, DEFAULT_FUEL_ECONOMY_KWH_PER_MI, DEFAULT_SOC};
 use super::telemetry_code;
@@ -38,12 +40,12 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
         ),
         TelemetryField::code_code(
             tk::CONNECTION_STATE,
-            &["HomePluggedIn", "AwayPluggedIn", "Disconnected"],
+            EV_CONNECTION_STATE_LABELS,
             "Connection state (0=HomePluggedIn, 1=AwayPluggedIn, 2=Disconnected)",
         ),
         TelemetryField::code_code(
             tk::CHARGING_LEVEL,
-            &["0", "L1", "L2"],
+            EV_CHARGING_LEVEL_LABELS,
             "Charging level code (1=L1, 2=L2)",
         ),
         TelemetryField::temp_c(

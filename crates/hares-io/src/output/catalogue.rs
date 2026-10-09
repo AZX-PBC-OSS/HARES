@@ -10,6 +10,14 @@
 //! lose its column: the schema pins compare the catalogue-derived schema
 //! against the recorded one at every verbosity.
 //!
+//! The equipment declarations are merged, not discarded: one telemetry key
+//! has one declaration across the workspace. Two equipment declaring the
+//! same key with different properties contradict each other, and a static
+//! telemetry-derived column whose key the equipment declare differently
+//! contradicts the declaration; both are assembly errors naming both sides.
+//! The static tables are corrected to the declarations where they disagree
+//! (the declarations are the authority; the tables mirror them).
+//!
 //! The per-equipment column set stays bug-compatible with the pre-catalogue
 //! classifier surface: the same name-classifier functions
 //! (`equipment_name_to_end_use`, `is_hvac_or_wh`, `is_ev`, and kin) are
@@ -61,6 +69,19 @@ pub enum CatalogueError {
         aggregation: Aggregation,
         /// The declared kind, as the catalogue sees it.
         kind: String,
+    },
+    /// Two declarations of one telemetry key disagree on its properties:
+    /// two equipment declaring the same channel differently, or a static
+    /// telemetry-derived column whose declaration contradicts the merged
+    /// declaration of the key it reads. Names both sides.
+    #[error("declared channel '{key}' has contradicting declarations: {first}; {second}")]
+    DeclarationConflict {
+        /// The telemetry key both declarations describe.
+        key: String,
+        /// The first declaration's source and properties.
+        first: String,
+        /// The second declaration's source and properties.
+        second: String,
     },
 }
 
@@ -262,6 +283,9 @@ pub struct Catalogue {
     /// `(min verbosity, observe-only)` per def.
     tags: Vec<(u8, bool)>,
     index: HashMap<String, usize>,
+    /// Column name → the telemetry key the column's value is read from at
+    /// record time, for the per-equipment telemetry-derived columns only.
+    telemetry_keys: HashMap<String, &'static str>,
     /// The instance-qualified equipment names the catalogue was built from,
     /// in order; the schema metadata derivation (the lighting-created
     /// flags) reads them.
@@ -279,6 +303,14 @@ impl Catalogue {
     #[must_use]
     pub fn resolve(&self, name: &str) -> Option<&VariableDef> {
         self.index.get(name).map(|&i| &self.defs[i])
+    }
+
+    /// The telemetry key the named column's value is read from at record
+    /// time, for the per-equipment telemetry-derived columns. The core
+    /// output, dwelling, zone and actor columns read no telemetry key.
+    #[must_use]
+    pub fn telemetry_key(&self, column: &str) -> Option<&'static str> {
+        self.telemetry_keys.get(column).copied()
     }
 
     /// The instance-qualified equipment names the catalogue was built from.
@@ -323,6 +355,29 @@ impl Catalogue {
 pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueError> {
     let mut defs: Vec<VariableDef> = Vec::new();
     let mut tags: Vec<(u8, bool)> = Vec::new();
+    let mut telemetry_keys: HashMap<String, &'static str> = HashMap::new();
+
+    // The merged declaration table: one telemetry key, one declaration. Two
+    // equipment declaring the same key with different properties contradict
+    // each other: an assembly error naming both.
+    let mut declared: HashMap<&str, (String, &TelemetryField)> = HashMap::new();
+    for eq in &input.equipment {
+        let tag = equipment_tag(eq);
+        for field in &eq.telemetry {
+            match declared.get(field.name.as_ref()) {
+                Some((first_tag, first)) if fields_contradict(first, field) => {
+                    return Err(CatalogueError::DeclarationConflict {
+                        key: field.name.to_string(),
+                        first: format!("{first_tag} declares {}", field_summary(first)),
+                        second: format!("{tag} declares {}", field_summary(field)),
+                    });
+                }
+                _ => {
+                    declared.insert(field.name.as_ref(), (tag.clone(), field));
+                }
+            }
+        }
+    }
 
     // Instance-qualified names, deduplicated and reserved-filtered, exactly
     // as the pre-catalogue build_schema computed them.
@@ -568,7 +623,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
                 push(
                     &mut defs,
                     &mut tags,
-                    variable_for(t.def.clone(), &format!("{name} {}", t.suffix), eq.id),
+                    telemetry_variable(t, name, eq, &declared, &mut telemetry_keys)?,
                     7,
                     false,
                 )?;
@@ -580,7 +635,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
                     push(
                         &mut defs,
                         &mut tags,
-                        variable_for(t.def.clone(), &format!("{name} {}", t.suffix), eq.id),
+                        telemetry_variable(t, name, eq, &declared, &mut telemetry_keys)?,
                         7,
                         false,
                     )?;
@@ -590,40 +645,26 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
             // Fraction read telemetry. The interleaving is today's column
             // order (columns.rs's v7 block): speed, main, fan, runtime
             // fraction, capacity, COP.
-            for (t, min_v) in [
-                (
-                    CORE_OUTPUT_VARIABLES[HVAC_V7_CORE_COLUMNS_START].1.clone(),
-                    7,
-                ),
-                (
-                    CORE_OUTPUT_VARIABLES[HVAC_V7_CORE_COLUMNS_START + 1]
-                        .1
-                        .clone(),
-                    7,
-                ),
-                (HVAC_V7_TELEMETRY_COLUMNS[0].def.clone(), 7),
-                (HVAC_V7_TELEMETRY_COLUMNS[1].def.clone(), 7),
-                (
-                    CORE_OUTPUT_VARIABLES[HVAC_V7_CORE_COLUMNS_START + 2]
-                        .1
-                        .clone(),
-                    7,
-                ),
-                (
-                    CORE_OUTPUT_VARIABLES[HVAC_V7_CORE_COLUMNS_START + 3]
-                        .1
-                        .clone(),
-                    7,
-                ),
-            ] {
-                let suffix = t.name.to_string();
-                push(
-                    &mut defs,
-                    &mut tags,
-                    variable_for(t, &format!("{name} {suffix}"), eq.id),
-                    min_v,
-                    false,
-                )?;
+            let core = |i: usize| {
+                let t = &CORE_OUTPUT_VARIABLES[i].1;
+                variable_for(t.clone(), &format!("{name} {}", t.name), eq.id)
+            };
+            let mut hvac_v7: Vec<VariableDef> = Vec::with_capacity(6);
+            hvac_v7.push(core(HVAC_V7_CORE_COLUMNS_START));
+            hvac_v7.push(core(HVAC_V7_CORE_COLUMNS_START + 1));
+            for t in HVAC_V7_TELEMETRY_COLUMNS {
+                hvac_v7.push(telemetry_variable(
+                    t,
+                    name,
+                    eq,
+                    &declared,
+                    &mut telemetry_keys,
+                )?);
+            }
+            hvac_v7.push(core(HVAC_V7_CORE_COLUMNS_START + 2));
+            hvac_v7.push(core(HVAC_V7_CORE_COLUMNS_START + 3));
+            for def in hvac_v7 {
+                push(&mut defs, &mut tags, def, 7, false)?;
             }
         }
     }
@@ -649,7 +690,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
                 push(
                     &mut defs,
                     &mut tags,
-                    variable_for(t.def.clone(), &format!("{name} {}", t.suffix), eq.id),
+                    telemetry_variable(t, name, eq, &declared, &mut telemetry_keys)?,
                     8,
                     false,
                 )?;
@@ -700,6 +741,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         defs,
         tags,
         index,
+        telemetry_keys,
         equipment_names,
     })
 }
@@ -737,6 +779,103 @@ fn variable_for(mut def: VariableDef, name: &str, id: EquipmentId) -> VariableDe
     def.name = Cow::Owned(name.to_string());
     def.source = VariableSource::Equipment(id);
     def
+}
+
+/// The source tag for a catalogue input equipment, naming id and base name.
+fn equipment_tag(eq: &CatalogueEquipment) -> String {
+    format!("equipment:{} ({})", eq.id.0, eq.name)
+}
+
+/// A declaration's semantic properties, for a conflict message. The
+/// description is prose and may differ between declaring sites; the unit,
+/// kind (with its label table), aggregation, sampling and nullability
+/// may not.
+fn field_summary(field: &TelemetryField) -> String {
+    format!(
+        "unit '{}', kind {}, aggregation {:?}, sampling {:?}, nullable {}",
+        field.unit.symbol(),
+        kind_summary(&field.kind),
+        field.aggregation,
+        field.sampling,
+        field.nullable,
+    )
+}
+
+fn def_summary(def: &VariableDef) -> String {
+    format!(
+        "unit '{}', kind {}, aggregation {:?}, sampling {:?}, nullable {}",
+        def.unit.symbol(),
+        kind_summary(&def.kind),
+        def.aggregation,
+        def.sampling,
+        def.nullable,
+    )
+}
+
+fn kind_summary(kind: &VariableKind) -> String {
+    match kind {
+        VariableKind::Enum { labels } => {
+            let spellings: Vec<&str> = (0..labels.len())
+                .map(|i| labels.get(i).unwrap_or_default())
+                .collect();
+            format!("enum {spellings:?}")
+        }
+        other => kind_tag(other),
+    }
+}
+
+/// Whether two declarations of one telemetry key disagree on any semantic
+/// property. Prose (the description) may differ; the unit, kind,
+/// aggregation, sampling and nullability may not.
+fn fields_contradict(a: &TelemetryField, b: &TelemetryField) -> bool {
+    a.unit != b.unit
+        || a.kind != b.kind
+        || a.aggregation != b.aggregation
+        || a.sampling != b.sampling
+        || a.nullable != b.nullable
+}
+
+/// Builds one telemetry-derived column for one equipment instance: the
+/// static table's declaration, checked against the merged declaration of
+/// the telemetry key the column reads. A contradiction is an assembly
+/// error naming both sides. Records the column's telemetry key for the
+/// schema-enrichment check.
+fn telemetry_variable(
+    t: &TelemetryColumn,
+    name: &str,
+    eq: &CatalogueEquipment,
+    declared: &HashMap<&str, (String, &TelemetryField)>,
+    telemetry_keys: &mut HashMap<String, &'static str>,
+) -> Result<VariableDef, CatalogueError> {
+    let def = variable_for(t.def.clone(), &format!("{name} {}", t.suffix), eq.id);
+    if let Some((first_tag, field)) = declared.get(t.key)
+        && column_field_contradiction(&def, field)
+    {
+        return Err(CatalogueError::DeclarationConflict {
+            key: t.key.to_string(),
+            first: format!(
+                "the static per-capability column '{}' ({}) declares {}",
+                def.name,
+                def.source.tag(),
+                def_summary(&def)
+            ),
+            second: format!("{first_tag} declares {}", field_summary(field)),
+        });
+    }
+    telemetry_keys.insert(def.name.to_string(), t.key);
+    Ok(def)
+}
+
+/// Whether a column's declaration and the merged declaration of the
+/// telemetry key it reads disagree on any semantic property. Prose (the
+/// description) may differ; the unit, kind, aggregation, sampling and
+/// nullability may not.
+fn column_field_contradiction(def: &VariableDef, field: &TelemetryField) -> bool {
+    def.unit != field.unit
+        || def.kind != field.kind
+        || def.aggregation != field.aggregation
+        || def.sampling != field.sampling
+        || def.nullable != field.nullable
 }
 
 /// Builds a per-zone variable from a zone-template declaration.
@@ -1042,10 +1181,11 @@ static COOLING_DELIVERED_TEMPLATE: ZoneTemplate = zone_template!(
 );
 
 /// A static per-equipment telemetry-derived column: the telemetry key the
-/// value is read from at record time, and the column's declaration.
+/// value is read from at record time, and the column's declaration. The
+/// declaration must agree with the merged declaration of that key (an
+/// equipment's `TelemetryField`); a disagreement is an assembly error.
 struct TelemetryColumn {
     /// The telemetry key the column's value is read from.
-    #[allow(dead_code)]
     key: &'static str,
     /// The column name suffix after the instance name.
     suffix: &'static str,
@@ -1283,12 +1423,16 @@ static PV_V8_COLUMNS: &[TelemetryColumn] = &[
     ),
 ];
 
-/// Verbosity 8: EV telemetry diagnostic columns.
+/// Verbosity 8: EV telemetry diagnostic columns. The unit is the equipment
+/// declarations' canonical symbol (`ev/telemetry.rs` declares both channels
+/// `code_code`): the declaration is the authority and this table mirrors
+/// it. The fleet's unit-keyed rules resolve `code` through their fallback
+/// (Mean over time, WeightedSum across homes) until they fold by kind.
 static EV_V8_COLUMNS: &[TelemetryColumn] = &[
     telemetry_column!(
         "connection_state",
         "Connection State (-)",
-        Unit::Dimensionless,
+        Unit::Code,
         VariableKind::Enum {
             labels: hares_types::EnumLabels::Static(hares_types::EV_CONNECTION_STATE_LABELS),
         },
@@ -1299,7 +1443,7 @@ static EV_V8_COLUMNS: &[TelemetryColumn] = &[
     telemetry_column!(
         "charging_level",
         "Charging Level (-)",
-        Unit::Dimensionless,
+        Unit::Code,
         VariableKind::Enum {
             labels: hares_types::EnumLabels::Static(hares_types::EV_CHARGING_LEVEL_LABELS),
         },

@@ -1086,11 +1086,11 @@ fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
         ),
         TelemetryField::power_w(tk::HVAC_HEATING_CAPACITY_W, "Rated heating capacity"),
         TelemetryField::power_w(tk::HVAC_COOLING_CAPACITY_W, "Rated cooling capacity"),
-        TelemetryField::ratio_fraction(
+        TelemetryField::ratio(
             tk::CAP_RATIO,
             "Biquadratic capacity correction factor (1.0 = rated)",
         ),
-        TelemetryField::ratio_fraction(
+        TelemetryField::ratio(
             tk::EIR_RATIO,
             "Biquadratic EIR correction factor (1.0 = rated)",
         ),
