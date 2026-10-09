@@ -1373,11 +1373,19 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   `delta_h = h_tarp - h_static` today; when the model is enabled, the
   correction adds it on top wherever TARP at the actual difference
   exceeds the frozen value (stepping.rs `apply_convection_forcing`).
-  The enum's `#[default]` derive sits on `PerStepTarp`
+  The enum's `#[default]` derive sat on `PerStepTarp`
   (`crates/hares-envelope/src/thermal_solver/config.rs:623-624`), a
-  library-level default the production wiring overrides.
+  library-level default the production wiring overrides: the derive was
+  live and consumed, so a consumer constructing the solver config
+  through `Default` re-enabled the model production disables, and the
+  enum's docstring still advertised the per-step form as the default
+  going forward. The branch carrying this entry re-points the derive at
+  `AshraeSimple`, the production state, and the docstring now describes
+  it; nothing moves with the re-pointing, because the correction needs
+  a non-empty `interior_convection_injections` and every `Default`
+  consumer in the tree passes an empty one.
 - **Justification:** on vertical surfaces the two frozen forms agree
-  (3.076 against TARP's 1.31·12.9^(1/3) = 3.0759, 0.003%), so the choice
+  (3.076 against TARP's 1.31·12.9^(1/3) = 3.0723, 0.12%), so the choice
   of baseline is invisible there. On horizontal and tilted surfaces the
   two frozen forms disagree by up to 2x (the reduced horizontal: 0.948
   against 1.782), and the correction only ever adds conductance, so the
@@ -1386,7 +1394,8 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   A-matrix's linearization baseline, and the ASHRAE Simple table is a
   defensible baseline: it is EnergyPlus's own default inside convection
   algorithm when none is set (`DataHeatBalance.hh:613`,
-  `DataHeatBalance.hh:1842`, v26.2.0-IOFreeze lines; v24.2.0 has the
+  `DataHeatBalance.hh:1842`, the vendored pin's lines, `f7c103167a`, the
+  file unchanged from v26.2.0-IOFreeze; v24.2.0 has the
   same defaults at `:588` and `:1780`), and with it the per-step correction
   stays live on the horizontal surfaces (it fires above ΔT ≈ 1.6 K in the
   reduced direction), where OCHRE's larger frozen value would suppress it
@@ -1422,7 +1431,9 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   fails when the static films take OCHRE's frozen TARP values;
   `ashrae_simple_vertical_returns_3_076`,
   `ashrae_simple_horizontal_enhanced`, `ashrae_simple_horizontal_reduced`
-  fail when any frozen value moves).
+  fail when any frozen value moves), and `config.rs`'s
+  `the_enum_default_is_the_production_pin` fails if the derive default
+  re-points off the production pin.
 
 ## D-032: The multispeed CSV's Air Flow Ratio columns are unread on both sides
 

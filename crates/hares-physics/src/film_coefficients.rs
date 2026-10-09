@@ -502,7 +502,7 @@ pub fn film_resistances(
     // (1.02 × 0.9 = 0.918 BTU/h·ft²·°F), converted to SI.
     //
     // Vertical: h_conv = 3.076 W/(m²·K), which is OCHRE's frozen TARP value
-    // (1.31·12.9^(1/3) = 3.0759, envelope.py:374) to within 0.003%. The
+    // (1.31·12.9^(1/3) = 3.0723, envelope.py:374) to within 0.12%. The
     // horizontal and tilted values are NOT OCHRE's: its frozen film is the
     // TARP model at the clamped ΔT of 12.9 K (1.782 horizontal reduced
     // against 0.948 here, 3.566 horizontal enhanced against 4.040); the
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn vertical_surface_natural_h_and_resistance() {
-        // h = 1.31 * 12.9^(1/3) ≈ 3.0759; R = 1/h ≈ 0.3251
+        // h = 1.31 * 12.9^(1/3) ≈ 3.0723; R = 1/h ≈ 0.3255
         let h = tarp_h_natural(90.0, 12.9, true);
         let expected_h = 1.31 * 12.9_f64.cbrt();
         assert_approx(h, expected_h, 1e-10);

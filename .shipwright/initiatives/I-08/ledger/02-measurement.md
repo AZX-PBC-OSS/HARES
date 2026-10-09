@@ -2009,13 +2009,16 @@ matches EnergyPlus's; roof absorptance and emittance, ruled out because
 the same HPXML values sit on both sides; a radiant barrier, ruled out
 because BEopt has none; ventilation and terrain, not the cause, about
 0.1 °C of sensitivity; roof roughness, not the winter cause, about
-0.05 °C there, the departure registered as D-010; the interior film and
-ground long-wave, triaged in this entry, both reference-equivalent. The
-first five's evidence is the fix-or18c review's candidate triage of
-2026-10-05 (`verification/review-OR-18c-7b409ca5.md`) and the OD-56
-row's own record (`11-other-defects.md`). The free-float case's boundary
-conditions, the other half of the OD-56 row's scope, are untouched by
-this entry and stay with the row (`11-other-defects.md`, OD-56).
+0.05 °C there, the departure registered as D-010; deck and framing
+mass, ruled down in the same review, the same mass look-up table on
+both sides, low likelihood; the interior film and ground long-wave,
+triaged in this entry, both reference-equivalent. The first six's
+evidence is the fix-or18c review's candidate triage of 2026-10-05
+(`verification/review-OR-18c-7b409ca5.md`, a review doc) and the OD-56
+row's own record (`11-other-defects.md`, the row's record). The
+free-float case's boundary conditions, the other half of the OD-56
+row's scope, are untouched by this entry and stay with the row
+(`11-other-defects.md`, the row's record, OD-56).
 
 Candidate 1, the interior film on the roof deck and the attic floor.
 
@@ -2037,10 +2040,11 @@ the face's signed cos of tilt share a sign, reduced otherwise,
 at `:1938-1940`, and the Walton magnitudes at
 `ConvectionCoefficients.hh:409` (vertical, 1.31·ΔT^(1/3)), `:433`
 (enhanced, 9.482·ΔT^(1/3)/(7.238-|cos|)) and `:455` (reduced,
-1.810·ΔT^(1/3)/(1.382+|cos|)). The vendored EnergyPlus tree is
-v26.2.0-IOFreeze, and the Walton/TARP code is identical across the two
-versions (re-checked against the vendored copies: only formatting
-differs), so the v24.2.0 reading carries over at the v26.2 lines: the
+1.810·ΔT^(1/3)/(1.382+|cos|)). The vendored EnergyPlus tree is pinned
+at `f7c103167a`, 110 develop commits past v26.2.0-IOFreeze, and the
+Walton/TARP code is identical from v24.2.0 through that pin (re-checked
+against the vendored copies: only formatting differs), so the v24.2.0
+reading carries over at the pin's lines: the
 dispatch at `ConvectionCoefficients.cc:331-342`, `CalcASHRAETARPNatural`
 at `:1902-1948` (the sign logic `:1933-1945`), the negative cos at
 `:1961-1963`, the Walton magnitudes at the same `.hh` lines `:409`,
@@ -2060,9 +2064,9 @@ and the per-step TARP correction is wired but disabled
 frozen non-vertical baseline is the registered divergence D-031 (class
 (a) against OCHRE), pinned by
 `the_attic_floor_s_frozen_films_are_the_ashrae_simple_horizontal_values`;
-D-031's justification's `DataHeatBalance.hh:613` and `:1842` are
-v26.2.0-IOFreeze lines (v24.2.0 has the same defaults at `:588` and
-`:1780`).
+D-031's justification's `DataHeatBalance.hh:613` and `:1842` are the
+vendored pin's lines, the file unchanged from v26.2.0-IOFreeze
+(v24.2.0 has the same defaults at `:588` and `:1780`).
 
 Probe 1 (freeze OCHRE's TARP form on the deck's attic face and the
 attic floor, `tarp_h_natural` at the clamped 12.9 K in place of the
@@ -2111,8 +2115,10 @@ state.dataEnvrn->OutDryBulbTemp`), the ground share terms at `:9388`
 and `:9396`, the view split
 `ViewFactorGroundIR = 1 - ViewFactorSkyIR` (`SolarShading.cc:10362`),
 the same form on windows (`DataSurfaces.cc:318-323`); the vendored
-v26.2.0-IOFreeze tree carries the same code at
-`HeatBalanceSurfaceManager.cc:9764`, the ground share at `:9955` and
+tree at its pin `f7c103167a` carries the same code at
+`HeatBalanceSurfaceManager.cc:9764` (v26.2.0-IOFreeze itself has the
+ground view at `:9701`: the pin sits 110 develop commits past the tag
+and this file's lines shift in between), the ground share at `:9955` and
 `:9963`, `SolarShading.cc:10694` and `DataSurfaces.cc:320-325`. OCHRE
 radiates
 only outdoor-facing surfaces (`ochre/Models/Envelope.py:186`, `:772`)
