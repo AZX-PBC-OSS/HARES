@@ -876,6 +876,84 @@ fn unavailable_period_hours_reject_out_of_range_negative_and_fractional_values()
     }
 }
 
+/// The wet appliances' draw splits across the water heating systems by
+/// each system's share of the home's load (OpenStudio-HPXML
+/// hotwater_appliances.rb:474-487): the six systems of the base-dhw-multiple
+/// sample each draw their FractionDHWLoadServed share of the washer's and
+/// the dishwasher's daily volume, so the volumes sum to the appliance's
+/// daily volume, not once per system.
+#[test]
+fn multi_water_heater_homes_apportion_the_wet_appliance_draw() {
+    use hares_physics::water_density_kg_m3;
+
+    let defaults = repo_defaults();
+    let building = parse_hpxml(&fixture(
+        "tests/fixtures/hpxml/ochre_samples/base-dhw-multiple.xml",
+    ))
+    .expect("base-dhw-multiple parses");
+    let mut specs =
+        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("equipment resolves");
+    let washer_daily_l = hares_physics::units::volume_m3_to_l(spec_f64(
+        wet_appliance_spec(&specs, "Clothes Washer"),
+        "daily_hot_water_m3",
+    ));
+    let dw_daily_l = hares_physics::units::volume_m3_to_l(spec_f64(
+        wet_appliance_spec(&specs, "Dishwasher"),
+        "daily_hot_water_m3",
+    ));
+    assert!(washer_daily_l > 0.0 && dw_daily_l > 0.0);
+
+    let mut schedule = synthetic_schedule_8760_rows();
+    hares_io::inject_schedule_into_specs(
+        &mut specs,
+        &mut schedule,
+        Some(&project_root().join("defaults")),
+        &defaults,
+        &mut Vec::new(),
+    )
+    .expect("injection succeeds");
+
+    // Each system's appliance draw column integrates to its share of the
+    // appliances' daily volume on an active day.
+    let day = 300;
+    let mut total_l = 0.0;
+    let mut systems_with_a_column = 0usize;
+    for wh in specs
+        .iter()
+        .filter(|s| s.name.contains("Water Heater") || s.name == "Indirect Tank")
+    {
+        let share = spec_f64(wh, "fraction_dhw_load_served");
+        assert!(share > 0.0, "every sampled system serves part of the load");
+        // The column this spec wired: the one named for it (the name
+        // carries the spec index as its suffix).
+        let col_prefix = format!(
+            "appliance_hot_water_draw_kg_s_{}",
+            wh.name.to_ascii_lowercase().replace(' ', "_")
+        );
+        let col_idx = schedule
+            .column_names
+            .iter()
+            .position(|name| name.starts_with(&col_prefix))
+            .unwrap_or_else(|| panic!("the schedule has a {col_prefix} column"));
+        let day_kg = schedule.columns[col_idx][day * 24..(day + 1) * 24]
+            .iter()
+            .sum::<f64>()
+            * 3600.0;
+        let setpoint_c = spec_f64(wh, "setpoint_c");
+        let rho_kg_per_l = water_density_kg_m3(setpoint_c) / 1000.0;
+        total_l += day_kg / rho_kg_per_l;
+        systems_with_a_column += 1;
+    }
+    assert_eq!(systems_with_a_column, 6, "all six systems draw their share");
+    // Four systems at 0.2 and two at 0.1: the shares sum to 1.
+    let expected_l = washer_daily_l + dw_daily_l;
+    assert!(
+        (total_l - expected_l).abs() <= 1e-6 * expected_l,
+        "the systems' shares must sum to the appliances' daily volume: \
+         {total_l} L against {expected_l} L"
+    );
+}
+
 fn occupied_bldg0527060() -> String {
     let xml = std::fs::read_to_string(fixture(
         "tests/fixtures/resstock/2025.1/bldg0527060/home.xml",

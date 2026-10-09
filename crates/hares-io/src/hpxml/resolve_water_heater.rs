@@ -481,6 +481,24 @@ pub(super) fn resolve_water_heaters(
         }
         spec.system_id = element_id(wh);
 
+        // FractionDHWLoadServed apportionment (OpenStudio-HPXML
+        // hotwater_appliances.rb:383 and :474-487): each water heating
+        // system's share of the home's hot-water load scales its fixture
+        // draw and wet-appliance volumes. The schematron requires either
+        // the element on every system summing to 1 or on none at all; a
+        // file without it has a single system serving everything, so the
+        // absent value reads as 1.0. A share of zero draws nothing, the
+        // same skip `if gpd_frac > 0` runs.
+        let fraction_dhw_load_served = child_f64(wh, "FractionDHWLoadServed").unwrap_or(1.0);
+        spec.parameters.insert(
+            "fraction_dhw_load_served".to_string(),
+            json!(fraction_dhw_load_served.max(0.0)),
+        );
+        spec.parameters.insert(
+            "draws_dhw_load".to_string(),
+            json!(fraction_dhw_load_served > 0.0),
+        );
+
         // Set autosize_water_heater flag when capacity or tank volume is
         // absent for storage-type water heaters. Tankless water heaters
         // are sized by flow rate, not FHR/tank volume, and are excluded.

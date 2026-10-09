@@ -117,6 +117,36 @@ fn usage_multiplier_of(node: &XmlNode) -> f64 {
 /// value zeroes both appliances), the raw `NumberofBedrooms` with the
 /// parser's 3-bedroom fallback (the Addendum 81 asset branch's input), and
 /// whether the home is an apartment unit.
+/// The wet appliance's apportionment inputs (OpenStudio-HPXML
+/// hotwater_appliances.rb:474-487): `IsSharedAppliance` (defaulted false),
+/// the system the appliance rides (`AttachedToWaterHeatingSystem`) and
+/// whether it has its own hot-water distribution
+/// (`AttachedToHotWaterDistribution` present).
+fn insert_wet_appliance_apportionment(
+    node: &XmlNode,
+    tag: &str,
+    params: &mut Map<String, Value>,
+) -> Result<(), HpxmlError> {
+    let (path, system_kind): (&'static str, &'static str) = if tag == "Dishwasher" {
+        ("Dishwasher/IsSharedAppliance", "Dishwasher")
+    } else {
+        ("ClothesWasher/IsSharedAppliance", "Clothes Washer")
+    };
+    let is_shared = child_bool(node, "IsSharedAppliance", path, system_kind)?.unwrap_or(false);
+    params.insert("is_shared_appliance".to_string(), json!(is_shared));
+    if let Some(idref) = node
+        .child("AttachedToWaterHeatingSystem")
+        .and_then(|c| c.attrs.get("idref").cloned())
+    {
+        params.insert("attached_water_heating_system_id".to_string(), json!(idref));
+    }
+    params.insert(
+        "attached_hot_water_distribution".to_string(),
+        json!(node.child("AttachedToHotWaterDistribution").is_some()),
+    );
+    Ok(())
+}
+
 fn wet_appliance_occupancy_inputs(details: &XmlNode) -> OccupancyInputs {
     let n_occ = details
         .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
@@ -336,6 +366,7 @@ pub(super) fn resolve_scheduled_loads(
                             occupancy: wet_appliance_occupancy_inputs(details),
                         };
                         let (annual_kwh, gpd) = calc_clothes_washer_energy_gpd(&inputs, adjusted);
+                        insert_wet_appliance_apportionment(node, "ClothesWasher", &mut params)?;
                         tracing::debug!(
                             appliance = "Clothes Washer",
                             annual_electric_kwh = annual_kwh,
@@ -476,6 +507,7 @@ pub(super) fn resolve_scheduled_loads(
                             occupancy: wet_appliance_occupancy_inputs(details),
                         };
                         let (annual_kwh, gpd) = calc_dishwasher_energy_gpd(&inputs, adjusted);
+                        insert_wet_appliance_apportionment(node, "Dishwasher", &mut params)?;
                         tracing::debug!(
                             appliance = "Dishwasher",
                             annual_electric_kwh = annual_kwh,

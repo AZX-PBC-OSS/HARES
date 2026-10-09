@@ -1029,9 +1029,9 @@ fn inject_water_heater_schedule_columns(
     // appliance with a positive daily volume needs its column: the volume is
     // drawn through the column's shape, so a file without it has no way to
     // express the draw.
-    let washer_daily_l = wet_appliance_daily_volume_l(specs, "Clothes Washer");
-    let dishwasher_daily_l = wet_appliance_daily_volume_l(specs, "Dishwasher");
-    let washer_col = if washer_daily_l > 0.0 {
+    let washer = WetApplianceDraw::new(specs, "Clothes Washer");
+    let dishwasher = WetApplianceDraw::new(specs, "Dishwasher");
+    let washer_col = if washer.daily_l > 0.0 {
         Some(
             csv_col_map
                 .get("hot_water_clothes_washer")
@@ -1043,7 +1043,7 @@ fn inject_water_heater_schedule_columns(
     } else {
         None
     };
-    let dishwasher_col = if dishwasher_daily_l > 0.0 {
+    let dishwasher_col = if dishwasher.daily_l > 0.0 {
         Some(
             csv_col_map
                 .get("hot_water_dishwasher")
@@ -1060,6 +1060,11 @@ fn inject_water_heater_schedule_columns(
         return Ok(());
     }
 
+    let wh_count = specs
+        .iter()
+        .filter(|s| WATER_HEATER_EQUIPMENT.contains(&s.name.as_str()))
+        .count();
+
     for (i, spec) in specs.iter_mut().enumerate() {
         if !WATER_HEATER_EQUIPMENT.contains(&spec.name.as_str()) {
             continue;
@@ -1068,13 +1073,23 @@ fn inject_water_heater_schedule_columns(
         // or mains source field: its tempered fixture draw is not wired (a
         // separate gap), so only the appliance draw reaches it here.
         let supports_fixture_draw = spec.name.as_str() != "Heat Pump Water Heater";
+        // The system's share of the home's hot-water load
+        // (hotwater_appliances.rb:383): its fixture draw scales by
+        // FractionDHWLoadServed, and a system serving none of the load
+        // draws nothing.
+        let fixture_share = spec
+            .parameters
+            .get("fraction_dhw_load_served")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0);
+        let draws_dhw = fixture_share > 0.0;
         // One density convention for every L to kg conversion on the draw
         // paths: the drawn water's temperature, the water heater's hot
         // supply temperature.
         let rho_kg_per_l = water_density_kg_m3(water_heater_hot_supply_temp_c(spec)) / 1000.0;
-        if let Some(col_idx) = draw_col {
+        if let (Some(col_idx), true) = (draw_col, draws_dhw) {
             let raw_values = schedule.columns[col_idx].clone();
-            let avg_daily_l = water_heater_avg_daily_draw_l(spec)?;
+            let avg_daily_l = water_heater_avg_daily_draw_l(spec)? * fixture_share;
             // The normalization's mean comes from the pre-period column
             // (the peak OpenStudio-HPXML computes), the shape from the
             // zeroed one: the period removes volume.
@@ -1102,27 +1117,35 @@ fn inject_water_heater_schedule_columns(
             }
         }
         // The wet appliances' untempered draw beside the tempered fixture
-        // draw: each appliance's column normalized to its daily volume, in
-        // mass at the drawn water's density (the water heater's hot supply
-        // temperature), the same conversion the fixture draw runs.
-        if washer_col.is_some() || dishwasher_col.is_some() {
+        // draw: each appliance's column normalized to this system's share
+        // of the appliance's daily volume (hotwater_appliances.rb:474-487),
+        // in mass at the drawn water's density (the water heater's hot
+        // supply temperature), the same conversion the fixture draw runs.
+        let washer_share = washer.share_for(spec, wh_count);
+        let dishwasher_share = dishwasher.share_for(spec, wh_count);
+        if washer_share.is_some() || dishwasher_share.is_some() {
             let mut appliance_draw: Option<Vec<f64>> = None;
-            if let Some(col_idx) = washer_col {
+            if let (Some(col_idx), Some(volume_l)) =
+                (washer_col, washer_share.map(|share| washer.daily_l * share))
+            {
                 let mean = column_mean(pre_period_columns, col_idx, &schedule.columns[col_idx]);
                 let series = normalize_draw_profile_at_mean(
                     &schedule.columns[col_idx],
                     mean,
-                    washer_daily_l,
+                    volume_l,
                     rho_kg_per_l,
                 );
                 appliance_draw = Some(series);
             }
-            if let Some(col_idx) = dishwasher_col {
+            if let (Some(col_idx), Some(volume_l)) = (
+                dishwasher_col,
+                dishwasher_share.map(|share| dishwasher.daily_l * share),
+            ) {
                 let mean = column_mean(pre_period_columns, col_idx, &schedule.columns[col_idx]);
                 let series = normalize_draw_profile_at_mean(
                     &schedule.columns[col_idx],
                     mean,
-                    dishwasher_daily_l,
+                    volume_l,
                     rho_kg_per_l,
                 );
                 appliance_draw = match appliance_draw {
@@ -1177,6 +1200,69 @@ fn wet_appliance_daily_volume_l(specs: &[EquipmentSpec], name: &str) -> f64 {
         .and_then(serde_json::Value::as_f64)
         .map(hares_physics::units::volume_m3_to_l)
         .unwrap_or(0.0)
+}
+
+/// A wet appliance's daily volume with the attachment inputs its
+/// apportionment across the water heating systems reads
+/// (`resolve_loads::insert_wet_appliance_apportionment` stored them on the
+/// spec).
+struct WetApplianceDraw {
+    daily_l: f64,
+    is_shared: bool,
+    attached_water_heating_system_id: Option<String>,
+    attached_hot_water_distribution: bool,
+}
+
+impl WetApplianceDraw {
+    fn new(specs: &[EquipmentSpec], name: &str) -> Self {
+        let spec = specs.iter().find(|s| s.name == name);
+        let param = |key: &str| {
+            spec.and_then(|s| s.parameters.get(key))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        };
+        Self {
+            daily_l: wet_appliance_daily_volume_l(specs, name),
+            is_shared: param("is_shared_appliance"),
+            attached_water_heating_system_id: spec
+                .and_then(|s| s.parameters.get("attached_water_heating_system_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            attached_hot_water_distribution: param("attached_hot_water_distribution"),
+        }
+    }
+
+    /// This water heating system's share of the appliance's daily volume
+    /// (OpenStudio-HPXML hotwater_appliances.rb:474-487): a shared appliance
+    /// with its own hot-water distribution splits evenly across the
+    /// building's water heating systems; a shared appliance without one
+    /// rides its attached system alone (`None` for the others); an in-unit
+    /// appliance follows the system's FractionDHWLoadServed. `None`: this
+    /// system draws none of the appliance's volume.
+    fn share_for(&self, wh: &EquipmentSpec, wh_count: usize) -> Option<f64> {
+        if self.daily_l <= 0.0 {
+            return None;
+        }
+        if self.is_shared {
+            if self.attached_hot_water_distribution {
+                return Some(1.0 / wh_count as f64);
+            }
+            let attached = self.attached_water_heating_system_id.as_deref();
+            if attached
+                .zip(wh.system_id.as_deref())
+                .is_some_and(|(a, b)| a == b)
+            {
+                return Some(1.0);
+            }
+            return None;
+        }
+        let fraction = wh
+            .parameters
+            .get("fraction_dhw_load_served")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0);
+        (fraction > 0.0).then_some(fraction)
+    }
 }
 
 /// The construction error for a schedule file without a column an appliance's
