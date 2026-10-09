@@ -319,13 +319,15 @@ fn mshp_heater_rows_match_ochre_capacity_ratios_and_cops() {
     }
 }
 
-/// Every row OCHRE ships must appear verbatim (a byte-identical line) in the
-/// shipped CSV: capacity ratios, air flow ratios, COPs, SHRs and the
-/// "Received From" provenance column. The reference's data is the reference's
-/// data; a row re-derived for HARES is a broken window that must not live
-/// silently in a defaults file (D-020). The shipped CSV's HARES-only families
-/// (Gas Furnace, Air Conditioner, GSHP Cooler/Heater), which have no OCHRE
-/// row, follow the pinned block.
+/// The shipped CSV's first block is the vendored file byte for byte: the
+/// exact byte block, order-sensitive, with no \r tolerance (raw bytes, not
+/// `str::lines()`, which strips a trailing \r per line). Every row OCHRE
+/// ships (capacity ratios, air flow ratios, COPs, SHRs and the "Received
+/// From" provenance column) sits in it in the reference's order. The
+/// reference's data is the reference's data; a row re-derived for HARES is
+/// a broken window that must not live silently in a defaults file. The
+/// shipped CSV's HARES-only families (Gas Furnace, Air Conditioner, GSHP
+/// Cooler/Heater), which have no OCHRE row, follow the pinned block.
 #[test]
 fn shipped_multispeed_rows_match_ochre_verbatim() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -336,26 +338,39 @@ fn shipped_multispeed_rows_match_ochre_verbatim() {
         .to_path_buf();
     let ochre_csv = root.join("vendors/OCHRE/ochre/defaults/HVAC Multispeed Parameters.csv");
     let shipped_csv = defaults_dir().join("HVAC Multispeed Parameters.csv");
-    let ochre_lines: Vec<String> = std::fs::read_to_string(&ochre_csv)
-        .expect("vendored OCHRE multispeed CSV is readable")
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    let shipped_lines: Vec<String> = std::fs::read_to_string(&shipped_csv)
-        .expect("shipped multispeed CSV is readable")
-        .lines()
-        .map(str::to_owned)
-        .collect();
+    let ochre_bytes = std::fs::read(&ochre_csv).expect("vendored OCHRE multispeed CSV is readable");
+    let shipped_bytes = std::fs::read(&shipped_csv).expect("shipped multispeed CSV is readable");
 
-    let missing: Vec<String> = ochre_lines
+    let ochre_block: Vec<&[u8]> = ochre_bytes.split_inclusive(|&b| b == b'\n').collect();
+    let shipped_lines: Vec<&[u8]> = shipped_bytes.split_inclusive(|&b| b == b'\n').collect();
+    assert!(
+        shipped_lines.len() >= ochre_block.len(),
+        "shipped multispeed CSV must carry the vendored block ({} lines) before its \
+         HARES-only families, found {} lines",
+        ochre_block.len(),
+        shipped_lines.len(),
+    );
+
+    let diverging: Vec<String> = ochre_block
         .iter()
-        .filter(|row| !shipped_lines.iter().any(|shipped| shipped == *row))
-        .cloned()
+        .zip(shipped_lines.iter())
+        .enumerate()
+        .filter(|(_, (ochre, shipped))| ochre != shipped)
+        .map(|(i, (ochre, shipped))| {
+            format!(
+                "line {}: shipped {:?} != vendored {:?}",
+                i + 1,
+                String::from_utf8_lossy(shipped),
+                String::from_utf8_lossy(ochre),
+            )
+        })
         .collect();
     assert!(
-        missing.is_empty(),
-        "shipped multispeed CSV rows must be OCHRE's verbatim; diverging rows:\n{}",
-        missing.join("\n")
+        diverging.is_empty(),
+        "shipped multispeed CSV's first {} lines must be OCHRE's block byte for byte; \
+         diverging lines:\n{}",
+        ochre_block.len(),
+        diverging.join("\n"),
     );
 }
 
