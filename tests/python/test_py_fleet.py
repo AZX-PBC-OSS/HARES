@@ -306,13 +306,16 @@ def test_from_resstock_hpxml_dir_names_buildings_dir(tmp_path: Path) -> None:
     _write_extracted_building(tmp_path, 12345)
 
     # The static surface no longer carries the removed keyword, so the call
-    # goes through getattr on purpose.
+    # goes through getattr on purpose. All three required positionals are
+    # passed so Python's own missing-argument TypeError cannot satisfy the
+    # match before the removed-keys machinery runs.
     legacy_from_resstock = getattr(PyFleet, "from_resstock")
-    with pytest.raises(TypeError, match="buildings_dir"):
+    with pytest.raises(TypeError, match="pass the unpacked buildings directory"):
         legacy_from_resstock(
             str(metadata),
+            str(tmp_path),
+            str(tmp_path),
             hpxml_dir=str(tmp_path),
-            weather_dir=str(tmp_path),
         )
 
 
