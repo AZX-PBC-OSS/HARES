@@ -1026,6 +1026,9 @@ impl PyDwelling {
     }
 
     pub fn telemetry(&self) -> PyResult<PyTelemetry> {
+        if crate::py_callback::delivery_in_progress() {
+            return Err(reentry_refusal());
+        }
         let fatal = self.poisoned.load(Ordering::Acquire);
         if fatal {
             // Dwelling is fatally poisoned — the mutex cannot be locked, but we
@@ -1638,12 +1641,7 @@ impl PyDwelling {
     /// the GIL released, so the call re-acquires it; an exception from the
     /// callable fails the run as a typed callback error, and the run stays
     /// ended after it.
-    pub fn attach_callback(
-        &mut self,
-        _py: Python<'_>,
-        report: &str,
-        callback: Bound<'_, PyAny>,
-    ) -> PyResult<()> {
+    pub fn attach_callback(&mut self, report: &str, callback: Bound<'_, PyAny>) -> PyResult<()> {
         if !callback.is_callable() {
             let repr = callback
                 .repr()
@@ -2196,6 +2194,9 @@ impl PyDwelling {
     /// Acquire the dwelling mutex after checking the poisoned flag.
     /// Returns `FatalDwellingError` if the dwelling is in a fatal error state.
     fn acquire(&self) -> PyResult<MutexGuard<'_, Dwelling>> {
+        if crate::py_callback::delivery_in_progress() {
+            return Err(reentry_refusal());
+        }
         if self.poisoned.load(Ordering::Acquire) {
             return Err(FatalDwellingError::new_err(
                 "dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance",
@@ -2215,6 +2216,9 @@ impl PyDwelling {
     /// Fatal errors are prefixed with [`FATAL_DWELLING_PREFIX`] so callers can
     /// distinguish permanent from transient failures.
     pub(crate) fn acquire_string(&self) -> Result<MutexGuard<'_, Dwelling>, String> {
+        if crate::py_callback::delivery_in_progress() {
+            return Err(crate::py_callback::REENTRY_MESSAGE.to_string());
+        }
         if self.poisoned.load(Ordering::Acquire) {
             return Err(format!(
                 "{}dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance",
@@ -2239,6 +2243,9 @@ impl PyDwelling {
     /// GIL-free variant that preserves [`HaresError`] for proper Python exception mapping
     /// via [`to_py_err`].
     fn acquire_hares(&self) -> Result<MutexGuard<'_, Dwelling>, HaresError> {
+        if crate::py_callback::delivery_in_progress() {
+            return Err(reentry_hares_error());
+        }
         if self.poisoned.load(Ordering::Acquire) {
             return Err(HaresError::Dwelling(
                 "dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance".to_string(),
@@ -2391,6 +2398,21 @@ impl PyTimestepsIter {
             self.next_step, self.total_steps
         )
     }
+}
+
+/// The typed callback error a dwelling accessor raises when a batch
+/// callback re-enters the dwelling from the delivery thread.
+fn reentry_hares_error() -> HaresError {
+    HaresError::Callback {
+        report: hares_io::output::callback::TIMESTEP_REPORT.to_string(),
+        message: crate::py_callback::REENTRY_MESSAGE.to_string(),
+    }
+}
+
+/// The same refusal as [`reentry_hares_error`], mapped to the exception
+/// the typed callback error carries.
+fn reentry_refusal() -> PyErr {
+    to_py_err(reentry_hares_error())
 }
 
 pub(crate) fn to_py_err(err: HaresError) -> PyErr {

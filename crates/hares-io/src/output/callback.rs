@@ -22,9 +22,11 @@
 //! Python surface row that adds `Destination` to the config.
 
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 
 use arrow::record_batch::RecordBatch;
+use hares_types::panic_hook::panic_payload_to_string;
 
 /// The report the engine builds today: the run's timestep table. The
 /// destinations work replaces this fixed name with the report names the
@@ -112,7 +114,10 @@ impl CallbackAttachment {
     }
 
     /// Delivers one batch to the sink. A sink that panicked is reported
-    /// as a callback error, never as a panic through the recorder.
+    /// as a callback error, never as a panic through the recorder: the
+    /// unwind is caught here (the same shape the Python sink has), so a
+    /// panic surfaces as the typed error the run latches instead of
+    /// unwinding through the step and leaving it half-stepped.
     pub(crate) fn deliver(
         &self,
         batch: &RecordBatch,
@@ -128,7 +133,14 @@ impl CallbackAttachment {
             bldg_id: self.bldg_id,
             batch_index,
         };
-        callback.on_batch(&ctx, batch)
+        let delivered = catch_unwind(AssertUnwindSafe(|| callback.on_batch(&ctx, batch)));
+        match delivered {
+            Ok(result) => result,
+            Err(payload) => Err(CallbackError::new(format!(
+                "the attached callback panicked: {}",
+                panic_payload_to_string(payload)
+            ))),
+        }
     }
 }
 

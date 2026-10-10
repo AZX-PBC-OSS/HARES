@@ -3638,9 +3638,21 @@ impl Dwelling {
         // `finish()`, this is where today's flush ran): every file report's
         // partial is flushed, closed and published under its target name.
         for recorder in self.recorders.iter_mut() {
-            recorder
+            match recorder
                 .flush_and_close()
-                .map_err(|err| Self::recorder_error("output close", err))?;
+                .map_err(|err| Self::recorder_error("output close", err))
+            {
+                Ok(()) => {}
+                // A callback error at the close (the final partial batch)
+                // ends the run the way the step path does: latched, so
+                // every later step returns it without stepping anything.
+                Err(err) => {
+                    if matches!(err, HaresError::Callback { .. }) {
+                        self.terminal_error = Some(err.clone());
+                    }
+                    return Err(err);
+                }
+            }
         }
         if let Some(ref mut writer) = self.diagnostic_writer {
             std::io::Write::flush(writer)

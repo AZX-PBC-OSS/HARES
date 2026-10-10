@@ -310,7 +310,8 @@ impl StreamingRecorder {
         // The callback sees every built batch exactly once, in flush
         // order, until the outputs are published. Its error fails the
         // flush, naming the report; the batch itself is already written
-        // and retained.
+        // to the destination file, but a failed delivery ends the flush
+        // before the retention push, so the batch is not retained.
         if let Some(attachment) = &self.callback
             && !self.closed
         {

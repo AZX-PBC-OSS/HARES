@@ -14,9 +14,12 @@ use std::sync::{Arc, Mutex};
 use arrow::array::{Float64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, Duration};
+use hares_control::DispatchRequest;
+use hares_core::actor::Actor;
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
 use hares_io::{Destination, ReportSpec, Selection, SiteLocationOverride};
+use hares_types::{EnvironmentState, TelemetryField};
 
 /// The one report the engine builds today: the run's timestep table.
 const REPORT: &str = "timestep";
@@ -324,5 +327,181 @@ fn attach_after_the_first_recorded_row_is_an_error() {
     assert!(
         matches!(err, hares_types::HaresError::Callback { .. }),
         "expected a callback error, got: {err:?}"
+    );
+}
+
+/// Attaching with output recording disabled is refused: the callback sink
+/// rides the output recorder, so a config without a destination for the
+/// report has nothing to attach to.
+#[test]
+fn attach_without_output_recording_is_refused() {
+    let run_dir = tempfile::tempdir().expect("tempdir");
+    let mut sim = config(false, &run_dir.path().join("run.parquet"));
+    sim.write_output = false;
+    let mut run = dwelling(sim, 7);
+    let err = run
+        .attach_callback(
+            REPORT,
+            Box::new(Collecting {
+                sink: Arc::new(Mutex::new(Vec::new())),
+                fail_on: None,
+            }),
+        )
+        .expect_err("attaching without output recording fails");
+    match &err {
+        hares_types::HaresError::Callback { report, message } => {
+            assert_eq!(report, REPORT);
+            assert!(
+                message.contains("write_output"),
+                "the refusal must name write_output, got: {message}"
+            );
+        }
+        other => panic!("expected a callback error, got: {other:?}"),
+    }
+}
+
+/// A callback attached before the first recorded row survives a roster
+/// rebuild: the dwelling holds the attachment and hands a clone to the
+/// fresh recorder, so the callback still receives every batch.
+#[test]
+fn the_callback_survives_a_roster_rebuild() {
+    struct Idle;
+    impl Actor for Idle {
+        fn name(&self) -> &str {
+            "idle"
+        }
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
+        }
+        fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {}
+    }
+
+    let run_dir = tempfile::tempdir().expect("tempdir");
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let mut run = dwelling(config(false, &run_dir.path().join("run.parquet")), 7);
+    run.attach_callback(
+        REPORT,
+        Box::new(Collecting {
+            sink: Arc::clone(&sink),
+            fail_on: None,
+        }),
+    )
+    .expect("the callback attaches");
+    run.add_actor(Box::new(Idle)).expect("the roster rebuilds");
+    run.simulate().expect("the run completes");
+
+    let got = sink.lock().expect("sink lock");
+    assert_eq!(
+        got.len(),
+        3,
+        "the rebuilt recorder still delivers every batch"
+    );
+    let indices: Vec<u64> = got.iter().map(|c| c.batch_index).collect();
+    assert_eq!(indices, vec![0, 1, 2], "the flush order is unchanged");
+}
+
+/// A Rust sink that panics ends the run as a typed callback error, the
+/// way a sink that returns an error does: the step delivered nothing, the
+/// run latches (a later step returns the error without stepping) and the
+/// telemetry is consistent with the steps that completed.
+#[test]
+fn a_panicking_rust_callback_ends_the_run_as_a_callback_error() {
+    struct Panicking;
+    impl BatchCallback for Panicking {
+        fn on_batch(
+            &mut self,
+            _ctx: &BatchContext<'_>,
+            _batch: &RecordBatch,
+        ) -> Result<(), CallbackError> {
+            panic!("the sink exploded");
+        }
+    }
+
+    let run_dir = tempfile::tempdir().expect("tempdir");
+    let mut run = dwelling(config(false, &run_dir.path().join("run.parquet")), 7);
+    run.attach_callback(REPORT, Box::new(Panicking))
+        .expect("the callback attaches");
+
+    let mut steps_ok = 0;
+    let err = loop {
+        match run.step() {
+            Ok(_) => steps_ok += 1,
+            Err(err) => break err,
+        }
+    };
+    match &err {
+        hares_types::HaresError::Callback { report, message } => {
+            assert_eq!(report, REPORT);
+            assert!(
+                message.contains("the sink exploded"),
+                "the error must carry the panic's cause, got: {message}"
+            );
+        }
+        other => panic!("expected a callback error, got: {other:?}"),
+    }
+
+    // The step the delivery failed in delivered nothing: the completed
+    // steps' results are exactly what the run holds.
+    assert_eq!(
+        run.results().steps.len(),
+        steps_ok,
+        "the failed step's result is not in the run's telemetry"
+    );
+
+    // The budget semantics: the run stays ended.
+    let later = run.step().expect_err("the run stays ended");
+    assert!(
+        later.to_string().contains("the sink exploded"),
+        "the later step's error must carry the original cause, got: {later}"
+    );
+}
+
+/// A callback error at the close (the final partial batch delivered inside
+/// `flush_and_close`) latches the run ended the way the step path does.
+#[test]
+fn a_callback_error_at_close_latches_the_run_ended() {
+    let run_dir = tempfile::tempdir().expect("tempdir");
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let mut run = dwelling(config(false, &run_dir.path().join("run.parquet")), 7);
+    run.attach_callback(
+        REPORT,
+        Box::new(Collecting {
+            sink: Arc::clone(&sink),
+            fail_on: Some(2),
+        }),
+    )
+    .expect("the callback attaches");
+
+    // Batches 0 and 1 deliver at the full flushes; the 16-row partial
+    // stays buffered until the close.
+    for _ in 0..80 {
+        run.step().expect("the steps before the close record");
+    }
+
+    let err = run
+        .simulate()
+        .expect_err("the close fails on the final batch");
+    match &err {
+        hares_types::HaresError::Callback { report, message } => {
+            assert_eq!(report, REPORT);
+            assert!(
+                message.contains("the store is full"),
+                "the error must carry the callback's cause, got: {message}"
+            );
+        }
+        other => panic!("expected a callback error, got: {other:?}"),
+    }
+
+    // The latch: a later step returns the close's error without stepping,
+    // not the horizon's end.
+    let later = run.step().expect_err("the run stays ended");
+    assert!(
+        later.to_string().contains("the store is full"),
+        "the later step's error must carry the close's cause, got: {later}"
+    );
+    assert_eq!(
+        sink.lock().expect("sink lock").len(),
+        2,
+        "the callback saw only the batches before the close"
     );
 }

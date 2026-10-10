@@ -2,6 +2,10 @@
 every flushed batch of the run's report, in order, and an exception from
 the callable fails the run as a typed error instead of a panic."""
 
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 from typing import Any, cast
 
 import polars as pl
@@ -107,3 +111,76 @@ def test_unknown_report_name_is_rejected(tmp_path):
     with pytest.raises(HaresSimulationError) as excinfo:
         dw.attach_callback("hourly", callback)
     assert REPORT in str(excinfo.value)
+
+
+def _reentry_probe() -> int:
+    """The re-entry pin's child body: attach a callback that calls back
+    into the dwelling and require the typed refusal, never a hang."""
+    from hares import Dwelling, SimulationConfig
+
+    root = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory() as tmp:
+        dw = Dwelling.from_hpxml(
+            str(root / "tests/fixtures/hpxml/ochre_samples/base.xml"),
+            str(root / "data/examples/BEopt_example_schedule.csv"),
+            str(root / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            config=SimulationConfig(
+                start_time="2019-01-01T00:00:00",
+                duration=24 * 3600,
+                time_res=900,
+                output_verbosity=2,
+                write_output=True,
+                output_path=str(Path(tmp) / "run.parquet"),
+                retain_batches=False,
+                output_chunk_size=40,
+            ),
+            defaults_path=str(root / "defaults"),
+            bldg_id=42,
+        )
+        dw.initialize()
+
+        def reenter(info: object, batch: object) -> None:
+            dw.results()
+
+        dw.attach_callback(REPORT, reenter)
+        try:
+            dw.simulate()
+        except HaresSimulationError as exc:
+            assert "a callback may not re-enter the dwelling" in str(exc), str(exc)
+        else:
+            raise AssertionError("the re-entrant callback must fail the run")
+
+        # The budget semantics: the run stays ended, the error carried
+        # through.
+        try:
+            dw.step()
+        except HaresSimulationError as exc:
+            assert "a callback may not re-enter the dwelling" in str(exc), str(exc)
+        else:
+            raise AssertionError("the run stays ended after the refusal")
+    return 0
+
+
+def test_callback_may_not_reenter_the_dwelling():
+    """A callback calling back into the dwelling (results, metrics, step,
+    apply_control) is refused as a typed error that fails the run, never a
+    deadlock: the delivery thread holds the dwelling's mutex and the GIL
+    across the call, so a re-entrant accessor parks forever and starves
+    every other thread, which no in-process check could report. The probe
+    therefore runs in a child process joined on a timeout, so a regression
+    fails fast instead of hanging the suite."""
+    probe = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), "--reentry-probe"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert probe.returncode == 0, (
+        f"the re-entry probe failed (returncode {probe.returncode}):\n{probe.stderr}"
+    )
+
+
+if __name__ == "__main__":
+    if "--reentry-probe" in sys.argv:
+        raise SystemExit(_reentry_probe())
