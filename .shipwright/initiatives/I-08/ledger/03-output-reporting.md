@@ -689,8 +689,9 @@ stays). The freeze resolves every report's selection against the catalogue
 (`resolve_selection`: `Verbosity(n)` to the tier's variables with the
 observe gate honoured, `Named` exact and case-sensitive with the
 edit-distance suggestions, `Pattern` a glob that may match nothing), unions
-the resolved columns in catalogue order into the producer surface, and
-builds one `RowPlan` with one projection per report
+the resolved columns first-seen across the reports in `reports` order, each
+report's resolution in its own order inside it, into the producer surface,
+and builds one `RowPlan` with one projection per report
 (`from_resolved_projections`). One `StreamingRecorder` per report, each
 with its own schema: a `Verbosity(n)` report's schema is the catalogue's
 `build_schema(catalogue, n)` (byte-identical to the old pipeline's schema,
@@ -709,8 +710,11 @@ OR-6's `finish()`.
 
 The file destination rules, as built: lazy creation (the file exists from
 the first flushed batch, never at construction or from an unflushed
-buffer), a unique hidden partial (`.<file name>.partial-<pid>-<n>` in the
-target's directory, a process-global counter for n), the freeze-time
+buffer), a unique hidden partial (`.<file name>.partial-<pid>-<creation
+nanos>-<n>` in the target's directory: the pid namespaces concurrent
+processes, the creation nanos keep the name unique across a pid's reuse,
+and a process-global counter separates the recorders of one process), the
+freeze-time
 checks at recorder construction (an existing target with
 `overwrite: false` is `TargetExists` naming the path and stating the
 override, before the first step; a missing parent directory is
@@ -740,12 +744,20 @@ frames equal (Parquet on bits) against the Memory table. The frame readers
 frame in `reports` order, today's step fallback when there is none; the
 engine's metrics come from the memory batches when one exists and ride the
 incremental calculator on the first file report when none does (the
-calculator failing to initialize still fails the plan); `metrics()`
-without a `Memory` report still raises the honest no-batches error (OR-8
-owns the metrics decoupling). The diagnostics CSV writer rides the first
+calculator failing to initialize still fails the plan: the run is refused
+at freeze, never zeroed metrics behind a warning, and the refusal names
+the remedy, carrying the power column in that report's selection or adding
+a `Memory` report); `metrics()` without a `Memory` report names the real
+cause, that its batches come from a `Memory` report and a file-only run
+has none, not a plea to run `simulate()` first (the metrics decoupling is
+the metrics entry's). The diagnostics CSV writer rides the first
 report in `reports` order with `Selection::Verbosity(n)`, `n >= 4`, and a
 file destination, at `<stem>_diagnostics.csv` beside it; with no such
 report nothing is written and nothing falls back to the working directory.
+The rider's one guard is a freeze-time check that its path does not
+collide with a report's own destination (the eager create would truncate
+that report's target before the recorder's existing-target check ran);
+the rider's full removal belongs to the diagnostics row.
 
 The removed keys: `write_output`, `output_format`, `output_path`,
 `output_verbosity`, `retain_batches` and `rotation` are rows of
@@ -798,10 +810,13 @@ rows, the full selected schema) and `test_gym_default_writes_no_file` in
 fresh temporary working directory leaves it empty; at the old defaults
 the episode wrote a csv into the working directory).
 
-Gates on the commit: fmt clean; clippy `--all-features --all-targets
--D warnings` clean; nextest `--all-features` 7626/7626 and `-F dst`
-7774/7774; pytest canonical (uv sync --locked --all-extras --all-groups)
-1542 passed, 0 failed, 0 skipped; pyright 0 errors; the goldens bitwise
+Gates on the commit: `cargo fmt --all -- --check` clean;
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+clean; `cargo nextest run --all-features -j 4` 7626/7626;
+`cargo nextest run -F dst -j 4` 7559/7559 (the first record's 7774 was
+misrecorded); pytest canonical (`uv sync --locked --all-extras
+--all-groups`, then `uv run pytest tests/python`) 1542 passed, 0 failed,
+0 skipped; `uv run pyright` 0 errors; the goldens bitwise
 through `frame_golden compare-all` in both profiles (7 manifests identical
 on the default build and `full_year_900s_dst` identical on the dst build,
 values and schemas unchanged; the parquet destination's frames are the
@@ -815,10 +830,63 @@ Two notes carried: the catalogue tests' shared synthetic fixture still
 wrote `time_res_s`/`duration_s` under `[simulation]` (removed keys their
 rows rejected two rows before this one; the fixture's two tests failed on
 the parent commit too), fixed here to `time_res`/`duration`; and the
-pre-existing `cargo clippy --workspace --all-targets --release -F dst
--D warnings` failures (the pyo3 constructors' argument counts and the
-first-keyword-return loop in `hares-python`) exist on the parent commit
-and are not this row's.
+`cargo clippy --workspace --all-targets --release -F dst -D warnings`
+failures (the pyo3 constructors' argument counts and the
+first-keyword-return loop in `hares-python`) pre-existed on the parent
+commit; the review round below fixed them on this branch, and the base
+gate, `cargo clippy --workspace --all-targets --all-features -- -D
+warnings`, is clean at the tip.
+
+Independent review round at tip `f95cb9b3`, six findings fixed on this
+branch. (1) HIGH: the base clippy gate was not clean: three
+`too_many_arguments` lints on the pyo3 dwelling-config constructors' nine
+positional arguments and one `never_loop` on the unexpected-keyword
+check's first-iteration return. The constructors now forward one
+`DwellingConfigArgs` struct behind unchanged pyo3 signatures, each allow
+states the parameter-list constraint, and the keyword check reads the
+first unexpected keyword directly; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` is clean at the tip. (2)
+HIGH: the hard-link publish refusal was classified by error text (a
+contains-"link" match no raw errno message fires for the capability
+refusals that matter), so a filesystem refusing links reported an
+ordinary path failure. The classifier now matches `ErrorKind::Unsupported`
+and `ErrorKind::CrossesDevices` into `HardLinkUnavailable` (naming the
+target and stating that `overwrite: true` publishes by rename) and
+leaves EPERM a path error; unit tests pin the classifier on constructed
+errnos and a real link(2) on a directory probes the OS path. The partial
+name gains a creation-nanos component, so a reused pid cannot
+reconstruct a stale partial name, and the pid comment states the real
+scoping. (3) MEDIUM: the metrics-init refusal did not suggest the
+remedy; it now names both (include the power column in the report's
+selection, or add a `Memory` report) at both sites, and the consequence,
+the run refused at freeze, is stated in the destination rules above. (4)
+MEDIUM: the multi-report wiring had no end-to-end pin that two
+differently-shaped reports receive their own projections;
+`multi_report_each_destination_carries_its_own_selection` runs a
+`Named`-selection Memory report and a `Verbosity(2)` csv report through
+`Dwelling::from_config` and compares each destination's contents against
+its own selection's resolution, shared columns value for value (a
+swapped projection fails the recorders' column-width check or the
+per-destination comparison). The metrics refusal and the diagnostics
+rider's collision check carry their own pins
+(`metrics_refusal_on_a_file_only_run_names_the_remedy`,
+`diagnostics_rider_path_colliding_with_a_report_destination_is_refused`).
+(5) LOW: the union-order comment and the streaming doc comment in
+`tests/engine.rs` said "catalogue order" and `retain_batches=false`
+where the code is first-seen and the config is a file-only report list;
+corrected above and at the comment. (6) LOW: the gate record's `-F dst`
+count was wrong, corrected above, and every count now carries its exact
+command.
+
+Gates after the fixes: `cargo fmt --all -- --check` clean;
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+clean; `cargo nextest run --all-features -j 4` 7633 passed (1 skipped);
+`cargo nextest run -F dst -j 4` 7566 passed (1 skipped); `uv sync
+--locked --all-extras --all-groups`, then `uv run maturin develop` and
+`uv run pytest tests/python` 1542 passed, 0 failed; `uv run pyright` 0
+errors; the goldens bitwise through `frame_golden compare-all` on the
+default build (7 manifests identical) and on the dst build
+(`full_year_900s_dst` identical).
 
 ## OR-4: diagnostics become a catalogue report
 
