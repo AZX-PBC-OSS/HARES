@@ -3295,8 +3295,10 @@ serialisable marker; `Dwelling::attach_callback` in `hares-core`;
 (every `output_chunk_size` rows, and the final partial batch where the
 run's outputs are published: at the end of `simulate()`, today's
 `flush_and_close`, until OR-6, then at `finish()`), in order, with
-`batch_index` counting from 0. An error fails the run at that step, and
-the failed run still removes its partial files. Without a `Callback`
+`batch_index` counting from 0. An error fails the run at that step; the
+failed run's partial output file stays as written, the failed-run
+cleanup belonging to the destinations entry, which owns the
+partial-name publish the error path will share. Without a `Callback`
 report no adapter exists. Replay export (OR-16)
 rewrites `Callback` destinations to `Memory`. The Python constructor
 `Destination.callback()` lands with the Python attach in
@@ -3349,7 +3351,15 @@ the recorder, hands the fresh one the same attachment instead of dropping
 it. A callback error fails the flush naming the report
 (`OutputError::Callback`, mapped through one helper at both record sites)
 and latches `terminal_error`, so every later step returns it without
-stepping anything: the failure budget's semantics. Zero cost when unused:
+stepping anything: the failure budget's semantics, at a step's flush and
+at the close (the final partial batch delivered inside
+`flush_and_close`) alike. A callback may not re-enter the dwelling: the
+delivery thread holds the dwelling's mutex and the GIL across the call,
+so a re-entrant accessor would park forever; a thread-local delivery
+flag the Python sink sets around the callable's invocation is checked
+by every dwelling acquisition path, which refuses the re-entry with the
+typed callback error naming it instead of parking, and the run latches
+the refusal the same way. Zero cost when unused:
 one `None` branch per flush, pinned structurally in-crate
 (`no_callback_report_constructs_no_adapter`).
 
@@ -3361,8 +3371,10 @@ Arrow batch through the conversions the results method already uses. The
 GIL: the step binding detaches around the run, and the sink re-acquires
 per call (`Python::attach` inside `catch_unwind`), so an exception from
 the callable surfaces as the typed callback error, never a panic through
-the recorder (a callback that panicked is reported the same way, from the
-attachment's poisoned mutex, on the next delivery); the dedicated
+the recorder (a sink that panics is caught at the delivery itself, Rust
+and Python alike, and reported as the typed callback error at once, so
+the unwind never crosses the step and the attachment's mutex never
+poisons); the dedicated
 exception class with the original exception chained as `__cause__`, the
 zero-copy Arrow batch and the config-side `Destination.callback()`
 constructor remain with the surface entry.
@@ -3378,7 +3390,9 @@ retained batches, today's memory surface, on bits, schema included),
 callback's cause, the run stayed ended, the callback never called again),
 `callback_context_carries_bldg_id_and_report_name` and
 `attach_to_non_callback_report_is_an_error` (adapted: the one report name
-the engine builds); `no_callback_report_constructs_no_adapter`
+the engine builds) and `attach_after_the_first_recorded_row_is_an_error`
+(the count the review corrected: seven Rust tests over the row's first
+record of six); `no_callback_report_constructs_no_adapter`
 (structural, in-crate, in the writer's tests) and `no_callback_after_finish`
 (in the callback module's tests) pin the zero-attachment shape and the
 publication boundary. Two wait for the destinations row:
@@ -3393,6 +3407,34 @@ failed on the missing attach. Gates: fmt; clippy `--all-features
 The base commit failed every Rust suite there on one stale test file (the
 catalogue tests' synthetic TOML still carried the removed
 `time_res_s`/`duration_s` keys), fixed first as `bc610fcc`.
+
+The review's findings are fixed as `66c825f6`: the re-entrancy guard
+above, pinned by a probe run in a child process joined on a timeout (a
+regression parks the child holding the GIL, which no in-process check
+could report, so the probe's run fails at the timeout instead of
+hanging the suite); the Rust sink's panic caught at the delivery and
+reported as the typed callback error, the run ended, a later step
+returning it, the telemetry consistent with the steps that ran (RED at
+the parent: the unwind crossed the test); the re-attach through a
+roster rebuild pinned (the pin fails when the re-attach is dropped,
+mutation-proven); the write_output refusal pinned; the close-time
+latch pinned (RED at the parent: the later step reported the horizon's
+end instead of the close's cause); the writer doc corrected (the
+failed batch is written but not retained, the flush ending before the
+retention push); and this record corrected (the failed-run
+partial-file removal the Change paragraph claimed never existed here).
+The review-fix commit adds four Rust tests, nine in the integration
+file and two in-crate, and the Python file gains the re-entry probe,
+five Python tests in all. The delivery's IPC cost, measured end to end
+over a building-year run (876 batches at `output_chunk_size` 40):
+about 0.1 ms per batch at verbosity 2, about 0.09 s per
+building-year, and about 0.3 ms per batch at verbosity 8; the review
+recorded about 0.8 ms per batch (about 0.7 s per building-year). The
+review-fix tree's gates: fmt; clippy with no new diagnostics on the
+touched crates (the workspace's known base diagnostics unchanged);
+nextest `--all-features` 7638/7638; pytest 1545 passed, 0 failed,
+0 skipped; pyright 0; the eight goldens bitwise (`compare-all` 7
+manifests identical, `full_year_900s_dst` identical).
 
 ## OR-15: `metrics_from_table`
 
