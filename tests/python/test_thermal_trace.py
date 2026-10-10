@@ -263,7 +263,7 @@ def hares_48h(tmp_path_factory: pytest.TempPathFactory) -> pl.DataFrame:
 
     dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, reports=[ReportSpec("frame", Selection.verbosity(9), Destination.memory())]))
     dwelling.initialize()
-    return dwelling.simulate()
+    return dwelling.simulate().reports[0].table()
 
 
 # ---------------------------------------------------------------------------

@@ -315,6 +315,9 @@ class _RecordingDwelling:
         self.applied_controls.append(name)
         self._dwelling.apply_control(name, signal)
 
+    def finish(self):
+        return self._dwelling.finish()
+
 
 class _FaultyDwelling:
     """Decorator around ``Dwelling`` that fails at a configured simulation step."""
@@ -344,6 +347,9 @@ class _FaultyDwelling:
 
     def apply_control(self, name: str, signal: ControlSignal) -> None:
         self._dwelling.apply_control(name, signal)
+
+    def finish(self):
+        return self._dwelling.finish()
 
 
 class _FaultyAggregator:

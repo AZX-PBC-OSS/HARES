@@ -14,7 +14,14 @@ HPXML_PV = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base-pv.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
-from hares import Dwelling, ReportSpec, SimulationConfig, SimulationMetrics
+from hares import Dwelling, ReportSpec, RunMetrics, RunResult, SimulationConfig
+
+
+def _run_metrics(result: RunResult) -> RunMetrics:
+    """The run's metrics: a run that requested them always carries them."""
+    metrics = result.metrics
+    assert metrics is not None
+    return metrics
 
 
 def _frame_report(verbosity: int) -> list[ReportSpec]:
@@ -43,11 +50,11 @@ class TestMetrics:
     def test_metrics_after_simulate(self):
         dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=_base_config(master_seed=0, verbosity=1))
         dw.initialize()
-        dw.simulate()
+        result = dw.simulate()
 
-        metrics = dw.metrics()
+        metrics = result.metrics
 
-        assert isinstance(metrics, SimulationMetrics)
+        assert isinstance(metrics, RunMetrics)
 
         annual = metrics.total_energy_kwh
         assert annual.net_energy_kwh > 0, (
@@ -88,37 +95,41 @@ class TestMetrics:
     def test_metrics_repr_works(self):
         dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
         dw.initialize()
-        dw.simulate()
+        result = dw.simulate()
 
-        metrics = dw.metrics()
+        metrics = _run_metrics(result)
 
         assert isinstance(repr(metrics.total_energy_kwh), str)
         assert isinstance(repr(metrics.peak_power_kw), str)
         assert isinstance(repr(metrics.grid_interaction), str)
         assert isinstance(repr(metrics.efficiency), str)
 
-    def test_metrics_before_simulate_raises(self, tmp_path):
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, reports=_frame_report(0), metrics=True))
+    def test_metrics_none_without_the_request(self, tmp_path):
+        """A run that did not request metrics carries none: RunResult.metrics
+        is None exactly when SimulationConfig.metrics is not requested."""
+        from hares import SimulationConfig
+
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, metrics=False))
         dw.initialize()
 
-        with pytest.raises(ValueError, match="no steps run yet"):
-            dw.metrics()
+        result = dw.simulate()
+        assert result.metrics is None
 
     def test_envelope_loads_none_at_low_verbosity(self):
         dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=0))
         dw.initialize()
-        dw.simulate()
+        result = dw.simulate()
 
-        metrics = dw.metrics()
+        metrics = _run_metrics(result)
 
         assert metrics.envelope_loads_kwh is None
 
     def test_envelope_loads_present_at_high_verbosity(self, tmp_path):
         dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=6))
         dw.initialize()
-        dw.simulate()
+        result = dw.simulate()
 
-        metrics = dw.metrics()
+        metrics = _run_metrics(result)
         env = metrics.envelope_loads_kwh
 
         assert env is not None
@@ -146,9 +157,9 @@ class TestMetrics:
     def test_gas_energy_available_when_fuel_type_present(self):
         dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
         dw.initialize()
-        dw.simulate()
+        result = dw.simulate()
 
-        metrics = dw.metrics()
+        metrics = _run_metrics(result)
 
         assert metrics.gas_energy is not None
         assert metrics.gas_energy.total_therms >= 0
@@ -159,9 +170,9 @@ class TestMetrics:
     def test_combined_total_energy_kwh(self):
         dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
         dw.initialize()
-        dw.simulate()
+        result = dw.simulate()
 
-        metrics = dw.metrics()
+        metrics = _run_metrics(result)
         combined = metrics.combined_total_energy_kwh
 
         assert math.isfinite(combined)
@@ -173,9 +184,9 @@ class TestMetrics:
         """Verify the renamed/added TotalEnergyKwh properties are accessible."""
         dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
         dw.initialize()
-        dw.simulate()
+        result = dw.simulate()
 
-        annual = dw.metrics().total_energy_kwh
+        annual = _run_metrics(result).total_energy_kwh
         # Verify new fields are present and consistent
         assert math.isfinite(annual.net_energy_kwh)
         assert math.isfinite(annual.gross_consumption_kwh)
@@ -195,9 +206,9 @@ class TestMetrics:
         """
         dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
         dw.initialize()
-        dw.simulate()
+        result = dw.simulate()
 
-        annual = dw.metrics().total_energy_kwh
+        annual = _run_metrics(result).total_energy_kwh
         # The base.xml fixture has no PV, so gross_pv_generation should be 0
         assert annual.gross_pv_generation_kwh == 0.0, (
             "base.xml has no PV — gross_pv_generation_kwh should be zero"
@@ -223,9 +234,9 @@ class TestMetrics:
         """
         dw = Dwelling.from_hpxml(HPXML_PV, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(start_time="2019-07-15T00:00:00Z", duration=86400, time_res=900))
         dw.initialize()
-        dw.simulate()
+        result = dw.simulate()
 
-        annual = dw.metrics().total_energy_kwh
+        annual = _run_metrics(result).total_energy_kwh
         assert annual.gross_consumption_kwh > 0, (
             "PV-equipped dwelling must have non-zero gross consumption"
         )
@@ -237,17 +248,14 @@ class TestMetrics:
         assert annual.gross_pv_generation_kwh >= 0.0
 
     def test_metrics_none_unless_requested(self):
-        """metrics() reads the run's accumulated metrics only when the run
-        requested them: a config without metrics=True names the request,
-        one with it returns the metrics."""
+        """RunResult.metrics is Some exactly when the run requested them:
+        a config without metrics=True carries none, one with it computes."""
         dw = Dwelling.from_hpxml(
             HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=0, metrics=False)
         )
         dw.initialize()
-        dw.simulate()
-
-        with pytest.raises(ValueError, match="metrics=True"):
-            dw.metrics()
+        result = dw.simulate()
+        assert result.metrics is None
 
         requested = Dwelling.from_hpxml(
             HPXML,
@@ -257,8 +265,8 @@ class TestMetrics:
             config=_base_config(verbosity=0, metrics=True),
         )
         requested.initialize()
-        requested.simulate()
+        requested_result = requested.simulate()
 
-        metrics = requested.metrics()
-        assert isinstance(metrics, SimulationMetrics)
+        metrics = _run_metrics(requested_result)
+        assert isinstance(metrics, RunMetrics)
         assert metrics.total_energy_kwh.net_energy_kwh > 0

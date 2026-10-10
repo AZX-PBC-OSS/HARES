@@ -1,10 +1,10 @@
-//! Python bindings for simulation metrics.
+//! Python bindings for the run's metrics (the result surface's `RunMetrics`).
 
 use std::collections::BTreeMap;
 
+use hares_core::RunMetrics;
 use hares_io::output::metrics::{
-    EnvelopeComponentLoadsKwh, FullSimulationMetrics, GasEnergyMetrics, Reliability,
-    SimulationCoverage,
+    EnvelopeComponentLoadsKwh, GasEnergyMetrics, Reliability, SimulationCoverage,
 };
 use pyo3::prelude::*;
 
@@ -274,53 +274,53 @@ impl PyGasEnergyMetrics {
     }
 }
 
-#[pyclass(frozen, name = "SimulationMetrics")]
-pub struct PySimulationMetrics {
-    pub(crate) inner: FullSimulationMetrics,
+/// The finished run's metrics: the `RunResult.metrics` getter's payload.
+#[pyclass(frozen, name = "RunMetrics")]
+pub struct PyRunMetrics {
+    pub(crate) inner: RunMetrics,
 }
 
 #[pymethods]
-impl PySimulationMetrics {
+impl PyRunMetrics {
     #[getter]
     fn total_energy_kwh(&self) -> PyTotalEnergyKwh {
         PyTotalEnergyKwh {
-            inner: self.inner.metrics.total_energy_kwh.clone(),
+            inner: self.inner.total_energy_kwh.clone(),
         }
     }
 
     #[getter]
     fn peak_power_kw(&self) -> PyPeakPowerKw {
         PyPeakPowerKw {
-            inner: self.inner.metrics.peak_power_kw.clone(),
+            inner: self.inner.peak_power_kw.clone(),
         }
     }
 
     #[getter]
     fn comfort_hours(&self) -> Option<f64> {
-        self.inner.metrics.comfort_hours
+        self.inner.comfort_hours
     }
 
     #[getter]
     fn unmet_load_hours(&self) -> Option<f64> {
-        self.inner.metrics.unmet_load_hours
+        self.inner.unmet_load_hours
     }
 
     #[getter]
     fn renewable_energy_fraction(&self) -> Option<f64> {
-        self.inner.metrics.renewable_energy_fraction
+        self.inner.renewable_energy_fraction
     }
 
     #[getter]
     fn grid_interaction(&self) -> PyGridInteractionMetrics {
         PyGridInteractionMetrics {
-            inner: self.inner.metrics.grid_interaction_metrics.clone(),
+            inner: self.inner.grid_interaction_metrics.clone(),
         }
     }
 
     #[getter]
     fn envelope_loads_kwh(&self) -> Option<PyEnvelopeComponentLoadsKwh> {
         self.inner
-            .metrics
             .envelope_loads_kwh
             .as_ref()
             .map(|e| PyEnvelopeComponentLoadsKwh { inner: e.clone() })
@@ -329,23 +329,23 @@ impl PySimulationMetrics {
     #[getter]
     fn efficiency(&self) -> PyEfficiencyMetrics {
         PyEfficiencyMetrics {
-            inner: self.inner.metrics.efficiency.clone(),
+            inner: self.inner.efficiency.clone(),
         }
     }
 
     #[getter]
     fn rows_with_partial_setpoint_data_fraction(&self) -> Option<f64> {
-        self.inner.metrics.rows_with_partial_setpoint_data_fraction
+        self.inner.rows_with_partial_setpoint_data_fraction
     }
 
     #[getter]
     fn simulation_duration_hours(&self) -> f64 {
-        self.inner.metrics.simulation_duration_hours
+        self.inner.simulation_duration_hours
     }
 
     #[getter]
     fn coverage(&self) -> String {
-        match self.inner.metrics.coverage {
+        match self.inner.coverage {
             SimulationCoverage::FullYear => "FullYear".to_string(),
             SimulationCoverage::LeapYear => "LeapYear".to_string(),
             SimulationCoverage::PartialYear => "PartialYear".to_string(),
@@ -355,12 +355,12 @@ impl PySimulationMetrics {
 
     #[getter]
     fn nan_step_count(&self) -> u64 {
-        self.inner.metrics.nan_step_count
+        self.inner.nan_step_count
     }
 
     #[getter]
     fn metrics_reliability(&self) -> String {
-        match self.inner.metrics.metrics_reliability {
+        match self.inner.metrics_reliability {
             Reliability::Reliable => "Reliable".to_string(),
             Reliability::Degraded => "Degraded".to_string(),
         }
@@ -380,20 +380,24 @@ impl PySimulationMetrics {
     }
 
     fn __repr__(&self) -> String {
-        let total = &self.inner.metrics.total_energy_kwh;
+        let total = &self.inner.total_energy_kwh;
         let gas = self.inner.gas_energy.as_ref();
         if let Some(g) = gas {
             format!(
-                "SimulationMetrics(electric={:.0} kWh, gas={:.0} therms, peak={:.1} kW)",
+                "RunMetrics(electric={:.0} kWh, gas={:.0} therms, peak={:.1} kW)",
                 total.net_energy_kwh,
                 g.total_therms,
-                self.inner.metrics.peak_power_kw.rolling.peak_15min_kw
+                self.inner.peak_power_kw.rolling.peak_15min_kw
             )
         } else {
             format!(
-                "SimulationMetrics(electric={:.0} kWh, peak={:.1} kW)",
-                total.net_energy_kwh, self.inner.metrics.peak_power_kw.rolling.peak_15min_kw
+                "RunMetrics(electric={:.0} kWh, peak={:.1} kW)",
+                total.net_energy_kwh, self.inner.peak_power_kw.rolling.peak_15min_kw
             )
         }
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
     }
 }

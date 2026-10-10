@@ -208,6 +208,9 @@ class VecDwellingGymEnv:
 
         self._max_steps = int(math.ceil(episode_length.total_seconds() / _time_res))
         self._time_res_s = _time_res
+        # Each dwelling's finished run result, `None` until the episode's
+        # truncating step finalises the run through ``finish()``.
+        self._run_results: list[Any] = [None] * self.num_envs
 
         _logger = logging.getLogger(__name__)
         _logger.info(
@@ -226,6 +229,7 @@ class VecDwellingGymEnv:
             dwelling.reset_with_seed(int(applied_seed))
             seeds.append(int(applied_seed))
         self._steps_elapsed[:] = 0
+        self._run_results = [None] * self.num_envs
 
         obs = np.vstack(
             [telemetry_to_observation(d.telemetry(), self._observation_fields) for d in self._dwellings]
@@ -368,12 +372,27 @@ class VecDwellingGymEnv:
         for idx, trunc in enumerate(auto_trunc.tolist()):
             if trunc:
                 infos[idx]["truncated"] = True
+                # The episode's end finalises the dwelling's run: the
+                # finished RunResult is the episode's report surface.
+                self._run_results[idx] = self._dwellings[idx].finish()
 
         return obs, reward_arr, done_arr, trunc_arr, infos
 
     @property
     def unwrapped(self) -> "VecDwellingGymEnv":
         return self
+
+    @property
+    def run_results(self) -> list[Any]:
+        """Each dwelling's finished run ``RunResult``, once its episode has
+        run to truncation (``None`` before that, cleared on ``reset()``)."""
+        return self._run_results
+
+    @property
+    def envs(self) -> list[Any]:
+        """The underlying dwellings, one per environment: their live
+        ``health()`` reads at any step."""
+        return self._dwellings
 
     def close(self) -> None:
         return None

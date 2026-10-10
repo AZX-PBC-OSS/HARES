@@ -54,7 +54,7 @@ use hares_io::{
     Building, CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
     DEFROST_STATE_SUFFIX, Destination, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
     ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
-    FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX, FullSimulationMetrics,
+    FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX,
     GAS_POWER_SUFFIX, HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX,
     MAIN_POWER_SUFFIX, MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX, MODE_SUFFIX, MetricsCalculator,
     PAN_HEATER_POWER_SUFFIX, POWER_FACTOR_SUFFIX, PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX,
@@ -2395,10 +2395,6 @@ pub struct Dwelling {
     /// slots in `record_step`. A run without the request holds `None` and
     /// pays nothing for the metrics.
     metrics_calculator: Option<MetricsCalculator>,
-    /// The run's finalized metrics, written once at the end of
-    /// `simulate()`: the accumulator's `finish()`. `None` before it and
-    /// whenever the run did not request metrics.
-    run_metrics: Option<std::result::Result<FullSimulationMetrics, HaresError>>,
     /// The batch callback attached through [`Dwelling::attach_callback`],
     /// the source of truth: the named report's recorder every roster plan
     /// rebuild produces while the run is fresh gets a clone, so a roster
@@ -3552,7 +3548,6 @@ fn build_from_blueprint_inner(
         terminal_error: None,
         recorders: Vec::new(),
         metrics_calculator: None,
-        run_metrics: None,
         attached_callback: None,
         roster: RosterCaches::default(),
         rng,
@@ -4894,38 +4889,6 @@ impl Dwelling {
             OutputError::Callback { report, message } => HaresError::Callback { report, message },
             other => HaresError::Io(format!("{context} failed: {other}")),
         }
-    }
-
-    /// Takes run metrics collected incrementally by a streaming recorder.
-    ///
-    /// `None` when the run did not request metrics: no accumulator was
-    /// built and the run pays nothing for them. The inner `Result` carries
-    /// the calculator's typed error (a non-finite accumulator) when the
-    /// metrics could not be finalized.
-    pub fn take_run_metrics(
-        &mut self,
-    ) -> Option<std::result::Result<FullSimulationMetrics, HaresError>> {
-        self.run_metrics.take()
-    }
-
-    /// The run's metrics snapshot without consuming it: the finalized
-    /// metrics once `simulate()` finished them, else a finish of the
-    /// accumulator's state so far (exact at every step). `None` when the
-    /// run did not request metrics, or when it requested them and no step
-    /// has been fed yet.
-    #[must_use]
-    pub fn run_metrics_snapshot(
-        &self,
-    ) -> Option<std::result::Result<FullSimulationMetrics, HaresError>> {
-        if let Some(finalized) = &self.run_metrics {
-            return Some(finalized.clone());
-        }
-        let calculator = self.metrics_calculator.as_ref()?;
-        (calculator.rows_fed() > 0).then(|| {
-            calculator.clone().finish().map_err(|err| {
-                HaresError::InvalidState(format!("metrics finalization failed: {err}"))
-            })
-        })
     }
 
     /// Rows written to the run's recorders over the run; `None` when no

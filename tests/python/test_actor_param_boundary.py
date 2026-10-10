@@ -65,7 +65,9 @@ def test_finite_thermostat_param_still_attaches_and_simulates(tmp_path) -> None:
         )
         if params is not None:
             dwelling.add_actor_by_name("IdealThermostat", "Thermostat", params)
-        return float(dwelling.simulate()["HVAC Heating Delivered (W)"].sum())
+        return float(
+            dwelling.simulate().reports[0].table()["HVAC Heating Delivered (W)"].sum()
+        )
 
     scheduled = heating_delivered_w_sum("scheduled", None)
     overridden = heating_delivered_w_sum("overridden", {"target": HEATING, "heating_c": 21.0})
@@ -116,7 +118,7 @@ def test_finite_list_element_param_still_attaches_and_simulates(tmp_path) -> Non
         # an unrelated loud error the landed occupant runtime raises).
         {"occupancy_column": [1.0, 0.0] * 6},
     )
-    df = dwelling.simulate()
+    df = dwelling.simulate().reports[0].table()
     assert df is not None and len(df) > 0, "the finite occupancy column must simulate"
 
 

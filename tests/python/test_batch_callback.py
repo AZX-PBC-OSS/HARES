@@ -66,8 +66,8 @@ def reference_frame(tmp_path):
     dw = make_dwelling(
         sim_config=callback_config(str(tmp_path / "reference.parquet"), retain_batches=True)
     )
-    dw.simulate()
-    return dw.results()
+    result = dw.simulate()
+    return result.reports[0].table()
 
 
 def test_callback_receives_every_batch_in_order(tmp_path):
@@ -152,7 +152,7 @@ def _reentry_probe() -> int:
         dw.initialize()
 
         def reenter(info: object, batch: object) -> None:
-            dw.results()
+            dw.health()
 
         dw.attach_callback(REPORT, reenter)
         try:

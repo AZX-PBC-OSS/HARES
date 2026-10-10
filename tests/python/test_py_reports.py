@@ -35,7 +35,8 @@ def test_python_memory_report_returns_frame() -> None:
         ),
     )
     dwelling.initialize()
-    df = dwelling.simulate()
+    result = dwelling.simulate()
+    df = result.reports[0].table()
 
     assert df.height == 96, f"24 h at 900 s is 96 rows, got {df.height}"
     assert "Time" in df.columns
@@ -46,10 +47,10 @@ def test_python_memory_report_returns_frame() -> None:
     assert any(c.startswith("Temperature -") for c in df.columns)
 
 
-def test_simulate_without_a_memory_report_names_reports(tmp_path) -> None:
-    """The interim frame return reads the first Memory report's batches; a
-    run whose reports write to files only has no frame, and the error names
-    `reports` (the step fallback frame is gone with the step history)."""
+def test_simulate_without_a_memory_report_has_no_frame(tmp_path) -> None:
+    """A run whose reports write to files only carries the file report's
+    result: its table() names the report and its destination (no step
+    fallback frame exists)."""
     import pytest
     from hares import Destination, Dwelling, ReportSpec, Selection, SimulationConfig
     from hares._hares import HaresSimulationError
@@ -75,8 +76,9 @@ def test_simulate_without_a_memory_report_names_reports(tmp_path) -> None:
         ),
     )
     dwelling.initialize()
-    with pytest.raises(HaresSimulationError) as excinfo:
-        dwelling.simulate()
-    message = str(excinfo.value)
-    assert "no Memory report" in message, message
-    assert "reports" in message, message
+    result = dwelling.simulate()
+
+    assert result.metrics is not None, "the run has a report, so it has metrics"
+    with pytest.raises(HaresSimulationError, match="file"):
+        result.reports[0].table()
+    assert result.reports[0].path == str(target)

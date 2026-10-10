@@ -409,6 +409,9 @@ class HELICSDwelling:
         self._publication_configs: list[HELICSPublicationConfig] = []
         self._subscription_configs: list[HELICSSubscriptionConfig] = []
         self._finalized = False
+        # The finished run's result, set when the stepping loop runs to its
+        # end and finalises the dwelling through ``finish()``.
+        self._run_result: Any = None
         self._federation_terminated = False
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
@@ -604,6 +607,10 @@ class HELICSDwelling:
                 self._read_subscriptions()
                 self._dwelling.step()
                 self._publish_results()
+            # The stepping loop's end finalises the dwelling's run: the
+            # finished RunResult carries the reports the run published (the
+            # final partial batch included).
+            self._run_result = self._dwelling.finish()
             # Signal completion to the HELICS federation. A federate that has
             # no further time steps must inform the broker so it can coordinate
             # clean shutdown. Without this handshake other federates may stall
@@ -630,6 +637,12 @@ class HELICSDwelling:
             return
         self._fed.disconnect()
         self._finalized = True
+
+    @property
+    def run_result(self) -> Any:
+        """The finished run's ``RunResult`` (``None`` until ``run()`` has
+        stepped the horizon to its end)."""
+        return self._run_result
 
     def _enter_executing_mode(self) -> None:
         """Enter executing mode with a wall-clock deadline.

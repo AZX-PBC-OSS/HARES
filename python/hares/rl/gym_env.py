@@ -488,6 +488,9 @@ class DwellingGymEnv(_GYM_BASE):
         )
         self._dwelling.initialize()
         self._initial_snapshot = bytes(self._dwelling.save_state())
+        # The episode's finished run result, `None` until a truncating step
+        # finalises the run through ``finish()``.
+        self._run_result: Any = None
 
         bounds = [
             observation_field_bounds(f) for f in self._observation_fields
@@ -545,6 +548,18 @@ class DwellingGymEnv(_GYM_BASE):
         self._steps_elapsed: int = 0
         self._active_seed: int | None = None
 
+    @property
+    def dwelling(self) -> PyDwelling:
+        """The environment's underlying dwelling: its live ``health()``
+        reads at any step, its ``finish()`` result at the episode's end."""
+        return self._dwelling
+
+    @property
+    def run_result(self) -> Any:
+        """The finished run's ``RunResult``, once an episode has run to its
+        truncation (``None`` before that, cleared on ``reset()``)."""
+        return self._run_result
+
     def _observation(self) -> np.ndarray:
         obs = telemetry_to_observation(self._dwelling.telemetry(), self._observation_fields)
         return np.ascontiguousarray(obs, dtype=np.float64)
@@ -584,6 +599,7 @@ class DwellingGymEnv(_GYM_BASE):
         self._dwelling.reset_with_seed(applied_seed)
         self._steps_elapsed = 0
         self._active_seed = applied_seed
+        self._run_result = None
 
         obs = self._observation()
         obs_mask = ~np.isfinite(obs)
@@ -631,6 +647,12 @@ class DwellingGymEnv(_GYM_BASE):
         obs = telemetry_to_observation(telemetry, self._observation_fields)
         self._steps_elapsed += 1
         truncated = self._steps_elapsed >= self._max_steps
+
+        # The episode's end finalises the run: the finished RunResult is
+        # the episode's report surface (the health totals ride the
+        # dwelling's live health()).
+        if truncated and self._run_result is None:
+            self._run_result = self._dwelling.finish()
 
         if self._reward_fn is None:
             # The batch path's default reward: the negative net electric

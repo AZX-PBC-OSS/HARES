@@ -140,7 +140,7 @@ def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
 
     dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, reports=_frame_reports(6)))
     dwelling.initialize()
-    df = dwelling.simulate()
+    df = dwelling.simulate().reports[0].table()
 
     time_res_h = TIME_RES_MIN / 60.0
     result: dict[str, float] = {}
@@ -156,7 +156,7 @@ def _run_hares_simulate_24h(output_dir: Path) -> dict[str, float]:
 
     dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES_24H, time_res=TIME_RES_MIN * 60, duration=DURATION_H_24 * 3600, reports=_frame_reports(6)))
     dwelling.initialize()
-    df = dwelling.simulate()
+    df = dwelling.simulate().reports[0].table()
 
     time_res_h = TIME_RES_MIN / 60.0
     result: dict[str, float] = {}

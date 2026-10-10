@@ -109,7 +109,7 @@ class TestFullSimulation:
         duration_s = 300
         time_res_s = 60
         dw = _init_dwelling(duration_s=duration_s, time_res_s=time_res_s)
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         assert isinstance(df, pl.DataFrame)
         expected_rows = duration_s // time_res_s
         assert df.height == expected_rows, (
@@ -124,7 +124,7 @@ class TestFullSimulation:
 
     def test_simulate_expected_columns(self, tmp_path):
         dw = _init_dwelling(verbosity=3)
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         cols = df.columns
         assert "Total Electric Power (kW)" in cols
         first_power = df["Total Electric Power (kW)"].to_list()[0]
@@ -144,7 +144,7 @@ class TestFullSimulation:
 
     def test_verbosity_2_includes_outdoor_temp(self, tmp_path):
         dw = _init_dwelling(verbosity=2)
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         assert "Outdoor Dry Bulb (C)" in df.columns
         col = df["Outdoor Dry Bulb (C)"]
         assert col.null_count() == 0
@@ -154,7 +154,7 @@ class TestFullSimulation:
     def test_verbosity_1_includes_outdoor_temp(self, tmp_path):
         # Outdoor Dry Bulb (C) is a context column present at every verbosity level.
         dw = _init_dwelling(verbosity=1)
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         assert "Outdoor Dry Bulb (C)" in df.columns
 
 
@@ -412,8 +412,9 @@ class TestMetrics:
             verbosity=1,
             start_time="2019-01-01T05:00:00",
         )
-        dw.simulate()
-        m = dw.metrics()
+        result = dw.simulate()
+        m = result.metrics
+        assert m is not None
         assert m.total_energy_kwh is not None
         assert isinstance(m.total_energy_kwh.net_energy_kwh, float)
         assert m.total_energy_kwh.net_energy_kwh > 0, (

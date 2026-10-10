@@ -17,6 +17,14 @@ from ._hares import Selection
 from ._hares import DwellingConfig
 from ._hares import ControlSignal
 from ._hares import Telemetry
+from ._hares import Provenance
+from ._hares import ReportResult
+from ._hares import EquipmentProvenance
+from ._hares import RunHealth
+from ._hares import RunResult
+from ._hares import WarmupOutcome
+from ._hares import WarmupResiduals
+from ._hares import Warning
 
 from hares.simulation_plan import SimulationPlan, SimulationSegment
 
@@ -91,7 +99,7 @@ from ._hares import (
 )
 
 # Metrics types
-from ._hares import SimulationMetrics
+from ._hares import RunMetrics
 from ._hares import TotalEnergyKwh
 from ._hares import PeakPowerKw
 from ._hares import RollingPeakKw
@@ -158,6 +166,15 @@ __all__ = [
     "Selection",
     "Frequency",
     "Destination",
+    # Results
+    "RunResult",
+    "ReportResult",
+    "RunHealth",
+    "WarmupOutcome",
+    "WarmupResiduals",
+    "Warning",
+    "Provenance",
+    "EquipmentProvenance",
     "ControlSignal",
     "Telemetry",
     # Equipment
@@ -224,7 +241,7 @@ __all__ = [
     "ExtrapolationStrategy",
     "RoofShape",
     # Metrics
-    "SimulationMetrics",
+    "RunMetrics",
     "TotalEnergyKwh",
     "PeakPowerKw",
     "RollingPeakKw",

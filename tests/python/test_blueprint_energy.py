@@ -262,8 +262,8 @@ def test_results_dataframe_has_expected_columns():
         dw.step()
 
     # The frame is the reports surface's: simulate() at the horizon's end
-    # finalises the run and returns the memory report's batches.
-    results = dw.simulate()
+    # finalises the run and the memory report's table is the frame.
+    results = dw.simulate().reports[0].table()
     assert results is not None, "results() returned None"
     columns = list(results.columns)
     assert "Time" in columns, f"Missing Time column in {columns}"
@@ -280,7 +280,7 @@ def test_gas_furnace_results_show_lower_electric_than_ashp():
     dw_gas.initialize()
     for _ in dw_gas.timesteps():
         dw_gas.step()
-    gas_results = dw_gas.simulate()
+    gas_results = dw_gas.simulate().reports[0].table()
     gas_total = gas_results["Total Electric Power (kW)"].sum()
 
     bp_hp = _make_blueprint(reports=reports)
@@ -291,7 +291,7 @@ def test_gas_furnace_results_show_lower_electric_than_ashp():
     dw_hp.initialize()
     for _ in dw_hp.timesteps():
         dw_hp.step()
-    hp_results = dw_hp.simulate()
+    hp_results = dw_hp.simulate().reports[0].table()
     hp_total = hp_results["Total Electric Power (kW)"].sum()
 
     # Heat pump should use more electricity than gas furnace

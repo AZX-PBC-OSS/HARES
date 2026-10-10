@@ -292,7 +292,7 @@ class TestBillingSummary:
 
         for _ in range(EXPECTED_STEPS):
             dw.step()
-        dw.finalize_billing()
+        dw.finish()
 
         summaries = dw.billing_summaries()
         assert len(summaries) > 0, "finalize_billing must emit the run's period"

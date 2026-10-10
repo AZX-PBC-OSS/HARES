@@ -47,7 +47,7 @@ pyo3::create_exception!(
     pyo3::exceptions::PyRuntimeError
 );
 
-use crate::conversions::{naive_chrono_to_py_datetime, record_batches_to_polars_df};
+use crate::conversions::naive_chrono_to_py_datetime;
 use crate::py_actor::PyActor;
 use crate::py_actor::PyPriority;
 use crate::py_config::PySimulationConfig;
@@ -58,7 +58,7 @@ use crate::py_equipment::{
     PyBattery, PyEquipment, PyEquipmentDescriptor, PyEv, PyProtocolBridge, PyPv,
     extract_charging_lut, extract_ocv_table, extract_u_neg_table,
 };
-use crate::py_metrics::PySimulationMetrics;
+use crate::py_result::{PyRunHealth, PyRunResult};
 use crate::py_telemetry::PyTelemetry;
 use crate::utils::finite_f64_optional;
 use crate::utils::validate_finite;
@@ -630,28 +630,6 @@ pub(crate) fn zone_keys_for_step(step: &hares_core::StepResult) -> Vec<String> {
         .collect()
 }
 
-/// The polars frame of the run result's first `Memory` report, in `reports`
-/// order: the frame the interim Python surface returns while `simulate()`
-/// still reads as a frame. A run with no `Memory` report names it.
-pub(crate) fn first_memory_frame(
-    py: Python<'_>,
-    result: &hares_core::RunResult,
-) -> PyResult<Py<PyAny>> {
-    let batches = result
-        .reports
-        .iter()
-        .find(|report| matches!(report.output, hares_core::ReportOutput::Memory(_)))
-        .map(|report| report.batches().to_vec());
-    match batches {
-        Some(batches) => record_batches_to_polars_df(py, &batches),
-        None => Err(HaresSimulationError::new_err(
-            "no Memory report: the frame comes from a Memory report's retained \
-             batches, and this run's reports write to files only; add a \
-             Destination.memory() report to SimulationConfig(reports=[...])",
-        )),
-    }
-}
-
 /// The dict `PyDwelling.step()` returns, built from one step result and the
 /// zone keys [`zone_keys_for_step`] names: the one conversion both
 /// `PyDwelling.step()` and every `batch_step` row go through, so both paths
@@ -835,7 +813,10 @@ impl PyDwelling {
         }
     }
 
-    pub fn simulate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    /// Runs the full configured horizon and returns the finished run's
+    /// result: the one finalisation a stepped run takes through
+    /// `finish()` is the same path this takes at the horizon's end.
+    pub fn simulate(&self, py: Python<'_>) -> PyResult<PyRunResult> {
         let _guard = PanicHookGuard::new();
         #[cfg(debug_assertions)]
         {
@@ -883,7 +864,63 @@ impl PyDwelling {
             );
         }
 
-        first_memory_frame(py, &result)
+        Ok(PyRunResult { inner: result })
+    }
+
+    /// Finalises the run in place: the billing close, the post-hoc
+    /// diagnostics, the recorders' flush, close and publish (the final
+    /// partial batch included), the metrics, the health, the warning
+    /// record and the provenance, and returns the finished run's result.
+    /// Idempotent: a call after the first returns the first call's result.
+    /// A run that has stepped nothing cannot finish.
+    pub fn finish(&self, py: Python<'_>) -> PyResult<PyRunResult> {
+        let _guard = PanicHookGuard::new();
+        #[cfg(debug_assertions)]
+        {
+            assert!(
+                panic_hook::is_installed(),
+                "custom panic hook must be installed before finish"
+            );
+        }
+        let finish_outcome = py.detach(|| {
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut dwelling = self.acquire_hares()?;
+                dwelling.finish()
+            }))
+        });
+        let finish_result = match finish_outcome {
+            Ok(result) => result,
+            Err(payload) => {
+                if self.dwelling.is_poisoned() {
+                    self.mark_poisoned();
+                }
+                return Err(PyRuntimeError::new_err(format!(
+                    "HARES internal panic: {}",
+                    panic_hook::panic_payload_to_string(payload)
+                )));
+            }
+        };
+        match finish_result {
+            Ok(result) => Ok(PyRunResult { inner: result }),
+            Err(e) => {
+                if self.poisoned.load(Ordering::Acquire) {
+                    return Err(FatalDwellingError::new_err(e.to_string()));
+                }
+                Err(to_py_err(e))
+            }
+        }
+    }
+
+    /// The run's live health totals: readable at any step, needing no
+    /// report.
+    pub fn health(&self) -> PyResult<PyRunHealth> {
+        if crate::py_callback::delivery_in_progress() {
+            return Err(reentry_refusal());
+        }
+        let dwelling = self.acquire()?;
+        Ok(PyRunHealth {
+            inner: dwelling.health().clone(),
+        })
     }
 
     pub fn step(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -1649,28 +1686,6 @@ impl PyDwelling {
         }
     }
 
-    pub fn results(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dwelling = self.acquire()?;
-        // The first Memory report's flushed batches, as far as the run has
-        // got: the frame the run's reports hold. No step fallback exists
-        // (the step history is gone); a run with no Memory report names it.
-        let batches: Vec<_> = dwelling.flushed_batches().to_vec();
-        let has_memory = dwelling
-            .sim_config()
-            .reports
-            .iter()
-            .any(|report| matches!(report.destination, hares_io::Destination::Memory));
-        drop(dwelling);
-        if batches.is_empty() && !has_memory {
-            return Err(HaresSimulationError::new_err(
-                "no Memory report: the frame comes from a Memory report's flushed \
-                 batches, and this run's reports write to files only; add a \
-                 Destination.memory() report to SimulationConfig(reports=[...])",
-            ));
-        }
-        record_batches_to_polars_df(py, &batches)
-    }
-
     /// Attaches a Python callable as the dwelling's batch callback: the
     /// recorder calls it with the batch's info and the batch as a polars
     /// frame, once per flushed batch, in flush order. The step runs with
@@ -1694,30 +1709,6 @@ impl PyDwelling {
                 Box::new(crate::py_callback::PyBatchCallback::new(callback.unbind())),
             )
             .map_err(to_py_err)
-    }
-
-    pub fn metrics(&self) -> PyResult<PySimulationMetrics> {
-        // The metrics are computed only when the run requested them: one
-        // path, the accumulator fed per step from the catalogue input
-        // plan. Without the request there is nothing to read.
-        if !self.config.sim_config.metrics {
-            return Err(PyValueError::new_err(
-                "metrics were not requested: pass metrics=True to SimulationConfig to have \
-                 the run compute them",
-            ));
-        }
-        let dwelling = self.acquire()?;
-        match dwelling.run_metrics_snapshot() {
-            Some(Ok(full_metrics)) => Ok(PySimulationMetrics {
-                inner: full_metrics,
-            }),
-            // A run that requested metrics and has stepped nothing has no
-            // accumulator state to read.
-            None => Err(PyValueError::new_err(
-                "no steps run yet; run simulate() (or step()) first",
-            )),
-            Some(Err(err)) => Err(PyValueError::new_err(err.to_string())),
-        }
     }
 
     pub fn reset_with_seed(&mut self, seed: u64) -> PyResult<()> {
@@ -2026,14 +2017,6 @@ impl PyDwelling {
     /// Attach a gas tariff to this dwelling for metadata/reporting.
     pub fn set_gas_tariff(&mut self, tariff: crate::py_tariff::PyGasTariff) {
         self.gas_tariff = Some(tariff);
-    }
-
-    /// Emit the final partial billing period. Call after the last `step()`
-    /// when driving the simulation step-by-step. Idempotent.
-    pub fn finalize_billing(&self) -> PyResult<()> {
-        let mut dwelling = self.acquire()?;
-        dwelling.finalize_billing();
-        Ok(())
     }
 
     /// Returns accumulated billing period summaries.

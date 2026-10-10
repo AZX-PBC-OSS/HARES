@@ -122,7 +122,7 @@ class TestArchetypeTariffIntegration:
             dw.add_ev_with_driver(
                 VehicleId.tesla_model_y_lr(), archetype_id, seed=42
             )
-            df = dw.simulate()
+            df = dw.simulate().reports[0].table()
             col = _ev_power_col(df, "Tesla Model Y LR AWD")
             # Sum of positive values = total charging energy
             return _scalar(df[col].filter(df[col] > 0).sum(), "total EV charging energy")
@@ -149,7 +149,7 @@ class TestArchetypeTariffIntegration:
                 EvArchetypeId.daily_commuter_l2(),
                 seed=99,
             )
-            df = dw.simulate()
+            df = dw.simulate().reports[0].table()
             return df["Total Electric Power (kW)"].to_list()
 
         run1 = run()
@@ -173,7 +173,7 @@ class TestArchetypeTariffIntegration:
             EvArchetypeId.phev_commuter(),
             seed=42,
         )
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         col = _ev_power_col(df, "Toyota RAV4 Prime")
         max_power = df[col].max()
         assert isinstance(max_power, (int, float)) and max_power > 0, (
@@ -192,7 +192,7 @@ class TestArchetypeTariffIntegration:
             dw.add_ev_with_driver(
                 VehicleId.nissan_leaf30(), archetype_id, seed=42
             )
-            df = dw.simulate()
+            df = dw.simulate().reports[0].table()
             col = _ev_power_col(df, "Nissan Leaf S 30kWh")
             return _scalar(df[col].max(), "max EV power")
 
@@ -222,7 +222,7 @@ class TestChargingLoadProfile:
             EvArchetypeId.daily_commuter_l2(),
             seed=42,
         )
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         col = _ev_power_col(df, "Tesla Model Y LR AWD")
 
         df = df.with_columns(pl.col("Time").dt.hour().cast(pl.Int32).alias("hour"))
@@ -257,7 +257,7 @@ class TestChargingLoadProfile:
             EvArchetypeId.daily_commuter_l2(),
             seed=42,
         )
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         col = _ev_power_col(df, "Tesla Model Y LR AWD")
         max_power = _scalar(df[col].max(), "max EV power")
 
@@ -318,7 +318,7 @@ class TestChargingLoadProfile:
             EvArchetypeId.daily_commuter_l1(),
             seed=42,
         )
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         col = _ev_power_col(df, "Nissan Leaf S 30kWh")
         charging = df.filter(pl.col(col) > 0.1)
 
@@ -366,7 +366,7 @@ class TestHpxmlDeclaredEv:
 
         dw = Dwelling.from_hpxml(str(hpxml_path), SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3 * 86400, time_res=900, master_seed=42, reports=_frame_report(1)))
         dw.initialize()
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
 
         col = _ev_power_col(df, "EV")
         charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
@@ -403,7 +403,7 @@ class TestDefaultStrategyEv:
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
         dw.set_electric_tariff(tariff)
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
 
         col = _ev_power_col(df, "EV1")
         charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
@@ -426,7 +426,7 @@ class TestDefaultStrategyEv:
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
 
         col = _ev_power_col(df, "EV1")
         charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
@@ -491,7 +491,7 @@ class TestDefaultStrategyEv:
             f"all actors: {sorted(actors)}"
         )
 
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         for name in ("EV1", "EV2"):
             col = _ev_power_col(df, name)
             charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), f"{name} charging energy")
@@ -532,7 +532,7 @@ class TestDefaultStrategyEv:
             f"all actors: {sorted(actors)}"
         )
 
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         for label in ("EV1", "Tesla Model Y LR AWD"):
             col = _ev_power_col(df, label)
             charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), f"{label} charging energy")
@@ -810,7 +810,7 @@ class TestDefaultStrategyEv:
                     EvArchetypeId.daily_commuter_l2(),
                     seed=42,
                 )
-            df = dw.simulate()
+            df = dw.simulate().reports[0].table()
             col = _ev_power_col(df, "Tesla Model Y LR AWD")
             return _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
 

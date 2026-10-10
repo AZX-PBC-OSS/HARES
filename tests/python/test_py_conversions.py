@@ -34,7 +34,8 @@ def dwelling():
 @pytest.fixture(scope="session")
 def simulated_df(dwelling):
     """Run simulate() once and share the resulting DataFrame across tests."""
-    return dwelling.simulate()
+    result = dwelling.simulate()
+    return result.reports[0].table()
 
 
 # One ResStock 2025.1 fixture building (committed): HPXML + schedule + weather.
@@ -70,46 +71,32 @@ def fleet(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_simulate_returns_dataframe(simulated_df):
-    """Verify that simulate() returns a non-empty polars DataFrame with columns."""
-    assert isinstance(simulated_df, pl.DataFrame)
-    assert simulated_df.width > 0, "DataFrame should have at least one column"
-    assert simulated_df.height > 0, "DataFrame should have at least one row"
+def test_simulate_returns_run_result(dwelling):
+    """simulate() returns the run's RunResult whose memory report's table
+    is a non-empty polars DataFrame with columns."""
+    result = dwelling.simulate()
+
+    assert isinstance(result.reports[0].table(), pl.DataFrame)
+    frame = result.reports[0].table()
+    assert frame.width > 0, "DataFrame should have at least one column"
+    assert frame.height > 0, "DataFrame should have at least one row"
 
 
-def test_results_before_simulate_returns_empty_frame(dwelling):
-    """results() before any step returns a zero-row frame (the memory
-    report has flushed nothing yet), and a run with no memory report names
-    `reports` instead of falling back to a step frame.
-
-    Note: uses a fresh dwelling (not the simulated one) to test the
-    pre-simulate path.
-    """
-    from hares._hares import HaresSimulationError
-
-    fresh = Dwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        config=SimulationConfig(
-            start_time="2019-01-01T00:00:00",
-            duration=86400,
-            reports=[ReportSpec("frame", Selection.verbosity(0), Destination.memory())],
-        ),
-    )
-    df = fresh.results()
-
-    assert isinstance(df, pl.DataFrame)
-    assert df.height == 0, "Results before simulate should be empty"
-
+def test_no_report_run_has_no_metrics_and_no_reports(dwelling):
+    """A run with no reports carries no reports and no metrics: the
+    RunResult's surface is empty by construction (nothing was recorded)."""
     no_report = Dwelling.from_hpxml(
         HPXML,
         SCHEDULE,
         WEATHER,
         config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400),
     )
-    with pytest.raises(HaresSimulationError, match="no Memory report"):
-        no_report.results()
+    no_report.initialize()
+    result = no_report.simulate()
+
+    assert result.reports == []
+    assert result.metrics is None
+    assert result.warnings_dropped == 0
 
 
 def test_results_dataframe_columns_include_time_and_power(simulated_df):

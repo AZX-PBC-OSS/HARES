@@ -67,8 +67,8 @@ def test_simulation_plan_empty_segments_raises():
 def test_run_returns_the_full_batch_schema(tmp_path):
     """run()'s frame is the memory report's batch schema, not the two-column
     steps fallback: the plan defaults to a verbosity memory report because
-    its contract is returning dw.results(), whose full schema exists only
-    when a memory report retains the flushed batches."""
+    its contract is returning the run's report table, whose full schema
+    exists only when a memory report retains the flushed batches."""
     plan = SimulationPlan(
         HPXML,
         SCHEDULE,

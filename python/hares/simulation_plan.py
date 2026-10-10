@@ -143,10 +143,20 @@ class SimulationPlan:
                 )
                 raise
 
-            # The frame is the reports surface's: simulate() at the
-            # segment's horizon end finalises the run (billing, flush,
-            # publish) and returns the memory report's batches.
-            df: pl.DataFrame = dw.simulate()
+            # The frame is the RunResult's: finish() finalises the segment
+            # (billing, flush, publish) and the memory report's table is
+            # the segment's frame.
+            run_result = dw.finish()
+            memory_reports = [
+                report for report in run_result.reports if report.path is None
+            ]
+            if not memory_reports:
+                raise ValueError(
+                    "the segment's config declares no Memory report: the plan's "
+                    "frame comes from a Memory report's retained batches; add a "
+                    "Destination.memory() report to SimulationConfig(reports=[...])"
+                )
+            df: pl.DataFrame = memory_reports[0].table()
             if not df.is_empty():
                 df = df.with_columns(pl.lit(i).alias("segment"))
                 all_frames.append(df)

@@ -227,7 +227,162 @@ through the extension's `batch_step`). Both paths clamp every action value
 to the declared bounds of its column before the value reaches the dwelling,
 and the clamped values are counted on the acting dwelling's run health in
 every build; the count is exposed with the run's `RunResult`, alongside the
-other run-total counters.
+other run-total counters. An episode's truncating step finalises the run
+through `finish()`; the finished `RunResult` is the wrapper's `run_result`
+(one dwelling) or `run_results` (the vector), and the underlying dwellings
+are reachable (`env.dwelling`, `envs`), so `health()` reads at any step.
+
+## Results
+
+One run carries one result: `Dwelling.simulate()` and
+`Dwelling.finish()` return the run's `RunResult` — the reports' delivered
+outputs, the metrics, the health totals, the warning record and the
+provenance.
+
+```python
+from hares import Destination, Dwelling, ReportSpec, Selection, SimulationConfig
+
+dw = Dwelling.from_hpxml(
+    hpxml="path/to/building.xml",
+    schedule="path/to/schedules.csv",
+    weather="path/to/weather.epw",
+    config=SimulationConfig(
+        start_time="2019-01-01T00:00:00",
+        duration=86400,
+        time_res=900,
+        reports=[ReportSpec("frame", Selection.verbosity(2), Destination.memory())],
+    ),
+    defaults_path="path/to/HARES/defaults",
+)
+dw.initialize()
+
+# Run the whole horizon: the return value is the run's RunResult.
+result = dw.simulate()
+
+frame = result.reports[0].table()   # the memory report's polars DataFrame
+print(result.metrics.total_energy_kwh.net_energy_kwh)
+print(result.health.clamped_actions)
+for warning in result.warnings:
+    print(warning.source, warning.message)
+print(result.provenance.bldg_id, result.provenance.site_utc_offset_s)
+```
+
+The lifecycle: `initialize()` is required once before the first `step()`
+or `simulate()` — both raise `RuntimeError` without it — and `reset_with_seed`
+clears it (a fresh `initialize()` re-snapshots). A run steps to its end
+either through `simulate()` or one `step()` at a time, then `finish()`
+finalises it: the billing close, the recorders' flush and publish (the
+final partial batch included), the metrics, the health, the warning record
+and the provenance, in one path. `finish()` is idempotent — every call
+after the first returns the first call's result — and a `step()` past the
+finished run is a `RuntimeError`.
+
+```python
+from hares import Destination, Dwelling, ReportSpec, Selection, SimulationConfig
+
+dw = Dwelling.from_hpxml(
+    hpxml="path/to/building.xml",
+    schedule="path/to/schedules.csv",
+    weather="path/to/weather.epw",
+    config=SimulationConfig(
+        start_time="2019-01-01T00:00:00",
+        duration=86400,
+        time_res=900,
+        reports=[ReportSpec("frame", Selection.verbosity(2), Destination.memory())],
+    ),
+    defaults_path="path/to/HARES/defaults",
+)
+dw.initialize()
+for _ in dw.timesteps():
+    dw.step()
+result = dw.finish()          # the same finalisation simulate() runs
+print(result.reports[0].rows)
+```
+
+`health()` is live: readable at any step, needing no report.
+
+```python
+from hares import Dwelling, SimulationConfig
+
+dw = Dwelling.from_hpxml(
+    hpxml="path/to/building.xml",
+    schedule="path/to/schedules.csv",
+    weather="path/to/weather.epw",
+    config=SimulationConfig(
+        start_time="2019-01-01T00:00:00",
+        duration=86400,
+        time_res=900,
+    ),
+    defaults_path="path/to/HARES/defaults",
+)
+dw.initialize()
+dw.step()
+print(dw.health().rejected_control_signals)
+print(dw.health().warmup.outcome)   # "disabled" or "ran"
+```
+
+Requesting reports: a run records nothing no report asks for. A report is
+a name, a selection (`Selection.verbosity(n)`, `.named([...])`,
+`.pattern(glob)`, `.diagnostics()`), a frequency (`Frequency.timestep()`)
+and a destination (`Destination.memory()`, `.parquet(path, overwrite=False)`,
+`.csv(path, overwrite=False)`). A `Memory` destination retains the run's
+batches and its `ReportResult.table()` returns the frame; a file
+destination's result is the published path (its `table()` raises, naming
+the report and its destination); a run with no report carries no metrics.
+
+Each column's Arrow type is the report's schema's type for that column,
+with units and enum labels read from the catalogue (polars drops Arrow
+field metadata, so the schema — `ReportResult`'s and the catalogue's — is
+where a column's unit and labels live).
+
+`SteppableFleet` stepping does not rewind: a stepped fleet's dwellings
+advance one step per `step()` call across the whole fleet.
+
+## Changes in this release
+
+Every callable, class and keyword added to, changed in or removed from
+`hares._hares` since `ebdb1a17`, each removed or renamed one with its
+replacement.
+
+- Added: `ReportSpec`, `Selection` (with `verbosity`, `named`, `pattern`,
+  `diagnostics`), `Frequency` (with `timestep`), `Destination` (with
+  `memory`, `parquet`, `csv`), `RunResult`, `ReportResult`, `RunMetrics`,
+  `RunHealth`, `WarmupOutcome`, `WarmupResiduals`, `Warning`, `Provenance`,
+  `EquipmentProvenance`, `SiteLocationOverride`.
+- Added: `Dwelling.finish()`, `Dwelling.health()`,
+  `Dwelling.initialize()`, `Dwelling.attach_callback()`,
+  `Dwelling.config()`, `Dwelling.dwelling_fatal`,
+  `Dwelling.set_solar_override()` and the solar-override and LUT-injection
+  methods, `DwellingBlueprint` and its constructors, `SimulationPlan`,
+  `SimulationConfig.diagnostics`, `Fleet.from_resstock`,
+  `SteppableFleet` and its methods.
+- Removed: `Dwelling.results()` — read the run's reports off the
+  `RunResult` (`simulate()`'s or `finish()`'s return,
+  `result.reports[i].table()`).
+- Removed: `Dwelling.metrics()` — read `result.metrics` off the
+  `RunResult`.
+- Removed: `Dwelling.finalize_billing()` — `finish()` closes the final
+  billing period; `billing_summaries()` reads the summaries after it.
+- Removed: `Dwelling.set_tariff()` — `set_electric_tariff()` (and
+  `set_gas_tariff()`).
+- Renamed: `SimulationMetrics` to `RunMetrics` (the same getters, read
+  off the `RunResult`).
+- Removed keywords: `write_output`, `output_format`, `output_path`,
+  `output_verbosity`, `retain_batches`, `rotation` — pass
+  `reports=[ReportSpec(...)]`; `latitude`, `longitude`, `elevation_m`,
+  `utc_offset_h` — pass `site_location=SiteLocationOverride(...)`; the
+  `time_res_s`/`duration_s` forms became `time_res`/`duration`.
+- Moved to the shared `_hares_types` stub module (still exported, typed
+  there once for both modules): `StepResult`, `FleetStepEntry`,
+  `SteppableBuildError`, `SteppableStepResult`.
+- Added module functions: `batch_step`, `field_bounds`,
+  `field_bounds_table`, `clip_action` (the RL fast paths), and the
+  weather parsers `parse_weather`, `parse_epw`, `parse_psm3`,
+  `parse_tmy3`, `parse_resstock_csv`.
+- Added: the equipment classes `ElectricBoiler`, `ElectricFurnace`,
+  `GasBoiler`, `IndirectTank`, `TanklessWaterHeater`; the exceptions
+  `HaresConfigError`, `HaresEquipmentError`, `HaresSimulationError`;
+  the callback info class `BatchInfo`.
 
 ## Troubleshooting
 

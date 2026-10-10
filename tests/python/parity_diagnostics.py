@@ -312,7 +312,7 @@ def run_hares(
     import hares
 
     dwelling_sim = hares.Dwelling.from_hpxml(str((fixture_dir / "building.xml").resolve()), str((fixture_dir / "schedule.csv").resolve()), str((fixture_dir / "weather.epw").resolve()), defaults_path=str(Path("defaults").resolve()), config=SimulationConfig(start_time=sim_cfg["start_time_iso"], time_res=sim_cfg["time_res_s"], duration=sim_cfg["duration_s"], verbosity=sim_cfg["verbosity"], csv_path=str(out_dir / "hares_parity_diagnostics.csv")))
-    pdf = dwelling_sim.simulate().to_pandas()
+    pdf = dwelling_sim.simulate().reports[0].table().to_pandas()
     pdf = _normalize_time_index(pdf, sim_cfg["start_time"])
 
     dwelling_obs = hares.Dwelling.from_hpxml(str((fixture_dir / "building.xml").resolve()), str((fixture_dir / "schedule.csv").resolve()), str((fixture_dir / "weather.epw").resolve()), defaults_path=str(Path("defaults").resolve()), config=SimulationConfig(start_time=sim_cfg["start_time_iso"], time_res=sim_cfg["time_res_s"], duration=sim_cfg["duration_s"], verbosity=sim_cfg["verbosity"], csv_path=str(out_dir / "hares_parity_diagnostics_obs.csv")))

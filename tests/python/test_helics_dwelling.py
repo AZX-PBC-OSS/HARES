@@ -193,6 +193,10 @@ class _FakeDwelling:
             raise RuntimeError("synthetic failure")
         return {}
 
+    def finish(self) -> None:
+        self._log.append(("finish", self._step_count))
+        return None
+
     def telemetry(self) -> Any:
         idx = max(self._step_count - 1, 0)
         p_kw, q_kvar = self._telemetry_values[idx]

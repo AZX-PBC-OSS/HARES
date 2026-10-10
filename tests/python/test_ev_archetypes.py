@@ -84,7 +84,7 @@ class TestAddEvWithDriver:
                 EvArchetypeId.daily_commuter_l2(),
                 seed=123,
             )
-            df = dw.simulate()
+            df = dw.simulate().reports[0].table()
             results.append(df)
         assert results[0].equals(results[1])
 

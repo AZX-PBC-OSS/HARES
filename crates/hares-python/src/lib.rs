@@ -17,6 +17,7 @@ mod py_hvac;
 mod py_metrics;
 mod py_pv_sizing;
 mod py_report;
+mod py_result;
 mod py_tariff;
 mod py_telemetry;
 mod py_water_heater;
@@ -42,7 +43,7 @@ use py_equipment::{
 use py_fleet::{PyFleet, PyFleetResults, PySteppableFleet};
 use py_metrics::{
     PyEfficiencyMetrics, PyEnvelopeComponentLoadsKwh, PyGasEnergyMetrics, PyGridInteractionMetrics,
-    PyPeakPowerKw, PyRollingPeakKw, PySimulationMetrics, PyTotalEnergyKwh,
+    PyPeakPowerKw, PyRollingPeakKw, PyRunMetrics, PyTotalEnergyKwh,
 };
 use py_pv_sizing::{PyPvCandidate, PyPvSizingResult, PyRoofPlane, PyRoofShape, PyUsableRoofArea};
 use py_report::{PyDestination, PyFrequency, PyReportSpec, PySelection};
@@ -127,7 +128,15 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStormWatchTrigger>()?;
     m.add_class::<PyDepartureConstraint>()?;
     m.add_class::<PyExtrapolationStrategy>()?;
-    m.add_class::<PySimulationMetrics>()?;
+    m.add_class::<PyRunMetrics>()?;
+    m.add_class::<py_result::PyRunResult>()?;
+    m.add_class::<py_result::PyReportResult>()?;
+    m.add_class::<py_result::PyRunHealth>()?;
+    m.add_class::<py_result::PyWarmupOutcome>()?;
+    m.add_class::<py_result::PyWarmupResiduals>()?;
+    m.add_class::<py_result::PyWarning>()?;
+    m.add_class::<py_result::PyProvenance>()?;
+    m.add_class::<py_result::PyEquipmentProvenance>()?;
     m.add_class::<PyTotalEnergyKwh>()?;
     m.add_class::<PyPeakPowerKw>()?;
     m.add_class::<PyRollingPeakKw>()?;

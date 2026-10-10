@@ -163,7 +163,7 @@ def _run_hares(output_dir: Path) -> tuple[dict[str, float], float, float]:
     init_elapsed = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    df = dwelling.simulate()
+    df = dwelling.simulate().reports[0].table()
     sim_elapsed = time.perf_counter() - t1
 
     time_res_h = TIME_RES_MIN / 60.0
