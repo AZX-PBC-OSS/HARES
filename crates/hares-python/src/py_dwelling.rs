@@ -669,6 +669,8 @@ pub struct PyDwelling {
 impl PyDwelling {
     #[classmethod]
     #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, initialization_duration = None, defaults_path = None, overrides = None, **unexpected))]
+    // PyO3 #[classmethod] constructor must match the Python API parameter list.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_hpxml(
         _cls: &Bound<'_, PyType>,
         hpxml: String,
@@ -683,17 +685,18 @@ impl PyDwelling {
     ) -> PyResult<Self> {
         // The dwelling-level keywords are the config's own; every simulation
         // setting rides on the one SimulationConfig object.
-        let config = crate::py_config::PyDwellingConfig::new(
-            hpxml,
-            schedule,
-            weather,
-            config,
-            bldg_id,
-            initialization_duration,
-            defaults_path,
-            overrides,
-            unexpected,
-        )?;
+        let config =
+            crate::py_config::PyDwellingConfig::from_args(crate::py_config::DwellingConfigArgs {
+                hpxml,
+                schedule,
+                weather,
+                config,
+                bldg_id,
+                initialization_duration,
+                defaults_path,
+                overrides,
+                unexpected,
+            })?;
         let config = config.to_dwelling_config()?;
         let dwelling = Dwelling::from_config(config.clone()).map_err(to_py_err)?;
         Ok(Self {
@@ -3557,12 +3560,7 @@ mod profiling_summary_tests {
                 "2023-01-01T00:00:00-07:00",
                 crate::py_config::WholeSeconds(96 * 3600),
                 crate::py_config::WholeSeconds(3600),
-                0,
                 None,
-                false,
-                "csv",
-                false,
-                "none",
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 0,

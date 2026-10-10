@@ -78,7 +78,9 @@ fn unexpected_keyword_error(
     unexpected: &Bound<'_, PyDict>,
     scopes: &[hares_io::KeyScope],
 ) -> PyResult<()> {
-    for key in unexpected.keys() {
+    // The first unexpected keyword is the one named, as Python's own
+    // check does; the rest are irrelevant to the raised error.
+    if let Some(key) = unexpected.keys().into_iter().next() {
         let key_str: String = key.extract()?;
         for scope in scopes {
             if let Some(message) = hares_io::removed_key_message(*scope, &key_str) {
@@ -437,6 +439,23 @@ impl PySimulationConfig {
 #[derive(Debug, Clone)]
 pub struct PyDwellingConfig(pub DwellingConfig);
 
+/// The dwelling-constructor arguments every Python-facing dwelling
+/// constructor shares: the input triple, the one config object and the
+/// dwelling-level keywords. One struct, so the dwelling config's, the
+/// dwelling's and the blueprint's constructors forward one shape instead
+/// of nine arguments.
+pub(crate) struct DwellingConfigArgs<'a> {
+    pub hpxml: String,
+    pub schedule: Option<String>,
+    pub weather: String,
+    pub config: PySimulationConfig,
+    pub bldg_id: i64,
+    pub initialization_duration: Option<i64>,
+    pub defaults_path: Option<String>,
+    pub overrides: Option<&'a Bound<'a, PyDict>>,
+    pub unexpected: Option<&'a Bound<'a, PyDict>>,
+}
+
 fn parse_overrides(overrides: Option<&Bound<'_, PyDict>>) -> PyResult<Option<serde_json::Value>> {
     let Some(dict) = overrides else {
         return Ok(None);
@@ -472,6 +491,8 @@ impl PyDwellingConfig {
         overrides = None,
         **unexpected,
     ))]
+    // PyO3 #[new] constructor must match the Python API parameter list.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         hpxml: String,
         schedule: Option<String>,
@@ -483,48 +504,17 @@ impl PyDwellingConfig {
         overrides: Option<&Bound<'_, PyDict>>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        // Every unexpected keyword is either a removed key this surface once
-        // carried (the removed-keys table's message names where the
-        // capability lives now) or a typo Python itself would refuse. The
-        // first offending keyword is named, as Python's own check does.
-        // Every scope is in the lookup, so a removed key names its
-        // replacement on the dwelling constructors too, not only on the
-        // config's own.
-        if let Some(unexpected) = unexpected {
-            unexpected_keyword_error(
-                "DwellingConfig",
-                unexpected,
-                &[
-                    hares_io::KeyScope::DwellingTable,
-                    hares_io::KeyScope::SimulationConfig,
-                    hares_io::KeyScope::PythonKeyword,
-                ],
-            )?;
-        }
-
-        if let Some(init_dur) = initialization_duration
-            && init_dur < 0
-        {
-            return Err(PyValueError::new_err(
-                "initialization_duration must be non-negative",
-            ));
-        }
-
-        let parsed_overrides = parse_overrides(overrides)?;
-
-        Ok(Self(DwellingConfig {
-            hpxml_path: PathBuf::from(&hpxml),
-            schedule_path: schedule.map(PathBuf::from),
-            weather_path: PathBuf::from(&weather),
-            defaults_path: defaults_path.map(PathBuf::from),
-            sim_config: config.0,
-            overrides: parsed_overrides,
+        Self::from_args(DwellingConfigArgs {
+            hpxml,
+            schedule,
+            weather,
+            config,
             bldg_id,
-            initialization_duration: initialization_duration
-                .filter(|&d| d != 0)
-                .map(|d| std::time::Duration::from_secs(d as u64)),
-            patches: None,
-        }))
+            initialization_duration,
+            defaults_path,
+            overrides,
+            unexpected,
+        })
     }
 
     #[getter]
@@ -601,6 +591,59 @@ impl PyDwellingConfig {
 }
 
 impl PyDwellingConfig {
+    /// The one dwelling-config construction the Python-facing constructors
+    /// share.
+    ///
+    /// # Errors
+    ///
+    /// A removed keyword, a negative `initialization_duration`, or an
+    /// override that is not a JSON object.
+    pub(crate) fn from_args(args: DwellingConfigArgs<'_>) -> PyResult<Self> {
+        // Every unexpected keyword is either a removed key this surface once
+        // carried (the removed-keys table's message names where the
+        // capability lives now) or a typo Python itself would refuse. The
+        // first offending keyword is named, as Python's own check does.
+        // Every scope is in the lookup, so a removed key names its
+        // replacement on the dwelling constructors too, not only on the
+        // config's own.
+        if let Some(unexpected) = args.unexpected {
+            unexpected_keyword_error(
+                "DwellingConfig",
+                unexpected,
+                &[
+                    hares_io::KeyScope::DwellingTable,
+                    hares_io::KeyScope::SimulationConfig,
+                    hares_io::KeyScope::PythonKeyword,
+                ],
+            )?;
+        }
+
+        if let Some(init_dur) = args.initialization_duration
+            && init_dur < 0
+        {
+            return Err(PyValueError::new_err(
+                "initialization_duration must be non-negative",
+            ));
+        }
+
+        let parsed_overrides = parse_overrides(args.overrides)?;
+
+        Ok(Self(DwellingConfig {
+            hpxml_path: PathBuf::from(&args.hpxml),
+            schedule_path: args.schedule.map(PathBuf::from),
+            weather_path: PathBuf::from(&args.weather),
+            defaults_path: args.defaults_path.map(PathBuf::from),
+            sim_config: args.config.0,
+            overrides: parsed_overrides,
+            bldg_id: args.bldg_id,
+            initialization_duration: args
+                .initialization_duration
+                .filter(|&d| d != 0)
+                .map(|d| std::time::Duration::from_secs(d as u64)),
+            patches: None,
+        }))
+    }
+
     pub fn to_dwelling_config(&self) -> PyResult<DwellingConfig> {
         Ok(self.0.clone())
     }
