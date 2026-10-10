@@ -17,7 +17,8 @@ use hares_control::DispatchTarget;
 use hares_equipment::Equipment;
 use hares_io::{
     Catalogue, CatalogueInput, Destination, RowPlan, Selection, StreamingRecorder, build_catalogue,
-    build_schema as build_schema_from_catalogue, build_schema_for_columns, resolve_selection,
+    build_schema as build_schema_from_catalogue, build_schema_for_columns,
+    build_schema_for_diagnostics, resolve_selection,
 };
 use hares_tariff::{ElectricTariff, TariffEvaluator};
 use hares_types::{
@@ -1462,6 +1463,7 @@ impl Dwelling {
                     Selection::Verbosity(verbosity) => {
                         build_schema_from_catalogue(catalogue, *verbosity, self.diagnostics)
                     }
+                    Selection::Diagnostics => build_schema_for_diagnostics(catalogue),
                     Selection::Named(_) | Selection::Pattern(_) => {
                         build_schema_for_columns(catalogue, names)
                     }

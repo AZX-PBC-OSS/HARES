@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig};
-use hares_io::{OutputFormat, RotationPolicy, SimulationConfig, SiteLocationOverride};
+use hares_io::{Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride};
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -43,19 +43,14 @@ fn cz4a_sim_config() -> SimulationConfig {
         start_time: start,
         duration: Duration::hours(1),
         time_res: Duration::seconds(60),
-        output_verbosity: 0,
-        write_output: false,
-        output_path: None,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
+        diagnostics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        diagnostics: false,
     }
 }
 
@@ -96,13 +91,10 @@ fn diagnostics_columns(n_zones: usize) -> Vec<String> {
 /// recorded schema at verbosity 8 carries no diagnostics column.
 #[test]
 fn diagnostics_absent_without_a_diagnostics_report() {
+    // The file half: a run with no report configured creates nothing.
     let dir = tempfile::tempdir().expect("temp dir");
-    let output = dir.path().join("verb8.csv");
 
-    let mut sim = cz4a_sim_config();
-    sim.output_verbosity = 8;
-    sim.write_output = false;
-    sim.output_path = Some(output);
+    let sim = cz4a_sim_config();
     let mut dwelling = Dwelling::from_config(cz4a_config(sim)).expect("fixture dwelling builds");
     dwelling.simulate().expect("run succeeds");
     drop(dwelling);
@@ -115,14 +107,15 @@ fn diagnostics_absent_without_a_diagnostics_report() {
         "a run without a diagnostics request must create nothing, found: {left:?}"
     );
 
-    // The recorded schema half: with output on and no diagnostics request,
-    // no diagnostics column is recorded, at verbosity 8 included.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let output = dir.path().join("verb8b.csv");
+    // The recorded schema half: a Verbosity(8) memory report with no
+    // diagnostics request records no diagnostics column.
     let mut sim = cz4a_sim_config();
-    sim.output_verbosity = 8;
-    sim.write_output = true;
-    sim.output_path = Some(output);
+    sim.reports = vec![ReportSpec {
+        name: "frame".to_string(),
+        selection: Selection::Verbosity(8),
+        frequency: hares_io::Frequency::default(),
+        destination: Destination::Memory,
+    }];
     let mut dwelling = Dwelling::from_config(cz4a_config(sim)).expect("fixture dwelling builds");
     dwelling.simulate().expect("run succeeds");
     let columns = dwelling
@@ -142,14 +135,14 @@ fn diagnostics_absent_without_a_diagnostics_report() {
 /// fixture (pinned at `fixtures/diagnostics_cz4a.csv`).
 #[test]
 fn diagnostics_in_memory_with_verbosity_0_report() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let output = dir.path().join("diag.csv");
-
     let mut sim = cz4a_sim_config();
     sim.diagnostics = true;
-    sim.retain_batches = true;
-    sim.write_output = true;
-    sim.output_path = Some(output);
+    sim.reports = vec![ReportSpec {
+        name: "frame".to_string(),
+        selection: Selection::Verbosity(0),
+        frequency: hares_io::Frequency::default(),
+        destination: Destination::Memory,
+    }];
     let mut dwelling = Dwelling::from_config(cz4a_config(sim)).expect("fixture dwelling builds");
     dwelling.simulate().expect("run succeeds");
 
@@ -256,14 +249,15 @@ fn diagnostics_in_memory_with_verbosity_0_report() {
 /// bitwise equal, in order.
 #[test]
 fn without_the_request_frames_equal_the_requested_frames_minus_diagnostics() {
-    let run = |diagnostics: bool, root: &tempfile::TempDir| -> (Vec<String>, Vec<Vec<u64>>) {
-        let output = root.path().join("frame.csv");
+    let run = |diagnostics: bool| -> (Vec<String>, Vec<Vec<u64>>) {
         let mut sim = cz4a_sim_config();
-        sim.output_verbosity = 2;
         sim.diagnostics = diagnostics;
-        sim.retain_batches = true;
-        sim.write_output = true;
-        sim.output_path = Some(output);
+        sim.reports = vec![ReportSpec {
+            name: "frame".to_string(),
+            selection: Selection::Verbosity(2),
+            frequency: hares_io::Frequency::default(),
+            destination: Destination::Memory,
+        }];
         let mut dwelling =
             Dwelling::from_config(cz4a_config(sim)).expect("fixture dwelling builds");
         dwelling.simulate().expect("run succeeds");
@@ -289,10 +283,8 @@ fn without_the_request_frames_equal_the_requested_frames_minus_diagnostics() {
         (names, rows)
     };
 
-    let without_root = tempfile::tempdir().expect("temp dir");
-    let (without_names, without_rows) = run(false, &without_root);
-    let with_root = tempfile::tempdir().expect("temp dir");
-    let (with_names, with_rows_full) = run(true, &with_root);
+    let (without_names, without_rows) = run(false);
+    let (with_names, with_rows_full) = run(true);
 
     // The requested run's schema is the other's plus the diagnostics block,
     // appended last.

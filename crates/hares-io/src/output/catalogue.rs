@@ -353,7 +353,9 @@ impl Catalogue {
     /// column name.
     #[must_use]
     pub fn tag(&self, name: &str) -> Option<(u8, bool)> {
-        self.index.get(name).map(|&i| self.tags[i])
+        self.index
+            .get(name)
+            .map(|&i| (self.tags[i].min_verbosity, self.tags[i].observe_only))
     }
 
     /// The diagnostics variables, in schema order (the block appends last,
@@ -2287,6 +2289,18 @@ fn diagnostics_field(var: &VariableDef) -> arrow::datatypes::FieldRef {
     std::sync::Arc::new(
         Field::new(var.name.as_ref(), DataType::Float64, var.nullable).with_metadata(metadata),
     )
+}
+
+/// Builds the Arrow output schema of a `Diagnostics`-selected report: the
+/// `Time` label, then the diagnostics block's fields, each marked so the
+/// row plan's freeze resolves the block from the schema alone.
+#[must_use]
+pub fn build_schema_for_diagnostics(catalogue: &Catalogue) -> Schema {
+    let mut fields = vec![Field::new(TIMESTAMP_COL, DataType::Utf8, false)];
+    for var in catalogue.diagnostics_variables() {
+        fields.push(diagnostics_field(var).as_ref().clone());
+    }
+    Schema::new_with_metadata(fields, schema_metadata(catalogue, 0))
 }
 
 /// The schema metadata every schema builder carries: the mode-ordinal map,

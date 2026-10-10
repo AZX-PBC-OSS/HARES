@@ -467,6 +467,11 @@ pub fn resolve_selection(
             .iter()
             .map(|def| def.name.to_string())
             .collect()),
+        Selection::Diagnostics => Ok(catalogue
+            .diagnostics_variables()
+            .iter()
+            .map(|def| def.name.to_string())
+            .collect()),
         Selection::Named(selected) => resolve_named(selected, &names)
             .map(|slots| slots.iter().map(|&s| names[s].to_string()).collect()),
         Selection::Pattern(pattern) => {

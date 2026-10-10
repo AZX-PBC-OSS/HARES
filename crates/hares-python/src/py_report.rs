@@ -38,6 +38,7 @@ impl PySelection {
             Selection::Verbosity(v) => format!("Selection.verbosity({v})"),
             Selection::Named(names) => format!("Selection.named({names:?})"),
             Selection::Pattern(pattern) => format!("Selection.pattern({pattern:?})"),
+            Selection::Diagnostics => "Selection.diagnostics()".to_string(),
         }
     }
 }

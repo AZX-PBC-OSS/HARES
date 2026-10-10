@@ -327,7 +327,6 @@ impl PySimulationConfig {
         self.assign(|cfg| cfg.time_res = d)
     }
 
-    #[getter]
     /// Whether the run requests the diagnostics report: the per-step
     /// diagnostics variables join the run's schema, and the per-step
     /// diagnostics recording runs. Without it a run records no diagnostics

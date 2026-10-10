@@ -44,6 +44,7 @@ fn sim_config(
             frequency: Frequency::default(),
             destination: Destination::Memory,
         }],
+        diagnostics: false,
         output_chunk_size: chunk,
         setpoint_deadband_c: None,
         master_seed: 0,

@@ -18,7 +18,8 @@ pub use callback::{BatchCallback, BatchContext, CallbackAttachment, CallbackErro
 pub use catalogue::{
     Catalogue, CatalogueActor, CatalogueEquipment, CatalogueError, CatalogueInput,
     DIAGNOSTICS_METADATA_KEY, EquipmentColumnFamilies, VariableDef, VariableSource,
-    build_catalogue, build_schema, build_schema_for_columns, build_schema_for_specs,
+    build_catalogue, build_schema, build_schema_for_columns, build_schema_for_diagnostics,
+    build_schema_for_specs,
 };
 pub use columns::{
     CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,

@@ -479,30 +479,6 @@ fn metrics_refusal_on_a_file_only_run_names_the_remedy() {
     );
 }
 
-/// The diagnostics rider's one guard: its derived path must not collide
-/// with a report's own destination, or the rider's eager create would
-/// truncate that report's target before the recorder's existing-target
-/// check ever ran.
-#[test]
-fn diagnostics_rider_path_colliding_with_a_report_destination_is_refused() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let verbose = tmp.path().join("out.csv");
-    let colliding = tmp.path().join("out_diagnostics.csv");
-    let toml = sim_toml(&format!(
-        "{}{}",
-        file_report("full", 4, "csv", &verbose, false),
-        file_report("rider", 0, "csv", &colliding, false),
-    ));
-    let err = Dwelling::from_config(dwelling_config(&toml))
-        .err()
-        .expect("the rider's path colliding with a report's own destination is refused");
-    let message = err.to_string();
-    assert!(
-        message.contains("collides") && message.contains("out_diagnostics.csv"),
-        "the refusal names the collision and the colliding path: {message}"
-    );
-}
-
 fn f64_column(batches: &[RecordBatch], name: &str) -> Vec<f64> {
     let mut values = Vec::new();
     for batch in batches {

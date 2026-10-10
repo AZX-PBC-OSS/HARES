@@ -14,7 +14,7 @@ use std::time::Duration;
 use chrono::{FixedOffset, TimeZone};
 use criterion::{Criterion, criterion_group, criterion_main};
 use hares_core::{DwellingConfig, SimulationEngine};
-use hares_io::{OutputFormat, RotationPolicy, SimulationConfig, SiteLocationOverride};
+use hares_io::{Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride};
 
 fn cz4a_config(diagnostics: bool, output: &Path) -> DwellingConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -32,18 +32,21 @@ fn cz4a_config(diagnostics: bool, output: &Path) -> DwellingConfig {
             start_time: start,
             duration: chrono::Duration::hours(24),
             time_res: chrono::Duration::minutes(1),
-            output_verbosity: 2,
+            reports: vec![ReportSpec {
+                name: "file".to_string(),
+                selection: Selection::Verbosity(2),
+                frequency: hares_io::Frequency::default(),
+                destination: Destination::Csv {
+                    path: output.to_path_buf(),
+                    overwrite: true,
+                },
+            }],
             diagnostics,
-            write_output: true,
-            output_path: Some(output.to_path_buf()),
-            output_format: OutputFormat::Csv,
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         defaults_path: Some(root.join("defaults")),

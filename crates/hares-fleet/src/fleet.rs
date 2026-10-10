@@ -1282,7 +1282,6 @@ mod tests {
             start_time: fixture_start::fixture_start(),
             duration: Duration::hours(1),
             time_res: Duration::minutes(1),
-<<<<<<< HEAD
             reports: vec![hares_io::ReportSpec {
                 name: "frame".to_string(),
                 selection: hares_io::Selection::Verbosity(0),
@@ -1292,13 +1291,7 @@ mod tests {
                     overwrite: false,
                 },
             }],
-=======
-            output_verbosity: 0,
             diagnostics: false,
-            output_path: Some(output_path),
-            write_output: true,
-            output_format: OutputFormat::Csv,
->>>>>>> 81448376 (fix: diagnostics are a catalogue report, created only when requested)
             output_chunk_size: 128,
             setpoint_deadband_c: None,
             master_seed: 0,

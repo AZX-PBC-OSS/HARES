@@ -877,6 +877,7 @@ destination = { csv = { path = "/tmp/sim_output.csv" } }
                 report("frame", Some("/tmp/sim_output.csv")),
                 report("copy", Some("/tmp/sim_output.csv")),
             ],
+            diagnostics: false,
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,

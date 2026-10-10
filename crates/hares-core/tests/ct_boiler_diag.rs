@@ -76,7 +76,6 @@ mod tests {
                     .unwrap(),
                 duration: Duration::hours(24),
                 time_res: Duration::minutes(15),
-<<<<<<< HEAD
                 reports: vec![hares_io::ReportSpec {
                     name: "frame".to_string(),
                     selection: hares_io::Selection::Verbosity(4),
@@ -86,13 +85,7 @@ mod tests {
                         overwrite: false,
                     },
                 }],
-=======
-                output_verbosity: 4,
                 diagnostics: false,
-                output_path: Some(output.clone()),
-                write_output: true,
-                output_format: OutputFormat::Csv,
->>>>>>> 81448376 (fix: diagnostics are a catalogue report, created only when requested)
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
