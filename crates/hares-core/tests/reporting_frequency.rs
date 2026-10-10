@@ -498,8 +498,8 @@ fn minutes_15_energy_sum_equals_timestep_sum() {
         let got = row.values[energy_column - 1];
         assert!(
             (got - expected).abs() <= 1e-12 * expected.abs(),
-            "quarter {p}: the period's energy {got} must equal, bitwise, the \
-             three steps' sum {expected}"
+            "quarter {p}: the period's energy {got} must equal the three \
+             steps' sum {expected} to 1e-12 relative"
         );
         assert_eq!(row.step_count, 3, "quarter {p}");
     }
@@ -565,7 +565,9 @@ fn batch_fed_reducer_equals_row_fed_reducer() {
             })
             .collect();
         let valid = vec![true; values.len()];
-        row_fed.push_row(local_ms, &values, &valid, &mut sink(&mut row_rows));
+        row_fed
+            .push_row(local_ms, &values, &valid, &mut sink(&mut row_rows))
+            .expect("the run's rows feed the reducer");
     }
     collect(row_fed, &mut row_rows);
 

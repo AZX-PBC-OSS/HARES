@@ -8,6 +8,14 @@
 //! labelled at the nominal period start in the naive local wall clock the
 //! row's own timestamp carries; a closed period carries the steps that fell
 //! in it and, per rule, the reduced value and the count of valid steps.
+//!
+//! Validity is the caller's declaration, taken as fed: a step the caller
+//! marks valid with a non-finite value (NaN or an infinity) propagates
+//! through `Sum`, `Mean` and `Last` and poisons the period's aggregate for
+//! that variable (`Mode` drops it, as it drops a code outside the declared
+//! labels). Undefined values arrive as null per the catalogue's
+//! null-for-not-applicable rule upstream, and the reducer excludes them
+//! with the valid-step count.
 
 use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
 use arrow::datatypes::DataType;
@@ -82,10 +90,13 @@ pub enum ReduceError {
     /// A `Mode` rule counts per code, so it needs the enum's label count.
     #[error("a Mode rule needs enum_codes set to the enum's label count")]
     ModeWithoutCodes,
-    /// A batch fed the reducer carries fewer columns than the rules read.
+    /// A feed carries the wrong number of values for the rules: a batch
+    /// fewer columns than the `Time` column plus one per rule, a row a
+    /// value or validity slice that is not one per rule.
     #[error(
-        "the batch carries {got} columns but the reducer reads {expected}: \
-         the Time column plus one column per rule"
+        "the feed carries {got} values but the reducer reads {expected}: \
+         a batch feeds the Time column plus one value per rule, a row one \
+         value per rule"
     )]
     ColumnCount { expected: usize, got: usize },
     /// A batch column is not the type the feed reads.
@@ -268,21 +279,39 @@ impl PeriodReducer {
     /// offset applied to the step instant, the time the row's own timestamp
     /// column carries), the step's values in rule order, and their
     /// validity. Closed periods emit through `emit` in order.
+    ///
+    /// # Errors
+    ///
+    /// [`ReduceError::ColumnCount`] when `values` or `valid` does not
+    /// carry exactly one entry per rule: the refused row feeds nothing
+    /// and emits nothing, in release builds as in debug builds.
     pub fn push_row(
         &mut self,
         local_ms: i64,
         values: &[f64],
         valid: &[bool],
         emit: &mut dyn FnMut(PeriodRow<'_>),
-    ) {
-        debug_assert_eq!(values.len(), self.rules.len());
-        debug_assert_eq!(valid.len(), self.rules.len());
+    ) -> Result<(), ReduceError> {
+        let expected = self.rules.len();
+        if values.len() != expected {
+            return Err(ReduceError::ColumnCount {
+                expected,
+                got: values.len(),
+            });
+        }
+        if valid.len() != expected {
+            return Err(ReduceError::ColumnCount {
+                expected,
+                got: valid.len(),
+            });
+        }
         self.advance(local_ms, emit);
         for (rule, (value, &is_valid)) in self.rules.iter_mut().zip(values.iter().zip(valid)) {
             if is_valid {
                 rule.add(*value);
             }
         }
+        Ok(())
     }
 
     /// Feeds a record batch: the `Time` column first (Utf8, RFC 3339 at the
@@ -442,7 +471,7 @@ mod tests {
 
     use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
-    use chrono::{Datelike, FixedOffset, TimeZone, Timelike};
+    use chrono::{Datelike, FixedOffset, NaiveDate, TimeZone, Timelike};
     use hares_types::Aggregation;
 
     use super::{PeriodCalendar, PeriodReducer, PeriodRow, ReduceError, TimeRule, naive_local};
@@ -564,7 +593,9 @@ mod tests {
             PeriodReducer::new(frequency, PeriodCalendar, day_rules()).expect("reducer builds");
         let mut rows = Vec::new();
         for (local_ms, values) in synthetic_day(step_ms) {
-            reducer.push_row(local_ms, &values, valid, &mut sink(&mut rows));
+            reducer
+                .push_row(local_ms, &values, valid, &mut sink(&mut rows))
+                .expect("the day's rows feed the reducer");
         }
         collect(reducer, &mut rows);
         rows
@@ -687,12 +718,14 @@ mod tests {
         let base = local_ms_at(offset(), 2023, 1, 1, 0, 30);
         let mut rows = Vec::new();
         for i in 0..91 {
-            reducer.push_row(
-                base + i64::from(i) * STEP_MS,
-                &[1.0],
-                &[true],
-                &mut sink(&mut rows),
-            );
+            reducer
+                .push_row(
+                    base + i64::from(i) * STEP_MS,
+                    &[1.0],
+                    &[true],
+                    &mut sink(&mut rows),
+                )
+                .expect("the run's rows feed the reducer");
         }
         collect(reducer, &mut rows);
 
@@ -746,12 +779,14 @@ mod tests {
                     .expect("reducer builds");
             let mut rows = Vec::new();
             for (i, &local_ms) in times.iter().enumerate() {
-                reducer.push_row(
-                    local_ms,
-                    &[f64::from(i as u32) + 1.0],
-                    &[true],
-                    &mut sink(&mut rows),
-                );
+                reducer
+                    .push_row(
+                        local_ms,
+                        &[f64::from(i as u32) + 1.0],
+                        &[true],
+                        &mut sink(&mut rows),
+                    )
+                    .expect("the boundary rows feed the reducer");
             }
             collect(reducer, &mut rows);
 
@@ -801,22 +836,26 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            reducer.push_row(
-                base + i64::try_from(i).expect("step index") * STEP_MS,
-                &[value, value, value],
-                &[valid, valid, valid],
-                &mut sink(&mut rows),
-            );
+            reducer
+                .push_row(
+                    base + i64::try_from(i).expect("step index") * STEP_MS,
+                    &[value, value, value],
+                    &[valid, valid, valid],
+                    &mut sink(&mut rows),
+                )
+                .expect("the hour's rows feed the reducer");
         }
         // Second hour: every step null. The period is null: the value slot
         // carries 0.0 and the valid counts are zero.
         for i in 0..4 {
-            reducer.push_row(
-                base + 3_600_000 + i64::from(i) * STEP_MS,
-                &[0.0, 0.0, 0.0],
-                &[false; 3],
-                &mut sink(&mut rows),
-            );
+            reducer
+                .push_row(
+                    base + 3_600_000 + i64::from(i) * STEP_MS,
+                    &[0.0, 0.0, 0.0],
+                    &[false; 3],
+                    &mut sink(&mut rows),
+                )
+                .expect("the hour's rows feed the reducer");
         }
         // Third hour: nulls between valid steps; `Last` holds the last
         // VALID step's value.
@@ -824,12 +863,14 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            reducer.push_row(
-                base + 7_200_000 + i64::try_from(i).expect("step index") * STEP_MS,
-                &[value, value, value],
-                &[valid, valid, valid],
-                &mut sink(&mut rows),
-            );
+            reducer
+                .push_row(
+                    base + 7_200_000 + i64::try_from(i).expect("step index") * STEP_MS,
+                    &[value, value, value],
+                    &[valid, valid, valid],
+                    &mut sink(&mut rows),
+                )
+                .expect("the hour's rows feed the reducer");
         }
         collect(reducer, &mut rows);
 
@@ -854,7 +895,9 @@ mod tests {
             .expect("reducer builds");
         let mut rows = Vec::new();
         for (local_ms, values) in synthetic_day(STEP_MS) {
-            reducer.push_row(local_ms, &values, &[true; 4], &mut sink(&mut rows));
+            reducer
+                .push_row(local_ms, &values, &[true; 4], &mut sink(&mut rows))
+                .expect("the day's rows feed the reducer");
         }
         assert!(
             rows.is_empty(),
@@ -907,12 +950,14 @@ mod tests {
         for i in 0_i64..6 {
             let value_a = row_values[i as usize];
             let valid_a = i != 2;
-            row_fed.push_row(
-                base + i * STEP_MS,
-                &[value_a, value_a],
-                &[valid_a, valid_a],
-                &mut sink(&mut row_rows),
-            );
+            row_fed
+                .push_row(
+                    base + i * STEP_MS,
+                    &[value_a, value_a],
+                    &[valid_a, valid_a],
+                    &mut sink(&mut row_rows),
+                )
+                .expect("the hour's rows feed the reducer");
         }
         collect(row_fed, &mut row_rows);
         batch_fed
@@ -929,6 +974,56 @@ mod tests {
         assert_eq!(batch_rows[0].step_count, 4);
         assert_eq!(batch_rows[1].values[0].to_bits(), 11.0_f64.to_bits());
         assert_eq!(batch_rows[1].values[1].to_bits(), 5.5_f64.to_bits());
+    }
+
+    #[test]
+    fn push_row_refuses_a_length_mismatch_like_the_batch_feed() {
+        let mut reducer = PeriodReducer::new(
+            Frequency::Hourly,
+            PeriodCalendar,
+            vec![rule(Aggregation::Sum)],
+        )
+        .expect("reducer builds");
+        let mut rows = Vec::new();
+
+        let err = reducer
+            .push_row(
+                local_ms_at(offset(), 2023, 1, 1, 0, 0),
+                &[1.0, 2.0],
+                &[true],
+                &mut sink(&mut rows),
+            )
+            .expect_err("two values against one rule is a mismatch");
+        assert!(
+            matches!(
+                err,
+                ReduceError::ColumnCount {
+                    expected: 1,
+                    got: 2
+                }
+            ),
+            "got: {err:?}"
+        );
+
+        let err = reducer
+            .push_row(
+                local_ms_at(offset(), 2023, 1, 1, 0, 0),
+                &[1.0],
+                &[true, false],
+                &mut sink(&mut rows),
+            )
+            .expect_err("two validity flags against one rule is a mismatch");
+        assert!(
+            matches!(
+                err,
+                ReduceError::ColumnCount {
+                    expected: 1,
+                    got: 2
+                }
+            ),
+            "got: {err:?}"
+        );
+        assert!(rows.is_empty(), "a refused row emits nothing");
     }
 
     #[test]
@@ -1047,12 +1142,14 @@ mod tests {
                 .expect("reducer builds");
         let mut rows = Vec::new();
         for i in 0..4 {
-            reducer.push_row(
-                base + i64::from(i) * STEP_MS,
-                &[1.0],
-                &[true],
-                &mut sink(&mut rows),
-            );
+            reducer
+                .push_row(
+                    base + i64::from(i) * STEP_MS,
+                    &[1.0],
+                    &[true],
+                    &mut sink(&mut rows),
+                )
+                .expect("the quarter hour's rows feed the reducer");
         }
         collect(reducer, &mut rows);
 
@@ -1082,12 +1179,14 @@ mod tests {
         .expect("reducer builds");
         let mut rows = Vec::new();
         for i in 0..4 {
-            reducer.push_row(
-                base + i64::from(i) * STEP_MS,
-                &[1.0],
-                &[true],
-                &mut sink(&mut rows),
-            );
+            reducer
+                .push_row(
+                    base + i64::from(i) * STEP_MS,
+                    &[1.0],
+                    &[true],
+                    &mut sink(&mut rows),
+                )
+                .expect("the hour's rows feed the reducer");
         }
         collect(reducer, &mut rows);
         assert_eq!(rows.len(), 1, "all four steps sit inside the first hour");
@@ -1106,7 +1205,9 @@ mod tests {
         let evening = local_ms_at(site, 2023, 1, 1, 23, 30);
         let next_day = local_ms_at(site, 2023, 1, 2, 0, 0);
         for local_ms in [evening, evening + STEP_MS, next_day, next_day + STEP_MS] {
-            reducer.push_row(local_ms, &[1.0], &[true], &mut sink(&mut rows));
+            reducer
+                .push_row(local_ms, &[1.0], &[true], &mut sink(&mut rows))
+                .expect("the day's rows feed the reducer");
         }
         collect(reducer, &mut rows);
         assert_eq!(rows.len(), 2);
@@ -1120,6 +1221,126 @@ mod tests {
             time_label(rows[1].start_local_ms, site),
             "2023-01-02T00:00:00+05:30"
         );
+    }
+
+    /// The naive local wall-clock milliseconds of a civil time read
+    /// straight onto the reducer's wall clock: the DST probes below
+    /// construct the repeated and the nonexistent hours by hand, as the
+    /// run's own timestamp column renders them (the naive local time), so
+    /// no fixed-offset constructor stands in for a time the wall clock
+    /// does not have.
+    fn naive_ms(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+        NaiveDate::from_ymd_opt(y, mo, d)
+            .expect("date")
+            .and_hms_opt(h, mi, 0)
+            .expect("civil time")
+            .and_utc()
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn dst_fall_back_repeated_hour_merges_into_one_bucket() {
+        // A fall-back day's wall clock (2023-11-05 at a United States
+        // site): the 01:00 hour runs twice, 02:00 -07:00 becoming 01:00
+        // -08:00. The 24 h from local midnight stamp 96 steps of 900 s at
+        // the wall clock's reading of the step's start, so the repeated
+        // hour's stamps are the same naive times twice.
+        let mut stamps: Vec<i64> = Vec::new();
+        for i in 0..8 {
+            stamps.push(naive_ms(2023, 11, 5, 0, 0) + i64::from(i) * STEP_MS);
+        }
+        for i in 0..4 {
+            stamps.push(naive_ms(2023, 11, 5, 1, 0) + i64::from(i) * STEP_MS);
+        }
+        for i in 0..84 {
+            stamps.push(naive_ms(2023, 11, 5, 2, 0) + i64::from(i) * STEP_MS);
+        }
+        assert_eq!(stamps.len(), 96, "24 h of 900 s steps");
+        assert_eq!(
+            stamps[8], stamps[4],
+            "the wall clock reads the 01:00 hour a second time"
+        );
+
+        let mut reducer = PeriodReducer::new(
+            Frequency::Hourly,
+            PeriodCalendar,
+            vec![rule(Aggregation::Sum)],
+        )
+        .expect("reducer builds");
+        let mut rows = Vec::new();
+        for local_ms in stamps {
+            reducer
+                .push_row(local_ms, &[1.0], &[true], &mut sink(&mut rows))
+                .expect("the day's rows feed the reducer");
+        }
+        collect(reducer, &mut rows);
+
+        assert_eq!(
+            rows.len(),
+            23,
+            "the repeated hour merges into one bucket: the 24 h run covers \
+             the hours 00:00 to 22:00 only"
+        );
+        assert_eq!(rows[0].step_count, 4);
+        assert_eq!(
+            rows[1].step_count, 8,
+            "both passes of the repeated hour count into the same bucket"
+        );
+        assert_eq!(rows[1].values[0].to_bits(), 8.0_f64.to_bits());
+        assert_eq!(rows[1].valid_steps, &[8]);
+        for row in &rows[2..] {
+            assert_eq!(row.step_count, 4);
+        }
+        assert_eq!(rows[1].start_local_ms, naive_ms(2023, 11, 5, 1, 0));
+        assert_eq!(rows[22].start_local_ms, naive_ms(2023, 11, 5, 22, 0));
+    }
+
+    #[test]
+    fn dst_spring_forward_nonexistent_hour_yields_no_bucket() {
+        // A spring-forward day's wall clock (2023-03-12 at a United States
+        // site): the 02:00 hour does not exist, 02:00 -07:00 becoming
+        // 03:00 -06:00. The naive day runs 00:00, 01:00, then 03:00
+        // through 23:00, 23 wall hours, 92 steps of 900 s.
+        let mut stamps: Vec<i64> = Vec::new();
+        for i in 0..8 {
+            stamps.push(naive_ms(2023, 3, 12, 0, 0) + i64::from(i) * STEP_MS);
+        }
+        for i in 0..84 {
+            stamps.push(naive_ms(2023, 3, 12, 3, 0) + i64::from(i) * STEP_MS);
+        }
+        assert_eq!(
+            stamps.len(),
+            92,
+            "the wall day has 23 hours: no step falls in the nonexistent hour"
+        );
+
+        let mut reducer = PeriodReducer::new(
+            Frequency::Hourly,
+            PeriodCalendar,
+            vec![rule(Aggregation::Sum)],
+        )
+        .expect("reducer builds");
+        let mut rows = Vec::new();
+        for local_ms in stamps {
+            reducer
+                .push_row(local_ms, &[1.0], &[true], &mut sink(&mut rows))
+                .expect("the day's rows feed the reducer");
+        }
+        collect(reducer, &mut rows);
+
+        assert_eq!(rows.len(), 23, "the nonexistent hour opens no bucket");
+        for row in &rows {
+            assert_eq!(row.step_count, 4);
+            assert_eq!(row.values[0].to_bits(), 4.0_f64.to_bits());
+        }
+        assert_eq!(rows[1].start_local_ms, naive_ms(2023, 3, 12, 1, 0));
+        assert_eq!(
+            rows[2].start_local_ms,
+            naive_ms(2023, 3, 12, 3, 0),
+            "the hour after the gap labels at 03:00; nothing panics on the \
+             skipped hour"
+        );
+        assert_eq!(rows[22].start_local_ms, naive_ms(2023, 3, 12, 23, 0));
     }
 
     /// A synthetic batch: the Time column, then one Float64 column per
