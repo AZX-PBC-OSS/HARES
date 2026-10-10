@@ -11,7 +11,7 @@ from typing import Any, cast
 import polars as pl
 import pytest
 from conftest import make_dwelling
-from hares import SimulationConfig
+from hares import Destination, ReportSpec, Selection, SimulationConfig
 from hares._hares import HaresSimulationError
 
 REPORT = "timestep"
@@ -37,10 +37,17 @@ def callback_config(output_path, retain_batches):
         start_time="2019-01-01T00:00:00",
         duration=24 * 3600,
         time_res=900,
-        output_verbosity=2,
-        write_output=True,
-        output_path=output_path,
-        retain_batches=retain_batches,
+        reports=[
+            ReportSpec(
+                REPORT,
+                Selection.verbosity(2),
+                (
+                    Destination.memory()
+                    if retain_batches
+                    else Destination.parquet(output_path)
+                ),
+            )
+        ],
         output_chunk_size=40,
     )
 
@@ -97,13 +104,13 @@ def test_callback_exception_fails_the_run(tmp_path):
 
 
 def test_attach_requires_a_callable(tmp_path):
-    dw = make_dwelling(write_output=True, output_path=str(tmp_path / "run.parquet"))
+    dw = make_dwelling(sim_config=callback_config(str(tmp_path / "run.parquet"), retain_batches=True))
     with pytest.raises(TypeError):
         dw.attach_callback(REPORT, cast(Any, 42))
 
 
 def test_unknown_report_name_is_rejected(tmp_path):
-    dw = make_dwelling(write_output=True, output_path=str(tmp_path / "run.parquet"))
+    dw = make_dwelling(sim_config=callback_config(str(tmp_path / "run.parquet"), retain_batches=True))
 
     def callback(info, batch):
         raise AssertionError("never called")
@@ -128,10 +135,13 @@ def _reentry_probe() -> int:
                 start_time="2019-01-01T00:00:00",
                 duration=24 * 3600,
                 time_res=900,
-                output_verbosity=2,
-                write_output=True,
-                output_path=str(Path(tmp) / "run.parquet"),
-                retain_batches=False,
+                reports=[
+                    ReportSpec(
+                        REPORT,
+                        Selection.verbosity(2),
+                        Destination.parquet(str(Path(tmp) / "run.parquet")),
+                    )
+                ],
                 output_chunk_size=40,
             ),
             defaults_path=str(root / "defaults"),
