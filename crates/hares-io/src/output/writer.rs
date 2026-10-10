@@ -59,14 +59,29 @@ pub enum OutputError {
     HardLinkUnavailable { target: PathBuf },
 }
 
+/// Whether a `hard_link` failure means this filesystem cannot complete a
+/// hard link, as opposed to an ordinary path failure: the capability
+/// errors are `Unsupported` and `CrossesDevices`. `PermissionDenied`
+/// (EPERM, a filesystem that refuses links without declaring them
+/// unsupported) and every other kind is a path error.
+fn hard_link_unavailable(source: &std::io::Error) -> bool {
+    matches!(
+        source.kind(),
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::CrossesDevices
+    )
+}
+
 /// Inner writer abstraction over Parquet and CSV backends.
 enum Backend {
     Parquet(Box<ArrowWriter<BufWriter<File>>>),
     Csv(Box<arrow::csv::Writer<BufWriter<File>>>),
 }
 
-/// The per-process partial-name counter: two recorders in one process never
-/// share a partial file, two processes never share a pid.
+/// The per-recorder partial-name counter: two recorders in one process
+/// never share a partial file. The pid and the creation nanos in the name
+/// do the cross-process part: a pid is only unique among concurrently
+/// running processes, so a reused pid must not reconstruct a stale
+/// partial name.
 static PARTIAL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// One report's streaming recorder: buffers rows, flushes batches to the
@@ -155,14 +170,24 @@ impl StreamingRecorder {
                     });
                 }
                 // The unique partial name: a dot file in the target's own
-                // directory, named after it, unique per recorder and per
-                // process.
+                // directory, named after it. The pid namespaces concurrent
+                // processes, and the creation nanos keep the name unique
+                // across a pid's reuse; the process-global counter separates
+                // recorders created within one process.
                 let file_name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "output".to_string());
                 let n = PARTIAL_COUNTER.fetch_add(1, Ordering::Relaxed);
-                Some(parent.join(format!(".{file_name}.partial-{}-{n}", std::process::id())))
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                Some(parent.join(format!(
+                    ".{file_name}.partial-{}-{}-{n}",
+                    std::process::id(),
+                    nanos
+                )))
             }
         };
 
@@ -320,15 +345,9 @@ impl StreamingRecorder {
                     std::io::ErrorKind::AlreadyExists => OutputError::TargetExists {
                         target: target.clone(),
                     },
-                    std::io::ErrorKind::CrossesDevices
-                    | std::io::ErrorKind::Unsupported
-                    | std::io::ErrorKind::PermissionDenied
-                        if source.to_string().contains("link") =>
-                    {
-                        OutputError::HardLinkUnavailable {
-                            target: target.clone(),
-                        }
-                    }
+                    _ if hard_link_unavailable(&source) => OutputError::HardLinkUnavailable {
+                        target: target.clone(),
+                    },
                     _ => OutputError::PathIo {
                         path: target.clone(),
                         source,
@@ -896,5 +915,89 @@ mod tests {
         recorder.flush_and_close().unwrap();
         assert!(path.exists());
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn link_capability_errors_classify_as_hard_link_unavailable() {
+        // The capability refusals: a filesystem that reports the operation
+        // unsupported, and one that refuses the cross-device link.
+        for source in [
+            std::io::Error::from(std::io::ErrorKind::Unsupported),
+            std::io::Error::from(std::io::ErrorKind::CrossesDevices),
+        ] {
+            assert!(
+                super::hard_link_unavailable(&source),
+                "{source} must classify as a link-capability failure"
+            );
+        }
+    }
+
+    #[test]
+    fn eperm_and_ordinary_errors_classify_as_path_errors() {
+        // EPERM, the errno a filesystem that merely refuses links raises:
+        // a raw OS error, not an ErrorKind construction.
+        let eperm = std::io::Error::from_raw_os_error(1);
+        assert_eq!(eperm.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            !super::hard_link_unavailable(&eperm),
+            "EPERM is a path error, not a link-capability failure"
+        );
+        for source in [
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+            std::io::Error::other("something else"),
+        ] {
+            assert!(
+                !super::hard_link_unavailable(&source),
+                "{source} must classify as a path error"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_link_refusal_from_the_os_is_a_path_error() {
+        // The integration probe: the one link refusal a test filesystem
+        // can raise portably is link(2) on a directory, EPERM on Linux.
+        // The real error must land in the path-error class, the class the
+        // publish reports as PathIo.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("dir");
+        std::fs::create_dir(&dir).unwrap();
+        let err = std::fs::hard_link(&dir, tmp.path().join("target"))
+            .expect_err("directories do not hard link");
+        assert!(
+            !super::hard_link_unavailable(&err),
+            "the OS refused the link with {err} ({:?}); it must classify as a path error",
+            err.kind()
+        );
+    }
+
+    #[test]
+    fn two_recorders_never_share_a_partial_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = test_schema();
+        let first = StreamingRecorder::new(
+            schema.clone(),
+            10,
+            Destination::Csv {
+                path: tmp.path().join("a.csv"),
+                overwrite: false,
+            },
+        )
+        .unwrap();
+        let second = StreamingRecorder::new(
+            schema,
+            10,
+            Destination::Csv {
+                path: tmp.path().join("b.csv"),
+                overwrite: false,
+            },
+        )
+        .unwrap();
+        assert_ne!(
+            first.partial_path, second.partial_path,
+            "two recorder creations in one process produce distinct partial names"
+        );
     }
 }
