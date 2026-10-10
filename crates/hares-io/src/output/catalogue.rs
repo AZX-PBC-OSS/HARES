@@ -2354,7 +2354,19 @@ pub fn build_schema_for_columns(catalogue: &Catalogue, names: &[String]) -> Sche
             continue;
         }
         max_verbosity = max_verbosity.max(min_v);
-        fields.push(variable_field(var).as_ref().clone());
+        // A diagnostics variable keeps the block's marker, so a schema
+        // built from explicit columns (the union the reports' selections
+        // resolve to) still freezes the block's producer bindings.
+        let field = if catalogue
+            .diagnostics_variables()
+            .iter()
+            .any(|d| d.name == var.name)
+        {
+            diagnostics_field(var)
+        } else {
+            variable_field(var)
+        };
+        fields.push(field.as_ref().clone());
     }
     Schema::new_with_metadata(fields, schema_metadata(catalogue, max_verbosity))
 }
