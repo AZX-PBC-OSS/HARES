@@ -26,7 +26,7 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::{Duration, TimeZone};
-    use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
+    use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
 
     /// Parse a CSV into column-name -> Vec<f64> map.
     /// Non-numeric cells (headers, timestamps) are silently skipped per-cell.
@@ -337,39 +337,28 @@ mod tests {
             .run(beopt_config(1, csv_path.clone()))
             .expect("engine.run should succeed");
 
-        // The engine may return a different resolved path
+        // The run's published file report, in `reports` order.
         let actual_output = result
-            .timeseries_path
-            .as_ref()
-            .cloned()
+            .reports
+            .iter()
+            .find_map(|report| report.path().cloned())
             .unwrap_or(csv_path.clone());
         eprintln!("  csv_path requested: {}", csv_path.display());
         eprintln!("  timeseries_path returned: {}", actual_output.display());
         eprintln!("  csv_path exists: {}", csv_path.exists());
         eprintln!("  timeseries_path exists: {}", actual_output.exists());
 
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "BEopt simulation failed: {:?}",
-            result.status
-        );
-
-        eprintln!(
-            "[smoke_beopt_1h] status={:?} elapsed={:?}",
-            result.status, result.elapsed
-        );
         eprintln!("  warnings:");
         for w in &result.warnings {
             eprintln!("    {w}");
         }
+        let metrics = result
+            .metrics
+            .as_ref()
+            .expect("a run with reports computes its metrics");
         eprintln!(
             "  total kWh (from metrics): {:.4}",
-            result
-                .metrics
-                .as_ref()
-                .expect("the run requested metrics")
-                .total_energy_kwh
-                .net_energy_kwh
+            metrics.total_energy_kwh.net_energy_kwh
         );
 
         // Parse output CSV for per-equipment breakdown
@@ -397,20 +386,9 @@ mod tests {
             // (base loads + HVAC cycling or schedule-driven equipment). Zero
             // total energy indicates engine dispatch regression.
             assert!(
-                result
-                    .metrics
-                    .as_ref()
-                    .expect("the run requested metrics")
-                    .total_energy_kwh
-                    .net_energy_kwh
-                    > 0.0,
+                metrics.total_energy_kwh.net_energy_kwh > 0.0,
                 "total energy should be > 0 for a 1h BEopt run, got {}",
-                result
-                    .metrics
-                    .as_ref()
-                    .expect("the run requested metrics")
-                    .total_energy_kwh
-                    .net_energy_kwh
+                metrics.total_energy_kwh.net_energy_kwh
             );
 
             // Debug: dump heater stats from CSV
@@ -451,18 +429,8 @@ mod tests {
             // --- Physics-validated sanity checks ---
             assert_physics_bounds(
                 &csv_path,
-                result
-                    .metrics
-                    .as_ref()
-                    .expect("the run requested metrics")
-                    .total_energy_kwh
-                    .net_energy_kwh,
-                &result
-                    .metrics
-                    .as_ref()
-                    .expect("the run requested metrics")
-                    .total_energy_kwh
-                    .per_end_use,
+                metrics.total_energy_kwh.net_energy_kwh,
+                &metrics.total_energy_kwh.per_end_use,
                 1.0,
             );
         } else {
@@ -534,24 +502,14 @@ mod tests {
         let result = engine.run(config).expect("engine.run should succeed");
 
         // --- 1. Engine runs to completion on the ResStock HPXML fixture. ---
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "ResStock simulation failed: {:?}",
-            result.status
-        );
+        let metrics = result
+            .metrics
+            .as_ref()
+            .expect("a run with reports computes its metrics");
 
         eprintln!(
-            "[smoke_resstock_1h] status={:?} elapsed={:?}",
-            result.status, result.elapsed
-        );
-        eprintln!(
-            "  total kWh: {:.4}",
-            result
-                .metrics
-                .as_ref()
-                .expect("the run requested metrics")
-                .total_energy_kwh
-                .net_energy_kwh
+            "[smoke_resstock_1h] total kWh: {:.4}",
+            metrics.total_energy_kwh.net_energy_kwh
         );
 
         // --- 2. Output CSV is produced and non-empty. ---
@@ -617,12 +575,7 @@ mod tests {
         //        draw 0.3–5 kWh over a noon hour with base loads only. The band
         //        [0.1, 10] kWh/h covers every plausible occupancy level without
         //        masking real breakage. ---
-        let total_kwh = result
-            .metrics
-            .as_ref()
-            .expect("the run requested metrics")
-            .total_energy_kwh
-            .net_energy_kwh;
+        let total_kwh = metrics.total_energy_kwh.net_energy_kwh;
         assert!(
             total_kwh.is_finite(),
             "total electric energy is non-finite: {total_kwh}"
@@ -665,13 +618,7 @@ mod tests {
         // --- 6. No per-end-use bucket reports negative energy over the window.
         //        Catches sign-flip regressions in aggregation that slip past
         //        the per-timestep check above. ---
-        for (end_use, &kwh) in &result
-            .metrics
-            .as_ref()
-            .expect("the run requested metrics")
-            .total_energy_kwh
-            .per_end_use
-        {
+        for (end_use, &kwh) in &metrics.total_energy_kwh.per_end_use {
             assert!(
                 kwh.is_finite(),
                 "Non-finite energy for end-use '{end_use}': {kwh}"
@@ -690,12 +637,7 @@ mod tests {
         assert_physics_bounds(
             &csv_path,
             total_kwh,
-            &result
-                .metrics
-                .as_ref()
-                .expect("the run requested metrics")
-                .total_energy_kwh
-                .per_end_use,
+            &metrics.total_energy_kwh.per_end_use,
             1.0,
         );
     }
@@ -764,12 +706,6 @@ mod tests {
         let result = engine
             .run(beopt_config(1, csv_path.clone()))
             .expect("engine.run should succeed");
-
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "BEopt simulation failed: {:?}",
-            result.status
-        );
 
         // The BEopt fixture has an air-to-air heat pump → HVAC_HEATING equipment.
         let per_end_use = &result

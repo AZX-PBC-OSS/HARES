@@ -84,7 +84,7 @@ fn f64_map(values: &BTreeMap<String, f64>) -> MetricValue {
 }
 
 /// Flattens every field of the run metrics into one metrics row.
-pub fn flatten_metrics(metrics: &hares_io::output::metrics::SimulationMetrics) -> MetricsRow {
+pub fn flatten_metrics(metrics: &hares_core::RunMetrics) -> MetricsRow {
     use hares_io::output::metrics::{Reliability, SimulationCoverage};
 
     let mut row = MetricsRow::new();

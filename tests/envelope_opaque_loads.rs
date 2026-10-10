@@ -147,9 +147,8 @@ mod tests {
             let result = engine.run(config).expect("engine.run should succeed");
             let envelope_loads = result
                 .metrics
-                .clone()
-                .expect("the run requested metrics")
-                .envelope_loads_kwh
+                .as_ref()
+                .and_then(|m| m.envelope_loads_kwh.clone())
                 .expect("verbosity 6 must produce envelope-load metrics");
 
             (parse_csv_columns(&csv_path), envelope_loads)

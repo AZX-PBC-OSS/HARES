@@ -15,6 +15,18 @@ use super::helpers;
 const CHECKPOINT_AT_STEP: u64 = 30;
 const TOTAL_STEPS: i64 = 60;
 
+/// Steps the dwelling to its horizon, collecting the per-step results (the
+/// step history is gone; the caller's loop is the accumulator).
+fn run_collecting_steps(
+    dwelling: &mut Dwelling,
+) -> std::result::Result<Vec<hares_core::StepResult>, hares_types::HaresError> {
+    let mut steps = Vec::new();
+    for _ in 0..dwelling.clock.total_steps() {
+        steps.push(dwelling.step()?);
+    }
+    Ok(steps)
+}
+
 pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     let scratch = tempfile::tempdir().expect("create scratch directory");
     let schedule_path = scratch.path().join("schedule.csv");
@@ -43,7 +55,7 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
         }
     };
 
-    let ref_results = match dwelling_ref.simulate() {
+    let ref_results = match run_collecting_steps(&mut dwelling_ref) {
         Ok(r) => r,
         Err(err) => {
             return Err(vec![format!("reference simulation failed: {err}")]);
@@ -102,7 +114,7 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     }
 
     // Compare the tail of the reference run with the restarted run.
-    let ref_tail = &ref_results.steps[CHECKPOINT_AT_STEP as usize..];
+    let ref_tail = &ref_results[CHECKPOINT_AT_STEP as usize..];
     let compare_len = ref_tail.len().min(restarted_steps.len());
 
     if compare_len == 0 {
@@ -440,7 +452,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         )))
         .unwrap();
 
-    let ref_results = match dwelling_ref.simulate() {
+    let ref_results = match run_collecting_steps(&mut dwelling_ref) {
         Ok(r) => r,
         Err(err) => {
             return Err(vec![format!("reference simulation failed: {err}")]);
@@ -625,7 +637,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         restarted_steps.push(step);
     }
 
-    let ref_tail = &ref_results.steps[CHECKPOINT_AT_STEP as usize..];
+    let ref_tail = &ref_results[CHECKPOINT_AT_STEP as usize..];
     let compare_len = ref_tail.len().min(restarted_steps.len());
     if compare_len == 0 {
         failures.push("no steps to compare after checkpoint restart".to_string());

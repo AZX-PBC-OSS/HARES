@@ -8,7 +8,7 @@ use std::time::Duration as StdDuration;
 
 use arrow::array::{Array, Float64Array};
 use corpus::{DiscoveredFixture, ParityFixture, discover_fixtures};
-use hares_core::{DwellingConfig, SimStatus, SimulationEngine};
+use hares_core::{DwellingConfig, SimulationEngine};
 use hares_io::{SimulationConfig, parse_hpxml, resolve_equipment};
 use hares_io::{defaults::DefaultsStore, hpxml::ZoneType};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -566,20 +566,19 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
         .map_err(|err| format!("simulation failed: {err}"))?;
 
     eprintln!(
-        "[parity] fixture={} status={:?} elapsed={:?} warnings={:?}",
-        fixture.id, outcome.status, outcome.elapsed, outcome.warnings
+        "[parity] fixture={} warnings={:?}",
+        fixture.id, outcome.warnings
     );
 
-    if matches!(outcome.status, SimStatus::Failed(_)) {
-        return Err(format!("simulation status failed: {:?}", outcome.status));
-    }
+    // The run's published file report, in `reports` order: the parity
+    // comparison reads the CSV the manifest's report wrote.
+    let timeseries_path = outcome
+        .reports
+        .iter()
+        .find_map(|report| report.path().cloned());
 
-    let actual_columns = read_parquet_columns(
-        outcome
-            .timeseries_path
-            .as_deref()
-            .unwrap_or(csv_path.as_path()),
-    )?;
+    let actual_columns =
+        read_parquet_columns(timeseries_path.as_deref().unwrap_or(csv_path.as_path()))?;
     let reference_columns = read_parquet_columns(&fixture.reference_output_parquet)?;
     if let Some(pinned_c) = pinned_start_c {
         let reference_start_c = reference_columns
@@ -599,11 +598,7 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     // TEMP TRIAGE: keep the harness's HARES output for inspection.
     if let Some(keep) = std::env::var_os("PARITY_KEEP_OUTPUT") {
         let dst = Path::new(&keep).join(format!("hares-{}.parquet", fixture.id));
-        if let Some(src) = outcome
-            .timeseries_path
-            .as_deref()
-            .or(Some(csv_path.as_path()))
-        {
+        if let Some(src) = timeseries_path.as_deref().or(Some(csv_path.as_path())) {
             let _ = fs::copy(src, &dst);
             eprintln!("[parity] kept {}", dst.display());
         }

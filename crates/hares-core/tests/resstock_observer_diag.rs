@@ -20,7 +20,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use chrono::{Duration, TimeZone};
-    use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
+    use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
     use hares_io::Destination;
 
     fn project_root() -> PathBuf {
@@ -109,8 +109,7 @@ mod tests {
         };
 
         let engine = SimulationEngine::new();
-        let result = engine.run(config).expect("run");
-        assert!(!matches!(result.status, SimStatus::Failed(_)));
+        engine.run(config).expect("run");
 
         // Read diagnostic CSV output (verbosity 4)
         if output.exists() {

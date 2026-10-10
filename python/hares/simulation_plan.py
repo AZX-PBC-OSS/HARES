@@ -55,7 +55,7 @@ class SimulationPlan:
         # Every simulation-level field rides on the one SimulationConfig the
         # constructor builds, so a plan can configure recording like any
         # other caller. The verbosity memory report retains the run's
-        # batches: run() returns dw.results(), whose full batch schema
+        # batches: run() returns the report's frame, whose full schema
         # exists only when a memory report retains the flushed batches. A
         # caller can still pass `reports` explicitly through extra_kwargs.
         self._sim_kwargs: dict[str, Any] = {
@@ -143,7 +143,10 @@ class SimulationPlan:
                 )
                 raise
 
-            df: pl.DataFrame = dw.results()
+            # The frame is the reports surface's: simulate() at the
+            # segment's horizon end finalises the run (billing, flush,
+            # publish) and returns the memory report's batches.
+            df: pl.DataFrame = dw.simulate()
             if not df.is_empty():
                 df = df.with_columns(pl.lit(i).alias("segment"))
                 all_frames.append(df)

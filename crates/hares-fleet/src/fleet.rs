@@ -8,8 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{
-    Dwelling, DwellingConfig, DwellingTelemetry, SimStatus as CoreSimStatus, SimulationEngine,
-    SimulationResults, StepResult,
+    Dwelling, DwellingConfig, DwellingTelemetry, RunResult, SimulationEngine, StepResult,
 };
 use hares_io::{
     ResStockBuilding, ResStockVersion, SampleWeightClass, SimulationConfig, classify_sample_weight,
@@ -40,11 +39,13 @@ pub enum SimStatus {
 }
 
 /// Fleet-owned simulation payload for one dwelling.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct DwellingOutcome {
-    pub result: SimulationResults,
+    pub result: std::sync::Arc<RunResult>,
     pub sample_weight: f64,
     pub status: SimStatus,
+    /// Wall-clock the home's run took (the engine's own timing).
+    pub elapsed: std::time::Duration,
 }
 
 /// The fleet construction report: what a ResStock fleet build parsed and
@@ -823,23 +824,22 @@ impl SteppableFleet {
 
 fn run_entry(entry: &FleetEntry) -> std::result::Result<DwellingOutcome, SimError> {
     let engine = SimulationEngine::new();
+    let started = std::time::Instant::now();
     match engine.run(entry.config.clone()) {
         Ok(result) => {
-            let status = map_status(&result.status);
-            if let SimStatus::Failed(message) = &status {
-                return Err(SimError::Failed {
-                    bldg_id: entry.config.bldg_id,
-                    message: message.clone(),
-                });
-            }
-
+            let status = if result.warnings.is_empty() {
+                SimStatus::Ok
+            } else {
+                SimStatus::Flagged(format!("{} warning(s)", result.warnings.len()))
+            };
             Ok(DwellingOutcome {
                 result,
                 sample_weight: entry.sample_weight,
                 status,
+                elapsed: started.elapsed(),
             })
         }
-        Err(err) => Err(SimError::Engine {
+        Err(err) => Err(SimError::Failed {
             bldg_id: entry.config.bldg_id,
             message: err.to_string(),
         }),
@@ -902,14 +902,6 @@ fn step_dwellings_parallel(
         .collect()
 }
 
-fn map_status(status: &CoreSimStatus) -> SimStatus {
-    match status {
-        CoreSimStatus::Ok => SimStatus::Ok,
-        CoreSimStatus::Flagged(message) => SimStatus::Flagged(message.clone()),
-        CoreSimStatus::Failed(message) => SimStatus::Failed(message.clone()),
-    }
-}
-
 fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
     SimulationConfig {
         start_time: FixedOffset::east_opt(0)
@@ -930,6 +922,13 @@ fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
     }
+}
+
+/// The aggregation tests' provenance placeholder config: the fleet sim
+/// config with no reports.
+#[cfg(test)]
+pub(crate) fn resstock_sim_config_for_tests() -> SimulationConfig {
+    resstock_sim_config(None)
 }
 
 fn matches_filter(
@@ -2627,16 +2626,14 @@ mod tests {
             .next()
             .expect("one outcome")
             .expect("the fixture dwelling must run without a simulation error");
+        // The fleet's sim config writes no output: the run's metrics are
+        // None (no report), and no run warning accompanies that.
         match &outcome.status {
             SimStatus::Ok => {}
-            // The fleet's sim config writes no output, so the missing
-            // recorder's note is the one benign flag; anything else is a
-            // run that did not go to completion cleanly.
-            SimStatus::Flagged(message) if message.contains("no output recorder") => {}
             status => panic!("the dwelling must run to completion, got: {status:?}"),
         }
         assert!(
-            outcome.result.elapsed > std::time::Duration::ZERO,
+            outcome.elapsed > std::time::Duration::ZERO,
             "the dwelling must have stepped"
         );
     }

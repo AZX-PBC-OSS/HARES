@@ -153,7 +153,7 @@ impl StreamingRecorder {
         let n_value_cols = schema.fields().len() - 1;
 
         let partial_path = match &destination {
-            Destination::Memory => None,
+            Destination::Memory | Destination::Callback => None,
             Destination::Parquet { path, overwrite } | Destination::Csv { path, overwrite } => {
                 let parent = path.parent().unwrap_or_else(|| Path::new("."));
                 match std::fs::metadata(parent) {
@@ -263,6 +263,7 @@ impl StreamingRecorder {
                 Backend::Csv(Box::new(writer))
             }
             Destination::Memory => unreachable!("a memory destination has no partial file"),
+            Destination::Callback => unreachable!("a callback destination has no partial file"),
         });
         tracing::info!(
             path = %partial.display(),
@@ -359,6 +360,7 @@ impl StreamingRecorder {
                 overwrite
             }
             Destination::Memory => unreachable!("a memory destination publishes nothing"),
+            Destination::Callback => unreachable!("a callback destination publishes nothing"),
         };
         if overwrite {
             std::fs::rename(&partial, &target).map_err(|source| OutputError::PathIo {
@@ -490,6 +492,13 @@ impl StreamingRecorder {
     #[must_use]
     pub fn total_rows(&self) -> usize {
         self.total_rows
+    }
+
+    /// Batches the recorder has built (and delivered) so far, the final
+    /// partial batch included.
+    #[must_use]
+    pub fn batches_built(&self) -> u64 {
+        self.batches_built
     }
 
     /// Build a `RecordBatch` from the current buffer, draining buffers to

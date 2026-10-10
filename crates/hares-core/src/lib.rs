@@ -25,6 +25,7 @@ pub mod invariants;
 pub mod observer;
 #[cfg(feature = "observe")]
 mod observer_capture;
+pub mod result;
 pub mod rng;
 pub mod scheduler;
 pub mod telemetry;
@@ -37,16 +38,18 @@ pub use actor_registry::{ActorConfig, ActorFactory, ActorRegistry};
 pub use checkpoint::DwellingCheckpoint;
 pub use clock::SimClock;
 pub use dwelling::{
-    BatteryLutData, Dwelling, DwellingConfig, HpxmlInputs, PremiseZip,
-    SimulationResults as DwellingSimulationResults, StepResult, building_to_boundary_inputs,
-    building_to_zone_inputs, shipped_defaults_dir,
+    BatteryLutData, Dwelling, DwellingConfig, HpxmlInputs, PremiseZip, StepResult,
+    building_to_boundary_inputs, building_to_zone_inputs, shipped_defaults_dir,
 };
-pub use engine::{KernelTimer, SimStatus, SimulationEngine, SimulationResults};
+pub use engine::{KernelTimer, SimulationEngine};
 pub use environment::{EnvironmentInitOptions, EnvironmentManager};
 pub use hares_io::SimulationConfig;
 #[cfg(feature = "profiling")]
 pub use health::{ActorTiming, ActorTimings};
 pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
 pub use rand_chacha::ChaCha8Rng;
+pub use result::{
+    EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
+};
 pub use rng::derive_dwelling_rng;
 pub use telemetry::DwellingTelemetry;

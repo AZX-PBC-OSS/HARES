@@ -24,7 +24,7 @@ fn fleet() -> hares_fleet::Fleet {
 }
 
 /// Without the builder the homes run with the constructor's own sim
-/// config: the recorder off, no retained batches, run metrics empty.
+/// config: the recorder off, no retained batches, no run metrics.
 #[test]
 fn resstock_fleet_runs_without_a_recorder_by_default() {
     let outcomes = fleet().simulate(1);
@@ -36,23 +36,23 @@ fn resstock_fleet_runs_without_a_recorder_by_default() {
             outcome.status
         );
         assert!(
-            outcome
-                .result
-                .timeseries
-                .as_ref()
-                .is_none_or(|batches| batches.is_empty()),
+            outcome.result.reports.is_empty() || memory_batches(&outcome).is_empty(),
             "without a recorder no batches are flushed"
         );
-        assert_eq!(
-            outcome
-                .result
-                .metrics
-                .as_ref()
-                .map_or(0.0, |m| { m.total_energy_kwh.net_energy_kwh }),
-            0.0,
+        assert!(
+            outcome.result.metrics.is_none(),
             "without the metrics request the run's result carries none"
         );
     }
+}
+
+fn memory_batches(outcome: &hares_fleet::DwellingOutcome) -> Vec<arrow::record_batch::RecordBatch> {
+    outcome
+        .result
+        .reports
+        .iter()
+        .flat_map(|report| report.batches().to_vec())
+        .collect()
 }
 
 /// The builder gives every home one memory report at the verbosity: the
@@ -71,10 +71,7 @@ fn with_memory_report_runs_the_recorder() {
             "with the recorder on the run completes: {:?}",
             outcome.status
         );
-        let batches = outcome
-            .result
-            .timeseries
-            .expect("the retained batches exist");
+        let batches = memory_batches(&outcome);
         let first = batches.first().expect("at least one batch");
         assert_eq!(
             first.schema().field(0).name(),
@@ -82,15 +79,13 @@ fn with_memory_report_runs_the_recorder() {
             "the timeseries schema leads with the timestamp column"
         );
         assert!(first.num_columns() > 1, "the product columns exist");
+        let metrics = outcome
+            .result
+            .metrics
+            .as_ref()
+            .expect("the run's metrics are computed from the recorded rows");
         assert!(
-            outcome
-                .result
-                .metrics
-                .as_ref()
-                .expect("the builder requests metrics")
-                .total_energy_kwh
-                .net_energy_kwh
-                > 0.0,
+            metrics.total_energy_kwh.net_energy_kwh > 0.0,
             "the run metrics are computed from the recorded rows"
         );
         assert_eq!(first.num_rows(), 60, "one hour at the constructor's step");

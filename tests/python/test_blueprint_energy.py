@@ -245,15 +245,25 @@ def test_full_swap_gas_to_electric_does_not_panic():
 
 
 def test_results_dataframe_has_expected_columns():
-    """results() should return a DataFrame with Time and Total Electric Power."""
-    bp = _make_blueprint()
+    """results() returns the memory report's frame with Time and Total
+    Electric Power (a report requests the frame; nothing is recorded
+    that no report requests)."""
+    from hares import Destination, ReportSpec, Selection
+
+    bp = _make_blueprint(
+        reports=[
+            ReportSpec("frame", Selection.verbosity(0), Destination.memory())
+        ]
+    )
     dw = bp.build()
     dw.initialize()
 
     for _ in dw.timesteps():
         dw.step()
 
-    results = dw.results()
+    # The frame is the reports surface's: simulate() at the horizon's end
+    # finalises the run and returns the memory report's batches.
+    results = dw.simulate()
     assert results is not None, "results() returned None"
     columns = list(results.columns)
     assert "Time" in columns, f"Missing Time column in {columns}"
@@ -262,15 +272,18 @@ def test_results_dataframe_has_expected_columns():
 
 def test_gas_furnace_results_show_lower_electric_than_ashp():
     """results() electric total should be lower for gas furnace than ASHP."""
-    bp_gas = _make_blueprint()
+    from hares import Destination, ReportSpec, Selection
+
+    reports = [ReportSpec("frame", Selection.verbosity(0), Destination.memory())]
+    bp_gas = _make_blueprint(reports=reports)
     dw_gas = bp_gas.build()
     dw_gas.initialize()
     for _ in dw_gas.timesteps():
         dw_gas.step()
-    gas_results = dw_gas.results()
+    gas_results = dw_gas.simulate()
     gas_total = gas_results["Total Electric Power (kW)"].sum()
 
-    bp_hp = _make_blueprint()
+    bp_hp = _make_blueprint(reports=reports)
     bp_hp.remove_equipment_by_end_use([EndUse.HVAC_HEATING, EndUse.HVAC_COOLING])
     bp_hp.add_equipment(ASHPHeater("ASHP", capacity_w=12000, hspf=9.5, backup_capacity_w=5000))
     bp_hp.add_equipment(ASHPCooler("ASHP Cooler", capacity_w=10000, seer=18.0))
@@ -278,7 +291,7 @@ def test_gas_furnace_results_show_lower_electric_than_ashp():
     dw_hp.initialize()
     for _ in dw_hp.timesteps():
         dw_hp.step()
-    hp_results = dw_hp.results()
+    hp_results = dw_hp.simulate()
     hp_total = hp_results["Total Electric Power (kW)"].sum()
 
     # Heat pump should use more electricity than gas furnace

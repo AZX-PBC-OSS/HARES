@@ -1336,42 +1336,40 @@ mod tests {
             }
         };
 
-        let collect_temps =
-            |results: &hares_core::DwellingSimulationResults| -> (Vec<f64>, Vec<f64>) {
-                let zone_indoor = ZoneId(1);
-                let zone_attic = ZoneId(2);
-                let indoor: Vec<f64> = results
-                    .steps
-                    .iter()
-                    .map(|s| {
-                        s.zone_temperatures_c
-                            .iter()
-                            .find(|(z, _)| *z == zone_indoor)
-                            .map(|(_, t)| *t)
-                            .unwrap_or(f64::NAN)
-                    })
-                    .collect();
-                let attic: Vec<f64> = results
-                    .steps
-                    .iter()
-                    .map(|s| {
-                        s.zone_temperatures_c
-                            .iter()
-                            .find(|(z, _)| *z == zone_attic)
-                            .map(|(_, t)| *t)
-                            .unwrap_or(f64::NAN)
-                    })
-                    .collect();
-                (indoor, attic)
-            };
+        let collect_temps = |steps: &[hares_core::StepResult]| -> (Vec<f64>, Vec<f64>) {
+            let zone_indoor = ZoneId(1);
+            let zone_attic = ZoneId(2);
+            let indoor: Vec<f64> = steps
+                .iter()
+                .map(|s| {
+                    s.zone_temperatures_c
+                        .iter()
+                        .find(|(z, _)| *z == zone_indoor)
+                        .map(|(_, t)| *t)
+                        .unwrap_or(f64::NAN)
+                })
+                .collect();
+            let attic: Vec<f64> = steps
+                .iter()
+                .map(|s| {
+                    s.zone_temperatures_c
+                        .iter()
+                        .find(|(z, _)| *z == zone_attic)
+                        .map(|(_, t)| *t)
+                        .unwrap_or(f64::NAN)
+                })
+                .collect();
+            (indoor, attic)
+        };
 
         // ── Baseline: HARES solar (Perez model), no override ──────────────
         let mut baseline = build_freefloat_dwelling(scenario);
         let n_steps = baseline.n_steps;
+        let mut baseline_steps = Vec::new();
         for _ in 0..n_steps {
-            baseline.dwelling.step().expect("dwelling.step (baseline)");
+            baseline_steps.push(baseline.dwelling.step().expect("dwelling.step (baseline)"));
         }
-        let (baseline_indoor, baseline_attic) = collect_temps(&baseline.dwelling.results());
+        let (baseline_indoor, baseline_attic) = collect_temps(&baseline_steps);
         let baseline_indoor_mae = mae(&baseline_indoor, &ochre_indoor);
         let baseline_attic_mae = mae(&baseline_attic, &ochre_attic);
 
@@ -1391,10 +1389,11 @@ mod tests {
             .set_solar_override(solar_data)
             .expect("the freefloat scenarios carry no PV");
 
+        let mut override_steps = Vec::new();
         for _ in 0..n_steps {
-            dwelling_ov.step().expect("dwelling.step (override)");
+            override_steps.push(dwelling_ov.step().expect("dwelling.step (override)"));
         }
-        let (override_indoor, override_attic) = collect_temps(&dwelling_ov.results());
+        let (override_indoor, override_attic) = collect_temps(&override_steps);
         let override_indoor_mae = mae(&override_indoor, &ochre_indoor);
         let override_attic_mae = mae(&override_attic, &ochre_attic);
 

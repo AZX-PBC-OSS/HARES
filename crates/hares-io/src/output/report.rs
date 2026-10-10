@@ -165,14 +165,20 @@ pub enum Destination {
         #[serde(default)]
         overwrite: bool,
     },
+    /// The batch callback: every built batch is handed to the attached
+    /// callback, in flush order, and nothing is retained. As a config
+    /// value it is the serialisable marker a run's provenance records for
+    /// a report whose batches go to the attached callback.
+    Callback,
 }
 
 impl Destination {
-    /// The file path of a file destination; `None` for [`Destination::Memory`].
+    /// The file path of a file destination; `None` for [`Destination::Memory`]
+    /// and [`Destination::Callback`].
     #[must_use]
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Destination::Memory => None,
+            Destination::Memory | Destination::Callback => None,
             Destination::Parquet { path, .. } | Destination::Csv { path, .. } => Some(path),
         }
     }

@@ -44,3 +44,39 @@ def test_python_memory_report_returns_frame() -> None:
     # context column at every tier; the zone temperature needs 2).
     assert "Outdoor Dry Bulb (C)" in df.columns
     assert any(c.startswith("Temperature -") for c in df.columns)
+
+
+def test_simulate_without_a_memory_report_names_reports(tmp_path) -> None:
+    """The interim frame return reads the first Memory report's batches; a
+    run whose reports write to files only has no frame, and the error names
+    `reports` (the step fallback frame is gone with the step history)."""
+    import pytest
+    from hares import Destination, Dwelling, ReportSpec, Selection, SimulationConfig
+    from hares._hares import HaresSimulationError
+
+    target = tmp_path / "run.csv"
+    dwelling = Dwelling.from_hpxml(
+        HPXML,
+        SCHEDULE,
+        WEATHER,
+        defaults_path=str(HARES_DEFAULTS),
+        bldg_id=1,
+        config=SimulationConfig(
+            start_time="2023-01-01T00:00:00-07:00",
+            duration=86400,
+            time_res=900,
+            reports=[
+                ReportSpec(
+                    "file",
+                    Selection.verbosity(2),
+                    Destination.csv(str(target)),
+                )
+            ],
+        ),
+    )
+    dwelling.initialize()
+    with pytest.raises(HaresSimulationError) as excinfo:
+        dwelling.simulate()
+    message = str(excinfo.value)
+    assert "no Memory report" in message, message
+    assert "reports" in message, message

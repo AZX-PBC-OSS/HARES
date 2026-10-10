@@ -392,7 +392,14 @@ fn extract_rows(
     outcome: &DwellingOutcome,
     dwelling_index: usize,
 ) -> Option<(Arc<Schema>, Vec<RecordBatch>)> {
-    let batches = outcome.result.timeseries.as_ref()?;
+    // The fleet's aggregate folds the memory reports' retained batches: the
+    // run's own frame surface, one report at a time.
+    let batches: Vec<RecordBatch> = outcome
+        .result
+        .reports
+        .iter()
+        .flat_map(|report| report.batches().to_vec())
+        .collect();
     let first = batches.first()?;
     let schema = first.schema();
 
@@ -757,7 +764,6 @@ mod tests {
     use std::time::Duration as StdDuration;
 
     use arrow::datatypes::Schema;
-    use hares_core::SimulationResults;
     use hares_io::output::metrics::{
         GridInteractionMetrics, PeakPowerKw, Reliability, RollingPeakKw, SimulationCoverage,
         SimulationMetrics, TotalEnergyKwh,
@@ -956,17 +962,41 @@ mod tests {
         metrics: SimulationMetrics,
         batch: Option<RecordBatch>,
     ) -> DwellingOutcome {
+        let reports = batch
+            .map(|b| {
+                let rows = b.num_rows();
+                hares_core::ReportResult {
+                    name: "frame".to_string(),
+                    output: hares_core::ReportOutput::Memory(vec![b]),
+                    frequency: hares_io::Frequency::default(),
+                    rows,
+                    batches_delivered: 1,
+                }
+            })
+            .into_iter()
+            .collect();
         DwellingOutcome {
-            result: SimulationResults {
-                timeseries_path: None,
-                timeseries: batch.map(|b| vec![b]),
-                metrics: Some(metrics),
+            result: std::sync::Arc::new(hares_core::RunResult {
+                reports,
+                metrics: Some(hares_core::RunMetrics::from(
+                    hares_io::FullSimulationMetrics {
+                        metrics,
+                        gas_energy: None,
+                    },
+                )),
+                health: Default::default(),
                 warnings: Vec::new(),
-                status: hares_core::SimStatus::Ok,
-                elapsed: StdDuration::from_secs(1),
-            },
+                warnings_dropped: 0,
+                provenance: hares_core::Provenance {
+                    config: crate::fleet::resstock_sim_config_for_tests(),
+                    bldg_id: 0,
+                    site_utc_offset_s: 0,
+                    equipment: Vec::new(),
+                },
+            }),
             sample_weight,
             status,
+            elapsed: StdDuration::from_secs(1),
         }
     }
 
@@ -1628,16 +1658,33 @@ mod tests {
         );
 
         let outcome = DwellingOutcome {
-            result: SimulationResults {
-                timeseries_path: None,
-                timeseries: Some(vec![batch1, batch2]),
-                metrics: Some(sample_metrics(10.0, 1.0)),
+            result: std::sync::Arc::new(hares_core::RunResult {
+                reports: vec![hares_core::ReportResult {
+                    name: "frame".to_string(),
+                    output: hares_core::ReportOutput::Memory(vec![batch1, batch2]),
+                    frequency: hares_io::Frequency::default(),
+                    rows: 2,
+                    batches_delivered: 2,
+                }],
+                metrics: Some(hares_core::RunMetrics::from(
+                    hares_io::FullSimulationMetrics {
+                        metrics: sample_metrics(10.0, 1.0),
+                        gas_energy: None,
+                    },
+                )),
+                health: Default::default(),
                 warnings: Vec::new(),
-                status: hares_core::SimStatus::Ok,
-                elapsed: StdDuration::from_secs(1),
-            },
+                warnings_dropped: 0,
+                provenance: hares_core::Provenance {
+                    config: crate::fleet::resstock_sim_config_for_tests(),
+                    bldg_id: 0,
+                    site_utc_offset_s: 0,
+                    equipment: Vec::new(),
+                },
+            }),
             sample_weight: 1.0,
             status: SimStatus::Ok,
+            elapsed: StdDuration::from_secs(1),
         };
 
         let result = extract_rows(&outcome, 0);

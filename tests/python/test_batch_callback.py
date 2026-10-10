@@ -53,8 +53,10 @@ def callback_config(output_path, retain_batches):
 
 
 def build_dwelling(collector, tmp_path):
+    # The callback rides the named report's recorder, memory included: the
+    # batches are delivered exactly as a file destination delivers them.
     dw = make_dwelling(
-        sim_config=callback_config(str(tmp_path / "run.parquet"), retain_batches=False)
+        sim_config=callback_config(str(tmp_path / "run.parquet"), retain_batches=True)
     )
     dw.attach_callback(REPORT, collector)
     return dw

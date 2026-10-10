@@ -108,6 +108,7 @@ impl PyDestination {
                 "Destination.csv({}, overwrite={overwrite:?})",
                 path.display()
             ),
+            Destination::Callback => "Destination.callback()".to_string(),
         }
     }
 }

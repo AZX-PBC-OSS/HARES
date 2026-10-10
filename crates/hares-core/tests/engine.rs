@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
-use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
+use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
 use tempfile::TempDir;
 
 /// The test's own directory, removed on drop (panics included), holding the
@@ -177,7 +177,7 @@ fn csv_report(name: &str, path: &std::path::Path, verbosity: u8) -> hares_io::Re
 }
 
 #[test]
-fn run_success_produces_metrics_elapsed_and_output_path() {
+fn run_success_produces_metrics_and_output_path() {
     let scratch = Scratch::with_inputs();
     let csv_path = scratch.path("output.csv");
 
@@ -196,19 +196,32 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
     let engine = SimulationEngine::new();
     let result = engine.run(config).expect("engine run should succeed");
 
-    assert!(matches!(
-        result.status,
-        SimStatus::Ok | SimStatus::Flagged(_)
-    ));
-    assert!(result.elapsed > std::time::Duration::ZERO);
-    let metrics = result.metrics.as_ref().expect("the run requested metrics");
+    let metrics = result
+        .metrics
+        .as_ref()
+        .expect("the run requested metrics");
     assert!(metrics.total_energy_kwh.net_energy_kwh.is_finite());
     assert!(metrics.total_energy_kwh.net_energy_kwh > 0.0);
     assert!(metrics.peak_power_kw.rolling.peak_15min_kw.is_finite());
-    assert!(result.timeseries.is_some());
-    assert!(!result.timeseries.unwrap().is_empty());
-    assert_eq!(result.timeseries_path, Some(csv_path.clone()));
+
+    // The file report's published path is the csv report's target; the
+    // memory report retains the run's batches.
+    let file = result
+        .reports
+        .iter()
+        .find(|report| report.name == "file")
+        .expect("the csv report is in the result");
+    assert_eq!(file.path(), Some(&csv_path));
     assert!(csv_path.exists());
+    let frame = result
+        .reports
+        .iter()
+        .find(|report| report.name == "frame")
+        .expect("the memory report is in the result");
+    assert!(
+        !frame.batches().is_empty(),
+        "the frame report retains batches"
+    );
 }
 
 #[test]
@@ -286,15 +299,15 @@ fn run_with_streaming_output_computes_metrics() {
         .expect("streaming run should succeed");
 
     // Nothing is retained in memory on the streaming run -- the honest
-    // timeseries is empty -- but the metrics must be fully computed.
+    // report is empty -- but the metrics must be fully computed.
     assert!(
-        streamed.timeseries.as_ref().is_some_and(Vec::is_empty),
+        memory_batches(&streamed).is_empty(),
         "streaming run must not retain batches"
     );
     let streamed_metrics = streamed
         .metrics
         .as_ref()
-        .expect("the run requested metrics");
+        .expect("streaming run must compute metrics (None reports no computation)");
     assert_eq!(
         streamed_metrics.simulation_duration_hours, 1.0,
         "streaming run must compute metrics (zeroed metrics report 0 hours)"
@@ -302,13 +315,6 @@ fn run_with_streaming_output_computes_metrics() {
     assert!(
         streamed_metrics.total_energy_kwh.net_energy_kwh > 0.0,
         "streaming run must report real energy totals"
-    );
-    assert!(
-        !matches!(&streamed.status, SimStatus::Flagged(msg)
-            if msg.contains("zero-step") || msg.contains("metrics unavailable")),
-        "a fully-recorded streaming run must not be flagged as zero-step or \
-         metrics-unavailable, got: {:?}",
-        streamed.status
     );
 
     // One path: every run's accumulator is fed per step from the row
@@ -318,6 +324,14 @@ fn run_with_streaming_output_computes_metrics() {
         streamed.metrics, retained.metrics,
         "a file-only run's metrics must equal a memory-report run's metrics"
     );
+}
+
+fn memory_batches(result: &hares_core::RunResult) -> Vec<arrow::record_batch::RecordBatch> {
+    result
+        .reports
+        .iter()
+        .flat_map(|report| report.batches().to_vec())
+        .collect()
 }
 
 /// Streaming (incremental recorder-fed) metrics must equal batch (retained-
@@ -360,11 +374,11 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
     let streamed_metrics = streamed
         .metrics
         .as_ref()
-        .expect("the run requested metrics");
+        .expect("streaming run must compute metrics");
     let retained_metrics = retained
         .metrics
         .as_ref()
-        .expect("the run requested metrics");
+        .expect("retained run must compute metrics");
     assert!(
         streamed_metrics.envelope_loads_kwh.is_some(),
         "verbosity 6 must produce envelope-load columns"
@@ -414,11 +428,11 @@ fn run_with_zero_duration_is_a_validate_error() {
     );
 }
 
-/// A run that does not request metrics carries none, and a run with no
-/// report is not flagged for it: the absence of the request is the
-/// contract, not a defect to warn about.
+/// A run that does not request metrics carries none: the absence of the
+/// request is the contract, not a defect to warn about. `RunResult.metrics`
+/// is `Some` exactly when `SimulationConfig.metrics` is requested.
 #[test]
-fn run_without_metrics_request_returns_none_metrics_and_ok_status() {
+fn run_without_metrics_request_returns_none_metrics() {
     let scratch = Scratch::with_inputs();
 
     let config = DwellingConfig {
@@ -444,15 +458,7 @@ fn run_without_metrics_request_returns_none_metrics_and_ok_status() {
 
     assert!(
         result.metrics.is_none(),
-        "a run without the metrics request carries none"
-    );
-    assert!(
-        !matches!(&result.status, SimStatus::Flagged(msg)
-            if msg.contains("no output recorder")
-                || msg.contains("metrics unavailable")
-                || msg.contains("zero-step")),
-        "not requesting metrics is not a flag, and a stepped run is not \
-         zero-step: got {:?}",
-        result.status
+        "a run without the metrics request carries none, got: {:?}",
+        result.metrics.as_ref().map(|m| m.simulation_duration_hours)
     );
 }

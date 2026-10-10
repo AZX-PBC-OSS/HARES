@@ -33,7 +33,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::actors::{BatteryManagementActor, BmsParams};
-use hares_core::{Dwelling, DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
+use hares_core::{Dwelling, DwellingConfig, SimulationConfig, SimulationEngine};
 use hares_equipment::config::ConfigValue;
 use hares_equipment::{Equipment, EquipmentConfig, EquipmentRegistry};
 use hares_types::{
@@ -187,14 +187,9 @@ fn nightly_strategy_keeps_ev_charged_over_long_horizon() {
         sim_config(Duration::days(45), Some(csv_path.clone()), 5),
         Some(overrides),
     );
-    let result = SimulationEngine::new()
+    SimulationEngine::new()
         .run(config)
         .expect("engine.run should succeed");
-    assert!(
-        !matches!(result.status, SimStatus::Failed(_)),
-        "simulation failed: {:?}",
-        result.status
-    );
 
     let (charge_days, cancelled_max) = summarize_ev_run(&csv_path);
 
@@ -872,12 +867,7 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
         initialization_duration: None,
         patches: None,
     };
-    let result = SimulationEngine::new().run(config).expect("engine.run");
-    assert!(
-        !matches!(result.status, SimStatus::Failed(_)),
-        "simulation failed: {:?}",
-        result.status
-    );
+    SimulationEngine::new().run(config).expect("engine.run");
 
     let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
@@ -925,14 +915,9 @@ fn low_target_strategy_pack_is_raised_to_the_anxiety_band_before_departure() {
         sim_config(Duration::days(14), Some(csv_path.clone()), 5),
         Some(overrides),
     );
-    let result = SimulationEngine::new()
+    SimulationEngine::new()
         .run(config)
         .expect("engine.run should succeed");
-    assert!(
-        !matches!(result.status, SimStatus::Failed(_)),
-        "simulation failed: {:?}",
-        result.status
-    );
 
     let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
@@ -1001,14 +986,9 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
         initialization_duration: None,
         patches: None,
     };
-    let result = SimulationEngine::new()
+    SimulationEngine::new()
         .run(config)
         .expect("engine.run should succeed");
-    assert!(
-        !matches!(result.status, SimStatus::Failed(_)),
-        "simulation failed: {:?}",
-        result.status
-    );
 
     let (charge_days, cancelled_max) = summarize_ev_run(&csv_path);
     assert!(

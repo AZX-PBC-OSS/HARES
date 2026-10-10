@@ -12,7 +12,7 @@ use arrow::array::{Array, Float64Array, StringArray, TimestampMicrosecondArray};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_core::{Actor, Dwelling, DwellingConfig, SimStatus, SimulationEngine, StepResult};
+use hares_core::{Actor, Dwelling, DwellingConfig, SimulationEngine, StepResult};
 use hares_io::SimulationConfig;
 use hares_types::{ControlSignal, DRLevel, EndUse, OperatingMode, TelemetryField};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -604,17 +604,12 @@ fn run_fixture_to_columns_with_verbosity(
     let outcome = engine
         .run(dwelling_config)
         .expect("parity fixture simulation must succeed");
-    assert!(
-        !matches!(outcome.status, SimStatus::Failed(_)),
-        "fixture {} must not fail simulation: {:?}",
-        fixture.id,
-        outcome.status
-    );
+    let published = outcome
+        .reports
+        .iter()
+        .find_map(|report| report.path().cloned());
 
-    let path = outcome
-        .timeseries_path
-        .as_deref()
-        .unwrap_or(csv_path.as_path());
+    let path = published.as_deref().unwrap_or(csv_path.as_path());
     read_parquet_columns(path).expect("actual parquet output must be readable")
 }
 
@@ -623,7 +618,8 @@ fn simulate_fixture_steps(
     actor: Option<Box<dyn Actor>>,
 ) -> Vec<StepResult> {
     // Recording is off (no report is configured: nothing is recorded and
-    // no file is written).
+    // no file is written). The step history is gone: the horizon's step
+    // results are what the stepping loop itself collects.
     let mut dwelling_config = build_dwelling_config(fixture);
     dwelling_config.sim_config.reports = Vec::new();
     let mut dwelling = Dwelling::from_config(dwelling_config).expect("fixture dwelling must load");
@@ -631,19 +627,20 @@ fn simulate_fixture_steps(
         dwelling.add_actor(actor).unwrap();
     }
 
-    dwelling
-        .simulate()
-        .expect("fixture simulation must succeed")
-        .steps
+    let mut steps = Vec::new();
+    for _ in 0..dwelling.clock.total_steps() {
+        steps.push(dwelling.step().expect("fixture simulation must succeed"));
+    }
+    steps
 }
 
 fn simulate_fixture_timestamps(config: DwellingConfig) -> Vec<NaiveDateTime> {
     let mut dwelling = Dwelling::from_config(config).expect("fixture dwelling must load");
-    let results = dwelling
-        .simulate()
-        .expect("fixture simulation must succeed")
-        .steps;
-    results.into_iter().map(|step| step.timestamp).collect()
+    let mut steps = Vec::new();
+    for _ in 0..dwelling.clock.total_steps() {
+        steps.push(dwelling.step().expect("fixture simulation must succeed"));
+    }
+    steps.into_iter().map(|step| step.timestamp).collect()
 }
 
 fn read_reference_time_axis_local(path: &Path) -> Result<Vec<NaiveDateTime>, String> {

@@ -473,7 +473,7 @@ impl Dwelling {
         // in the run's health.
         for warning in change.orphaned {
             self.health.evicted_actors += 1;
-            self.warnings.push(warning);
+            self.warnings.push_from("actors", warning);
         }
         let live = std::mem::take(&mut self.actors);
         self.actors = ActorRosterChange::arrange(

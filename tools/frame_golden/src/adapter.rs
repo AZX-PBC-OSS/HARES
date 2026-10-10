@@ -19,7 +19,7 @@ use arrow::array::{
     BooleanArray, Float64Array, Float64Builder, Int64Array, RecordBatch, StringArray, StringBuilder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
-use hares_core::{Dwelling, DwellingConfig, SimStatus, SimulationEngine};
+use hares_core::{Dwelling, DwellingConfig, SimulationEngine};
 use hares_fleet::aggregation::{AggregationResolution, aggregate};
 use hares_fleet::{DwellingOutcome, Fleet};
 
@@ -27,6 +27,16 @@ use crate::defaults;
 use crate::error::{FrameGoldenError, FrameGoldenResult};
 use crate::golden::{MetricsRow, flatten_metrics};
 use crate::manifest::{GoldenManifest, ManifestKind, repo_path};
+
+/// The retained batches across the run result's memory reports, in
+/// `reports` order: the frames a dwelling golden compares.
+fn memory_batches(result: &hares_core::RunResult) -> Vec<RecordBatch> {
+    result
+        .reports
+        .iter()
+        .flat_map(|report| report.batches().to_vec())
+        .collect()
+}
 
 /// Whether a run keeps its frames. `Full` runs the manifest's own reports
 /// (a memory destination retains every product in memory); `Discard` runs
@@ -192,31 +202,19 @@ fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         .map_err(|err| FrameGoldenError::Engine(format!("simulation failed: {err}")))?;
     let simulate = simulate_start.elapsed();
 
-    if let SimStatus::Failed(message) = &result.status {
+    // A discarded run keeps nothing by design; a retained run that flushed
+    // zero batches is a zero-step simulation, which a golden cannot pin.
+    let batches = memory_batches(&result);
+    if batches.is_empty() && req.output == RunOutput::Full {
         return Err(FrameGoldenError::Engine(format!(
-            "dwelling {} failed: {message}",
+            "dwelling {} retained no output batches: zero-step simulation",
             home.bldg_id
         )));
     }
 
     let mut frames = BTreeMap::new();
-    match &result.timeseries {
-        Some(batches) if !batches.is_empty() => {
-            frames.insert(
-                "frame".to_string(),
-                FrameProducts::from_batches(batches.clone())?,
-            );
-        }
-        // A discarded run keeps nothing by design; a retained run that
-        // flushed zero batches is a zero-step simulation, which a golden
-        // cannot pin.
-        Some(_) | None if req.output == RunOutput::Full => {
-            return Err(FrameGoldenError::Engine(format!(
-                "dwelling {} retained no output batches: zero-step simulation",
-                home.bldg_id
-            )));
-        }
-        _ => {}
+    if !batches.is_empty() {
+        frames.insert("frame".to_string(), FrameProducts::from_batches(batches)?);
     }
     // The billing product appears only when a tariff is configured; the
     // manifest's [tariff] table attaches one through `Dwelling::set_tariff`.

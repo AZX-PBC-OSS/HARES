@@ -479,9 +479,9 @@ fn water_heater_default_follows_the_weather_station_climate_zone() {
             .unwrap_or_else(|err| panic!("{weather}: dwelling builds: {err}"))
             .take_warnings();
         assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains(&format!("IECC zone {zone} derived from weather station"))),
+            warnings.iter().any(|w| w
+                .message
+                .contains(&format!("IECC zone {zone} derived from weather station"))),
             "{weather}: the derived zone must be a warning, got {warnings:?}"
         );
     }

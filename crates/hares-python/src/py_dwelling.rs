@@ -47,7 +47,7 @@ pyo3::create_exception!(
     pyo3::exceptions::PyRuntimeError
 );
 
-use crate::conversions::{batches_or_steps_to_polars_df, naive_chrono_to_py_datetime};
+use crate::conversions::{naive_chrono_to_py_datetime, record_batches_to_polars_df};
 use crate::py_actor::PyActor;
 use crate::py_actor::PyPriority;
 use crate::py_config::PySimulationConfig;
@@ -630,6 +630,28 @@ pub(crate) fn zone_keys_for_step(step: &hares_core::StepResult) -> Vec<String> {
         .collect()
 }
 
+/// The polars frame of the run result's first `Memory` report, in `reports`
+/// order: the frame the interim Python surface returns while `simulate()`
+/// still reads as a frame. A run with no `Memory` report names it.
+pub(crate) fn first_memory_frame(
+    py: Python<'_>,
+    result: &hares_core::RunResult,
+) -> PyResult<Py<PyAny>> {
+    let batches = result
+        .reports
+        .iter()
+        .find(|report| matches!(report.output, hares_core::ReportOutput::Memory(_)))
+        .map(|report| report.batches().to_vec());
+    match batches {
+        Some(batches) => record_batches_to_polars_df(py, &batches),
+        None => Err(HaresSimulationError::new_err(
+            "no Memory report: the frame comes from a Memory report's retained \
+             batches, and this run's reports write to files only; add a \
+             Destination.memory() report to SimulationConfig(reports=[...])",
+        )),
+    }
+}
+
 /// The dict `PyDwelling.step()` returns, built from one step result and the
 /// zone keys [`zone_keys_for_step`] names: the one conversion both
 /// `PyDwelling.step()` and every `batch_step` row go through, so both paths
@@ -827,15 +849,15 @@ impl PyDwelling {
                 "PyDwelling.simulate() called before initialize(). Call dwelling.initialize() first.",
             ));
         }
-        let sim_result: Result<Result<(), HaresError>, _> = py.detach(|| {
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                let mut dwelling = self.acquire_hares()?;
-                dwelling.simulate()?;
-                Ok(())
-            }))
-        });
-        match sim_result {
-            Ok(Ok(())) => {}
+        let sim_result: Result<Result<std::sync::Arc<hares_core::RunResult>, HaresError>, _> = py
+            .detach(|| {
+                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    let mut dwelling = self.acquire_hares()?;
+                    dwelling.simulate()
+                }))
+            });
+        let result = match sim_result {
+            Ok(Ok(result)) => result,
             Ok(Err(e)) => {
                 if self.poisoned.load(Ordering::Acquire) {
                     return Err(FatalDwellingError::new_err(e.to_string()));
@@ -851,7 +873,7 @@ impl PyDwelling {
                     panic_hook::panic_payload_to_string(payload)
                 )));
             }
-        }
+        };
 
         #[cfg(debug_assertions)]
         {
@@ -861,11 +883,7 @@ impl PyDwelling {
             );
         }
 
-        let dwelling = self.acquire()?;
-        let batches: Vec<_> = dwelling.flushed_batches().to_vec();
-        let steps = dwelling.results().steps.clone();
-        drop(dwelling);
-        batches_or_steps_to_polars_df(py, &batches, &steps)
+        first_memory_frame(py, &result)
     }
 
     pub fn step(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -1633,10 +1651,24 @@ impl PyDwelling {
 
     pub fn results(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dwelling = self.acquire()?;
+        // The first Memory report's flushed batches, as far as the run has
+        // got: the frame the run's reports hold. No step fallback exists
+        // (the step history is gone); a run with no Memory report names it.
         let batches: Vec<_> = dwelling.flushed_batches().to_vec();
-        let steps = dwelling.results().steps.clone();
+        let has_memory = dwelling
+            .sim_config()
+            .reports
+            .iter()
+            .any(|report| matches!(report.destination, hares_io::Destination::Memory));
         drop(dwelling);
-        batches_or_steps_to_polars_df(py, &batches, &steps)
+        if batches.is_empty() && !has_memory {
+            return Err(HaresSimulationError::new_err(
+                "no Memory report: the frame comes from a Memory report's flushed \
+                 batches, and this run's reports write to files only; add a \
+                 Destination.memory() report to SimulationConfig(reports=[...])",
+            ));
+        }
+        record_batches_to_polars_df(py, &batches)
     }
 
     /// Attaches a Python callable as the dwelling's batch callback: the
@@ -2036,7 +2068,11 @@ impl PyDwelling {
     /// Drains and returns warning messages accumulated since the previous call.
     pub fn take_warnings(&self) -> PyResult<Vec<String>> {
         let mut dwelling = self.acquire()?;
-        Ok(dwelling.take_warnings())
+        Ok(dwelling
+            .take_warnings()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect())
     }
 
     /// Injects a warning message into the dwelling's warning buffer.

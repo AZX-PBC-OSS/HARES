@@ -742,7 +742,7 @@ fn removing_an_actors_unit_evicts_it_with_a_counted_warning() {
             assert_eq!(
                 warnings
                     .iter()
-                    .filter(|w| w.contains("actor 'DR' is evicted"))
+                    .filter(|w| w.message.contains("actor 'DR' is evicted"))
                     .count(),
                 1,
                 "{context}: {warnings:?}"
@@ -794,7 +794,7 @@ fn an_actor_is_evicted_only_when_a_target_loses_its_last_unit() {
     assert!(
         warnings
             .iter()
-            .any(|w| w.contains("actor 'Two Target DR' is evicted")),
+            .any(|w| w.message.contains("actor 'Two Target DR' is evicted")),
         "{warnings:?}"
     );
     steps_without_rejections(&mut dwelling, "the end-use actor heats the backup unit");

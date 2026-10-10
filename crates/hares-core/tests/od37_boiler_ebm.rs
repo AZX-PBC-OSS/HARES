@@ -90,13 +90,19 @@ fn bldg2_january_config() -> DwellingConfig {
 #[test]
 fn the_ac_never_cools_bldg2_in_january_and_the_zone_holds_the_heating_band() {
     let mut dwelling = Dwelling::from_config(bldg2_january_config()).expect("build dwelling");
-    let results = dwelling.simulate().expect("simulate");
-    assert!(results.steps.len() >= 168, "a week at 1 h");
+    // The step history is gone: the horizon's step results are what the
+    // stepping loop itself collects.
+    let total = dwelling.clock.total_steps();
+    assert!(total >= 168, "a week at 1 h");
+    let mut steps = Vec::new();
+    for _ in 0..total {
+        steps.push(dwelling.step().expect("step"));
+    }
 
     let mut zone_min_c = f64::INFINITY;
     let mut zone_max_c = f64::NEG_INFINITY;
     let mut cooling_kwh = 0.0;
-    for step in &results.steps {
+    for step in &steps {
         for (_, temp_c) in &step.zone_temperatures_c {
             zone_min_c = zone_min_c.min(*temp_c);
             zone_max_c = zone_max_c.max(*temp_c);

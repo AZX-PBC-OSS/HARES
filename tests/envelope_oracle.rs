@@ -20,7 +20,7 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::{Duration, TimeZone};
-    use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
+    use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
 
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
@@ -389,17 +389,12 @@ mod tests {
             .run(beopt_config(csv_path.clone()))
             .expect("engine.run should succeed");
 
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "simulation failed: {:?}",
-            result.status
-        );
+        let published = result
+            .reports
+            .iter()
+            .find_map(|report| report.path().cloned());
 
-        let actual_path = result
-            .timeseries_path
-            .as_ref()
-            .cloned()
-            .unwrap_or(csv_path.clone());
+        let actual_path = published.unwrap_or(csv_path.clone());
 
         assert!(
             actual_path.exists(),

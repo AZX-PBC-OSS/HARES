@@ -22,13 +22,14 @@ pub fn run_multi_instance_check() -> Result<(), Vec<String>> {
     };
 
     match dwelling.simulate() {
-        Ok(results) => {
-            if results.steps.is_empty() {
+        Ok(_) => {
+            let stepped = dwelling.clock.current_step();
+            if stepped == 0 {
                 failures.push("multi-instance simulation produced zero steps".to_string());
             } else {
                 eprintln!(
                     "[multi_instance] PASS -- {} steps completed for multi-equipment dwelling",
-                    results.steps.len()
+                    stepped
                 );
             }
         }

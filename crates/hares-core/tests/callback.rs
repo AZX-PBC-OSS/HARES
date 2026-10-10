@@ -419,21 +419,35 @@ fn the_callback_survives_a_roster_rebuild() {
 /// telemetry is consistent with the steps that completed.
 #[test]
 fn a_panicking_rust_callback_ends_the_run_as_a_callback_error() {
-    struct Panicking;
-    impl BatchCallback for Panicking {
+    let sink: Arc<Mutex<Vec<Collected>>> = Arc::new(Mutex::new(Vec::new()));
+    struct PanickingThenCollecting {
+        sink: Arc<Mutex<Vec<Collected>>>,
+    }
+    impl BatchCallback for PanickingThenCollecting {
         fn on_batch(
             &mut self,
-            _ctx: &BatchContext<'_>,
-            _batch: &RecordBatch,
+            ctx: &BatchContext<'_>,
+            batch: &RecordBatch,
         ) -> Result<(), CallbackError> {
+            self.sink.lock().expect("sink lock").push(Collected {
+                report: ctx.report.to_string(),
+                bldg_id: ctx.bldg_id,
+                batch_index: ctx.batch_index,
+                batch: batch.clone(),
+            });
             panic!("the sink exploded");
         }
     }
 
     let run_dir = tempfile::tempdir().expect("tempdir");
     let mut run = dwelling(config(false, &run_dir.path().join("run.parquet")), 7);
-    run.attach_callback(REPORT, Box::new(Panicking))
-        .expect("the callback attaches");
+    run.attach_callback(
+        REPORT,
+        Box::new(PanickingThenCollecting {
+            sink: Arc::clone(&sink),
+        }),
+    )
+    .expect("the callback attaches");
 
     let mut steps_ok = 0;
     let err = loop {
@@ -453,13 +467,13 @@ fn a_panicking_rust_callback_ends_the_run_as_a_callback_error() {
         other => panic!("expected a callback error, got: {other:?}"),
     }
 
-    // The step the delivery failed in delivered nothing: the completed
-    // steps' results are exactly what the run holds.
-    assert_eq!(
-        run.results().steps.len(),
-        steps_ok,
-        "the failed step's result is not in the run's telemetry"
-    );
+    // The step the delivery failed in delivered nothing further to the
+    // sink: one delivery (the first batch, whose flush panicked), then the
+    // run stays ended and the sink sees nothing more.
+    let got = sink.lock().expect("sink lock");
+    assert_eq!(got.len(), 1, "one delivery, then the sink exploded");
+    assert_eq!(got[0].batch_index, 0);
+    assert!(steps_ok >= 1, "the steps before the failed flush completed");
 
     // The budget semantics: the run stays ended.
     let later = run.step().expect_err("the run stays ended");

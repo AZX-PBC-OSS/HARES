@@ -888,10 +888,13 @@ fn normal_operation_produces_no_dispatch_warnings() {
         dwelling.step().expect("step");
     }
 
-    let dispatch_warnings: Vec<&String> = dwelling
+    let dispatch_warnings: Vec<&hares_types::Warning> = dwelling
         .warnings
         .iter()
-        .filter(|w| w.contains("control target not found") || w.contains("control apply failed"))
+        .filter(|w| {
+            w.message.contains("control target not found")
+                || w.message.contains("control apply failed")
+        })
         .collect();
     assert!(
         dispatch_warnings.is_empty(),
@@ -1077,7 +1080,7 @@ fn thermostat_is_evicted_with_its_equipment() {
     assert!(
         warnings
             .iter()
-            .any(|w| w.contains("IdealThermostat") && w.contains(&heating_name)),
+            .any(|w| w.message.contains("IdealThermostat") && w.message.contains(&heating_name)),
         "the removed override is reported, got {warnings:?}"
     );
     dwelling

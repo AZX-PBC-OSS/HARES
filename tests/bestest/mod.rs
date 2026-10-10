@@ -303,13 +303,20 @@ fn run_case(case: &BestestCase) -> CaseObservation {
             .unwrap_or_else(|err| panic!("failed to load BESTEST case {}: {err}", case.id));
     eprintln!("[bestest] case={} loaded in {:?}", case.id, t0.elapsed());
     let t1 = std::time::Instant::now();
-    let results = dwelling
-        .simulate()
-        .unwrap_or_else(|err| panic!("simulation failed for BESTEST case {}: {err}", case.id));
+    // The step history is gone: the horizon's step results are what the
+    // stepping loop itself collects.
+    let total_steps = dwelling.clock.total_steps();
+    let mut steps = Vec::with_capacity(total_steps as usize);
+    for _ in 0..total_steps {
+        let step = dwelling
+            .step()
+            .unwrap_or_else(|err| panic!("simulation failed for BESTEST case {}: {err}", case.id));
+        steps.push(step);
+    }
     eprintln!(
         "[bestest] case={} simulated {} steps in {:?}",
         case.id,
-        results.steps.len(),
+        steps.len(),
         t1.elapsed()
     );
 
@@ -319,7 +326,7 @@ fn run_case(case: &BestestCase) -> CaseObservation {
     let mut heating_kwh = 0.0;
     let mut cooling_kwh = 0.0;
 
-    for step in &results.steps {
+    for step in &steps {
         for (_, temp_c) in &step.zone_temperatures_c {
             max_temp = max_temp.max(*temp_c);
             min_temp = min_temp.min(*temp_c);

@@ -22,7 +22,6 @@ fn utc_ms(instant: &str) -> i64 {
         .timestamp_millis()
 }
 
-use hares_core::SimulationResults;
 use hares_fleet::Fleet;
 use hares_fleet::aggregation::{self, AggregationResolution};
 use hares_fleet::fleet::{DwellingOutcome, SimStatus};
@@ -78,16 +77,68 @@ fn outcome(
     batch: Option<RecordBatch>,
 ) -> DwellingOutcome {
     DwellingOutcome {
-        result: SimulationResults {
-            timeseries_path: None,
-            timeseries: batch.map(|b| vec![b]),
-            metrics: Some(metrics),
-            warnings: Vec::new(),
-            status: hares_core::SimStatus::Ok,
-            elapsed: StdDuration::from_secs(1),
-        },
+        result: std::sync::Arc::new(test_run_result(metrics, batch)),
         sample_weight,
         status,
+        elapsed: StdDuration::from_secs(1),
+    }
+}
+
+fn test_run_result(
+    metrics: SimulationMetrics,
+    batch: Option<RecordBatch>,
+) -> hares_core::RunResult {
+    let reports = batch
+        .map(|b| {
+            let rows = b.num_rows();
+            hares_core::ReportResult {
+                name: "frame".to_string(),
+                output: hares_core::ReportOutput::Memory(vec![b]),
+                frequency: hares_io::Frequency::default(),
+                rows,
+                batches_delivered: 1,
+            }
+        })
+        .into_iter()
+        .collect();
+    hares_core::RunResult {
+        reports,
+        metrics: Some(hares_core::RunMetrics::from(
+            hares_io::FullSimulationMetrics {
+                metrics,
+                gas_energy: None,
+            },
+        )),
+        health: Default::default(),
+        warnings: Vec::new(),
+        warnings_dropped: 0,
+        provenance: hares_core::Provenance {
+            config: test_sim_config(),
+            bldg_id: 0,
+            site_utc_offset_s: 0,
+            equipment: Vec::new(),
+        },
+    }
+}
+
+fn test_sim_config() -> hares_io::SimulationConfig {
+    use chrono::TimeZone;
+    hares_io::SimulationConfig {
+        start_time: chrono::FixedOffset::east_opt(0)
+            .expect("UTC offset")
+            .with_ymd_and_hms(2019, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid timestamp"),
+        duration: chrono::Duration::hours(24),
+        time_res: chrono::Duration::minutes(1),
+        reports: Vec::new(),
+        diagnostics: false,
+        output_chunk_size: 10_000,
+        setpoint_deadband_c: None,
+        master_seed: 0,
+        civil_timezone: None,
+        site_location: hares_io::SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
 

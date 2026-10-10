@@ -370,7 +370,7 @@ fn ambiguous_by_name_warns_and_delivers_nothing() {
     let warnings = dwelling.take_warnings();
     let has_ambig = warnings
         .iter()
-        .any(|w| w.contains("ambiguous") && w.contains("PV"));
+        .any(|w| w.message.contains("ambiguous") && w.message.contains("PV"));
     assert!(
         has_ambig,
         "expected ambiguity warning for ByName('PV'), got: {warnings:?}"
@@ -399,7 +399,7 @@ fn single_instance_by_name_still_matches_bare_name() {
 
     let warnings = dwelling.take_warnings();
     assert!(
-        !warnings.iter().any(|w| w.contains("ambiguous")),
+        !warnings.iter().any(|w| w.message.contains("ambiguous")),
         "single-instance ByName('PV') must not produce ambiguity warning, got: {warnings:?}"
     );
 }

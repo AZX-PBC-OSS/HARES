@@ -5,7 +5,6 @@
 
 use std::hash::{Hash, Hasher};
 
-use hares_core::engine::SimStatus as CoreSimStatus;
 use hares_equipment::battery::catalog::BatteryProductId as RustBatteryProductId;
 use hares_equipment::ev::catalog::{
     EvArchetypeId as RustEvArchetypeId, VehicleId as RustVehicleId,
@@ -806,16 +805,6 @@ impl PySimStatus {
             }
         }
         hasher.finish()
-    }
-}
-
-impl From<CoreSimStatus> for PySimStatus {
-    fn from(status: CoreSimStatus) -> Self {
-        match status {
-            CoreSimStatus::Ok => PySimStatus::Success(None),
-            CoreSimStatus::Flagged(msg) => PySimStatus::Flagged(Some(msg)),
-            CoreSimStatus::Failed(msg) => PySimStatus::Failed(Some(msg)),
-        }
     }
 }
 

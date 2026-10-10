@@ -261,6 +261,7 @@ fn a_microwave_column_on_an_os_hpxml_building_counts_only_the_residual_mels() {
     let warnings: Vec<String> = dwelling
         .take_warnings()
         .into_iter()
+        .map(|warning| warning.to_string())
         .filter(|warning| warning.starts_with("schedule: "))
         .collect();
 
@@ -327,6 +328,7 @@ fn bldg0176775_schedule_warnings(schedule_path: &Path) -> Vec<String> {
     bldg0176775_dwelling(schedule_path)
         .take_warnings()
         .into_iter()
+        .map(|warning| warning.to_string())
         .filter(|warning| warning.starts_with("schedule: "))
         .collect()
 }

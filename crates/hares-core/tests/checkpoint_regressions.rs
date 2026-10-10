@@ -742,7 +742,14 @@ fn assert_resume_equals_continuous(
     let k = case.checkpoint_step;
     let mut continuous =
         Dwelling::from_config(resumable_dwelling_config(case)).expect("build continuous dwelling");
-    let continuous_steps = continuous.simulate().expect("continuous run").steps;
+    // The step history is gone: the horizon's step results are what the
+    // stepping loop itself collects, and finish() is the finalisation the
+    // flush (the tail batch) rides.
+    let mut continuous_steps = Vec::new();
+    for _ in 0..continuous.clock.total_steps() {
+        continuous_steps.push(continuous.step().expect("continuous run"));
+    }
+    continuous.finish().expect("continuous run finishes");
     assert!(
         continuous_steps[k..]
             .iter()
@@ -859,7 +866,10 @@ fn the_boiler_fluid_publish_marker_survives_a_checkpoint_restore() {
 
     let warnings = resumed.take_warnings();
     assert!(
-        warnings.len() == 1 && warnings[0].contains("the fluid domain published no payload"),
+        warnings.len() == 1
+            && warnings[0]
+                .message
+                .contains("the fluid domain published no payload"),
         "the resumed run must warn on the starved payload exactly once: {warnings:?}"
     );
     assert_eq!(

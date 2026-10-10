@@ -40,7 +40,7 @@
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
-use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
+use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
 use hares_equipment::{Equipment, EvConfig};
 
 mod common;
@@ -410,14 +410,9 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
         initialization_duration: None,
         patches: None,
     };
-    let result = SimulationEngine::new()
+    SimulationEngine::new()
         .run(config)
         .expect("engine.run should succeed");
-    assert!(
-        !matches!(result.status, SimStatus::Failed(_)),
-        "simulation failed: {:?}",
-        result.status
-    );
 
     let (charge_days, cancelled_max) = ev_charge_days_and_peak_cancelled(&csv_path, STEPS_PER_DAY);
     assert!(

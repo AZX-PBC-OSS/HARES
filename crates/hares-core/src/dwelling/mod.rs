@@ -52,7 +52,7 @@ use hares_io::output::OutputError;
 use hares_io::output::callback::{BatchCallback, CallbackAttachment};
 use hares_io::{
     Building, CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
-    DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
+    DEFROST_STATE_SUFFIX, Destination, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
     ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
     FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX, FullSimulationMetrics,
     GAS_POWER_SUFFIX, HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX,
@@ -99,6 +99,9 @@ use crate::health::{ActorTiming, ActorTimings};
 use crate::health::{RejectionGate, RunHealth, WarmupOutcome, WarmupResiduals};
 use crate::invariants::InvariantChecker;
 use crate::invariants::check_basement_lighting_foundation;
+use crate::result::{
+    EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
+};
 use crate::rng::{advance_dwelling_rng, derive_sub_rng, ev_driver_stream};
 use crate::scheduler::{ExecutionPhase, StepScheduler};
 use crate::telemetry::DwellingTelemetry;
@@ -1480,12 +1483,6 @@ pub struct StepResult {
     pub gas_power_w: f64,
 }
 
-/// Accumulated simulation outputs.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SimulationResults {
-    pub steps: Vec<StepResult>,
-}
-
 /// Internal control queue and routing logic.
 ///
 /// # Tier ordering (across priority levels)
@@ -1782,10 +1779,10 @@ impl ControlDispatcher {
 
                             if let Err(err) = eq.apply_control(&request.signal) {
                                 rejected_control_signals.record(&eq_name);
-                                warnings.push(format!(
-                                    "control apply failed for '{}' : {err}",
-                                    eq_name
-                                ));
+                                warnings.push_from(
+                                    "control",
+                                    format!("control apply failed for '{eq_name}' : {err}"),
+                                );
                             } else {
                                 any_delivered = true;
                             }
@@ -1793,10 +1790,10 @@ impl ControlDispatcher {
 
                         if !any_matched && !any_skipped {
                             rejected_control_signals.record(&format!("{end_use:?}"));
-                            warnings.push(format!(
-                                "control target not found by end-use: {:?}",
-                                end_use
-                            ));
+                            warnings.push_from(
+                                "control",
+                                format!("control target not found by end-use: {end_use:?}"),
+                            );
                         }
 
                         on_signal(&request, any_delivered, any_overwrote, any_skipped);
@@ -1845,11 +1842,17 @@ fn route_request(
                     })
                     .count();
                 if instance_count >= 2 {
-                    warnings.push(format!(
-                        "control target '{name}' is ambiguous — {instance_count} instances exist. Use ByEndUse or a qualified name like '{name} #1'"
-                    ));
+                    warnings.push_from(
+                        "control",
+                        format!(
+                            "control target '{name}' is ambiguous — {instance_count} instances exist. Use ByEndUse or a qualified name like '{name} #1'"
+                        ),
+                    );
                 } else {
-                    warnings.push(format!("control target not found by name: {name}"));
+                    warnings.push_from(
+                        "control",
+                        format!("control target not found by name: {name}"),
+                    );
                 }
             }
             delivered
@@ -1864,10 +1867,10 @@ fn route_request(
             );
             if !delivered {
                 rejected_control_signals.record(&format!("{end_use:?}"));
-                warnings.push(format!(
-                    "control target not found by end-use: {:?}",
-                    end_use
-                ));
+                warnings.push_from(
+                    "control",
+                    format!("control target not found by end-use: {end_use:?}"),
+                );
             }
             delivered
         }
@@ -1887,10 +1890,13 @@ fn apply_to_matching(
             delivered = true;
             if let Err(err) = eq.apply_control(signal) {
                 rejected_control_signals.record(&eq.descriptor().name);
-                warnings.push(format!(
-                    "control apply failed for '{}' : {err}",
-                    eq.descriptor().name
-                ));
+                warnings.push_from(
+                    "control",
+                    format!(
+                        "control apply failed for '{}' : {err}",
+                        eq.descriptor().name
+                    ),
+                );
             }
         }
     }
@@ -2429,7 +2435,10 @@ pub struct Dwelling {
     billing_summaries: Vec<BillingPeriodSummary>,
     prior_electrical_summary: ElectricalSummary,
     latest_env: EnvironmentState,
-    simulation_results: SimulationResults,
+    /// The finished run's result, `Some` from the first `finish()` on:
+    /// every later `finish()` returns the same Arc, and a step past it is
+    /// a typed error.
+    run_result: Option<Arc<RunResult>>,
     custom_domain_solvers: Vec<Box<dyn DomainSolver>>,
     /// The custom domain slot handle of each installed solver, in the
     /// same order: resolved once at installation, read every step.
@@ -3561,7 +3570,7 @@ fn build_from_blueprint_inner(
         billing_summaries: Vec::new(),
         prior_electrical_summary: ElectricalSummary::default(),
         latest_env: initial_env,
-        simulation_results: SimulationResults::default(),
+        run_result: None,
         custom_domain_solvers: Vec::new(),
         custom_solver_slots: Vec::new(),
         active_equipment_ids: HashSet::new(),
@@ -3713,8 +3722,10 @@ fn build_from_blueprint_inner(
 }
 
 impl Dwelling {
-    /// Runs the full configured horizon and returns accumulated results.
-    pub fn simulate(&mut self) -> Result<SimulationResults> {
+    /// Runs the full configured horizon and finalises the run: the one
+    /// result the caller reads, from the same finalisation path a stepped
+    /// run takes through [`Self::finish`].
+    pub fn simulate(&mut self) -> Result<Arc<RunResult>> {
         let run = self.simulate_inner();
         // A run that fails removes its partial files: nothing partial is
         // ever published under a report's target name.
@@ -3726,7 +3737,7 @@ impl Dwelling {
         run
     }
 
-    fn simulate_inner(&mut self) -> Result<SimulationResults> {
+    fn simulate_inner(&mut self) -> Result<Arc<RunResult>> {
         while self.clock.current_step() < self.clock.total_steps() {
             self.run_timestep(self.recording_enabled())?;
         }
@@ -3739,24 +3750,44 @@ impl Dwelling {
         #[cfg(feature = "profiling")]
         {
             let started = std::time::Instant::now();
-            let finalised = self.finalise_outputs();
+            let finished = self.finish();
             if self.profiling.finish.is_none() {
                 self.profiling.finish = Some(started.elapsed());
             }
-            finalised?;
+            finished
         }
         #[cfg(not(feature = "profiling"))]
-        self.finalise_outputs()?;
-
-        Ok(self.simulation_results.clone())
+        self.finish()
     }
 
-    /// The run's finalisation: the billing finalisation, the post-hoc
-    /// diagnostic checks (observe builds) and every recorder's flush,
-    /// close and publish. Idempotent: the billing finalisation is one, the
-    /// checks read accumulated observer data, and a closed recorder
-    /// re-flushes and re-publishes nothing.
-    fn finalise_outputs(&mut self) -> Result<()> {
+    /// Finalises the run: the billing close, the post-hoc diagnostic
+    /// checks, the recorders' flush, close and publish (the final partial
+    /// batch included), the run's metrics, health, warning record and
+    /// provenance, in one path — the path `simulate()` takes at the end of
+    /// the horizon and a stepped run takes at its own end. Idempotent: a
+    /// call after the first returns the first call's result, and nothing
+    /// finalises twice. A run that has stepped nothing cannot finish.
+    ///
+    /// # Errors
+    ///
+    /// `HaresError::Simulation` naming the lifecycle rule when no step has
+    /// run, or when the run ended at an earlier error (the latched cause);
+    /// a recorder or metrics failure carries its own cause.
+    pub fn finish(&mut self) -> Result<Arc<RunResult>> {
+        if let Some(result) = &self.run_result {
+            return Ok(Arc::clone(result));
+        }
+        if self.clock.current_step() == 0 {
+            return Err(HaresError::Simulation(
+                "finish() before the first step: a run with nothing stepped has nothing \
+                 to finalise; step() or simulate() first"
+                    .to_string(),
+            ));
+        }
+        if let Some(ended) = &self.terminal_error {
+            return Err(ended.clone());
+        }
+
         self.finalize_billing();
 
         // --- Post-hoc diagnostic checks on accumulated observer data ---
@@ -3771,9 +3802,8 @@ impl Dwelling {
             }
         }
 
-        // The destinations' publish point (until the finalize entry adds
-        // `finish()`, this is where today's flush ran): every file report's
-        // partial is flushed, closed and published under its target name.
+        // The destinations' publish point: every file report's partial is
+        // flushed, closed and published under its target name.
         for recorder in self.recorders.iter_mut() {
             match recorder
                 .flush_and_close()
@@ -3791,14 +3821,98 @@ impl Dwelling {
                 }
             }
         }
-        // The run's metrics, finalized from the one path: the accumulator
-        // fed per step. `None` when the run did not request them.
-        self.run_metrics = self.metrics_calculator.take().map(|calculator| {
-            calculator.finish().map_err(|err| {
-                HaresError::InvalidState(format!("metrics finalization failed: {err}"))
+        let reports: Vec<ReportResult> = self
+            .recorders
+            .iter()
+            .zip(self.reports.iter())
+            .map(|(recorder, spec)| ReportResult {
+                name: spec.name.clone(),
+                output: match recorder.destination() {
+                    Destination::Memory => {
+                        ReportOutput::Memory(recorder.flushed_batches().to_vec())
+                    }
+                    Destination::Parquet { .. } | Destination::Csv { .. } => {
+                        ReportOutput::File(spec.destination.path().cloned().unwrap_or_default())
+                    }
+                    Destination::Callback => ReportOutput::Callback,
+                },
+                frequency: spec.frequency,
+                rows: recorder.total_rows(),
+                batches_delivered: recorder.batches_built(),
             })
+            .collect();
+
+        // The run's metrics, finalized from the one path: the accumulator
+        // fed per step from the row plan's producer slots. `None` when the
+        // run did not request them.
+        let metrics = self
+            .metrics_calculator
+            .take()
+            .map(|calculator| {
+                calculator
+                    .finish()
+                    .map(RunMetrics::from)
+                    .map_err(|err| {
+                        HaresError::InvalidState(format!("metrics finalization failed: {err}"))
+                    })
+            })
+            .transpose()?;
+
+        let (warnings, warnings_dropped) = {
+            let (record, dropped) = self.warnings.run_record();
+            (record.to_vec(), dropped)
+        };
+        let provenance = self.build_provenance();
+        let health = self.health.clone();
+
+        let result = Arc::new(RunResult {
+            reports,
+            metrics,
+            health,
+            warnings,
+            warnings_dropped,
+            provenance,
         });
-        Ok(())
+        self.run_result = Some(Arc::clone(&result));
+        Ok(result)
+    }
+
+    /// The run's provenance: the validated config, the building id, the
+    /// site's UTC offset, and one equipment entry per equipment carrying
+    /// the diagnostics preamble's records (zone mapping, zone type, OCV
+    /// source and the equipment's own provenance lines). A report with the
+    /// attached batch callback records the `Destination::Callback` marker
+    /// for itself in the recorded config.
+    fn build_provenance(&self) -> Provenance {
+        let equipment = self
+            .equipment
+            .iter()
+            .map(|eq| {
+                let descriptor = eq.descriptor();
+                EquipmentProvenance {
+                    name: descriptor.name.clone(),
+                    zone: descriptor.zone,
+                    zone_type: descriptor.zone_type.clone(),
+                    ocv_source: eq.ocv_source().map(str::to_string),
+                    notes: eq.provenance_lines(),
+                }
+            })
+            .collect();
+        let mut config = self.sim_config.clone();
+        if let Some(attachment) = &self.attached_callback
+            && let Some(report) = config
+                .reports
+                .iter_mut()
+                .find(|report| report.name == *attachment.report())
+        {
+            report.destination = Destination::Callback;
+        }
+        Provenance {
+            config,
+            bldg_id: self.bldg_id,
+            site_utc_offset_s: self.clock.start_time.offset().local_minus_utc(),
+            equipment,
+        }
     }
 
     /// Runs post-hoc diagnostic checks on accumulated observer data and returns
@@ -3839,8 +3953,8 @@ impl Dwelling {
 
     /// Returns accumulated results gathered so far.
     #[must_use]
-    pub fn results(&self) -> SimulationResults {
-        self.simulation_results.clone()
+    pub fn sim_config(&self) -> &SimulationConfig {
+        &self.sim_config
     }
 
     /// Test-only hook: causes the next [`step()`](Self::step) call to panic.
@@ -3879,6 +3993,12 @@ impl Dwelling {
 
     /// Executes exactly one simulation timestep.
     /// Steps the simulation one timestep.
+    ///
+    /// # Errors
+    ///
+    /// A step after the run finished is a typed error (the finished run's
+    /// result is fixed); a step past the horizon, a latched run end, a
+    /// failed dwelling or a failing step carry their own causes.
     pub fn step(&mut self) -> Result<StepResult> {
         #[cfg(debug_assertions)]
         if self.test_panic_on_step {
@@ -3889,8 +4009,14 @@ impl Dwelling {
             !self.test_assert_panic_on_step,
             "test-induced assert failure in Dwelling::step()"
         );
-        self.run_timestep(self.recording_enabled())?;
-        Ok(self.simulation_results.steps.last().unwrap().clone())
+        if self.run_result.is_some() {
+            return Err(HaresError::Simulation(
+                "the run finished and cannot step further: the finished run's result is \
+                 fixed; read it with finish()"
+                    .to_string(),
+            ));
+        }
+        self.run_timestep(self.recording_enabled())
     }
 
     /// Queues a control signal for one equipment instance by name.
@@ -4500,10 +4626,13 @@ impl Dwelling {
         Ok(())
     }
 
-    /// Drains and returns warning messages accumulated since the previous
-    /// call. The buffer is bounded ([`WarningLog::CAPACITY`]); if messages
-    /// were dropped since the last drain, the final entry reports how many.
-    pub fn take_warnings(&mut self) -> Vec<String> {
+    /// Drains and returns the warnings accumulated since the previous
+    /// call. The drain is bounded ([`WarningLog::CAPACITY`]); if warnings
+    /// were dropped since the last drain, the final entry reports how
+    /// many. The run's own record (every warning, the first
+    /// [`WarningLog::CAPACITY`] of the run) is the finished run's
+    /// `RunResult.warnings` and is not drained by this.
+    pub fn take_warnings(&mut self) -> Vec<Warning> {
         self.warnings.take()
     }
 
@@ -4686,9 +4815,10 @@ impl Dwelling {
         self.observer_buf.as_ref()
     }
 
-    /// Pushes a warning string into the internal warning queue.
+    /// Pushes a warning string into the internal warning queue, from the
+    /// `python` source (the injected-warning surface's producer).
     pub fn push_warning(&mut self, msg: String) {
-        self.warnings.push(msg);
+        self.warnings.push_from("python", msg);
     }
 
     /// Returns the record batches the run's first `Memory` report retained
@@ -5093,8 +5223,6 @@ impl Dwelling {
                     .map(|(prev, curr)| (prev - curr).abs())
                     .fold(0.0_f64, f64::max);
 
-                self.simulation_results.steps.clear();
-
                 if max_delta < threshold_c {
                     tracing::info!(
                         iterations = iteration,
@@ -5121,8 +5249,6 @@ impl Dwelling {
 
         self.is_warming_up = false;
 
-        self.simulation_results.steps.clear();
-
         // Honest warning surface: the run proceeded without a converged
         // initial state, so the non-convergence is counted in health AND
         // pushed as a run warning naming the zones whose day-over-day
@@ -5141,11 +5267,14 @@ impl Dwelling {
         } else {
             threshold_exceeding_zones
         };
-        self.warnings.push(format!(
-            "warm-up failed to converge within {max_iter} iterations; proceeding with \
-             current thermal state; zones exceeding the {threshold_c} °C daily \
-             residual: {warned_zones:?}"
-        ));
+        self.warnings.push_from(
+            "warmup",
+            format!(
+                "warm-up failed to converge within {max_iter} iterations; proceeding with \
+                 current thermal state; zones exceeding the {threshold_c} °C daily \
+                 residual: {warned_zones:?}"
+            ),
+        );
         tracing::warn!(
             iterations = max_iter,
             "warm-up failed to converge within {} iterations; \
@@ -5334,10 +5463,13 @@ impl Dwelling {
     /// computes discarded contribution totals, pushes a warning, increments
     /// the run-total health counter, and emits a `tracing::warn!`.
     fn rollback_failed_equipment_ports(&mut self, idx: usize, err: &HaresError) {
-        self.warnings.push(format!(
-            "equipment step failed for '{}' : {err}",
-            self.equipment[idx].descriptor().name
-        ));
+        self.warnings.push_from(
+            self.equipment[idx].descriptor().name.as_ref(),
+            format!(
+                "equipment step failed for '{}' : {err}",
+                self.equipment[idx].descriptor().name
+            ),
+        );
         // self.rollback_ports holds the pre-step snapshot (from copy_into);
         // self.ports holds the polluted post-step state.
         std::mem::swap(&mut self.ports, &mut self.rollback_ports);
@@ -5369,7 +5501,16 @@ impl Dwelling {
         );
     }
 
-    fn run_timestep(&mut self, record_output: bool) -> Result<()> {
+    fn run_timestep(&mut self, record_output: bool) -> Result<StepResult> {
+        // Every warning the step's dispatch and equipment drains raise
+        // carries the step it was raised in: the step's own index.
+        self.warnings.set_step(Some(self.clock.current_step()));
+        let result = self.run_timestep_inner(record_output);
+        self.warnings.set_step(None);
+        result
+    }
+
+    fn run_timestep_inner(&mut self, record_output: bool) -> Result<StepResult> {
         if let Some(ended) = &self.terminal_error {
             return Err(HaresError::Simulation(format!(
                 "the run ended at an earlier step and cannot continue: {ended}"
@@ -6832,8 +6973,6 @@ impl Dwelling {
         self.ports.zero();
         let _ = self.clock.next();
 
-        self.simulation_results.steps.push(step_result);
-
         // Invariant: the dwelling RNG must have been consumed during this
         // timestep.  A zero-delta means run_timestep never called
         // advance_dwelling_rng, which would make checkpoint captures
@@ -6858,7 +6997,7 @@ impl Dwelling {
         #[cfg(feature = "profiling")]
         phase_clock.finish(&mut self.profiling);
 
-        Ok(())
+        Ok(step_result)
     }
 
     /// Fingerprints the frozen output state for the rejected-roster-change
@@ -9027,7 +9166,7 @@ fn cfg_gated_helper() {
             "the init warning drains at registration, got {warnings:?}"
         );
         assert!(
-            warnings[0].contains("Warner") && warnings[0].contains("init warning"),
+            warnings[0].source.as_ref() == "Warner" && warnings[0].message.contains("init warning"),
             "the init warning names the equipment: {}",
             warnings[0]
         );
@@ -9042,12 +9181,12 @@ fn cfg_gated_helper() {
             "one step warning from the third step, got {warnings:?}"
         );
         assert!(
-            warnings[0].starts_with("step 2: "),
+            warnings[0].to_string().starts_with("step 2: "),
             "the step warning carries the step index: {}",
             warnings[0]
         );
         assert!(
-            warnings[0].contains("Warner") && warnings[0].contains("step warning"),
+            warnings[0].source.as_ref() == "Warner" && warnings[0].message.contains("step warning"),
             "the step warning names the equipment: {}",
             warnings[0]
         );
@@ -9079,7 +9218,9 @@ fn cfg_gated_helper() {
             "the tariff parse warning reaches the log, got {warnings:?}"
         );
         assert!(
-            warnings[0].starts_with("tariff: test tariff parse warning"),
+            warnings[0]
+                .to_string()
+                .starts_with("tariff: test tariff parse warning"),
             "the warning is prefixed with the tariff source: {}",
             warnings[0]
         );
@@ -10148,9 +10289,9 @@ fn cfg_gated_helper() {
         );
 
         let warnings = dwelling.take_warnings();
-        let rejection = warnings
-            .iter()
-            .find(|w| w.contains("control apply failed for ") && w.contains("IdealCapacity"));
+        let rejection = warnings.iter().find(|w| {
+            w.message.contains("control apply failed for ") && w.message.contains("IdealCapacity")
+        });
         assert!(
             rejection.is_some(),
             "expected a control-apply-failed warning, got: {warnings:?}"
@@ -10201,12 +10342,12 @@ occupancy = 1.0
         .expect("write synthetic TOML");
 
         let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
-        let results = dwelling.simulate().expect("simulate");
+        dwelling.simulate().expect("simulate");
 
         assert_eq!(
-            results.steps.len(),
+            dwelling.clock.current_step(),
             10,
-            "simulate() must still accumulate in-memory step results when no report is configured"
+            "simulate() must step the configured horizon to its end"
         );
         assert!(
             dwelling.flushed_batches().is_empty(),
@@ -10467,8 +10608,12 @@ occupancy = 1.0
         );
 
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("control target not found by name"));
-        assert!(warnings[0].contains("NonExistent"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("control target not found by name")
+        );
+        assert!(warnings[0].message.contains("NonExistent"));
     }
 
     #[test]
@@ -10496,8 +10641,12 @@ occupancy = 1.0
         );
 
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("control target not found by end-use"));
-        assert!(warnings[0].contains("battery"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("control target not found by end-use")
+        );
+        assert!(warnings[0].message.contains("battery"));
     }
 
     #[test]
@@ -10525,7 +10674,7 @@ occupancy = 1.0
         );
 
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("control apply failed"));
+        assert!(warnings[0].message.contains("control apply failed"));
     }
 
     #[test]
@@ -10587,8 +10736,12 @@ occupancy = 1.0
 
         // Should not find the equipment (different custom end use)
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("control target not found by end-use"));
-        assert!(warnings[0].contains("ice_storage"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("control target not found by end-use")
+        );
+        assert!(warnings[0].message.contains("ice_storage"));
     }
 
     #[test]
@@ -10617,8 +10770,12 @@ occupancy = 1.0
         );
 
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("control target not found by end-use"));
-        assert!(warnings[0].contains("novel_equipment_type"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("control target not found by end-use")
+        );
+        assert!(warnings[0].message.contains("novel_equipment_type"));
     }
 
     #[test]
@@ -12081,7 +12238,7 @@ occupancy = 1.0
 
         // eq1 should generate a warning but eq2 should still receive the signal
         assert_eq!(warnings.len(), 1, "one warning for rejected signal");
-        assert!(warnings[0].contains("control apply failed"));
+        assert!(warnings[0].message.contains("control apply failed"));
         assert_eq!(
             equipment[1].telemetry().get(tk::LAST_POWER_KW),
             Some(7.0),
@@ -14588,6 +14745,16 @@ occupancy = 1.0
         );
     }
 
+    /// Steps the dwelling to its horizon, collecting the per-step results
+    /// (the step history is gone; the caller's loop is the accumulator).
+    fn simulate_collecting_steps(dwelling: &mut Dwelling) -> Vec<StepResult> {
+        let mut steps = Vec::new();
+        for _ in 0..dwelling.clock.total_steps() {
+            steps.push(dwelling.step().expect("step"));
+        }
+        steps
+    }
+
     fn temp_toml(tag: &str) -> (tempfile::TempDir, PathBuf) {
         crate::temp_file::temp_file(&format!("{tag}.toml"))
     }
@@ -15003,7 +15170,10 @@ occupancy = 0.0
 
         // Warning must be pushed.
         assert!(
-            dwelling.warnings.iter().any(|w| w.contains("FailingEq")),
+            dwelling
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("FailingEq")),
             "warning must contain failing equipment name; warnings: {:?}",
             dwelling.warnings
         );
@@ -15039,7 +15209,10 @@ occupancy = 0.0
             spy_observed
         );
         assert!(
-            dwelling.warnings.iter().any(|w| w.contains("FailingEq")),
+            dwelling
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("FailingEq")),
             "warning must contain failing equipment name"
         );
         assert_failed_output_not_snapshotted(&dwelling, EquipmentId(999));
@@ -15300,7 +15473,10 @@ occupancy = 0.0
 
         assert_eq!(dwelling.health.port_rollbacks, 1, "the failure is counted");
         assert!(
-            dwelling.warnings.iter().any(|w| w.contains("FlakyEq")),
+            dwelling
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("FlakyEq")),
             "the failure stays loud as a warning; warnings: {:?}",
             dwelling.warnings.iter().collect::<Vec<_>>()
         );
@@ -18345,7 +18521,7 @@ latent_gain_fraction = 0.08
             dwelling_a
                 .warnings
                 .iter()
-                .any(|w| w.contains("control apply failed for 'LoadA'")),
+                .any(|w| w.message.contains("control apply failed for 'LoadA'")),
             "every rejection stays a warning; warnings: {:?}",
             dwelling_a.warnings
         );
@@ -18457,7 +18633,7 @@ latent_gain_fraction = 0.08
         let warmup_warnings = dwelling
             .warnings
             .iter()
-            .filter(|w| w.contains("warm-up failed to converge"))
+            .filter(|w| w.message.contains("warm-up failed to converge"))
             .count();
         assert_eq!(
             warmup_warnings, 1,
@@ -19166,21 +19342,12 @@ occupancy = 1.0
             Dwelling::from_toml_config_with_reports(&toml_path_b, Some(Vec::new()))
                 .expect("build dwelling B");
 
-        let results_a = dwelling_a.simulate().expect("simulate A");
-        let results_b = dwelling_b.simulate().expect("simulate B");
+        let results_a = simulate_collecting_steps(&mut dwelling_a);
+        let results_b = simulate_collecting_steps(&mut dwelling_b);
 
-        assert_eq!(
-            results_a.steps.len(),
-            results_b.steps.len(),
-            "step counts must match"
-        );
+        assert_eq!(results_a.len(), results_b.len(), "step counts must match");
 
-        for (i, (step_a, step_b)) in results_a
-            .steps
-            .iter()
-            .zip(results_b.steps.iter())
-            .enumerate()
-        {
+        for (i, (step_a, step_b)) in results_a.iter().zip(results_b.iter()).enumerate() {
             assert_eq!(
                 step_a.zone_temperatures_c, step_b.zone_temperatures_c,
                 "zone temperatures must match at step {i}"
@@ -19240,21 +19407,12 @@ occupancy = 1.0
             Dwelling::from_toml_config_with_reports(&toml_path_b, Some(Vec::new()))
                 .expect("build dwelling B");
 
-        let results_a = dwelling_a.simulate().expect("simulate A");
-        let results_b = dwelling_b.simulate().expect("simulate B");
+        let results_a = simulate_collecting_steps(&mut dwelling_a);
+        let results_b = simulate_collecting_steps(&mut dwelling_b);
 
-        assert_eq!(
-            results_a.steps.len(),
-            results_b.steps.len(),
-            "step counts must match"
-        );
+        assert_eq!(results_a.len(), results_b.len(), "step counts must match");
 
-        for (i, (step_a, step_b)) in results_a
-            .steps
-            .iter()
-            .zip(results_b.steps.iter())
-            .enumerate()
-        {
+        for (i, (step_a, step_b)) in results_a.iter().zip(results_b.iter()).enumerate() {
             assert_eq!(
                 step_a.zone_temperatures_c, step_b.zone_temperatures_c,
                 "zone temperatures must match at step {i}"
@@ -19495,21 +19653,16 @@ occupancy = 1.0
         let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A");
         let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B");
 
-        let results_a = a.simulate().expect("simulate A");
-        let results_b = b.simulate().expect("simulate B");
+        let results_a = simulate_collecting_steps(&mut a);
+        let results_b = simulate_collecting_steps(&mut b);
 
         assert_eq!(
-            results_a.steps.len(),
-            results_b.steps.len(),
+            results_a.len(),
+            results_b.len(),
             "both dwellings must produce the same number of steps"
         );
 
-        for (i, (step_a, step_b)) in results_a
-            .steps
-            .iter()
-            .zip(results_b.steps.iter())
-            .enumerate()
-        {
+        for (i, (step_a, step_b)) in results_a.iter().zip(results_b.iter()).enumerate() {
             assert_eq!(
                 step_a.timestamp, step_b.timestamp,
                 "step {i}: timestamps must match"
@@ -19616,21 +19769,16 @@ latent_gain_fraction = 0.08
         let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A");
         let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B");
 
-        let results_a = a.simulate().expect("simulate A");
-        let results_b = b.simulate().expect("simulate B");
+        let results_a = simulate_collecting_steps(&mut a);
+        let results_b = simulate_collecting_steps(&mut b);
 
         assert_eq!(
-            results_a.steps.len(),
-            results_b.steps.len(),
+            results_a.len(),
+            results_b.len(),
             "both dwellings must produce the same number of steps"
         );
 
-        for (i, (step_a, step_b)) in results_a
-            .steps
-            .iter()
-            .zip(results_b.steps.iter())
-            .enumerate()
-        {
+        for (i, (step_a, step_b)) in results_a.iter().zip(results_b.iter()).enumerate() {
             assert_eq!(
                 step_a.timestamp, step_b.timestamp,
                 "step {i}: timestamps must match"
@@ -19691,12 +19839,12 @@ latent_gain_fraction = 0.08
         let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A (seed 42)");
         let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B (seed 99)");
 
-        let results_a = a.simulate().expect("simulate A");
-        let results_b = b.simulate().expect("simulate B");
+        let results_a = simulate_collecting_steps(&mut a);
+        let results_b = simulate_collecting_steps(&mut b);
 
         assert_eq!(
-            results_a.steps.len(),
-            results_b.steps.len(),
+            results_a.len(),
+            results_b.len(),
             "both dwellings must produce the same number of steps"
         );
 
@@ -19704,13 +19852,9 @@ latent_gain_fraction = 0.08
         // With event_probability = 0.5 and 10 independent RNG draws per
         // dwelling, the chance of two different ChaCha8Rng seeds producing
         // identical sequences is astronomically low (≈ 2^-10 < 0.1%).
-        let any_differ = results_a
-            .steps
-            .iter()
-            .zip(results_b.steps.iter())
-            .any(|(sa, sb)| {
-                (sa.net_electric_power_kw - sb.net_electric_power_kw).abs() > f64::EPSILON
-            });
+        let any_differ = results_a.iter().zip(results_b.iter()).any(|(sa, sb)| {
+            (sa.net_electric_power_kw - sb.net_electric_power_kw).abs() > f64::EPSILON
+        });
         assert!(
             any_differ,
             "different master seeds (42 vs 99) must produce different \
@@ -19788,21 +19932,16 @@ event_probability_schedule = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 
         let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A");
         let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B");
 
-        let results_a = a.simulate().expect("simulate A");
-        let results_b = b.simulate().expect("simulate B");
+        let results_a = simulate_collecting_steps(&mut a);
+        let results_b = simulate_collecting_steps(&mut b);
 
         assert_eq!(
-            results_a.steps.len(),
-            results_b.steps.len(),
+            results_a.len(),
+            results_b.len(),
             "both dwellings must produce the same number of steps"
         );
 
-        for (i, (step_a, step_b)) in results_a
-            .steps
-            .iter()
-            .zip(results_b.steps.iter())
-            .enumerate()
-        {
+        for (i, (step_a, step_b)) in results_a.iter().zip(results_b.iter()).enumerate() {
             assert_eq!(
                 step_a.timestamp, step_b.timestamp,
                 "step {i}: timestamps must match"
@@ -19893,7 +20032,7 @@ occupancy = 0.0
         // --- Uninterrupted reference run ---
         let mut ref_dwelling =
             Dwelling::from_toml_config(&toml_path_a).expect("build ref dwelling");
-        let ref_results = ref_dwelling.simulate().expect("simulate ref");
+        let ref_results = simulate_collecting_steps(&mut ref_dwelling);
 
         // --- Interrupted run: step to checkpoint, save, restore, continue ---
         let mut dwelling_a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A");
@@ -19916,7 +20055,7 @@ occupancy = 0.0
             restarted_steps.push(step);
         }
 
-        let ref_tail = &ref_results.steps[CHECKPOINT_AT_STEP as usize..];
+        let ref_tail = &ref_results[CHECKPOINT_AT_STEP as usize..];
         let compare_len = ref_tail.len().min(restarted_steps.len());
 
         assert!(

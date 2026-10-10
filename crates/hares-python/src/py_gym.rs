@@ -628,7 +628,13 @@ pub fn batch_step_py(
                 // already reports the fatal state.
                 let warnings = dwelling
                     .acquire_string()
-                    .map(|mut guard| guard.take_warnings())
+                    .map(|mut guard| {
+                        guard
+                            .take_warnings()
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect::<Vec<String>>()
+                    })
                     .unwrap_or_default();
                 info.insert("warning_count".to_string(), warnings.len() as f64);
                 match step_result {

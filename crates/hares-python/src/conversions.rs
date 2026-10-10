@@ -3,7 +3,6 @@
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDateTime;
-use hares_core::StepResult;
 use hares_fleet::{DwellingMetrics, FleetResults, SimStatus};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -11,49 +10,6 @@ use pyo3::types::PyAny;
 use pyo3::types::PyDict;
 
 use crate::py_fleet::PyFleetResults;
-
-/// Route to the IPC path when Arrow batches are available, otherwise fall back to the
-/// step-result path.
-pub fn batches_or_steps_to_polars_df(
-    py: Python<'_>,
-    batches: &[RecordBatch],
-    steps: &[StepResult],
-) -> PyResult<Py<PyAny>> {
-    if batches.is_empty() {
-        steps_to_polars_df(py, steps)
-    } else {
-        record_batches_to_polars_df(py, batches)
-    }
-}
-
-/// Convert in-memory dwelling step results to a polars `DataFrame`.
-///
-/// The Time column is the rows' naive local wall clock, the same
-/// representation the record batches' `Timestamp(Millisecond, None)`
-/// column reads back as: one convention on both paths.
-pub fn steps_to_polars_df(py: Python<'_>, steps: &[StepResult]) -> PyResult<Py<PyAny>> {
-    let mut times = Vec::with_capacity(steps.len());
-    let mut total_power_kw = Vec::with_capacity(steps.len());
-
-    for step in steps {
-        times.push(step.timestamp.and_utc().timestamp_millis());
-        total_power_kw.push(step.net_electric_power_kw);
-    }
-
-    let polars = py.import("polars")?;
-    let datetime_dtype = polars.getattr("Datetime")?.call1(("ms", py.None()))?;
-    let time_series = polars
-        .getattr("Series")?
-        .call1(("Time", times))?
-        .call_method1("cast", (datetime_dtype,))?;
-
-    let data = PyDict::new(py);
-    data.set_item("Time", time_series)?;
-    data.set_item("Total Electric Power (kW)", total_power_kw)?;
-
-    let df = polars.getattr("DataFrame")?.call1((data,))?;
-    Ok(df.unbind())
-}
 
 /// Convert one or more Arrow `RecordBatch` values into a polars `DataFrame` via Arrow IPC.
 pub fn record_batches_to_polars_df(py: Python<'_>, batches: &[RecordBatch]) -> PyResult<Py<PyAny>> {

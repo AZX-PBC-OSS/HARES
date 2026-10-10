@@ -59,10 +59,10 @@ fn base_xml_config(month: u32, time_res_s: i64) -> DwellingConfig {
 
 /// The conditioned zone's min and max over the run.
 fn conditioned_zone_range(dwelling: &mut Dwelling) -> (f64, f64) {
-    let results = dwelling.simulate().expect("simulate");
     let mut zone_min_c = f64::INFINITY;
     let mut zone_max_c = f64::NEG_INFINITY;
-    for step in &results.steps {
+    for _ in 0..dwelling.clock.total_steps() {
+        let step = dwelling.step().expect("step");
         // The conditioned zone only: the unconditioned attic's excursions
         // are not the HVAC's holding band.
         for (zone, temp_c) in &step.zone_temperatures_c {
@@ -117,9 +117,9 @@ fn cycling_path_energy_matches_the_ideal_paths_integral_over_a_week() {
     let mut energy_by_res = [0.0_f64; 2];
     for (i, time_res_s) in [60_i64, 900].into_iter().enumerate() {
         let mut dwelling = Dwelling::from_config(base_xml_config(7, time_res_s)).expect("build");
-        let results = dwelling.simulate().expect("simulate");
         let dt_hours = time_res_s as f64 / 3600.0;
-        for step in &results.steps {
+        for _ in 0..dwelling.clock.total_steps() {
+            let step = dwelling.step().expect("step");
             energy_by_res[i] += step.hvac_cooling_w / 1000.0 * dt_hours;
         }
     }

@@ -8,7 +8,6 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, FixedOffset, TimeZone};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use hares_core::{SimStatus as CoreSimStatus, SimulationResults};
 use hares_fleet::aggregation::aggregate;
 use hares_fleet::{AggregationResolution, DwellingOutcome, SimStatus};
 use hares_io::output::metrics::{
@@ -52,17 +51,51 @@ fn empty_metrics() -> SimulationMetrics {
 }
 
 fn outcome_from_batch(batch: RecordBatch, sample_weight: f64) -> DwellingOutcome {
+    let rows = batch.num_rows();
     DwellingOutcome {
-        result: SimulationResults {
-            timeseries_path: None,
-            timeseries: Some(vec![batch]),
-            metrics: Some(empty_metrics()),
+        result: Arc::new(hares_core::RunResult {
+            reports: vec![hares_core::ReportResult {
+                name: "frame".to_string(),
+                output: hares_core::ReportOutput::Memory(vec![batch]),
+                frequency: hares_io::Frequency::default(),
+                rows,
+                batches_delivered: 1,
+            }],
+            metrics: Some(hares_core::RunMetrics::from(
+                hares_io::FullSimulationMetrics {
+                    metrics: empty_metrics(),
+                    gas_energy: None,
+                },
+            )),
+            health: Default::default(),
             warnings: Vec::new(),
-            status: CoreSimStatus::Ok,
-            elapsed: StdDuration::from_secs(1),
-        },
+            warnings_dropped: 0,
+            provenance: hares_core::Provenance {
+                config: hares_io::SimulationConfig {
+                    start_time: FixedOffset::east_opt(0)
+                        .expect("UTC offset")
+                        .with_ymd_and_hms(2019, 1, 1, 0, 0, 0)
+                        .single()
+                        .expect("valid timestamp"),
+                    duration: chrono::Duration::hours(24),
+                    time_res: chrono::Duration::minutes(1),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                },
+                bldg_id: 0,
+                site_utc_offset_s: 0,
+                equipment: Vec::new(),
+            },
+        }),
         sample_weight,
         status: SimStatus::Ok,
+        elapsed: StdDuration::from_secs(1),
     }
 }
 

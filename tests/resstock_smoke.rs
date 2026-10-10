@@ -24,7 +24,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use chrono::{Duration, TimeZone};
-    use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
+    use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
     use sha2::{Digest, Sha256};
 
     fn project_root() -> PathBuf {
@@ -215,22 +215,14 @@ mod tests {
 
         let result = engine.run(config).expect("engine.run should succeed");
 
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "[{version}] {bldg_name} simulation failed: {:?}",
-            result.status
-        );
+        let metrics = result
+            .metrics
+            .as_ref()
+            .expect("a run with reports computes its metrics");
 
         eprintln!(
-            "[{version}] {bldg_name} OK — status={:?}, elapsed={:?}, energy={:.4} kWh",
-            result.status,
-            result.elapsed,
-            result
-                .metrics
-                .as_ref()
-                .expect("the run requested metrics")
-                .total_energy_kwh
-                .net_energy_kwh
+            "[{version}] {bldg_name} OK — energy={:.4} kWh",
+            metrics.total_energy_kwh.net_energy_kwh
         );
 
         // Net energy is signed by definition: consumption minus PV
@@ -239,11 +231,7 @@ mod tests {
         // physically correct, so a negative net is allowed only when
         // generation actually occurred. The gross terms are non-negative by
         // definition, and the net must equal their difference.
-        let energy = &result
-            .metrics
-            .as_ref()
-            .expect("the run requested metrics")
-            .total_energy_kwh;
+        let energy = &metrics.total_energy_kwh;
         assert!(
             energy.gross_consumption_kwh >= 0.0 && energy.gross_pv_generation_kwh >= 0.0,
             "[{version}] {bldg_name} gross energy terms must be non-negative: \
@@ -421,10 +409,6 @@ mod tests {
 
         let engine = SimulationEngine::new();
         let result = engine.run(config).expect("engine.run should succeed");
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "winter run failed: {result:?}"
-        );
 
         let data = parse_csv_columns(&csv_path);
         let outdoor = data
@@ -545,10 +529,6 @@ mod tests {
         let config = seasonal_72h_config(version, &bldg_dir, 7, 15, &csv_path);
         let engine = SimulationEngine::new();
         let result = engine.run(config).expect("engine.run should succeed");
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "{version} summer 72 h run failed: {result:?}"
-        );
 
         let cooling_kwh = result
             .metrics
@@ -583,10 +563,6 @@ mod tests {
         let config = seasonal_72h_config(version, &bldg_dir, 1, 15, &csv_path);
         let engine = SimulationEngine::new();
         let result = engine.run(config).expect("engine.run should succeed");
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "{version} winter 72 h run failed: {result:?}"
-        );
 
         let heating_kwh = result
             .metrics

@@ -15,8 +15,18 @@ WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
 @pytest.fixture(scope="session")
 def dwelling():
-    """Create a Dwelling from the committed BEopt example inputs."""
-    dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400))
+    """Create a Dwelling from the committed BEopt example inputs, with the
+    memory report the frame-reading tests read."""
+    dw = Dwelling.from_hpxml(
+        HPXML,
+        SCHEDULE,
+        WEATHER,
+        config=SimulationConfig(
+            start_time="2019-01-01T00:00:00",
+            duration=86400,
+            reports=[ReportSpec("frame", Selection.verbosity(0), Destination.memory())],
+        ),
+    )
     dw.initialize()
     return dw
 
@@ -67,20 +77,39 @@ def test_simulate_returns_dataframe(simulated_df):
     assert simulated_df.height > 0, "DataFrame should have at least one row"
 
 
-def test_results_before_simulate_returns_dataframe(dwelling):
-    """Verify results() returns DataFrame even before simulate() (empty batches fallback).
+def test_results_before_simulate_returns_empty_frame(dwelling):
+    """results() before any step returns a zero-row frame (the memory
+    report has flushed nothing yet), and a run with no memory report names
+    `reports` instead of falling back to a step frame.
 
-    Note: uses a fresh dwelling (not the simulated one) to test the pre-simulate path.
+    Note: uses a fresh dwelling (not the simulated one) to test the
+    pre-simulate path.
     """
-    fresh = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400))
+    from hares._hares import HaresSimulationError
+
+    fresh = Dwelling.from_hpxml(
+        HPXML,
+        SCHEDULE,
+        WEATHER,
+        config=SimulationConfig(
+            start_time="2019-01-01T00:00:00",
+            duration=86400,
+            reports=[ReportSpec("frame", Selection.verbosity(0), Destination.memory())],
+        ),
+    )
     df = fresh.results()
 
     assert isinstance(df, pl.DataFrame)
     assert df.height == 0, "Results before simulate should be empty"
-    assert df.width > 0, (
-        "Schema should have columns even when no rows have been produced"
+
+    no_report = Dwelling.from_hpxml(
+        HPXML,
+        SCHEDULE,
+        WEATHER,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400),
     )
-    assert "Time" in df.columns, "Schema should include a Time column"
+    with pytest.raises(HaresSimulationError, match="no Memory report"):
+        no_report.results()
 
 
 def test_results_dataframe_columns_include_time_and_power(simulated_df):

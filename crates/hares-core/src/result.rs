@@ -1,0 +1,248 @@
+//! The run's result surface: one `RunResult` per run, built by
+//! `Dwelling::finish()` — the single finalisation path `simulate()` and a
+//! stepped run share. The caller reads the result it returns: the reports'
+//! delivered outputs, the run's metrics, its health totals, its warning
+//! record and its provenance.
+
+use std::path::PathBuf;
+
+use arrow::record_batch::RecordBatch;
+use hares_io::output::metrics::{
+    EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, GasEnergyMetrics,
+    GridInteractionMetrics, PeakPowerKw, Reliability, RollingPeakKw, SimulationCoverage,
+    SimulationMetrics, TotalEnergyKwh,
+};
+use hares_io::{Frequency, SimulationConfig};
+use hares_types::{Warning, ZoneId};
+
+use crate::health::RunHealth;
+
+/// The metrics of a finished run: the full metric set, gas included
+/// (`FullSimulationMetrics` flattened — the calculator's own type stays in
+/// `hares-io`; every result surface carries this one).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunMetrics {
+    pub total_energy_kwh: TotalEnergyKwh,
+    pub peak_power_kw: PeakPowerKw,
+    pub comfort_hours: Option<f64>,
+    pub unmet_load_hours: Option<f64>,
+    /// Fraction of the gross load (consumption behind the meter) covered by
+    /// PV generation. Can exceed 1.0 when generation exceeds load (net-positive
+    /// home); 0.0 when no consumption was recorded. `None` without a PV column.
+    pub renewable_energy_fraction: Option<f64>,
+    pub grid_interaction_metrics: GridInteractionMetrics,
+    /// Envelope component loads. `None` if component gain columns not present.
+    pub envelope_loads_kwh: Option<EnvelopeComponentLoadsKwh>,
+    /// Per-equipment efficiency metrics. Always present (fields are Option).
+    pub efficiency: EfficiencyMetrics,
+    /// Fraction of rows that lacked valid setpoint data but still
+    /// accumulated envelope/HVAC/battery energy. `None` if setpoints
+    /// are not configured.
+    pub rows_with_partial_setpoint_data_fraction: Option<f64>,
+    /// Actual simulation duration in hours as computed from accumulated rows.
+    pub simulation_duration_hours: f64,
+    /// Whether the simulation period is a full calendar year.
+    pub coverage: SimulationCoverage,
+    /// Number of power-value timesteps skipped due to non-finite (NaN/Inf) values.
+    pub nan_step_count: u64,
+    /// Reliability status: `Degraded` if any power timesteps were skipped.
+    pub metrics_reliability: Reliability,
+    /// Gas energy metrics. `None` when no gas power column was present.
+    pub gas_energy: Option<GasEnergyMetrics>,
+}
+
+impl From<FullSimulationMetrics> for RunMetrics {
+    fn from(full: FullSimulationMetrics) -> Self {
+        let FullSimulationMetrics {
+            metrics:
+                SimulationMetrics {
+                    total_energy_kwh,
+                    peak_power_kw,
+                    comfort_hours,
+                    unmet_load_hours,
+                    renewable_energy_fraction,
+                    grid_interaction_metrics,
+                    envelope_loads_kwh,
+                    efficiency,
+                    rows_with_partial_setpoint_data_fraction,
+                    simulation_duration_hours,
+                    coverage,
+                    nan_step_count,
+                    metrics_reliability,
+                },
+            gas_energy,
+        } = full;
+        Self {
+            total_energy_kwh,
+            peak_power_kw,
+            comfort_hours,
+            unmet_load_hours,
+            renewable_energy_fraction,
+            grid_interaction_metrics,
+            envelope_loads_kwh,
+            efficiency,
+            rows_with_partial_setpoint_data_fraction,
+            simulation_duration_hours,
+            coverage,
+            nan_step_count,
+            metrics_reliability,
+            gas_energy,
+        }
+    }
+}
+
+impl RunMetrics {
+    /// The zeroed set: the metrics a run with reports but nothing recorded
+    /// reports, matching the pre-result surface's zeroed shape. A computed
+    /// result is never these unless the run's numbers are genuinely zero.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            total_energy_kwh: TotalEnergyKwh {
+                net_energy_kwh: 0.0,
+                gross_consumption_kwh: 0.0,
+                gross_pv_generation_kwh: 0.0,
+                per_end_use: std::collections::BTreeMap::new(),
+                duration_hours: 0.0,
+            },
+            peak_power_kw: PeakPowerKw {
+                per_end_use: std::collections::BTreeMap::new(),
+                rolling: RollingPeakKw {
+                    peak_15min_kw: 0.0,
+                    peak_30min_kw: 0.0,
+                    peak_60min_kw: 0.0,
+                },
+            },
+            comfort_hours: None,
+            unmet_load_hours: None,
+            renewable_energy_fraction: None,
+            grid_interaction_metrics: GridInteractionMetrics {
+                peak_import_kw: 0.0,
+                peak_export_kw: 0.0,
+            },
+            envelope_loads_kwh: None,
+            efficiency: EfficiencyMetrics::default(),
+            rows_with_partial_setpoint_data_fraction: None,
+            simulation_duration_hours: 0.0,
+            coverage: SimulationCoverage::PartialYear,
+            nan_step_count: 0,
+            metrics_reliability: Reliability::Reliable,
+            gas_energy: None,
+        }
+    }
+
+    /// Combined total energy: electric kWh + gas kWh equivalent.
+    #[must_use]
+    pub fn combined_total_energy_kwh(&self) -> f64 {
+        self.total_energy_kwh.net_energy_kwh
+            + self
+                .gas_energy
+                .as_ref()
+                .map_or(0.0, |g| g.total_kwh_equivalent)
+    }
+}
+
+/// One report's delivered output: what the run holds for that report.
+#[derive(Debug, Clone)]
+pub enum ReportOutput {
+    /// The report's batches, retained by the `Memory` destination.
+    Memory(Vec<RecordBatch>),
+    /// The published file path: the `Parquet` or `Csv` destination's
+    /// target, published at `finish()`.
+    File(PathBuf),
+    /// The report's batches went to the attached batch callback; nothing
+    /// is retained.
+    Callback,
+}
+
+/// One report's result as the run delivered it.
+#[derive(Debug, Clone)]
+pub struct ReportResult {
+    /// The report's name (unique within the run's config).
+    pub name: String,
+    /// What the report delivered.
+    pub output: ReportOutput,
+    /// The reporting frequency the report reduced at.
+    pub frequency: Frequency,
+    /// Rows the report recorded over the run.
+    pub rows: usize,
+    /// Batches the report built (and delivered) over the run, the final
+    /// partial batch included.
+    pub batches_delivered: u64,
+}
+
+impl ReportResult {
+    /// The report's retained batches; `None` for a file or callback report.
+    #[must_use]
+    pub fn batches(&self) -> &[RecordBatch] {
+        match &self.output {
+            ReportOutput::Memory(batches) => batches,
+            ReportOutput::File(_) | ReportOutput::Callback => &[],
+        }
+    }
+
+    /// The published file path; `None` for a memory or callback report.
+    #[must_use]
+    pub fn path(&self) -> Option<&PathBuf> {
+        match &self.output {
+            ReportOutput::File(path) => Some(path),
+            ReportOutput::Memory(_) | ReportOutput::Callback => None,
+        }
+    }
+}
+
+/// One equipment's init-time provenance: the diagnostics equipment
+/// preamble's records, one entry per equipment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EquipmentProvenance {
+    /// The equipment's instance name.
+    pub name: String,
+    /// The zone the equipment serves.
+    pub zone: Option<ZoneId>,
+    /// The HPXML location label the zone type came from, when the
+    /// equipment declares one.
+    pub zone_type: Option<String>,
+    /// OCV data provenance for battery and EV equipment; `None` for
+    /// equipment that does not use OCV tables.
+    pub ocv_source: Option<String>,
+    /// The equipment's own init-time provenance lines: scaling choices,
+    /// coefficient conventions, and other model-parameter metadata.
+    pub notes: Vec<String>,
+}
+
+/// The run's provenance: what produced it.
+#[derive(Debug, Clone)]
+pub struct Provenance {
+    /// The validated configuration the run ran under (the master seed in
+    /// effect). The entries that add fields to the config after this one
+    /// are recorded here as the config itself carries them.
+    pub config: SimulationConfig,
+    /// The building id the run ran for.
+    pub bldg_id: i64,
+    /// The site's UTC offset in seconds, from the simulation start's fixed
+    /// offset.
+    pub site_utc_offset_s: i32,
+    /// One entry per equipment, in equipment order.
+    pub equipment: Vec<EquipmentProvenance>,
+}
+
+/// One simulation run's result: the finalisation every run shares, whether
+/// it ran through `simulate()` or step by step to `finish()`.
+#[derive(Debug, Clone)]
+pub struct RunResult {
+    /// One result per configured report, in `reports` order.
+    pub reports: Vec<ReportResult>,
+    /// The run's metrics; `None` when the run declared no report (metrics
+    /// are computed from the reports' flushed batches until the metrics
+    /// entry decouples them).
+    pub metrics: Option<RunMetrics>,
+    /// The run's health totals, recorded unconditionally in every build.
+    pub health: RunHealth,
+    /// The run's warning record: the first `WarningLog::CAPACITY` warnings
+    /// of the run.
+    pub warnings: Vec<Warning>,
+    /// Warnings dropped past the record's capacity.
+    pub warnings_dropped: u64,
+    /// What produced the run.
+    pub provenance: Provenance,
+}
