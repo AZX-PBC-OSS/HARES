@@ -333,6 +333,13 @@ pub struct DwellingProfilingSummary {
     /// registered actor in registration order, filled from the dwelling's
     /// `ActorTimings` store when `profiling_summary()` is called.
     pub per_actor: Vec<ActorTiming>,
+    /// The run's finalisation time: the billing finalisation and every
+    /// recorder's flush, close and publish, timed once around the first
+    /// finalising call, outside `step_total`. `None` until that call has
+    /// run, so a summary taken mid-run never shows a zero that reads as a
+    /// measurement; a later finalising call leaves the first call's
+    /// measurement.
+    pub finish: Option<StdDuration>,
 }
 
 /// The phases of `run_timestep`, named only by the step's phase clock.
@@ -3710,6 +3717,33 @@ impl Dwelling {
         while self.clock.current_step() < self.clock.total_steps() {
             self.run_timestep(!self.reports.is_empty())?;
         }
+
+        // The finalisation is timed once, around the first finalising
+        // call, outside `step_total`: a later finalising call finalises
+        // nothing and leaves the first call's measurement, and the field
+        // stays None until then (a summary taken mid-run never shows a
+        // zero that reads as a measurement).
+        #[cfg(feature = "profiling")]
+        {
+            let started = std::time::Instant::now();
+            let finalised = self.finalise_outputs();
+            if self.profiling.finish.is_none() {
+                self.profiling.finish = Some(started.elapsed());
+            }
+            finalised?;
+        }
+        #[cfg(not(feature = "profiling"))]
+        self.finalise_outputs()?;
+
+        Ok(self.simulation_results.clone())
+    }
+
+    /// The run's finalisation: the billing finalisation, the post-hoc
+    /// diagnostic checks (observe builds) and every recorder's flush,
+    /// close and publish. Idempotent: the billing finalisation is one, the
+    /// checks read accumulated observer data, and a closed recorder
+    /// re-flushes and re-publishes nothing.
+    fn finalise_outputs(&mut self) -> Result<()> {
         self.finalize_billing();
 
         // --- Post-hoc diagnostic checks on accumulated observer data ---
@@ -3744,7 +3778,7 @@ impl Dwelling {
                 }
             }
         }
-        Ok(self.simulation_results.clone())
+        Ok(())
     }
 
     /// Runs post-hoc diagnostic checks on accumulated observer data and returns

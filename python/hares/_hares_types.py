@@ -68,9 +68,10 @@ class ProfilingSummary(TypedDict):
 
     Seconds per phase, plus the process memory high-water mark, the
     hot-path allocation counters (each ``None`` when no measurement is
-    available: the extension does not install the counting allocator), and
-    ``per_actor``: the run's per-actor totals, one entry per registered
-    actor in registration order.
+    available: the extension does not install the counting allocator),
+    ``finish_s`` (the run's finalisation time, ``None`` until the run's
+    finalising call has run), and ``per_actor``: the run's per-actor
+    totals, one entry per registered actor in registration order.
     """
 
     environment_s: float
@@ -85,6 +86,7 @@ class ProfilingSummary(TypedDict):
     output_s: float
     accounting_s: float
     step_total_s: float
+    finish_s: float | None
     memory_high_water_kb: int | None
     hot_path_allocations: int | None
     hot_path_alloc_violations: int | None

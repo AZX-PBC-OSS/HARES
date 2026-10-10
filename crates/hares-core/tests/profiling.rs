@@ -62,6 +62,56 @@ fn load_cz2a_fixture() -> Dwelling {
     Dwelling::from_config(config).expect("fixture dwelling must load")
 }
 
+/// The cz2a fixture with one Parquet report at verbosity 2, streamed to
+/// `path` (published at the run's end).
+fn load_cz2a_fixture_with_parquet(path: &std::path::Path) -> Dwelling {
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    root.push("../../tests/fixtures/parity");
+    root.push("cz2a_gas_furnace_ac_res_wh");
+
+    let config_path = root.join("config.toml");
+    let config_contents =
+        std::fs::read_to_string(&config_path).expect("fixture config.toml must be readable");
+    let config_value: toml::Value =
+        toml::from_str(&config_contents).expect("fixture config.toml must parse");
+    let sim_table = config_value
+        .get("simulation")
+        .and_then(|value| value.as_table())
+        .expect("fixture config.toml must contain [simulation]");
+    let sim_toml = toml::to_string(sim_table).expect("simulation table must serialize");
+    let mut sim_config =
+        SimulationConfig::from_toml(&sim_toml).expect("simulation config must parse");
+    sim_config.time_res = Duration::hours(1);
+    sim_config.duration = Duration::hours(96);
+    sim_config.reports = vec![hares_io::ReportSpec {
+        name: "frame".to_string(),
+        selection: hares_io::Selection::Verbosity(2),
+        frequency: hares_io::Frequency::default(),
+        destination: hares_io::Destination::Parquet {
+            path: path.to_path_buf(),
+            overwrite: false,
+        },
+    }];
+
+    let bldg_id = config_value
+        .get("bldg_id")
+        .and_then(|value| value.as_integer())
+        .unwrap_or(1);
+    let config = DwellingConfig {
+        hpxml_path: root.join("building.xml"),
+        schedule_path: Some(root.join("schedule.csv")),
+        weather_path: root.join("weather.epw"),
+        defaults_path: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")),
+        sim_config,
+        overrides: None,
+        bldg_id,
+        initialization_duration: None,
+        patches: None,
+    };
+
+    Dwelling::from_config(config).expect("fixture dwelling must load")
+}
+
 /// The phases are differences of the same `Instant` readings that bound the
 /// step, so their sum must equal `step_total` exactly (`Duration` equality,
 /// no tolerance, no timing dependence).
@@ -203,5 +253,50 @@ fn profiling_summary_reports_process_high_water_mark() {
     assert!(
         kb <= later,
         "the summary's high-water mark {kb} KiB must not exceed the later VmHWM read {later} KiB"
+    );
+}
+
+/// The finalisation is timed once, outside `step_total`: the summary's
+/// `finish` is None while the run is unfinalised, Some after the run's
+/// finalising call (the billing finalisation and the Parquet report's
+/// flush, close and publish), and a later finalising call leaves the
+/// first call's measurement. The duration's value is not asserted.
+#[test]
+fn profiling_finish_timer_covers_file_finalisation() {
+    let dir = tempfile::tempdir().expect("temp directory");
+    let parquet = dir.path().join("cz2a_frame.parquet");
+    let mut dwelling = load_cz2a_fixture_with_parquet(&parquet);
+    for _ in 0..96 {
+        dwelling.step().expect("cz2a fixture step must succeed");
+    }
+
+    let before = dwelling.profiling_summary();
+    assert!(
+        before.finish.is_none(),
+        "the summary of an unfinalised run carries no finish measurement: {before:?}"
+    );
+
+    dwelling
+        .simulate()
+        .expect("the finalising simulate completes");
+    let finish = dwelling
+        .profiling_summary()
+        .finish
+        .expect("the finalising call is timed");
+    assert!(
+        parquet.exists(),
+        "the Parquet file exists at its final name after the finalising call"
+    );
+
+    dwelling
+        .simulate()
+        .expect("a later finalising call finalises nothing");
+    let again = dwelling
+        .profiling_summary()
+        .finish
+        .expect("the measurement stays");
+    assert_eq!(
+        again, finish,
+        "the later call leaves the first call's measurement"
     );
 }

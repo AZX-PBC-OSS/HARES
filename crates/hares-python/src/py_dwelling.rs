@@ -793,6 +793,7 @@ impl PyDwelling {
             d.set_item("output_s", p.output.as_secs_f64())?;
             d.set_item("accounting_s", p.accounting.as_secs_f64())?;
             d.set_item("step_total_s", p.step_total.as_secs_f64())?;
+            d.set_item("finish_s", p.finish.map(|d| d.as_secs_f64()))?;
             d.set_item("memory_high_water_kb", p.memory_high_water_kb)?;
             d.set_item("hot_path_allocations", p.hot_path_allocations)?;
             d.set_item("hot_path_alloc_violations", p.hot_path_alloc_violations)?;
@@ -3800,6 +3801,85 @@ mod profiling_summary_tests {
                     "'{name}' declares no interests, so the filter must call decide() every step"
                 );
             }
+        });
+    }
+
+    /// The Python summary's `finish_s` is None until the run's finalising
+    /// call has run and a float after it: a summary taken mid-run never
+    /// shows a zero that reads as a measurement.
+    #[test]
+    fn profiling_summary_reports_finish() {
+        Python::attach(|py| {
+            let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            root.push("../..");
+            let fixture = root.join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
+            let defaults = root.join("defaults");
+
+            let sim_config = crate::py_config::PySimulationConfig::new(
+                "2023-01-01T00:00:00-07:00",
+                crate::py_config::WholeSeconds(96 * 3600),
+                crate::py_config::WholeSeconds(3600),
+                None,
+                false,
+                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                None,
+                0,
+                None,
+                None,
+                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                None,
+                None,
+            )
+            .expect("the sim config builds");
+
+            let mut dwelling = PyDwelling::from_hpxml(
+                &py.get_type::<PyDwelling>(),
+                fixture.join("building.xml").to_string_lossy().into_owned(),
+                Some(fixture.join("schedule.csv").to_string_lossy().into_owned()),
+                fixture.join("weather.epw").to_string_lossy().into_owned(),
+                sim_config,
+                1,
+                None,
+                Some(defaults.to_string_lossy().into_owned()),
+                None,
+                None,
+            )
+            .expect("cz2a fixture must load");
+
+            dwelling.initialize().expect("initialize must succeed");
+            for _ in 0..96 {
+                dwelling.step(py).expect("cz2a fixture step must succeed");
+            }
+
+            let finish_key = |dwelling: &PyDwelling| {
+                let summary = dwelling
+                    .profiling_summary(py)
+                    .expect("a profiling build reports a summary");
+                summary
+                    .bind(py)
+                    .get_item("finish_s")
+                    .expect("get_item must not raise")
+            };
+            assert!(
+                finish_key(&dwelling).is_none(),
+                "the summary of an unfinalised run reports finish_s as None"
+            );
+
+            // The finalising call runs on the inner dwelling: the binding's
+            // own simulate() builds the results frame after finalising,
+            // which this test's interpreter need not carry. The subject is
+            // the timer the engine sets, read here through the Python
+            // summary.
+            {
+                let mut d = dwelling
+                    .acquire()
+                    .expect("fresh dwelling must not be poisoned");
+                d.simulate().expect("the finalising simulate completes");
+            }
+            let finish = finish_key(&dwelling)
+                .extract::<f64>()
+                .expect("finish_s is a float after the finalising call");
+            assert!(finish.is_finite(), "the measurement is a float: {finish}");
         });
     }
 }
