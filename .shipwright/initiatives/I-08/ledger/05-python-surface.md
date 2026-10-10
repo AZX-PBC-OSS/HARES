@@ -805,6 +805,82 @@ changes" line names has a manifest under `tests/fixtures/golden/`);
 **Dependencies:** OR-6 (schedule: the next row), OR-12;
 `11-other-defects.md` OD-18 (row 30b, the clamped-action count).
 
+**State:** committed `46455aef` (branch `row/r43-or6-py9`, directly
+after OR-6, one commit). The surface as built: frozen pyclasses over
+the Rust types, registered on the module, exported from `hares`,
+stubbed in `_hares.pyi` — `RunResult` (`reports`, `metrics`, `health`,
+`warnings`, `warnings_dropped`, `provenance`), `ReportResult` (`name`,
+`table()` over the retained batches through the existing IPC
+conversion, `path`, `batches_delivered`, `rows`, `frequency`; `table()`
+on a file or callback report raises `HaresSimulationError` naming the
+report and its destination, never an empty table), `RunMetrics`
+(`SimulationMetrics` renamed, over the flattened `RunMetrics`; equal
+compares by value), `RunHealth` (the six counters plus `warmup`), the
+`WarmupOutcome` and `WarmupResiduals` pyclasses, `Warning`
+(`step_index`, `source`, `message`), `Provenance` (`config`,
+`bldg_id`, `site_utc_offset_s`, `equipment`) and
+`EquipmentProvenance` (`name`, `zone`, `zone_type`, `ocv_source`,
+`notes`). `Dwelling.simulate()` and `Dwelling.finish()` return the
+`RunResult` (`finish()` idempotent, the run's health live through
+`Dwelling.health()`, needing no report); `results()`, `metrics()` and
+`finalize_billing()` are deleted with the interim frame return, and
+`billing_summaries()` read after `simulate()` or `finish()` holds every
+period (`billing_summaries_survive_finish`), `dwelling_fatal` staying.
+The policy constructors are not this entry's (they land with OR-12's
+row).
+
+The wrappers finish their runs: `SimulationPlan` calls `finish()` at
+each segment's end and its frame is the first `Memory` report's
+`ReportResult.table()` (a plan whose config declares no `Memory` report
+is a `ValueError` naming the remedy, where the interim surface's
+`simulate()` named it as `HaresSimulationError`); `DwellingGymEnv`
+finishes at the truncating step and exposes `run_result` and the
+underlying `dwelling`; `VecDwellingGymEnv` finishes each dwelling at
+its truncation and exposes `run_results` and `envs`; the HELICS
+dwelling wrapper finishes after the stepping loop and exposes
+`run_result`. Every `simulate()` caller in `tests/python`, the notebook
+and the docs reads the frame from `result.reports[i].table()`.
+
+The docs' forward references made true now: `docs/python.md`'s RL
+section's "the count is exposed with the run's `RunResult`" (row 30b's
+line), its gym paragraph reading the finished `RunResult` off
+`run_result`/`run_results`/`env.dwelling`/`envs`, and row 44's
+dependency on the Python `finish()` (PR-4 times the finalisation this
+entry exposes). `docs/python.md` gains the Results section (the
+lifecycle: `initialize()` required once and cleared by
+`reset_with_seed`; `simulate()`, stepping and `finish()`; the live
+`health()`; requesting reports; the Arrow type of each column with
+units and labels read from the catalogue; `SteppableFleet` stepping
+does not rewind), its examples run as `test_docs_results_examples`, and
+the Changes in this release section listing every added, changed,
+renamed and removed name against the committed baseline
+`tests/python/fixtures/_hares_ebdb1a17.pyi` (the stub as it was at
+`ebdb1a17`, verified byte-equal to `git show
+ebdb1a17:python/ochre_next/_hares.pyi` before committing); the Numeric
+changes section pre-dates this row and keeps its standing lines.
+
+The RED, proven differentially at the OR-6 commit (the extension built
+there, the acceptance tests run against it): seven of the ten fail on
+the missing surface — `python_stepped_finish_equals_simulate`,
+`health_readable_with_no_reports_requested`,
+`health_counts_clamped_gym_actions`,
+`file_report_table_raises_naming_destination`,
+`simulation_plan_reads_run_result`, and the two stub/doc pins
+(`stub_changes_are_listed` on the missing changes section,
+`test_docs_results_examples` on the missing Results section) — while
+`billing_summaries_survive_finish` (the summaries pre-date the row),
+`stubs_cover_every_binding` (trivially: no unstubbed class exists
+either way) and `numeric_changes_name_existing_goldens` pass; GREEN:
+all ten pass with the row (1559 Python tests total).
+
+Gates at the commit: fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; `cargo nextest run --all-features
+-j 4` 7674/7674; `cargo nextest run -F dst -j 4` 7607/7607; pytest
+canonical 1559 passed, 0 failed, 0 skipped; pyright 0 errors; the
+goldens bitwise in both profiles (`frame_golden compare-all` 7
+manifests identical on the default build, `full_year_900s_dst`
+identical on the dst build).
+
 ## PY-10: the batch callback in Python
 
 **Kind:** initiative work (`dl-i08-architecture.destinations`).

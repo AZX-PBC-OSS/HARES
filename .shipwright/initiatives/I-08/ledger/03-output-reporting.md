@@ -2809,6 +2809,91 @@ R18, RL-1, RL-2 and X-4). The stepped-episode loop runs through the
 Python surface of this commit, with `reports=[]` in place of
 `write_output=False`.
 
+**State:** committed `7aa5c509` (branch `row/r43-or6-py9`, cut from
+`7e95e974`, one commit). The lifecycle as built: `Dwelling::finish()`
+is the one finalisation for every run — the billing close, the post-hoc
+diagnostics, the recorders' flush, close and publish (the final partial
+batch included), the run metrics, the health record, the warning record
+and the provenance — and `simulate()` is step-to-horizon then that same
+`finish()`. `finish()` is idempotent and returns the first call's
+`Arc`; a step past the finished run and a finish before the first step
+are typed errors.
+
+`RunResult` (`crates/hares-core/src/result.rs`, new) carries: `reports`,
+one `ReportResult` per configured report in `reports` order, each
+holding the report's name, frequency, `batches_delivered`, `rows`, and
+the delivered output (the retained batches for a `Memory` destination,
+the published path for a file, the `Callback` marker for a callback
+report; a run with the attached batch callback records
+`Destination::Callback` for that report in the recorded config, pinned
+by `provenance_records_callback_destination_marker`); `metrics`, the
+`FullSimulationMetrics` type renamed and flattened to `RunMetrics`,
+`Some` exactly when the run has at least one report; `health` (the
+OR-5 `RunHealth`, recorded in every build); the warning record and
+`warnings_dropped`; and the `Provenance` (the validated config with the
+master seed in effect, `bldg_id`, `site_utc_offset_s`, and one
+`EquipmentProvenance` per equipment: the instance name, zone mapping,
+zone type, OCV source and the equipment's own provenance lines — the
+diagnostics preamble OR-4 dropped, now carried on the result where the
+diagnostics row's consumers read it, pinned by
+`provenance_carries_equipment_zone_mapping`).
+
+The step history (`SimulationResults.steps`) is deleted: `step()`
+returns the step's own `StepResult`, computed directly, and the
+unbounded accumulation is gone. `WarningLog` stores `Warning` values in
+two bounded buffers: the run record (the first `WarningLog::CAPACITY`
+warnings of the run plus `warnings_dropped`, which becomes
+`RunResult.warnings`) and the per-drain buffer `take_warnings()`
+returns, bounded at `CAPACITY` per drain with its own dropped count, so
+the gym's per-step drain keeps receiving every warning after the run
+record is full; the dwelling's internal producers name their sources
+(control, warmup, the failing equipment's name, actors, python).
+`SimulationEngine::run` and `run_dwelling` return `Arc<RunResult>`
+through one shared finalisation; the engine's second result type
+`SimStatus`, `empty_metrics`, `finalize_run_metrics`,
+`resolved_output_path` and `compute_metrics_from_batches` are deleted,
+and typed errors reach the engine's caller unchanged (pinned by
+`engine_run_preserves_invariant_violation_type`).
+
+`hares-python` adapts internally: Python `simulate()` and `results()`
+keep returning the first `Memory` report's frame, read from the reports
+surface; a run with no `Memory` report raises `HaresSimulationError`
+naming `reports` (the step fallback frame is gone with the step
+history). The fleet's `DwellingOutcome` carries the `Arc<RunResult>`
+plus its own elapsed, and its metrics reads handle the `None` a
+no-report run has.
+
+The RED: the ten acceptance tests are
+`crates/hares-core/tests/run_result.rs`, written against the surface
+before it exists (`result.rs` is new in this commit), so the file does
+not compile against the parent; GREEN: all ten pass on the commit
+(`stepped_run_finish_equals_simulate` with `output_chunk_size = 40` so
+the last batch is partial, reports on bits, metrics on bits, health,
+warnings; `finish_before_end_flushes_partial_batch_and_billing` over 72
+h finished after 50 steps, the `Memory` report holding 50 rows and the
+billing summary covering those steps; `finish_is_idempotent_and_returns_the_same_arc`
+by `Arc::ptr_eq`; the two typed-error pins;
+`take_warnings_returns_only_new_warnings_and_run_result_keeps_all`;
+`gym_drain_sees_warnings_past_run_capacity` over 1 100 BESTEST 600
+steps, each drain exactly that step's warning, the run record the
+first 1 000 with `warnings_dropped` 100; the two provenance pins) and
+every suite that reads the old surface migrated with the row.
+
+Measurements (the commit body records them; the raw figures:
+`step()` allocates 5.00 per step against the parent's 6.01, the history
+push gone; the M-3 item 5 re-takes: 500 construct-and-simulate
+repetitions +748 kB (flat), 10^3 to 10^6 steps +8 kB (the 0.11 kB/step
+retention growth is gone), 100 stepped episodes through the Python
+surface +16 kB (flat)).
+
+Gates at the commit (run in this row's worktree, on `7aa5c509` itself):
+fmt clean; clippy `--workspace --all-targets --all-features -D
+warnings` clean; `cargo nextest run --all-features -j 4` 7674/7674;
+`cargo nextest run -F dst -j 4` 7607/7607; pytest canonical 1549
+passed, 0 failed, 0 skipped; pyright 0 errors; the goldens bitwise in
+both profiles (`frame_golden compare-all` 7 manifests identical on the
+default build, `full_year_900s_dst` identical on the dst build).
+
 ## OR-7: `Time` becomes an Arrow `Timestamp`
 
 **Kind:** initiative work.
