@@ -14,7 +14,6 @@ use hares_equipment::{
     BatteryConfig, BatteryLutType, EquipmentConfig, EquipmentRegistry, EvConfig,
     ProtocolBridgeConfig, PvConfig, config::ConfigValue,
 };
-use hares_io::output::metrics::MetricsCalculator;
 use hares_types::panic_hook::{self, PanicHookGuard};
 use hares_types::{BatteryChemistry, EvConnectionState, HaresError, SurfaceIrradiance};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
@@ -1666,59 +1665,27 @@ impl PyDwelling {
     }
 
     pub fn metrics(&self) -> PyResult<PySimulationMetrics> {
+        // The metrics are computed only when the run requested them: one
+        // path, the accumulator fed per step from the catalogue input
+        // plan. Without the request there is nothing to read.
+        if !self.config.sim_config.metrics {
+            return Err(PyValueError::new_err(
+                "metrics were not requested: pass metrics=True to SimulationConfig to have \
+                 the run compute them",
+            ));
+        }
         let dwelling = self.acquire()?;
-        let batches: Vec<_> = dwelling.flushed_batches().to_vec();
-
-        if batches.is_empty() {
-            // Name the real cause: the batches come from a `Memory` report,
-            // so a run whose reports all write to files has none even after
-            // `simulate()`, while an unrun dwelling with a `Memory` report
-            // has simply not flushed yet.
-            let has_memory = self
-                .config
-                .sim_config
-                .reports
-                .iter()
-                .any(|report| matches!(report.destination, hares_io::Destination::Memory));
-            return Err(PyValueError::new_err(if has_memory {
-                "no batches flushed yet; run simulate() first".to_string()
-            } else {
-                "no Memory report: metrics() computes from a Memory report's \
-                 flushed batches, and this run's reports write to files only; \
-                 add a Destination.memory() report to SimulationConfig(reports=[...])"
-                    .to_string()
-            }));
+        match dwelling.run_metrics_snapshot() {
+            Some(Ok(full_metrics)) => Ok(PySimulationMetrics {
+                inner: full_metrics,
+            }),
+            // A run that requested metrics and has stepped nothing has no
+            // accumulator state to read.
+            None => Err(PyValueError::new_err(
+                "no steps run yet; run simulate() (or step()) first",
+            )),
+            Some(Err(err)) => Err(PyValueError::new_err(err.to_string())),
         }
-
-        let schema = batches[0].schema();
-        let time_res_secs =
-            u32::try_from(self.config.sim_config.time_res.num_seconds()).map_err(|_| {
-                PyValueError::new_err(
-                    self.config
-                        .sim_config
-                        .time_res_secs_u32()
-                        .expect_err("the same bound validate() rejects")
-                        .to_string(),
-                )
-            })?;
-
-        let mut calculator =
-            MetricsCalculator::new(&schema, time_res_secs, &self.config.sim_config).map_err(
-                |e| PyValueError::new_err(format!("failed to create metrics calculator: {e}")),
-            )?;
-
-        for batch in &batches {
-            calculator
-                .accumulate(batch)
-                .map_err(|e| PyValueError::new_err(format!("metrics accumulation failed: {e}")))?;
-        }
-
-        let full_metrics = calculator
-            .finish()
-            .map_err(|e| PyValueError::new_err(format!("metrics finalization failed: {e}")))?;
-        Ok(PySimulationMetrics {
-            inner: full_metrics,
-        })
     }
 
     pub fn reset_with_seed(&mut self, seed: u64) -> PyResult<()> {
@@ -3700,6 +3667,7 @@ mod profiling_summary_tests {
                 crate::py_config::WholeSeconds(96 * 3600),
                 crate::py_config::WholeSeconds(3600),
                 None,
+                false,
                 false,
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,

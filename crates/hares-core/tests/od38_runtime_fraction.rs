@@ -41,6 +41,7 @@ fn base_xml_config(month: u32, time_res_s: i64) -> DwellingConfig {
             time_res: Duration::seconds(time_res_s),
             reports: Vec::new(),
             diagnostics: false,
+            metrics: false,
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,

@@ -2364,3 +2364,33 @@ per-row `parse_timestamp` (one RFC 3339 parse per home row before) is
 also gone: the fleet reads the timestamp's milliseconds and applies the
 home's metadata offset. No wall-time bench was run: the work removed is
 linear in rows and the goldens prove the outputs equal.
+### The run metrics' per-step cost with and without the request, 2026-10-10 (branch `row/r46-or8`, worktree of `7e95e974`)
+
+Criterion, `cargo bench -p hares-core --bench metrics_request` (new in
+this row; 20 samples, 2 s warm-up, 6 s measurement, this host, WSL2).
+Both sides run the same one-day two-zone model (the cz4a parity fixture,
+verbosity 2, one memory report, 96 steps of 900 s, no warm-up); the only
+difference is the metrics request.
+
+- `without`: the run requests no metrics, so no metrics code runs in the
+  step: no input plan, no accumulator, no feed. The step pays one
+  `Option` branch.
+- `with`: the accumulator is fed per step from the row plan's producer
+  slots and its arithmetic runs (the end-use and envelope reads, the
+  rolling peak window, the comfort and unmet checks).
+
+Three paired runs of the bench: without 25.1 / 21.2 / 22.7 ms per run,
+with 23.3 / 21.5 / 22.4 ms. The pair's delta flips sign across runs
+(-1.8, +0.2, -0.3 ms per run), and the run-to-run spread of the medians
+itself (about 4 ms) is an order above the deltas. The bench cannot
+resolve a per-step cost this small: 96 steps per run puts the deltas
+under 4 microseconds per step even before the noise is subtracted, and
+the honest figure is a bound, not a point estimate: the metrics feed's
+per-step cost is within this host's noise on this bench, and the share
+of `simulate()` wall time the requested metrics take is not resolvable
+here (under the noise floor on a one-day run). What the row holds is
+the structural claim: with no request no metrics code runs in the step
+(no input plan, no accumulator, no feed), proven by the code path and
+the tests (`metrics_absent_unless_requested`, the in-crate pin that the
+dwelling holds no accumulator without the request). The consumer's fit
+path later gets exactly this shape: no request, no cost.

@@ -81,7 +81,7 @@ fn outcome(
         result: SimulationResults {
             timeseries_path: None,
             timeseries: batch.map(|b| vec![b]),
-            metrics,
+            metrics: Some(metrics),
             warnings: Vec::new(),
             status: hares_core::SimStatus::Ok,
             elapsed: StdDuration::from_secs(1),

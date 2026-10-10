@@ -45,6 +45,7 @@ fn sim_config(
             destination: Destination::Memory,
         }],
         diagnostics: false,
+        metrics: false,
         output_chunk_size: chunk,
         setpoint_deadband_c: None,
         master_seed: 0,

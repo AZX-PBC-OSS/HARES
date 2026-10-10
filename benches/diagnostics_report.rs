@@ -42,6 +42,7 @@ fn cz4a_config(diagnostics: bool, output: &Path) -> DwellingConfig {
                 },
             }],
             diagnostics,
+            metrics: false,
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,

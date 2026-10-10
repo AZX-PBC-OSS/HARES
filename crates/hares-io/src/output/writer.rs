@@ -20,8 +20,6 @@ use parquet::file::properties::WriterProperties;
 use thiserror::Error;
 
 use super::callback::CallbackAttachment;
-use super::metrics::{FullSimulationMetrics, MetricsCalculator, MetricsError};
-use crate::config::SimulationConfig;
 use crate::output::report::Destination;
 use tracing;
 
@@ -45,8 +43,6 @@ pub enum OutputError {
     ColumnMismatch { expected: usize, got: usize },
     #[error("chunk_size must be > 0")]
     InvalidChunkSize,
-    #[error("metrics error: {0}")]
-    Metrics(#[from] MetricsError),
     #[error(
         "cannot publish {target}: the target exists and the report does not \
          overwrite it; set overwrite: true to replace it"
@@ -112,11 +108,6 @@ pub struct StreamingRecorder {
     backend: Option<Backend>,
     total_rows: usize,
     flushed_batches: Vec<RecordBatch>,
-    /// Incremental metrics calculator fed on every flushed batch. Attached
-    /// via [`StreamingRecorder::enable_metrics`] so streaming
-    /// (non-retaining) runs still produce run metrics at O(chunk_size)
-    /// memory. `None` when not enabled or already taken.
-    metrics_calculator: Option<MetricsCalculator>,
     /// Whether the partial file has been published (or discarded): a second
     /// close is a no-op, not a second publish.
     published: bool,
@@ -216,7 +207,6 @@ impl StreamingRecorder {
             backend: None,
             total_rows: 0,
             flushed_batches: Vec::new(),
-            metrics_calculator: None,
             published: false,
             callback: None,
             batches_built: 0,
@@ -291,10 +281,6 @@ impl StreamingRecorder {
         let batch = self.build_batch()?;
         let batch_index = self.batches_built;
         self.batches_built += 1;
-
-        if let Some(calculator) = self.metrics_calculator.as_mut() {
-            calculator.accumulate(&batch)?;
-        }
 
         self.ensure_backend()?;
         match self.backend.as_mut() {
@@ -466,40 +452,6 @@ impl StreamingRecorder {
     #[must_use]
     pub fn flushed_batches(&self) -> &[RecordBatch] {
         &self.flushed_batches
-    }
-
-    /// Attaches an incremental metrics calculator, fed on every flushed
-    /// batch.
-    ///
-    /// For streaming runs (a file destination, which retains no batches)
-    /// this is the only way run metrics remain available: flushed batches
-    /// are written to disk and dropped, so post-hoc computation from
-    /// [`Self::flushed_batches`] is impossible. The calculator sees the
-    /// same batches in the same order a post-hoc pass over retained batches
-    /// would, so both paths produce identical metrics.
-    ///
-    /// Must be called before the first row is recorded. Falls within the
-    /// same degradation contract as post-hoc metrics: callers decide how to
-    /// surface an init failure (e.g. zeroed metrics plus a warning) rather
-    /// than treating it as fatal.
-    pub fn enable_metrics(
-        &mut self,
-        time_res_secs: u32,
-        config: &SimulationConfig,
-    ) -> Result<(), MetricsError> {
-        MetricsCalculator::new(&self.schema, time_res_secs, config).map(|calculator| {
-            self.metrics_calculator = Some(calculator);
-        })
-    }
-
-    /// Takes the incrementally collected run metrics, consuming the
-    /// calculator. `None` when metrics were never enabled (or already
-    /// taken). Only meaningful after `flush_and_close` — the final partial
-    /// batch is fed at close.
-    pub fn take_metrics(&mut self) -> Option<Result<FullSimulationMetrics, MetricsError>> {
-        self.metrics_calculator
-            .take()
-            .map(MetricsCalculator::finish)
     }
 
     /// Flush remaining rows, publish the report's file, and return summary

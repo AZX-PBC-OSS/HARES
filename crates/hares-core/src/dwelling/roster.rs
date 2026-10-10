@@ -16,8 +16,8 @@ use chrono_tz::Tz;
 use hares_control::DispatchTarget;
 use hares_equipment::Equipment;
 use hares_io::{
-    Catalogue, CatalogueInput, Destination, RowPlan, Selection, StreamingRecorder, build_catalogue,
-    build_schema as build_schema_from_catalogue, build_schema_for_columns,
+    Catalogue, CatalogueInput, MetricsCalculator, RowPlan, Selection, StreamingRecorder,
+    build_catalogue, build_schema as build_schema_from_catalogue, build_schema_for_columns,
     build_schema_for_diagnostics, resolve_selection,
 };
 use hares_tariff::{ElectricTariff, TariffEvaluator};
@@ -115,7 +115,8 @@ struct PreStepRosterCaches {
 
 /// The output-pipeline part of a roster plan.
 enum OutputCachesPlan {
-    /// No report is configured: nothing to plan or install.
+    /// No report is configured and no metrics requested: nothing to plan
+    /// or install.
     Disabled,
     /// No rows recorded yet: the schema is rebuilt from the prospective
     /// roster, with the row plan, its producer bindings and one recorder
@@ -139,13 +140,15 @@ struct FrozenOutputCaches {
 
 /// The fresh-schema plan's payload: one recorder per report, the row plan
 /// and its producer bindings, and the union schema the bindings resolved
-/// against with the columns the reports promise.
+/// against with the columns the reports promise. The metrics accumulator,
+/// built when the run requested metrics, rides the same freeze.
 struct FreshOutputCaches {
     recorders: Vec<StreamingRecorder>,
     row_plan: RowPlan,
     bindings: OutputRowBindings,
     union_schema: Schema,
     expected_columns: std::collections::HashSet<String>,
+    metrics_calculator: Option<MetricsCalculator>,
 }
 
 /// Everything [`Dwelling::plan_roster_caches`] derives from a prospective
@@ -1302,12 +1305,17 @@ impl Dwelling {
             )?,
         );
 
-        let output = if self.reports.is_empty() {
+        let output = if self.reports.is_empty() && !self.sim_config.metrics {
             OutputCachesPlan::Disabled
         } else if self
             .recorders
             .first()
             .map_or(0, StreamingRecorder::total_rows)
+            .max(
+                self.metrics_calculator
+                    .as_ref()
+                    .map_or(0, |c| c.rows_fed() as usize),
+            )
             == 0
         {
             self.plan_fresh_schema(equipment, actors, &catalogue)?
@@ -1403,7 +1411,11 @@ impl Dwelling {
         // across the reports in `reports` order, each report's resolved
         // names in its own order inside its report. The producer bindings
         // bind against it; each report reads its own columns out of the
-        // union row through its projection.
+        // union row through its projection. A run that requests metrics
+        // with no reports resolves the union to the `Verbosity(0)` preset,
+        // the minimum today's output always contained: the metrics'
+        // availability is evaluated against it and the accumulator is fed
+        // from its producer slots.
         let mut union: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for names in &resolved {
@@ -1412,6 +1424,10 @@ impl Dwelling {
                     union.push(name.clone());
                 }
             }
+        }
+        if self.reports.is_empty() {
+            union = resolve_selection(&Selection::Verbosity(0), catalogue)
+                .map_err(|err| HaresError::Dwelling(err.to_string()))?;
         }
         let union_schema = build_schema_for_columns(catalogue, &union);
         let union_schema = enrich_schema_with_telemetry_units(union_schema, equipment, catalogue);
@@ -1484,44 +1500,51 @@ impl Dwelling {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?;
 
-        // Streaming runs collect run metrics incrementally at flush time;
-        // a calculator that cannot initialize fails the plan (the run's
-        // numbers are either computed or the change is refused), it does
-        // not zero the metrics behind a warning. A `Memory` destination
-        // retains its batches, and the run computes metrics post-hoc from
-        // them, so the incremental calculator rides the first file report
-        // when no memory report exists.
-        if !self
-            .reports
-            .iter()
-            .any(|report| matches!(report.destination, Destination::Memory))
-            && let Some(recorder) = recorders.first_mut()
-        {
+        // The run metrics' one path: when the run requests them, a fixed
+        // metrics input plan resolves the metrics' columns against the
+        // producer surface (the catalogue-derived union, independent of the
+        // reports' destinations), and the accumulator is fed per step from
+        // the row plan's producer slots. A plan that cannot resolve fails
+        // the freeze (the run's numbers are either computed or the run is
+        // refused); a run without the request builds no plan and no
+        // accumulator and pays nothing.
+        let metrics_calculator = if self.sim_config.metrics {
+            let available: Vec<String> = union_schema
+                .fields()
+                .iter()
+                .skip(1)
+                .map(|f| f.name().clone())
+                .collect();
             let time_res_secs = self.sim_config.time_res_secs_u32().map_err(|err| {
                 HaresError::InvalidState(format!("metrics calculator time resolution: {err}"))
             })?;
-            recorder
-                .enable_metrics(time_res_secs, &self.sim_config)
-                .map_err(|err| {
-                    // The run's metrics ride this report's columns when no
-                    // `Memory` report exists; a missing power column names
-                    // both remedies, and the refusal is the plan's: the run's
-                    // numbers are either computed or the run is refused.
+            let plan =
+                hares_io::MetricsInputPlan::build(&available, &self.sim_config).map_err(|err| {
+                    // A missing required column names the remedy: the
+                    // metrics are computed from the union of the reports'
+                    // selections, so some report must carry the column.
                     let mut message = format!("metrics calculator init failed: {err}");
                     if matches!(
                         err,
                         hares_io::output::metrics::MetricsError::MissingRequiredColumn(_)
                     ) {
                         message.push_str(
-                            "; the run's metrics are computed from the first report's own \
-                             columns when no Memory report exists: include the power column \
-                             in that report's selection (a Verbosity selection at tier 2 or \
-                             deeper carries it, or name it), or add a Memory report",
+                            "; the run requested metrics, and the metrics are computed from \
+                             the union of the reports' selections: include the power column \
+                             in a report's selection (a Verbosity selection at tier 2 or \
+                             deeper carries it, or name it)",
                         );
                     }
                     HaresError::InvalidState(message)
                 })?;
-        }
+            Some(
+                MetricsCalculator::new(plan, time_res_secs, &self.sim_config).map_err(|err| {
+                    HaresError::InvalidState(format!("metrics calculator init failed: {err}"))
+                })?,
+            )
+        } else {
+            None
+        };
         // An attached batch callback survives the rebuild: the dwelling
         // holds the attachment and hands a clone to the named report's
         // fresh recorder (the recorders are in `reports` order).
@@ -1540,6 +1563,7 @@ impl Dwelling {
             bindings,
             union_schema,
             expected_columns,
+            metrics_calculator,
         })))
     }
 
@@ -1626,12 +1650,15 @@ impl Dwelling {
         self.roster.zones = plan.zones;
 
         match plan.output {
-            OutputCachesPlan::Disabled => {}
+            OutputCachesPlan::Disabled => {
+                self.metrics_calculator = None;
+            }
             OutputCachesPlan::FrozenUpdate(frozen) => {
                 self.roster.bindings = frozen.bindings;
             }
             OutputCachesPlan::FreshSchema(fresh) => {
                 self.recorders = fresh.recorders;
+                self.metrics_calculator = fresh.metrics_calculator;
                 self.roster.row_plan = fresh.row_plan;
                 self.roster.record_projections = self.roster.row_plan.projections().to_vec();
                 self.roster.union_schema = fresh.union_schema;

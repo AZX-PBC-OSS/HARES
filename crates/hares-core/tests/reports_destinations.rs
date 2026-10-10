@@ -449,34 +449,22 @@ fn multi_report_each_destination_carries_its_own_selection() {
     }
 }
 
-/// The file-only metrics refusal names both remedies: the run's metrics
-/// ride the first file report's own columns when no `Memory` report
-/// exists, so a selection without the power column is refused at freeze
-/// with the fix stated in the message.
+/// A file-only run whose only report is a narrow selection without the
+/// power column builds: the metrics are computed only when requested, and
+/// this run does not request them. The refusal on the request path is
+/// pinned in `metrics_optional.rs`.
 #[test]
-fn metrics_refusal_on_a_file_only_run_names_the_remedy() {
+fn narrow_file_only_run_without_the_metrics_request_builds() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let target = tmp.path().join("lean.csv");
     let toml = sim_toml(&format!(
         "\n[[reports]]\nname = \"lean\"\nselection = {{ named = [\"Outdoor Dry Bulb (C)\"] }}\ndestination = {{ csv = {{ path = \"{}\", overwrite = false }} }}\n",
         target.display()
     ));
-    let err = Dwelling::from_config(dwelling_config(&toml))
-        .err()
-        .expect("a file-only run whose first report lacks the power column is refused at freeze");
-    let message = err.to_string();
-    assert!(
-        message.contains("metrics calculator init failed"),
-        "the refusal is the metrics calculator's init: {message}"
-    );
-    assert!(
-        message.contains("include the power column"),
-        "the refusal suggests the power-column remedy: {message}"
-    );
-    assert!(
-        message.contains("add a Memory report"),
-        "the refusal suggests the memory-report remedy: {message}"
-    );
+    let mut dwelling = Dwelling::from_config(dwelling_config(&toml))
+        .expect("a narrow file-only run without the metrics request builds");
+    dwelling.simulate().expect("the run completes");
+    assert!(target.exists(), "the narrow report published its file");
 }
 
 fn f64_column(batches: &[RecordBatch], name: &str) -> Vec<f64> {

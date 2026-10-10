@@ -61,6 +61,7 @@ fn sim_config(
             })
             .collect(),
         diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,

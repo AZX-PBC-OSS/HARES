@@ -40,6 +40,7 @@ fn sim_config(duration: Duration) -> SimulationConfig {
         time_res: Duration::seconds(900),
         reports: Vec::new(),
         diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,

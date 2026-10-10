@@ -228,7 +228,14 @@ fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
     }
 
     let health = serde_json::to_value(dwelling.health())?;
-    let metrics_rows = vec![flatten_metrics(&result.metrics)];
+    // The metrics product appears exactly when the run requested metrics
+    // (the manifests set `metrics = true`); a run without the request
+    // records none.
+    let metrics_rows = result
+        .metrics
+        .as_ref()
+        .map(|metrics| vec![flatten_metrics(metrics)])
+        .unwrap_or_default();
 
     Ok(RunProducts {
         kind: ManifestKind::Dwelling,
@@ -447,7 +454,8 @@ fn fleet_products(
 
     let metrics_rows = completed
         .iter()
-        .map(|outcome| flatten_metrics(&outcome.result.metrics))
+        .filter_map(|outcome| outcome.result.metrics.as_ref())
+        .map(flatten_metrics)
         .collect();
 
     Ok(RunProducts {
@@ -495,7 +503,16 @@ fn homes_frame(bldg_ids: &[i64], outcomes: &[DwellingOutcome]) -> FrameGoldenRes
     let bldg_ids: Int64Array = bldg_ids.iter().copied().collect();
     let total_energy: Float64Array = outcomes
         .iter()
-        .map(|outcome| outcome.result.metrics.total_energy_kwh.net_energy_kwh)
+        .map(|outcome| {
+            // Metrics are a per-home config request; the manifests set
+            // `metrics = true`, so every home carries them. A home without
+            // the request reads zero, the pre-decoupling reading.
+            outcome
+                .result
+                .metrics
+                .as_ref()
+                .map_or(0.0, |m| m.total_energy_kwh.net_energy_kwh)
+        })
         .collect();
     let peak_power: Float64Array = outcomes
         .iter()
@@ -503,8 +520,8 @@ fn homes_frame(bldg_ids: &[i64], outcomes: &[DwellingOutcome]) -> FrameGoldenRes
             outcome
                 .result
                 .metrics
-                .grid_interaction_metrics
-                .peak_import_kw
+                .as_ref()
+                .map_or(0.0, |m| m.grid_interaction_metrics.peak_import_kw)
         })
         .collect();
     let sample_weight: Float64Array = outcomes

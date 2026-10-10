@@ -144,6 +144,7 @@ fn simulation_config_with_frame(csv_path: PathBuf, with_frame: bool) -> Simulati
         time_res: Duration::minutes(1),
         reports,
         diagnostics: false,
+        metrics: true,
         output_chunk_size: 128,
         setpoint_deadband_c: None,
         master_seed: 0,
@@ -200,16 +201,10 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
         SimStatus::Ok | SimStatus::Flagged(_)
     ));
     assert!(result.elapsed > std::time::Duration::ZERO);
-    assert!(result.metrics.total_energy_kwh.net_energy_kwh.is_finite());
-    assert!(result.metrics.total_energy_kwh.net_energy_kwh > 0.0);
-    assert!(
-        result
-            .metrics
-            .peak_power_kw
-            .rolling
-            .peak_15min_kw
-            .is_finite()
-    );
+    let metrics = result.metrics.as_ref().expect("the run requested metrics");
+    assert!(metrics.total_energy_kwh.net_energy_kwh.is_finite());
+    assert!(metrics.total_energy_kwh.net_energy_kwh > 0.0);
+    assert!(metrics.peak_power_kw.rolling.peak_15min_kw.is_finite());
     assert!(result.timeseries.is_some());
     assert!(!result.timeseries.unwrap().is_empty());
     assert_eq!(result.timeseries_path, Some(csv_path.clone()));
@@ -296,12 +291,16 @@ fn run_with_streaming_output_computes_metrics() {
         streamed.timeseries.as_ref().is_some_and(Vec::is_empty),
         "streaming run must not retain batches"
     );
+    let streamed_metrics = streamed
+        .metrics
+        .as_ref()
+        .expect("the run requested metrics");
     assert_eq!(
-        streamed.metrics.simulation_duration_hours, 1.0,
+        streamed_metrics.simulation_duration_hours, 1.0,
         "streaming run must compute metrics (zeroed metrics report 0 hours)"
     );
     assert!(
-        streamed.metrics.total_energy_kwh.net_energy_kwh > 0.0,
+        streamed_metrics.total_energy_kwh.net_energy_kwh > 0.0,
         "streaming run must report real energy totals"
     );
     assert!(
@@ -312,11 +311,12 @@ fn run_with_streaming_output_computes_metrics() {
         streamed.status
     );
 
-    // The incremental calculator sees the same batches in the same order as
-    // a post-hoc pass over retained batches, so both paths must agree.
+    // One path: every run's accumulator is fed per step from the row
+    // plan's producer slots, so a file-only run's metrics equal a
+    // memory-report run's, on bits.
     assert_eq!(
         streamed.metrics, retained.metrics,
-        "streaming (incremental) metrics must equal retained-batch metrics"
+        "a file-only run's metrics must equal a memory-report run's metrics"
     );
 }
 
@@ -357,18 +357,26 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
         .expect("streaming run should succeed");
 
     // Envelope loads must be present and compared, not just energy totals.
+    let streamed_metrics = streamed
+        .metrics
+        .as_ref()
+        .expect("the run requested metrics");
+    let retained_metrics = retained
+        .metrics
+        .as_ref()
+        .expect("the run requested metrics");
     assert!(
-        streamed.metrics.envelope_loads_kwh.is_some(),
+        streamed_metrics.envelope_loads_kwh.is_some(),
         "verbosity 6 must produce envelope-load columns"
     );
     assert_eq!(
-        streamed.metrics.envelope_loads_kwh, retained.metrics.envelope_loads_kwh,
+        streamed_metrics.envelope_loads_kwh, retained_metrics.envelope_loads_kwh,
         "streaming and batch envelope loads must agree exactly"
     );
     assert_eq!(
-        streamed.metrics, retained.metrics,
-        "streaming (incremental) metrics must equal retained-batch metrics \
-         field-for-field, including energy totals"
+        streamed_metrics, retained_metrics,
+        "the one path's metrics must agree field-for-field, including energy \
+         totals"
     );
 }
 
@@ -406,10 +414,11 @@ fn run_with_zero_duration_is_a_validate_error() {
     );
 }
 
-/// A run with output disabled has nothing to compute metrics from; the
-/// status must say so honestly instead of misreporting a zero-step run.
+/// A run that does not request metrics carries none, and a run with no
+/// report is not flagged for it: the absence of the request is the
+/// contract, not a defect to warn about.
 #[test]
-fn run_without_output_recorder_reports_metrics_unavailable() {
+fn run_without_metrics_request_returns_none_metrics_and_ok_status() {
     let scratch = Scratch::with_inputs();
 
     let config = DwellingConfig {
@@ -418,6 +427,7 @@ fn run_without_output_recorder_reports_metrics_unavailable() {
         weather_path: scratch.weather(),
         sim_config: SimulationConfig {
             reports: Vec::new(),
+            metrics: false,
             ..simulation_config(scratch.path("output.csv"))
         },
         defaults_path: Some(repo_defaults_path()),
@@ -430,15 +440,19 @@ fn run_without_output_recorder_reports_metrics_unavailable() {
     let engine = SimulationEngine::new();
     let result = engine
         .run(config)
-        .expect("output-disabled run should succeed");
+        .expect("a run without the metrics request should succeed");
 
     assert!(
-        matches!(&result.status, SimStatus::Flagged(msg) if msg.contains("no output recorder")),
-        "output-disabled run must be flagged with the no-recorder reason, got: {:?}",
-        result.status
+        result.metrics.is_none(),
+        "a run without the metrics request carries none"
     );
-    assert_eq!(
-        result.metrics.simulation_duration_hours, 0.0,
-        "output-disabled run has no metrics source"
+    assert!(
+        !matches!(&result.status, SimStatus::Flagged(msg)
+            if msg.contains("no output recorder")
+                || msg.contains("metrics unavailable")
+                || msg.contains("zero-step")),
+        "not requesting metrics is not a flag, and a stepped run is not \
+         zero-step: got {:?}",
+        result.status
     );
 }

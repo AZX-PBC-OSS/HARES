@@ -276,6 +276,7 @@ impl PySimulationConfig {
         time_res = WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
         reports = None,
         diagnostics = false,
+        metrics = false,
         output_chunk_size = hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
         setpoint_deadband_c = None,
         master_seed = 0,
@@ -293,6 +294,7 @@ impl PySimulationConfig {
         time_res: WholeSeconds,
         reports: Option<Vec<crate::py_report::PyReportSpec>>,
         diagnostics: bool,
+        metrics: bool,
         output_chunk_size: usize,
         setpoint_deadband_c: Option<f64>,
         master_seed: u64,
@@ -342,6 +344,7 @@ impl PySimulationConfig {
                 .map(|report| report.0)
                 .collect::<Vec<ReportSpec>>(),
             diagnostics,
+            metrics,
             output_chunk_size,
             setpoint_deadband_c,
             master_seed,
@@ -433,6 +436,21 @@ impl PySimulationConfig {
     #[setter]
     pub fn set_diagnostics(&mut self, value: bool) -> PyResult<()> {
         self.assign(|cfg| cfg.diagnostics = value)
+    }
+
+    /// Whether the run requests the run metrics: a fixed metrics input
+    /// plan freezes from the catalogue and the accumulator is fed per
+    /// step. Without the request the run builds no metrics plan and no
+    /// accumulator, feeds nothing per step, and its result carries no
+    /// metrics.
+    #[getter]
+    pub fn metrics(&self) -> bool {
+        self.0.metrics
+    }
+
+    #[setter]
+    pub fn set_metrics(&mut self, value: bool) -> PyResult<()> {
+        self.assign(|cfg| cfg.metrics = value)
     }
 
     #[getter]
@@ -793,6 +811,7 @@ mod tests {
             WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
             None,
             false,
+            false,
             hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
             None,
             0,
@@ -854,6 +873,7 @@ mod tests {
                     WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
                     None,
                     false,
+                    false,
                     hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                     None,
                     0,
@@ -881,6 +901,7 @@ mod tests {
                 WholeSeconds(3600),
                 WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
                 None,
+                false,
                 false,
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
@@ -911,6 +932,7 @@ mod tests {
                 WholeSeconds(3600),
                 WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
                 None,
+                false,
                 false,
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,

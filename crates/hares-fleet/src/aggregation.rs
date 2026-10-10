@@ -253,12 +253,20 @@ pub fn aggregate(
     let per_dwelling_metrics = results
         .iter()
         .map(|outcome| DwellingMetrics {
-            total_energy_kwh: outcome.result.metrics.total_energy_kwh.net_energy_kwh,
+            // Metrics are a per-home config request (the fleet's own
+            // builders set them); a home whose config did not request
+            // them contributes zero, the same reading the pre-decoupling
+            // empty-metrics runs gave.
+            total_energy_kwh: outcome
+                .result
+                .metrics
+                .as_ref()
+                .map_or(0.0, |m| m.total_energy_kwh.net_energy_kwh),
             peak_power_kw: outcome
                 .result
                 .metrics
-                .grid_interaction_metrics
-                .peak_import_kw,
+                .as_ref()
+                .map_or(0.0, |m| m.grid_interaction_metrics.peak_import_kw),
             sample_weight: outcome.sample_weight,
             status: outcome.status.clone(),
             failed: matches!(outcome.status, SimStatus::Failed(_)),
@@ -952,7 +960,7 @@ mod tests {
             result: SimulationResults {
                 timeseries_path: None,
                 timeseries: batch.map(|b| vec![b]),
-                metrics,
+                metrics: Some(metrics),
                 warnings: Vec::new(),
                 status: hares_core::SimStatus::Ok,
                 elapsed: StdDuration::from_secs(1),
@@ -1623,7 +1631,7 @@ mod tests {
             result: SimulationResults {
                 timeseries_path: None,
                 timeseries: Some(vec![batch1, batch2]),
-                metrics: sample_metrics(10.0, 1.0),
+                metrics: Some(sample_metrics(10.0, 1.0)),
                 warnings: Vec::new(),
                 status: hares_core::SimStatus::Ok,
                 elapsed: StdDuration::from_secs(1),

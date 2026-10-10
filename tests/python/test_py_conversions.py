@@ -48,6 +48,7 @@ def fleet(tmp_path: Path):
                 ReportSpec("frame", Selection.verbosity(0), Destination.memory()),
                 ReportSpec("file", Selection.verbosity(0), Destination.csv(str(tmp_path / "fleet_bldg0000002.csv"))),
             ],
+            metrics=True,
         ),
         defaults_path=str(ROOT / "defaults"),
     )

@@ -40,7 +40,7 @@ pub use columns::{
 };
 pub use metrics::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,
-    SimulationMetrics,
+    MetricsInputPlan, SimulationMetrics,
 };
 pub use reduce::{PeriodCalendar, PeriodReducer, PeriodRow, ReduceError, TimeRule};
 pub use report::{

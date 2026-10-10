@@ -8,6 +8,7 @@ start_time = "2018-01-01T00:00:00-06:00"
 duration = 604800
 time_res = 3600
 master_seed = 0
+metrics = true
 
 [[simulation.reports]]
 name = "frame"

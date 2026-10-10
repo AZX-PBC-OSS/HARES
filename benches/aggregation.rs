@@ -56,7 +56,7 @@ fn outcome_from_batch(batch: RecordBatch, sample_weight: f64) -> DwellingOutcome
         result: SimulationResults {
             timeseries_path: None,
             timeseries: Some(vec![batch]),
-            metrics: empty_metrics(),
+            metrics: Some(empty_metrics()),
             warnings: Vec::new(),
             status: CoreSimStatus::Ok,
             elapsed: StdDuration::from_secs(1),

@@ -24,14 +24,17 @@ def _frame_report(verbosity: int) -> list[ReportSpec]:
     return [ReportSpec("frame", Selection.verbosity(verbosity), Destination.memory())]
 
 
-def _base_config(verbosity: int = 0, **extra: Any) -> SimulationConfig:
+def _base_config(verbosity: int = 0, metrics: bool = True, **extra: Any) -> SimulationConfig:
     # The verbosity memory report retains the batches metrics() reads;
-    # nothing is recorded that no report requests.
+    # nothing is recorded that no report requests. The tests read metrics,
+    # so they request them (pass metrics=False for a run that carries
+    # none).
     return SimulationConfig(
         start_time="2019-01-01T00:00:00",
         duration=3600,
         time_res=60,
         reports=_frame_report(verbosity),
+        metrics=metrics,
         **extra,
     )
 
@@ -95,10 +98,10 @@ class TestMetrics:
         assert isinstance(repr(metrics.efficiency), str)
 
     def test_metrics_before_simulate_raises(self, tmp_path):
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, reports=_frame_report(0)))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, reports=_frame_report(0), metrics=True))
         dw.initialize()
 
-        with pytest.raises(ValueError, match="no batches flushed"):
+        with pytest.raises(ValueError, match="no steps run yet"):
             dw.metrics()
 
     def test_envelope_loads_none_at_low_verbosity(self):
@@ -232,3 +235,30 @@ class TestMetrics:
             f"({annual.gross_consumption_kwh:.2f}) and net ({annual.net_energy_kwh:.2f})"
         )
         assert annual.gross_pv_generation_kwh >= 0.0
+
+    def test_metrics_none_unless_requested(self):
+        """metrics() reads the run's accumulated metrics only when the run
+        requested them: a config without metrics=True names the request,
+        one with it returns the metrics."""
+        dw = Dwelling.from_hpxml(
+            HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=0, metrics=False)
+        )
+        dw.initialize()
+        dw.simulate()
+
+        with pytest.raises(ValueError, match="metrics=True"):
+            dw.metrics()
+
+        requested = Dwelling.from_hpxml(
+            HPXML,
+            SCHEDULE,
+            WEATHER,
+            defaults_path=str(HARES_DEFAULTS),
+            config=_base_config(verbosity=0, metrics=True),
+        )
+        requested.initialize()
+        requested.simulate()
+
+        metrics = requested.metrics()
+        assert isinstance(metrics, SimulationMetrics)
+        assert metrics.total_energy_kwh.net_energy_kwh > 0

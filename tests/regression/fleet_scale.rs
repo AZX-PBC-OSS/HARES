@@ -51,6 +51,8 @@ pub fn run_fleet_scale_check() -> Result<(), Vec<String>> {
                     let total = dwelling_outcome
                         .result
                         .metrics
+                        .as_ref()
+                        .expect("the fleet requested metrics")
                         .total_energy_kwh
                         .net_energy_kwh;
                     if total <= 0.0 || !total.is_finite() {

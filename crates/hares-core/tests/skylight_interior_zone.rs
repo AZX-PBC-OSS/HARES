@@ -187,6 +187,7 @@ fn dwelling_config(hpxml_xml: &str) -> (DwellingConfig, tempfile::TempDir) {
             time_res: Duration::minutes(1),
             reports: Vec::new(),
             diagnostics: false,
+            metrics: false,
             output_chunk_size: 128,
             setpoint_deadband_c: None,
             master_seed: 0,

@@ -175,6 +175,7 @@ def make_dwelling(
     start_time: str = "2019-01-01T00:00:00",
     sim_config=None,
     csv_path: str | None = None,
+    metrics: bool = True,
     **kw,
 ):
     """Build and initialize a dwelling from the committed BEopt inputs.
@@ -183,8 +184,10 @@ def make_dwelling(
     ``verbosity`` memory report keeps the recorder's batches in memory,
     which ``results()`` and ``metrics()`` read for the full schema;
     ``csv_path`` adds a csv file destination when a test reads the file.
-    Nothing in the engine defaults a report on: nothing is recorded that
-    no report requests.
+    ``metrics`` requests the run metrics the tests read (pass
+    ``metrics=False`` for a run that must carry none). Nothing in the
+    engine defaults a report on: nothing is recorded that no report
+    requests, and no metrics are computed that were not requested.
     """
     from hares import Dwelling, SimulationConfig
 
@@ -195,6 +198,7 @@ def make_dwelling(
             time_res=time_res_s,
             master_seed=seed,
             reports=reports_for(verbosity, csv_path),
+            metrics=metrics,
         )
     dw = Dwelling.from_hpxml(
         HPXML,

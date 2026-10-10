@@ -44,8 +44,13 @@ fn resstock_fleet_runs_without_a_recorder_by_default() {
             "without a recorder no batches are flushed"
         );
         assert_eq!(
-            outcome.result.metrics.total_energy_kwh.net_energy_kwh, 0.0,
-            "without a recorder the run metrics stay empty"
+            outcome
+                .result
+                .metrics
+                .as_ref()
+                .map_or(0.0, |m| { m.total_energy_kwh.net_energy_kwh }),
+            0.0,
+            "without the metrics request the run's result carries none"
         );
     }
 }
@@ -78,7 +83,14 @@ fn with_memory_report_runs_the_recorder() {
         );
         assert!(first.num_columns() > 1, "the product columns exist");
         assert!(
-            outcome.result.metrics.total_energy_kwh.net_energy_kwh > 0.0,
+            outcome
+                .result
+                .metrics
+                .as_ref()
+                .expect("the builder requests metrics")
+                .total_energy_kwh
+                .net_energy_kwh
+                > 0.0,
             "the run metrics are computed from the recorded rows"
         );
         assert_eq!(first.num_rows(), 60, "one hour at the constructor's step");

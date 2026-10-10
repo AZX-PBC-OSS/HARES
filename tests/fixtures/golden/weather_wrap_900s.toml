@@ -7,6 +7,7 @@ start_time = "2023-12-30T00:00:00-07:00"
 duration = 345600
 time_res = 900
 master_seed = 0
+metrics = true
 
 [[simulation.reports]]
 name = "frame"

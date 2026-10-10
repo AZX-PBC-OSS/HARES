@@ -56,7 +56,7 @@ use hares_io::{
     ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
     FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX, FullSimulationMetrics,
     GAS_POWER_SUFFIX, HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX,
-    MAIN_POWER_SUFFIX, MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX, MODE_SUFFIX,
+    MAIN_POWER_SUFFIX, MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX, MODE_SUFFIX, MetricsCalculator,
     PAN_HEATER_POWER_SUFFIX, POWER_FACTOR_SUFFIX, PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX,
     PvPanelDefaults, REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
     RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL, SCHEDULE_SUFFIX,
@@ -2383,6 +2383,16 @@ pub struct Dwelling {
     /// One streaming recorder per report, in `reports` order. Empty when no
     /// report is configured: nothing is recorded and no file is written.
     pub recorders: Vec<StreamingRecorder>,
+    /// The run's metrics accumulator, present exactly when the run
+    /// requested metrics: built at the roster plan from the catalogue's
+    /// fixed metrics input plan, fed per step from the row plan's producer
+    /// slots in `record_step`. A run without the request holds `None` and
+    /// pays nothing for the metrics.
+    metrics_calculator: Option<MetricsCalculator>,
+    /// The run's finalized metrics, written once at the end of
+    /// `simulate()`: the accumulator's `finish()`. `None` before it and
+    /// whenever the run did not request metrics.
+    run_metrics: Option<std::result::Result<FullSimulationMetrics, HaresError>>,
     /// The batch callback attached through [`Dwelling::attach_callback`],
     /// the source of truth: the named report's recorder every roster plan
     /// rebuild produces while the run is fresh gets a clone, so a roster
@@ -2707,6 +2717,7 @@ impl Dwelling {
             time_res,
             reports,
             diagnostics: false,
+            metrics: false,
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,
@@ -3531,6 +3542,8 @@ fn build_from_blueprint_inner(
         consecutive_step_failures: Vec::new(),
         terminal_error: None,
         recorders: Vec::new(),
+        metrics_calculator: None,
+        run_metrics: None,
         attached_callback: None,
         roster: RosterCaches::default(),
         rng,
@@ -3715,7 +3728,7 @@ impl Dwelling {
 
     fn simulate_inner(&mut self) -> Result<SimulationResults> {
         while self.clock.current_step() < self.clock.total_steps() {
-            self.run_timestep(!self.reports.is_empty())?;
+            self.run_timestep(self.recording_enabled())?;
         }
 
         // The finalisation is timed once, around the first finalising
@@ -3778,6 +3791,13 @@ impl Dwelling {
                 }
             }
         }
+        // The run's metrics, finalized from the one path: the accumulator
+        // fed per step. `None` when the run did not request them.
+        self.run_metrics = self.metrics_calculator.take().map(|calculator| {
+            calculator.finish().map_err(|err| {
+                HaresError::InvalidState(format!("metrics finalization failed: {err}"))
+            })
+        });
         Ok(())
     }
 
@@ -3869,7 +3889,7 @@ impl Dwelling {
             !self.test_assert_panic_on_step,
             "test-induced assert failure in Dwelling::step()"
         );
-        self.run_timestep(!self.reports.is_empty())?;
+        self.run_timestep(self.recording_enabled())?;
         Ok(self.simulation_results.steps.last().unwrap().clone())
     }
 
@@ -4748,23 +4768,34 @@ impl Dwelling {
 
     /// Takes run metrics collected incrementally by a streaming recorder.
     ///
-    /// `None` when no recorder was constructed, when no metrics calculator
-    /// was attached (a `Memory` destination retains its batches, and the
-    /// run computes metrics post-hoc from [`Self::flushed_batches`]
-    /// instead), or when an attached calculator failed to initialize —
-    /// [`Self::recorded_rows`] and the dwelling warnings distinguish the
-    /// cases. The inner `Result` carries the calculator's typed error (a
-    /// non-finite accumulator) when the metrics could not be finalized.
-    pub fn take_streamed_metrics(
+    /// `None` when the run did not request metrics: no accumulator was
+    /// built and the run pays nothing for them. The inner `Result` carries
+    /// the calculator's typed error (a non-finite accumulator) when the
+    /// metrics could not be finalized.
+    pub fn take_run_metrics(
         &mut self,
     ) -> Option<std::result::Result<FullSimulationMetrics, HaresError>> {
-        let calculator = self
-            .recorders
-            .iter_mut()
-            .map(StreamingRecorder::take_metrics)
-            .find(Option::is_some)
-            .flatten();
-        calculator.map(|res| res.map_err(|e| HaresError::InvalidState(e.to_string())))
+        self.run_metrics.take()
+    }
+
+    /// The run's metrics snapshot without consuming it: the finalized
+    /// metrics once `simulate()` finished them, else a finish of the
+    /// accumulator's state so far (exact at every step). `None` when the
+    /// run did not request metrics, or when it requested them and no step
+    /// has been fed yet.
+    #[must_use]
+    pub fn run_metrics_snapshot(
+        &self,
+    ) -> Option<std::result::Result<FullSimulationMetrics, HaresError>> {
+        if let Some(finalized) = &self.run_metrics {
+            return Some(finalized.clone());
+        }
+        let calculator = self.metrics_calculator.as_ref()?;
+        (calculator.rows_fed() > 0).then(|| {
+            calculator.clone().finish().map_err(|err| {
+                HaresError::InvalidState(format!("metrics finalization failed: {err}"))
+            })
+        })
     }
 
     /// Rows written to the run's recorders over the run; `None` when no
@@ -4772,6 +4803,13 @@ impl Dwelling {
     #[must_use]
     pub fn recorded_rows(&self) -> Option<usize> {
         self.recorders.first().map(StreamingRecorder::total_rows)
+    }
+
+    /// Whether this run records output: a report is configured, or the run
+    /// requested metrics (whose accumulator is fed from the row plan's
+    /// producer slots per step).
+    fn recording_enabled(&self) -> bool {
+        !self.reports.is_empty() || self.sim_config.metrics
     }
 
     /// Populates `latest_env.equipment_core` and `latest_env.equipment_telemetry`
@@ -7156,6 +7194,15 @@ impl Dwelling {
         // of the union row, in the report's own column order. The
         // projections were copied at freeze; the union row's borrow ends
         // with the producers' writes above.
+        // The run metrics' one path: the accumulator is fed per step from
+        // the row plan's producer slots, before anything reads the row
+        // onward. `None` when the run did not request metrics: the step
+        // pays one branch and nothing else.
+        if let Some(calculator) = self.metrics_calculator.as_mut() {
+            calculator.accumulate_row(row).map_err(|err| {
+                HaresError::InvalidState(format!("metrics accumulation failed: {err}"))
+            })?;
+        }
         for (recorder, projection) in self
             .recorders
             .iter_mut()
@@ -7900,6 +7947,56 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+
+    /// The structural half of the metrics request: a dwelling built
+    /// without it holds no metrics input plan and no accumulator, and one
+    /// built with it holds the accumulator fed from the row plan's
+    /// producer slots.
+    #[test]
+    fn metrics_accumulator_present_exactly_when_requested() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let home = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
+        let build = |metrics: bool| {
+            let sim_toml = format!(
+                r#"
+start_time = "2024-02-27T00:00:00-07:00"
+duration = 86400
+time_res = 900
+metrics = {metrics}
+
+[[reports]]
+name = "frame"
+selection = {{ verbosity = 2 }}
+destination = "memory"
+"#
+            );
+            Dwelling::from_config(DwellingConfig {
+                hpxml_path: home.join("building.xml"),
+                schedule_path: Some(home.join("schedule.csv")),
+                weather_path: home.join("weather.epw"),
+                defaults_path: Some(root.join("defaults")),
+                sim_config: hares_io::SimulationConfig::from_toml(&sim_toml)
+                    .expect("sim config parses"),
+                overrides: None,
+                bldg_id: 1,
+                initialization_duration: None,
+                patches: None,
+            })
+            .expect("dwelling builds")
+        };
+
+        let without = build(false);
+        assert!(
+            without.metrics_calculator.is_none(),
+            "a run without the metrics request holds no accumulator"
+        );
+
+        let with = build(true);
+        assert!(
+            with.metrics_calculator.is_some(),
+            "a run that requests metrics holds the accumulator, built at freeze"
+        );
+    }
     use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
     use std::time::Duration;
     use syn::spanned::Spanned;

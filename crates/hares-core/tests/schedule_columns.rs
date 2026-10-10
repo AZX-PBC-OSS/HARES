@@ -99,6 +99,7 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
         time_res: Duration::seconds(time_res_s),
         reports: Vec::new(),
         diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: sim
@@ -294,6 +295,7 @@ fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
         time_res: Duration::seconds(900),
         reports: Vec::new(),
         diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,

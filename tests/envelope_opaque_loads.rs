@@ -128,6 +128,7 @@ mod tests {
                         },
                     }],
                     diagnostics: false,
+                    metrics: true,
                     output_chunk_size: 1024,
                     setpoint_deadband_c: None,
                     master_seed: 42,
@@ -146,6 +147,8 @@ mod tests {
             let result = engine.run(config).expect("engine.run should succeed");
             let envelope_loads = result
                 .metrics
+                .clone()
+                .expect("the run requested metrics")
                 .envelope_loads_kwh
                 .expect("verbosity 6 must produce envelope-load metrics");
 

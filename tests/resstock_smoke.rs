@@ -198,6 +198,7 @@ mod tests {
                     },
                 }],
                 diagnostics: false,
+                metrics: true,
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
@@ -222,7 +223,14 @@ mod tests {
 
         eprintln!(
             "[{version}] {bldg_name} OK — status={:?}, elapsed={:?}, energy={:.4} kWh",
-            result.status, result.elapsed, result.metrics.total_energy_kwh.net_energy_kwh
+            result.status,
+            result.elapsed,
+            result
+                .metrics
+                .as_ref()
+                .expect("the run requested metrics")
+                .total_energy_kwh
+                .net_energy_kwh
         );
 
         // Net energy is signed by definition: consumption minus PV
@@ -231,7 +239,11 @@ mod tests {
         // physically correct, so a negative net is allowed only when
         // generation actually occurred. The gross terms are non-negative by
         // definition, and the net must equal their difference.
-        let energy = &result.metrics.total_energy_kwh;
+        let energy = &result
+            .metrics
+            .as_ref()
+            .expect("the run requested metrics")
+            .total_energy_kwh;
         assert!(
             energy.gross_consumption_kwh >= 0.0 && energy.gross_pv_generation_kwh >= 0.0,
             "[{version}] {bldg_name} gross energy terms must be non-negative: \
@@ -392,6 +404,7 @@ mod tests {
                     },
                 }],
                 diagnostics: false,
+                metrics: true,
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
@@ -455,7 +468,12 @@ mod tests {
         // The cooling end use equals the crankcase heater's energy: the AC is
         // the fixture's only cooling equipment, so the two books reconcile.
         let crankcase_energy_kwh = (below_threshold_steps as f64) * RATED_CRANKCASE_KW * STEP_HOURS;
-        let cooling_kwh = result.metrics.total_energy_kwh.per_end_use["hvac_cooling"];
+        let cooling_kwh = result
+            .metrics
+            .as_ref()
+            .expect("the run requested metrics")
+            .total_energy_kwh
+            .per_end_use["hvac_cooling"];
         assert!(
             (cooling_kwh - crankcase_energy_kwh).abs() < 1e-9,
             "hvac_cooling {cooling_kwh} kWh must equal the crankcase heater's \
@@ -496,6 +514,7 @@ mod tests {
                     },
                 }],
                 diagnostics: false,
+                metrics: true,
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
@@ -531,7 +550,12 @@ mod tests {
             "{version} summer 72 h run failed: {result:?}"
         );
 
-        let cooling_kwh = result.metrics.total_energy_kwh.per_end_use["hvac_cooling"];
+        let cooling_kwh = result
+            .metrics
+            .as_ref()
+            .expect("the run requested metrics")
+            .total_energy_kwh
+            .per_end_use["hvac_cooling"];
         eprintln!("[{version}] summer_72h hvac_cooling: {cooling_kwh:.3} kWh");
         assert!(
             cooling_kwh > 0.0,
@@ -564,7 +588,12 @@ mod tests {
             "{version} winter 72 h run failed: {result:?}"
         );
 
-        let heating_kwh = result.metrics.total_energy_kwh.per_end_use["hvac_heating"];
+        let heating_kwh = result
+            .metrics
+            .as_ref()
+            .expect("the run requested metrics")
+            .total_energy_kwh
+            .per_end_use["hvac_heating"];
         eprintln!("[{version}] winter_72h hvac_heating: {heating_kwh:.3} kWh");
         assert!(
             heating_kwh > 0.0,

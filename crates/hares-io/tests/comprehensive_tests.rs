@@ -23,7 +23,7 @@ use chrono::Duration;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use tempfile::tempdir;
 
-use hares_io::output::metrics::MetricsCalculator;
+use hares_io::output::metrics::{MetricsCalculator, MetricsInputPlan};
 use hares_io::{
     ColumnMapper, Destination, ResStockError, ResStockVersion, SimulationConfig,
     build_schema_for_specs, expected_columns_at_verbosity, parse_resstock_metadata,
@@ -45,6 +45,7 @@ fn test_config(deadband: Option<f64>) -> SimulationConfig {
         time_res: Duration::hours(1),
         reports: Vec::new(),
         diagnostics: false,
+        metrics: false,
         output_chunk_size: 16,
         master_seed: 0,
         setpoint_deadband_c: deadband,
@@ -92,6 +93,49 @@ fn build_batch(columns: Vec<(&str, Vec<f64>)>) -> RecordBatch {
     RecordBatch::try_new(schema, arrays).expect("record batch")
 }
 
+/// The metrics input plan for a test schema: the schema's value-column
+/// names in order (a leading `Time` column skipped, the union-schema
+/// convention).
+fn plan_for(schema: &Schema, config: &SimulationConfig) -> MetricsInputPlan {
+    let names: Vec<String> = schema
+        .fields()
+        .iter()
+        .skip(usize::from(
+            schema.fields().first().is_some_and(|f| f.name() == "Time"),
+        ))
+        .map(|f| f.name().clone())
+        .collect();
+    MetricsInputPlan::build(&names, config).expect("metrics plan builds")
+}
+
+/// The calculator for a test schema.
+fn calc_for(schema: &Schema, time_res_secs: u32, config: &SimulationConfig) -> MetricsCalculator {
+    MetricsCalculator::new(plan_for(schema, config), time_res_secs, config)
+        .expect("calculator builds")
+}
+
+/// Feeds every row of the batch, in order: the same values the producer
+/// row carried, one `accumulate_row` per row.
+fn accumulate(
+    calc: &mut MetricsCalculator,
+    batch: &RecordBatch,
+) -> Result<(), hares_io::output::metrics::MetricsError> {
+    for r in 0..batch.num_rows() {
+        let row: Vec<f64> = batch
+            .columns()
+            .iter()
+            .map(|c| {
+                c.as_any()
+                    .downcast_ref::<Float64Array>()
+                    .expect("f64 column")
+                    .value(r)
+            })
+            .collect();
+        calc.accumulate_row(&row)?;
+    }
+    Ok(())
+}
+
 fn write_parquet(path: &Path, batch: &RecordBatch) {
     let file = std::fs::File::create(path).expect("create parquet");
     let mut writer = ArrowWriter::try_new(file, batch.schema(), None).expect("writer");
@@ -106,10 +150,16 @@ fn write_parquet(path: &Path, batch: &RecordBatch) {
 #[test]
 fn build_schema_output_accepted_by_metrics_calculator_verbosity_0() {
     let schema = build_schema_for_specs(&[], 0, &[]);
-    let result = MetricsCalculator::new(&schema, 3600, &test_config(None));
+    let names: Vec<String> = schema
+        .fields()
+        .iter()
+        .skip(1)
+        .map(|f| f.name().clone())
+        .collect();
+    let result = MetricsInputPlan::build(&names, &test_config(None));
     assert!(
         result.is_ok(),
-        "MetricsCalculator::new must accept build_schema([], 0, &[]) output: {:?}",
+        "MetricsInputPlan::build must accept build_schema([], 0, &[]) output: {:?}",
         result.err()
     );
 }
@@ -121,10 +171,16 @@ fn build_schema_output_accepted_by_metrics_calculator_verbosity_1() {
         make_spec("Gas Furnace", FuelType::Gas),
     ];
     let schema = build_schema_for_specs(&specs, 1, &[]);
-    let result = MetricsCalculator::new(&schema, 3600, &test_config(None));
+    let names: Vec<String> = schema
+        .fields()
+        .iter()
+        .skip(1)
+        .map(|f| f.name().clone())
+        .collect();
+    let result = MetricsInputPlan::build(&names, &test_config(None));
     assert!(
         result.is_ok(),
-        "MetricsCalculator::new must accept build_schema(specs, 1, &[]) output: {:?}",
+        "MetricsInputPlan::build must accept build_schema(specs, 1, &[]) output: {:?}",
         result.err()
     );
 }
@@ -138,10 +194,16 @@ fn build_schema_output_accepted_by_metrics_calculator_all_verbosity_levels() {
     ];
     for v in 0..=8 {
         let schema = build_schema_for_specs(&specs, v, &[]);
-        let result = MetricsCalculator::new(&schema, 3600, &test_config(None));
+        let names: Vec<String> = schema
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|f| f.name().clone())
+            .collect();
+        let result = MetricsInputPlan::build(&names, &test_config(None));
         assert!(
             result.is_ok(),
-            "MetricsCalculator::new must accept build_schema output at verbosity {v}: {:?}",
+            "MetricsInputPlan::build must accept build_schema output at verbosity {v}: {:?}",
             result.err()
         );
     }
@@ -319,11 +381,14 @@ fn verbosity_8_includes_capacity_and_cop_columns() {
 fn gas_annual_energy_therms_is_non_none_with_gas_column() {
     let schema =
         schema_from_columns(&["Total Electric Power (kW)", "Total Gas Power (therms/hour)"]);
-    let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-    calc.accumulate(&build_batch(vec![
-        ("Total Electric Power (kW)", vec![1.0, 2.0]),
-        ("Total Gas Power (therms/hour)", vec![0.5, 1.5]),
-    ]))
+    let mut calc = calc_for(&schema, 3600, &test_config(None));
+    accumulate(
+        &mut calc,
+        &build_batch(vec![
+            ("Total Electric Power (kW)", vec![1.0, 2.0]),
+            ("Total Gas Power (therms/hour)", vec![0.5, 1.5]),
+        ]),
+    )
     .unwrap();
     let metrics = calc.finish().unwrap();
 
@@ -342,11 +407,14 @@ fn gas_annual_energy_therms_is_non_none_with_gas_column() {
 fn total_energy_includes_both_electric_and_gas() {
     let schema =
         schema_from_columns(&["Total Electric Power (kW)", "Total Gas Power (therms/hour)"]);
-    let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-    calc.accumulate(&build_batch(vec![
-        ("Total Electric Power (kW)", vec![1.0]),
-        ("Total Gas Power (therms/hour)", vec![1.0]),
-    ]))
+    let mut calc = calc_for(&schema, 3600, &test_config(None));
+    accumulate(
+        &mut calc,
+        &build_batch(vec![
+            ("Total Electric Power (kW)", vec![1.0]),
+            ("Total Gas Power (therms/hour)", vec![1.0]),
+        ]),
+    )
     .unwrap();
     let metrics = calc.finish().unwrap();
 

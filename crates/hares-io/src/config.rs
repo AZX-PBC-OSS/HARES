@@ -247,6 +247,14 @@ pub struct SimulationConfig {
     /// and pays nothing for them (default: false).
     #[serde(default)]
     pub diagnostics: bool,
+    /// Whether the run requests the run metrics (default: false). Without
+    /// the request the run builds no metrics input plan and no accumulator,
+    /// feeds nothing per step, and its result carries no metrics. With it,
+    /// a fixed metrics input plan freezes from the catalogue, independent
+    /// of the reports, and the accumulator is fed per step from the row
+    /// plan's producer slots.
+    #[serde(default)]
+    pub metrics: bool,
     /// Rows per Arrow RecordBatch flush (default: 10 000).
     #[serde(default = "default_output_chunk_size")]
     pub output_chunk_size: usize,
@@ -991,6 +999,7 @@ max_evictions = 0
             time_res: Duration::seconds(i64::from(u32::MAX) + 1),
             reports: Vec::new(),
             diagnostics: false,
+            metrics: false,
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,
@@ -1050,6 +1059,7 @@ destination = { csv = { path = "/tmp/sim_output.csv" } }
                 report("copy", Some("/tmp/sim_output.csv")),
             ],
             diagnostics: false,
+            metrics: false,
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,
@@ -1089,6 +1099,7 @@ latitude_deg = 95.0
             time_res: Duration::seconds(60),
             reports: Vec::new(),
             diagnostics: false,
+            metrics: false,
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,

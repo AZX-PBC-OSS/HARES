@@ -315,7 +315,9 @@ impl Fleet {
 
     /// Gives every dwelling one memory report at the verbosity: the run
     /// mode whose retained batches a caller reads (the fleet's aggregate
-    /// folds them), with real run metrics.
+    /// folds them), with real run metrics. The metrics are a per-home
+    /// config request: this builder sets `metrics = true` on every home's
+    /// config, so the aggregate's per-dwelling metrics are computed.
     ///
     /// A fleet built from ResStock metadata constructs its homes' sim
     /// configs itself, so this builder is the one surface that moves their
@@ -340,6 +342,7 @@ impl Fleet {
                 frequency: hares_io::Frequency::default(),
                 destination: hares_io::Destination::Memory,
             }];
+            entry.config.sim_config.metrics = true;
         }
         Ok(self)
     }
@@ -918,6 +921,7 @@ fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
         time_res: Duration::minutes(1),
         reports: Vec::new(),
         diagnostics: false,
+        metrics: false,
         output_chunk_size: 10_000,
         setpoint_deadband_c: None,
         master_seed: 0,
@@ -1293,6 +1297,7 @@ mod tests {
                 },
             }],
             diagnostics: false,
+            metrics: false,
             output_chunk_size: 128,
             setpoint_deadband_c: None,
             master_seed: 0,

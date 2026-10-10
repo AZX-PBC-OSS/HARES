@@ -39,6 +39,7 @@ fn config(hpxml: &Path, overrides: Option<serde_json::Value>) -> DwellingConfig 
             time_res: Duration::seconds(3600),
             reports: Vec::new(),
             diagnostics: false,
+            metrics: false,
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,

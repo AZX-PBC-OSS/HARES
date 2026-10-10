@@ -80,6 +80,7 @@ fn config(retain_batches: bool, output_path: &std::path::Path) -> SimulationConf
             },
         }],
         diagnostics: false,
+        metrics: false,
         output_chunk_size: 40,
         setpoint_deadband_c: None,
         master_seed: 0,

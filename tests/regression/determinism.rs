@@ -46,6 +46,8 @@ pub fn run_determinism_checks() -> Result<(), Vec<String>> {
                 Ok(result) => {
                     let mut trajectory: Vec<f64> = result
                         .metrics
+                        .as_ref()
+                        .expect("the run requested metrics")
                         .total_energy_kwh
                         .per_end_use
                         .values()
