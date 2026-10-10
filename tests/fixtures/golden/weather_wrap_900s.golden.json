@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "65a89b0daa315c6fc75480da06a86b28d28940dd",
+  "git_head": "7652eecbc2d229f12c76804a34ffe3c5b61b079e",
   "git_dirty": false,
   "metrics": [
     {
@@ -170,7 +170,7 @@
       "schema": [
         {
           "name": "Time",
-          "arrow_type": "Utf8",
+          "arrow_type": "Timestamp(ms)",
           "nullable": false
         },
         {
@@ -327,12 +327,12 @@
       "columns": [
         {
           "name": "Time",
-          "digest": "155894909cf781048118a904159a6646b3ea7a3f5940190b8bc73b8e50e05c9a",
+          "digest": "38be187f0fe8ff8cb7b05cd79a7805f03a0726247b60210b314110fd21cb9424",
           "blocks": [
-            "71494a56dd4d908f4792cd7d92eebb46af57d62f4b05e1bc6d177b316af36c87",
-            "64cada72d9e7312bcfcfa56fdcc5ad978785ac4cdc4a22cecc07ac8c241df564",
-            "b591a8c7a64b474252b05b728b46de30832f1a6a87150d48cf891de27d7dacae",
-            "284066061f0344958cbe82c28b70c8c9aa453e67f9c7f72a9e923c6a2660b7b5"
+            "cacac7d80e1a53687d70283c622e73401cc5893bf9b4d6156f59667cafb94aaf",
+            "6cdf278eab33122bec49091181f82060b31e7d2954a46464c250bcaf28888418",
+            "cd342e96122d6f94e58a5f0d2ab071bd981d5532fd7d61d2b39a001197a171ef",
+            "7e3c0d5b37cfbf96f1c4a42914ab947b250c6b52024450c37ac373f8d765661e"
           ]
         },
         {
