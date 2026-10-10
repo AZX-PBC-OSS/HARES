@@ -330,14 +330,13 @@ fn attach_after_the_first_recorded_row_is_an_error() {
     );
 }
 
-/// Attaching with output recording disabled is refused: the callback sink
-/// rides the output recorder, so a config without a destination for the
-/// report has nothing to attach to.
+/// Attaching without a report to ride is refused: the callback sink rides
+/// a report's recorder, so a config that declares no reports has nothing
+/// to attach to.
 #[test]
 fn attach_without_output_recording_is_refused() {
-    let run_dir = tempfile::tempdir().expect("tempdir");
-    let mut sim = config(false, &run_dir.path().join("run.parquet"));
-    sim.write_output = false;
+    let mut sim = config(false, std::path::Path::new("unused.parquet"));
+    sim.reports.clear();
     let mut run = dwelling(sim, 7);
     let err = run
         .attach_callback(
@@ -347,13 +346,13 @@ fn attach_without_output_recording_is_refused() {
                 fail_on: None,
             }),
         )
-        .expect_err("attaching without output recording fails");
+        .expect_err("attaching without a report to ride fails");
     match &err {
         hares_types::HaresError::Callback { report, message } => {
             assert_eq!(report, REPORT);
             assert!(
-                message.contains("write_output"),
-                "the refusal must name write_output, got: {message}"
+                message.contains("no reports"),
+                "the refusal must name the missing report, got: {message}"
             );
         }
         other => panic!("expected a callback error, got: {other:?}"),
