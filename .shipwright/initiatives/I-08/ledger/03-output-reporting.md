@@ -2854,6 +2854,52 @@ their `Time` does not change.
 **Measurement:** per-row `format!`/`to_string` calls for a full-year run
 before and after, recorded.
 
+**State:** committed `7652eecb` + the goldens `14f0d980` (branch
+`row/r45-or7`, cut from `7e95e974`). The Time column is
+`Timestamp(Millisecond, None)`, the row's naive local wall-clock
+milliseconds written once per row as an `i64` from the step's
+timestamp; the one stated convention across the surface: Time is the
+local wall clock at the interval's start, the schema metadata's
+`hares:utc_offset_s` (the site's standard-time offset, inserted at the
+recorder freeze from the resolved site location) recovers the instant
+(UTC = Time - offset), and the row plan's UTC-epoch stamp stays UTC
+epoch (the r37 review note holds: the reducer reads the column, never
+the plan field as if local). The schema metadata carries exactly
+`hares:utc_offset_s` and `hares:catalogue_digest`: the four
+pre-catalogue keys deleted with their tests and `mode_ordinal_json`;
+`Catalogue::digest()` is the SHA-256 of the canonical per-variable
+encoding documented on the method (the digest tests pin the byte string
+and the schema metadata). `StepResult.timestamp` is a `NaiveDateTime`
+equal to the row's Time; the Python step dict, the environment's
+`current_time` and the timesteps iterator carry naive `datetime`s; the
+steps-only polars fallback builds the same Datetime(ms) column the
+Arrow-IPC path yields. The fleet aggregation reads each home's Time as
+naive local milliseconds and subtracts the home's `hares:utc_offset_s`
+from the local-truncated wall clock to recover the same UTC epoch
+bucket key the parsed strings keyed; its output Time stays a Utf8 RFC
+3339 `Z` string until B-12, and the fleet_mixed_offset and
+resstock_2025_fleet goldens compared identical, not re-captured. The
+period reducer's `push_batch` reads the Timestamp column (the
+`ReduceError::TimeValue` parse error retired with it); its tests and
+the DST hour pins re-ran green. `frame_golden` compares Time as `i64`
+(the physical-bytes comparison the tool already used for timestamp
+columns). The docs' "Time" section is in `docs/python.md`;
+`test_docs_time_example` runs its example as written. Acceptance:
+`time_column_is_millisecond_timestamp_local`,
+`frame_starts_at_start_time_with_exact_row_count`,
+`schema_metadata_holds_only_offset_and_digest` (Rust, over the
+`full_year_hourly` inputs at 48 h), `step_time_is_naive_local` and the
+frame dtype pin (Python), the digest canonical and metadata tests, the
+migrated `batch_fed_reducer_equals_row_fed_reducer` on Timestamp
+batches. Delta recorded in `02-measurement.md`: the six dwelling
+frames' Time column moved (Utf8 to Timestamp(ms)), every other column
+bit-identical, the re-captured goldens twice byte-identical. Gates:
+fmt clean; clippy `--workspace --all-targets --all-features -D
+warnings` clean; nextest `--all-features -j 4` 7669/7669 (1 ignored
+pin generator), `-F dst` 7602/7602; pytest 1551 passed (filtered
+canonical); pyright 0; compare-all identical in the default, dst and
+observe builds at both captures.
+
 ## OR-8: metrics computed only when requested, from one path independent of reports and destinations (structural)
 
 **Kind:** initiative work (`dl-i08-architecture.metrics_optional`,

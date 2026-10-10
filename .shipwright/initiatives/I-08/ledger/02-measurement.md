@@ -2333,3 +2333,34 @@ hold byte-unchanged without the request, and the pin fixture's
 differential holds row for row). The goldens are bitwise in every
 profile after the change (the diagnostics columns exist only under the
 request), so no value moved.
+
+### The Time column's string formats retire, 2026-10-10 (branch `row/r45-or7`, engine `7652eecb` on `7e95e974`)
+
+The output Time column's dtype moves: Utf8 (an RFC 3339 string with the
+step's offset, formatted per row with chrono `%+` and copied per row in
+`StreamingRecorder::push_row`) to `Timestamp(Millisecond, None)` (the
+row's naive local wall-clock milliseconds, written once per row as an
+`i64`). The cause is the schema change itself: one time convention
+across the surface, the local wall clock in the column and the site's
+standard-time UTC offset in the schema metadata `hares:utc_offset_s`
+(UTC = Time - offset). No value column moved.
+
+Golden movement (cause: the declared dtype change; the values' wall
+clocks are the same instants the strings spelled): the six dwelling
+frames' Time column digest moved and the schema's Time field reads
+`Timestamp(ms)`; every other column's digest is bit-identical; row
+counts unchanged. The two fleet manifests compared identical (their
+aggregate Time stays a Utf8 RFC 3339 UTC string; the aggregate products
+are unchanged and were not re-captured). The re-captured files are
+byte-identical across two captures at `7652eecb`.
+
+Per-row string work for a full-year run, before and after: before, two
+string operations per recorded row (the `%+` format! into the reused
+buffer plus the push_row copy); after, zero (one `i64` push). A
+full-year run records 8,760 rows at 3,600 s (`full_year_hourly`,
+17,520 calls before) and 35,040 rows at 900 s
+(`full_year_900s_dst`, 70,080 calls before). The fleet aggregation's
+per-row `parse_timestamp` (one RFC 3339 parse per home row before) is
+also gone: the fleet reads the timestamp's milliseconds and applies the
+home's metadata offset. No wall-time bench was run: the work removed is
+linear in rows and the goldens prove the outputs equal.
