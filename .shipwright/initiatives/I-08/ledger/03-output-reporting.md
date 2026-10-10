@@ -3328,6 +3328,72 @@ so it does not offer the marker either.
 **Dependencies:** OR-3. `05-python-surface.md` PY-10 implements the trait
 for Python.
 
+**State:** done as `b512848e` (branch `row/r40-or14`, cut from
+`c9c3399e`), ahead of the destinations entry the model follows, as the
+entry's sink. `BatchCallback` (`on_batch(&mut self, ctx, batch)`), `BatchContext`
+(`report`, `bldg_id`, `batch_index`) and `CallbackError` live in
+`crates/hares-io/src/output/callback.rs`, with the report name the engine
+builds today as the constant `TIMESTEP_REPORT` (`"timestep"`, the run's
+timestep table); `HaresError::Callback { report, message }` is in
+`hares-types`; `Dwelling::attach_callback(report, callback)` is in
+`hares-core`, validating the report name, refusing a dwelling whose
+output recording is disabled and refusing rows already recorded (the
+destinations freeze with the first recorded row). The recorder delivers
+every built batch in flush order, the index counting from 0, and never
+after the outputs are published (a `closed` flag set by
+`flush_and_close`, so rows pushed after the final flush buffer on without
+reaching the callback). The delivery rides a shared attachment
+(`Arc<Mutex<Box<dyn BatchCallback>>>`) the dwelling holds as the source
+of truth, so a roster change before the first recorded row, which rebuilds
+the recorder, hands the fresh one the same attachment instead of dropping
+it. A callback error fails the flush naming the report
+(`OutputError::Callback`, mapped through one helper at both record sites)
+and latches `terminal_error`, so every later step returns it without
+stepping anything: the failure budget's semantics. Zero cost when unused:
+one `None` branch per flush, pinned structurally in-crate
+(`no_callback_report_constructs_no_adapter`).
+
+The Python attach landed with this row, ahead of its surface entry, on
+the operator's instruction: `Dwelling.attach_callback(report, fn)` with a
+`BatchInfo` pyclass (report, bldg_id, batch_index) and the batch as the
+established Python frame surface, a polars DataFrame built over the
+Arrow batch through the conversions the results method already uses. The
+GIL: the step binding detaches around the run, and the sink re-acquires
+per call (`Python::attach` inside `catch_unwind`), so an exception from
+the callable surfaces as the typed callback error, never a panic through
+the recorder (a callback that panicked is reported the same way, from the
+attachment's poisoned mutex, on the next delivery); the dedicated
+exception class with the original exception chained as `__cause__`, the
+zero-copy Arrow batch and the config-side `Destination.callback()`
+constructor remain with the surface entry.
+
+The acceptance tests, with the surface as it stands: the four that do not
+need the destination model run in `crates/hares-core/tests/callback.rs`
+over the `cz4a_ashp_hpwh` inputs, start `2023-01-01T00:00:00-07:00`, 24 h
+at 900 s, `output_chunk_size = 40`:
+`callback_receives_every_batch_once_in_order` (three batches of 40, 40
+and 16 rows, indices 0, 1, 2, the concatenation equal to the same run's
+retained batches, today's memory surface, on bits, schema included),
+`callback_error_fails_the_run_naming_the_report` (the message carries the
+callback's cause, the run stayed ended, the callback never called again),
+`callback_context_carries_bldg_id_and_report_name` and
+`attach_to_non_callback_report_is_an_error` (adapted: the one report name
+the engine builds); `no_callback_report_constructs_no_adapter`
+(structural, in-crate, in the writer's tests) and `no_callback_after_finish`
+(in the callback module's tests) pin the zero-attachment shape and the
+publication boundary. Two wait for the destinations row:
+`callback_report_without_attachment_fails_before_first_step` and
+`validated_config_keeps_callback_marker`, whose serialisable marker and
+round-trip live with the destination model. RED first: the Rust tests
+failed to compile against the base (no callback module), the Python tests
+failed on the missing attach. Gates: fmt; clippy `--all-features
+--all-targets -D warnings`; nextest `--all-features` 7634/7634; pytest
+1544 passed, 0 failed, 0 skipped; pyright 0; the eight goldens bitwise
+(`compare-all` 7 manifests identical, `full_year_900s_dst` identical).
+The base commit failed every Rust suite there on one stale test file (the
+catalogue tests' synthetic TOML still carried the removed
+`time_res_s`/`duration_s` keys), fixed first as `bc610fcc`.
+
 ## OR-15: `metrics_from_table`
 
 **Kind:** initiative work (`dl-i08-architecture.new_capability`).
