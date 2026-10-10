@@ -3033,6 +3033,99 @@ M-2) over 24 h.
 **Measurement:** `simulate()` wall time with and without `metrics`, and
 the metrics share when requested, recorded.
 
+**State:** committed `4bc3ed70` (branch `row/r46-or8`, worktree of
+`7e95e974`, one commit).
+
+The decoupling, as built. `SimulationConfig.metrics: bool`, default
+`false`, the TOML key and the Python keyword of the same name (the
+constructor keyword, the getter and the setter, the stub's signature,
+`frame_golden`'s `SIMULATION_KEYS` pin extended). The run result's
+metrics become `Option<SimulationMetrics>` (the entry's `RunResult`
+surface arrives with its own row; this base's `SimulationResults`
+carries the semantics): `None` without the request, and `None` on every
+failed-run path.
+
+The one path. The metrics input plan (`MetricsInputPlan`, `hares-io`) is
+the fixed declared list of the columns the metrics read, resolved once
+at the roster freeze against the producer surface's variable names in
+producer-slot order: the union of the selected reports' variables
+(catalogue-derived), or the `Verbosity(0)` preset for a run with no
+reports. Each metric whose availability depends on a column being
+present keeps that dependence, evaluated against that same surface; the
+required-column refusal stays on the request path (a metrics request
+whose surface lacks the total electric power column is refused at
+freeze, naming the remedy: include the power column in a report's
+selection). The accumulator (`MetricsCalculator`) holds the plan and is
+fed per step from the row plan's producer slots
+(`accumulate_row(&[f64])`), so its state is exact at every step; the
+dwelling owns it (`Option`), finalises it at the end of `simulate()`
+and hands it to the engine through `take_run_metrics()` (plus
+`run_metrics_snapshot()` for a mid-run read). The batch feed and every
+second path are deleted: the recorder's `enable_metrics`/`take_metrics`
+and its per-flush calculator are gone from `StreamingRecorder`, the
+engine's post-hoc `compute_metrics_from_batches`/`finalize_run_metrics`
+and `empty_metrics` are gone, and the Python `metrics()` reads the one
+path (raising, naming `metrics=True`, when the run did not request
+them; "no steps run yet" before any step). The old batch-scoped
+observe logs (the end-use boundary log, the per-batch NaN and
+setpoint-missing summaries) are replaced by one end-use log per run at
+finish. The calculator's type checks are gone with the batch schema
+(the catalogue's value columns are typed once); the row feed has no
+nulls, so the nullable-setpoint tests became non-finite-setpoint tests
+with the same asserted outcomes.
+
+Bug compatibility: with a single report (every golden fixture's shape)
+the union is that report's schema, and the per-step feed reads the same
+values the flushed batches carried, in the same order, through the same
+arithmetic, so every accumulator sees the same bits: the goldens'
+metrics products are bitwise unchanged (`frame_golden compare-all`
+identical on the default build, the dst golden identical on the dst
+build, `metrics = true` set in every manifest). A multi-report run's
+availability now evaluates against the union of the reports' variables
+(the declared semantics; no golden has more than one report). A run
+whose first report is a narrow selection without the power column now
+builds and runs (the metrics absent without the request): the
+construction-blocking first-report refusal of the destinations entry
+dies here, pinned by
+`narrow_first_report_builds_and_runs_without_the_metrics_request`;
+with the request the refusal names the column and the remedy
+(`narrow_first_report_with_the_metrics_request_names_the_missing_column`).
+
+Every caller that reads metrics today requests them: the golden
+manifests (`metrics = true`, config-only), the fleet's
+`with_memory_report` (the builder that moves the homes' output mode
+also sets `metrics = true` per home; the aggregate's per-dwelling
+metrics read zero for a home without the request, the reading the
+pre-decoupling empty-metrics runs gave), the engine and fleet tests
+that read metrics, and the Python tests through `make_dwelling` and
+`_base_config` (both default the request on; the new
+`metrics_none_unless_requested` passes it off explicitly).
+
+The RED first: the six run-level tests in
+`crates/hares-core/tests/metrics_optional.rs` were written against the
+surface before it existed and failed on the parent as compile errors
+(no `metrics` field, `result.metrics` not an `Option`), and the Python
+`metrics_none_unless_requested` failed `DID NOT RAISE` (the old
+post-hoc path computed from the memory batches regardless of any
+request). GREEN: all six plus the in-crate structural pin
+(`metrics_accumulator_present_exactly_when_requested`: the dwelling
+holds no accumulator without the request, the accumulator with it) and
+the Python test landed with the row.
+
+Gates on the commit: `cargo fmt --all -- --check` clean;
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+clean; `cargo nextest run --all-features -j 4` 7671 passed (1 skipped);
+`cargo nextest run -F dst -j 4` 7604 passed (1 skipped); `uv sync
+--locked --all-extras --all-groups`, then `uv run maturin develop` and
+`uv run pytest tests/python` 1549 passed, 0 failed, 0 skipped;
+`uv run pyright` 0 errors; the goldens bitwise (`frame_golden
+compare-all` 6 manifests identical on the default build,
+`full_year_900s_dst` identical on the dst build). The cost measurement
+is in `02-measurement.md`: the paired bench's deltas flip sign across
+runs, so the metrics feed's per-step cost is a bound (within this
+host's noise), and the structural claim, no metrics code runs in the
+step without the request, is proven by the code path and the tests.
+
 ## OR-9: `initialize()` no longer serialises an unread checkpoint
 
 **Kind:** initiative work (V7).
