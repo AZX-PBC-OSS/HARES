@@ -116,8 +116,7 @@ fn diagnostics_report_records_all_envelope_gain_columns() {
 
     // The run requests the diagnostics report; the envelope columns ride
     // the run's memory report's frames.
-    let content = format!(
-        r#"building_id = 4242
+    let content = r#"building_id = 4242
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
@@ -129,7 +128,7 @@ master_seed = 0
 
 [[simulation.reports]]
 name = "frame"
-selection = {{ verbosity = 4 }}
+selection = { verbosity = 4 }
 destination = "memory"
 [geometry]
 number_of_bedrooms = 3.0
@@ -153,8 +152,7 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-"#,
-    );
+"#;
     fs::write(&toml_path, content).expect("failed to write synthetic TOML");
 
     let mut dwelling =
