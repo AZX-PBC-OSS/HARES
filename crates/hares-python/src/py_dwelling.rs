@@ -1637,9 +1637,24 @@ impl PyDwelling {
         let batches: Vec<_> = dwelling.flushed_batches().to_vec();
 
         if batches.is_empty() {
-            return Err(PyValueError::new_err(
-                "no batches flushed yet; run simulate() first",
-            ));
+            // Name the real cause: the batches come from a `Memory` report,
+            // so a run whose reports all write to files has none even after
+            // `simulate()`, while an unrun dwelling with a `Memory` report
+            // has simply not flushed yet.
+            let has_memory = self
+                .config
+                .sim_config
+                .reports
+                .iter()
+                .any(|report| matches!(report.destination, hares_io::Destination::Memory));
+            return Err(PyValueError::new_err(if has_memory {
+                "no batches flushed yet; run simulate() first".to_string()
+            } else {
+                "no Memory report: metrics() computes from a Memory report's \
+                 flushed batches, and this run's reports write to files only; \
+                 add a Destination.memory() report to SimulationConfig(reports=[...])"
+                    .to_string()
+            }));
         }
 
         let schema = batches[0].schema();

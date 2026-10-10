@@ -257,10 +257,10 @@ fn run_returns_err_for_missing_weather_path() {
     assert!(weather_err.to_string().contains("weather_path"));
 }
 
-/// A streaming run (retain_batches=false, the default configuration shape)
-/// must still produce real run metrics: they are collected incrementally at
+/// A file-only run (a csv report with no `Memory` report beside it) must
+/// still produce real run metrics: they are collected incrementally at
 /// flush time. The previous behavior returned zeroed metrics with a false
-/// "zero-step" flag for every non-retaining run.
+/// "zero-step" flag for every run that retained no batches.
 #[test]
 fn run_with_streaming_output_computes_metrics() {
     let scratch = Scratch::with_inputs();

@@ -8,8 +8,8 @@ use std::time::{Duration as StdDuration, Instant};
 use arrow::record_batch::RecordBatch;
 use hares_io::SimulationConfig;
 use hares_io::output::metrics::{
-    GridInteractionMetrics, MetricsCalculator, PeakPowerKw, Reliability, RollingPeakKw,
-    SimulationCoverage, SimulationMetrics, TotalEnergyKwh,
+    GridInteractionMetrics, MetricsCalculator, MetricsError, PeakPowerKw, Reliability,
+    RollingPeakKw, SimulationCoverage, SimulationMetrics, TotalEnergyKwh,
 };
 use hares_types::HaresError;
 use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
@@ -430,10 +430,20 @@ fn compute_metrics_from_batches(
 
     // A calculator that cannot initialize is a failed computation, not
     // zeroed metrics: the run's numbers are either computed or the run
-    // reports the failure.
+    // reports the failure. A missing column names the remedy: the metrics
+    // are computed from the reports' own columns, so the selection must
+    // carry the power column.
     let mut calculator =
         MetricsCalculator::new(&schema, time_res_secs, sim_config).map_err(|err| {
-            HaresError::InvalidState(format!("metrics calculator init failed: {err}"))
+            let mut message = format!("metrics calculator init failed: {err}");
+            if matches!(err, MetricsError::MissingRequiredColumn(_)) {
+                message.push_str(
+                    "; the run's metrics are computed from a report's own columns: \
+                     include the power column in the report's selection (a Verbosity \
+                     selection at tier 2 or deeper carries it, or name it)",
+                );
+            }
+            HaresError::InvalidState(message)
         })?;
 
     for batch in batches {
@@ -637,6 +647,12 @@ mod tests {
                 .to_lowercase()
                 .contains("total electric power"),
             "the error names the missing column: {err}"
+        );
+        assert!(
+            err.to_string()
+                .to_lowercase()
+                .contains("include the power column"),
+            "the error suggests the remedy, carrying the column in the report's selection: {err}"
         );
     }
 

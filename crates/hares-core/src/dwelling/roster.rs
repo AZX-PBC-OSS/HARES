@@ -66,8 +66,9 @@ pub(super) struct RosterCaches {
     /// indices without borrowing the plan.
     pub(super) record_projections: Vec<Vec<usize>>,
     /// The union schema the producer bindings resolved against: the columns
-    /// every report's selections span, in catalogue order. A mid-run roster
-    /// change rebuilds the bindings against this frozen schema.
+    /// every report's selections span, first-seen across the reports. A
+    /// mid-run roster change rebuilds the bindings against this frozen
+    /// schema.
     pub(super) union_schema: Schema,
     /// The columns the reports promise (the union of the selections
     /// resolved against the catalogue): an expected column the frozen
@@ -1383,9 +1384,11 @@ impl Dwelling {
                     .map_err(|err| HaresError::Dwelling(err.to_string()))
             })
             .collect::<Result<_>>()?;
-        // The union surface: every selected variable once, in catalogue
-        // order. The producer bindings bind against it; each report reads
-        // its own columns out of the union row through its projection.
+        // The union surface: every selected variable once, first-seen
+        // across the reports in `reports` order, each report's resolved
+        // names in its own order inside its report. The producer bindings
+        // bind against it; each report reads its own columns out of the
+        // union row through its projection.
         let mut union: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for names in &resolved {
@@ -1474,7 +1477,23 @@ impl Dwelling {
             recorder
                 .enable_metrics(time_res_secs, &self.sim_config)
                 .map_err(|err| {
-                    HaresError::InvalidState(format!("metrics calculator init failed: {err}"))
+                    // The run's metrics ride this report's columns when no
+                    // `Memory` report exists; a missing power column names
+                    // both remedies, and the refusal is the plan's: the run's
+                    // numbers are either computed or the run is refused.
+                    let mut message = format!("metrics calculator init failed: {err}");
+                    if matches!(
+                        err,
+                        hares_io::output::metrics::MetricsError::MissingRequiredColumn(_)
+                    ) {
+                        message.push_str(
+                            "; the run's metrics are computed from the first report's own \
+                             columns when no Memory report exists: include the power column \
+                             in that report's selection (a Verbosity selection at tier 2 or \
+                             deeper carries it, or name it), or add a Memory report",
+                        );
+                    }
+                    HaresError::InvalidState(message)
                 })?;
         }
         Ok(OutputCachesPlan::FreshSchema(Box::new(FreshOutputCaches {

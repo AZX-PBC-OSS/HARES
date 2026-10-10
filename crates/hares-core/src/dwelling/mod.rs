@@ -3513,6 +3513,23 @@ fn build_from_blueprint_inner(
                 }
                 _ => None,
             });
+    // The rider's one guard: its path must not collide with a report's own
+    // destination, or the eager create below would truncate that report's
+    // target before the recorder's existing-target check ever ran. The
+    // rider is removed whole when diagnostics become a catalogue report;
+    // until then this check is all it gets.
+    if let Some(diag_path) = &diagnostic_path
+        && let Some(report_name) = dwelling.reports.iter().find_map(|report| {
+            (report.destination.path() == Some(diag_path)).then(|| report.name.clone())
+        })
+    {
+        return Err(HaresError::Io(format!(
+            "the diagnostics rider's path {} collides with report '{}'s own \
+             destination; rename one",
+            diag_path.display(),
+            report_name
+        )));
+    }
     dwelling.diagnostic_writer = match diagnostic_path {
         Some(diag_path) => {
             tracing::info!(

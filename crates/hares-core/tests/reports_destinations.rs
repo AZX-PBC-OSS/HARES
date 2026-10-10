@@ -353,6 +353,156 @@ fn schema_equal_across_destinations() {
     assert!(lines.next().is_some(), "csv carries the run's rows");
 }
 
+/// Two differently-shaped reports in one run: each destination's contents
+/// are that report's own selection's resolution, never its neighbour's. A
+/// run where report i's recorder receives report j's projection fails
+/// here: the recorders' column-width check refuses the misprojected rows,
+/// and the per-destination schema comparison refuses a same-width swap.
+#[test]
+fn multi_report_each_destination_carries_its_own_selection() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let csv = tmp.path().join("full.csv");
+    let toml = sim_toml(&format!(
+        "\n[[reports]]\nname = \"probe\"\nselection = {{ named = [\"Total Electric Power (kW)\", \"Outdoor Dry Bulb (C)\"] }}\ndestination = \"memory\"\n{}",
+        file_report("full", 2, "csv", &csv, false),
+    ));
+    let mut dwelling = Dwelling::from_config(dwelling_config(&toml)).expect("dwelling builds");
+    dwelling.simulate().expect("run completes");
+
+    // Each selection resolves against the dwelling's own catalogue.
+    let catalogue = dwelling.catalogue();
+    let probe_selection = hares_io::Selection::Named(vec![
+        "Total Electric Power (kW)".to_string(),
+        "Outdoor Dry Bulb (C)".to_string(),
+    ]);
+    let full_selection = hares_io::Selection::Verbosity(2);
+    let probe_names = hares_io::resolve_selection(&probe_selection, &catalogue)
+        .expect("the probe selection resolves");
+    let full_names = hares_io::resolve_selection(&full_selection, &catalogue)
+        .expect("the full selection resolves");
+    assert_ne!(
+        probe_names.len(),
+        full_names.len(),
+        "the two reports are differently shaped"
+    );
+
+    // The memory destination's contents are the probe's own selection: the
+    // timestamp plus exactly the resolved columns, in order.
+    let memory = dwelling.flushed_batches().to_vec();
+    assert!(!memory.is_empty(), "the memory report retains batches");
+    let memory_names: Vec<String> = memory[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    let expected_probe: Vec<String> = std::iter::once("Time".to_string())
+        .chain(probe_names.iter().cloned())
+        .collect();
+    assert_eq!(
+        memory_names, expected_probe,
+        "the memory report carries its own selection, not the other report's"
+    );
+
+    // The csv destination's contents are the full report's own selection.
+    let csv_text = std::fs::read_to_string(&csv).expect("csv exists");
+    let mut lines = csv_text.lines();
+    let header = lines.next().expect("csv header");
+    let csv_names: Vec<String> = header.split(',').map(str::trim).map(String::from).collect();
+    let expected_full: Vec<String> = std::iter::once("Time".to_string())
+        .chain(full_names.iter().cloned())
+        .collect();
+    assert_eq!(
+        csv_names, expected_full,
+        "the csv report carries its own selection, not the other report's"
+    );
+
+    // And the columns the selections share are projections of the same
+    // union row: the destinations agree value for value.
+    for column in ["Total Electric Power (kW)", "Outdoor Dry Bulb (C)"] {
+        let memory_values = f64_column(&memory, column);
+        let csv_idx = csv_names
+            .iter()
+            .position(|name| name == column)
+            .unwrap_or_else(|| panic!("csv carries {column}"));
+        let csv_values: Vec<f64> = lines
+            .clone()
+            .filter_map(|line| line.split(',').nth(csv_idx))
+            .map(|cell| {
+                cell.trim()
+                    .parse::<f64>()
+                    .unwrap_or_else(|e| panic!("{column}: {cell:?} does not parse: {e}"))
+            })
+            .collect();
+        assert_eq!(
+            memory_values.len(),
+            csv_values.len(),
+            "{column}: both destinations carry every step"
+        );
+        for (a, b) in memory_values.iter().zip(csv_values.iter()) {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "{column}: both destinations project the same union row"
+            );
+        }
+    }
+}
+
+/// The file-only metrics refusal names both remedies: the run's metrics
+/// ride the first file report's own columns when no `Memory` report
+/// exists, so a selection without the power column is refused at freeze
+/// with the fix stated in the message.
+#[test]
+fn metrics_refusal_on_a_file_only_run_names_the_remedy() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let target = tmp.path().join("lean.csv");
+    let toml = sim_toml(&format!(
+        "\n[[reports]]\nname = \"lean\"\nselection = {{ named = [\"Outdoor Dry Bulb (C)\"] }}\ndestination = {{ csv = {{ path = \"{}\", overwrite = false }} }}\n",
+        target.display()
+    ));
+    let err = Dwelling::from_config(dwelling_config(&toml))
+        .err()
+        .expect("a file-only run whose first report lacks the power column is refused at freeze");
+    let message = err.to_string();
+    assert!(
+        message.contains("metrics calculator init failed"),
+        "the refusal is the metrics calculator's init: {message}"
+    );
+    assert!(
+        message.contains("include the power column"),
+        "the refusal suggests the power-column remedy: {message}"
+    );
+    assert!(
+        message.contains("add a Memory report"),
+        "the refusal suggests the memory-report remedy: {message}"
+    );
+}
+
+/// The diagnostics rider's one guard: its derived path must not collide
+/// with a report's own destination, or the rider's eager create would
+/// truncate that report's target before the recorder's existing-target
+/// check ever ran.
+#[test]
+fn diagnostics_rider_path_colliding_with_a_report_destination_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let verbose = tmp.path().join("out.csv");
+    let colliding = tmp.path().join("out_diagnostics.csv");
+    let toml = sim_toml(&format!(
+        "{}{}",
+        file_report("full", 4, "csv", &verbose, false),
+        file_report("rider", 0, "csv", &colliding, false),
+    ));
+    let err = Dwelling::from_config(dwelling_config(&toml))
+        .err()
+        .expect("the rider's path colliding with a report's own destination is refused");
+    let message = err.to_string();
+    assert!(
+        message.contains("collides") && message.contains("out_diagnostics.csv"),
+        "the refusal names the collision and the colliding path: {message}"
+    );
+}
+
 fn f64_column(batches: &[RecordBatch], name: &str) -> Vec<f64> {
     let mut values = Vec::new();
     for batch in batches {
