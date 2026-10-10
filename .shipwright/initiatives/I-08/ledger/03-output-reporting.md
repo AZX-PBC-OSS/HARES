@@ -3175,6 +3175,82 @@ here from the start (this is new output, so nothing changes numerically);
 **Dependencies:** OR-1 (`Aggregation::Last`), OR-2 (the row plan's local
 timestamp), OR-3.
 
+**State:** committed `b2aee9a2` on branch `row/r39-or13` (cut from
+`c9c3399e`), run ahead of its destinations dependency: the report list
+does not exist yet, so the per-report frequency has no config surface to
+ride on and the run's one report stays a timestep report. What lands is
+the reducer and its frequency, as public items of `hares-io` for the
+report layer and the fleet's per-home use that follow: `Frequency` gains
+`Minutes(NonZeroU32)`, `Hourly`, `Daily`, `Monthly`, `Annual` and
+`RunPeriod` (externally tagged snake_case, so a config carries `"hourly"`
+or `{ minutes = 15 }`), and `crates/hares-io/src/output/reduce.rs` holds
+`PeriodReducer`, `PeriodCalendar`, `TimeRule`, `PeriodRow` and
+`ReduceError`. `TimeRule::from_variable` reads the declared aggregation
+off a `VariableDef` and, for an `Enum` variable, its label count; the
+reducer sums step values in step order into one `f64` per period and
+variable, `Mean` divides once by the valid-step count, `Mode` counts per
+code with ties to the lowest code, `Last` holds the last valid step's
+value, null steps are excluded and a period with no valid step is null
+with its `<name> [valid steps]` count carried per rule, and every period
+carries its step count. The step-to-period alignment buckets on the
+naive local wall clock the row's own timestamp carries, never on the row
+plan's per-row field (stamped in UTC epoch seconds, the frozen row
+plan's review note): `push_row` takes the caller's local milliseconds
+(the run's fixed offset applied to the step instant) and `push_batch`
+parses a batch's Utf8 `Time` with `DateTime::parse_from_rfc3339` and
+takes its naive local value, so both feeds bucket on the same local
+milliseconds; `push_batch` also reads the Arrow null masks as the row
+feed reads its validity bits, ignores columns beyond the rules, and
+errors on a column count or type mismatch and on an unparseable `Time`
+value. Rows are labelled at the nominal period start (the OCHRE
+reference the aggregation rules follow does the same: its per-column
+rule picks sum for the energy units and mean otherwise,
+`ochre/Analysis.py:85-94`, and its hourly output resamples onto
+left-labelled periods, `ochre/Dwelling.py:351-353`, with steps stamped
+at their interval start, `ochre/Simulator.py:263,319`); because the
+validated period is a whole multiple of the timestep, every period
+boundary coincides with a step interval end, so a step belongs to the
+period its interval completes in, which is the period the floor computes.
+`Minutes(n)` is refused where `n` does not divide the hour, both at
+construction and at `Frequency::validate(time_res)`, the shared check
+the configuration's validate runs for every report frequency once the
+report list lands (the period must be a whole multiple of the timestep;
+months and years are whole numbers of days, so for them the timestep
+must divide a day). The Python frequency constructors wait for the
+reports binding that gives them a receiver. The acceptance tests: the
+reducer's hand-computed cases in `reduce.rs` (the minute report over a
+synthetic day at a 300 s step with 96 quarter-hour rows whose sums,
+means, modes and running totals are hand-computed; the hourly, daily,
+monthly and annual cases over the same day; the partial first and last
+periods of a 91-step run from 00:30; the calendar-boundary labels across
+a month and year; the null exclusions with valid counts; the run
+period's one row; the batch-fed and row-fed feeds equal on bits; the
+batch mismatches; the quarter-hour labels at a half-hour site offset),
+and the run-level cases in `crates/hares-core/tests/
+reporting_frequency.rs` over the parity fixture at a 900 s and a 300 s
+step (the hourly energy equal to its four steps' sum, the power and
+temperature means, the daily enum mode with the tie to the lowest code
+from a scripted actor, the hourly running total's fourth step, the
+minutes-15 sums bitwise, the two feeds equal over a real run, the
+partial periods, the run period). RED first: the tests were written
+against the parent state and failed as compile errors on the missing
+reducer (`unresolved imports reduce::PeriodCalendar,
+reduce::PeriodReducer, reduce::PeriodRow, reduce::ReduceError,
+reduce::TimeRule` in both crates), then turned green. Gates: fmt clean;
+clippy `--all-features --all-targets -D warnings` green on every crate
+the row touches and identical to the parent on `hares-python`, whose
+four lints (`too_many_arguments` on three binding constructors,
+`never_loop` on the removed-key helper) fail at the parent unchanged;
+nextest `--all-features` 7864/7864 (22 new tests; the one skip is the
+parent's ignored kind-pin generator); pytest 1617 passed with 26 failed
+and 4 errors, the identical failed set at the parent (the fold's
+Python-side residue, addressed on the sibling rows); pyright 0 errors;
+the goldens bitwise, `compare-all` 6 manifests identical plus
+`full_year_900s_dst` identical, the timestep frames unchanged and the
+new frequencies additive. The parent's two catalogue test failures (the
+synthetic TOML's removed keys) were fixed here first, cherry-picked from
+the sibling branch's fix as `3ac9dfb6`.
+
 ## OR-14: the batch callback destination
 
 **Kind:** initiative work (`dl-i08-architecture.destinations`).
