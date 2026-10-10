@@ -113,10 +113,9 @@ fn diagnostics_report_records_all_envelope_gain_columns() {
     // The output goes in a directory removed when the test ends.
     let dir = tempfile::tempdir().expect("temp dir");
     let toml_path = dir.path().join("diag-csv.toml");
-    let csv_path = dir.path().join("diag-csv.csv");
 
     // The run requests the diagnostics report; the envelope columns ride
-    // the run's frames whether or not the output file is written.
+    // the run's memory report's frames.
     let content = format!(
         r#"building_id = 4242
 
@@ -131,7 +130,7 @@ master_seed = 0
 [[simulation.reports]]
 name = "frame"
 selection = {{ verbosity = 4 }}
-destination = {{ csv = {{ path = "{}" }} }}
+destination = "memory"
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -155,7 +154,6 @@ ach = 0.0
 [schedule]
 occupancy = 0.0
 "#,
-        csv_path.display()
     );
     fs::write(&toml_path, content).expect("failed to write synthetic TOML");
 
