@@ -11,11 +11,16 @@
 //! the output schema, and OR-1 replaces it as the implementor without
 //! touching the plan builder.
 
+use std::num::NonZeroU32;
+
 use arrow::datatypes::Schema;
+use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::catalogue::Catalogue;
+
+use crate::config::ConfigError;
 
 /// What a report selects (`plan.md` 2.2). This entry adds the variants that
 /// can run against the current recorder; `Diagnostics` arrives with the
@@ -37,14 +42,105 @@ pub enum Selection {
     Pattern(String),
 }
 
-/// The reporting frequency of a selection. Only the timestep frequency can
-/// run at this entry; the period frequencies arrive with the reporting
-/// frequency entry.
+/// The reporting frequency of a selection. The `Timestep` frequency is one
+/// row per step, the recorder's own shape; the calendar periods reduce the
+/// step stream through a `PeriodReducer`, each variable by its declared
+/// aggregation. Every non-timestep variant is externally tagged in TOML
+/// with its snake_case name, so a config carries `"hourly"`,
+/// `{ minutes = 15 }` and so on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Frequency {
+    /// One row per step: no reduction.
     #[default]
     Timestep,
+    /// Sub-hourly periods of `n` minutes: `n` divides the hour, the period
+    /// is a whole multiple of the timestep, and the periods start on the
+    /// local clock hour.
+    Minutes(NonZeroU32),
+    /// Calendar hours in the naive local wall clock.
+    Hourly,
+    /// Calendar days in the naive local wall clock.
+    Daily,
+    /// Calendar months in the naive local wall clock.
+    Monthly,
+    /// Calendar years in the naive local wall clock.
+    Annual,
+    /// One row covering the whole run.
+    RunPeriod,
+}
+
+impl Frequency {
+    /// The frequency's own checks against the run's time resolution: the
+    /// checks the configuration's validate runs for every report whose
+    /// frequency is not the default. `Minutes(n)` requires `n` to divide
+    /// the hour; every calendar period must be a whole multiple of the
+    /// timestep, so a period holds a whole number of steps and the steps
+    /// tile it exactly.
+    ///
+    /// # Errors
+    ///
+    /// A `Minutes(n)` whose `n` does not divide 60 (the value and the rule
+    /// named), and a calendar period that is not a whole multiple of
+    /// `time_res`. Months and years are whole numbers of days, so for them
+    /// the check is that the timestep divides a day.
+    pub fn validate(self, time_res: Duration) -> Result<(), ConfigError> {
+        let step = time_res.num_seconds();
+        let reject = |period_s: i64, name: &str| {
+            Err(ConfigError::Validation(format!(
+                "frequency {name}: the period ({period_s} s) is not a whole \
+                 multiple of the time_res ({step} s)"
+            )))
+        };
+        match self {
+            Self::Timestep | Self::RunPeriod => Ok(()),
+            Self::Minutes(n) => {
+                let n = n.get();
+                if 60 % n != 0 {
+                    return Err(ConfigError::Validation(format!(
+                        "frequency Minutes({n}) is not a valid reporting \
+                         frequency: n must divide the hour (60)"
+                    )));
+                }
+                let period_s = i64::from(n) * 60;
+                if period_s % step != 0 {
+                    reject(period_s, &format!("Minutes({n})"))
+                } else {
+                    Ok(())
+                }
+            }
+            Self::Hourly => {
+                if 3600 % step != 0 {
+                    reject(3600, "Hourly")
+                } else {
+                    Ok(())
+                }
+            }
+            Self::Daily => {
+                if 86_400 % step != 0 {
+                    reject(86_400, "Daily")
+                } else {
+                    Ok(())
+                }
+            }
+            Self::Monthly | Self::Annual => {
+                if 86_400 % step != 0 {
+                    Err(ConfigError::Validation(format!(
+                        "frequency {}: every calendar period is a whole number \
+                         of days, so the time_res ({step} s) must divide a day \
+                         (86 400 s)",
+                        if matches!(self, Self::Monthly) {
+                            "Monthly"
+                        } else {
+                            "Annual"
+                        }
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
 }
 
 /// Where a report's batches go (`plan.md` 2.2). `Callback` arrives with the
@@ -437,6 +533,7 @@ fn glob_match(pattern: &str, name: &str) -> bool {
 mod tests {
     use super::*;
     use arrow::datatypes::{DataType, Field};
+    use chrono::Duration;
 
     /// A surface over the level-0 and verbosity-2 columns of a small
     /// schema, for the selection-resolution tests.
@@ -584,5 +681,124 @@ mod tests {
         assert_eq!(edit_distance("kw", "kW"), 1);
         assert_eq!(edit_distance("abc", "abc"), 0);
         assert_eq!(edit_distance("flat", "kart"), 3);
+    }
+
+    #[test]
+    fn frequency_serde_round_trips_every_variant() {
+        // The unit variants are their snake_case strings; `Minutes` is a
+        // one-key table. Both spellings are what a config's TOML carries,
+        // so the round-trip runs through the embedded form: a table's
+        // `frequency` key.
+        #[derive(Deserialize)]
+        struct Wrapped {
+            #[serde(default)]
+            frequency: Frequency,
+        }
+        let cases: [(Frequency, &str); 7] = [
+            (Frequency::Timestep, "\"timestep\""),
+            (Frequency::Hourly, "\"hourly\""),
+            (Frequency::Daily, "\"daily\""),
+            (Frequency::Monthly, "\"monthly\""),
+            (Frequency::Annual, "\"annual\""),
+            (Frequency::RunPeriod, "\"run_period\""),
+            (
+                Frequency::Minutes(NonZeroU32::new(15).expect("nonzero")),
+                "{ minutes = 15 }",
+            ),
+        ];
+        for (frequency, toml) in cases {
+            let document = format!("frequency = {toml}");
+            let wrapped: Wrapped = toml::from_str(&document).expect("the TOML spelling parses");
+            assert_eq!(wrapped.frequency, frequency, "{document}");
+        }
+        // The bare form, as a JSON document of the same externally tagged
+        // shape.
+        for (frequency, json) in [
+            (Frequency::Timestep, "\"timestep\""),
+            (Frequency::Hourly, "\"hourly\""),
+            (Frequency::RunPeriod, "\"run_period\""),
+            (
+                Frequency::Minutes(NonZeroU32::new(15).expect("nonzero")),
+                "{\"minutes\":15}",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<Frequency>(json).expect("the JSON spelling parses"),
+                frequency,
+                "{json}"
+            );
+        }
+        // The default is the timestep.
+        assert_eq!(Frequency::default(), Frequency::Timestep);
+        // A minutes value that is not a whole number of minutes is refused
+        // by the type: zero does not construct a NonZeroU32, and the
+        // frequency's own rule rejects the rest.
+        assert!(toml::from_str::<Wrapped>("frequency = { minutes = 0 }").is_err());
+    }
+
+    #[test]
+    fn minutes_not_dividing_the_hour_is_a_validate_error() {
+        let step = Duration::seconds(900);
+        for n in [7_u32, 90] {
+            let err = Frequency::Minutes(NonZeroU32::new(n).expect("nonzero"))
+                .validate(step)
+                .expect_err("minutes that do not divide the hour are a validate error");
+            let message = err.to_string();
+            assert!(
+                message.contains(&n.to_string()) && message.contains("divide the hour"),
+                "the error names the value and the rule, got: {message}"
+            );
+        }
+        // A whole divisor of the hour whose period still misses the step:
+        // 15 minutes at a 600 s step is 1.5 steps.
+        let err = Frequency::Minutes(NonZeroU32::new(15).expect("nonzero"))
+            .validate(Duration::seconds(600))
+            .expect_err("a period that is not a whole number of steps is a validate error");
+        let message = err.to_string();
+        assert!(message.contains("not a whole multiple"), "got: {message}");
+        // The same period at a 300 s and a 900 s step is fine.
+        for step_s in [300_i64, 900] {
+            Frequency::Minutes(NonZeroU32::new(15).expect("nonzero"))
+                .validate(Duration::seconds(step_s))
+                .expect("the period tiles the step");
+        }
+    }
+
+    #[test]
+    fn frequency_not_multiple_of_step_is_a_validate_error() {
+        // An hourly period at a 7200 s step cannot tile the hour.
+        let err = Frequency::Hourly
+            .validate(Duration::seconds(7200))
+            .expect_err("an hour at a 7200 s step is a validate error");
+        assert!(
+            err.to_string().contains("not a whole multiple"),
+            "got: {err}"
+        );
+        // Every calendar period is whole days: the timestep must divide a
+        // day, so a 7000 s step fails the month and the day alike.
+        for frequency in [Frequency::Daily, Frequency::Monthly, Frequency::Annual] {
+            frequency
+                .validate(Duration::seconds(7000))
+                .expect_err("a 7000 s step does not tile a day");
+        }
+        // The timestep and the run period carry no tiling requirement.
+        Frequency::Timestep
+            .validate(Duration::seconds(7000))
+            .expect("the timestep frequency takes no period check");
+        Frequency::RunPeriod
+            .validate(Duration::seconds(7000))
+            .expect("the run period is one row over whatever the run spans");
+        // The ordinary resolutions pass everywhere.
+        for frequency in [
+            Frequency::Hourly,
+            Frequency::Daily,
+            Frequency::Monthly,
+            Frequency::Annual,
+            Frequency::RunPeriod,
+        ] {
+            frequency
+                .validate(Duration::seconds(900))
+                .expect("a 900 s step tiles every period");
+        }
     }
 }

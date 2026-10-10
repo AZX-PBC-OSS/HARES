@@ -7,6 +7,7 @@
 pub mod catalogue;
 pub mod columns;
 pub mod metrics;
+pub mod reduce;
 pub mod report;
 pub mod writer;
 
@@ -38,6 +39,7 @@ pub use metrics::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,
     SimulationMetrics,
 };
+pub use reduce::{PeriodCalendar, PeriodReducer, PeriodRow, ReduceError, TimeRule};
 pub use report::{
     Destination, Frequency, ReportSpec, RowPlan, RowPlanError, SchemaSurface, Selection,
     VariableSurface, resolve_selection,
