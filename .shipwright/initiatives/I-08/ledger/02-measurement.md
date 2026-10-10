@@ -2310,14 +2310,26 @@ diagnostics request.
   about 199.0 ms per day, about 138 µs per step.
 - `with`: the run records the diagnostics block (20 columns on this
   model): the zone and port reads, the plan-row writes and the batch
-  building. Median about 201.7 ms per day in the same process, the delta
-  about 2.7 ms per day, about 1.9 µs per step.
+  building. Median about 201.7 ms per day in the same process, the
+  pair's delta about 2.7 ms per day.
 
-In the observe profile the post-hoc accumulator's per-step record joins
-the with side; cross-process medians there move more than the delta
-(with 209.8 ms against without 229.3 ms in one run, 233.1 against 231.2
-in another), so the accumulator's per-step cost sits inside this host's
-run-to-run noise on the two-zone model, and the release profile's paired
-about 2 µs per step is the honest per-step figure. The goldens are
-bitwise in every profile after the change (the diagnostics columns exist
-only under the request), so no value moved.
+CORRECTED the same day, on review: the first version of this record read
+that one pair's delta as a per-step cost, about 1.9 µs per step, and
+called it the honest figure. The bench cannot resolve a cost that
+small. Re-running the paired benches gave deltas of about +150, -1.7
+and +20 ms per day: the sign flips, so the 2.7 ms pair was one sample
+of this noise, not a stable estimate. The bench's own order biases it
+besides: the two benches run in one process in a fixed order, and the
+second inherits the first's warmed state, so the pair's delta carries
+the order's effect along with anything it measures. The magnitude is
+therefore recorded as a bound, not a point estimate: the with-request
+recording's per-step cost is within this host's noise on this bench.
+The observe profile's cross-process medians sit in the same noise (with
+209.8 ms against without 229.3 ms in one run, 233.1 against 231.2 in
+another). What the row holds is the structural claim: with no request
+no diagnostics code runs in the step (no schema column, no capture, no
+accumulator), proven by the code path and the tests (the schema pins
+hold byte-unchanged without the request, and the pin fixture's
+differential holds row for row). The goldens are bitwise in every
+profile after the change (the diagnostics columns exist only under the
+request), so no value moved.

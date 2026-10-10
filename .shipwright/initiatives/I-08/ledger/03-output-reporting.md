@@ -993,9 +993,13 @@ parent, the parity and thermal-trace environment failures; 1618
 passed); pyright 0; the goldens bitwise in all three profiles
 (compare-all 7 identical, `-F dst` 1, `-F observe` 7, the tool's
 observe feature forwarding added for the third line). Measurement: the
-diagnostics' per-step recording is about 1.9 µs per step on the
-two-zone model with the request and nothing without it
-(`02-measurement.md`, the bench this row adds).
+with-request recording's per-step cost is within host noise on the
+two-zone model, the magnitude recorded as a bound and not a point
+estimate (the bench's paired deltas flipped sign across re-runs, about
++150, -1.7 and +20 ms per day, and the bench's fixed order biases the
+pair it measures; corrected on review), and nothing runs without the
+request (`02-measurement.md`, the bench this row adds; the structural
+claim proven by the code path and the tests).
 
 ## OR-5: health recorded and physics invariants enforced in every build, including warm-up
 
