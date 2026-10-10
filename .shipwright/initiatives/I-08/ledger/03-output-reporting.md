@@ -929,6 +929,74 @@ exist at this row.
 
 **Dependencies:** OR-3.
 
+**State:** committed `81448376` (branch `row/r41-or4`, cut from
+`c9c3399e`, one commit). The destinations entry had not landed at the
+cut, so the request rides the one config type: `SimulationConfig.diagnostics`
+(serde default `false`, the TOML `[simulation] diagnostics` key, the
+Python keyword, getter and setter, and the stub entry), and the report
+is the run's own frames, read back through the recorder's retained
+batches or the output file. `Selection::Diagnostics` joins the report
+selections (the plan.md variant): the catalogue's diagnostics block is a
+contiguous suffix appended to the schema last, every field carrying the
+block's metadata marker, so the freeze resolves the selection's
+projection from the schema alone (`SchemaSurface` reports the block's
+offset through the variable surface; the verbosity preset spans the
+slots before it). The declarations: the CSV's every column as
+catalogue variables, 23 on the three-zone all-classes fixture (941 to
+964 in the kinds pin, regenerated and reviewed): `step`, `timestamp_s`,
+`outdoor_temp_c`, the per-zone triples `zone{id}_temp_c`,
+`zone{id}_thermal_gain_w`, `zone{id}_latent_gain_w` (`VariableSource::Zone`,
+keyed by zone id as the CSV's names were), `electrical_net_kw`,
+`electrical_net_kvar` and the nine envelope component gains
+(`VariableSource::Dwelling`; `air_density_kg_m3` declares the new
+`Unit::KilogramPerCubicMeter`). The verbosity schema pins
+(`v0..8.json`) are byte-unchanged: no verbosity preset emits the block.
+
+The gating: `diagnostic_writer`, the `output_verbosity >= 4` gate and
+the equipment preamble are deleted (the preamble's information rides
+with the destinations entry's successor, as planned); the diagnostics
+bindings resolve the block's slots at freeze into the producer
+bindings and `record_step` writes them by index, reading the same
+sources at the same step point the CSV writer read (the write moved
+after the other producers' writes; the intervening code touches none of
+the sources). The post-hoc diagnostic accumulator is created only when
+the run requests the diagnostics (at assembly and on observer enable),
+so an unrequested run's step pays nothing for the diagnostics, and its
+findings surface as tracing warnings: the `# diag` comment lines died
+with the writer, and the summary line with them.
+
+The acceptance tests live in `crates/hares-core/tests/diagnostics_report.rs`:
+`diagnostics_absent_without_a_diagnostics_report` (RED at the parent:
+the unrequested verbosity-8 run created the CSV in the output
+directory), `diagnostics_in_memory_with_verbosity_0_report` (the frame's
+diagnostics columns equal the pinned CSV row for row at the CSV's
+printed precision), and `without_the_request_frames_equal_the_requested_frames_minus_diagnostics`
+(the shared columns bitwise equal, the requested schema exactly the
+other's plus the block). The pin `crates/hares-core/tests/fixtures/diagnostics_cz4a.csv`
+was captured from the parent commit's writer before any code change,
+per the entry. The migrated tests: `port_radiant_diag`'s CSV test reads
+the frame now; the post-hoc wiring test pins both directions through a
+capturing tracing subscriber (the checks run only when requested); the
+two catalogue tests whose synthetic TOML carried the removed
+`time_res_s`/`duration_s` keys were already failing at the parent and
+load `time_res`/`duration` here. The Python surface: the `diagnostics`
+keyword, getter and setter, the stub entry, and a pytest for the
+default and the round trip.
+
+Gates: fmt; clippy `-D warnings` (default, dst, observe,
+observe-profiling, all-features; four pre-existing hares-python lints at
+the parent fixed in passing: the loop that never looped and three
+pyo3 constructors' argument counts, allowed like their siblings);
+nextest `--all-features` 7841/7841 and `-F observe` 7822/7822; pytest
+unchanged from the parent (26 failures + 4 errors identical at the
+parent, the parity and thermal-trace environment failures; 1618
+passed); pyright 0; the goldens bitwise in all three profiles
+(compare-all 7 identical, `-F dst` 1, `-F observe` 7, the tool's
+observe feature forwarding added for the third line). Measurement: the
+diagnostics' per-step recording is about 1.9 µs per step on the
+two-zone model with the request and nothing without it
+(`02-measurement.md`, the bench this row adds).
+
 ## OR-5: health recorded and physics invariants enforced in every build, including warm-up
 
 **Kind:** initiative work; closes `01-baseline-repair.md` BR-5 (the three

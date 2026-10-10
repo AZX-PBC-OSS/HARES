@@ -2296,3 +2296,28 @@ the end-to-end effect sits inside noise; the per-step win compounds with
 the reporting work that follows on this path. The goldens are bitwise
 after the change (compare-all 7 manifests identical,
 `full_year_900s_dst` identical), so no value moved.
+
+### The diagnostics report's per-step recording, 2026-10-09 (branch `row/r41-or4`, engine `81448376` on `c9c3399e`)
+
+Criterion, `cargo bench -p hares-core --bench diagnostics_report` (new in
+this row; 20 samples, 2 s warm-up, 6 s measurement, this host, WSL2).
+Both sides run the same one-day two-zone model (the cz4a parity fixture,
+verbosity 2, output on, 1440 steps of 60 s); the only difference is the
+diagnostics request.
+
+- `without`: the run requests no diagnostics, so no diagnostics code runs
+  in the step: no schema column, no capture, no accumulator. Median
+  about 199.0 ms per day, about 138 µs per step.
+- `with`: the run records the diagnostics block (20 columns on this
+  model): the zone and port reads, the plan-row writes and the batch
+  building. Median about 201.7 ms per day in the same process, the delta
+  about 2.7 ms per day, about 1.9 µs per step.
+
+In the observe profile the post-hoc accumulator's per-step record joins
+the with side; cross-process medians there move more than the delta
+(with 209.8 ms against without 229.3 ms in one run, 233.1 against 231.2
+in another), so the accumulator's per-step cost sits inside this host's
+run-to-run noise on the two-zone model, and the release profile's paired
+about 2 µs per step is the honest per-step figure. The goldens are
+bitwise in every profile after the change (the diagnostics columns exist
+only under the request), so no value moved.
