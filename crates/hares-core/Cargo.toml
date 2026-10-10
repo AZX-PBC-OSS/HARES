@@ -124,3 +124,8 @@ name = "output_row_plan"
 path = "../../benches/output_row_plan.rs"
 harness = false
 
+[[bench]]
+name = "diagnostics_report"
+path = "../../benches/diagnostics_report.rs"
+harness = false
+

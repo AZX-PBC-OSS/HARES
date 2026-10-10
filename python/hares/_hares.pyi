@@ -2295,6 +2295,7 @@ class SimulationConfig:
         duration: int | timedelta,
         time_res: int | timedelta = ...,
         reports: list[ReportSpec] | None = ...,
+        diagnostics: bool = ...,
         output_chunk_size: int = ...,
         setpoint_deadband_c: float | None = ...,
         master_seed: int = ...,
@@ -2315,6 +2316,11 @@ class SimulationConfig:
     def time_res(self) -> int: ...
     @time_res.setter
     def time_res(self, value: int | timedelta) -> None: ...
+    @property
+    @property
+    def diagnostics(self) -> bool: ...
+    @diagnostics.setter
+    def diagnostics(self, value: bool) -> None: ...
     @property
     def reports(self) -> list[ReportSpec]: ...
     @reports.setter

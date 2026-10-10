@@ -241,6 +241,12 @@ pub struct SimulationConfig {
     /// a run with no reports records nothing.
     #[serde(default)]
     pub reports: Vec<ReportSpec>,
+    /// Whether the run requests the diagnostics report: the per-step
+    /// diagnostics variables, declared in the catalogue and appended to
+    /// the run's schema. Without it a run records no diagnostics variable
+    /// and pays nothing for them (default: false).
+    #[serde(default)]
+    pub diagnostics: bool,
     /// Rows per Arrow RecordBatch flush (default: 10 000).
     #[serde(default = "default_output_chunk_size")]
     pub output_chunk_size: usize,
@@ -813,6 +819,7 @@ output_verboisty = 3
             duration: Duration::seconds(i64::from(u32::MAX) * 2),
             time_res: Duration::seconds(i64::from(u32::MAX) + 1),
             reports: Vec::new(),
+            diagnostics: false,
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,
@@ -907,6 +914,7 @@ latitude_deg = 95.0
             duration: Duration::seconds(3600),
             time_res: Duration::seconds(60),
             reports: Vec::new(),
+            diagnostics: false,
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,

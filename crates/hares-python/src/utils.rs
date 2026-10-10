@@ -16,6 +16,7 @@ const SIM_CONFIG_FIELD_KEYWORDS: &[&str] = &[
     "duration",
     "time_res",
     "reports",
+    "diagnostics",
     "output_chunk_size",
     "setpoint_deadband_c",
     "master_seed",

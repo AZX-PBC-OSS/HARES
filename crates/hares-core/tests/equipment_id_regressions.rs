@@ -108,6 +108,7 @@ fn sim_config(duration: Duration, csv_path: Option<PathBuf>, verbosity: u8) -> S
                 },
             })
             .collect(),
+        diagnostics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,

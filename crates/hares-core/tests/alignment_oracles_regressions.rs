@@ -627,8 +627,8 @@ fn simulate_fixture_steps(
     fixture: &ParityFixture,
     actor: Option<Box<dyn Actor>>,
 ) -> Vec<StepResult> {
-    // Recording is off (no report is configured: the diagnostics writer
-    // rides a verbosity-4+ file report only, and none is requested here).
+    // Recording is off (no report is configured: nothing is recorded and
+    // no file is written).
     let mut dwelling_config = build_dwelling_config(fixture);
     dwelling_config.sim_config.reports = Vec::new();
     let mut dwelling = Dwelling::from_config(dwelling_config).expect("fixture dwelling must load");

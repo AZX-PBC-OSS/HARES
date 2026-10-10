@@ -629,6 +629,7 @@ mod tests {
             duration: chrono::Duration::hours(1),
             time_res: chrono::Duration::hours(1),
             reports: Vec::new(),
+            diagnostics: false,
             output_chunk_size: 16,
             setpoint_deadband_c: None,
             master_seed: 0,

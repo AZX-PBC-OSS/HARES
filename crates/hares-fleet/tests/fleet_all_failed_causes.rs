@@ -45,7 +45,15 @@ fn config_with_schedule_source(bldg_id: i64, schedule_path: Option<PathBuf>) -> 
             start_time,
             duration: Duration::hours(24),
             time_res: Duration::seconds(900),
+<<<<<<< HEAD
             reports: Vec::new(),
+=======
+            output_verbosity: 0,
+            diagnostics: false,
+            output_path: None,
+            write_output: false,
+            output_format: OutputFormat::Csv,
+>>>>>>> 81448376 (fix: diagnostics are a catalogue report, created only when requested)
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,

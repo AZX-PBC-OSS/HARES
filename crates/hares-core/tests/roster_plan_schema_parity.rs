@@ -34,6 +34,7 @@ fn sim_config(csv_path: PathBuf) -> SimulationConfig {
                 overwrite: false,
             },
         }],
+        diagnostics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,

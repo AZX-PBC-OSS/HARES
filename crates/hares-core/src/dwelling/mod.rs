@@ -93,7 +93,6 @@ use serde_json::{Map, Value};
 use crate::actors::{
     BatteryManagementActor, BmsParams, EvDriverActor, EvDriverParams, SolverFeedbackActor,
 };
-use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
 #[cfg(feature = "profiling")]
 use crate::health::{ActorTiming, ActorTimings};
@@ -1125,6 +1124,130 @@ struct OutputRowBindings {
     end_use_aggregates: Vec<Option<usize>>,
     /// Telemetry key to output column of each actor, in actor order.
     actors: Vec<Vec<(String, usize)>>,
+    /// The diagnostics block's slots, present only when the frozen schema
+    /// carries the block (the run requested the diagnostics report). The
+    /// per-step gate rides this `Option`: with `None` the step reads and
+    /// writes nothing for the diagnostics.
+    diagnostics: Option<DiagnosticsBindings>,
+}
+
+/// The slot of one zone's three diagnostics columns.
+#[derive(Debug, Default, Clone)]
+struct ZoneDiagSlots {
+    zone: ZoneId,
+    temp_c: usize,
+    thermal_gain_w: usize,
+    latent_gain_w: usize,
+}
+
+/// The slots of the diagnostics block's envelope columns, in the block's
+/// order.
+#[derive(Debug, Default, Clone)]
+struct DiagEnvelopeSlots {
+    port_radiant_w: usize,
+    port_shortwave_w: usize,
+    port_convective_w: usize,
+    window_solar_w: usize,
+    opaque_solar_lwr_w: usize,
+    interior_lwr_w: usize,
+    internal_gain_w: usize,
+    air_density_kg_m3: usize,
+    ghi_w_m2: usize,
+}
+
+/// The diagnostics block's producer bindings: every diagnostics column's
+/// slot, resolved once at freeze from the schema's marked fields.
+#[derive(Debug, Default, Clone)]
+struct DiagnosticsBindings {
+    step: usize,
+    timestamp_s: usize,
+    outdoor_temp_c: usize,
+    zones: Vec<ZoneDiagSlots>,
+    electrical_net_kw: usize,
+    electrical_net_kvar: usize,
+    envelope: DiagEnvelopeSlots,
+}
+
+/// Which per-zone diagnostics column a name spells.
+enum ZoneDiagKind {
+    Temp,
+    Sensible,
+    Latent,
+}
+
+/// Parses a diagnostics zone column name: `zone{N}_temp_c`,
+/// `zone{N}_thermal_gain_w` or `zone{N}_latent_gain_w`, where N is the
+/// zone's id.
+fn zone_diag_name(name: &str) -> Option<(u16, ZoneDiagKind)> {
+    let rest = name.strip_prefix("zone")?;
+    let underscore = rest.find('_')?;
+    let id = rest[..underscore].parse().ok()?;
+    let kind = match &rest[underscore..] {
+        "_temp_c" => ZoneDiagKind::Temp,
+        "_thermal_gain_w" => ZoneDiagKind::Sensible,
+        "_latent_gain_w" => ZoneDiagKind::Latent,
+        _ => return None,
+    };
+    Some((id, kind))
+}
+
+/// Resolves the diagnostics block's producer bindings from the frozen
+/// schema: every field carrying the diagnostics marker, by name. `None`
+/// when the schema carries no marked field, which is the per-step gate.
+fn build_diagnostics_bindings(schema: &Schema) -> Option<DiagnosticsBindings> {
+    let mut diag = DiagnosticsBindings::default();
+    let mut zones: Vec<Option<ZoneDiagSlots>> = Vec::new();
+    let mut any = false;
+    for (slot, field) in schema.fields().iter().skip(1).enumerate() {
+        if !field
+            .metadata()
+            .contains_key(hares_io::DIAGNOSTICS_METADATA_KEY)
+        {
+            continue;
+        }
+        any = true;
+        let name = field.name().as_str();
+        match name {
+            "step" => diag.step = slot,
+            "timestamp_s" => diag.timestamp_s = slot,
+            "outdoor_temp_c" => diag.outdoor_temp_c = slot,
+            "electrical_net_kw" => diag.electrical_net_kw = slot,
+            "electrical_net_kvar" => diag.electrical_net_kvar = slot,
+            "port_radiant_w" => diag.envelope.port_radiant_w = slot,
+            "port_shortwave_w" => diag.envelope.port_shortwave_w = slot,
+            "port_convective_w" => diag.envelope.port_convective_w = slot,
+            "window_solar_w" => diag.envelope.window_solar_w = slot,
+            "opaque_solar_lwr_w" => diag.envelope.opaque_solar_lwr_w = slot,
+            "interior_lwr_w" => diag.envelope.interior_lwr_w = slot,
+            "internal_gain_w" => diag.envelope.internal_gain_w = slot,
+            "air_density_kg_m3" => diag.envelope.air_density_kg_m3 = slot,
+            "ghi_w_m2" => diag.envelope.ghi_w_m2 = slot,
+            other => {
+                if let Some((id, kind)) = zone_diag_name(other) {
+                    let index = usize::from(id);
+                    if zones.len() < index {
+                        zones.resize(index, None);
+                    }
+                    let entry = &mut zones[index - 1];
+                    let entry = entry.get_or_insert_with(|| ZoneDiagSlots {
+                        zone: ZoneId(id),
+                        temp_c: 0,
+                        thermal_gain_w: 0,
+                        latent_gain_w: 0,
+                    });
+                    match kind {
+                        ZoneDiagKind::Temp => entry.temp_c = slot,
+                        ZoneDiagKind::Sensible => entry.thermal_gain_w = slot,
+                        ZoneDiagKind::Latent => entry.latent_gain_w = slot,
+                    }
+                }
+            }
+        }
+    }
+    any.then(|| {
+        diag.zones = zones.into_iter().flatten().collect();
+        diag
+    })
 }
 
 /// Constructs the row plan's producer bindings from the frozen schema: the
@@ -1150,7 +1273,50 @@ fn build_output_row_bindings(
             &column_index,
         ),
         actors: build_actor_column_map(actors, &column_index),
+        diagnostics: build_diagnostics_bindings(schema),
     })
+}
+
+/// Writes one step's diagnostics columns into the plan row: the zone
+/// temperatures, the thermal ports' sensible and latent gains, the
+/// electrical net from the ports, and the thermal solver's component
+/// gains. The values are the per-step diagnostics CSV's row semantics
+/// (a zone absent from the environment or the ports records 0.0, the same
+/// default the CSV's row writer applied), at full f64 precision.
+fn write_diagnostics_row(
+    row: &mut [f64],
+    diag: &DiagnosticsBindings,
+    step: u64,
+    env: &EnvironmentState,
+    ports: &PortSlots,
+    gains: &EnvelopeComponentGains,
+) {
+    row[diag.step] = step as f64;
+    row[diag.timestamp_s] = env.current_time.timestamp() as f64;
+    row[diag.outdoor_temp_c] = env.weather.outdoor_temp_c;
+    for zone in &diag.zones {
+        let temp = env
+            .zones
+            .iter()
+            .find(|z| z.id == zone.zone)
+            .map(|z| z.temperature_c)
+            .unwrap_or(0.0);
+        row[zone.temp_c] = temp;
+        let thermal = ports.thermal.iter().find(|t| t.zone == zone.zone);
+        row[zone.thermal_gain_w] = thermal.map_or(0.0, |t| t.heat().sensible_w());
+        row[zone.latent_gain_w] = thermal.map_or(0.0, |t| t.heat().latent_w);
+    }
+    row[diag.electrical_net_kw] = power_w_to_kw(ports.electrical.net_active_w());
+    row[diag.electrical_net_kvar] = ports.electrical.reactive_power_kvar;
+    row[diag.envelope.port_radiant_w] = gains.port_radiant_w;
+    row[diag.envelope.port_shortwave_w] = gains.port_shortwave_w;
+    row[diag.envelope.port_convective_w] = gains.port_convective_w;
+    row[diag.envelope.window_solar_w] = gains.window_solar_w;
+    row[diag.envelope.opaque_solar_lwr_w] = gains.opaque_solar_lwr_w;
+    row[diag.envelope.interior_lwr_w] = gains.interior_lwr_w;
+    row[diag.envelope.internal_gain_w] = gains.internal_gain_w;
+    row[diag.envelope.air_density_kg_m3] = gains.air_density_kg_m3;
+    row[diag.envelope.ghi_w_m2] = env.weather.ghi_w_m2;
 }
 
 /// Resolves v8 per-equipment telemetry diagnostic columns for the given
@@ -2384,14 +2550,16 @@ pub struct Dwelling {
     island_excess_kw: f64,
     /// Output config retained for schema rebuilds when equipment changes.
     reports: Vec<hares_io::ReportSpec>,
+    /// Whether the run requested the diagnostics report: the diagnostics
+    /// variables join the schema and the row plan, and the per-step
+    /// diagnostics recording runs. Without it the run pays nothing for
+    /// them.
+    diagnostics: bool,
     output_chunk_size: usize,
     /// Simulation config retained for output-schema rebuilds when equipment
     /// changes: the incremental metrics calculator re-initializes against
     /// the rebuilt schema.
     sim_config: SimulationConfig,
-    /// Diagnostic CSV writer, opened for a verbosity-4+ report with a file
-    /// destination.
-    diagnostic_writer: Option<std::io::BufWriter<std::fs::File>>,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
     /// Run-total per-actor scheduler-entry timings (one slot per registered
@@ -2522,6 +2690,7 @@ impl Dwelling {
             duration,
             time_res,
             reports,
+            diagnostics: false,
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,
@@ -3410,9 +3579,9 @@ fn build_from_blueprint_inner(
         island_unserved_kw: 0.0,
         island_excess_kw: 0.0,
         reports: config.sim_config.reports.clone(),
+        diagnostics: config.sim_config.diagnostics,
         output_chunk_size: config.sim_config.output_chunk_size,
         sim_config: config.sim_config.clone(),
-        diagnostic_writer: None,
         #[cfg(feature = "profiling")]
         profiling: DwellingProfilingSummary::default(),
         #[cfg(feature = "profiling")]
@@ -3424,6 +3593,13 @@ fn build_from_blueprint_inner(
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         envelope_diagnostics: solvers.envelope_diagnostics,
     };
+
+    // The post-hoc diagnostic accumulator: part of the diagnostics report,
+    // created only when the run requested it.
+    #[cfg(feature = "observe")]
+    if dwelling.diagnostics {
+        dwelling.initialize_diagnostic_accum();
+    }
 
     // Registering the built-in actors is the one roster plan of assembly:
     // it derives the port tables, the fluid loop-type map, the output
@@ -3497,107 +3673,8 @@ fn build_from_blueprint_inner(
         );
     }
 
-    // Initialise the diagnostic CSV for the first report in `reports` order
-    // that selects a verbosity of at least 4 into a file destination: until
-    // the diagnostics-as-catalogue entry, the writer rides that report's
-    // path (`<stem>_diagnostics.csv` in the same directory). With no such
-    // report, nothing is written and nothing falls back to the working
-    // directory.
-    let diagnostic_path: Option<PathBuf> =
-        dwelling
-            .reports
-            .iter()
-            .find_map(|report| match (&report.selection, &report.destination) {
-                (
-                    hares_io::Selection::Verbosity(verbosity),
-                    hares_io::Destination::Parquet { path, .. }
-                    | hares_io::Destination::Csv { path, .. },
-                ) if *verbosity >= 4 => {
-                    let stem = path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| format!("dwelling_{}", dwelling.bldg_id));
-                    Some(path.with_file_name(format!("{stem}_diagnostics.csv")))
-                }
-                _ => None,
-            });
-    // The rider's one guard: its path must not collide with a report's own
-    // destination, or the eager create below would truncate that report's
-    // target before the recorder's existing-target check ever ran. The
-    // rider is removed whole when diagnostics become a catalogue report;
-    // until then this check is all it gets.
-    if let Some(diag_path) = &diagnostic_path
-        && let Some(report_name) = dwelling.reports.iter().find_map(|report| {
-            (report.destination.path() == Some(diag_path)).then(|| report.name.clone())
-        })
-    {
-        return Err(HaresError::Io(format!(
-            "the diagnostics rider's path {} collides with report '{}'s own \
-             destination; rename one",
-            diag_path.display(),
-            report_name
-        )));
-    }
-    dwelling.diagnostic_writer = match diagnostic_path {
-        Some(diag_path) => {
-            tracing::info!(
-                path = %diag_path.display(),
-                "diagnostic CSV output enabled (a verbosity >= 4 report with a file destination)"
-            );
-            let file = match std::fs::File::create(&diag_path) {
-                Ok(file) => file,
-                Err(err) => {
-                    // The dwelling is about to be dropped carrying the
-                    // accumulated warning log; emit it so this failure carries
-                    // the context that led here.
-                    for entry in dwelling.take_warnings() {
-                        tracing::warn!("{entry}");
-                    }
-                    return Err(HaresError::Io(format!(
-                        "diagnostic file create failed: {err}"
-                    )));
-                }
-            };
-            let mut writer = std::io::BufWriter::new(file);
-            let n_zones = dwelling.latest_env.zones.len();
-            diagnostics::write_header(&mut writer, n_zones);
-            // Emit equipment zone-id mapping so zone routing is traceable.
-            let equipment_zones: Vec<(String, u16, Option<String>)> = dwelling
-                .equipment
-                .iter()
-                .filter_map(|eq| {
-                    eq.descriptor().zone.map(|z| {
-                        (
-                            eq.descriptor().name.clone(),
-                            z.0,
-                            eq.descriptor().zone_type.clone(),
-                        )
-                    })
-                })
-                .collect();
-            let ocv_sources: Vec<(String, String)> = dwelling
-                .equipment
-                .iter()
-                .filter_map(|eq| {
-                    eq.ocv_source()
-                        .map(|s| (eq.descriptor().name.clone(), s.to_string()))
-                })
-                .collect();
-            let provenance_lines: Vec<String> = dwelling
-                .equipment
-                .iter()
-                .flat_map(|eq| eq.provenance_lines())
-                .collect();
-            diagnostics::write_equipment_init(
-                &mut writer,
-                &equipment_zones,
-                &ocv_sources,
-                &provenance_lines,
-            );
-            Some(writer)
-        }
-        None => None,
-    };
+    // The diagnostics rider is gone: the diagnostics are a catalogue
+    // report, recorded with the run's frames when the run requests them.
 
     Ok(dwelling)
 }
@@ -3654,10 +3731,6 @@ impl Dwelling {
                 }
             }
         }
-        if let Some(ref mut writer) = self.diagnostic_writer {
-            std::io::Write::flush(writer)
-                .map_err(|err| HaresError::Io(format!("diagnostic close failed: {err}")))?;
-        }
         Ok(self.simulation_results.clone())
     }
 
@@ -3681,7 +3754,7 @@ impl Dwelling {
             })
             .collect();
         let time_res_s = self.latest_env.time_step_secs();
-        accum.run_post_hoc_checks(&mut self.diagnostic_writer, &zone_names, time_res_s)
+        accum.run_post_hoc_checks(&zone_names, time_res_s)
     }
 
     /// Emit the final partial billing period (if any). Call after the last
@@ -4405,12 +4478,14 @@ impl Dwelling {
     /// Enables the step observer with a ring buffer of the given capacity.
     ///
     /// Calling this again replaces any existing buffer and discards buffered snapshots.
-    /// Also initialises the post-hoc diagnostic accumulator when called for the
-    /// first time or re-created.
+    /// Also re-initialises the post-hoc diagnostic accumulator when the run
+    /// requested the diagnostics report.
     #[cfg(feature = "observe")]
     pub fn enable_observer(&mut self, capacity: usize) {
         self.observer_buf = Some(ObserverBuffer::new(capacity));
-        self.initialize_diagnostic_accum();
+        if self.diagnostics {
+            self.initialize_diagnostic_accum();
+        }
     }
 
     /// Initialises (or re-initialises) the post-hoc diagnostic accumulator from
@@ -6123,26 +6198,6 @@ impl Dwelling {
             ));
         }
 
-        // Step 4 diagnostic: capture per-timestep diagnostics for CSV output.
-        if let Some(ref mut writer) = self.diagnostic_writer {
-            let gains = self.thermal_solver.component_gains();
-            let envelope = EnvelopeDiag {
-                window_solar_w: gains.window_solar_w,
-                opaque_solar_lwr_w: gains.opaque_solar_lwr_w,
-                interior_lwr_w: gains.interior_lwr_w,
-                internal_gain_w: gains.internal_gain_w,
-                port_convective_w: gains.port_convective_w,
-                port_radiant_w: gains.port_radiant_w,
-                port_shortwave_w: gains.port_shortwave_w,
-                air_density_kg_m3: gains.air_density_kg_m3,
-                ghi_w_m2: self.latest_env.weather.ghi_w_m2,
-            };
-            let step = self.clock.current_step();
-            let diag = diagnostics::capture(step, &self.latest_env, &self.ports, Some(envelope));
-            let n_zones = self.latest_env.zones.len();
-            diagnostics::write_row(writer, &diag, n_zones);
-        }
-
         #[cfg(test)]
         let humidity_alloc_before = thread_allocations();
         self.latest_env
@@ -6937,6 +6992,21 @@ impl Dwelling {
                     .sensible_for_category(ThermalCategory::HvacCooling)
                     .abs();
             }
+        }
+
+        // The diagnostics block: written only when the run requested the
+        // diagnostics report and the frozen schema carries the block. Every
+        // value is the per-step diagnostics CSV's row semantics (the zone
+        // lookups default to 0.0 the same way), at full f64 precision.
+        if let Some(diag) = &self.roster.bindings.diagnostics {
+            write_diagnostics_row(
+                row,
+                diag,
+                self.clock.current_step(),
+                &self.latest_env,
+                &self.ports,
+                gains,
+            );
         }
 
         self.timestamp_buf.clear();
@@ -12878,7 +12948,7 @@ occupancy = 1.0
                 .collect(),
         };
         let catalogue = hares_io::build_catalogue(&input).expect("the actor catalogue builds");
-        let extended = hares_io::build_schema(&catalogue, 0);
+        let extended = hares_io::build_schema(&catalogue, 0, false);
         let extended_fields = extended.fields().len();
 
         // Schema must gain columns (one per actor telemetry key) beside
@@ -19085,7 +19155,7 @@ occupancy = 0.0
         // the freeze builds it: from the dwelling's catalogue, whose actor
         // block already carries the actor columns.
         let catalogue = dwelling.catalogue();
-        let schema = hares_io::build_schema(&catalogue, 8);
+        let schema = hares_io::build_schema(&catalogue, 8, false);
         let schema = enrich_schema_with_telemetry_units(schema, &equipment, &catalogue);
         let column_name = "Total Electric Power (kW)";
         let selections = [
@@ -19196,7 +19266,7 @@ occupancy = 0.0
         // freeze builds it: from the dwelling's catalogue, whose actor
         // block already carries the actor columns.
         let catalogue = dwelling.catalogue();
-        let schema = hares_io::build_schema(&catalogue, 2);
+        let schema = hares_io::build_schema(&catalogue, 2, false);
         let schema = enrich_schema_with_telemetry_units(schema, &equipment, &catalogue);
         // The golden column indices: every value column's position by name,
         // the map the freeze resolved against.
@@ -19932,7 +20002,7 @@ occupancy = 0.0
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
 
         let catalogue = catalogue_from_equipment(&equipment);
-        let schema = hares_io::build_schema(&catalogue, 5);
+        let schema = hares_io::build_schema(&catalogue, 5, false);
         let enriched =
             enrich_schema_with_telemetry_units(schema, &equipment_refs(&equipment), &catalogue);
         let reactive_col = enriched
@@ -19958,7 +20028,7 @@ occupancy = 0.0
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
 
         let catalogue = catalogue_from_equipment(&equipment);
-        let schema = hares_io::build_schema(&catalogue, 5);
+        let schema = hares_io::build_schema(&catalogue, 5, false);
         let enriched =
             enrich_schema_with_telemetry_units(schema, &equipment_refs(&equipment), &catalogue);
         let reactive_col = enriched
@@ -20013,7 +20083,7 @@ occupancy = 0.0
             actors: Vec::new(),
         };
         let catalogue = hares_io::build_catalogue(&input).expect("the specs catalogue builds");
-        let schema = hares_io::build_schema(&catalogue, 8);
+        let schema = hares_io::build_schema(&catalogue, 8, false);
 
         let make = |unit_declaration: TelemetryField| -> Vec<Box<dyn Equipment>> {
             make_multiple(vec![unit_declaration])

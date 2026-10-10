@@ -5,11 +5,9 @@
 //! [`RowPlan`]; the per-step path writes values by precomputed index and
 //! never looks a column name up. The plan-input surface is
 //! [`VariableSurface`]: the catalogue's variable names in producer-slot
-//! order. OR-1's `Catalogue` implements the typed form of this surface
-//! (its `variables()` slice is in schema order and its name index answers
-//! `resolve`); until it lands, [`SchemaSurface`] provides the surface from
-//! the output schema, and OR-1 replaces it as the implementor without
-//! touching the plan builder.
+//! order. The catalogue derives the run's schema, and [`SchemaSurface`]
+//! provides the surface from it; the catalogue can implement the typed
+//! form of the same seam without touching the plan builder.
 
 use std::num::NonZeroU32;
 
@@ -22,17 +20,17 @@ use super::catalogue::Catalogue;
 
 use crate::config::ConfigError;
 
-/// What a report selects (`plan.md` 2.2). This entry adds the variants that
-/// can run against the current recorder; `Diagnostics` arrives with the
-/// diagnostics-as-catalogue entry and the period frequencies with the
-/// reporting-frequency entry.
+/// What a report selects (`plan.md` 2.2). The `Diagnostics` variant
+/// selects the per-step diagnostics variables, declared in the catalogue
+/// as one block and appended to the run's schema only when a run requests
+/// them; the period frequencies arrive with the reporting-frequency entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Selection {
     /// The verbosity preset: every variable the selected verbosity tier
     /// emits. The preset is materialized by the variable surface: the
-    /// schema (and, from OR-1 on, the catalogue view of a run) is built at
-    /// the selected verbosity, so the selection resolves to all of it.
+    /// schema (or the catalogue view of a run) is built at the selected
+    /// verbosity, so the selection resolves to all of it.
     Verbosity(u8),
     /// Explicit variable names, resolved exactly and case-sensitively.
     Named(Vec<String>),
@@ -40,6 +38,11 @@ pub enum Selection {
     /// `?` matches exactly one, everything else is literal (brackets have
     /// no special meaning), case-sensitive.
     Pattern(String),
+    /// The diagnostics block: the per-step diagnostics variables, appended
+    /// to the run's schema when the run requests the diagnostics. The
+    /// schema carries the block only for a run that requested it, so this
+    /// selection resolves to the block's slots in the freeze.
+    Diagnostics,
 }
 
 /// The reporting frequency of a selection. The `Timestep` frequency is one
@@ -193,32 +196,52 @@ pub struct ReportSpec {
 }
 
 /// The variables a row plan freezes from, in producer-slot (schema) order.
-/// The minimal plan-input seam: OR-1's `Catalogue` implements this over its
-/// schema-ordered `VariableDef` slice, replacing [`SchemaSurface`] as the
-/// implementor, and no plan code changes with it.
+/// The minimal plan-input seam: the catalogue's typed surface implements
+/// this over its schema-ordered `VariableDef` slice; [`SchemaSurface`]
+/// provides it from the output schema.
 pub trait VariableSurface {
     /// The variable names, in producer-slot (schema) order.
     fn variable_names(&self) -> Vec<&str>;
+
+    /// The producer-slot index of the diagnostics block's first variable,
+    /// when the surface carries the block. The block is a contiguous
+    /// suffix of the schema's variables; a verbosity preset spans the
+    /// slots before it, the diagnostics selection the slots from it.
+    fn diagnostics_offset(&self) -> Option<usize>;
 }
 
 /// The schema-built variable surface: the output schema's value columns in
-/// schema order (the timestamp column excluded). This is the variable
-/// surface until OR-1's catalogue supplies the typed one.
+/// schema order (the timestamp column excluded). The diagnostics block,
+/// when the schema carries it, is reported through
+/// [`VariableSurface::diagnostics_offset`]: the schema's diagnostics
+/// fields carry the block's metadata marker.
 pub struct SchemaSurface {
     names: Vec<String>,
+    /// The index of the first diagnostics field among the value columns,
+    /// when the schema carries the block.
+    diagnostics_start: Option<usize>,
 }
 
 impl SchemaSurface {
     /// Builds the surface from a schema, skipping the timestamp column:
-    /// recorder rows address the value columns only.
+    /// recorder rows address the value columns only. The diagnostics
+    /// offset is read from the schema's own diagnostics field marker.
     pub fn new(schema: &Schema) -> Self {
+        let mut diagnostics_start = None;
+        let mut names = Vec::new();
+        for (idx, field) in schema.fields().iter().skip(1).enumerate() {
+            if diagnostics_start.is_none()
+                && field
+                    .metadata()
+                    .contains_key(super::catalogue::DIAGNOSTICS_METADATA_KEY)
+            {
+                diagnostics_start = Some(idx);
+            }
+            names.push(field.name().clone());
+        }
         Self {
-            names: schema
-                .fields()
-                .iter()
-                .skip(1)
-                .map(|field| field.name().clone())
-                .collect(),
+            names,
+            diagnostics_start,
         }
     }
 }
@@ -226,6 +249,10 @@ impl SchemaSurface {
 impl VariableSurface for SchemaSurface {
     fn variable_names(&self) -> Vec<&str> {
         self.names.iter().map(String::as_str).collect()
+    }
+
+    fn diagnostics_offset(&self) -> Option<usize> {
+        self.diagnostics_start
     }
 }
 
@@ -240,6 +267,11 @@ pub enum RowPlanError {
     /// A `Pattern` selection matched no variable.
     #[error("output pattern '{0}' matches no variable")]
     EmptyPattern(String),
+    /// A `Diagnostics` selection against a surface that carries no
+    /// diagnostics block: the run did not request the diagnostics, so the
+    /// schema has none to select.
+    #[error("diagnostics selection: the schema carries no diagnostics block")]
+    NoDiagnostics,
 }
 
 /// The frozen write plan for a run's output rows.
@@ -286,13 +318,14 @@ impl RowPlan {
         surface: &dyn VariableSurface,
     ) -> Result<Self, RowPlanError> {
         let names = surface.variable_names();
+        let diagnostics_start = surface.diagnostics_offset();
         let mut projections = Vec::with_capacity(selections.len());
         for selection in selections {
             let projection = match selection {
                 // The preset is materialized by the surface: the schema (or
                 // catalogue view) is built at the selected verbosity, so the
-                // selection spans all of it.
-                Selection::Verbosity(_) => (0..names.len()).collect(),
+                // selection spans the slots before the diagnostics block.
+                Selection::Verbosity(_) => (0..diagnostics_start.unwrap_or(names.len())).collect(),
                 Selection::Named(selected) => resolve_named(selected, &names)?,
                 Selection::Pattern(pattern) => {
                     let matched: Vec<usize> = names
@@ -306,6 +339,12 @@ impl RowPlan {
                     }
                     matched
                 }
+                // The diagnostics block: the slots from the block's first
+                // variable to the end of the schema, in schema order.
+                Selection::Diagnostics => match diagnostics_start {
+                    Some(start) => (start..names.len()).collect(),
+                    None => return Err(RowPlanError::NoDiagnostics),
+                },
             };
             projections.push(projection);
         }

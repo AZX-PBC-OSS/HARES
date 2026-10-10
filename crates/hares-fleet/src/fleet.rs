@@ -917,6 +917,7 @@ fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
         duration: duration.unwrap_or_else(|| Duration::hours(24)),
         time_res: Duration::minutes(1),
         reports: Vec::new(),
+        diagnostics: false,
         output_chunk_size: 10_000,
         setpoint_deadband_c: None,
         master_seed: 0,
@@ -1281,6 +1282,7 @@ mod tests {
             start_time: fixture_start::fixture_start(),
             duration: Duration::hours(1),
             time_res: Duration::minutes(1),
+<<<<<<< HEAD
             reports: vec![hares_io::ReportSpec {
                 name: "frame".to_string(),
                 selection: hares_io::Selection::Verbosity(0),
@@ -1290,6 +1292,13 @@ mod tests {
                     overwrite: false,
                 },
             }],
+=======
+            output_verbosity: 0,
+            diagnostics: false,
+            output_path: Some(output_path),
+            write_output: true,
+            output_format: OutputFormat::Csv,
+>>>>>>> 81448376 (fix: diagnostics are a catalogue report, created only when requested)
             output_chunk_size: 128,
             setpoint_deadband_c: None,
             master_seed: 0,

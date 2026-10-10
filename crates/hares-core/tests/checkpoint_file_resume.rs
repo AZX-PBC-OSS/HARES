@@ -31,6 +31,7 @@ fn dwelling(case: &Case) -> Dwelling {
             duration: Duration::days(7),
             time_res: Duration::seconds(case.time_res_s),
             reports: Vec::new(),
+            diagnostics: false,
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,

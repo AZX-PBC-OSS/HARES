@@ -44,6 +44,7 @@ fn test_config(deadband: Option<f64>) -> SimulationConfig {
         duration: Duration::hours(1),
         time_res: Duration::hours(1),
         reports: Vec::new(),
+        diagnostics: false,
         output_chunk_size: 16,
         master_seed: 0,
         setpoint_deadband_c: deadband,

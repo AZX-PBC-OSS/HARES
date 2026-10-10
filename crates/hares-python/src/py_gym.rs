@@ -781,6 +781,7 @@ mod tests {
             crate::py_config::WholeSeconds(600),
             crate::py_config::WholeSeconds(60),
             None,
+            false,
             hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
             None,
             0,

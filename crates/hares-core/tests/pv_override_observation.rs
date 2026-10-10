@@ -26,6 +26,7 @@ fn pv_dwelling() -> Dwelling {
             duration: Duration::hours(4),
             time_res: Duration::hours(1),
             reports: Vec::new(),
+            diagnostics: false,
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,

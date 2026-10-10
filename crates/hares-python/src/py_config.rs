@@ -184,6 +184,7 @@ impl PySimulationConfig {
         duration,
         time_res = WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
         reports = None,
+        diagnostics = false,
         output_chunk_size = hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
         setpoint_deadband_c = None,
         master_seed = 0,
@@ -199,6 +200,7 @@ impl PySimulationConfig {
         duration: WholeSeconds,
         time_res: WholeSeconds,
         reports: Option<Vec<crate::py_report::PyReportSpec>>,
+        diagnostics: bool,
         output_chunk_size: usize,
         setpoint_deadband_c: Option<f64>,
         master_seed: u64,
@@ -246,6 +248,7 @@ impl PySimulationConfig {
                 .into_iter()
                 .map(|report| report.0)
                 .collect::<Vec<ReportSpec>>(),
+            diagnostics,
             output_chunk_size,
             setpoint_deadband_c,
             master_seed,
@@ -322,6 +325,21 @@ impl PySimulationConfig {
             ))
         })?;
         self.assign(|cfg| cfg.time_res = d)
+    }
+
+    #[getter]
+    /// Whether the run requests the diagnostics report: the per-step
+    /// diagnostics variables join the run's schema, and the per-step
+    /// diagnostics recording runs. Without it a run records no diagnostics
+    /// variable and pays nothing for them.
+    #[getter]
+    pub fn diagnostics(&self) -> bool {
+        self.0.diagnostics
+    }
+
+    #[setter]
+    pub fn set_diagnostics(&mut self, value: bool) -> PyResult<()> {
+        self.assign(|cfg| cfg.diagnostics = value)
     }
 
     #[getter]
@@ -479,6 +497,7 @@ fn parse_overrides(overrides: Option<&Bound<'_, PyDict>>) -> PyResult<Option<ser
 #[pymethods]
 impl PyDwellingConfig {
     #[new]
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         hpxml,
         schedule,
@@ -669,6 +688,7 @@ mod tests {
             WholeSeconds(duration),
             WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
             None,
+            false,
             hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
             None,
             0,
@@ -728,6 +748,7 @@ mod tests {
                     WholeSeconds(3600),
                     WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
                     None,
+                    false,
                     hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                     None,
                     0,
@@ -754,6 +775,7 @@ mod tests {
                 WholeSeconds(3600),
                 WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
                 None,
+                false,
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 0,
@@ -782,6 +804,7 @@ mod tests {
                 WholeSeconds(3600),
                 WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
                 None,
+                false,
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 0,

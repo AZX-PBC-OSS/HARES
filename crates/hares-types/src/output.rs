@@ -58,6 +58,8 @@ pub enum Unit {
     KilowattHourPerMile,
     /// Kilograms per second.
     KilogramPerSecond,
+    /// Kilograms per cubic metre (moist-air density).
+    KilogramPerCubicMeter,
     /// Litres per day.
     LitrePerDay,
     /// A count of things.
@@ -103,6 +105,7 @@ impl Unit {
             Self::JoulePerKilogramKelvin => "J/(kg*K)",
             Self::KilowattHourPerMile => "kWh/mi",
             Self::KilogramPerSecond => "kg/s",
+            Self::KilogramPerCubicMeter => "kg/m3",
             Self::LitrePerDay => "L/day",
             Self::Count => "count",
             Self::Byte => "bytes",

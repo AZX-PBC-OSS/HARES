@@ -67,6 +67,7 @@ fn bldg2_january_config() -> DwellingConfig {
             duration: Duration::days(7),
             time_res: Duration::hours(1),
             reports: Vec::new(),
+            diagnostics: false,
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,

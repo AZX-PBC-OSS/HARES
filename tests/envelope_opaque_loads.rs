@@ -127,6 +127,7 @@ mod tests {
                             overwrite: false,
                         },
                     }],
+                    diagnostics: false,
                     output_chunk_size: 1024,
                     setpoint_deadband_c: None,
                     master_seed: 42,

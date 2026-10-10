@@ -3629,6 +3629,7 @@ mod profiling_summary_tests {
                 crate::py_config::WholeSeconds(96 * 3600),
                 crate::py_config::WholeSeconds(3600),
                 None,
+                false,
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 0,

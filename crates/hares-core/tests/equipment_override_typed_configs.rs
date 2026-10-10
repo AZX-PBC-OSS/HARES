@@ -46,6 +46,7 @@ fn config(hpxml: &Path, overrides: Option<Value>, start_hour: u32) -> DwellingCo
             duration: Duration::hours(24),
             time_res: Duration::seconds(3600),
             reports: Vec::new(),
+            diagnostics: false,
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,

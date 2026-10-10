@@ -44,6 +44,7 @@ fn config_with_chunk(csv_path: &Path, config_chunk_size: usize) -> DwellingConfi
                     overwrite: false,
                 },
             }],
+            diagnostics: false,
             output_chunk_size: config_chunk_size,
             setpoint_deadband_c: None,
             master_seed: 0,

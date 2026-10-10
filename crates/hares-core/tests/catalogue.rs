@@ -157,7 +157,7 @@ fn catalogue_schema_equals_pinned_schema_at_every_verbosity() {
             .unwrap_or_else(|err| panic!("schema pin missing at {path}: {err}"));
         let pins: Vec<Value> = serde_json::from_str(&raw).expect("pin JSON parses");
 
-        let schema = hares_io::build_schema(&catalogue, verbosity);
+        let schema = hares_io::build_schema(&catalogue, verbosity, false);
         let actual: Vec<(&str, String, bool)> = schema
             .fields()
             .iter()
@@ -276,7 +276,7 @@ fn catalogue_queryable_before_run() {
 fn every_written_channel_is_declared_and_every_declared_variable_is_written() {
     let catalogue = all_classes_catalogue();
     for verbosity in 0..=8u8 {
-        let schema = hares_io::build_schema(&catalogue, verbosity);
+        let schema = hares_io::build_schema(&catalogue, verbosity, false);
         for field in schema.fields() {
             let name = field.name().as_str();
             if name == "Time" {
@@ -645,7 +645,7 @@ fn ev_code_columns_carry_the_declared_code_unit_end_to_end() {
 
     // The schema field metadata carries the same symbol at the verbosity
     // that emits the columns.
-    let schema = hares_io::build_schema(&catalogue, 8);
+    let schema = hares_io::build_schema(&catalogue, 8, false);
     for field in schema.fields() {
         let name = field.name().as_str();
         if name.ends_with("Connection State (-)") || name.ends_with("Charging Level (-)") {

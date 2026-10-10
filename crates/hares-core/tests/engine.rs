@@ -143,6 +143,7 @@ fn simulation_config_with_frame(csv_path: PathBuf, with_frame: bool) -> Simulati
         duration: Duration::hours(1),
         time_res: Duration::minutes(1),
         reports,
+        diagnostics: false,
         output_chunk_size: 128,
         setpoint_deadband_c: None,
         master_seed: 0,

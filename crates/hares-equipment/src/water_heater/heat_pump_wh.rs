@@ -3617,10 +3617,10 @@ mod tests {
         );
     }
 
-    /// `provenance_lines()` must emit the two `# eq` comment lines that
-    /// `write_equipment_init` writes into the diagnostic CSV.  This test
-    /// guards against format-string typos, field-order swaps, and
-    /// precision regressions in the trait override.
+    /// `provenance_lines()` must emit the two `# eq` provenance records the
+    /// run's provenance surface carries.  This test guards against
+    /// format-string typos, field-order swaps, and precision regressions in
+    /// the trait override.
     #[test]
     fn provenance_lines_reports_cop_curve_is_normalized_and_cop_scale() {
         let mut typed = base_typed_config();

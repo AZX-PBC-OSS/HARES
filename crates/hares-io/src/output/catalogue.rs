@@ -280,8 +280,8 @@ pub struct CatalogueInput {
 #[derive(Debug, Clone, Default)]
 pub struct Catalogue {
     defs: Vec<VariableDef>,
-    /// `(min verbosity, observe-only)` per def.
-    tags: Vec<(u8, bool)>,
+    /// The schema-derivation tags per def.
+    tags: Vec<VarTag>,
     index: HashMap<String, usize>,
     /// Column name → the telemetry key the column's value is read from at
     /// record time, for the per-equipment telemetry-derived columns only.
@@ -332,13 +332,17 @@ impl Catalogue {
     }
 
     /// The variables emitted at `verbosity`, in schema order, honouring the
-    /// `observe` feature gate.
+    /// `observe` feature gate. The diagnostics variables are not a
+    /// verbosity tier: they are selected by the diagnostics request alone.
     #[must_use]
     pub fn variables_at_verbosity(&self, verbosity: u8) -> Vec<&VariableDef> {
         let mut selected = Vec::new();
         for i in 0..self.defs.len() {
-            let (min_v, observe_only) = self.tags[i];
-            if min_v <= verbosity && (!observe_only || cfg!(feature = "observe")) {
+            let tag = &self.tags[i];
+            if tag.diagnostics {
+                continue;
+            }
+            if tag.min_verbosity <= verbosity && (!tag.observe_only || cfg!(feature = "observe")) {
                 selected.push(&self.defs[i]);
             }
         }
@@ -351,6 +355,22 @@ impl Catalogue {
     pub fn tag(&self, name: &str) -> Option<(u8, bool)> {
         self.index.get(name).map(|&i| self.tags[i])
     }
+
+    /// The diagnostics variables, in schema order (the block appends last,
+    /// after the actor columns).
+    #[must_use]
+    pub fn diagnostics_variables(&self) -> &[VariableDef] {
+        let start = self.diagnostics_offset().unwrap_or(self.defs.len());
+        &self.defs[start..]
+    }
+
+    /// The catalogue index of the first diagnostics variable, or `None`
+    /// when the model declares none. The diagnostics block is a contiguous
+    /// suffix of the schema's variable list.
+    #[must_use]
+    pub fn diagnostics_offset(&self) -> Option<usize> {
+        self.tags.iter().position(|tag| tag.diagnostics)
+    }
 }
 
 /// Builds the catalogue: the dwelling statics, the per-equipment columns in
@@ -361,7 +381,7 @@ impl Catalogue {
 #[allow(clippy::too_many_lines)]
 pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueError> {
     let mut defs: Vec<VariableDef> = Vec::new();
-    let mut tags: Vec<(u8, bool)> = Vec::new();
+    let mut tags: Vec<VarTag> = Vec::new();
     let mut telemetry_keys: HashMap<String, &'static str> = HashMap::new();
 
     // The merged declaration table: one telemetry key, one declaration. Two
@@ -729,6 +749,38 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         }
     }
 
+    // ── Diagnostics block: the per-step diagnostics, appended last ────────
+    // Never emitted by a verbosity preset; the diagnostics request selects
+    // the whole block. The order is the pre-catalogue CSV writer's column
+    // order.
+    push_diagnostics(&mut defs, &mut tags, DIAGNOSTICS_STEP.clone())?;
+    push_diagnostics(&mut defs, &mut tags, DIAGNOSTICS_TIMESTAMP_S.clone())?;
+    push_diagnostics(&mut defs, &mut tags, DIAGNOSTICS_OUTDOOR_TEMP_C.clone())?;
+    for (zone_id, _label) in &input.zones {
+        for def in diagnostics_zone_variables(*zone_id) {
+            push_diagnostics(&mut defs, &mut tags, def)?;
+        }
+    }
+    push_diagnostics(&mut defs, &mut tags, DIAGNOSTICS_ELECTRICAL_NET_KW.clone())?;
+    push_diagnostics(
+        &mut defs,
+        &mut tags,
+        DIAGNOSTICS_ELECTRICAL_NET_KVAR.clone(),
+    )?;
+    for def in [
+        DIAGNOSTICS_PORT_RADIANT_W.clone(),
+        DIAGNOSTICS_PORT_SHORTWAVE_W.clone(),
+        DIAGNOSTICS_PORT_CONVECTIVE_W.clone(),
+        DIAGNOSTICS_WINDOW_SOLAR_W.clone(),
+        DIAGNOSTICS_OPAQUE_SOLAR_LWR_W.clone(),
+        DIAGNOSTICS_INTERIOR_LWR_W.clone(),
+        DIAGNOSTICS_INTERNAL_GAIN_W.clone(),
+        DIAGNOSTICS_AIR_DENSITY.clone(),
+        DIAGNOSTICS_GHI.clone(),
+    ] {
+        push_diagnostics(&mut defs, &mut tags, def)?;
+    }
+
     // A duplicate name is an assembly error naming both sources.
     let mut index: HashMap<String, usize> = HashMap::with_capacity(defs.len());
     for (i, def) in defs.iter().enumerate() {
@@ -754,23 +806,61 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
 }
 
 /// Validates and appends one variable with its schema-derivation tags.
+/// The schema-derivation tags one catalogue variable carries: the minimum
+/// verbosity tier that emits it, whether the variable exists only under the
+/// `observe` feature gate, and whether it is a diagnostics variable (the
+/// diagnostics report's block: never emitted by a verbosity preset,
+/// appended to the schema only when the run requests the diagnostics).
+#[derive(Debug, Clone, Copy)]
+struct VarTag {
+    min_verbosity: u8,
+    observe_only: bool,
+    diagnostics: bool,
+}
+
+/// The field-metadata marker a diagnostics column carries in the Arrow
+/// schema: the diagnostics block is self-describing, so the row plan's
+/// freeze resolves the block from the schema alone.
+pub const DIAGNOSTICS_METADATA_KEY: &str = "hares_diagnostics";
+
 fn push(
     defs: &mut Vec<VariableDef>,
-    tags: &mut Vec<(u8, bool)>,
+    tags: &mut Vec<VarTag>,
     def: VariableDef,
     min_v: u8,
     observe_only: bool,
 ) -> Result<(), CatalogueError> {
     def.validate()?;
     defs.push(def);
-    tags.push((min_v, observe_only));
+    tags.push(VarTag {
+        min_verbosity: min_v,
+        observe_only,
+        diagnostics: false,
+    });
+    Ok(())
+}
+
+/// Appends one diagnostics variable: never in a verbosity preset, tagged
+/// for the diagnostics report's schema block.
+fn push_diagnostics(
+    defs: &mut Vec<VariableDef>,
+    tags: &mut Vec<VarTag>,
+    def: VariableDef,
+) -> Result<(), CatalogueError> {
+    def.validate()?;
+    defs.push(def);
+    tags.push(VarTag {
+        min_verbosity: 0,
+        observe_only: false,
+        diagnostics: true,
+    });
     Ok(())
 }
 
 /// Pushes the dwelling-level static variables of one verbosity block.
 fn push_statics(
     defs: &mut Vec<VariableDef>,
-    tags: &mut Vec<(u8, bool)>,
+    tags: &mut Vec<VarTag>,
     min_verbosity: u8,
 ) -> Result<(), CatalogueError> {
     for (_name, def, level, observe_only) in DWELLING_VARIABLES {
@@ -1186,6 +1276,194 @@ static COOLING_DELIVERED_TEMPLATE: ZoneTemplate = zone_template!(
     Sampling::IntervalMean,
     "HVAC cooling delivered to the zone"
 );
+
+/// The diagnostics report's variables: the per-step diagnostics the
+/// pre-catalogue CSV writer carried, declared once and appended to the
+/// catalogue as one block. A verbosity preset never emits them; the
+/// diagnostics request alone selects them. The names are the writer's
+/// column names, so the report carries the same surface the CSV did; the
+/// per-zone names key the zone's id (`zone1_temp_c` is the zone with
+/// `ZoneId(1)`), and their sources are per-zone.
+macro_rules! diagnostics_variable {
+    ($name:literal, $unit:expr, $kind:expr, $agg:expr, $sampling:expr, $desc:literal) => {
+        VariableDef {
+            name: Cow::Borrowed($name),
+            unit: $unit,
+            kind: $kind,
+            aggregation: $agg,
+            sampling: $sampling,
+            nullable: true,
+            source: VariableSource::Dwelling,
+            description: Cow::Borrowed($desc),
+        }
+    };
+}
+
+static DIAGNOSTICS_STEP: VariableDef = diagnostics_variable!(
+    "step",
+    Unit::Count,
+    VariableKind::Quantity {
+        across_homes: AcrossHomes::Sum,
+    },
+    Aggregation::Sum,
+    Sampling::InstantAtEnd,
+    "The row's step index"
+);
+static DIAGNOSTICS_TIMESTAMP_S: VariableDef = diagnostics_variable!(
+    "timestamp_s",
+    Unit::Second,
+    VariableKind::Quantity {
+        across_homes: AcrossHomes::Mean,
+    },
+    Aggregation::Mean,
+    Sampling::InstantAtEnd,
+    "The row's start time as UTC epoch seconds"
+);
+static DIAGNOSTICS_OUTDOOR_TEMP_C: VariableDef = diagnostics_variable!(
+    "outdoor_temp_c",
+    Unit::Celsius,
+    VariableKind::Temperature,
+    Aggregation::Mean,
+    Sampling::InstantAtEnd,
+    "Outdoor dry-bulb temperature"
+);
+static DIAGNOSTICS_ELECTRICAL_NET_KW: VariableDef = diagnostics_variable!(
+    "electrical_net_kw",
+    Unit::Kilowatt,
+    VariableKind::Power,
+    Aggregation::Mean,
+    Sampling::IntervalMean,
+    "Net electric power from the electrical ports (consumption positive)"
+);
+static DIAGNOSTICS_ELECTRICAL_NET_KVAR: VariableDef = diagnostics_variable!(
+    "electrical_net_kvar",
+    Unit::VoltAmpereReactive,
+    VariableKind::Power,
+    Aggregation::Mean,
+    Sampling::IntervalMean,
+    "Net reactive power from the electrical ports"
+);
+static DIAGNOSTICS_WINDOW_SOLAR_W: VariableDef = diagnostics_variable!(
+    "window_solar_w",
+    Unit::Watt,
+    VariableKind::Power,
+    Aggregation::Mean,
+    Sampling::IntervalMean,
+    "Window solar gain from the thermal solver's component gains"
+);
+static DIAGNOSTICS_OPAQUE_SOLAR_LWR_W: VariableDef = diagnostics_variable!(
+    "opaque_solar_lwr_w",
+    Unit::Watt,
+    VariableKind::Power,
+    Aggregation::Mean,
+    Sampling::IntervalMean,
+    "Opaque exterior solar and long-wave absorption from the component gains"
+);
+static DIAGNOSTICS_INTERIOR_LWR_W: VariableDef = diagnostics_variable!(
+    "interior_lwr_w",
+    Unit::Watt,
+    VariableKind::Power,
+    Aggregation::Mean,
+    Sampling::IntervalMean,
+    "Interior long-wave radiation exchange activity from the component gains"
+);
+static DIAGNOSTICS_INTERNAL_GAIN_W: VariableDef = diagnostics_variable!(
+    "internal_gain_w",
+    Unit::Watt,
+    VariableKind::Power,
+    Aggregation::Mean,
+    Sampling::IntervalMean,
+    "Non-HVAC internal gains from the component gains"
+);
+static DIAGNOSTICS_PORT_CONVECTIVE_W: VariableDef = diagnostics_variable!(
+    "port_convective_w",
+    Unit::Watt,
+    VariableKind::Power,
+    Aggregation::Mean,
+    Sampling::IntervalMean,
+    "Total port convective gain (HVAC and appliances)"
+);
+static DIAGNOSTICS_PORT_RADIANT_W: VariableDef = diagnostics_variable!(
+    "port_radiant_w",
+    Unit::Watt,
+    VariableKind::Power,
+    Aggregation::Mean,
+    Sampling::IntervalMean,
+    "Total port radiant gain distributed to surfaces (HVAC and appliances)"
+);
+static DIAGNOSTICS_PORT_SHORTWAVE_W: VariableDef = diagnostics_variable!(
+    "port_shortwave_w",
+    Unit::Watt,
+    VariableKind::Power,
+    Aggregation::Mean,
+    Sampling::IntervalMean,
+    "Total port short-wave gain absorbed by the surfaces"
+);
+static DIAGNOSTICS_AIR_DENSITY: VariableDef = diagnostics_variable!(
+    "air_density_kg_m3",
+    Unit::KilogramPerCubicMeter,
+    VariableKind::Quantity {
+        across_homes: AcrossHomes::Mean,
+    },
+    Aggregation::Mean,
+    Sampling::InstantAtEnd,
+    "Outdoor moist-air density used for infiltration mass-flow conversion"
+);
+static DIAGNOSTICS_GHI: VariableDef = diagnostics_variable!(
+    "ghi_w_m2",
+    Unit::WattPerSquareMeter,
+    VariableKind::Quantity {
+        across_homes: AcrossHomes::Mean,
+    },
+    Aggregation::Mean,
+    Sampling::InstantAtEnd,
+    "Global horizontal irradiance at this timestep"
+);
+
+/// The diagnostics block's per-zone variables: the zone's temperature and
+/// the thermal port's sensible and latent gain into it.
+fn diagnostics_zone_variables(zone_id: ZoneId) -> Vec<VariableDef> {
+    let mut vars = Vec::with_capacity(3);
+    let named = |suffix: &str, mut def: VariableDef| {
+        def.name = Cow::Owned(format!("zone{}{suffix}", zone_id.0));
+        def.source = VariableSource::Zone(zone_id);
+        def
+    };
+    vars.push(named(
+        "_temp_c",
+        diagnostics_variable!(
+            "",
+            Unit::Celsius,
+            VariableKind::Temperature,
+            Aggregation::Mean,
+            Sampling::InstantAtEnd,
+            "Zone temperature"
+        ),
+    ));
+    vars.push(named(
+        "_thermal_gain_w",
+        diagnostics_variable!(
+            "",
+            Unit::Watt,
+            VariableKind::Power,
+            Aggregation::Mean,
+            Sampling::IntervalMean,
+            "Total thermal port sensible gain into the zone (HVAC and appliances combined)"
+        ),
+    ));
+    vars.push(named(
+        "_latent_gain_w",
+        diagnostics_variable!(
+            "",
+            Unit::Watt,
+            VariableKind::Power,
+            Aggregation::Mean,
+            Sampling::IntervalMean,
+            "Thermal port latent gain into the zone"
+        ),
+    ));
+    vars
+}
 
 /// A static per-equipment telemetry-derived column: the telemetry key the
 /// value is read from at record time, and the column's declaration. The
@@ -1960,15 +2238,24 @@ static DWELLING_VARIABLES: &[(&str, VariableDef, u8, bool)] = &[
 
 /// Builds the Arrow output schema from the catalogue at `verbosity`: the
 /// `Time` label, then every catalogue variable emitted at the verbosity,
-/// preserving catalogue order. Field metadata carries `Unit::symbol()` as
-/// the `unit` entry (no metadata for [`Unit::None`]); the schema metadata
-/// is the pre-catalogue one (verbosity, mode map, lighting-created flags).
+/// preserving catalogue order. With `diagnostics`, the diagnostics block
+/// appends last, each of its fields marked so the row plan's freeze
+/// resolves the block from the schema alone. Field metadata carries
+/// `Unit::symbol()` as the `unit` entry (no metadata for [`Unit::None`]);
+/// the schema metadata is the pre-catalogue one (verbosity, mode map,
+/// lighting-created flags).
 #[must_use]
-pub fn build_schema(catalogue: &Catalogue, verbosity: u8) -> Schema {
+pub fn build_schema(catalogue: &Catalogue, verbosity: u8, diagnostics: bool) -> Schema {
     let mut fields = vec![Field::new(TIMESTAMP_COL, DataType::Utf8, false)];
 
     for var in catalogue.variables_at_verbosity(verbosity) {
         fields.push(variable_field(var).as_ref().clone());
+    }
+
+    if diagnostics {
+        for var in catalogue.diagnostics_variables() {
+            fields.push(diagnostics_field(var).as_ref().clone());
+        }
     }
 
     Schema::new_with_metadata(fields, schema_metadata(catalogue, verbosity))
@@ -1986,6 +2273,20 @@ pub fn variable_field(var: &VariableDef) -> arrow::datatypes::FieldRef {
         field = field.with_metadata(metadata);
     }
     std::sync::Arc::new(field)
+}
+
+/// One diagnostics block's Arrow field: the column name, `Float64`, the
+/// declaration's nullability, the unit metadata, and the block's own
+/// marker the row plan's freeze resolves the selection from.
+fn diagnostics_field(var: &VariableDef) -> arrow::datatypes::FieldRef {
+    let mut metadata = std::collections::HashMap::new();
+    if var.unit != Unit::None {
+        metadata.insert("unit".to_string(), var.unit.symbol().to_string());
+    }
+    metadata.insert(DIAGNOSTICS_METADATA_KEY.to_string(), "true".to_string());
+    std::sync::Arc::new(
+        Field::new(var.name.as_ref(), DataType::Float64, var.nullable).with_metadata(metadata),
+    )
 }
 
 /// The schema metadata every schema builder carries: the mode-ordinal map,
@@ -2069,7 +2370,7 @@ pub fn build_schema_for_specs(
         actors: Vec::new(),
     };
     match build_catalogue(&input) {
-        Ok(catalogue) => build_schema(&catalogue, verbosity),
+        Ok(catalogue) => build_schema(&catalogue, verbosity, false),
         // The spec path cannot produce duplicates the live path could not
         // (same classifiers, same names); a panic here is a bug in the
         // static tables, not an input error.

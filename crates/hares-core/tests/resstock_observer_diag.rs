@@ -68,8 +68,7 @@ mod tests {
     #[test]
     fn observer_diagnostic_2024_2_winter_24h() {
         let bldg_dir = fixtures_dir().join("2024.2").join("bldg0000002");
-        // The output and its `_diagnostics.csv` sibling go in a directory
-        // removed when the test ends.
+        // The output goes in a directory removed when the test ends.
         let output_dir = tempfile::tempdir().expect("temp dir");
         let output = output_dir.path().join("obs_diag");
 
@@ -93,6 +92,7 @@ mod tests {
                         overwrite: false,
                     },
                 }],
+                diagnostics: false,
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,

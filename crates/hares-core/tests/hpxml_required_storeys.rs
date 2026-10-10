@@ -37,7 +37,15 @@ fn ach50_infiltration_without_floors_above_grade_is_an_error() {
             start_time,
             duration: Duration::hours(1),
             time_res: Duration::seconds(3600),
+<<<<<<< HEAD
             reports: Vec::new(),
+=======
+            output_verbosity: 0,
+            diagnostics: false,
+            output_path: None,
+            write_output: false,
+            output_format: OutputFormat::Csv,
+>>>>>>> 81448376 (fix: diagnostics are a catalogue report, created only when requested)
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,

@@ -389,6 +389,7 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
                 overwrite: false,
             },
         }],
+        diagnostics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
@@ -465,8 +466,6 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
             .unwrap(),
         duration: Duration::days(2),
         time_res: Duration::seconds(900),
-        // The diagnostics CSV rides the verbosity-5 report's file
-        // destination (until the diagnostics-as-catalogue entry).
         reports: vec![hares_io::ReportSpec {
             name: "frame".to_string(),
             selection: hares_io::Selection::Verbosity(5),
@@ -476,6 +475,7 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
                 overwrite: false,
             },
         }],
+        diagnostics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
@@ -600,8 +600,6 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
             .unwrap(),
         duration: Duration::days(2),
         time_res: Duration::seconds(900),
-        // The diagnostics CSV rides the verbosity-5 report's file
-        // destination (until the diagnostics-as-catalogue entry).
         reports: vec![hares_io::ReportSpec {
             name: "frame".to_string(),
             selection: hares_io::Selection::Verbosity(5),
@@ -611,6 +609,7 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
                 overwrite: false,
             },
         }],
+        diagnostics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
@@ -672,8 +671,6 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
             .unwrap(),
         duration: Duration::days(2),
         time_res: Duration::seconds(900),
-        // The diagnostics CSV rides the verbosity-5 report's file
-        // destination (until the diagnostics-as-catalogue entry).
         reports: vec![hares_io::ReportSpec {
             name: "frame".to_string(),
             selection: hares_io::Selection::Verbosity(5),
@@ -683,6 +680,7 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
                 overwrite: false,
             },
         }],
+        diagnostics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,

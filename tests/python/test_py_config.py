@@ -219,6 +219,7 @@ class TestSimulationConfig:
             duration=7200,
             time_res=300,
             reports=[ReportSpec("frame", Selection.verbosity(5), Destination.memory())],
+            diagnostics=True,
             output_chunk_size=5000,
             setpoint_deadband_c=1.5,
             master_seed=42,
@@ -226,10 +227,25 @@ class TestSimulationConfig:
             site_location=SiteLocationOverride(latitude_deg=40.0),
             max_consecutive_step_failures=3,
         )
+        assert cfg.diagnostics is True
         toml_keys = tomllib.loads(cfg.to_toml()).keys()
         assert sorted(keyword_names) == sorted(toml_keys), (
             "the keyword surface and the TOML keys must be the same name map"
         )
+        parsed = SimulationConfig.from_toml(cfg.to_toml())
+        assert parsed.diagnostics is True
+
+    def test_diagnostics_defaults_false_and_round_trips(self):
+        """The diagnostics request defaults to false, the getter and setter
+        round-trip it, and the TOML path carries the same default."""
+        cfg = SimulationConfig(**required_kwargs())
+        assert cfg.diagnostics is False
+        cfg.diagnostics = True
+        assert cfg.diagnostics is True
+        assert SimulationConfig.from_toml(cfg.to_toml()).diagnostics is True
+        assert SimulationConfig.from_toml(
+            f'start_time = "{START}"\nduration = 3600\n'
+        ).diagnostics is False
 
     def test_site_location_override_round_trips(self):
         """`SiteLocationOverride(latitude_deg=40.0)` through the config,

@@ -136,6 +136,7 @@ pub fn build_dwelling_config(
                     overwrite: true,
                 },
             }],
+            diagnostics: false,
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,

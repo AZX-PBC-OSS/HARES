@@ -244,6 +244,7 @@ const SIMULATION_KEYS: &[&str] = &[
     "duration",
     "time_res",
     "reports",
+    "diagnostics",
     "output_chunk_size",
     "setpoint_deadband_c",
     "master_seed",
@@ -579,12 +580,20 @@ mod tests {
                 .expect("parse start"),
             duration: chrono::Duration::seconds(86400),
             time_res: chrono::Duration::seconds(3600),
+<<<<<<< HEAD
             reports: vec![hares_io::ReportSpec {
                 name: "frame".to_string(),
                 selection: hares_io::Selection::Verbosity(2),
                 frequency: hares_io::Frequency::default(),
                 destination: hares_io::Destination::Memory,
             }],
+=======
+            output_verbosity: 2,
+            diagnostics: false,
+            output_path: Some(std::path::PathBuf::from("out.csv")),
+            write_output: false,
+            output_format: hares_io::OutputFormat::Csv,
+>>>>>>> 81448376 (fix: diagnostics are a catalogue report, created only when requested)
             output_chunk_size: 1024,
             setpoint_deadband_c: Some(1.0),
             master_seed: 0,

@@ -1,15 +1,10 @@
-//! Per-timestep diagnostic output for debugging thermal runaway and solver issues.
+//! The post-hoc diagnostic checks over the run's accumulated per-step data.
 //!
-//! Enable with a verbosity-4+ report whose destination is a file (the
-//! writer rides that report's path).
-//! Writes a CSV with one row per timestep containing zone temps, solver inputs/outputs,
-//! equipment operating points, and port accumulations.
-//!
-//! ## Post-hoc diagnostic checks
-//!
-//! When `cfg(feature = "observe")` is active, `DiagnosticAccumulator` collects
-//! per-step data during the simulation and `run_post_hoc_checks()` evaluates
-//! four diagnostic checks at end-of-run:
+//! The per-step diagnostics are a catalogue report: the run requests them
+//! and their columns are recorded with the run's frames. On top of the
+//! recorded columns, when `cfg(feature = "observe")` is active,
+//! `DiagnosticAccumulator` collects per-step data during the simulation and
+//! `run_post_hoc_checks()` evaluates four diagnostic checks at end-of-run:
 //!
 //! - Excessive unmet heating/cooling hours
 //! - Equipment short-cycling (mode change frequency)
@@ -19,369 +14,10 @@
 //! Thresholds follow the defaults in the ticket:
 //! `unmet_load_threshold = 0.05` (5%), `max_cycles_per_hour = 4`.
 
-use std::io::Write;
-
-use hares_types::{EnvironmentState, PortSlots, ZoneId};
-
-use hares_physics::units::power_w_to_kw;
-
 #[cfg(feature = "observe")]
 use hares_equipment::Equipment;
 #[cfg(feature = "observe")]
-use hares_types::{OperatingMode, ZoneState};
-
-/// Collects diagnostic data for a single timestep.
-#[derive(Debug, Default)]
-pub struct StepDiagnostics {
-    pub step: u64,
-    pub timestamp_s: f64,
-    pub outdoor_temp_c: f64,
-    pub zone_temps_c: Vec<(ZoneId, f64)>,
-    /// Total thermal port sensible gain per zone (W) (HVAC + appliances
-    /// combined): convective, long-wave radiant and short-wave.
-    pub thermal_gains_w: Vec<(ZoneId, f64)>,
-    pub thermal_latent_w: Vec<(ZoneId, f64)>,
-    pub electrical_net_kw: f64,
-    pub electrical_net_kvar: f64,
-    pub equipment: Vec<EquipmentDiag>,
-    /// Per-equipment sensible gain contributions to each zone.
-    pub equipment_sensible_w: Vec<(String, ZoneId, f64)>,
-    /// Envelope component gains from the thermal solver.
-    pub envelope: Option<EnvelopeDiag>,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct EnvelopeDiag {
-    pub window_solar_w: f64,
-    pub opaque_solar_lwr_w: f64,
-    /// Total interior LWR exchange activity (W) (Σ|q_i|/2).
-    pub interior_lwr_w: f64,
-    /// Non-HVAC internal gains (W).
-    pub internal_gain_w: f64,
-    /// Total port convective (W) (HVAC + appliances).
-    pub port_convective_w: f64,
-    /// Total port radiant (W) (HVAC + appliances distributed to surfaces).
-    ///
-    /// ASHRAE HoF Ch. 18: internal gains have separate convective and radiant
-    /// components; reporting both enables MRT diagnosis and BESTEST comparisons.
-    /// EnergyPlus exposes `OtherEquipment Radiant Heating Rate [W]` as a
-    /// separate output variable (I/O Ref v8.4, Internal Gains group).
-    pub port_radiant_w: f64,
-    /// Total port short-wave (visible light) (W), absorbed by the surfaces
-    /// like transmitted diffuse solar.
-    pub port_shortwave_w: f64,
-    /// Outdoor moist-air density used for infiltration mass-flow conversion [kg/m³].
-    pub air_density_kg_m3: f64,
-    /// Global horizontal irradiance [W/m²] at this timestep.
-    /// Enables validation of window transmitted solar against expected
-    /// GHI × window_area × SHGC at any reference timestep.
-    pub ghi_w_m2: f64,
-}
-
-#[derive(Debug)]
-pub struct EquipmentDiag {
-    pub name: String,
-    /// Zone mapping is populated at dwelling init via `write_equipment_init`,
-    /// not per-step in `capture()`. Per-step zone routing is verified through
-    /// the per-zone thermal gain columns in the diagnostic CSV.
-    pub zone_id: Option<ZoneId>,
-    pub mode: f64,
-    pub electric_kw: f64,
-    pub reactive_kvar: f64,
-    pub sensible_gain_w: f64,
-}
-
-/// Writes diagnostic CSV header.
-pub fn write_header(w: &mut impl Write, n_zones: usize) {
-    let mut cols = vec![
-        "step".to_string(),
-        "timestamp_s".to_string(),
-        "outdoor_temp_c".to_string(),
-    ];
-    for i in 0..n_zones {
-        cols.push(format!("zone{}_temp_c", i + 1));
-        cols.push(format!("zone{}_thermal_gain_w", i + 1));
-        cols.push(format!("zone{}_latent_gain_w", i + 1));
-    }
-    cols.push("electrical_net_kw".to_string());
-    cols.push("electrical_net_kvar".to_string());
-    cols.push("port_radiant_w".to_string());
-    cols.push("port_shortwave_w".to_string());
-    cols.push("port_convective_w".to_string());
-    cols.push("window_solar_w".to_string());
-    cols.push("opaque_solar_lwr_w".to_string());
-    cols.push("interior_lwr_w".to_string());
-    cols.push("internal_gain_w".to_string());
-    cols.push("air_density_kg_m3".to_string());
-    cols.push("ghi_w_m2".to_string());
-    let _ = writeln!(w, "{}", cols.join(","));
-}
-
-/// Writes one row of diagnostic data.
-///
-/// Every float field is screened for finiteness before CSV formatting:
-/// non-finite values produce an empty column to avoid corrupting
-/// downstream parsers with `NaN` or `inf` tokens.
-pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
-    let mut vals: Vec<String> = vec![
-        d.step.to_string(),
-        if d.timestamp_s.is_finite() {
-            format!("{:.1}", d.timestamp_s)
-        } else {
-            String::new()
-        },
-        if d.outdoor_temp_c.is_finite() {
-            format!("{:.2}", d.outdoor_temp_c)
-        } else {
-            String::new()
-        },
-    ];
-    for i in 0..n_zones {
-        let zone_id = ZoneId((i + 1) as u16);
-        let temp = d
-            .zone_temps_c
-            .iter()
-            .find(|(z, _)| *z == zone_id)
-            .map(|(_, t)| *t)
-            .unwrap_or(0.0);
-        let gain = d
-            .thermal_gains_w
-            .iter()
-            .find(|(z, _)| *z == zone_id)
-            .map(|(_, g)| *g)
-            .unwrap_or(0.0);
-        let latent = d
-            .thermal_latent_w
-            .iter()
-            .find(|(z, _)| *z == zone_id)
-            .map(|(_, l)| *l)
-            .unwrap_or(0.0);
-        vals.push(if temp.is_finite() {
-            format!("{:.4}", temp)
-        } else {
-            String::new()
-        });
-        vals.push(if gain.is_finite() {
-            format!("{:.1}", gain)
-        } else {
-            String::new()
-        });
-        vals.push(if latent.is_finite() {
-            format!("{:.1}", latent)
-        } else {
-            String::new()
-        });
-    }
-    vals.push(if d.electrical_net_kw.is_finite() {
-        format!("{:.4}", d.electrical_net_kw)
-    } else {
-        String::new()
-    });
-    vals.push(if d.electrical_net_kvar.is_finite() {
-        format!("{:.4}", d.electrical_net_kvar)
-    } else {
-        String::new()
-    });
-    vals.push(
-        d.envelope
-            .as_ref()
-            .map(|e| {
-                if e.port_radiant_w.is_finite() {
-                    format!("{:.1}", e.port_radiant_w)
-                } else {
-                    String::new()
-                }
-            })
-            .unwrap_or_default(),
-    );
-    vals.push(
-        d.envelope
-            .as_ref()
-            .map(|e| {
-                if e.port_shortwave_w.is_finite() {
-                    format!("{:.1}", e.port_shortwave_w)
-                } else {
-                    String::new()
-                }
-            })
-            .unwrap_or_default(),
-    );
-    vals.push(
-        d.envelope
-            .as_ref()
-            .map(|e| {
-                if e.port_convective_w.is_finite() {
-                    format!("{:.1}", e.port_convective_w)
-                } else {
-                    String::new()
-                }
-            })
-            .unwrap_or_default(),
-    );
-    vals.push(
-        d.envelope
-            .as_ref()
-            .map(|e| {
-                if e.window_solar_w.is_finite() {
-                    format!("{:.1}", e.window_solar_w)
-                } else {
-                    String::new()
-                }
-            })
-            .unwrap_or_default(),
-    );
-    vals.push(
-        d.envelope
-            .as_ref()
-            .map(|e| {
-                if e.opaque_solar_lwr_w.is_finite() {
-                    format!("{:.1}", e.opaque_solar_lwr_w)
-                } else {
-                    String::new()
-                }
-            })
-            .unwrap_or_default(),
-    );
-    vals.push(
-        d.envelope
-            .as_ref()
-            .map(|e| {
-                if e.interior_lwr_w.is_finite() {
-                    format!("{:.1}", e.interior_lwr_w)
-                } else {
-                    String::new()
-                }
-            })
-            .unwrap_or_default(),
-    );
-    vals.push(
-        d.envelope
-            .as_ref()
-            .map(|e| {
-                if e.internal_gain_w.is_finite() {
-                    format!("{:.1}", e.internal_gain_w)
-                } else {
-                    String::new()
-                }
-            })
-            .unwrap_or_default(),
-    );
-    vals.push(
-        d.envelope
-            .as_ref()
-            .map(|e| {
-                if e.air_density_kg_m3.is_finite() {
-                    format!("{:.5}", e.air_density_kg_m3)
-                } else {
-                    String::new()
-                }
-            })
-            .unwrap_or_default(),
-    );
-    vals.push(
-        d.envelope
-            .as_ref()
-            .map(|e| {
-                if e.ghi_w_m2.is_finite() {
-                    format!("{:.1}", e.ghi_w_m2)
-                } else {
-                    String::new()
-                }
-            })
-            .unwrap_or_default(),
-    );
-    let _ = writeln!(w, "{}", vals.join(","));
-}
-
-/// Write equipment zone-id mapping at init for diagnostic traceability.
-///
-/// Emitted for a verbosity-4+ report with a file destination, to surface
-/// the zone routing
-/// resolved from HPXML for each equipment instance. The mapping is written
-/// as a comment block after the CSV header so downstream tools can
-/// verify per-zone thermal attribution without inspecting config internals.
-/// The optional `zone_type` is the HPXML `<Location>` label for water heater
-/// equipment.
-///
-/// `ocv_sources` provides `ocv_source` provenance tags for battery/EV equipment.
-pub fn write_equipment_init(
-    w: &mut impl Write,
-    equipment: &[(String, u16, Option<String>)],
-    ocv_sources: &[(String, String)],
-    provenance_lines: &[String],
-) {
-    for (name, zone_id, zone_type) in equipment {
-        match zone_type {
-            Some(zt) => {
-                let _ = writeln!(
-                    w,
-                    "# eq zone_id: {name} -> ZoneId({zone_id}), zone_type={zt}"
-                );
-            }
-            None => {
-                let _ = writeln!(w, "# eq zone_id: {name} -> ZoneId({zone_id})");
-            }
-        }
-    }
-    for (name, source) in ocv_sources {
-        let _ = writeln!(w, "# eq ocv_source: {name} -> {source}");
-    }
-    for line in provenance_lines {
-        let _ = writeln!(w, "{line}");
-    }
-}
-
-/// Capture diagnostics from the current environment and port state.
-///
-/// Screens every float field for finiteness at the point of construction.
-/// Non-finite values are reported via `tracing::error!` and written as
-/// non-finite sentinels to the diagnostic snapshot so the invariant pass
-/// (and post-hoc checks) can detect and report them with full context.
-pub fn capture(
-    step: u64,
-    env: &EnvironmentState,
-    ports: &PortSlots,
-    envelope: Option<EnvelopeDiag>,
-) -> StepDiagnostics {
-    let timestamp_s = env.current_time.timestamp() as f64;
-    let zone_temps_c: Vec<(ZoneId, f64)> =
-        env.zones.iter().map(|z| (z.id, z.temperature_c)).collect();
-    let thermal_gains_w: Vec<(ZoneId, f64)> = ports
-        .thermal
-        .iter()
-        .map(|t| (t.zone, t.heat().sensible_w()))
-        .collect();
-    let thermal_latent_w: Vec<(ZoneId, f64)> = ports
-        .thermal
-        .iter()
-        .map(|t| (t.zone, t.heat().latent_w))
-        .collect();
-    let outdoor_temp_c = env.weather.outdoor_temp_c;
-    let electrical_net_kw = power_w_to_kw(ports.electrical.net_active_w());
-    let electrical_net_kvar = ports.electrical.reactive_power_kvar;
-
-    // The capture is a recorder: non-finite inputs are not re-screened here.
-    // Run-path non-finite detection is the unconditional zone and electrical
-    // screens; a value that reached this recorder already passed them.
-
-    StepDiagnostics {
-        step,
-        timestamp_s,
-        outdoor_temp_c,
-        zone_temps_c,
-        thermal_gains_w,
-        thermal_latent_w,
-        electrical_net_kw,
-        electrical_net_kvar,
-        equipment: Vec::new(),
-        equipment_sensible_w: Vec::new(),
-        envelope,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Post-hoc diagnostic checks (gated behind `observe` feature)
-// ---------------------------------------------------------------------------
+use hares_types::{OperatingMode, ZoneId, ZoneState};
 
 /// Per-zone counters accumulated across the simulation for post-hoc checks.
 #[cfg(feature = "observe")]
@@ -578,22 +214,13 @@ impl DiagnosticAccumulator {
     }
 
     /// Runs all four post-hoc diagnostic checks using accumulated data and
-    /// writes findings to the provided diagnostic CSV writer (as `# diag` comment
-    /// lines) and emits structured `tracing` warnings/errors.
+    /// emits structured `tracing` warnings/errors for the findings.
     ///
-    /// `writer` is the same `BufWriter` used for per-step CSV rows, opened
-    /// for a verbosity-4+ report with a file destination.  If `None`, only
-    /// tracing messages are
-    /// emitted.  `time_res_s` is the timestep resolution in seconds, used to
-    /// convert step counts to hours for the short-cycling check.
+    /// `time_res_s` is the timestep resolution in seconds, used to convert
+    /// step counts to hours for the short-cycling check.
     ///
     /// Returns the number of diagnostic violations found (for caller observability).
-    pub fn run_post_hoc_checks(
-        &self,
-        writer: &mut Option<impl Write>,
-        zone_names: &[String],
-        time_res_s: f64,
-    ) -> usize {
+    pub fn run_post_hoc_checks(&self, zone_names: &[String], time_res_s: f64) -> usize {
         let mut violations = 0;
         let sim_hours = (self.total_steps as f64) * time_res_s / 3600.0;
         if sim_hours <= 0.0 {
@@ -620,15 +247,6 @@ impl DiagnosticAccumulator {
                     total_sensor_steps = zc.steps_with_setpoint,
                     "diagnostic: excessive unmet heating hours"
                 );
-                if let Some(w) = writer.as_mut() {
-                    let _ = writeln!(
-                        w,
-                        "# diag unmet_heating: zone={zone_name}, \
-                         unmet_pct={heat_pct:.1}, threshold_pct={threshold_pct:.1}, \
-                         unmet_steps={}, total_sensor_steps={}",
-                        zc.unmet_heating_steps, zc.steps_with_setpoint,
-                    );
-                }
                 violations += 1;
             }
             if cool_pct > threshold_pct {
@@ -641,15 +259,6 @@ impl DiagnosticAccumulator {
                     total_sensor_steps = zc.steps_with_setpoint,
                     "diagnostic: excessive unmet cooling hours"
                 );
-                if let Some(w) = writer.as_mut() {
-                    let _ = writeln!(
-                        w,
-                        "# diag unmet_cooling: zone={zone_name}, \
-                         unmet_pct={cool_pct:.1}, threshold_pct={threshold_pct:.1}, \
-                         unmet_steps={}, total_sensor_steps={}",
-                        zc.unmet_cooling_steps, zc.steps_with_setpoint,
-                    );
-                }
                 violations += 1;
             }
         }
@@ -671,15 +280,6 @@ impl DiagnosticAccumulator {
                     max_cycles_per_hour = MAX_CYCLES_PER_HOUR,
                     "diagnostic: equipment short-cycling detected"
                 );
-                if let Some(w) = writer.as_mut() {
-                    let _ = writeln!(
-                        w,
-                        "# diag short_cycling: equipment={}, zone={zone_label}, \
-                         mode_changes={}, cycles_per_hour={cycles_per_hour:.1}, \
-                         max={MAX_CYCLES_PER_HOUR}",
-                        ec.name, ec.mode_changes,
-                    );
-                }
                 violations += 1;
             }
         }
@@ -694,14 +294,6 @@ impl DiagnosticAccumulator {
                     total_steps = self.total_steps,
                     "diagnostic: temperature excursion below freezing in conditioned zone"
                 );
-                if let Some(w) = writer.as_mut() {
-                    let _ = writeln!(
-                        w,
-                        "# diag freezing: zone={zone_name}, \
-                         freezing_steps={}, total_steps={}",
-                        zc.freezing_steps, self.total_steps,
-                    );
-                }
                 violations += 1;
             }
         }
@@ -717,27 +309,8 @@ impl DiagnosticAccumulator {
                     total_steps = self.total_steps,
                     "diagnostic: simultaneous heating and cooling detected in conditioned zone"
                 );
-                if let Some(w) = writer.as_mut() {
-                    let _ = writeln!(
-                        w,
-                        "# diag simultaneous_hc: zone={zone_name}, \
-                         simultaneous_steps={count}, total_steps={}",
-                        self.total_steps,
-                    );
-                }
                 violations += 1;
             }
-        }
-
-        // Always emit a summary line so downstream tooling can verify that
-        // post-hoc checks executed (even when zero violations are found).
-        if let Some(w) = writer.as_mut() {
-            let _ = writeln!(
-                w,
-                "# diag summary: total_steps={}, violations={violations}, \
-                 sim_hours={sim_hours:.2}",
-                self.total_steps,
-            );
         }
 
         violations
@@ -746,7 +319,8 @@ impl DiagnosticAccumulator {
 
 #[cfg(feature = "observe")]
 impl DiagnosticAccumulator {
-    /// Records one step of data. Call once per timestep when the observer is active.
+    /// Records one step of data. Call once per timestep when the run
+    /// requested the diagnostics.
     ///
     /// - `zone_temps_c`, `heating_setpoints_c`, `cooling_setpoints_c` are all
     ///   indexed by zone position (not ZoneId).
@@ -860,13 +434,10 @@ fn zone_name_for(id: ZoneId, zone_names: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
-    use chrono::{DateTime, Duration};
-
-    use hares_types::{EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, ZoneState};
-
+    #[cfg(feature = "observe")]
     use super::*;
+    #[cfg(feature = "observe")]
+    use hares_types::ZoneState;
 
     /// `record_from_state` moves its scratch out for the step and back: the
     /// same buffers (same allocation, same capacity) come back holding the
@@ -918,222 +489,5 @@ mod tests {
         assert_eq!(acc.total_steps, 2);
         let freezing: Vec<u64> = acc.zone_counters.iter().map(|z| z.freezing_steps).collect();
         assert_eq!(freezing, [2, 1]);
-    }
-
-    /// Verifies that `capture()` extracts zone temperatures, thermal gains,
-    /// and electrical net power from live environment and port state, and
-    /// that `write_header()` + `write_row()` produce well-formed CSV with
-    /// expected headers and data values.
-    #[test]
-    fn capture_and_write_row_produce_valid_csv() {
-        let env = EnvironmentState {
-            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
-            zones: vec![ZoneState::new(ZoneId(1), 22.5, 0.008, 100.0)],
-            weather: WeatherState::default(),
-            grid: GridState {
-                voltage_pu: 1.0,
-                frequency_hz: 60.0,
-                island_bus_voltage_pu: None,
-            },
-            schedule_row: None,
-            domains: hares_types::DomainSlots::default(),
-            equipment_telemetry: std::collections::HashMap::new(),
-            equipment_core: std::collections::HashMap::new(),
-            current_time: DateTime::parse_from_rfc3339("2024-06-15T12:00:00Z").unwrap(),
-            time_res: Duration::seconds(60),
-            price_signal: hares_types::PriceSignal::default(),
-            electrical: hares_types::ElectricalSummary::default(),
-        };
-
-        let ports = PortSlots::default();
-
-        let diag = capture(42, &env, &ports, None);
-
-        assert_eq!(diag.step, 42);
-        assert!(
-            diag.timestamp_s > 0.0,
-            "timestamp_s must be positive, got {}",
-            diag.timestamp_s
-        );
-        assert_eq!(
-            diag.zone_temps_c.len(),
-            1,
-            "expected 1 zone, got {}",
-            diag.zone_temps_c.len()
-        );
-        assert_eq!(diag.zone_temps_c[0].0, ZoneId(1));
-        assert!(
-            (diag.zone_temps_c[0].1 - 22.5).abs() < 0.01,
-            "zone temp mismatch"
-        );
-
-        let mut buf = Cursor::new(Vec::new());
-        write_header(&mut buf, 1);
-        write_row(&mut buf, &diag, 1);
-
-        let csv = String::from_utf8(buf.into_inner()).expect("valid UTF-8");
-        let lines: Vec<&str> = csv.lines().collect();
-        assert_eq!(lines.len(), 2, "expected header + 1 data row, got {csv:?}");
-
-        let header = lines[0];
-        let expected_cols = [
-            "step",
-            "timestamp_s",
-            "outdoor_temp_c",
-            "zone1_temp_c",
-            "zone1_thermal_gain_w",
-            "zone1_latent_gain_w",
-            "electrical_net_kw",
-            "electrical_net_kvar",
-            "port_radiant_w",
-            "port_shortwave_w",
-            "port_convective_w",
-            "window_solar_w",
-            "opaque_solar_lwr_w",
-            "interior_lwr_w",
-            "internal_gain_w",
-            "air_density_kg_m3",
-            "ghi_w_m2",
-        ];
-        for &col in &expected_cols {
-            assert!(
-                header.contains(col),
-                "header missing column '{col}'; header: {header}"
-            );
-        }
-
-        let data = lines[1];
-        let fields: Vec<&str> = data.split(',').map(|s| s.trim()).collect();
-        assert_eq!(
-            fields.len(),
-            expected_cols.len(),
-            "data row field count mismatch"
-        );
-
-        // step column
-        assert_eq!(fields[0].parse::<u64>().unwrap(), 42);
-        // zone1_temp_c should be ~22.5
-        let temp_val: f64 = fields[3].parse().unwrap();
-        assert!(
-            (temp_val - 22.5).abs() < 0.1,
-            "zone1_temp_c mismatch: {temp_val}"
-        );
-    }
-
-    /// Verifies that `write_header()` emits the correct column count for
-    /// multi-zone configurations.
-    #[test]
-    fn write_header_scales_with_zone_count() {
-        let mut buf = Cursor::new(Vec::new());
-        write_header(&mut buf, 3);
-
-        let csv = String::from_utf8(buf.into_inner()).expect("valid UTF-8");
-        let header = csv.lines().next().expect("header must exist");
-
-        for i in 1..=3 {
-            assert!(header.contains(&format!("zone{i}_temp_c")));
-            assert!(header.contains(&format!("zone{i}_thermal_gain_w")));
-            assert!(header.contains(&format!("zone{i}_latent_gain_w")));
-        }
-        assert!(!header.contains("zone4_temp_c"));
-    }
-
-    /// Verifies that `write_row()` writes `unwrap_or(0.0)` for missing gain
-    /// columns and `unwrap_or_default()` for envelope columns.
-    #[test]
-    fn write_row_handles_missing_gains_and_nullable_envelope() {
-        let diag = StepDiagnostics {
-            step: 1,
-            timestamp_s: 3600.0,
-            outdoor_temp_c: 5.0,
-            zone_temps_c: vec![(ZoneId(1), 20.0)],
-            thermal_gains_w: vec![],  // missing — should default to 0.0
-            thermal_latent_w: vec![], // missing
-            electrical_net_kw: 0.5,
-            electrical_net_kvar: 0.1,
-            equipment: vec![],
-            equipment_sensible_w: vec![],
-            envelope: None, // nullable envelope
-        };
-
-        let mut buf = Cursor::new(Vec::new());
-        write_header(&mut buf, 1);
-        write_row(&mut buf, &diag, 1);
-
-        let csv = String::from_utf8(buf.into_inner()).expect("valid UTF-8");
-        let lines: Vec<&str> = csv.lines().collect();
-        assert_eq!(lines.len(), 2);
-
-        let data = lines[1];
-        let fields: Vec<&str> = data.split(',').map(|s| s.trim()).collect();
-
-        // Missing thermal gain → unwrap_or(0.0)
-        let gain: f64 = fields[4].parse().unwrap();
-        assert_eq!(gain, 0.0, "missing thermal gain should default to 0.0");
-
-        let latent: f64 = fields[5].parse().unwrap();
-        assert_eq!(latent, 0.0, "missing latent should default to 0.0");
-
-        // Nullable envelope columns → unwrap_or_default() → empty string → could be ""
-        // We check at least that the row parses correctly (no panic).
-        assert_eq!(fields[0], "1");
-        assert_eq!(fields[1], "3600.0");
-    }
-
-    /// Verifies that `capture()` samples outdoor temperature from weather state.
-    #[test]
-    fn capture_smoke_test() {
-        let env = EnvironmentState {
-            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
-            zones: vec![ZoneState::new(ZoneId(1), 18.0, 0.006, 80.0)],
-            weather: WeatherState {
-                outdoor_temp_c: 12.3,
-                ..WeatherState::default()
-            },
-            grid: GridState {
-                voltage_pu: 0.98,
-                frequency_hz: 60.0,
-                island_bus_voltage_pu: None,
-            },
-            schedule_row: None,
-            domains: hares_types::DomainSlots::default(),
-            equipment_telemetry: std::collections::HashMap::new(),
-            equipment_core: std::collections::HashMap::new(),
-            current_time: DateTime::parse_from_rfc3339("2024-01-01T06:00:00Z").unwrap(),
-            time_res: Duration::seconds(300),
-            price_signal: hares_types::PriceSignal::default(),
-            electrical: hares_types::ElectricalSummary::default(),
-        };
-
-        let mut ports = PortSlots {
-            thermal: vec![hares_types::ThermalAccumulator {
-                sensible_gain_w: 100.0,
-                radiant_gain_w: 300.0,
-                shortwave_gain_w: 100.0,
-                latent_gain_w: 20.0,
-                ..hares_types::ThermalAccumulator::new(ZoneId(1))
-            }],
-            ..PortSlots::default()
-        };
-        ports
-            .accumulate(&hares_types::PortContribution::Electrical {
-                active_power_w: 1000.0,
-                reactive_power_kvar: 0.5,
-            })
-            .unwrap();
-        let diag = capture(1, &env, &ports, None);
-
-        assert_eq!(diag.step, 1);
-        assert!((diag.outdoor_temp_c - 12.3).abs() < 1e-9);
-        assert_eq!(diag.zone_temps_c.len(), 1);
-        assert_eq!(diag.zone_temps_c[0].0, ZoneId(1));
-        assert!((diag.zone_temps_c[0].1 - 18.0).abs() < 1e-9);
-        assert!((diag.electrical_net_kvar - 0.5).abs() < 1e-9);
-        assert_eq!(
-            diag.thermal_gains_w,
-            vec![(ZoneId(1), 500.0)],
-            "the sensible gain carries the convective, radiant and short-wave paths"
-        );
-        assert_eq!(diag.thermal_latent_w, vec![(ZoneId(1), 20.0)]);
     }
 }

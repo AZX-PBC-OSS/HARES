@@ -1375,13 +1375,27 @@ impl Dwelling {
         catalogue: &Catalogue,
     ) -> Result<OutputCachesPlan> {
         // Every report's selection resolves against the catalogue first:
-        // the variables each report records, in its own column order.
+        // the variables each report records, in its own column order. The
+        // diagnostics request appends the catalogue's diagnostics block to
+        // every report's columns as a suffix (the block is contiguous
+        // last in the report's schema, after the selection's own slots).
+        let diagnostics_names = self
+            .diagnostics
+            .then(|| {
+                resolve_selection(&Selection::Diagnostics, catalogue)
+                    .map_err(|err| HaresError::Dwelling(err.to_string()))
+            })
+            .transpose()?;
         let resolved: Vec<Vec<String>> = self
             .reports
             .iter()
             .map(|report| {
-                resolve_selection(&report.selection, catalogue)
-                    .map_err(|err| HaresError::Dwelling(err.to_string()))
+                let mut names = resolve_selection(&report.selection, catalogue)
+                    .map_err(|err| HaresError::Dwelling(err.to_string()))?;
+                if let Some(block) = &diagnostics_names {
+                    names.extend(block.iter().cloned());
+                }
+                Ok(names)
             })
             .collect::<Result<_>>()?;
         // The union surface: every selected variable once, first-seen
@@ -1446,7 +1460,7 @@ impl Dwelling {
             .map(|(report, names)| {
                 let schema = match &report.selection {
                     Selection::Verbosity(verbosity) => {
-                        build_schema_from_catalogue(catalogue, *verbosity)
+                        build_schema_from_catalogue(catalogue, *verbosity, self.diagnostics)
                     }
                     Selection::Named(_) | Selection::Pattern(_) => {
                         build_schema_for_columns(catalogue, names)

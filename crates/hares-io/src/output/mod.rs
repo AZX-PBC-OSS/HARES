@@ -17,8 +17,8 @@ use std::path::PathBuf;
 pub use callback::{BatchCallback, BatchContext, CallbackAttachment, CallbackError};
 pub use catalogue::{
     Catalogue, CatalogueActor, CatalogueEquipment, CatalogueError, CatalogueInput,
-    EquipmentColumnFamilies, VariableDef, VariableSource, build_catalogue, build_schema,
-    build_schema_for_columns, build_schema_for_specs,
+    DIAGNOSTICS_METADATA_KEY, EquipmentColumnFamilies, VariableDef, VariableSource,
+    build_catalogue, build_schema, build_schema_for_columns, build_schema_for_specs,
 };
 pub use columns::{
     CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
