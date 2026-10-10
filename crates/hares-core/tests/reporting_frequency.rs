@@ -2,7 +2,7 @@
 //! period rows at minute to run-period frequency, each variable reduced by
 //! its declared aggregation, fed from the frozen row plan's step stream.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use arrow::array::{Float64Array, RecordBatch};
 use arrow::datatypes::Schema;
@@ -11,7 +11,8 @@ use hares_control::DispatchRequest;
 use hares_core::{Actor, Dwelling, DwellingConfig};
 use hares_io::output::reduce::{PeriodCalendar, PeriodReducer, PeriodRow, TimeRule};
 use hares_io::{
-    Catalogue, Frequency, OutputFormat, RotationPolicy, SimulationConfig, SiteLocationOverride,
+    Catalogue, Destination, Frequency, ReportSpec, Selection, SimulationConfig,
+    SiteLocationOverride,
 };
 use hares_types::{
     AcrossHomes, Aggregation, EnumLabels, EnvironmentState, Sampling, Telemetry, TelemetryField,
@@ -32,23 +33,22 @@ fn sim_config(
     step_s: i64,
     verbosity: u8,
     chunk: usize,
-    dir: &Path,
 ) -> SimulationConfig {
     SimulationConfig {
         start_time: start,
         duration: Duration::seconds(duration_s),
         time_res: Duration::seconds(step_s),
-        output_verbosity: verbosity,
-        write_output: true,
-        output_path: Some(dir.join("reporting_frequency.csv")),
-        output_format: OutputFormat::Csv,
+        reports: vec![ReportSpec {
+            name: "frame".to_string(),
+            selection: Selection::Verbosity(verbosity),
+            frequency: Frequency::default(),
+            destination: Destination::Memory,
+        }],
         output_chunk_size: chunk,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        retain_batches: true,
-        rotation: RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
@@ -59,14 +59,13 @@ fn cz4a_dwelling(
     step_s: i64,
     verbosity: u8,
     chunk: usize,
-    dir: &Path,
 ) -> Dwelling {
     let fixture = project_root().join("tests/fixtures/parity/cz4a_ashp_hpwh");
     let config = DwellingConfig {
         hpxml_path: fixture.join("building.xml"),
         schedule_path: Some(fixture.join("schedule.csv")),
         weather_path: fixture.join("weather.epw"),
-        sim_config: sim_config(start, duration_s, step_s, verbosity, chunk, dir),
+        sim_config: sim_config(start, duration_s, step_s, verbosity, chunk),
         defaults_path: Some(project_root().join("defaults")),
         overrides: None,
         bldg_id: 1,
@@ -76,27 +75,17 @@ fn cz4a_dwelling(
     Dwelling::from_config(config).expect("cz4a dwelling builds")
 }
 
-/// The run's steps, the final partial batch flushed: the dwelling and the
-/// run's Timestep record batches, retained in memory.
+/// The run's steps through the run's end: the dwelling and the run's
+/// Timestep record batches, retained in memory.
 fn run_cz4a(
     start: DateTime<FixedOffset>,
     duration_s: i64,
     step_s: i64,
     verbosity: u8,
     chunk: usize,
-    dir: &Path,
 ) -> Dwelling {
-    let mut dwelling = cz4a_dwelling(start, duration_s, step_s, verbosity, chunk, dir);
-    let steps = usize::try_from(duration_s / step_s).expect("steps");
-    for _ in 0..steps {
-        dwelling.step().expect("dwelling steps");
-    }
-    dwelling
-        .recorder
-        .as_mut()
-        .expect("recorder with retained batches")
-        .flush()
-        .expect("final flush");
+    let mut dwelling = cz4a_dwelling(start, duration_s, step_s, verbosity, chunk);
+    dwelling.simulate().expect("cz4a run completes");
     dwelling
 }
 
@@ -129,7 +118,7 @@ fn time_label(start_local_ms: i64, site: FixedOffset) -> String {
     .to_string()
 }
 
-/// One rule per value column of the recorder's schema, in schema order:
+/// One rule per value column of the report's schema, in schema order:
 /// the rule each variable declares.
 fn rules_for(schema: &Schema, catalogue: &Catalogue) -> Vec<TimeRule> {
     schema
@@ -210,24 +199,13 @@ fn column_values(batches: &[RecordBatch], column: usize) -> Vec<f64> {
 
 #[test]
 fn hourly_energy_sum_equals_timestep_sum() {
-    let dir = tempfile::tempdir().expect("tempdir");
     let start = site_offset()
         .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
         .single()
         .expect("start");
-    let dwelling = run_cz4a(start, 86_400, 900, 4, 96, dir.path());
-    let batches: Vec<RecordBatch> = dwelling
-        .recorder
-        .as_ref()
-        .expect("retained batches")
-        .flushed_batches()
-        .to_vec();
-    let schema = dwelling
-        .recorder
-        .as_ref()
-        .expect("recorder")
-        .schema()
-        .clone();
+    let dwelling = run_cz4a(start, 86_400, 900, 4, 96);
+    let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
+    let schema = batches[0].schema();
     let rules = rules_for(&schema, &dwelling.catalogue());
 
     let energy_column = column_index(&schema, |name| name.ends_with("Energy (kWh)"));
@@ -253,24 +231,13 @@ fn hourly_energy_sum_equals_timestep_sum() {
 
 #[test]
 fn hourly_power_and_temperature_are_means() {
-    let dir = tempfile::tempdir().expect("tempdir");
     let start = site_offset()
         .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
         .single()
         .expect("start");
-    let dwelling = run_cz4a(start, 86_400, 900, 4, 96, dir.path());
-    let batches: Vec<RecordBatch> = dwelling
-        .recorder
-        .as_ref()
-        .expect("retained batches")
-        .flushed_batches()
-        .to_vec();
-    let schema = dwelling
-        .recorder
-        .as_ref()
-        .expect("recorder")
-        .schema()
-        .clone();
+    let dwelling = run_cz4a(start, 86_400, 900, 4, 96);
+    let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
+    let schema = batches[0].schema();
     let rules = rules_for(&schema, &dwelling.catalogue());
 
     let power_column = column_index(&schema, |name| name == "Total Electric Power (kW)");
@@ -363,48 +330,28 @@ impl Actor for PeriodProbeActor {
 }
 
 /// The two-day probe run: the dwelling with the probe actor registered,
-/// stepped and flushed.
-fn run_probe(duration_s: i64, dir: &Path) -> Dwelling {
+/// run through the run's end.
+fn run_probe(duration_s: i64) -> Dwelling {
     let start = site_offset()
         .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
         .single()
         .expect("start");
-    let mut dwelling = cz4a_dwelling(start, duration_s, 900, 0, 192, dir);
+    let mut dwelling = cz4a_dwelling(start, duration_s, 900, 0, 192);
     dwelling
         .add_actor(Box::new(PeriodProbeActor {
             steps: 0,
             telemetry: Telemetry::from_fields(PeriodProbeActor::OUTPUT_VARIABLES),
         }))
         .expect("the probe actor registers");
-    let steps = usize::try_from(duration_s / 900).expect("steps");
-    for _ in 0..steps {
-        dwelling.step().expect("dwelling steps");
-    }
-    dwelling
-        .recorder
-        .as_mut()
-        .expect("recorder with retained batches")
-        .flush()
-        .expect("final flush");
+    dwelling.simulate().expect("probe run completes");
     dwelling
 }
 
 #[test]
 fn daily_enum_column_is_mode_with_lowest_code_tie_break() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let dwelling = run_probe(2 * 86_400, dir.path());
-    let batches: Vec<RecordBatch> = dwelling
-        .recorder
-        .as_ref()
-        .expect("retained batches")
-        .flushed_batches()
-        .to_vec();
-    let schema = dwelling
-        .recorder
-        .as_ref()
-        .expect("recorder")
-        .schema()
-        .clone();
+    let dwelling = run_probe(2 * 86_400);
+    let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
+    let schema = batches[0].schema();
     let rules = rules_for(&schema, &dwelling.catalogue());
 
     let mode_column = column_index(&schema, |name| name == "actor:period_probe:mode");
@@ -430,20 +377,9 @@ fn daily_enum_column_is_mode_with_lowest_code_tie_break() {
 
 #[test]
 fn hourly_running_total_is_last() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let dwelling = run_probe(2 * 86_400, dir.path());
-    let batches: Vec<RecordBatch> = dwelling
-        .recorder
-        .as_ref()
-        .expect("retained batches")
-        .flushed_batches()
-        .to_vec();
-    let schema = dwelling
-        .recorder
-        .as_ref()
-        .expect("recorder")
-        .schema()
-        .clone();
+    let dwelling = run_probe(2 * 86_400);
+    let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
+    let schema = batches[0].schema();
     let rules = rules_for(&schema, &dwelling.catalogue());
 
     let total_column = column_index(&schema, |name| name == "actor:period_probe:running_total");
@@ -463,24 +399,13 @@ fn hourly_running_total_is_last() {
 
 #[test]
 fn minutes_15_energy_sum_equals_timestep_sum() {
-    let dir = tempfile::tempdir().expect("tempdir");
     let start = site_offset()
         .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
         .single()
         .expect("start");
-    let dwelling = run_cz4a(start, 86_400, 300, 4, 288, dir.path());
-    let batches: Vec<RecordBatch> = dwelling
-        .recorder
-        .as_ref()
-        .expect("retained batches")
-        .flushed_batches()
-        .to_vec();
-    let schema = dwelling
-        .recorder
-        .as_ref()
-        .expect("recorder")
-        .schema()
-        .clone();
+    let dwelling = run_cz4a(start, 86_400, 300, 4, 288);
+    let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
+    let schema = batches[0].schema();
     let rules = rules_for(&schema, &dwelling.catalogue());
 
     let energy_column = column_index(&schema, |name| name.ends_with("Energy (kWh)"));
@@ -518,38 +443,23 @@ fn minutes_15_energy_sum_equals_timestep_sum() {
 
 #[test]
 fn batch_fed_reducer_equals_row_fed_reducer() {
-    let dir = tempfile::tempdir().expect("tempdir");
     let start = site_offset()
         .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
         .single()
         .expect("start");
     // One row per flushed batch, so every step's row is at hand as the
     // per-step feed runs.
-    let mut dwelling = cz4a_dwelling(start, 86_400, 900, 4, 1, dir.path());
-    let schema = dwelling
-        .recorder
-        .as_ref()
-        .expect("recorder")
-        .schema()
-        .clone();
-    let rules = rules_for(&schema, &dwelling.catalogue());
-
-    let mut row_fed =
-        PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules.clone()).expect("builds");
-    let mut batch_fed =
-        PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules).expect("builds");
-    let mut row_rows = Vec::new();
-    let mut batch_rows = Vec::new();
-
+    let mut dwelling = cz4a_dwelling(start, 86_400, 900, 4, 1);
+    let mut step_rows: Vec<(i64, Vec<f64>)> = Vec::new();
+    let mut schema: Option<std::sync::Arc<Schema>> = None;
     let steps = 86_400_i64 / 900;
     for _ in 0..steps {
         dwelling.step().expect("dwelling steps");
-        let batches = dwelling
-            .recorder
-            .as_ref()
-            .expect("retained batches")
-            .flushed_batches();
+        let batches = dwelling.flushed_batches();
         let batch = batches.last().expect("chunk size one flushes per step");
+        if schema.is_none() {
+            schema = Some(batch.schema());
+        }
         // The per-step feed: the run's fixed offset applied to the step's
         // instant, the values read off the frozen plan's recorded row.
         let step_time = dwelling.latest_env().current_time;
@@ -564,25 +474,27 @@ fn batch_fed_reducer_equals_row_fed_reducer() {
                     .value(0)
             })
             .collect();
+        step_rows.push((local_ms, values));
+    }
+    let schema = schema.expect("chunk size one flushes every step's row");
+    let rules = rules_for(&schema, &dwelling.catalogue());
+
+    let mut row_fed =
+        PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules.clone()).expect("builds");
+    let mut batch_fed =
+        PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules).expect("builds");
+    let mut row_rows = Vec::new();
+    let mut batch_rows = Vec::new();
+
+    for (local_ms, values) in &step_rows {
         let valid = vec![true; values.len()];
         row_fed
-            .push_row(local_ms, &values, &valid, &mut sink(&mut row_rows))
+            .push_row(*local_ms, values, &valid, &mut sink(&mut row_rows))
             .expect("the run's rows feed the reducer");
     }
     collect(row_fed, &mut row_rows);
 
-    dwelling
-        .recorder
-        .as_mut()
-        .expect("recorder")
-        .flush()
-        .expect("final flush");
-    let batches: Vec<RecordBatch> = dwelling
-        .recorder
-        .as_ref()
-        .expect("retained batches")
-        .flushed_batches()
-        .to_vec();
+    let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
     for batch in &batches {
         batch_fed
             .push_batch(batch, &mut sink(&mut batch_rows))
@@ -600,25 +512,14 @@ fn batch_fed_reducer_equals_row_fed_reducer() {
 
 #[test]
 fn partial_first_and_last_period_carry_step_count() {
-    let dir = tempfile::tempdir().expect("tempdir");
     // 91 steps of 900 s from 00:30 to 23:15 local, the end exclusive.
     let start = site_offset()
         .with_ymd_and_hms(2023, 1, 1, 0, 30, 0)
         .single()
         .expect("start");
-    let dwelling = run_cz4a(start, 91 * 900, 900, 0, 96, dir.path());
-    let batches: Vec<RecordBatch> = dwelling
-        .recorder
-        .as_ref()
-        .expect("retained batches")
-        .flushed_batches()
-        .to_vec();
-    let schema = dwelling
-        .recorder
-        .as_ref()
-        .expect("recorder")
-        .schema()
-        .clone();
+    let dwelling = run_cz4a(start, 91 * 900, 900, 0, 96);
+    let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
+    let schema = batches[0].schema();
     let rules = rules_for(&schema, &dwelling.catalogue());
 
     let hourly = reduce_batches(Frequency::Hourly, &batches, rules);
@@ -641,24 +542,13 @@ fn partial_first_and_last_period_carry_step_count() {
 
 #[test]
 fn run_period_report_has_one_row() {
-    let dir = tempfile::tempdir().expect("tempdir");
     let start = site_offset()
         .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
         .single()
         .expect("start");
-    let dwelling = run_cz4a(start, 86_400, 900, 0, 96, dir.path());
-    let batches: Vec<RecordBatch> = dwelling
-        .recorder
-        .as_ref()
-        .expect("retained batches")
-        .flushed_batches()
-        .to_vec();
-    let schema = dwelling
-        .recorder
-        .as_ref()
-        .expect("recorder")
-        .schema()
-        .clone();
+    let dwelling = run_cz4a(start, 86_400, 900, 0, 96);
+    let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
+    let schema = batches[0].schema();
     let rules = rules_for(&schema, &dwelling.catalogue());
 
     let run_rows = reduce_batches(Frequency::RunPeriod, &batches, rules);
