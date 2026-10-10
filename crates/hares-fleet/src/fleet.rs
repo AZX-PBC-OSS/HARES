@@ -1740,7 +1740,7 @@ mod tests {
         assert!(first_step.iter().all(|result| result.is_ok()));
         for result in first_step {
             let step = result.expect("step succeeds");
-            assert!(step.timestamp.timestamp() > 0);
+            assert!(step.timestamp.and_utc().timestamp() > 0);
         }
         assert_eq!(fleet.current_step(), 1);
         assert!(!fleet.is_finished());

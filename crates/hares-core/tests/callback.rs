@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use arrow::array::{Float64Array, StringArray};
+use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, Duration};
 use hares_control::DispatchRequest;
@@ -112,6 +112,17 @@ fn assert_batches_bitwise_equal(a: &[RecordBatch], b: &[RecordBatch], label: &st
         assert_eq!(x.num_rows(), y.num_rows(), "{label}: batch {i} row count");
         for (j, (xc, yc)) in x.columns().iter().zip(y.columns()).enumerate() {
             if let (Some(xs), Some(ys)) = (
+                xc.as_any().downcast_ref::<TimestampMillisecondArray>(),
+                yc.as_any().downcast_ref::<TimestampMillisecondArray>(),
+            ) {
+                for k in 0..x.num_rows() {
+                    assert_eq!(
+                        xs.value(k),
+                        ys.value(k),
+                        "{label}: batch {i} column {j} row {k}"
+                    );
+                }
+            } else if let (Some(xs), Some(ys)) = (
                 xc.as_any().downcast_ref::<StringArray>(),
                 yc.as_any().downcast_ref::<StringArray>(),
             ) {

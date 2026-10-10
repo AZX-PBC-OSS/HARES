@@ -10,7 +10,7 @@ use std::time::Duration as StdDuration;
 
 use arrow::array::{Array, Float64Array, StringArray, TimestampMicrosecondArray};
 use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_core::{Actor, Dwelling, DwellingConfig, SimStatus, SimulationEngine, StepResult};
 use hares_io::SimulationConfig;
@@ -140,11 +140,10 @@ impl ParityFixture {
 fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
     let fixture = ParityFixture::new("cz4a_battery_only");
     let dwelling_config = build_dwelling_config(&fixture);
-    let local_offset = *dwelling_config.sim_config.start_time.offset();
-    let expected_start_time = dwelling_config.sim_config.start_time;
+    let expected_start_time = dwelling_config.sim_config.start_time.naive_local();
 
     let Some(reference_time) =
-        read_reference_time_axis_local_opt(&fixture.reference_output_parquet(), local_offset)
+        read_reference_time_axis_local_opt(&fixture.reference_output_parquet())
     else {
         eprintln!(
             "[alignment] skipping {} (missing: reference_output.parquet)",
@@ -159,20 +158,16 @@ fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
         "actual and reference time axes must have identical row counts"
     );
     assert_eq!(
-        actual_time.first().map(|ts| ts.naive_local()),
-        Some(expected_start_time.naive_local()),
+        actual_time.first().copied(),
+        Some(expected_start_time),
         "fixture must start at the configured local wall-clock time"
     );
     for (idx, (actual_value, reference_value)) in
         actual_time.iter().zip(reference_time.iter()).enumerate()
     {
         if idx > 0 {
-            let actual_step = actual_value
-                .naive_local()
-                .signed_duration_since(actual_time[idx - 1].naive_local());
-            let reference_step = reference_value
-                .naive_local()
-                .signed_duration_since(reference_time[idx - 1].naive_local());
+            let actual_step = actual_value.signed_duration_since(actual_time[idx - 1]);
+            let reference_step = reference_value.signed_duration_since(reference_time[idx - 1]);
             assert_eq!(
                 actual_step, reference_step,
                 "time axis cadence must match the OCHRE reference at row {idx}"
@@ -642,7 +637,7 @@ fn simulate_fixture_steps(
         .steps
 }
 
-fn simulate_fixture_timestamps(config: DwellingConfig) -> Vec<DateTime<FixedOffset>> {
+fn simulate_fixture_timestamps(config: DwellingConfig) -> Vec<NaiveDateTime> {
     let mut dwelling = Dwelling::from_config(config).expect("fixture dwelling must load");
     let results = dwelling
         .simulate()
@@ -651,10 +646,7 @@ fn simulate_fixture_timestamps(config: DwellingConfig) -> Vec<DateTime<FixedOffs
     results.into_iter().map(|step| step.timestamp).collect()
 }
 
-fn read_reference_time_axis_local(
-    path: &Path,
-    local_offset: FixedOffset,
-) -> Result<Vec<DateTime<FixedOffset>>, String> {
+fn read_reference_time_axis_local(path: &Path) -> Result<Vec<NaiveDateTime>, String> {
     let reference = read_parquet_columns(path)?;
     let reference_time = first_matching_column(&reference, &["Time"])
         .ok_or_else(|| format!("reference time column missing in '{}'", path.display()))?;
@@ -670,7 +662,7 @@ fn read_reference_time_axis_local(
                 )
             })?
             .naive_utc();
-        values.push(local_offset.from_utc_datetime(&naive));
+        values.push(naive);
     }
 
     Ok(values)
@@ -678,16 +670,12 @@ fn read_reference_time_axis_local(
 
 /// `read_reference_time_axis_local` with the same missing-file convention as
 /// [`read_parquet_columns_opt`]: `None` only when the file is absent.
-fn read_reference_time_axis_local_opt(
-    path: &Path,
-    local_offset: FixedOffset,
-) -> Option<Vec<DateTime<FixedOffset>>> {
+fn read_reference_time_axis_local_opt(path: &Path) -> Option<Vec<NaiveDateTime>> {
     if !path.exists() {
         return None;
     }
     Some(
-        read_reference_time_axis_local(path, local_offset)
-            .expect("reference parquet time axis must be readable"),
+        read_reference_time_axis_local(path).expect("reference parquet time axis must be readable"),
     )
 }
 

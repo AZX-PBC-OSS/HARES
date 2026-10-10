@@ -144,6 +144,55 @@ construction, naming itself and `defaults_path`; a schedule file that
 names every column the building's equipment needs builds without one. A
 schedule generated from the HPXML (`schedule=None`) always needs it.
 
+## Time
+
+Every output row's `Time` is an Arrow `Timestamp(Millisecond, None)`:
+the **naive local standard time** at the interval's start, a step's
+start for a timestep report or a period's nominal start for a
+reporting-period frequency, and nothing else. `Time` is one convention
+across the whole surface: a frame's column, a step's `timestamp` and the
+environment's `current_time` all carry the same local wall clock, as
+naive values with no time zone attached.
+
+To recover the UTC instant, apply the site's standard-time UTC offset,
+carried in the output schema's metadata as `hares:utc_offset_s` (decimal
+seconds, negative west of Greenwich): `UTC = Time - hares:utc_offset_s`.
+For a site at UTC-7 the metadata is `-25200`, so local midnight is
+`07:00Z`. A non-`Timestep` report additionally carries a `Step Count`
+column and, for each nullable variable, a `<name> [valid steps]` column
+counting the steps that contributed a value.
+
+`step()`'s dict carries `"timestamp"` as a naive `datetime` equal to the
+row's `Time`. A schedule row maps to a step by the step's local time of
+year divided by the step length, over a 365-day year: dates after
+February 28 in a leap year take their non-leap ordinal (February 29
+shares March 1's row). With `civil_timezone` set, the local time is the
+step's civil time in that zone, so the schedule follows the wall clock
+through daylight saving.
+
+```python
+from datetime import datetime
+
+from hares import Dwelling, SimulationConfig
+
+dw = Dwelling.from_hpxml(
+    hpxml="tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/building.xml",
+    schedule="tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/schedule.csv",
+    weather="tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/weather.epw",
+    config=SimulationConfig(
+        start_time="2023-01-01T00:00:00-07:00",
+        duration=6 * 3600,
+        time_res=3600,
+    ),
+    defaults_path="defaults",
+)
+dw.initialize()
+
+frame = dw.simulate()
+first = frame["Time"][0]  # a naive datetime: the local wall clock
+assert first == datetime(2023, 1, 1, 0, 0), "the first Time is start_time's wall clock"
+```
+
 ## Equipment zones
 
 Every HVAC unit, water heater and ventilation unit runs in a zone it can

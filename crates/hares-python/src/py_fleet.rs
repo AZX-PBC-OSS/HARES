@@ -15,7 +15,7 @@ use pyo3::types::{PyAny, PyDict, PyList, PyType};
 use tracing::warn;
 
 use crate::conversions::{
-    chrono_to_py_datetime, dwelling_metrics_to_polars_df, fleet_results_to_py,
+    dwelling_metrics_to_polars_df, fleet_results_to_py, naive_chrono_to_py_datetime,
     record_batches_to_polars_df,
 };
 use crate::py_config::{MAX_CHRONO_SECONDS, PyDwellingConfig};
@@ -479,7 +479,10 @@ impl PySteppableFleet {
             match entry {
                 Ok(step) => {
                     let result = PyDict::new(py);
-                    result.set_item("timestamp", chrono_to_py_datetime(py, step.timestamp)?)?;
+                    result.set_item(
+                        "timestamp",
+                        naive_chrono_to_py_datetime(py, step.timestamp)?,
+                    )?;
                     result.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
                     result.set_item("hvac_heating_w", step.hvac_heating_w)?;
                     result.set_item("hvac_cooling_w", step.hvac_cooling_w)?;

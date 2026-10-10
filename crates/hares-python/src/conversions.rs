@@ -2,7 +2,7 @@
 
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, FixedOffset, SecondsFormat};
+use chrono::NaiveDateTime;
 use hares_core::StepResult;
 use hares_fleet::{DwellingMetrics, FleetResults, SimStatus};
 use pyo3::exceptions::PyValueError;
@@ -27,20 +27,30 @@ pub fn batches_or_steps_to_polars_df(
 }
 
 /// Convert in-memory dwelling step results to a polars `DataFrame`.
+///
+/// The Time column is the rows' naive local wall clock, the same
+/// representation the record batches' `Timestamp(Millisecond, None)`
+/// column reads back as: one convention on both paths.
 pub fn steps_to_polars_df(py: Python<'_>, steps: &[StepResult]) -> PyResult<Py<PyAny>> {
     let mut times = Vec::with_capacity(steps.len());
     let mut total_power_kw = Vec::with_capacity(steps.len());
 
     for step in steps {
-        times.push(step.timestamp.to_rfc3339_opts(SecondsFormat::Secs, true));
+        times.push(step.timestamp.and_utc().timestamp_millis());
         total_power_kw.push(step.net_electric_power_kw);
     }
 
+    let polars = py.import("polars")?;
+    let datetime_dtype = polars.getattr("Datetime")?.call1(("ms", py.None()))?;
+    let time_series = polars
+        .getattr("Series")?
+        .call1(("Time", times))?
+        .call_method1("cast", (datetime_dtype,))?;
+
     let data = PyDict::new(py);
-    data.set_item("Time", times)?;
+    data.set_item("Time", time_series)?;
     data.set_item("Total Electric Power (kW)", total_power_kw)?;
 
-    let polars = py.import("polars")?;
     let df = polars.getattr("DataFrame")?.call1((data,))?;
     Ok(df.unbind())
 }
@@ -144,9 +154,15 @@ pub fn fleet_results_to_py(results: FleetResults) -> PyFleetResults {
     PyFleetResults::new(results)
 }
 
-pub fn chrono_to_py_datetime(py: Python<'_>, dt: DateTime<FixedOffset>) -> PyResult<Py<PyAny>> {
+/// Convert a naive local wall-clock time into a naive Python `datetime`:
+/// the representation the step dict's timestamp and the environment's
+/// `current_time` carry, the value the frame's Time column spells.
+pub fn naive_chrono_to_py_datetime(py: Python<'_>, dt: NaiveDateTime) -> PyResult<Py<PyAny>> {
     let datetime = py.import("datetime")?.getattr("datetime")?;
-    let obj = datetime.call_method1("fromisoformat", (dt.to_rfc3339(),))?;
+    let obj = datetime.call_method1(
+        "fromisoformat",
+        (dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),),
+    )?;
     Ok(obj.unbind())
 }
 

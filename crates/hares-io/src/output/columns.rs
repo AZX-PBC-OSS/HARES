@@ -704,59 +704,6 @@ mod tests {
     }
 
     #[test]
-    fn schema_metadata_includes_mode_map() {
-        let schema = build_schema_for_specs(&[], 0, &[]);
-        let meta = schema.metadata();
-        assert!(meta.contains_key("hares_mode_map"));
-        let json: serde_json::Value =
-            serde_json::from_str(meta.get("hares_mode_map").unwrap()).unwrap();
-        let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), OperatingMode::iter().count());
-    }
-
-    #[test]
-    fn schema_metadata_includes_basement_lighting_created() {
-        let specs = vec![
-            make_spec("Indoor Lighting", FuelType::Electric),
-            make_spec("Basement Lighting", FuelType::Electric),
-        ];
-        let schema = build_schema_for_specs(&specs, 1, &[]);
-        let meta = schema.metadata();
-        assert_eq!(
-            meta.get("basement_lighting_created").map(|s| s.as_str()),
-            Some("true"),
-        );
-
-        let schema_no_basement = build_schema_for_specs(&[], 0, &[]);
-        let meta_no = schema_no_basement.metadata();
-        assert_eq!(
-            meta_no.get("basement_lighting_created").map(|s| s.as_str()),
-            Some("false"),
-        );
-    }
-
-    #[test]
-    fn schema_metadata_includes_garage_lighting_created() {
-        let specs = vec![
-            make_spec("Indoor Lighting", FuelType::Electric),
-            make_spec("Garage Lighting", FuelType::Electric),
-        ];
-        let schema = build_schema_for_specs(&specs, 1, &[]);
-        let meta = schema.metadata();
-        assert_eq!(
-            meta.get("garage_lighting_created").map(|s| s.as_str()),
-            Some("true"),
-        );
-
-        let schema_no_garage = build_schema_for_specs(&[], 0, &[]);
-        let meta_no = schema_no_garage.metadata();
-        assert_eq!(
-            meta_no.get("garage_lighting_created").map(|s| s.as_str()),
-            Some("false"),
-        );
-    }
-
-    #[test]
     fn mode_ordinal_round_trips() {
         assert_eq!(OperatingMode::Off.as_code(), 0.0);
         assert_eq!(OperatingMode::Heating.as_code(), 1.0);

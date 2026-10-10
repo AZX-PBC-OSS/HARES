@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use arrow::array::{Float64Array, RecordBatch, StringArray};
+use arrow::array::{Float64Array, RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::Schema;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
@@ -101,7 +101,7 @@ static PARTIAL_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct StreamingRecorder {
     schema: Arc<Schema>,
     chunk_size: usize,
-    timestamp_buf: Vec<String>,
+    timestamp_buf: Vec<i64>,
     value_bufs: Vec<Vec<f64>>,
     /// The report's destination: the retention rule and, for a file, the
     /// publish target.
@@ -412,12 +412,14 @@ impl StreamingRecorder {
         }
     }
 
-    /// Append a single row. The first element of `timestamp` is the time
-    /// string; `values` contains the report's numeric columns in the
+    /// Append a single row. The `timestamp` is the row's naive local
+    /// wall-clock milliseconds (the `Timestamp(Millisecond, None)` Time
+    /// field's value; the schema metadata's `hares:utc_offset_s` recovers
+    /// the instant); `values` contains the report's numeric columns in the
     /// report's schema order (excluding the timestamp column).
     ///
     /// Automatically flushes when the buffer reaches `chunk_size`.
-    pub fn push_row(&mut self, timestamp: &str, values: &[f64]) -> Result<(), OutputError> {
+    pub fn push_row(&mut self, timestamp: i64, values: &[f64]) -> Result<(), OutputError> {
         let expected = self.value_bufs.len();
         if values.len() != expected {
             return Err(OutputError::ColumnMismatch {
@@ -426,7 +428,7 @@ impl StreamingRecorder {
             });
         }
 
-        self.timestamp_buf.push(timestamp.to_string());
+        self.timestamp_buf.push(timestamp);
         for (buf, &val) in self.value_bufs.iter_mut().zip(values.iter()) {
             buf.push(val);
         }
@@ -544,9 +546,10 @@ impl StreamingRecorder {
         let mut columns: Vec<Arc<dyn arrow::array::Array>> =
             Vec::with_capacity(self.schema.fields().len());
 
-        // Drain timestamp buffer into a StringArray (avoids clone).
+        // Drain timestamp buffer into a TimestampMillisecondArray (avoids
+        // clone); the Time field's type pins the array type.
         let timestamps = std::mem::take(&mut self.timestamp_buf);
-        columns.push(Arc::new(StringArray::from(timestamps)));
+        columns.push(Arc::new(TimestampMillisecondArray::from(timestamps)));
 
         // Drain each f64 buffer into a Float64Array.
         for buf in &mut self.value_bufs {
@@ -569,7 +572,11 @@ mod tests {
 
     fn test_schema() -> Schema {
         Schema::new(vec![
-            Field::new("Time", DataType::Utf8, false),
+            Field::new(
+                "Time",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
             Field::new("Total Electric Power (kW)", DataType::Float64, true),
             Field::new("Total Gas Power (therms/hour)", DataType::Float64, true),
         ])
@@ -605,7 +612,7 @@ mod tests {
 
         for (i, (e, g)) in test_values.iter().enumerate() {
             recorder
-                .push_row(&format!("2024-01-01T00:{i:02}:00Z"), &[*e, *g])
+                .push_row(i64::try_from(i).expect("row index") * 60_000, &[*e, *g])
                 .unwrap();
         }
 
@@ -670,12 +677,8 @@ mod tests {
         )
         .unwrap();
 
-        recorder
-            .push_row("2024-01-01T00:00:00Z", &[1.0, 2.0])
-            .unwrap();
-        recorder
-            .push_row("2024-01-01T00:01:00Z", &[3.0, 4.0])
-            .unwrap();
+        recorder.push_row(0, &[1.0, 2.0]).unwrap();
+        recorder.push_row(60_000, &[3.0, 4.0]).unwrap();
 
         let summary = recorder.finish().unwrap();
         assert_eq!(summary.row_count, 2);
@@ -697,7 +700,7 @@ mod tests {
 
         for i in 0..total_rows {
             recorder
-                .push_row(&format!("T{i}"), &[i as f64, 0.0])
+                .push_row(i64::try_from(i).expect("row index"), &[i as f64, 0.0])
                 .unwrap();
         }
 
@@ -705,7 +708,6 @@ mod tests {
         // (last push_row triggered the 10th flush).
         assert_eq!(recorder.buffered_rows(), 0);
         assert_eq!(recorder.total_rows(), total_rows);
-
         let summary = recorder.finish().unwrap();
         assert_eq!(summary.row_count, total_rows);
     }
@@ -745,7 +747,7 @@ mod tests {
         let schema = test_schema();
         let mut recorder = recorder_at(schema, &path, 100);
 
-        let result = recorder.push_row("T0", &[1.0]); // 1 value, expects 2
+        let result = recorder.push_row(0, &[1.0]); // 1 value, expects 2
         assert!(result.is_err());
     }
 
@@ -758,9 +760,7 @@ mod tests {
         let mut recorder = recorder_at(schema, &path, 1000);
 
         for i in 0..5 {
-            recorder
-                .push_row(&format!("T{i}"), &[i as f64, 0.0])
-                .unwrap();
+            recorder.push_row(i64::from(i), &[i as f64, 0.0]).unwrap();
         }
         assert_eq!(recorder.buffered_rows(), 5);
         assert!(
@@ -804,7 +804,7 @@ mod tests {
 
         for i in 0..25 {
             recorder
-                .push_row(&format!("T{i}"), &[i as f64, i as f64 * 2.0])
+                .push_row(i64::from(i), &[i as f64, i as f64 * 2.0])
                 .unwrap();
         }
         // 25 rows with chunk_size=10 → 2 flushes triggered by push_row.
@@ -824,7 +824,7 @@ mod tests {
 
         for i in 0..total_rows {
             recorder
-                .push_row(&format!("T{i}"), &[i as f64, 0.0])
+                .push_row(i64::try_from(i).expect("row index"), &[i as f64, 0.0])
                 .unwrap();
         }
         // A file destination streams: flushed batches are written and
@@ -874,7 +874,7 @@ mod tests {
             },
         )
         .unwrap();
-        recorder.push_row("T0", &[1.0, 2.0]).unwrap();
+        recorder.push_row(0, &[1.0, 2.0]).unwrap();
         recorder.finish().unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
@@ -921,8 +921,8 @@ mod tests {
             },
         )
         .unwrap();
-        recorder.push_row("T0", &[1.0, 2.0]).unwrap();
-        recorder.push_row("T1", &[3.0, 4.0]).unwrap();
+        recorder.push_row(0, &[1.0, 2.0]).unwrap();
+        recorder.push_row(1, &[3.0, 4.0]).unwrap();
         // The chunk flushed: the partial file exists mid-run.
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
         let partial_is_hidden = std::fs::read_dir(tmp.path())
@@ -946,7 +946,7 @@ mod tests {
 
         let schema = test_schema();
         let mut recorder = recorder_at(schema, &path, 1);
-        recorder.push_row("T0", &[1.0, 2.0]).unwrap();
+        recorder.push_row(0, &[1.0, 2.0]).unwrap();
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
 
         recorder.discard_partial();
@@ -964,7 +964,7 @@ mod tests {
 
         let schema = test_schema();
         let mut recorder = recorder_at(schema, &path, 100);
-        recorder.push_row("T0", &[1.0, 2.0]).unwrap();
+        recorder.push_row(0, &[1.0, 2.0]).unwrap();
         recorder.flush_and_close().unwrap();
         recorder.flush_and_close().unwrap();
         assert!(path.exists());

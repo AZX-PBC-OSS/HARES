@@ -29,7 +29,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use serde::{Deserialize, Serialize};
 
 use hares_types::{
@@ -372,6 +372,87 @@ impl Catalogue {
     #[must_use]
     pub fn diagnostics_offset(&self) -> Option<usize> {
         self.tags.iter().position(|tag| tag.diagnostics)
+    }
+
+    /// The catalogue's digest: the hex SHA-256 of the catalogue's
+    /// canonical encoding.
+    ///
+    /// The canonical encoding is the ASCII header `hares-catalogue-v1`
+    /// followed by a newline, then one record per variable in schema
+    /// order. A record is the variable's fields, each preceded by the NUL
+    /// byte, terminated with a newline: the column name; the kind
+    /// (`energy`, `power`, `temperature`, `ratio`, `state`, `enum:` with
+    /// the labels joined by the ASCII unit separator, or `quantity:` with
+    /// the across-homes rule); the over-time aggregation (`sum`, `mean`,
+    /// `mode`, `last`); the sampling rule (`interval-mean`,
+    /// `instant-at-start`, `instant-at-end`); the unit's symbol; and the
+    /// nullability (`0` never null, `1` nullable). Every semantic field
+    /// the catalogue declares is covered; the prose `description` and the
+    /// `source` tag are not, so a digest names the variables a schema
+    /// reports, not the sites that declared them.
+    #[must_use]
+    pub fn digest(&self) -> String {
+        use sha2::Digest as _;
+
+        const KIND_SEPARATOR: char = '\u{1f}';
+        let mut bytes = Vec::with_capacity(64 + self.defs.len() * 48);
+        bytes.extend_from_slice(b"hares-catalogue-v1\n");
+        for var in &self.defs {
+            bytes.push(0);
+            bytes.extend_from_slice(var.name.as_bytes());
+            bytes.push(0);
+            match &var.kind {
+                VariableKind::Energy => bytes.extend_from_slice(b"energy"),
+                VariableKind::Power => bytes.extend_from_slice(b"power"),
+                VariableKind::Temperature => bytes.extend_from_slice(b"temperature"),
+                VariableKind::Ratio => bytes.extend_from_slice(b"ratio"),
+                VariableKind::State => bytes.extend_from_slice(b"state"),
+                VariableKind::Enum { labels } => {
+                    bytes.extend_from_slice(b"enum:");
+                    for i in 0..labels.len() {
+                        if i > 0 {
+                            bytes.extend_from_slice(KIND_SEPARATOR.to_string().as_bytes());
+                        }
+                        bytes.extend_from_slice(labels.get(i).unwrap_or_default().as_bytes());
+                    }
+                }
+                VariableKind::Quantity { across_homes } => match across_homes {
+                    AcrossHomes::Sum => bytes.extend_from_slice(b"quantity:sum"),
+                    AcrossHomes::Mean => bytes.extend_from_slice(b"quantity:mean"),
+                },
+            }
+            bytes.push(0);
+            bytes.extend_from_slice(
+                match var.aggregation {
+                    Aggregation::Sum => "sum",
+                    Aggregation::Mean => "mean",
+                    Aggregation::Mode => "mode",
+                    Aggregation::Last => "last",
+                }
+                .as_bytes(),
+            );
+            bytes.push(0);
+            bytes.extend_from_slice(
+                match var.sampling {
+                    Sampling::IntervalMean => "interval-mean",
+                    Sampling::InstantAtStart => "instant-at-start",
+                    Sampling::InstantAtEnd => "instant-at-end",
+                }
+                .as_bytes(),
+            );
+            bytes.push(0);
+            bytes.extend_from_slice(var.unit.symbol().as_bytes());
+            bytes.push(0);
+            bytes.push(if var.nullable { b'1' } else { b'0' });
+            bytes.push(b'\n');
+        }
+        let mut hasher = sha2::Sha256::default();
+        hasher.update(&bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 }
 
@@ -1048,7 +1129,7 @@ static CORE_OUTPUT_VARIABLES: &[(&str, VariableDef)] = &[
             sampling: Sampling::InstantAtEnd,
             nullable: true,
             source: VariableSource::Dwelling,
-            description: Cow::Borrowed("Operating mode code (the hares_mode_map metadata table)"),
+            description: Cow::Borrowed("Operating mode code (the catalogue's mode labels)"),
         },
     ),
     (
@@ -2244,23 +2325,35 @@ static DWELLING_VARIABLES: &[(&str, VariableDef, u8, bool)] = &[
 /// appends last, each of its fields marked so the row plan's freeze
 /// resolves the block from the schema alone. Field metadata carries
 /// `Unit::symbol()` as the `unit` entry (no metadata for [`Unit::None`]);
-/// the schema metadata is the pre-catalogue one (verbosity, mode map,
-/// lighting-created flags).
+/// the schema metadata carries the catalogue digest.
 #[must_use]
 pub fn build_schema(catalogue: &Catalogue, verbosity: u8, diagnostics: bool) -> Schema {
-    let mut fields = vec![Field::new(TIMESTAMP_COL, DataType::Utf8, false)];
+    let mut fields = vec![time_field()];
 
     for var in catalogue.variables_at_verbosity(verbosity) {
-        fields.push(variable_field(var).as_ref().clone());
+        fields.push(variable_field(var));
     }
 
     if diagnostics {
         for var in catalogue.diagnostics_variables() {
-            fields.push(diagnostics_field(var).as_ref().clone());
+            fields.push(diagnostics_field(var));
         }
     }
 
-    Schema::new_with_metadata(fields, schema_metadata(catalogue, verbosity))
+    Schema::new_with_metadata(fields, schema_metadata(catalogue))
+}
+
+/// The output schema's Time field: a millisecond timestamp with no
+/// embedded time zone, never null. The value is the row's naive local
+/// wall-clock milliseconds; the schema metadata's `hares:utc_offset_s`
+/// (added per run at the recorder freeze) recovers the instant.
+#[must_use]
+pub fn time_field() -> arrow::datatypes::FieldRef {
+    std::sync::Arc::new(Field::new(
+        TIMESTAMP_COL,
+        DataType::Timestamp(TimeUnit::Millisecond, None),
+        false,
+    ))
 }
 
 /// One variable's Arrow field: the column name, `Float64`, the
@@ -2296,40 +2389,20 @@ fn diagnostics_field(var: &VariableDef) -> arrow::datatypes::FieldRef {
 /// row plan's freeze resolves the block from the schema alone.
 #[must_use]
 pub fn build_schema_for_diagnostics(catalogue: &Catalogue) -> Schema {
-    let mut fields = vec![Field::new(TIMESTAMP_COL, DataType::Utf8, false)];
+    let mut fields = vec![time_field()];
     for var in catalogue.diagnostics_variables() {
-        fields.push(diagnostics_field(var).as_ref().clone());
+        fields.push(diagnostics_field(var));
     }
-    Schema::new_with_metadata(fields, schema_metadata(catalogue, 0))
+    Schema::new_with_metadata(fields, schema_metadata(catalogue))
 }
 
-/// The schema metadata every schema builder carries: the mode-ordinal map,
-/// the lighting-created flags, and the verbosity the schema spans (for a
-/// named column set, the deepest tier the columns are drawn from).
-fn schema_metadata(
-    catalogue: &Catalogue,
-    verbosity: u8,
-) -> std::collections::HashMap<String, String> {
+/// The schema metadata every schema builder carries: the catalogue digest
+/// naming the catalogue the schema's variables come from. The run's site
+/// offset joins it at the recorder freeze (the dwelling's
+/// `hares:utc_offset_s`), the one key the schema builders cannot know.
+fn schema_metadata(catalogue: &Catalogue) -> std::collections::HashMap<String, String> {
     let mut metadata = std::collections::HashMap::new();
-    metadata.insert("hares_verbosity".to_string(), verbosity.to_string());
-    metadata.insert("hares_mode_map".to_string(), mode_ordinal_json());
-
-    let basement_lighting_created = catalogue
-        .equipment_names()
-        .iter()
-        .any(|n| n == "Basement Lighting");
-    metadata.insert(
-        "basement_lighting_created".to_string(),
-        basement_lighting_created.to_string(),
-    );
-    let garage_lighting_created = catalogue
-        .equipment_names()
-        .iter()
-        .any(|n| n == "Garage Lighting");
-    metadata.insert(
-        "garage_lighting_created".to_string(),
-        garage_lighting_created.to_string(),
-    );
+    metadata.insert("hares:catalogue_digest".to_string(), catalogue.digest());
     metadata
 }
 
@@ -2341,7 +2414,7 @@ fn schema_metadata(
 /// [`build_schema`] honours it).
 #[must_use]
 pub fn build_schema_for_columns(catalogue: &Catalogue, names: &[String]) -> Schema {
-    let mut fields = vec![Field::new(TIMESTAMP_COL, DataType::Utf8, false)];
+    let mut fields = vec![time_field()];
     let mut max_verbosity = 0u8;
     for name in names {
         let Some(var) = catalogue.resolve(name) else {
@@ -2366,9 +2439,9 @@ pub fn build_schema_for_columns(catalogue: &Catalogue, names: &[String]) -> Sche
         } else {
             variable_field(var)
         };
-        fields.push(field.as_ref().clone());
+        fields.push(field);
     }
-    Schema::new_with_metadata(fields, schema_metadata(catalogue, max_verbosity))
+    Schema::new_with_metadata(fields, schema_metadata(catalogue))
 }
 
 /// Builds a catalogue from spec-shaped inputs (no live descriptors) and
@@ -2404,16 +2477,152 @@ pub fn build_schema_for_specs(
     }
 }
 
-/// JSON encoding of the `OperatingMode` → ordinal mapping, embedded as
-/// Parquet custom metadata so output files are self-describing. Derived
-/// from the mode labels' order (label `i` is ordinal `i`), so a mode
-/// variant without a label fails the catalogue's mode-labels test instead
-/// of shipping an unmapped mode.
-fn mode_ordinal_json() -> String {
-    let pairs: Vec<(&str, u8)> = hares_types::MODE_LABELS
-        .iter()
-        .enumerate()
-        .map(|(i, label)| (*label, i as u8))
-        .collect();
-    serde_json::to_string(&pairs).expect("static map serialises")
+/// The digest's canonical encoding, pinned against a byte string the test
+/// writes out by the documented rule, over a two-variable catalogue.
+#[cfg(test)]
+mod digest_tests {
+    use std::borrow::Cow;
+    use std::collections::HashMap;
+
+    use hares_types::{Aggregation, Sampling, Unit, VariableKind};
+
+    use super::{Catalogue, VarTag, VariableDef, VariableSource};
+
+    fn def(name: &str, unit: Unit, kind: VariableKind, nullable: bool) -> VariableDef {
+        VariableDef {
+            name: Cow::Owned(name.to_string()),
+            unit,
+            aggregation: if matches!(kind, VariableKind::Energy) {
+                Aggregation::Sum
+            } else {
+                Aggregation::Mean
+            },
+            sampling: if nullable {
+                Sampling::InstantAtStart
+            } else {
+                Sampling::IntervalMean
+            },
+            nullable,
+            source: VariableSource::Dwelling,
+            description: Cow::Borrowed("digest test variable"),
+            kind,
+        }
+    }
+
+    fn catalogue_from_defs(defs: Vec<VariableDef>) -> Catalogue {
+        let tags: Vec<VarTag> = defs
+            .iter()
+            .map(|_| VarTag {
+                min_verbosity: 0,
+                observe_only: false,
+                diagnostics: false,
+            })
+            .collect();
+        let index = defs
+            .iter()
+            .enumerate()
+            .map(|(i, def)| (def.name.to_string(), i))
+            .collect::<HashMap<_, _>>();
+        Catalogue {
+            defs,
+            tags,
+            index,
+            telemetry_keys: HashMap::new(),
+            equipment_names: Vec::new(),
+        }
+    }
+
+    fn two_variable_catalogue() -> Catalogue {
+        catalogue_from_defs(vec![
+            def(
+                "Total Electric Power (kW)",
+                Unit::Kilowatt,
+                VariableKind::Power,
+                false,
+            ),
+            def(
+                "Temperature - Indoor (C)",
+                Unit::Celsius,
+                VariableKind::Temperature,
+                true,
+            ),
+        ])
+    }
+
+    #[test]
+    fn catalogue_digest_is_canonical() {
+        use sha2::Digest as _;
+
+        let catalogue = two_variable_catalogue();
+        // The byte string the rule writes for these two variables, by
+        // hand: the header line, then per variable its fields, each
+        // preceded by the NUL byte, terminated with a newline.
+        let canonical: &[u8] = b"hares-catalogue-v1\n\
+            \x00Total Electric Power (kW)\x00power\x00mean\x00interval-mean\x00kW\x000\n\
+            \x00Temperature - Indoor (C)\x00temperature\x00mean\x00instant-at-start\x00C\x001\n";
+        let mut hasher = sha2::Sha256::default();
+        hasher.update(canonical);
+        let expected = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            catalogue.digest(),
+            expected,
+            "the digest is the SHA-256 of the canonical byte string"
+        );
+    }
+
+    #[test]
+    fn catalogue_digest_changes_when_a_variable_changes() {
+        let catalogue = two_variable_catalogue();
+        let changed = catalogue
+            .variables()
+            .iter()
+            .map(|var| {
+                let mut var = var.clone();
+                if var.name == "Temperature - Indoor (C)" {
+                    var.nullable = !var.nullable;
+                }
+                var
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(
+            catalogue.digest(),
+            catalogue_from_defs(changed).digest(),
+            "a nullability change is a catalogue change and moves the digest"
+        );
+    }
+
+    #[test]
+    fn catalogue_digest_is_order_sensitive() {
+        let catalogue = two_variable_catalogue();
+        let swapped = catalogue
+            .variables()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_ne!(
+            catalogue.digest(),
+            catalogue_from_defs(swapped).digest(),
+            "the digest covers schema order: the same variables in another order"
+        );
+    }
+
+    #[test]
+    fn catalogue_digest_metadata_matches() {
+        let catalogue = two_variable_catalogue();
+        let digest = catalogue.digest();
+        let schema = super::build_schema(&catalogue, 0, false);
+        assert_eq!(
+            schema
+                .metadata()
+                .get("hares:catalogue_digest")
+                .map(String::as_str),
+            Some(digest.as_str()),
+            "the schema's digest metadata is the hex of Catalogue::digest()"
+        );
+    }
 }

@@ -1469,6 +1469,16 @@ impl Dwelling {
                     }
                 };
                 let schema = enrich_schema_with_telemetry_units(schema, equipment, catalogue);
+                // The run's site offset joins the catalogue digest in the
+                // schema metadata: the one key the builders cannot know,
+                // the sign that recovers an instant from the Time column's
+                // naive local wall clock.
+                let mut metadata = (*schema.metadata()).clone();
+                metadata.insert(
+                    "hares:utc_offset_s".to_string(),
+                    i64::from(self.utc_offset_s).to_string(),
+                );
+                let schema = schema.with_metadata(metadata);
                 StreamingRecorder::new(schema, self.output_chunk_size, report.destination.clone())
             })
             .collect::<std::result::Result<Vec<_>, _>>()

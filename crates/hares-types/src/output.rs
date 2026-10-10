@@ -732,8 +732,8 @@ impl TelemetryField {
 }
 
 /// The operating-mode code table: one label per `OperatingMode` ordinal,
-/// shared by every per-equipment `Mode (-)` column declaration. The
-/// `hares_mode_map` schema metadata carries the same table.
+/// shared by every per-equipment `Mode (-)` column declaration (the
+/// catalogue's enum labels are the decoding table).
 pub const MODE_LABELS: &[&str] = &[
     "Off",
     "Heating",

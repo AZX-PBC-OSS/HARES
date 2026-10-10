@@ -225,9 +225,7 @@ class TestChargingLoadProfile:
         df = dw.simulate()
         col = _ev_power_col(df, "Tesla Model Y LR AWD")
 
-        df = df.with_columns(
-            pl.col("Time").str.slice(11, 2).cast(pl.Int32).alias("hour")
-        )
+        df = df.with_columns(pl.col("Time").dt.hour().cast(pl.Int32).alias("hour"))
         charging = df.filter(pl.col(col) > 0.5)
 
         assert charging.height > 0, "A daily commuter must charge within a week"

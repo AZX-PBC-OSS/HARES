@@ -9,10 +9,18 @@
 use arrow::array::{Array, Float64Array, Float64Builder, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use chrono::Duration;
+use chrono::{DateTime, Duration};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
+
+/// The epoch milliseconds of an RFC 3339 instant: the Time value a
+/// synthetic batch carries (UTC-stamped homes, offset 0).
+fn utc_ms(instant: &str) -> i64 {
+    DateTime::parse_from_rfc3339(instant)
+        .expect("instant")
+        .timestamp_millis()
+}
 
 use hares_core::SimulationResults;
 use hares_fleet::Fleet;
@@ -83,10 +91,15 @@ fn outcome(
     }
 }
 
-fn batch(rows: &[&str], columns: Vec<(&str, Vec<Option<f64>>)>) -> RecordBatch {
-    let mut fields = vec![Field::new("Time", DataType::Utf8, false)];
-    let mut arrays: Vec<Arc<dyn arrow::array::Array>> =
-        vec![Arc::new(StringArray::from(rows.to_vec()))];
+fn batch(rows: &[i64], columns: Vec<(&str, Vec<Option<f64>>)>) -> RecordBatch {
+    let mut fields = vec![Field::new(
+        "Time",
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+        false,
+    )];
+    let mut arrays: Vec<Arc<dyn arrow::array::Array>> = vec![Arc::new(
+        arrow::array::TimestampMillisecondArray::from(rows.to_vec()),
+    )];
 
     for (name, values) in columns {
         fields.push(Field::new(name, DataType::Float64, true));
@@ -100,7 +113,12 @@ fn batch(rows: &[&str], columns: Vec<(&str, Vec<Option<f64>>)>) -> RecordBatch {
         arrays.push(Arc::new(builder.finish()));
     }
 
-    let schema = Arc::new(Schema::new(fields));
+    let schema = Arc::new(
+        Schema::new(fields).with_metadata(std::collections::HashMap::from([(
+            "hares:utc_offset_s".to_string(),
+            "0".to_string(),
+        )])),
+    );
     RecordBatch::try_new(schema, arrays).expect("valid test batch")
 }
 
@@ -218,9 +236,9 @@ fn run_fleet_integration(failures: &mut Vec<String>) {
 // ---------------------------------------------------------------------------
 
 fn run_weighted_sum_with_weights(failures: &mut Vec<String>) {
-    let t0 = "2021-01-01T00:00:00Z";
-    let t1 = "2021-01-01T00:15:00Z";
-    let t2 = "2021-01-01T00:30:00Z";
+    let t0 = utc_ms("2021-01-01T00:00:00Z");
+    let t1 = utc_ms("2021-01-01T00:15:00Z");
+    let t2 = utc_ms("2021-01-01T00:30:00Z");
 
     let d1 = outcome(
         1.0,
@@ -330,10 +348,10 @@ fn run_weighted_sum_with_weights(failures: &mut Vec<String>) {
 
 fn run_hourly_resample_suffix_rules(failures: &mut Vec<String>) {
     let rows = [
-        "2021-01-01T00:00:00Z",
-        "2021-01-01T00:15:00Z",
-        "2021-01-01T00:30:00Z",
-        "2021-01-01T00:45:00Z",
+        utc_ms("2021-01-01T00:00:00Z"),
+        utc_ms("2021-01-01T00:15:00Z"),
+        utc_ms("2021-01-01T00:30:00Z"),
+        utc_ms("2021-01-01T00:45:00Z"),
     ];
 
     let d1 = outcome(
@@ -447,7 +465,7 @@ fn run_hourly_resample_suffix_rules(failures: &mut Vec<String>) {
 // ---------------------------------------------------------------------------
 
 fn run_weighted_mean_vs_sum(failures: &mut Vec<String>) {
-    let t0 = "2021-01-01T00:00:00Z";
+    let t0 = utc_ms("2021-01-01T00:00:00Z");
 
     let make_dwelling = |weight: f64, power: f64, temp: f64, soc: f64| {
         outcome(
@@ -517,7 +535,7 @@ fn run_weighted_mean_vs_sum(failures: &mut Vec<String>) {
 // ---------------------------------------------------------------------------
 
 fn run_null_propagates_to_aggregate(failures: &mut Vec<String>) {
-    let t0 = "2021-01-01T00:00:00Z";
+    let t0 = utc_ms("2021-01-01T00:00:00Z");
 
     let d1 = outcome(
         1.0,

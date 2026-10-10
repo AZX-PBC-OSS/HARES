@@ -152,7 +152,7 @@ mod tests {
     fn no_callback_after_finish() {
         let schema = arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
             "Time",
-            arrow::datatypes::DataType::Utf8,
+            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
             false,
         )]);
 
@@ -183,7 +183,7 @@ mod tests {
 
         for i in 0..25 {
             recorder
-                .push_row(&format!("T{i}"), &[])
+                .push_row(i64::from(i), &[])
                 .expect("the row records");
         }
         // 25 rows at chunk 10: two full flushes delivered, five buffered.
@@ -204,7 +204,7 @@ mod tests {
         // callback.
         for i in 25..40 {
             recorder
-                .push_row(&format!("T{i}"), &[])
+                .push_row(i64::from(i), &[])
                 .expect("the row buffers");
         }
         recorder.flush().expect("the flush is a no-op write");

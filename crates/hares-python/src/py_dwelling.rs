@@ -47,7 +47,7 @@ pyo3::create_exception!(
     pyo3::exceptions::PyRuntimeError
 );
 
-use crate::conversions::{batches_or_steps_to_polars_df, chrono_to_py_datetime};
+use crate::conversions::{batches_or_steps_to_polars_df, naive_chrono_to_py_datetime};
 use crate::py_actor::PyActor;
 use crate::py_actor::PyPriority;
 use crate::py_config::PySimulationConfig;
@@ -640,7 +640,10 @@ pub(crate) fn step_result_to_py_dict(
     zone_keys: &[String],
 ) -> PyResult<Py<PyAny>> {
     let out = PyDict::new(py);
-    out.set_item("timestamp", chrono_to_py_datetime(py, step.timestamp)?)?;
+    out.set_item(
+        "timestamp",
+        naive_chrono_to_py_datetime(py, step.timestamp)?,
+    )?;
     out.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
     out.set_item("hvac_heating_w", step.hvac_heating_w)?;
     out.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
@@ -2128,7 +2131,10 @@ impl PyDwelling {
         // Both 0.0 during normal (grid-connected) operation.
         dict.set_item("island_unserved_kw", dwelling.island_unserved_kw())?;
         dict.set_item("island_excess_kw", dwelling.island_excess_kw())?;
-        dict.set_item("current_time", chrono_to_py_datetime(py, env.current_time)?)?;
+        dict.set_item(
+            "current_time",
+            naive_chrono_to_py_datetime(py, env.current_time.naive_local())?,
+        )?;
         let zones: Vec<Py<PyDict>> = env
             .zones
             .iter()
@@ -2389,7 +2395,9 @@ impl PyTimestepsIter {
                     .saturating_mul(i64::try_from(self.next_step).unwrap_or(i64::MAX)),
             );
         self.next_step = self.next_step.saturating_add(1);
-        Ok(Some(chrono_to_py_datetime(py, ts)?))
+        // The timesteps iterator yields the steps' naive local wall clock,
+        // the value the matching row's Time column carries.
+        Ok(Some(naive_chrono_to_py_datetime(py, ts.naive_local())?))
     }
 
     fn __repr__(&self) -> String {

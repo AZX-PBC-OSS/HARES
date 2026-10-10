@@ -3,10 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use arrow::array::{Array, Float64Array, Float64Builder, StringArray, StringBuilder};
+use arrow::array::{
+    Array, Float64Array, Float64Builder, StringArray, StringBuilder, TimestampMillisecondArray,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, FixedOffset, SecondsFormat, Timelike};
+use chrono::{DateTime, SecondsFormat, Timelike};
 
 use crate::fleet::{DwellingOutcome, FleetError, SimStatus};
 
@@ -306,7 +308,13 @@ pub fn aggregate(
             .map(|idx| ColumnAggregation::for_column(schema.field(*idx)))
             .collect();
 
-        let buckets = resample_rows(&rows, &numeric_columns, &aggregators, resolution);
+        let buckets = resample_rows(
+            &rows,
+            &numeric_columns,
+            &aggregators,
+            resolution,
+            utc_offset_seconds(&schema),
+        );
         successful.push((outcome.sample_weight, column_fields, buckets));
     }
 
@@ -435,28 +443,30 @@ fn numeric_column_indexes(schema: &Schema) -> Vec<usize> {
         .collect()
 }
 
-fn parse_timestamp(value: &str) -> Option<DateTime<FixedOffset>> {
-    DateTime::parse_from_rfc3339(value).ok()
-}
-
-fn bucket_start(
-    ts: DateTime<FixedOffset>,
-    resolution: AggregationResolution,
-) -> DateTime<FixedOffset> {
-    match resolution {
-        AggregationResolution::Hourly => ts
+/// The bucket start of a row fed at `local_ms`: the row's naive local
+/// wall clock truncated to the resolution's fields, as UTC epoch seconds
+/// of that wall clock (the value the parsed-`DateTime` form keyed before
+/// the Time column became a timestamp).
+fn bucket_start_from_local_ms(local_ms: i64, resolution: AggregationResolution) -> i64 {
+    let naive = DateTime::from_timestamp_millis(local_ms)
+        .unwrap_or_else(|| panic!("local milliseconds {local_ms} out of the chrono range"))
+        .naive_utc();
+    let truncated = match resolution {
+        AggregationResolution::Hourly => naive
             .with_minute(0)
             .and_then(|x| x.with_second(0))
             .and_then(|x| x.with_nanosecond(0))
-            .unwrap_or(ts),
+            .unwrap_or(naive),
         AggregationResolution::FifteenMin => {
-            let minute = (ts.minute() / 15) * 15;
-            ts.with_minute(minute)
+            let minute = (naive.minute() / 15) * 15;
+            naive
+                .with_minute(minute)
                 .and_then(|x| x.with_second(0))
                 .and_then(|x| x.with_nanosecond(0))
-                .unwrap_or(ts)
+                .unwrap_or(naive)
         }
-    }
+    };
+    truncated.and_utc().timestamp()
 }
 
 fn value_from_column(batch: &RecordBatch, column_idx: usize, row_idx: usize) -> Option<f64> {
@@ -474,11 +484,30 @@ fn value_from_column(batch: &RecordBatch, column_idx: usize, row_idx: usize) -> 
     }
 }
 
+/// The home's standard-time UTC offset in seconds, from the batch schema's
+/// `hares:utc_offset_s` metadata: the sign that recovers the instant from
+/// the Time column's naive local wall clock (UTC = local - offset). A
+/// schema without the metadata reads as UTC.
+fn utc_offset_seconds(schema: &Schema) -> i64 {
+    schema
+        .metadata()
+        .get("hares:utc_offset_s")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Buckets each row's Time on the local wall clock it carries: the
+/// `Timestamp(Millisecond, None)` column is the row's naive local
+/// wall-clock milliseconds, and the bucket key is the same UTC epoch
+/// second the pre-timestamp Utf8 `Time` keyed, recovered by applying the
+/// home's offset (the local-truncated wall clock minus
+/// `hares:utc_offset_s`).
 fn resample_rows(
     rows: &[RecordBatch],
     numeric_columns: &[usize],
     aggregators: &[ColumnAggregation],
     resolution: AggregationResolution,
+    utc_offset_s: i64,
 ) -> BTreeMap<i64, Vec<Option<f64>>> {
     let mut per_bucket: HashMap<i64, Vec<Accumulator>> = HashMap::new();
 
@@ -487,7 +516,11 @@ fn resample_rows(
             continue;
         }
 
-        let Some(time_col) = batch.column(0).as_any().downcast_ref::<StringArray>() else {
+        let Some(time_col) = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+        else {
             continue;
         };
 
@@ -496,10 +529,8 @@ fn resample_rows(
                 continue;
             }
 
-            let Some(ts) = parse_timestamp(time_col.value(row_idx)) else {
-                continue;
-            };
-            let bucket = bucket_start(ts, resolution).timestamp();
+            let local_ms = time_col.value(row_idx);
+            let bucket = bucket_start_from_local_ms(local_ms, resolution) - utc_offset_s;
 
             let accs = per_bucket.entry(bucket).or_insert_with(|| {
                 (0..numeric_columns.len())
@@ -931,9 +962,20 @@ mod tests {
         }
     }
 
-    fn batch(rows: &[&str], columns: Vec<(&str, Vec<Option<f64>>)>) -> RecordBatch {
-        let mut fields = vec![Field::new("Time", DataType::Utf8, false)];
-        let mut arrays: Vec<Arc<dyn Array>> = vec![Arc::new(StringArray::from(rows.to_vec()))];
+    /// A home batch: the Time column is the row's naive local
+    /// wall-clock milliseconds (UTC epoch millis here, the home's offset
+    /// in its schema metadata), then one Float64 column per entry,
+    /// nullable.
+    fn batch(rows: &[i64], columns: Vec<(&str, Vec<Option<f64>>)>) -> RecordBatch {
+        let mut fields = vec![Field::new(
+            "Time",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            false,
+        )];
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("hares:utc_offset_s".to_string(), "0".to_string());
+        let mut arrays: Vec<Arc<dyn Array>> =
+            vec![Arc::new(TimestampMillisecondArray::from(rows.to_vec()))];
 
         for (name, values) in columns {
             fields.push(Field::new(name, DataType::Float64, true));
@@ -947,15 +989,23 @@ mod tests {
             arrays.push(Arc::new(builder.finish()));
         }
 
-        let schema = Arc::new(Schema::new(fields));
+        let schema = Arc::new(Schema::new(fields).with_metadata(metadata));
         RecordBatch::try_new(schema, arrays).expect("valid test batch")
+    }
+
+    /// The epoch milliseconds of an RFC 3339 instant: the Time value a
+    /// test batch carries (UTC-stamped homes, offset 0).
+    fn utc_ms(instant: &str) -> i64 {
+        DateTime::parse_from_rfc3339(instant)
+            .expect("instant")
+            .timestamp_millis()
     }
 
     #[test]
     fn weighted_sum_uses_sample_weights_and_nulls() {
-        let t0 = "2021-01-01T00:00:00Z";
-        let t1 = "2021-01-01T00:15:00Z";
-        let t2 = "2021-01-01T00:30:00Z";
+        let t0 = utc_ms("2021-01-01T00:00:00Z");
+        let t1 = utc_ms("2021-01-01T00:15:00Z");
+        let t2 = utc_ms("2021-01-01T00:30:00Z");
 
         let d1 = outcome(
             1.0,
@@ -1030,8 +1080,8 @@ mod tests {
 
         // Intersection removes 00:30 because dwelling 3 ended early.
         assert_eq!(times.len(), 2);
-        assert_eq!(times.value(0), t0);
-        assert_eq!(times.value(1), t1);
+        assert_eq!(times.value(0), "2021-01-01T00:00:00Z");
+        assert_eq!(times.value(1), "2021-01-01T00:15:00Z");
 
         // 1*1 + 10*2 + 100*0.5 = 71.0
         assert!((values.value(0) - 71.0).abs() < 1e-9);
@@ -1042,10 +1092,10 @@ mod tests {
     #[test]
     fn hourly_resample_applies_suffix_aggregation_rules() {
         let rows = [
-            "2021-01-01T00:00:00Z",
-            "2021-01-01T00:15:00Z",
-            "2021-01-01T00:30:00Z",
-            "2021-01-01T00:45:00Z",
+            utc_ms("2021-01-01T00:00:00Z"),
+            utc_ms("2021-01-01T00:15:00Z"),
+            utc_ms("2021-01-01T00:30:00Z"),
+            utc_ms("2021-01-01T00:45:00Z"),
         ];
 
         let d1 = outcome(
@@ -1146,7 +1196,7 @@ mod tests {
 
     #[test]
     fn fleet_weighted_mean_vs_sum_with_unequal_weights() {
-        let t0 = "2021-01-01T00:00:00Z";
+        let t0 = utc_ms("2021-01-01T00:00:00Z");
 
         // Three dwellings with weights 1, 2, 3
         let make_dwelling = |weight: f64, power: f64, temp: f64, soc: f64| {
@@ -1211,8 +1261,8 @@ mod tests {
 
     #[test]
     fn aggregate_identical_dwellings_preserves_weighted_mean_identity_and_sums_correctly() {
-        let t0 = "2021-01-01T00:00:00Z";
-        let t1 = "2021-01-01T00:15:00Z";
+        let t0 = utc_ms("2021-01-01T00:00:00Z");
+        let t1 = utc_ms("2021-01-01T00:15:00Z");
 
         // Two dwellings with identical timeseries but different weights.
         // Weighted-sum columns (kW, kWh): fleet = value * (w1 + w2)
@@ -1270,7 +1320,7 @@ mod tests {
 
     #[test]
     fn aggregation_with_zero_weights() {
-        let t0 = "2021-01-01T00:00:00Z";
+        let t0 = utc_ms("2021-01-01T00:00:00Z");
 
         let zero_dwelling = outcome(
             0.0,
@@ -1309,7 +1359,7 @@ mod tests {
 
     #[test]
     fn aggregate_rejects_single_invalid_weight_among_valid() {
-        let t0 = "2021-01-01T00:00:00Z";
+        let t0 = utc_ms("2021-01-01T00:00:00Z");
 
         // One valid dwelling and one NaN-weighted dwelling. The all-invalid
         // guard would pass this (a positive weight exists), so aggregation must
@@ -1345,7 +1395,7 @@ mod tests {
 
     #[test]
     fn aggregate_rejects_negative_weight() {
-        let t0 = "2021-01-01T00:00:00Z";
+        let t0 = utc_ms("2021-01-01T00:00:00Z");
 
         let valid = outcome(
             1.0,
@@ -1378,7 +1428,7 @@ mod tests {
 
     #[test]
     fn aggregate_invalid_weight_index_counts_all_input_outcomes() {
-        let t0 = "2021-01-01T00:00:00Z";
+        let t0 = utc_ms("2021-01-01T00:00:00Z");
 
         // A failed dwelling precedes the invalid-weight dwelling. The reported
         // index counts every input outcome (not just successful ones), so the
@@ -1411,7 +1461,7 @@ mod tests {
 
     #[test]
     fn fleet_rejects_all_zero_weights() {
-        let t0 = "2021-01-01T00:00:00Z";
+        let t0 = utc_ms("2021-01-01T00:00:00Z");
 
         let d1 = outcome(
             0.0,
@@ -1438,7 +1488,7 @@ mod tests {
 
     #[test]
     fn column_mismatch_returns_empty_batch() {
-        let t0 = "2021-01-01T00:00:00Z";
+        let t0 = utc_ms("2021-01-01T00:00:00Z");
 
         let d1 = outcome(
             1.0,
@@ -1561,11 +1611,11 @@ mod tests {
     #[test]
     fn extract_rows_returns_none_on_intra_dwelling_schema_mismatch() {
         let batch1 = batch(
-            &["2021-01-01T00:00:00Z"],
+            &[utc_ms("2021-01-01T00:00:00Z")],
             vec![("Total Electric Power (kW)", vec![Some(1.0)])],
         );
         let batch2 = batch(
-            &["2021-01-01T00:15:00Z"],
+            &[utc_ms("2021-01-01T00:15:00Z")],
             vec![("Temperature - Indoor (C)", vec![Some(21.0)])],
         );
 

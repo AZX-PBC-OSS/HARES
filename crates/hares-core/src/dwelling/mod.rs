@@ -34,7 +34,7 @@ use std::time::Duration as StdDuration;
 use std::time::Instant;
 
 use arrow::datatypes::{Field, Schema};
-use chrono::{DateTime, Duration, FixedOffset, Timelike};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDateTime, Timelike};
 use hares_control::{
     DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceSignal, PriorityTier,
 };
@@ -1457,7 +1457,12 @@ fn build_zone_column_caches(
 /// Single-step observable output.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StepResult {
-    pub timestamp: DateTime<FixedOffset>,
+    /// The step row's own time: the naive local wall clock at the step's
+    /// interval start, the value the output frame's `Time` column carries
+    /// (a `Timestamp(Millisecond, None)` of these wall-clock
+    /// milliseconds). The site's standard-time UTC offset, the output
+    /// schema metadata's `hares:utc_offset_s`, recovers the instant.
+    pub timestamp: NaiveDateTime,
     pub net_electric_power_kw: f64,
     pub zone_temperatures_c: Vec<(ZoneId, f64)>,
     /// Thermal energy delivered to the zone by HVAC heating equipment (W, positive).
@@ -2445,8 +2450,12 @@ pub struct Dwelling {
     /// Everything the step path reads that derives from the equipment and
     /// actor rosters, installed as a whole by each roster change.
     roster: RosterCaches,
-    /// Pre-allocated buffer for RFC 3339 timestamp formatting, reused each step.
-    timestamp_buf: String,
+    /// The site's standard-time UTC offset in seconds, written into every
+    /// report schema's metadata as `hares:utc_offset_s` at the recorder
+    /// freeze: the one key the schema builders cannot know, the sign the
+    /// fleet's time alignment applies to recover an instant from the Time
+    /// column's naive local wall clock.
+    utc_offset_s: i32,
     /// Reused scratch for the per-report projected rows: the union row's
     /// values one report's projection selects, pushed to that report's
     /// recorder. Cleared and refilled per report per step.
@@ -3484,6 +3493,10 @@ fn build_from_blueprint_inner(
         bldg_id: config.bldg_id,
         failed: false,
         restored_from_checkpoint: false,
+        // The site's standard-time offset, resolved with the site location
+        // (the same value the run's fixed-offset clock starts at); the
+        // recorder freeze writes it into the output schemas' metadata.
+        utc_offset_s: (bp.site_location.utc_offset_h * 3600.0).round() as i32,
         #[cfg(debug_assertions)]
         test_panic_on_step: false,
         #[cfg(debug_assertions)]
@@ -3538,7 +3551,6 @@ fn build_from_blueprint_inner(
         custom_update_bufs: Vec::new(),
         #[cfg(test)]
         snapshot_allocations: SnapshotAllocations::default(),
-        timestamp_buf: String::with_capacity(32),
         projected_row_buf: Vec::new(),
         occupancy_column_idx,
         occupancy_scale,
@@ -6530,7 +6542,7 @@ impl Dwelling {
         let gas_power_w = self.ports.fuel.get(hares_types::FuelType::Gas);
 
         let step_result = StepResult {
-            timestamp: self.latest_env.current_time,
+            timestamp: self.latest_env.current_time.naive_local(),
             net_electric_power_kw: self.electrical_solver.net_active_kw(),
             zone_temperatures_c: self.roster.zone_temp_scratch.clone(),
             hvac_heating_w,
@@ -6729,9 +6741,17 @@ impl Dwelling {
 
     fn record_step(&mut self, step: &StepResult) -> Result<()> {
         // Begin the row the frozen plan built: zeroed, validity cleared,
-        // local timestamp stamped. Every write below is by precomputed
-        // index; the step path never looks a column name up.
-        self.roster.row_plan.begin_row(step.timestamp.timestamp());
+        // timestamp stamped. Every write below is by precomputed index;
+        // the step path never looks a column name up. The plan's stamp is
+        // the step instant in UTC epoch seconds (never a local-epoch
+        // stamp); the row's Time column carries the wall clock instead.
+        self.roster
+            .row_plan
+            .begin_row(self.latest_env.current_time.timestamp());
+        // The row's Time: the step's naive local wall clock, written once
+        // per row as the milliseconds the Timestamp(Millisecond, None)
+        // field carries.
+        let time_ms = step.timestamp.and_utc().timestamp_millis();
         let row = self.roster.row_plan.row_mut();
         let dwelling_columns = &self.roster.bindings.dwelling;
 
@@ -7009,15 +7029,11 @@ impl Dwelling {
             );
         }
 
-        self.timestamp_buf.clear();
-        use std::fmt::Write;
-        write!(&mut self.timestamp_buf, "{}", step.timestamp.format("%+"))
-            .expect("write to String is infallible");
+        let row = self.roster.row_plan.row();
         // Every report's recorder gets the row its selection projected out
         // of the union row, in the report's own column order. The
         // projections were copied at freeze; the union row's borrow ends
         // with the producers' writes above.
-        let row = self.roster.row_plan.row();
         for (recorder, projection) in self
             .recorders
             .iter_mut()
@@ -7026,7 +7042,7 @@ impl Dwelling {
             self.projected_row_buf.clear();
             self.projected_row_buf
                 .extend(projection.iter().map(|&slot| row[slot]));
-            if let Err(err) = recorder.push_row(&self.timestamp_buf, &self.projected_row_buf) {
+            if let Err(err) = recorder.push_row(time_ms, &self.projected_row_buf) {
                 return Err(Self::recorder_error("record push", err));
             }
         }
@@ -15903,9 +15919,7 @@ occupancy = 0.0
             },
         )
         .expect("recorder");
-        recorder
-            .push_row("2023-01-01T00:00:00", &[0.0, 0.0])
-            .expect("push row");
+        recorder.push_row(0, &[0.0, 0.0]).expect("push row");
         dwelling.recorders = vec![recorder];
         // The plan must reach the bindings rebuild (not stop at the
         // no-reports gate): one report whose selection promises the

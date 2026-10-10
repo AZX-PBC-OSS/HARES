@@ -17,7 +17,7 @@
 //! null-for-not-applicable rule upstream, and the reducer excludes them
 //! with the valid-step count.
 
-use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, Float64Array, RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::DataType;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Timelike};
 use hares_types::{Aggregation, VariableKind};
@@ -107,10 +107,6 @@ pub enum ReduceError {
         /// What the column must be.
         expected: &'static str,
     },
-    /// A batch `Time` value does not parse as an RFC 3339 timestamp at a
-    /// fixed offset.
-    #[error("batch Time value '{0}' does not parse as an RFC 3339 timestamp")]
-    TimeValue(String),
 }
 
 /// One rule's accumulation over the open period.
@@ -314,18 +310,19 @@ impl PeriodReducer {
         Ok(())
     }
 
-    /// Feeds a record batch: the `Time` column first (Utf8, RFC 3339 at the
-    /// run's fixed offset), then one Float64 column per rule, in rule
-    /// order. A batch may carry extra columns beyond the rules, which are
-    /// ignored; the batch's `Time` values are parsed to naive local
-    /// milliseconds, so both feeds bucket on the same local milliseconds.
+    /// Feeds a record batch: the `Time` column first
+    /// (`Timestamp(Millisecond, None)`, the row's naive local wall-clock
+    /// milliseconds), then one Float64 column per rule, in rule order. A
+    /// batch may carry extra columns beyond the rules, which are ignored;
+    /// the batch's `Time` values are the same local milliseconds
+    /// `push_row` takes, so both feeds bucket on the same local
+    /// milliseconds.
     ///
     /// # Errors
     ///
     /// [`ReduceError::ColumnCount`] when the batch has fewer columns than
-    /// the rules read, [`ReduceError::ColumnType`] when the `Time` column
-    /// or a rule column is of the wrong type, and
-    /// [`ReduceError::TimeValue`] when a `Time` value does not parse.
+    /// the rules read, and [`ReduceError::ColumnType`] when the `Time`
+    /// column or a rule column is of the wrong type.
     pub fn push_batch(
         &mut self,
         batch: &RecordBatch,
@@ -341,12 +338,19 @@ impl PeriodReducer {
         let time_field = batch.schema_ref().field(0).clone();
         let type_error = |name: &str| ReduceError::ColumnType {
             name: name.to_string(),
-            expected: "the Utf8 Time column first",
+            expected: "the millisecond-timestamp Time column first",
         };
-        if time_field.name() != "Time" || time_field.data_type() != &DataType::Utf8 {
+        if time_field.name() != "Time"
+            || time_field.data_type()
+                != &DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None)
+        {
             return Err(type_error(time_field.name()));
         }
-        let Some(time_values) = batch.column(0).as_any().downcast_ref::<StringArray>() else {
+        let Some(time_values) = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+        else {
             return Err(type_error(time_field.name()));
         };
         let mut rule_columns = Vec::with_capacity(self.rules.len());
@@ -365,10 +369,9 @@ impl PeriodReducer {
             rule_columns.push(column);
         }
         for row in 0..batch.num_rows() {
-            let time_value = time_values.value(row);
-            let parsed = DateTime::parse_from_rfc3339(time_value)
-                .map_err(|_| ReduceError::TimeValue(time_value.to_string()))?;
-            let local_ms = parsed.naive_local().and_utc().timestamp_millis();
+            // The Time column is the row's naive local wall clock: the
+            // same local milliseconds push_row takes.
+            let local_ms = time_values.value(row);
             self.advance(local_ms, emit);
             for (rule, column) in self.rules.iter_mut().zip(rule_columns.iter().copied()) {
                 if !column.is_null(row) {
@@ -469,7 +472,7 @@ mod tests {
     use std::num::NonZeroU32;
     use std::sync::Arc;
 
-    use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
+    use arrow::array::{Array, Float64Array, RecordBatch, TimestampMillisecondArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use chrono::{Datelike, FixedOffset, NaiveDate, TimeZone, Timelike};
     use hares_types::Aggregation;
@@ -925,10 +928,7 @@ mod tests {
     #[test]
     fn batch_fed_reducer_matches_row_fed_reducer_on_bits() {
         let base = local_ms_at(offset(), 2023, 1, 1, 0, 0);
-        let times: Vec<String> = (0..6)
-            .map(|i| time_label(base + i64::from(i) * STEP_MS, offset()))
-            .collect();
-        let borrowed: Vec<&str> = times.iter().map(String::as_str).collect();
+        let times: Vec<i64> = (0..6).map(|i| base + i64::from(i) * STEP_MS).collect();
         // A null in the first hour's third step; a third column no rule
         // reads, to pin that columns beyond the rules are ignored. Both
         // rules read the same column: the sum and the mean over its valid
@@ -936,7 +936,7 @@ mod tests {
         let column_a = vec![Some(1.0), Some(2.0), None, Some(4.0), Some(5.0), Some(6.0)];
         let column_b = column_a.clone();
         let column_extra = vec![Some(99.0); 6];
-        let batch = batch_with_columns(&borrowed, &[column_a, column_b, column_extra]);
+        let batch = batch_with_columns(&times, &[column_a, column_b, column_extra]);
 
         let rules = vec![rule(Aggregation::Sum), rule(Aggregation::Mean)];
         let mut row_fed =
@@ -1029,14 +1029,11 @@ mod tests {
     #[test]
     fn push_batch_rejects_column_count_type_and_time_mismatches() {
         let base = local_ms_at(offset(), 2023, 1, 1, 0, 0);
-        let times: Vec<String> = (0..2)
-            .map(|i| time_label(base + i64::from(i) * STEP_MS, offset()))
-            .collect();
-        let borrowed: Vec<&str> = times.iter().map(String::as_str).collect();
+        let times: Vec<i64> = (0..2).map(|i| base + i64::from(i) * STEP_MS).collect();
         let rules = vec![rule(Aggregation::Sum)];
 
         // Fewer columns than the rules read.
-        let short = batch_with_columns(&borrowed, &[]);
+        let short = batch_with_columns(&times, &[]);
         let mut reducer =
             PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules.clone()).expect("builds");
         let mut rows = Vec::new();
@@ -1054,7 +1051,8 @@ mod tests {
             "got: {err:?}"
         );
 
-        // A Float64 column where the Utf8 Time column belongs.
+        // A Float64 column where the millisecond-timestamp Time column
+        // belongs.
         let float_time = RecordBatch::try_new(
             Arc::new(Schema::new(vec![
                 Field::new("Time", DataType::Float64, false),
@@ -1077,11 +1075,15 @@ mod tests {
         // A rule column that is not Float64.
         let float_rule = RecordBatch::try_new(
             Arc::new(Schema::new(vec![
-                Field::new("Time", DataType::Utf8, false),
+                Field::new(
+                    "Time",
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ),
                 Field::new("c0", DataType::Float32, true),
             ])),
             vec![
-                Arc::new(StringArray::from(borrowed.clone())),
+                Arc::new(TimestampMillisecondArray::from(times.clone())),
                 Arc::new(arrow::array::Float32Array::from(vec![1.0; 2])),
             ],
         )
@@ -1091,17 +1093,6 @@ mod tests {
             .expect_err("a Float32 rule column is a type mismatch");
         assert!(
             matches!(err, ReduceError::ColumnType { ref name, .. } if name == "c0"),
-            "got: {err:?}"
-        );
-
-        // A Time value that does not parse.
-        let unparseable =
-            batch_with_columns(&["not a timestamp", "also not"], &[vec![Some(1.0); 2]]);
-        let err = reducer
-            .push_batch(&unparseable, &mut sink(&mut rows))
-            .expect_err("an unparseable Time value is an error");
-        assert!(
-            matches!(err, ReduceError::TimeValue(ref value) if value == "not a timestamp"),
             "got: {err:?}"
         );
     }
@@ -1343,11 +1334,17 @@ mod tests {
         assert_eq!(rows[22].start_local_ms, naive_ms(2023, 3, 12, 23, 0));
     }
 
-    /// A synthetic batch: the Time column, then one Float64 column per
-    /// entry, nullable.
-    fn batch_with_columns(times: &[&str], columns: &[Vec<Option<f64>>]) -> RecordBatch {
-        let mut fields = vec![Field::new("Time", DataType::Utf8, false)];
-        let mut arrays: Vec<Arc<dyn Array>> = vec![Arc::new(StringArray::from(times.to_vec()))];
+    /// A synthetic batch: the Time column (the row's naive local
+    /// wall-clock milliseconds), then one Float64 column per entry,
+    /// nullable.
+    fn batch_with_columns(times_ms: &[i64], columns: &[Vec<Option<f64>>]) -> RecordBatch {
+        let mut fields = vec![Field::new(
+            "Time",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            false,
+        )];
+        let mut arrays: Vec<Arc<dyn Array>> =
+            vec![Arc::new(TimestampMillisecondArray::from(times_ms.to_vec()))];
         for (i, column) in columns.iter().enumerate() {
             fields.push(Field::new(format!("c{i}"), DataType::Float64, true));
             arrays.push(Arc::new(Float64Array::from(column.clone())));

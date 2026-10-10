@@ -1,6 +1,6 @@
 [
   {
-    "arrow_type": "Utf8",
+    "arrow_type": "Timestamp(Millisecond, None)",
     "name": "Time",
     "nullable": false
   },

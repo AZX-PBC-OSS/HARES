@@ -107,10 +107,13 @@ def test_results_dataframe_has_time_column(simulated_df):
     assert "Time" in simulated_df.columns, "DataFrame should have Time column"
 
 
-def test_results_dataframe_time_is_string(simulated_df):
-    """Verify Time column is parsed as string (Arrow IPC preserves timestamp as string)."""
+def test_results_dataframe_time_is_datetime(simulated_df):
+    """Verify Time column is a naive-local millisecond Datetime (the Arrow
+    Timestamp type travels the IPC path intact)."""
     time_col = simulated_df.get_column("Time")
-    assert time_col.dtype == pl.String, "Time column is stored as string from Arrow IPC"
+    assert time_col.dtype == pl.Datetime("ms"), (
+        "Time column is a millisecond timestamp from Arrow IPC"
+    )
 
 
 def test_results_dataframe_has_expected_columns(simulated_df):

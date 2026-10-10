@@ -490,7 +490,11 @@ fn csv_writer_finish_flushes_all_data() {
     let path = tmp.path().join("out.csv");
 
     let schema = Schema::new(vec![
-        Field::new("Time", DataType::Utf8, false),
+        Field::new(
+            "Time",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            false,
+        ),
         Field::new("Total Electric Power (kW)", DataType::Float64, true),
     ]);
     let mut recorder = hares_io::StreamingRecorder::new(
@@ -506,7 +510,7 @@ fn csv_writer_finish_flushes_all_data() {
     // Write fewer rows than chunk_size to ensure finish() triggers flush.
     for i in 0..5 {
         recorder
-            .push_row(&format!("2024-01-01T00:{i:02}:00Z"), &[i as f64])
+            .push_row(i64::from(i) * 60_000, &[i as f64])
             .unwrap();
     }
     assert_eq!(recorder.buffered_rows(), 5);
@@ -539,7 +543,11 @@ fn csv_writer_finish_on_read_only_path_propagates_io_error() {
 
     // Write a valid file first.
     let schema = Schema::new(vec![
-        Field::new("Time", DataType::Utf8, false),
+        Field::new(
+            "Time",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            false,
+        ),
         Field::new("Total Electric Power (kW)", DataType::Float64, true),
     ]);
 
@@ -554,7 +562,7 @@ fn csv_writer_finish_on_read_only_path_propagates_io_error() {
         },
     )
     .unwrap();
-    recorder.push_row("2024-01-01T00:00:00Z", &[1.0]).unwrap();
+    recorder.push_row(0, &[1.0]).unwrap();
 
     // finish() should succeed here -- the main path works.
     let summary = recorder.finish().unwrap();
