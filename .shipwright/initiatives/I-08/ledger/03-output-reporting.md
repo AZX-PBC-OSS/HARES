@@ -3241,15 +3241,40 @@ clippy `--all-features --all-targets -D warnings` green on every crate
 the row touches and identical to the parent on `hares-python`, whose
 four lints (`too_many_arguments` on three binding constructors,
 `never_loop` on the removed-key helper) fail at the parent unchanged;
-nextest `--all-features` 7864/7864 (22 new tests; the one skip is the
-parent's ignored kind-pin generator); pytest 1617 passed with 26 failed
-and 4 errors, the identical failed set at the parent (the fold's
-Python-side residue, addressed on the sibling rows); pyright 0 errors;
+nextest `--all-features` 7648 run with 1 skipped (21 new tests: 13 in
+`reduce.rs` and 8 in `crates/hares-core/tests/reporting_frequency.rs`;
+the skip is the parent's ignored kind-pin generator); pytest in two
+invocations, the filtered gate `uv run --all-extras --all-groups
+--no-sync pytest` (the addopts' `-m 'not slow and not ochre'` left in
+place) 1540 passed, 0 failed, 0 errors, and the unfiltered block line
+`pytest -m ''` 1617 passed with 26 failed and 4 errors, the identical
+failed set at the parent (base-verified: the fold's Python-side
+residue, addressed on the sibling rows); pyright 0 errors;
 the goldens bitwise, `compare-all` 6 manifests identical plus
 `full_year_900s_dst` identical, the timestep frames unchanged and the
 new frequencies additive. The parent's two catalogue test failures (the
 synthetic TOML's removed keys) were fixed here first, cherry-picked from
-the sibling branch's fix as `3ac9dfb6`.
+the sibling branch's fix as `3ac9dfb6`. The verification round's
+findings were fixed as `a08ea0cb` on this branch: `push_row` checks its
+value and validity slices unconditionally and returns the batch feed's
+column count error (the debug assert panicked in debug builds and a
+release caller zipped a short slice into silent under-counting, while
+`push_batch` errored properly); the DST hour conventions are pinned at
+the reducer (a fall-back day's repeated hour merges into one bucket, a
+24 h run from local midnight giving 23 hourly rows with the repeated
+hour holding both passes' 8 steps; a spring-forward day's nonexistent
+hour opens no bucket, the wall day's 92 steps giving 23 hourly rows,
+no crash); the quarter-hour energy test's failure message names its
+1e-12 relative tolerance instead of claiming bitwise equality; the
+module docs record that a non-finite value on a valid step propagates
+through sum, mean and last and poisons the period's aggregate, while
+undefined values arrive as null per the catalogue's
+null-for-not-applicable rule and are excluded with the valid-step
+count. Gates at `a08ea0cb`: fmt clean; clippy green on the touched
+crates; nextest `--all-features -j 4` 7651 run with 1 skipped (the 3
+new pins); pytest 1540/0/0 filtered and 26 failed + 4 errors unfiltered
+(the parent's set); the goldens bitwise, `compare-all` identical plus
+`full_year_900s_dst` identical.
 
 ## OR-14: the batch callback destination
 
