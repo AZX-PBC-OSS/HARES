@@ -1468,6 +1468,7 @@ mod tests {
             civil_timezone: None,
             site_location: crate::SiteLocationOverride::default(),
             max_consecutive_step_failures: crate::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: crate::HealthPolicy::default(),
         }
     }
 
@@ -1495,6 +1496,7 @@ mod tests {
             civil_timezone: None,
             site_location: crate::SiteLocationOverride::default(),
             max_consecutive_step_failures: crate::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: crate::HealthPolicy::default(),
         }
     }
 

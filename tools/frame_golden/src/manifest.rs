@@ -251,6 +251,7 @@ const SIMULATION_KEYS: &[&str] = &[
     "civil_timezone",
     "site_location",
     "max_consecutive_step_failures",
+    "health_policy",
 ];
 
 /// The feature set the running binary was built with. The tool's features
@@ -598,6 +599,7 @@ mod tests {
                 utc_offset_h: None,
             },
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_io::HealthPolicy::default(),
         };
         let text = cfg.to_toml().expect("serialise the config");
         let table: toml::Table = toml::from_str(&text).expect("parse the TOML back");

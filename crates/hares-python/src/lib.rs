@@ -24,7 +24,7 @@ mod py_weather;
 mod utils;
 
 use py_actor::{PyActor, PyDRLevel, PyDispatchRequest, PyMode, PyPriority, PySignal};
-use py_config::{PyDwellingConfig, PySimulationConfig, PySiteLocationOverride};
+use py_config::{PyDwellingConfig, PyHealthPolicy, PySimulationConfig, PySiteLocationOverride};
 use py_control::PyControlSignal;
 use py_dwelling::{PyDwelling, PyTimestepsIter};
 use py_enums::{
@@ -148,6 +148,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGasTariffBuilder>()?;
     m.add_class::<PyBillingPeriodSummary>()?;
     m.add_class::<PyTariffTelemetry>()?;
+    m.add_class::<PyHealthPolicy>()?;
 
     m.add(
         "HaresConfigError",
@@ -160,6 +161,10 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "HaresSimulationError",
         m.py().get_type::<py_dwelling::HaresSimulationError>(),
+    )?;
+    m.add(
+        "HaresHealthPolicyError",
+        m.py().get_type::<py_dwelling::HaresHealthPolicyError>(),
     )?;
     m.add(
         "FatalDwellingError",

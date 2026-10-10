@@ -80,10 +80,10 @@ use hares_types::ElectricPower;
 use hares_types::rng::RngStream;
 use hares_types::{
     ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary,
-    EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, ScheduleSource, ThermalAccumulator,
-    ThermalCategory, ThermostatAxis, Warning, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
-    validate_core_contract,
+    EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, HealthEvent,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource,
+    ThermalAccumulator, ThermalCategory, ThermostatAxis, Warning, ZoneId, ZoneMap, ZoneRole,
+    telemetry_keys as tk, validate_core_contract,
 };
 use hares_types::{ControlCapabilities, CoreOutput, validate_port_core_electrical_consistency};
 use rand::SeedableRng;
@@ -96,7 +96,7 @@ use crate::actors::{
 use crate::environment::EnvironmentInitOptions;
 #[cfg(feature = "profiling")]
 use crate::health::{ActorTiming, ActorTimings};
-use crate::health::{RunHealth, WarmupOutcome, WarmupResiduals};
+use crate::health::{RejectionGate, RunHealth, WarmupOutcome, WarmupResiduals};
 use crate::invariants::InvariantChecker;
 use crate::invariants::check_basement_lighting_foundation;
 use crate::rng::{advance_dwelling_rng, derive_sub_rng, ev_driver_stream};
@@ -1604,7 +1604,7 @@ impl ControlDispatcher {
         &mut self,
         equipment: &mut [Box<dyn Equipment>],
         warnings: &mut WarningLog,
-        rejected_control_signals: &mut u64,
+        rejected_control_signals: &mut RejectionGate,
     ) {
         self.drain_tiers(
             equipment,
@@ -1619,7 +1619,7 @@ impl ControlDispatcher {
         &mut self,
         equipment: &mut [Box<dyn Equipment>],
         warnings: &mut WarningLog,
-        rejected_control_signals: &mut u64,
+        rejected_control_signals: &mut RejectionGate,
     ) -> DispatchCapture {
         let mut same_tier_conflicts = Vec::new();
         for (tier_idx, tier_que) in self.by_tier.iter().enumerate() {
@@ -1679,7 +1679,7 @@ impl ControlDispatcher {
         &mut self,
         equipment: &mut [Box<dyn Equipment>],
         warnings: &mut WarningLog,
-        rejected_control_signals: &mut u64,
+        rejected_control_signals: &mut RejectionGate,
         mut on_signal: impl FnMut(&DispatchRequest, bool, bool, bool),
     ) {
         // NOTE: `seen_targets` is deliberately NOT cleared here. The per-step
@@ -1774,7 +1774,7 @@ impl ControlDispatcher {
                             self.seen_targets.push((by_name, tier_idx));
 
                             if let Err(err) = eq.apply_control(&request.signal) {
-                                *rejected_control_signals += 1;
+                                rejected_control_signals.record(&eq_name);
                                 warnings.push(format!(
                                     "control apply failed for '{}' : {err}",
                                     eq_name
@@ -1785,7 +1785,7 @@ impl ControlDispatcher {
                         }
 
                         if !any_matched && !any_skipped {
-                            *rejected_control_signals += 1;
+                            rejected_control_signals.record(&format!("{end_use:?}"));
                             warnings.push(format!(
                                 "control target not found by end-use: {:?}",
                                 end_use
@@ -1817,7 +1817,7 @@ fn route_request(
     request: &DispatchRequest,
     equipment: &mut [Box<dyn Equipment>],
     warnings: &mut WarningLog,
-    rejected_control_signals: &mut u64,
+    rejected_control_signals: &mut RejectionGate,
 ) -> bool {
     match &request.target {
         DispatchTarget::ByName(name) => {
@@ -1829,7 +1829,7 @@ fn route_request(
                 |eq| eq.descriptor().name.as_str() == &**name,
             );
             if !delivered {
-                *rejected_control_signals += 1;
+                rejected_control_signals.record(name);
                 let instance_count = equipment
                     .iter()
                     .filter(|eq| {
@@ -1856,7 +1856,7 @@ fn route_request(
                 |eq| addressed_by_end_use(eq, end_use, EndUseReach::of(&request.signal)),
             );
             if !delivered {
-                *rejected_control_signals += 1;
+                rejected_control_signals.record(&format!("{end_use:?}"));
                 warnings.push(format!(
                     "control target not found by end-use: {:?}",
                     end_use
@@ -1871,7 +1871,7 @@ fn apply_to_matching(
     equipment: &mut [Box<dyn Equipment>],
     signal: &hares_types::ControlSignal,
     warnings: &mut WarningLog,
-    rejected_control_signals: &mut u64,
+    rejected_control_signals: &mut RejectionGate,
     matches: impl Fn(&dyn Equipment) -> bool,
 ) -> bool {
     let mut delivered = false;
@@ -1879,7 +1879,7 @@ fn apply_to_matching(
         if matches(&**eq) {
             delivered = true;
             if let Err(err) = eq.apply_control(signal) {
-                *rejected_control_signals += 1;
+                rejected_control_signals.record(&eq.descriptor().name);
                 warnings.push(format!(
                     "control apply failed for '{}' : {err}",
                     eq.descriptor().name
@@ -2706,6 +2706,7 @@ impl Dwelling {
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_io::HealthPolicy::default(),
         };
 
         let config = DwellingConfig {
@@ -4465,12 +4466,99 @@ impl Dwelling {
     ///
     /// # Errors
     ///
-    /// Always returns `Ok(())` today: the `Result` is the contract a future
-    /// policy escalation will fill (a clamp threshold that escalates to a
-    /// run failure).
+    /// A count whose run total crosses the run's health policy limit for
+    /// clamped actions returns the `HealthPolicyViolation` that ends the
+    /// run (the counter still lands first).
     pub fn record_clamped_actions(&mut self, count: u64) -> Result<()> {
-        self.health.clamped_actions += count;
-        Ok(())
+        self.health.clamped_actions = self.health.clamped_actions.saturating_add(count);
+        let total = self.health.clamped_actions;
+        self.escalate_on_limit(
+            HealthEvent::ClampedAction,
+            total,
+            Self::CLAMPED_ACTIONS_SOURCE,
+        )
+    }
+
+    /// The source a clamped-action violation names when the count arrived
+    /// through `record_clamped_actions`: the caller clips whole action
+    /// vectors, so no single equipment or actor owns the clamp.
+    const CLAMPED_ACTIONS_SOURCE: &'static str = "actions";
+
+    /// The run's health policy limit for `event`, when the run-total
+    /// `count` crosses it. The step index of a violation is None during
+    /// warm-up (warm-up replays are not steps of the run).
+    fn escalate_on_limit(&mut self, event: HealthEvent, count: u64, source: &str) -> Result<()> {
+        let Some(limit) = self.sim_config.health_policy.limit_for(event) else {
+            return Ok(());
+        };
+        if count <= limit {
+            return Ok(());
+        }
+        let step_index = (!self.is_warming_up).then_some(self.clock.current_step);
+        Err(
+            self.latch_health_violation(HaresError::HealthPolicyViolation {
+                event,
+                step_index,
+                origin: source.to_string(),
+                count,
+                limit,
+            }),
+        )
+    }
+
+    /// Latches the run ended at `violation` and returns it: the same run
+    /// end the failure budget and a callback error use, so every later
+    /// step returns the same error without stepping anything.
+    fn latch_health_violation(&mut self, violation: HaresError) -> HaresError {
+        self.terminal_error = Some(violation.clone());
+        violation
+    }
+
+    /// A gate over this step's rejected-control-signal counting, with the
+    /// policy's limit for it (the run total is the gate's baseline; the
+    /// pass lands its own count through `end_dispatch_pass`).
+    fn rejection_gate(&self) -> RejectionGate {
+        RejectionGate::new(
+            self.health.rejected_control_signals,
+            self.sim_config.health_policy.max_rejected_control_signals,
+        )
+    }
+
+    /// Ends one dispatch pass: the pass's count lands on the run total,
+    /// and a crossing the pass recorded becomes the latched violation that
+    /// ends the run naming the rejection's source.
+    fn end_dispatch_pass(&mut self, gate: RejectionGate) -> Result<()> {
+        let (counted, crossing) = gate.into_parts();
+        self.health.rejected_control_signals += counted;
+        match crossing {
+            Some(crossing) => self.escalate_on_limit(
+                HealthEvent::RejectedControlSignal,
+                crossing.count,
+                &crossing.source,
+            ),
+            None => Ok(()),
+        }
+    }
+
+    /// One plain dispatch pass under the run's health policy.
+    fn dispatch_pass(&mut self) -> Result<()> {
+        let mut gate = self.rejection_gate();
+        self.control_dispatcher
+            .dispatch_into(&mut self.equipment, &mut self.warnings, &mut gate);
+        self.end_dispatch_pass(gate)
+    }
+
+    /// One observed dispatch pass under the run's health policy.
+    #[cfg(feature = "observe")]
+    fn dispatch_pass_observed(&mut self) -> Result<DispatchCapture> {
+        let mut gate = self.rejection_gate();
+        let capture = self.control_dispatcher.dispatch_into_observed(
+            &mut self.equipment,
+            &mut self.warnings,
+            &mut gate,
+        );
+        self.end_dispatch_pass(gate)?;
+        Ok(capture)
     }
 
     #[cfg(feature = "profiling")]
@@ -4988,6 +5076,20 @@ impl Dwelling {
              proceeding with current thermal state",
             max_iter
         );
+        // The policy's warm-up requirement is checked when warm-up ends:
+        // a non-converged warm-up fails the run (counted first, as above),
+        // with the step index None (warm-up is not a step of the run).
+        if self.sim_config.health_policy.require_warmup_convergence {
+            return Err(
+                self.latch_health_violation(HaresError::HealthPolicyViolation {
+                    event: HealthEvent::WarmupNotConverged,
+                    step_index: None,
+                    origin: "warmup".to_string(),
+                    count: 1,
+                    limit: 0,
+                }),
+            );
+        }
         Ok(max_iter)
     }
 
@@ -5124,6 +5226,15 @@ impl Dwelling {
     fn record_equipment_step_failure(&mut self, idx: usize, err: HaresError) -> Result<()> {
         self.rollback_failed_equipment_ports(idx, &err);
         self.step_failed[idx] = true;
+        // The policy is evaluated where the rollback counter changed, so a
+        // limit set on it ends the run naming the equipment, ahead of the
+        // failure budget's own check.
+        let source = self.equipment[idx].descriptor().name.clone();
+        self.escalate_on_limit(
+            HealthEvent::PortRollback,
+            self.health.port_rollbacks,
+            &source,
+        )?;
         let streak = &mut self.consecutive_step_failures[idx];
         *streak = streak.saturating_add(1);
         let budget = self.sim_config.max_consecutive_step_failures;
@@ -5366,25 +5477,13 @@ impl Dwelling {
         // overrides take effect on the same step.
         #[cfg(feature = "observe")]
         let pre_dispatch_capture = if self.observer_buf.is_some() {
-            Some(self.control_dispatcher.dispatch_into_observed(
-                &mut self.equipment,
-                &mut self.warnings,
-                &mut self.health.rejected_control_signals,
-            ))
+            Some(self.dispatch_pass_observed()?)
         } else {
-            self.control_dispatcher.dispatch_into(
-                &mut self.equipment,
-                &mut self.warnings,
-                &mut self.health.rejected_control_signals,
-            );
+            self.dispatch_pass()?;
             None
         };
         #[cfg(not(feature = "observe"))]
-        self.control_dispatcher.dispatch_into(
-            &mut self.equipment,
-            &mut self.warnings,
-            &mut self.health.rejected_control_signals,
-        );
+        self.dispatch_pass()?;
         // End of the `environment` phase: entry through Step 1a' (environment
         // update, queued control dispatch).
         #[cfg(feature = "profiling")]
@@ -5604,11 +5703,7 @@ impl Dwelling {
         // external signal already applied.
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
-            let capture = self.control_dispatcher.dispatch_into_observed(
-                &mut self.equipment,
-                &mut self.warnings,
-                &mut self.health.rejected_control_signals,
-            );
+            let capture = self.dispatch_pass_observed()?;
             let merged = match pre_dispatch_capture {
                 Some(mut pre) => {
                     pre.signals.extend(capture.signals);
@@ -5618,18 +5713,10 @@ impl Dwelling {
             };
             obs_phases.post_dispatch = Some(merged);
         } else {
-            self.control_dispatcher.dispatch_into(
-                &mut self.equipment,
-                &mut self.warnings,
-                &mut self.health.rejected_control_signals,
-            );
+            self.dispatch_pass()?;
         }
         #[cfg(not(feature = "observe"))]
-        self.control_dispatcher.dispatch_into(
-            &mut self.equipment,
-            &mut self.warnings,
-            &mut self.health.rejected_control_signals,
-        );
+        self.dispatch_pass()?;
 
         // Step 2b: collect and dispatch derived control signals from equipment
         // that translate one signal into others (e.g. ProtocolBridge converting
@@ -5677,27 +5764,15 @@ impl Dwelling {
             }
             #[cfg(feature = "observe")]
             if self.observer_buf.is_some() {
-                let capture = self.control_dispatcher.dispatch_into_observed(
-                    &mut self.equipment,
-                    &mut self.warnings,
-                    &mut self.health.rejected_control_signals,
-                );
+                let capture = self.dispatch_pass_observed()?;
                 if let Some(ref mut merged) = obs_phases.post_dispatch {
                     merged.signals.extend(capture.signals);
                 }
             } else {
-                self.control_dispatcher.dispatch_into(
-                    &mut self.equipment,
-                    &mut self.warnings,
-                    &mut self.health.rejected_control_signals,
-                );
+                self.dispatch_pass()?;
             }
             #[cfg(not(feature = "observe"))]
-            self.control_dispatcher.dispatch_into(
-                &mut self.equipment,
-                &mut self.warnings,
-                &mut self.health.rejected_control_signals,
-            );
+            self.dispatch_pass()?;
         }
 
         // End of the `dispatch` phase (Steps 2 and 2b); Step 2a re-runs
@@ -5824,11 +5899,7 @@ impl Dwelling {
                     for req in self.actor_dispatch_buf.drain(..) {
                         self.control_dispatcher.queue(req);
                     }
-                    self.control_dispatcher.dispatch_into(
-                        &mut self.equipment,
-                        &mut self.warnings,
-                        &mut self.health.rejected_control_signals,
-                    );
+                    self.dispatch_pass()?;
                 }
             }
         }
@@ -6032,12 +6103,18 @@ impl Dwelling {
         // counters: take-and-discard would lose nothing (their counts
         // surface on the equipment's next successful step, take semantics
         // reset per take), and their step already failed the port contract.
-        let mut step_curve_index_clamps: u64 = 0;
         let mut step_fluid_payload_absences: u64 = 0;
+        // The equipment whose curve-index clamps drained this step, with
+        // each one's count: the policy is evaluated per source, so a limit
+        // set on the counter fails the run naming the equipment.
+        let mut curve_clamp_sources: Vec<(String, u64)> = Vec::new();
         for (idx, eq) in self.equipment.iter_mut().enumerate() {
             if !self.step_failed[idx] {
                 let counts = eq.take_health_counts();
-                step_curve_index_clamps += counts.curve_index_clamps;
+                if counts.curve_index_clamps > 0 {
+                    curve_clamp_sources
+                        .push((eq.descriptor().name.clone(), counts.curve_index_clamps));
+                }
                 step_fluid_payload_absences += counts.fluid_payload_absences;
             }
             // Warnings raised this step drain beside the health counts,
@@ -6054,7 +6131,14 @@ impl Dwelling {
                 self.warnings.push_warning(warning);
             }
         }
-        self.health.curve_index_clamps += step_curve_index_clamps;
+        for (source, added) in curve_clamp_sources {
+            self.health.curve_index_clamps += added;
+            self.escalate_on_limit(
+                HealthEvent::CurveIndexClamp,
+                self.health.curve_index_clamps,
+                &source,
+            )?;
+        }
         self.health.fluid_payload_absences += step_fluid_payload_absences;
 
         // Step 3c: propagate per-timestep ventilation recovery effectiveness
@@ -7770,7 +7854,7 @@ mod tests {
     use hares_types::ports::{PortContribution, PortSlots};
     use hares_types::{
         ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, DRLevel, EndUse,
-        EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, LoopId,
+        EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HealthEvent, LoopId,
         OperatingMode, PortDeclaration, SCHEDULE_DOMAIN_ID, Telemetry, TelemetryField, ZoneId,
         ZoneState,
     };
@@ -10120,7 +10204,7 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let equipment: &mut [Box<dyn Equipment>] = &mut [];
-        dispatcher.dispatch_into(equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(equipment, &mut warnings, &mut RejectionGate::new(0, None));
 
         assert!(dispatcher.by_tier.iter().all(|q| q.is_empty()));
     }
@@ -10154,7 +10238,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
@@ -10209,7 +10297,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(0.0));
@@ -10233,7 +10325,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("control target not found by name"));
@@ -10258,7 +10354,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("control target not found by end-use"));
@@ -10283,7 +10383,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("control apply failed"));
@@ -10309,7 +10413,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         // Should find the equipment and apply the signal
         assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
@@ -10336,7 +10444,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         // Should not find the equipment (different custom end use)
         assert_eq!(warnings.len(), 1);
@@ -10363,7 +10475,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("control target not found by end-use"));
@@ -10577,7 +10693,11 @@ occupancy = 1.0
             dispatcher.queue(req);
         }
         let mut warnings = WarningLog::new();
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
         assert!(
@@ -10803,7 +10923,7 @@ occupancy = 1.0
         dispatcher.drain_tiers(
             &mut equipment,
             &mut warnings,
-            &mut 0,
+            &mut RejectionGate::new(0, None),
             |_, delivered, _, _| {
                 if delivered {
                     delivered_count += 1;
@@ -10851,7 +10971,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         // Last queued signal in the same tier wins (FIFO within tier, last write wins)
@@ -10889,7 +11013,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         // Now the 1.0 kW signal wins — it was queued last.
@@ -10916,7 +11044,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         // Last queued (4.0 kW) wins.
@@ -10952,7 +11084,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings, &mut 0);
+        let capture = dispatcher.dispatch_into_observed(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         assert_eq!(capture.same_tier_conflicts.len(), 1);
@@ -10997,7 +11133,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
-        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings, &mut 0);
+        let capture = dispatcher.dispatch_into_observed(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         assert!(
@@ -11038,7 +11178,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings, &mut 0);
+        let capture = dispatcher.dispatch_into_observed(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         // Cross-tier overwrite is normal priority-based dispatch, not a same-tier conflict.
@@ -11083,7 +11227,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         // Last-queued signal (0.30) wins.
@@ -11123,7 +11271,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -11162,7 +11314,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery)];
-        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings, &mut 0);
+        let capture = dispatcher.dispatch_into_observed(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         assert_eq!(capture.same_tier_conflicts.len(), 1);
@@ -11207,7 +11363,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings, &mut 0);
+        let capture = dispatcher.dispatch_into_observed(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -11256,7 +11416,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery), Box::new(heater)];
-        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings, &mut 0);
+        let capture = dispatcher.dispatch_into_observed(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         assert!(
@@ -11293,7 +11457,11 @@ occupancy = 1.0
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> =
             vec![Box::new(eq1), Box::new(eq2), Box::new(eq3)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         // Both HVAC_HEATING equipment should receive the signal
@@ -11328,7 +11496,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(ev), Box::new(battery)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         assert!(warnings.is_empty());
         // EV should have received the DR signal (Critical = 3)
@@ -11371,7 +11543,12 @@ occupancy = 1.0
             },
             priority: PriorityTier::Safety,
         });
-        dispatcher.drain_tiers(&mut equipment, &mut warnings, &mut 0, |_, _, _, _| {});
+        dispatcher.drain_tiers(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+            |_, _, _, _| {},
+        );
         // Pass 1: Safety setpoint applied.
         assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
         assert!(warnings.is_empty());
@@ -11389,11 +11566,16 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
         let mut skipped = false;
-        dispatcher.drain_tiers(&mut equipment, &mut warnings, &mut 0, |_, _, _, s| {
-            if s {
-                skipped = true;
-            }
-        });
+        dispatcher.drain_tiers(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+            |_, _, _, s| {
+                if s {
+                    skipped = true;
+                }
+            },
+        );
         assert!(
             skipped,
             "Schedule signal should be skipped — higher-priority Safety signal already applied"
@@ -11441,11 +11623,16 @@ occupancy = 1.0
         });
 
         let mut delivered_count = 0;
-        dispatcher.drain_tiers(&mut equipment, &mut warnings, &mut 0, |_, d, _, _| {
-            if d {
-                delivered_count += 1;
-            }
-        });
+        dispatcher.drain_tiers(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+            |_, d, _, _| {
+                if d {
+                    delivered_count += 1;
+                }
+            },
+        );
         assert!(warnings.is_empty());
         // Both signals should be "delivered" (the ByEndUse one applies, then
         // the ByName one overwrites). Last-write-wins: 8.0 is the final value.
@@ -11486,7 +11673,12 @@ occupancy = 1.0
             },
             priority: PriorityTier::Safety,
         });
-        dispatcher.drain_tiers(&mut equipment, &mut warnings, &mut 0, |_, _, _, _| {});
+        dispatcher.drain_tiers(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+            |_, _, _, _| {},
+        );
 
         // Both batteries got the signal.
         assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
@@ -11507,11 +11699,16 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
         let mut skipped = false;
-        dispatcher.drain_tiers(&mut equipment, &mut warnings, &mut 0, |_, _, _, s| {
-            if s {
-                skipped = true;
-            }
-        });
+        dispatcher.drain_tiers(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+            |_, _, _, s| {
+                if s {
+                    skipped = true;
+                }
+            },
+        );
         assert!(
             skipped,
             "Schedule signal for Battery #1 must be skipped — Safety already applied"
@@ -11534,11 +11731,16 @@ occupancy = 1.0
             priority: PriorityTier::Schedule,
         });
         let mut skipped = false;
-        dispatcher.drain_tiers(&mut equipment, &mut warnings, &mut 0, |_, _, _, s| {
-            if s {
-                skipped = true;
-            }
-        });
+        dispatcher.drain_tiers(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+            |_, _, _, s| {
+                if s {
+                    skipped = true;
+                }
+            },
+        );
         assert!(
             skipped,
             "Schedule signal for Battery #2 must also be skipped"
@@ -11573,7 +11775,11 @@ occupancy = 1.0
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
 
         // First dispatch
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
         assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
 
         // Second dispatch with nothing queued -- queues should be empty
@@ -11582,7 +11788,7 @@ occupancy = 1.0
         dispatcher.drain_tiers(
             &mut equipment,
             &mut warnings,
-            &mut 0,
+            &mut RejectionGate::new(0, None),
             |_, delivered, _, _| {
                 if delivered {
                     delivered_count += 1;
@@ -11686,7 +11892,11 @@ occupancy = 1.0
             dispatcher.queue(req);
         }
         let mut warnings = WarningLog::new();
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         // Grid priority (0W) should overwrite Schedule priority (5000W)
         assert!(warnings.is_empty());
@@ -11728,7 +11938,11 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
-        dispatcher.dispatch_into(&mut equipment, &mut warnings, &mut 0);
+        dispatcher.dispatch_into(
+            &mut equipment,
+            &mut warnings,
+            &mut RejectionGate::new(0, None),
+        );
 
         // eq1 should generate a warning but eq2 should still receive the signal
         assert_eq!(warnings.len(), 1, "one warning for rejected signal");
@@ -18170,6 +18384,328 @@ latent_gain_fraction = 0.08
             ),
             "got: {err:?}"
         );
+    }
+
+    /// The empty policy (the default) keeps every health event counted and
+    /// nothing escalated: the tolerated-rollback run completes as before.
+    #[test]
+    fn empty_policy_never_escalates() {
+        let mut dwelling = bestest_dwelling();
+        assert_eq!(
+            dwelling.sim_config.health_policy,
+            hares_io::HealthPolicy::default(),
+            "a dwelling built without a policy carries the empty one"
+        );
+        let failing = FlakyPortEquipment::new("FlakyEq", 500.0, &[true]);
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(failing)]);
+
+        dwelling
+            .run_timestep(false)
+            .expect("the equipment succeeds");
+        dwelling
+            .run_timestep(false)
+            .expect("the rollback stays tolerated under the empty policy");
+        dwelling.run_timestep(false).expect_err(
+            "the second consecutive failure ends the run under the budget, not a policy",
+        );
+
+        assert_eq!(dwelling.health.port_rollbacks, 2);
+        assert!(
+            dwelling
+                .terminal_error
+                .as_ref()
+                .is_some_and(|ended| ended.to_string().contains("consecutive")),
+            "the terminal error is the failure budget's, not a policy violation: {:?}",
+            dwelling.terminal_error
+        );
+    }
+
+    /// The strict policy escalates the first counted port rollback: the
+    /// step fails with the violation naming the event, the step, the
+    /// equipment as source, the count and the limit.
+    #[test]
+    fn strict_policy_escalates_port_rollback_naming_step_and_source() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.sim_config.health_policy = hares_io::HealthPolicy::strict();
+        let failing = FlakyPortEquipment::new("FlakyEq", 500.0, &[true]);
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(failing)]);
+
+        dwelling
+            .run_timestep(false)
+            .expect("the first step succeeds");
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("the strict policy escalates the rollback");
+
+        assert!(
+            matches!(
+                &err,
+                HaresError::HealthPolicyViolation {
+                    event: HealthEvent::PortRollback,
+                    step_index: Some(_),
+                    origin,
+                    count: 1,
+                    limit: 0,
+                } if origin == "FlakyEq"
+            ),
+            "got: {err:?}"
+        );
+        // The run stays ended, the way the failure budget ends one.
+        let again = dwelling.run_timestep(false).expect_err("the run is ended");
+        assert!(
+            again.to_string().contains("ended"),
+            "the terminal error persists: {again}"
+        );
+    }
+
+    /// A limit allows counts up to itself and fails the first count past
+    /// it: two rollbacks pass under a limit of two, a third ends the run.
+    #[test]
+    fn limit_allows_count_up_to_limit() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.sim_config.health_policy = hares_io::HealthPolicy {
+            max_port_rollbacks: Some(2),
+            ..hares_io::HealthPolicy::default()
+        };
+        // The failure budget is raised out of the way: the policy is the subject.
+        dwelling.sim_config.max_consecutive_step_failures = 10;
+        // Succeed, roll back, succeed, roll back, roll back again.
+        let failing = FlakyPortEquipment::new("FlakyEq", 500.0, &[true, false, true, false, false]);
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(failing)]);
+
+        dwelling
+            .run_timestep(false)
+            .expect("the first step succeeds");
+        dwelling
+            .run_timestep(false)
+            .expect("the first rollback is within the limit");
+        dwelling
+            .run_timestep(false)
+            .expect("the recovery step succeeds");
+        dwelling
+            .run_timestep(false)
+            .expect("the second rollback reaches the limit exactly");
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("the third rollback crosses the limit");
+
+        assert!(
+            matches!(
+                &err,
+                HaresError::HealthPolicyViolation {
+                    event: HealthEvent::PortRollback,
+                    step_index: Some(4),
+                    count: 3,
+                    limit: 2,
+                    ..
+                }
+            ),
+            "got: {err:?}"
+        );
+        assert_eq!(dwelling.health.port_rollbacks, 3);
+    }
+
+    /// The strict policy escalates a non-converging warm-up: the run fails
+    /// with the violation whose step index is None (warm-up is not a step
+    /// of the run).
+    #[test]
+    fn strict_policy_escalates_warmup_nonconvergence() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.sim_config.health_policy = hares_io::HealthPolicy::strict();
+
+        // A 1e-9 °C threshold cannot be met across consecutive warm-up days
+        // of a transient start; the fixture is non-converging under it.
+        let err = dwelling
+            .run_warmup_converged(1e-9, 2)
+            .expect_err("the strict policy escalates the non-convergence");
+
+        assert!(
+            matches!(
+                &err,
+                HaresError::HealthPolicyViolation {
+                    event: HealthEvent::WarmupNotConverged,
+                    step_index: None,
+                    ..
+                }
+            ),
+            "got: {err:?}"
+        );
+        // The outcome is still recorded on the run health: counted, then escalated.
+        match &dwelling.health().warmup {
+            WarmupOutcome::Ran { converged, .. } => assert!(!converged),
+            other => panic!("expected WarmupOutcome::Ran, got {other:?}"),
+        }
+        // The run stays ended.
+        let again = dwelling.run_timestep(false).expect_err("the run is ended");
+        assert!(
+            again.to_string().contains("ended"),
+            "the terminal error persists: {again}"
+        );
+    }
+
+    /// The strict policy escalates a rejected control signal: the step
+    /// fails naming the equipment the signal was refused by.
+    #[test]
+    fn strict_policy_escalates_rejected_control_signals_naming_the_target() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.sim_config.health_policy = hares_io::HealthPolicy::strict();
+        let mut eq = TestEquipment::new(
+            "LoadA",
+            ControlCapabilities::POWER_SETPOINT | ControlCapabilities::SOC_TARGET,
+        );
+        eq.init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init LoadA");
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
+
+        // Out of bounds: target_soc must be within [0, 1].
+        dwelling.apply_control(
+            "LoadA",
+            ControlSignal::SOCTarget {
+                target_soc: 1.5,
+                min_soc: None,
+                max_soc: None,
+            },
+        );
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("the strict policy escalates the rejected signal");
+
+        assert!(
+            matches!(
+                &err,
+                HaresError::HealthPolicyViolation {
+                    event: HealthEvent::RejectedControlSignal,
+                    step_index: Some(0),
+                    origin,
+                    count: 1,
+                    limit: 0,
+                } if origin == "LoadA"
+            ),
+            "got: {err:?}"
+        );
+        // The counted rejection still landed on the run health.
+        assert_eq!(dwelling.health.rejected_control_signals, 1);
+    }
+
+    /// The strict policy escalates clamped actions through
+    /// `record_clamped_actions`: the Result the method's contract reserves
+    /// fills with the violation, and the run ends.
+    #[test]
+    fn strict_policy_escalates_clamped_actions() {
+        let mut dwelling = bestest_dwelling();
+
+        dwelling
+            .record_clamped_actions(0)
+            .expect("a zero count crosses no limit");
+        dwelling
+            .record_clamped_actions(2)
+            .expect("counted clamps stay counted under the empty policy");
+        dwelling.sim_config.health_policy = hares_io::HealthPolicy::strict();
+        let err = dwelling
+            .record_clamped_actions(1)
+            .expect_err("the strict policy escalates the clamp");
+
+        assert!(
+            matches!(
+                &err,
+                HaresError::HealthPolicyViolation {
+                    event: HealthEvent::ClampedAction,
+                    step_index: Some(_),
+                    count: 3,
+                    limit: 0,
+                    ..
+                }
+            ),
+            "got: {err:?}"
+        );
+        // The counted clamps still landed on the run health.
+        assert_eq!(dwelling.health.clamped_actions, 3);
+    }
+
+    /// The strict policy escalates a drained curve-index clamp: the step
+    /// fails naming the equipment whose curve lookup was clamped.
+    #[test]
+    fn strict_policy_escalates_curve_index_clamps_naming_the_equipment() {
+        use hares_equipment::hvac::air_conditioner::AirConditioner;
+        use hares_equipment::{CentralAirConditionerConfig, DuctConfig, HvacSetpointConfig};
+
+        let mut dwelling = bestest_dwelling();
+        dwelling.sim_config.health_policy = hares_io::HealthPolicy::strict();
+        let config = EquipmentConfig::from_typed(
+            "AC1".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 8_000.0,
+                eir: 0.33,
+                shr: Some(0.75),
+                number_of_speeds: 4,
+                stage_capacities_w: Some(vec![2_000.0, 4_000.0, 6_000.0, 8_000.0]),
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(0.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
+                hysteresis_c: Some(1.0),
+                airflow_m3_s_per_w: Some(hares_equipment::hvac::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+                fraction_load_served: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
+            },
+        )
+        .expect("typed AC config");
+        let mut ac = AirConditioner::new(config.clone());
+        ac.init(&config, &dwelling.latest_env)
+            .expect("init AC with one shared curve pair across three stages");
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(ac)]);
+
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("the strict policy escalates the drained clamp");
+
+        assert!(
+            matches!(
+                &err,
+                HaresError::HealthPolicyViolation {
+                    event: HealthEvent::CurveIndexClamp,
+                    origin,
+                    count,
+                    limit: 0,
+                    ..
+                } if origin == "AC1" && *count >= 1
+            ),
+            "got: {err:?}"
+        );
+        // The counted clamps still landed on the run health.
+        assert_eq!(dwelling.health.curve_index_clamps, err_count(&err));
+    }
+
+    /// The violation's count is the run total the crossing happened at.
+    fn err_count(err: &HaresError) -> u64 {
+        match err {
+            HaresError::HealthPolicyViolation { count, .. } => *count,
+            other => panic!("expected a policy violation, got {other:?}"),
+        }
     }
 
     /// A latched non-finite telemetry write fails the step with

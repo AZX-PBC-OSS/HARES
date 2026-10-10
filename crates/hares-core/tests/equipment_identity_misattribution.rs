@@ -66,6 +66,7 @@ fn sim_config(
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
     }
 }
 

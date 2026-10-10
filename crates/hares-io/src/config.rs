@@ -283,6 +283,11 @@ pub struct SimulationConfig {
     /// one equipment returns an error naming it. `0` tolerates no failure.
     #[serde(default = "default_max_consecutive_step_failures")]
     pub max_consecutive_step_failures: u32,
+    /// The run's health policy: which counted health events escalate to a
+    /// run failure. The empty policy (the default) changes no run: every
+    /// event stays counted and nothing escalates.
+    #[serde(default)]
+    pub health_policy: HealthPolicy,
 }
 
 /// Default for [`SimulationConfig::max_consecutive_step_failures`]: one
@@ -290,6 +295,67 @@ pub struct SimulationConfig {
 /// not end a long run, while the second consecutive failure of the same
 /// equipment, which the rollback cannot clear, ends it.
 pub const DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES: u32 = 1;
+
+/// The run's health policy: which counted health events escalate to a run
+/// failure, and which stay counted. The empty policy (the default) keeps
+/// every event counted and nothing escalated, so a run built without one
+/// behaves exactly as a run without a policy field would; a limit set
+/// here fails the run at the first count that crosses it.
+///
+/// A partial table is legal (`#[serde(default, deny_unknown_fields)]`):
+/// every field left unset keeps its side effect off.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HealthPolicy {
+    /// The port-rollback run total the run fails at crossing: `None`
+    /// keeps rollbacks counted only.
+    #[serde(default)]
+    pub max_port_rollbacks: Option<u64>,
+    /// The rejected-control-signal run total the run fails at crossing:
+    /// `None` keeps rejections counted only.
+    #[serde(default)]
+    pub max_rejected_control_signals: Option<u64>,
+    /// The clamped-action run total the run fails at crossing: `None`
+    /// keeps clamps counted only.
+    #[serde(default)]
+    pub max_clamped_actions: Option<u64>,
+    /// The curve-index-clamp run total the run fails at crossing: `None`
+    /// keeps clamps counted only.
+    #[serde(default)]
+    pub max_curve_index_clamps: Option<u64>,
+    /// Whether a warm-up that ends without converging fails the run.
+    #[serde(default)]
+    pub require_warmup_convergence: bool,
+}
+
+impl HealthPolicy {
+    /// The policy that rejects an evaluation on its first counted event:
+    /// every limit `Some(0)` and warm-up convergence required.
+    #[must_use]
+    pub fn strict() -> Self {
+        Self {
+            max_port_rollbacks: Some(0),
+            max_rejected_control_signals: Some(0),
+            max_clamped_actions: Some(0),
+            max_curve_index_clamps: Some(0),
+            require_warmup_convergence: true,
+        }
+    }
+
+    /// The counter limit the policy sets for `event`, if any. The warm-up
+    /// non-convergence is not a counter: its requirement is
+    /// [`Self::require_warmup_convergence`], so this returns `None` for it.
+    #[must_use]
+    pub fn limit_for(&self, event: hares_types::HealthEvent) -> Option<u64> {
+        match event {
+            hares_types::HealthEvent::PortRollback => self.max_port_rollbacks,
+            hares_types::HealthEvent::RejectedControlSignal => self.max_rejected_control_signals,
+            hares_types::HealthEvent::ClampedAction => self.max_clamped_actions,
+            hares_types::HealthEvent::CurveIndexClamp => self.max_curve_index_clamps,
+            hares_types::HealthEvent::WarmupNotConverged => None,
+        }
+    }
+}
 
 fn default_max_consecutive_step_failures() -> u32 {
     DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES
@@ -812,6 +878,111 @@ output_verboisty = 3
     }
 
     #[test]
+    fn health_policy_defaults_to_empty() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00+00:00"
+duration = 3600
+"#;
+        let cfg = SimulationConfig::from_toml(toml).expect("parse minimal config");
+        assert_eq!(
+            cfg.health_policy,
+            HealthPolicy::default(),
+            "a config without a health policy carries the empty one"
+        );
+        let serialized = cfg.to_toml().expect("serialize");
+        let round_tripped =
+            SimulationConfig::from_toml(&serialized).expect("re-parse serialized config");
+        assert_eq!(
+            round_tripped.health_policy,
+            HealthPolicy::default(),
+            "the empty policy round-trips as the empty one"
+        );
+    }
+
+    #[test]
+    fn health_policy_toml_round_trip() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00+00:00"
+duration = 3600
+
+[health_policy]
+max_port_rollbacks = 2
+max_clamped_actions = 4
+require_warmup_convergence = true
+"#;
+        let cfg = SimulationConfig::from_toml(toml).expect("parse config with a policy");
+        assert_eq!(cfg.health_policy.max_port_rollbacks, Some(2));
+        assert_eq!(cfg.health_policy.max_rejected_control_signals, None);
+        assert_eq!(cfg.health_policy.max_clamped_actions, Some(4));
+        assert_eq!(cfg.health_policy.max_curve_index_clamps, None);
+        assert!(cfg.health_policy.require_warmup_convergence);
+        let serialized = cfg.to_toml().expect("serialize config");
+        let round_tripped =
+            SimulationConfig::from_toml(&serialized).expect("re-parse serialized config");
+        assert_eq!(cfg, round_tripped, "the policy round-trips through TOML");
+    }
+
+    #[test]
+    fn health_policy_partial_table_is_legal() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00+00:00"
+duration = 3600
+
+[health_policy]
+max_port_rollbacks = 0
+"#;
+        let cfg = SimulationConfig::from_toml(toml)
+            .expect("a partial policy table parses, the other fields defaulting");
+        assert_eq!(cfg.health_policy.max_port_rollbacks, Some(0));
+        assert_eq!(cfg.health_policy.max_rejected_control_signals, None);
+        assert_eq!(cfg.health_policy.max_clamped_actions, None);
+        assert_eq!(cfg.health_policy.max_curve_index_clamps, None);
+        assert!(!cfg.health_policy.require_warmup_convergence);
+    }
+
+    #[test]
+    fn health_policy_unknown_key_is_an_error() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00+00:00"
+duration = 3600
+
+[health_policy]
+max_evictions = 0
+"#;
+        let err = SimulationConfig::from_toml(toml)
+            .expect_err("an unknown policy key is a typed error, not a silently ignored one");
+        assert!(
+            err.to_string().contains("max_evictions"),
+            "the error must name the key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn health_policy_strict_sets_every_limit_to_zero_and_requires_convergence() {
+        let policy = HealthPolicy::strict();
+        assert_eq!(policy.max_port_rollbacks, Some(0));
+        assert_eq!(policy.max_rejected_control_signals, Some(0));
+        assert_eq!(policy.max_clamped_actions, Some(0));
+        assert_eq!(policy.max_curve_index_clamps, Some(0));
+        assert!(policy.require_warmup_convergence);
+        // The strict policy's limits read off the events they gate.
+        assert_eq!(
+            policy.limit_for(hares_types::HealthEvent::PortRollback),
+            Some(0)
+        );
+        assert_eq!(
+            policy.limit_for(hares_types::HealthEvent::WarmupNotConverged),
+            None,
+            "the warm-up requirement is its own field, not a counter limit"
+        );
+        assert_eq!(
+            HealthPolicy::default().limit_for(hares_types::HealthEvent::ClampedAction),
+            None,
+            "the empty policy sets no limit: nothing escalates"
+        );
+    }
+
+    #[test]
     fn time_res_beyond_u32_seconds_is_an_error() {
         let cfg = SimulationConfig {
             start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
@@ -826,6 +997,7 @@ output_verboisty = 3
             civil_timezone: None,
             site_location: SiteLocationOverride::default(),
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: crate::HealthPolicy::default(),
         };
         let err = cfg
             .time_res_secs_u32()
@@ -884,6 +1056,7 @@ destination = { csv = { path = "/tmp/sim_output.csv" } }
             civil_timezone: None,
             site_location: SiteLocationOverride::default(),
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: crate::HealthPolicy::default(),
         };
         let built_err = built
             .validate()
@@ -925,6 +1098,7 @@ latitude_deg = 95.0
                 ..SiteLocationOverride::default()
             },
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: crate::HealthPolicy::default(),
         };
         let built_err = built
             .validate()

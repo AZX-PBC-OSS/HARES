@@ -8,6 +8,7 @@ from ._hares import Fleet
 from ._hares import SteppableFleet
 from ._hares import FleetResults
 from ._hares import SimulationConfig
+from ._hares import HealthPolicy
 from ._hares import SiteLocationOverride
 from ._hares import Destination
 from ._hares import Frequency
@@ -150,6 +151,7 @@ __all__ = [
     "SteppableFleet",
     "FleetResults",
     "SimulationConfig",
+    "HealthPolicy",
     "SiteLocationOverride",
     "DwellingConfig",
     "ReportSpec",

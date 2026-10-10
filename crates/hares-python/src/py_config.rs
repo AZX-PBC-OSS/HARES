@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use chrono::Duration;
 use hares_core::DwellingConfig;
-use hares_io::{ReportSpec, SimulationConfig, SiteLocationOverride};
+use hares_io::{HealthPolicy, ReportSpec, SimulationConfig, SiteLocationOverride};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyType};
@@ -168,6 +168,97 @@ fn opt_f64(value: Option<f64>) -> String {
     }
 }
 
+/// The run's health policy: which counted health events escalate to a run
+/// failure, and which stay counted. The empty policy (the default) keeps
+/// every event counted and nothing escalated; `strict` rejects an
+/// evaluation on its first counted event. The class is frozen: a policy is
+/// built once and passed to a config.
+#[pyclass(name = "HealthPolicy", frozen, from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyHealthPolicy(pub HealthPolicy);
+
+#[pymethods]
+impl PyHealthPolicy {
+    #[new]
+    #[pyo3(signature = (
+        *,
+        max_port_rollbacks = None,
+        max_rejected_control_signals = None,
+        max_clamped_actions = None,
+        max_curve_index_clamps = None,
+        require_warmup_convergence = false
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        max_port_rollbacks: Option<u64>,
+        max_rejected_control_signals: Option<u64>,
+        max_clamped_actions: Option<u64>,
+        max_curve_index_clamps: Option<u64>,
+        require_warmup_convergence: bool,
+    ) -> Self {
+        Self(HealthPolicy {
+            max_port_rollbacks,
+            max_rejected_control_signals,
+            max_clamped_actions,
+            max_curve_index_clamps,
+            require_warmup_convergence,
+        })
+    }
+
+    /// The policy that rejects an evaluation on its first counted event:
+    /// every limit 0 and warm-up convergence required.
+    #[classmethod]
+    pub fn strict(_cls: &Bound<'_, PyType>) -> Self {
+        Self(HealthPolicy::strict())
+    }
+
+    #[getter]
+    pub fn max_port_rollbacks(&self) -> Option<u64> {
+        self.0.max_port_rollbacks
+    }
+
+    #[getter]
+    pub fn max_rejected_control_signals(&self) -> Option<u64> {
+        self.0.max_rejected_control_signals
+    }
+
+    #[getter]
+    pub fn max_clamped_actions(&self) -> Option<u64> {
+        self.0.max_clamped_actions
+    }
+
+    #[getter]
+    pub fn max_curve_index_clamps(&self) -> Option<u64> {
+        self.0.max_curve_index_clamps
+    }
+
+    #[getter]
+    pub fn require_warmup_convergence(&self) -> bool {
+        self.0.require_warmup_convergence
+    }
+
+    pub fn __eq__(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
+    pub fn __repr__(&self) -> String {
+        let limit = |value: Option<u64>| match value {
+            Some(v) => format!("Some({v})"),
+            None => "None".to_string(),
+        };
+        format!(
+            "HealthPolicy(max_port_rollbacks={}, max_rejected_control_signals={}, \
+             max_clamped_actions={}, max_curve_index_clamps={}, \
+             require_warmup_convergence={})",
+            limit(self.0.max_port_rollbacks),
+            limit(self.0.max_rejected_control_signals),
+            limit(self.0.max_clamped_actions),
+            limit(self.0.max_curve_index_clamps),
+            self.0.require_warmup_convergence,
+        )
+    }
+}
+
 /// The one simulation config: a newtype over [`SimulationConfig`], so the
 /// TOML path, the synthetic TOML path and this constructor build the same
 /// typed config with the same defaults.
@@ -191,6 +282,7 @@ impl PySimulationConfig {
         civil_timezone = None,
         site_location = None,
         max_consecutive_step_failures = hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy = None,
         **unexpected
     ))]
     // PyO3 #[new] with kwargs maps 1:1 to Python kwargs; builder adds no value here.
@@ -207,6 +299,7 @@ impl PySimulationConfig {
         civil_timezone: Option<String>,
         site_location: Option<PySiteLocationOverride>,
         max_consecutive_step_failures: u32,
+        health_policy: Option<PyHealthPolicy>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         if let Some(unexpected) = unexpected {
@@ -255,6 +348,7 @@ impl PySimulationConfig {
             civil_timezone,
             site_location: site_location.map(|s| s.0).unwrap_or_default(),
             max_consecutive_step_failures,
+            health_policy: health_policy.map(|p| p.0).unwrap_or_default(),
         };
         inner
             .validate()
@@ -417,6 +511,17 @@ impl PySimulationConfig {
     #[setter]
     pub fn set_max_consecutive_step_failures(&mut self, value: u32) -> PyResult<()> {
         self.assign(|cfg| cfg.max_consecutive_step_failures = value)
+    }
+
+    #[getter]
+    pub fn health_policy(&self) -> PyHealthPolicy {
+        PyHealthPolicy(self.0.health_policy.clone())
+    }
+
+    #[setter]
+    pub fn set_health_policy(&mut self, value: PyHealthPolicy) -> PyResult<()> {
+        let policy = value.0;
+        self.assign(move |cfg| cfg.health_policy = policy)
     }
 
     pub fn __repr__(&self) -> String {
@@ -695,6 +800,7 @@ mod tests {
             None,
             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
+            None,
         )?;
         Ok(cfg.0)
     }
@@ -754,6 +860,7 @@ mod tests {
                     None,
                     None,
                     hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    None,
                     Some(&dict),
                 )
                 .expect_err("a removed keyword is an error");
@@ -781,6 +888,7 @@ mod tests {
                 None,
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                None,
                 Some(&dict),
             )
             .expect_err("an unknown keyword is an error");
@@ -810,6 +918,7 @@ mod tests {
                 None,
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                None,
                 Some(&dict),
             )
             .expect_err("duration_s is a removed keyword");

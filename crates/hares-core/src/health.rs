@@ -9,6 +9,69 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::ZoneId;
 
+/// The first policy crossing one counter's change sites recorded: the
+/// pieces a `HealthPolicyViolation` carries, with the step index the
+/// dwelling stamps on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HealthCrossing {
+    /// The equipment or actor the crossing's event came from.
+    pub source: String,
+    /// The run-total count at the crossing.
+    pub count: u64,
+    /// The limit the count crossed.
+    pub limit: u64,
+}
+
+/// One dispatch pass's rejected-control-signal counting under the run's
+/// health policy. Every rejection site records through [`Self::record`],
+/// which counts and, when the run-total count (the baseline the gate was
+/// built with plus the pass's rejections) crosses the policy's limit for
+/// rejected signals, remembers the first crossing with its source. The
+/// dwelling lands the pass's count on the run total and turns a recorded
+/// crossing into the latched `HealthPolicyViolation` that ends the run.
+#[derive(Debug)]
+pub(crate) struct RejectionGate {
+    baseline: u64,
+    limit: Option<u64>,
+    count: u64,
+    crossing: Option<HealthCrossing>,
+}
+
+impl RejectionGate {
+    /// A gate over the run total `baseline`, with the policy limit for
+    /// rejected control signals (`None` when the policy sets none).
+    pub(crate) fn new(baseline: u64, limit: Option<u64>) -> Self {
+        Self {
+            baseline,
+            limit,
+            count: 0,
+            crossing: None,
+        }
+    }
+
+    /// Counts one rejection from `source` and evaluates the policy on the
+    /// new run-total count: only the first crossing is remembered, so the
+    /// violation names the rejection that crossed.
+    pub fn record(&mut self, source: &str) {
+        self.count = self.count.saturating_add(1);
+        if let Some(limit) = self.limit {
+            let count = self.baseline + self.count;
+            if count > limit && self.crossing.is_none() {
+                self.crossing = Some(HealthCrossing {
+                    source: source.to_owned(),
+                    count,
+                    limit,
+                });
+            }
+        }
+    }
+
+    /// The pass's rejections and the first crossing it recorded, if any.
+    pub(crate) fn into_parts(self) -> (u64, Option<HealthCrossing>) {
+        (self.count, self.crossing)
+    }
+}
+
 /// Run-total health counters for one dwelling, recorded unconditionally in
 /// every build profile and never reset per step: a finished run always
 /// reports the degradation it hit without requiring a special build or log

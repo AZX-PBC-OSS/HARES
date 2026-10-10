@@ -108,6 +108,7 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
     }
 }
 
@@ -299,6 +300,7 @@ fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
     };
     let config = DwellingConfig {
         hpxml_path: bldg.join("home.xml"),

@@ -789,6 +789,7 @@ mod tests {
             None,
             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
+            None,
         )
         .expect("the sim config builds");
         let mut dwelling = PyDwelling::from_hpxml(

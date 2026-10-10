@@ -18,6 +18,7 @@ from hares import (
     Dwelling,
     DwellingConfig,
     Frequency,
+    HealthPolicy,
     ReportSpec,
     Selection,
     SimulationConfig,
@@ -67,6 +68,45 @@ class TestSimulationConfig:
         assert cfg.master_seed == 42
         assert cfg.start_time == "2024-01-01T00:00:00+00:00"
         assert cfg.reports == []
+
+    def test_health_policy_defaults_to_empty(self):
+        """A config built without a health policy carries the empty one."""
+        cfg = SimulationConfig(**required_kwargs())
+        assert cfg.health_policy == HealthPolicy()
+        assert cfg.health_policy.max_port_rollbacks is None
+        assert cfg.health_policy.max_rejected_control_signals is None
+        assert cfg.health_policy.max_clamped_actions is None
+        assert cfg.health_policy.max_curve_index_clamps is None
+        assert cfg.health_policy.require_warmup_convergence is False
+
+    def test_health_policy_strict_sets_every_limit(self):
+        policy = HealthPolicy.strict()
+        assert policy.max_port_rollbacks == 0
+        assert policy.max_rejected_control_signals == 0
+        assert policy.max_clamped_actions == 0
+        assert policy.max_curve_index_clamps == 0
+        assert policy.require_warmup_convergence is True
+
+    def test_health_policy_python_round_trip(self):
+        """A strict policy passed to SimulationConfig survives to_toml and
+        from_toml as an equal policy."""
+        policy = HealthPolicy.strict()
+        cfg = SimulationConfig(**required_kwargs(), health_policy=policy)
+        assert cfg.health_policy == policy
+        round_tripped = SimulationConfig.from_toml(cfg.to_toml())
+        assert round_tripped.health_policy == policy
+        # A custom policy round-trips field for field, the unset fields
+        # staying unset.
+        custom = HealthPolicy(
+            max_port_rollbacks=2,
+            max_clamped_actions=4,
+            require_warmup_convergence=True,
+        )
+        cfg = SimulationConfig(**required_kwargs(), health_policy=custom)
+        assert cfg.health_policy == custom
+        assert cfg.health_policy.max_rejected_control_signals is None
+        round_tripped = SimulationConfig.from_toml(cfg.to_toml())
+        assert round_tripped.health_policy == custom
 
     def test_duration_and_time_res_accept_timedelta(self):
         from datetime import timedelta

@@ -2287,6 +2287,36 @@ class ReportSpec:
     def frequency(self) -> Frequency: ...
     def __repr__(self) -> str: ...
 
+class HealthPolicy:
+    """The run's health policy: which counted health events escalate to a
+    run failure, and which stay counted. The empty policy (the default)
+    keeps every event counted and nothing escalated; ``strict`` rejects an
+    evaluation on its first counted event."""
+
+    def __init__(
+        self,
+        *,
+        max_port_rollbacks: int | None = None,
+        max_rejected_control_signals: int | None = None,
+        max_clamped_actions: int | None = None,
+        max_curve_index_clamps: int | None = None,
+        require_warmup_convergence: bool = False,
+    ) -> None: ...
+    @classmethod
+    def strict(cls) -> HealthPolicy: ...
+    @property
+    def max_port_rollbacks(self) -> int | None: ...
+    @property
+    def max_rejected_control_signals(self) -> int | None: ...
+    @property
+    def max_clamped_actions(self) -> int | None: ...
+    @property
+    def max_curve_index_clamps(self) -> int | None: ...
+    @property
+    def require_warmup_convergence(self) -> bool: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __repr__(self) -> str: ...
+
 class SimulationConfig:
     def __init__(
         self,
@@ -2302,6 +2332,7 @@ class SimulationConfig:
         civil_timezone: str | None = ...,
         site_location: SiteLocationOverride | None = ...,
         max_consecutive_step_failures: int = ...,
+        health_policy: HealthPolicy | None = ...,
         **unexpected: object,
     ) -> None: ...
     @property
@@ -2348,6 +2379,10 @@ class SimulationConfig:
     def max_consecutive_step_failures(self) -> int: ...
     @max_consecutive_step_failures.setter
     def max_consecutive_step_failures(self, value: int) -> None: ...
+    @property
+    def health_policy(self) -> HealthPolicy: ...
+    @health_policy.setter
+    def health_policy(self, value: HealthPolicy) -> None: ...
     def validate(self) -> None: ...
     def to_toml(self) -> str: ...
     @classmethod
@@ -2648,6 +2683,15 @@ class HaresEquipmentError(ValueError):
 
 class HaresSimulationError(RuntimeError):
     """Raised when a simulation cannot proceed."""
+
+class HaresHealthPolicyError(HaresSimulationError):
+    """Raised when a counted health event crosses the run's health policy
+    limit for it. The attributes carry the violation's fields: ``event``
+    (the event's name), ``step_index`` (the step it crossed at, or ``None``
+    for an event during warm-up or for the convergence check at its end),
+    ``source`` (the equipment or actor that produced the event), ``count``
+    (the run-total count at the crossing) and ``limit`` (the policy limit
+    it crossed)."""
 
 # ---------------------------------------------------------------------------
 # DwellingBlueprint

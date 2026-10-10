@@ -636,6 +636,7 @@ mod tests {
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_io::HealthPolicy::default(),
         };
         let err = match compute_metrics_from_batches(std::slice::from_ref(&batch), &sim_config) {
             Err(err) => err,

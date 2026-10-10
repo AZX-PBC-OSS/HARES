@@ -115,6 +115,26 @@ pub enum HaresError {
     /// `message`.
     #[error("callback error for report '{report}': {message}")]
     Callback { report: String, message: String },
+    /// A counted health event crossed the run's health policy limit for
+    /// it: the run ends naming the event, the step (None for an event
+    /// during warm-up or for the convergence check at its end), the source
+    /// (the equipment or actor that produced the event), the run-total
+    /// count and the limit it crossed. The source field is `origin`: a
+    /// thiserror field named `source` becomes the error chain's source,
+    /// which a name is not. The Display and the Python exception's
+    /// attribute name it `source`.
+    #[error(
+        "health policy: {event:?} from '{source}'{step_suffix}: count {count} exceeds the limit {limit}",
+        source = origin.as_str(),
+        step_suffix = step_index.map(|s| format!(" at step {s}")).unwrap_or_default()
+    )]
+    HealthPolicyViolation {
+        event: crate::HealthEvent,
+        step_index: Option<u64>,
+        origin: String,
+        count: u64,
+        limit: u64,
+    },
 }
 
 fn rejected_equipment_warnings(warnings: &[String]) -> String {
@@ -197,6 +217,13 @@ mod tests {
             HaresError::Callback {
                 report: "timestep".to_string(),
                 message: "the store is full".to_string(),
+            },
+            HaresError::HealthPolicyViolation {
+                event: crate::HealthEvent::PortRollback,
+                step_index: Some(7),
+                origin: "FlakyEq".to_string(),
+                count: 1,
+                limit: 0,
             },
         ];
         for err in errors {

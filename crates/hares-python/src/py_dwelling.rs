@@ -41,6 +41,7 @@ pyo3::create_exception!(
     HaresSimulationError,
     pyo3::exceptions::PyRuntimeError
 );
+pyo3::create_exception!(hares._hares, HaresHealthPolicyError, HaresSimulationError);
 pyo3::create_exception!(
     hares._hares,
     FatalDwellingError,
@@ -2446,6 +2447,27 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         HaresError::Equipment(_) | HaresError::InvalidEquipmentParameter { .. } => {
             HaresEquipmentError::new_err(msg)
         }
+        // The policy violation carries the variant's fields as attributes,
+        // so a consumer that gates on health reads the event, the step,
+        // the source, the count and the limit off the exception it caught.
+        HaresError::HealthPolicyViolation {
+            event,
+            step_index,
+            origin,
+            count,
+            limit,
+        } => {
+            let py_err = HaresHealthPolicyError::new_err(msg);
+            Python::attach(|py| {
+                let value = py_err.value(py);
+                let _ = value.setattr("event", format!("{event:?}"));
+                let _ = value.setattr("step_index", step_index);
+                let _ = value.setattr("source", origin.as_str());
+                let _ = value.setattr("count", count);
+                let _ = value.setattr("limit", limit);
+            });
+            py_err
+        }
         // Physics variant is DEPRECATED: zero production constructors remain in
         // the codebase (T-0144). Kept for serialization compatibility and future
         // hares-physics crate retrofitting (T-0145).
@@ -2720,6 +2742,46 @@ mod tests {
 
             let simulation = super::to_py_err(rejected(HaresError::Control("taken".to_string())));
             assert!(simulation.is_instance_of::<super::HaresSimulationError>(py));
+        });
+    }
+
+    /// A health policy violation converts to the health policy error class,
+    /// a subclass of the simulation error, whose attributes carry the
+    /// variant's fields.
+    #[test]
+    fn health_policy_violation_maps_to_python_error() {
+        use hares_types::{HaresError, HealthEvent};
+        Python::attach(|py| {
+            let violation = HaresError::HealthPolicyViolation {
+                event: HealthEvent::PortRollback,
+                step_index: Some(7),
+                origin: "PortEq".to_string(),
+                count: 1,
+                limit: 0,
+            };
+            let py_err = super::to_py_err(violation);
+            assert!(
+                py_err.is_instance_of::<super::HaresHealthPolicyError>(py),
+                "the violation maps to the health policy error, got: {py_err}"
+            );
+            assert!(py_err.is_instance_of::<super::HaresSimulationError>(py));
+            let value = py_err.value(py);
+            let attr = |name: &str| {
+                value
+                    .getattr(name)
+                    .unwrap_or_else(|_| panic!("the exception carries a '{name}' attribute"))
+            };
+            assert_eq!(
+                attr("event").extract::<String>().expect("event is a str"),
+                "PortRollback"
+            );
+            assert_eq!(attr("step_index").extract::<u64>().expect("step_index"), 7);
+            assert_eq!(
+                attr("source").extract::<String>().expect("source is a str"),
+                "PortEq"
+            );
+            assert_eq!(attr("count").extract::<u64>().expect("count"), 1);
+            assert_eq!(attr("limit").extract::<u64>().expect("limit"), 0);
         });
     }
 
@@ -3644,6 +3706,7 @@ mod profiling_summary_tests {
                 None,
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                None,
                 None,
             )
             .expect("the sim config builds");

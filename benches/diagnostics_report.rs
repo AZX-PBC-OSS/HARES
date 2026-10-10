@@ -48,6 +48,7 @@ fn cz4a_config(diagnostics: bool, output: &Path) -> DwellingConfig {
             civil_timezone: None,
             site_location: SiteLocationOverride::default(),
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_io::HealthPolicy::default(),
         },
         defaults_path: Some(root.join("defaults")),
         overrides: None,
