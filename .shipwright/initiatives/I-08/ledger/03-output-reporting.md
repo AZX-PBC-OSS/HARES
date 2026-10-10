@@ -676,6 +676,150 @@ cases the measurement compares: `no_report`, `memory`, `csv` and
 `parquet`, each the `single_building` fixture at verbosity 2; this commit
 adds it.
 
+**State:** committed `be1843fb` (branch `row/r38-or3`, cut from
+`c9c3399e`, one commit).
+
+The destination model, as built. `ReportSpec { name, selection, frequency,
+destination }` and `Destination::{Memory, Parquet{path, overwrite},
+Csv{path, overwrite}}` live in `hares-io/src/output/report.rs` (serde
+externally tagged, `deny_unknown_fields`); `SimulationConfig.reports:
+Vec<ReportSpec>` replaces `write_output`, `retain_batches`, `output_format`,
+`output_path`, `output_verbosity` and `rotation` (`output_chunk_size`
+stays). The freeze resolves every report's selection against the catalogue
+(`resolve_selection`: `Verbosity(n)` to the tier's variables with the
+observe gate honoured, `Named` exact and case-sensitive with the
+edit-distance suggestions, `Pattern` a glob that may match nothing), unions
+the resolved columns in catalogue order into the producer surface, and
+builds one `RowPlan` with one projection per report
+(`from_resolved_projections`). One `StreamingRecorder` per report, each
+with its own schema: a `Verbosity(n)` report's schema is the catalogue's
+`build_schema(catalogue, n)` (byte-identical to the old pipeline's schema,
+the goldens' proof), a `Named` or `Pattern` report's schema spans its
+resolved columns (`build_schema_for_columns`; its `hares_verbosity` metadata
+is the deepest tier the columns are drawn from). The producer bindings bind
+against the union schema; the expected-column set for the drift check is
+the union's own resolved names (a promised column the schema cannot place
+is still `InvariantViolation` at freeze, pinned by
+`row_plan_rejects_unplaceable_expected_variable`); `plan_equipment_columns`
+takes that set instead of the verbosity. `record_step` fills the one union
+row and pushes each report's projection of it to that report's recorder
+(projections copied at freeze into `RosterCaches`, one reused scratch
+slice, no per-step allocation); every file report records every step until
+OR-6's `finish()`.
+
+The file destination rules, as built: lazy creation (the file exists from
+the first flushed batch, never at construction or from an unflushed
+buffer), a unique hidden partial (`.<file name>.partial-<pid>-<n>` in the
+target's directory, a process-global counter for n), the freeze-time
+checks at recorder construction (an existing target with
+`overwrite: false` is `TargetExists` naming the path and stating the
+override, before the first step; a missing parent directory is
+`PathIo` naming the path), publish at the end of `simulate()` where
+today's `flush_and_close` ran: hard link plus partial removal with
+`overwrite: false` (a publish race into an existing target is
+`TargetExists`; a filesystem without hard links is `HardLinkUnavailable`
+naming the target and stating that `overwrite: true` publishes by
+rename), rename with `overwrite: true`; a failed run removes its partial
+files (`simulate()`'s error path calls `discard_partial` on every
+recorder); a zero-row run creates no file (the lazy creation never opens
+one); `File::create` and publish failures name the path. A stepped run
+publishes nothing until OR-6. `Memory` retains every flushed batch: alone
+it produces the full selected frame.
+
+The mapping from the old booleans, with the differential: a
+`Destination.parquet(path)` report at `Selection.verbosity(n)` is the old
+`write_output = true, output_format = "parquet", output_path = Some(path),
+output_verbosity = n` (and `Destination.memory()` is the old
+`retain_batches = true` half), proven by the gates: the eight goldens run
+through the migrated manifests' `[[simulation.reports]]` (every capture
+unchanged, `output_verbosity = 2` moved into the report's selection) and
+every frame is bitwise identical in both profiles, and
+`schema_equal_across_destinations` pins one run's Memory, Parquet and Csv
+frames equal (Parquet on bits) against the Memory table. The frame readers
+(Python `simulate()` and `results()`) return the first `Memory` report's
+frame in `reports` order, today's step fallback when there is none; the
+engine's metrics come from the memory batches when one exists and ride the
+incremental calculator on the first file report when none does (the
+calculator failing to initialize still fails the plan); `metrics()`
+without a `Memory` report still raises the honest no-batches error (OR-8
+owns the metrics decoupling). The diagnostics CSV writer rides the first
+report in `reports` order with `Selection::Verbosity(n)`, `n >= 4`, and a
+file destination, at `<stem>_diagnostics.csv` beside it; with no such
+report nothing is written and nothing falls back to the working directory.
+
+The removed keys: `write_output`, `output_format`, `output_path`,
+`output_verbosity`, `retain_batches` and `rotation` are rows of
+`REMOVED_KEYS` with scope `KeyScope::SimulationConfig`, every replacement
+naming `SimulationConfig.reports`, so TOML, synthetic TOML and the Python
+constructor reject them with the one message (the Python surface finds
+them through the scope scan); the `output_to_parquet` row is rewritten to
+name `SimulationConfig.reports`. The Python keywords leave the
+`SimulationConfig` constructor; the constructor takes
+`reports=[ReportSpec(...)]` and the frozen pyclasses `ReportSpec(name,
+selection, destination, frequency=None)`, `Selection.verbosity(n) /
+.named([...]) / .pattern(s)`, `Frequency.timestep()` and
+`Destination.memory() / .parquet(path, overwrite=False) / .csv(path,
+overwrite=False)` are registered on the module, exported from
+`hares`, stubbed in `_hares.pyi`, and their reprs round-trip through the
+config's `reports` getter. `SimulationConfig::validate()` gains the report
+checks: report names unique, report file paths unique,
+`Selection::Verbosity(n)` with `n <= 8`. `default_output_path`,
+`resolved_output_path`, `RotationPolicy`, `OutputFormat`, the rotating
+writer and `DEFAULT_WRITE_OUTPUT` are deleted; `SimulationResults.timeseries_path`
+is the first file report's path in `reports` order. The fleet's
+`with_output_verbosity` and `with_retained_output` are replaced by
+`with_memory_report(verbosity)` (the aggregate folds the memory reports'
+batches); the frame_golden adapter runs the manifests' own reports for a
+full capture and clears them for a discard. The bench group
+`output_destination` (no_report, memory, csv, parquet at verbosity 2) is
+in `benches/single_building.rs`.
+
+The RED first: the six run-level destination tests
+(`memory_only_produces_full_schema_and_no_file`,
+`existing_target_without_overwrite_fails_before_first_step`,
+`overwrite_true_replaces_target`, `missing_parent_dir_is_io_error_naming_path`,
+`failed_run_leaves_no_partial_file` by an equipment that returns `Err`
+from `step()` at the default failure budget,
+`schema_equal_across_destinations`) were written against the surface
+before it existed and failed on the parent commit at the config parse
+(the `reports` key rejected); the writer-level tests
+(`zero_row_run_creates_no_file` replacing
+`finish_on_empty_recorder_produces_valid_file`, the lazy creation, the
+publish and partial rules) failed the same way, and the config-level
+validate and removed-key pins failed on the missing fields. GREEN: all
+landed with the row. The new tests: the six run-level pins in
+`crates/hares-core/tests/reports_destinations.rs`, the writer's
+destination tests in `writer.rs`, the validate pins in `config.rs`, the
+removed-key pins in `config.rs` and `test_py_config.py`,
+`python_memory_report_returns_frame` in `tests/python/test_py_reports.py`
+(the cz4a fixture, 24 h at 900 s, one Memory report at verbosity 2: 96
+rows, the full selected schema) and `test_gym_default_writes_no_file` in
+`test_gym_env.py` (a default-valued config's gym episode of 20 steps in a
+fresh temporary working directory leaves it empty; at the old defaults
+the episode wrote a csv into the working directory).
+
+Gates on the commit: fmt clean; clippy `--all-features --all-targets
+-D warnings` clean; nextest `--all-features` 7626/7626 and `-F dst`
+7774/7774; pytest canonical (uv sync --locked --all-extras --all-groups)
+1542 passed, 0 failed, 0 skipped; pyright 0 errors; the goldens bitwise
+through `frame_golden compare-all` in both profiles (7 manifests identical
+on the default build and `full_year_900s_dst` identical on the dst build,
+values and schemas unchanged; the parquet destination's frames are the
+Memory table's, on bits). `cargo bench --bench single_building --no-run`
+compiles. The census grep's remaining hits: the removed-key table
+(`config.rs`) and its tests (`config.rs`, `test_py_config.py`,
+`py_config.rs`, the `[output]`-table probe in `synthetic.rs`), and one
+English "rotation" in `urdb.rs` (a months-rotation comment, not the key).
+
+Two notes carried: the catalogue tests' shared synthetic fixture still
+wrote `time_res_s`/`duration_s` under `[simulation]` (removed keys their
+rows rejected two rows before this one; the fixture's two tests failed on
+the parent commit too), fixed here to `time_res`/`duration`; and the
+pre-existing `cargo clippy --workspace --all-targets --release -F dst
+-D warnings` failures (the pyo3 constructors' argument counts and the
+first-keyword-return loop in `hares-python`) exist on the parent commit
+and are not this row's.
+
 ## OR-4: diagnostics become a catalogue report
 
 **Kind:** initiative work; also fixes `context.md` item 12.
