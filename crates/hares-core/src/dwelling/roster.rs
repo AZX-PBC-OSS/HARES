@@ -1496,6 +1496,18 @@ impl Dwelling {
                     HaresError::InvalidState(message)
                 })?;
         }
+        // An attached batch callback survives the rebuild: the dwelling
+        // holds the attachment and hands a clone to the named report's
+        // fresh recorder (the recorders are in `reports` order).
+        if let Some(attachment) = &self.attached_callback {
+            let report_index = self
+                .reports
+                .iter()
+                .position(|spec| spec.name == attachment.report());
+            if let Some(recorder) = report_index.and_then(|index| recorders.get_mut(index)) {
+                recorder.attach_callback(attachment.clone());
+            }
+        }
         Ok(OutputCachesPlan::FreshSchema(Box::new(FreshOutputCaches {
             recorders,
             row_plan,

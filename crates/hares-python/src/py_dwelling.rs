@@ -17,7 +17,7 @@ use hares_equipment::{
 use hares_io::output::metrics::MetricsCalculator;
 use hares_types::panic_hook::{self, PanicHookGuard};
 use hares_types::{BatteryChemistry, EvConnectionState, HaresError, SurfaceIrradiance};
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyType};
 use rand::SeedableRng;
@@ -1632,6 +1632,36 @@ impl PyDwelling {
         batches_or_steps_to_polars_df(py, &batches, &steps)
     }
 
+    /// Attaches a Python callable as the dwelling's batch callback: the
+    /// recorder calls it with the batch's info and the batch as a polars
+    /// frame, once per flushed batch, in flush order. The step runs with
+    /// the GIL released, so the call re-acquires it; an exception from the
+    /// callable fails the run as a typed callback error, and the run stays
+    /// ended after it.
+    pub fn attach_callback(
+        &mut self,
+        _py: Python<'_>,
+        report: &str,
+        callback: Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        if !callback.is_callable() {
+            let repr = callback
+                .repr()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|_| "unprintable".to_string());
+            return Err(PyTypeError::new_err(format!(
+                "the batch callback must be callable, got {repr}"
+            )));
+        }
+        let mut dwelling = self.acquire()?;
+        dwelling
+            .attach_callback(
+                report,
+                Box::new(crate::py_callback::PyBatchCallback::new(callback.unbind())),
+            )
+            .map_err(to_py_err)
+    }
+
     pub fn metrics(&self) -> PyResult<PySimulationMetrics> {
         let dwelling = self.acquire()?;
         let batches: Vec<_> = dwelling.flushed_batches().to_vec();
@@ -2397,6 +2427,7 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         | HaresError::InvariantViolation { .. }
         | HaresError::NanDetected { .. }
         | HaresError::NegativeDeliveredEnergy { .. }
+        | HaresError::Callback { .. }
         | HaresError::RejectedEquipment { .. } => HaresSimulationError::new_err(msg),
     }
 }

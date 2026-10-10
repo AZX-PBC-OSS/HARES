@@ -4,6 +4,7 @@
 //! rows up to a configurable chunk size and flushes to disk, keeping peak
 //! memory proportional to the chunk size rather than simulation length.
 
+pub mod callback;
 pub mod catalogue;
 pub mod columns;
 pub mod metrics;
@@ -13,6 +14,7 @@ pub mod writer;
 
 use std::path::PathBuf;
 
+pub use callback::{BatchCallback, BatchContext, CallbackAttachment, CallbackError};
 pub use catalogue::{
     Catalogue, CatalogueActor, CatalogueEquipment, CatalogueError, CatalogueInput,
     EquipmentColumnFamilies, VariableDef, VariableSource, build_catalogue, build_schema,

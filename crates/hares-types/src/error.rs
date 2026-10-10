@@ -110,6 +110,11 @@ pub enum HaresError {
         key: String,
         reason: String,
     },
+    /// A report's batch callback failed: the run ends at the flush where
+    /// the callback raised, with the callback's own message carried in
+    /// `message`.
+    #[error("callback error for report '{report}': {message}")]
+    Callback { report: String, message: String },
 }
 
 fn rejected_equipment_warnings(warnings: &[String]) -> String {
@@ -188,6 +193,10 @@ mod tests {
                 field: "hysteresis_c".to_string(),
                 value_c: 0.0,
                 class: crate::ThermostatBandClass::Cycling,
+            },
+            HaresError::Callback {
+                report: "timestep".to_string(),
+                message: "the store is full".to_string(),
             },
         ];
         for err in errors {

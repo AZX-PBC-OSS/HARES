@@ -1,0 +1,328 @@
+//! The batch callback: a run streams every flushed batch of its output
+//! report to an attached sink, in order, and a callback error ends the run
+//! the way the failure budget ends it.
+//!
+//! The sink is minimal on purpose: `on_batch` with the batch and a context
+//! naming the report, the building and the batch's index. The destination
+//! model lands later and turns the sink into one destination among
+//! several; the notes in `crates/hares-io/src/output/callback.rs` mark
+//! where each piece plugs in.
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use arrow::array::{Float64Array, StringArray};
+use arrow::record_batch::RecordBatch;
+use chrono::{DateTime, Duration};
+use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
+use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
+use hares_io::{Destination, ReportSpec, Selection, SiteLocationOverride};
+
+/// The one report the engine builds today: the run's timestep table.
+const REPORT: &str = "timestep";
+
+fn project_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+struct Collected {
+    report: String,
+    bldg_id: i64,
+    batch_index: u64,
+    batch: RecordBatch,
+}
+
+/// A test sink: collects the batches it is handed, and fails the named
+/// batch index with a message the run must carry through.
+struct Collecting {
+    sink: Arc<Mutex<Vec<Collected>>>,
+    fail_on: Option<u64>,
+}
+
+impl BatchCallback for Collecting {
+    fn on_batch(
+        &mut self,
+        ctx: &BatchContext<'_>,
+        batch: &RecordBatch,
+    ) -> Result<(), CallbackError> {
+        if self.fail_on == Some(ctx.batch_index) {
+            return Err(CallbackError::new("the store is full"));
+        }
+        self.sink.lock().expect("sink lock").push(Collected {
+            report: ctx.report.to_string(),
+            bldg_id: ctx.bldg_id,
+            batch_index: ctx.batch_index,
+            batch: batch.clone(),
+        });
+        Ok(())
+    }
+}
+
+fn config(retain_batches: bool, output_path: &std::path::Path) -> SimulationConfig {
+    SimulationConfig {
+        start_time: DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00").expect("start time"),
+        duration: Duration::hours(24),
+        time_res: Duration::seconds(900),
+        reports: vec![ReportSpec {
+            name: REPORT.to_string(),
+            selection: Selection::Verbosity(2),
+            frequency: hares_io::Frequency::default(),
+            destination: if retain_batches {
+                Destination::Memory
+            } else {
+                Destination::Parquet {
+                    path: output_path.to_path_buf(),
+                    overwrite: false,
+                }
+            },
+        }],
+        output_chunk_size: 40,
+        setpoint_deadband_c: None,
+        master_seed: 0,
+        civil_timezone: None,
+        site_location: SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+    }
+}
+
+fn dwelling(sim_config: SimulationConfig, bldg_id: i64) -> Dwelling {
+    let fixture = project_root().join("tests/fixtures/parity/cz4a_ashp_hpwh");
+    Dwelling::from_config(DwellingConfig {
+        hpxml_path: fixture.join("building.xml"),
+        schedule_path: Some(fixture.join("schedule.csv")),
+        weather_path: fixture.join("weather.epw"),
+        defaults_path: Some(project_root().join("defaults")),
+        sim_config,
+        overrides: None,
+        bldg_id,
+        initialization_duration: Some(std::time::Duration::from_secs(7 * 24 * 3600)),
+        patches: None,
+    })
+    .expect("the fixture dwelling builds")
+}
+
+fn assert_batches_bitwise_equal(a: &[RecordBatch], b: &[RecordBatch], label: &str) {
+    assert_eq!(a.len(), b.len(), "{label}: batch count");
+    for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+        assert_eq!(x.schema(), y.schema(), "{label}: batch {i} schema");
+        assert_eq!(x.num_rows(), y.num_rows(), "{label}: batch {i} row count");
+        for (j, (xc, yc)) in x.columns().iter().zip(y.columns()).enumerate() {
+            if let (Some(xs), Some(ys)) = (
+                xc.as_any().downcast_ref::<StringArray>(),
+                yc.as_any().downcast_ref::<StringArray>(),
+            ) {
+                for k in 0..x.num_rows() {
+                    assert_eq!(
+                        xs.value(k),
+                        ys.value(k),
+                        "{label}: batch {i} column {j} row {k}"
+                    );
+                }
+            } else {
+                let xs = xc
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap_or_else(|| {
+                        panic!("{label}: batch {i} column {j} is not a float column")
+                    });
+                let ys = yc
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap_or_else(|| {
+                        panic!("{label}: batch {i} column {j} is not a float column")
+                    });
+                for k in 0..x.num_rows() {
+                    assert_eq!(
+                        xs.value(k).to_bits(),
+                        ys.value(k).to_bits(),
+                        "{label}: batch {i} column {j} row {k}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The callback sees every flushed batch exactly once, in flush order, and
+/// the concatenation equals the same run's retained batches on bits: 96
+/// steps at 900 s with a 40-row chunk are batches of 40, 40 and 16 rows.
+#[test]
+fn callback_receives_every_batch_once_in_order() {
+    let reference_dir = tempfile::tempdir().expect("tempdir");
+    let mut reference = dwelling(
+        config(true, &reference_dir.path().join("reference.parquet")),
+        7,
+    );
+    reference.simulate().expect("the reference run completes");
+    let expected: Vec<RecordBatch> = reference.flushed_batches().to_vec();
+    assert_eq!(expected.len(), 3, "the reference run flushes three batches");
+    assert_eq!(
+        expected
+            .iter()
+            .map(RecordBatch::num_rows)
+            .collect::<Vec<_>>(),
+        vec![40, 40, 16],
+        "the batch boundaries follow the configured chunk size"
+    );
+
+    let run_dir = tempfile::tempdir().expect("tempdir");
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let mut run = dwelling(config(false, &run_dir.path().join("run.parquet")), 7);
+    run.attach_callback(
+        REPORT,
+        Box::new(Collecting {
+            sink: Arc::clone(&sink),
+            fail_on: None,
+        }),
+    )
+    .expect("the callback attaches");
+    run.simulate().expect("the callback run completes");
+
+    let got = sink.lock().expect("sink lock");
+    assert_eq!(got.len(), 3, "the callback saw three batches, once each");
+    let indices: Vec<u64> = got.iter().map(|c| c.batch_index).collect();
+    assert_eq!(indices, vec![0, 1, 2], "batch_index counts from 0 in order");
+
+    let got_batches: Vec<RecordBatch> = got.iter().map(|c| c.batch.clone()).collect();
+    assert_batches_bitwise_equal(
+        &got_batches,
+        &expected,
+        "the concatenated batches equal the retained batches",
+    );
+}
+
+/// The context names the report and the building the batch belongs to.
+#[test]
+fn callback_context_carries_bldg_id_and_report_name() {
+    let run_dir = tempfile::tempdir().expect("tempdir");
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let mut run = dwelling(config(false, &run_dir.path().join("run.parquet")), 42);
+    run.attach_callback(
+        REPORT,
+        Box::new(Collecting {
+            sink: Arc::clone(&sink),
+            fail_on: None,
+        }),
+    )
+    .expect("the callback attaches");
+    run.simulate().expect("the run completes");
+
+    let got = sink.lock().expect("sink lock");
+    assert!(!got.is_empty(), "the callback saw at least one batch");
+    for collected in got.iter() {
+        assert_eq!(collected.report, REPORT);
+        assert_eq!(collected.bldg_id, 42);
+    }
+    let indices: Vec<u64> = got.iter().map(|c| c.batch_index).collect();
+    assert_eq!(
+        indices,
+        (0..got.len() as u64).collect::<Vec<_>>(),
+        "the indices are the flush order"
+    );
+}
+
+/// A callback error fails the run at that step, naming the report and
+/// carrying the cause; the run stays ended (every later step returns the
+/// error without stepping anything) and the callback is never called
+/// again.
+#[test]
+fn callback_error_fails_the_run_naming_the_report() {
+    let run_dir = tempfile::tempdir().expect("tempdir");
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let mut run = dwelling(config(false, &run_dir.path().join("run.parquet")), 7);
+    run.attach_callback(
+        REPORT,
+        Box::new(Collecting {
+            sink: Arc::clone(&sink),
+            fail_on: Some(1),
+        }),
+    )
+    .expect("the callback attaches");
+
+    let mut steps_ok = 0;
+    let err = loop {
+        match run.step() {
+            Ok(_) => steps_ok += 1,
+            Err(err) => break err,
+        }
+    };
+    assert!(
+        steps_ok < 96,
+        "the run must fail at the flush, not run to the end: {steps_ok} steps ran"
+    );
+    match &err {
+        hares_types::HaresError::Callback { report, message } => {
+            assert_eq!(report, REPORT);
+            assert!(
+                message.contains("the store is full"),
+                "the error must carry the callback's cause, got: {message}"
+            );
+        }
+        other => panic!("expected a callback error, got: {other:?}"),
+    }
+
+    // The budget semantics: the run stays ended, and the failed callback
+    // is not called again.
+    let calls_after_failure = sink.lock().expect("sink lock").len();
+    for _ in 0..3 {
+        let later = run.step().expect_err("the run stays ended");
+        assert!(
+            later.to_string().contains("the store is full"),
+            "the later step's error must carry the original cause, got: {later}"
+        );
+    }
+    assert_eq!(
+        sink.lock().expect("sink lock").len(),
+        calls_after_failure,
+        "the callback is not called after the run ended"
+    );
+}
+
+/// Attaching to a report the engine does not build is a typed error naming
+/// the report and the one report that exists.
+#[test]
+fn attach_to_non_callback_report_is_an_error() {
+    let run_dir = tempfile::tempdir().expect("tempdir");
+    let mut run = dwelling(config(false, &run_dir.path().join("run.parquet")), 7);
+    let err = run
+        .attach_callback(
+            "hourly",
+            Box::new(Collecting {
+                sink: Arc::new(Mutex::new(Vec::new())),
+                fail_on: None,
+            }),
+        )
+        .expect_err("attaching to an unknown report fails");
+    match &err {
+        hares_types::HaresError::Callback { report, message } => {
+            assert_eq!(report, "hourly");
+            assert!(
+                message.contains(REPORT),
+                "the error must name the report that exists, got: {message}"
+            );
+        }
+        other => panic!("expected a callback error, got: {other:?}"),
+    }
+}
+
+/// A callback attached after rows were recorded is refused: the
+/// destinations freeze with the first recorded row.
+#[test]
+fn attach_after_the_first_recorded_row_is_an_error() {
+    let run_dir = tempfile::tempdir().expect("tempdir");
+    let mut run = dwelling(config(false, &run_dir.path().join("run.parquet")), 7);
+    run.step().expect("the first step runs");
+    let err = run
+        .attach_callback(
+            REPORT,
+            Box::new(Collecting {
+                sink: Arc::new(Mutex::new(Vec::new())),
+                fail_on: None,
+            }),
+        )
+        .expect_err("attaching after the first recorded row fails");
+    assert!(
+        matches!(err, hares_types::HaresError::Callback { .. }),
+        "expected a callback error, got: {err:?}"
+    );
+}

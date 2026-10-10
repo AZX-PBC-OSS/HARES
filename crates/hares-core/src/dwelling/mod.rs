@@ -48,6 +48,8 @@ use hares_equipment::{
     ActorSeed, BatteryLutType, Equipment, EquipmentConfig, EquipmentRegistry, OcvTable,
     RegularGridInterpolator, SetpointReconciliation, UNegTable,
 };
+use hares_io::output::OutputError;
+use hares_io::output::callback::{BatchCallback, CallbackAttachment};
 use hares_io::{
     Building, CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
     DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
@@ -2203,6 +2205,11 @@ pub struct Dwelling {
     /// One streaming recorder per report, in `reports` order. Empty when no
     /// report is configured: nothing is recorded and no file is written.
     pub recorders: Vec<StreamingRecorder>,
+    /// The batch callback attached through [`Dwelling::attach_callback`],
+    /// the source of truth: the named report's recorder every roster plan
+    /// rebuild produces while the run is fresh gets a clone, so a roster
+    /// change before the first recorded row keeps the attachment.
+    attached_callback: Option<CallbackAttachment>,
     pub rng: ChaCha8Rng,
     /// Bounded warning buffer (first [`WarningLog::CAPACITY`] messages kept,
     /// overflow counted) — see [`Dwelling::take_warnings`].
@@ -3334,6 +3341,7 @@ fn build_from_blueprint_inner(
         consecutive_step_failures: Vec::new(),
         terminal_error: None,
         recorders: Vec::new(),
+        attached_callback: None,
         roster: RosterCaches::default(),
         rng,
         warnings: std::mem::take(warnings),
@@ -3632,7 +3640,7 @@ impl Dwelling {
         for recorder in self.recorders.iter_mut() {
             recorder
                 .flush_and_close()
-                .map_err(|err| HaresError::Io(format!("output close failed: {err}")))?;
+                .map_err(|err| Self::recorder_error("output close", err))?;
         }
         if let Some(ref mut writer) = self.diagnostic_writer {
             std::io::Write::flush(writer)
@@ -4447,6 +4455,69 @@ impl Dwelling {
         match self.recorders.iter().find(|recorder| recorder.is_memory()) {
             Some(recorder) => recorder.flushed_batches(),
             None => &[],
+        }
+    }
+
+    /// Attaches a batch callback: the named report's recorder hands it
+    /// every flushed batch of that report, in flush order, with the batch
+    /// index counting from 0. The callback runs inside the flush that
+    /// built the batch; an error from it fails the run at that step with
+    /// [`HaresError::Callback`] and the run stays ended (every later step
+    /// returns the error without stepping anything). No batch reaches the
+    /// callback after the run's outputs are published (the final partial
+    /// batch at close, today).
+    ///
+    /// The report names one of the configuration's reports; the
+    /// `Callback` destination marker, when it lands, turns the attachment
+    /// into the report's own declaration.
+    ///
+    /// # Errors
+    ///
+    /// An unknown report name (the configuration declares no such report),
+    /// or rows already recorded (the destinations freeze with the first
+    /// recorded row): a typed [`HaresError::Callback`] naming the report.
+    pub fn attach_callback(
+        &mut self,
+        report: &str,
+        callback: Box<dyn BatchCallback>,
+    ) -> Result<()> {
+        let report_index = self.reports.iter().position(|spec| spec.name == report);
+        let report_index = report_index.ok_or_else(|| HaresError::Callback {
+            report: report.to_string(),
+            message: if self.reports.is_empty() {
+                format!("unknown report '{report}': the configuration declares no reports")
+            } else {
+                let names = self
+                    .reports
+                    .iter()
+                    .map(|spec| spec.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("unknown report '{report}': the configuration declares reports {names}")
+            },
+        })?;
+        if self.recorded_rows().is_some_and(|rows| rows > 0) {
+            return Err(HaresError::Callback {
+                report: report.to_string(),
+                message: "rows were already recorded: the destinations freeze with the first \
+                          recorded row, so attach the callback before the run starts"
+                    .to_string(),
+            });
+        }
+        let attachment = CallbackAttachment::new(report, self.bldg_id, callback);
+        self.recorders[report_index].attach_callback(attachment.clone());
+        self.attached_callback = Some(attachment);
+        Ok(())
+    }
+
+    /// The recorder error the run's step path maps: a callback failure
+    /// keeps its typed variant (the run names the report and stays ended),
+    /// every other recorder failure is an I/O error as before, prefixed
+    /// with the flushing context that produced it.
+    fn recorder_error(context: &str, err: OutputError) -> HaresError {
+        match err {
+            OutputError::Callback { report, message } => HaresError::Callback { report, message },
+            other => HaresError::Io(format!("{context} failed: {other}")),
         }
     }
 
@@ -6406,8 +6477,14 @@ impl Dwelling {
         phase_clock.enter(&mut self.profiling, ProfilePhase::Output);
 
         // Step 5: record outputs to disk (when enabled) and accumulate step results.
-        if record_output {
-            self.record_step(&step_result)?;
+        if record_output && let Err(err) = self.record_step(&step_result) {
+            // A callback error ends the run the way the failure budget
+            // does: latched, so every later step returns it without
+            // stepping anything.
+            if matches!(err, HaresError::Callback { .. }) {
+                self.terminal_error = Some(err.clone());
+            }
+            return Err(err);
         }
         // End of the `output` phase (Step 5).
         #[cfg(feature = "profiling")]
@@ -6868,7 +6945,7 @@ impl Dwelling {
             self.projected_row_buf
                 .extend(projection.iter().map(|&slot| row[slot]));
             if let Err(err) = recorder.push_row(&self.timestamp_buf, &self.projected_row_buf) {
-                return Err(HaresError::Io(format!("record push failed: {err}")));
+                return Err(Self::recorder_error("record push", err));
             }
         }
         Ok(())

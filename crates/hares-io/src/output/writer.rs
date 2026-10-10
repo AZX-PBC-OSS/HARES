@@ -19,6 +19,7 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use thiserror::Error;
 
+use super::callback::CallbackAttachment;
 use super::metrics::{FullSimulationMetrics, MetricsCalculator, MetricsError};
 use crate::config::SimulationConfig;
 use crate::output::report::Destination;
@@ -57,6 +58,8 @@ pub enum OutputError {
          overwrite: true to publish by rename"
     )]
     HardLinkUnavailable { target: PathBuf },
+    #[error("callback for report '{report}' failed: {message}")]
+    Callback { report: String, message: String },
 }
 
 /// Whether a `hard_link` failure means this filesystem cannot complete a
@@ -117,6 +120,16 @@ pub struct StreamingRecorder {
     /// Whether the partial file has been published (or discarded): a second
     /// close is a no-op, not a second publish.
     published: bool,
+    /// The attached batch callback, if any: every built batch is handed to
+    /// it in flush order. `None` when nothing is attached, which costs one
+    /// branch per flush and nothing else.
+    callback: Option<CallbackAttachment>,
+    /// Batches built so far, the `batch_index` every delivery carries.
+    batches_built: u64,
+    /// Whether the recorder's outputs are published (the final flush and
+    /// close has run). After this, no batch reaches the callback: the
+    /// buffered rows still record, the callback does not see them.
+    closed: bool,
 }
 
 impl StreamingRecorder {
@@ -205,6 +218,9 @@ impl StreamingRecorder {
             flushed_batches: Vec::new(),
             metrics_calculator: None,
             published: false,
+            callback: None,
+            batches_built: 0,
+            closed: false,
         })
     }
 
@@ -218,6 +234,13 @@ impl StreamingRecorder {
     #[must_use]
     pub fn destination(&self) -> &Destination {
         &self.destination
+    }
+
+    /// Attaches a batch callback: every built batch is handed to it in
+    /// flush order, with the context naming the report, the building and
+    /// the batch index. A later attach replaces the earlier one.
+    pub fn attach_callback(&mut self, attachment: CallbackAttachment) {
+        self.callback = Some(attachment);
     }
 
     /// Creates the partial file's backend writer at the first batch: the
@@ -266,6 +289,8 @@ impl StreamingRecorder {
         }
 
         let batch = self.build_batch()?;
+        let batch_index = self.batches_built;
+        self.batches_built += 1;
 
         if let Some(calculator) = self.metrics_calculator.as_mut() {
             calculator.accumulate(&batch)?;
@@ -280,6 +305,21 @@ impl StreamingRecorder {
                 writer.write(&batch)?;
             }
             None => {}
+        }
+
+        // The callback sees every built batch exactly once, in flush
+        // order, until the outputs are published. Its error fails the
+        // flush, naming the report; the batch itself is already written
+        // and retained.
+        if let Some(attachment) = &self.callback
+            && !self.closed
+        {
+            attachment
+                .deliver(&batch, batch_index)
+                .map_err(|err| OutputError::Callback {
+                    report: attachment.report().to_string(),
+                    message: err.message,
+                })?;
         }
 
         if self.is_memory() {
@@ -412,6 +452,9 @@ impl StreamingRecorder {
         self.flush_inner()?;
         self.close_backend_inner()?;
         self.publish()?;
+        // The outputs are published: the final partial batch was delivered
+        // by the flush above, and nothing reaches the callback after this.
+        self.closed = true;
         Ok(())
     }
 
@@ -735,6 +778,16 @@ mod tests {
             .unwrap();
         let total: usize = reader.filter_map(Result::ok).map(|b| b.num_rows()).sum();
         assert_eq!(total, 5);
+    }
+
+    /// Structural: a recorder with no callback attached constructs no
+    /// adapter, so a run that never attaches one pays a branch per flush
+    /// and nothing else.
+    #[test]
+    fn no_callback_report_constructs_no_adapter() {
+        let schema = test_schema();
+        let recorder = StreamingRecorder::new(schema, 10, Destination::Memory).unwrap();
+        assert!(recorder.callback.is_none());
     }
 
     #[test]
