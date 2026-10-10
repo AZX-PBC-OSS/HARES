@@ -294,6 +294,53 @@ under `--all-features`); `[pytest]` (the `_hares.pyi` stub).
 **Measurement:** `finish` for `consumer_shape_900s` with a Parquet
 destination, in the `02-measurement.md` log.
 
+**State:** committed `0f1e459b` on branch `row/r42-or12-pr4` (run after
+row 42, before the finalize entry this row's dependence list names: the
+`finish()` row and the Python `RunResult` row have not run, so the
+entry's shape is adapted to today's surface and the account is recorded
+here). The finalising call today is the end of `Dwelling::simulate()`:
+the billing finalisation, the observe post-hoc diagnostic checks and
+every recorder's flush, close and publish, now extracted as one
+idempotent `finalise_outputs()` (the billing finalisation is documented
+idempotent, the checks read accumulated observer data, and a closed
+recorder re-flushes and re-publishes nothing, proven by the second-call
+assertions). The timer wraps that section whole:
+`DwellingProfilingSummary.finish` is `Option<StdDuration>`, `None` until
+the first finalising call has run (a summary taken mid-run never shows a
+zero that reads as a measurement), `Some` after it, outside
+`step_total`, and a later finalising call leaves the first call's
+measurement. The Python summary's `finish_s` (None until finished, a
+float after), the `ProfilingSummary` TypedDict's field, the engine's
+emitted stats line and the golden tool's per-repetition profiling line
+(after `step_total`: `finish 0.003 s`, or `unavailable` when None) carry
+it. The tool's adapter reads the profiling summary after the run
+returns, which is already after the finalising call, so the entry's
+adapter move is vacuous here and the printed line is the measurement
+source. The acceptance tests drive the finalising call through
+`finish()`, which does not exist yet; here they drive it through
+`simulate()`: `profiling_finish_timer_covers_file_finalisation` in
+`crates/hares-core/tests/profiling.rs` (the cz2a fixture, 96 hourly
+steps, one Parquet destination in a `tempfile` directory: `finish` is
+None before, Some with the Parquet file at its final name after, and
+equality across a second finalising call; the duration's value not
+asserted) and `profiling_summary_reports_finish` (a `hares-python` Rust
+test compiled under `[test-profiling]`, built as PR-6's
+`profiling_summary_lists_actors` is): `finish_s` is Python None from
+`profiling_summary()` after the 96 steps and a float after the
+finalising call, which runs on the inner `Dwelling` so the test
+interpreter need not carry polars. RED first: both tests failed to
+compile on the missing field, then the None/Some assertions failed
+before the timer existed, then green. Gates: fmt clean; clippy
+`--workspace --all-targets --all-features -D warnings` clean; nextest
+`--all-features -j 4` 7896 passed, 1 skipped (the parent's ignored
+kind-pin generator), `-F dst` 7826 passed, `-F profiling` 7821 passed;
+the eight golden fixtures bitwise identical in both feature sets
+(verified no golden carries the profiling summary: the fixtures' JSON
+holds metrics, frame digests and health only, so the new field moves
+nothing); pytest unchanged (1648 passed with the base's 3 failures and
+4 setup errors, base-verified on a worktree of the base); pyright 0
+errors.
+
 ## PR-5: the Python binding reports zeros when profiling is compiled out
 
 **Kind:** fix.

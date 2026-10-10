@@ -2632,6 +2632,63 @@ carries `health_policy`); `11-other-defects.md` OD-18 (row 30b), which
 makes `clamped_actions` a counted event in every build, so a policy that
 escalates it can fire.
 
+**State:** committed `6fa206a9` on branch `row/r42-or12-pr4` (cut from
+`7e95e974`), one commit, the acceptance tests all present and green.
+The policy is `HealthPolicy` in `hares-io/src/config.rs`
+(`#[serde(default, deny_unknown_fields)]` at container level, so a
+partial table is legal and unknown keys are rejected; the empty policy
+is the `SimulationConfig.health_policy` default, so existing configs,
+TOML files and Python constructors are unchanged: a pure refactor for
+existing runs), with `strict()` (every limit `Some(0)` and
+`require_warmup_convergence`) and `limit_for(event)`. The violation is
+the `HaresError::HealthPolicyViolation` variant; the acceptance tests
+name the event, the step, the source, the count and the limit, and the
+run latches ended the way the failure budget and a callback error do
+(`terminal_error`), so every later step returns it without stepping.
+The variant's source field is named `origin`: a thiserror field named
+`source` is implicitly the error chain's source and must implement
+`StdError`, which a name is not; the Display reads "from '<name>'" and
+the Python exception's attribute is `source`, so the entry's shape holds
+at both surfaces consumers read. The policy is evaluated at the
+established checkpoints, one per counted change: the failed equipment
+step's booking checks the rollback limit after the rollback and ahead of
+the failure budget's own check; every rejected control signal counts
+through a `RejectionGate` (the run total as its baseline, the policy
+limit copied in) that the dispatch passes count into, remembering the
+first crossing with its source (the refusing equipment's name, the
+target name, or the end use, matching the warning each site already
+pushes), the pass's count landing on the run total before the violation
+returns (a failed step loses no counted rejections); the clamp drain
+lands each equipment's curve-index clamps one source at a time so the
+crossing names the equipment; `record_clamped_actions` keeps its
+signature and names the source "actions" (the caller clips whole action
+vectors, so no single equipment or actor owns the clamp); the warm-up
+end checks `require_warmup_convergence` where the non-convergence is
+recorded and warned, with `step_index: None`, count 1, limit 0, source
+"warmup". A step event's violation carries `step_index: Some(step)`
+except during warm-up (warm-up replays are not steps of the run). The
+Python surface: the frozen `HealthPolicy` pyclass (keyword per field,
+defaults empty, `strict()` classmethod, field getters, `__eq__`,
+`__repr__`), the `SimulationConfig(health_policy=...)` keyword with
+getter and setter, `HaresHealthPolicyError` (a `HaresSimulationError`
+subclass carrying `event` (the variant's Debug spelling, matching the
+serde vocabulary), `step_index`, `source`, `count` and `limit` as
+attributes) exported beside the other engine exceptions and covered by
+the pickle round trip (which iterates every exported exception class);
+the `_hares.pyi` stub carries the class, the keyword, the property and
+the exception. RED first: the acceptance tests failed to compile on the
+missing API at the base, then failed behaviorally with the types in and
+no machinery evaluating the policy, then green. Gates: fmt clean;
+clippy `--workspace --all-targets --all-features -D warnings` clean;
+nextest `--all-features -j 4` 7894 passed, 1 skipped (the parent's
+ignored kind-pin generator), `-F dst` 7826 passed; the eight golden
+fixtures bitwise identical (compare-all 7, `full_year_900s_dst` 1); the
+filtered suite `cargo nextest run -p hares-core -p hares-io -p
+hares-python health` green (plus the escalation tests by name, which the
+filter's name match does not reach); pytest 1648 passed with 3 failures
+and 4 setup errors identical to the base commit (base-verified on a
+worktree of the base, so none is this row's); pyright 0 errors.
+
 ## OR-6: one `RunResult`, `finish()` for `simulate()` and stepped runs alike
 
 **Kind:** initiative work. Fixes V12 (stepped runs lose the tail) and V26.
