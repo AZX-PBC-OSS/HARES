@@ -1172,13 +1172,13 @@ def self_test() -> None:
 
 
 def main() -> None:
-    output_path = OUTPUT_PATH
+    out_path = OUTPUT_PATH
     if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
         self_test()
         return
 
     if len(sys.argv) > 2 and sys.argv[1] == "--output":
-        output_path = sys.argv[2]
+        out_path = sys.argv[2]
 
     self_test()
 
@@ -1188,12 +1188,12 @@ def main() -> None:
     # Deterministic: sorted_keys=False because the ordered boundary list is
     # part of the schema, but we use stable JSON formatting otherwise.
     serialised = json.dumps(payload, indent=2, ensure_ascii=False)
-    with open(output_path, "w", encoding="utf-8") as fh:
+    with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(serialised)
         fh.write("\n")
 
     total_ua = payload["total_ua_w_k"]
-    print(f"Wrote {output_path}")
+    print(f"Wrote {out_path}")
     print(f"Total UA: {total_ua} W/K")
     for bd in payload["boundaries"]:
         print(

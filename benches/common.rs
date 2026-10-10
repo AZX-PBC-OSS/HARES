@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Duration;
 use hares_core::{DwellingConfig, SimulationConfig};
-use hares_io::OutputFormat;
 
 #[path = "../tests/support/fixture_start.rs"]
 mod fixture_start;
@@ -128,16 +127,19 @@ pub fn build_dwelling_config(
             start_time: fixture_start::fixture_start(),
             duration,
             time_res: Duration::minutes(1),
-            output_verbosity: 0,
-            output_path: Some(numbered_path(dir, "hares-bench-output", "csv")),
-            write_output: true,
-            output_format: OutputFormat::Csv,
+            reports: vec![hares_io::ReportSpec {
+                name: "file".to_string(),
+                selection: hares_io::Selection::Verbosity(0),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Csv {
+                    path: numbered_path(dir, "hares-bench-output", "csv"),
+                    overwrite: true,
+                },
+            }],
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
-            retain_batches: false,
             civil_timezone: None,
-            rotation: hares_io::RotationPolicy::default(),
             site_location: hares_io::SiteLocationOverride::default(),
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
@@ -157,8 +159,6 @@ pub fn synthetic_toml_case(path: &PathBuf, duration_s: i64) {
 start_time = "2024-01-01T00:00:00Z"
 time_res = 60
 duration = {duration_s}
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]

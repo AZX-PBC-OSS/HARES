@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use chrono::{Duration, TimeZone};
 use hares_core::actors::{BatteryManagementActor, BmsParams};
 use hares_core::{Dwelling, DwellingConfig};
-use hares_io::OutputFormat;
 use hares_types::{BmsMode, GridExportRule};
 use serde_json::{Value, json};
 
@@ -46,17 +45,12 @@ fn config(hpxml: &Path, overrides: Option<Value>, start_hour: u32) -> DwellingCo
             start_time,
             duration: Duration::hours(24),
             time_res: Duration::seconds(3600),
-            output_verbosity: 0,
-            write_output: false,
-            output_path: None,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides,
@@ -115,8 +109,15 @@ fn water_heater_setpoint_override_changes_behaviour() {
 fn battery_control_override_makes_the_pack_cycle() {
     fn max_observed_soc(overrides: Option<Value>, csv: &PathBuf) -> f64 {
         let mut cfg = config(&fixture("base-battery.xml"), overrides, 10);
-        cfg.sim_config.write_output = true;
-        cfg.sim_config.output_path = Some(csv.to_path_buf());
+        cfg.sim_config.reports = vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(0),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: csv.to_path_buf(),
+                overwrite: false,
+            },
+        }];
         let result = hares_core::SimulationEngine::new()
             .run(cfg)
             .expect("the engine run must succeed");

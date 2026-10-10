@@ -6,7 +6,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from hares import DwellingConfig, SimulationConfig
+from hares import Destination, DwellingConfig, ReportSpec, Selection, SimulationConfig
 from hares import Fleet as PyFleet
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -87,8 +87,10 @@ def _build_simulatable_fleet(output_dir: Path, n: int = 1):
                     start_time="2019-01-01T00:00:00",
                     duration=3600,
                     time_res=60,
-                    write_output=True,
-                    output_path=str(output_dir / f"fleet_{i + 1}.csv"),
+                    reports=[
+                        ReportSpec("frame", Selection.verbosity(0), Destination.memory()),
+                        ReportSpec("file", Selection.verbosity(0), Destination.csv(str(output_dir / f"fleet_{i + 1}.csv"))),
+                    ],
                 ),
                 bldg_id=i + 1,
             )
@@ -103,7 +105,7 @@ def test_from_buildings_constructs_fleet(tmp_path: Path) -> None:
 
     config = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False, start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
     )
     fleet = PyFleet.from_buildings([config])
 
@@ -116,11 +118,11 @@ def test_from_buildings_with_custom_weights(tmp_path: Path) -> None:
 
     config1 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False, start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
     )
     config2 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False, start_time="2019-01-01T00:00:00", duration=86400), bldg_id=2,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=2,
     )
 
     fleet = PyFleet.from_buildings([config1, config2], sample_weights=[2.0, 1.0])
@@ -134,7 +136,7 @@ def test_from_buildings_raises_on_weight_length_mismatch(tmp_path: Path) -> None
 
     config = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False, start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
     )
 
     with pytest.raises(ValueError, match="sample_weights length"):
@@ -153,11 +155,11 @@ def test_from_buildings_rejects_invalid_weight(tmp_path: Path, bad_weight: float
 
     config1 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False, start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
     )
     config2 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False, start_time="2019-01-01T00:00:00", duration=86400), bldg_id=2,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=2,
     )
 
     with pytest.raises(ValueError, match="invalid sample_weight"):
@@ -176,15 +178,15 @@ def test_len_returns_correct_count(tmp_path: Path) -> None:
 
     config1 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False, start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
     )
     config2 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False, start_time="2019-01-01T00:00:00", duration=86400), bldg_id=2,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=2,
     )
     config3 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False, start_time="2019-01-01T00:00:00", duration=86400), bldg_id=3,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=3,
     )
 
     fleet = PyFleet.from_buildings([config1, config2, config3])
@@ -415,7 +417,7 @@ def test_progress_callback_invoked(tmp_path: Path) -> None:
 def test_simulate_raise_on_failure_true_raises(tmp_path: Path) -> None:
     """Verify simulate(raise_on_failure=True) raises on any failure."""
     # Use invalid paths to force simulation failure
-    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, write_output=False)
+    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60)
     config = DwellingConfig(
         hpxml="/nonexistent/building.xml",
         schedule="/nonexistent/schedule.csv",
@@ -436,7 +438,7 @@ def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, write_output=False)
+    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60)
 
     # One valid config, one invalid -- partial failure
     good = DwellingConfig(
@@ -476,7 +478,7 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, output_verbosity=1, write_output=False)
+    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, verbosity=1)
 
     # The battery dwelling declares the control it tests: `Manual`, the
     # idle battery the column-mismatch scenario was built on.

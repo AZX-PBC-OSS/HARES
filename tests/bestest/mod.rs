@@ -291,7 +291,7 @@ fn bestest_extended_cases_are_tracked() {
         // The extended fixtures declare their infiltration (a constant
         // ACH): each builds under the strict rule that errors on a
         // conditioned zone with no measurement and no constant rate.
-        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+        Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
             .unwrap_or_else(|err| panic!("extended case {} builds: {err}", case.id));
     }
 }
@@ -299,7 +299,7 @@ fn bestest_extended_cases_are_tracked() {
 fn run_case(case: &BestestCase) -> CaseObservation {
     let t0 = std::time::Instant::now();
     let mut dwelling =
-        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+        Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
             .unwrap_or_else(|err| panic!("failed to load BESTEST case {}: {err}", case.id));
     eprintln!("[bestest] case={} loaded in {:?}", case.id, t0.elapsed());
     let t1 = std::time::Instant::now();
@@ -355,7 +355,7 @@ fn run_case(case: &BestestCase) -> CaseObservation {
 fn case_600ff_zone_air_balance_residual_bounded() {
     let case = core_cases().into_iter().find(|c| c.id == "600FF").unwrap();
     let mut dwelling =
-        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+        Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
             .unwrap_or_else(|err| panic!("failed to load BESTEST case 600FF: {err}"));
 
     let mut max_abs = 0.0_f64;

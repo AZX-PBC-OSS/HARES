@@ -4,9 +4,13 @@ bldg_id = 1
 start_time = "2023-01-01T00:00:00-07:00"
 duration = 3600
 time_res = 60
-output_verbosity = 3
 output_chunk_size = 1000
 master_seed = 0
+
+[[simulation.reports]]
+name = "frame"
+selection = { verbosity = 3 }
+destination = "memory"
 
 # The OCHRE reference holds this battery idle: the declared `Manual`
 # control is that battery following no management. (An HPXML battery

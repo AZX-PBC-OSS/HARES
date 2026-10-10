@@ -187,7 +187,9 @@ def load_sim_config(fixture_dir: Path) -> dict:
         "start_time_iso": simulation["start_time"],
         "duration_s": int(simulation["duration"]),
         "time_res_s": int(simulation["time_res"]),
-        "output_verbosity": int(simulation["output_verbosity"]),
+        "verbosity": int(
+            simulation["reports"][0]["selection"]["verbosity"]
+        ),
         "master_seed": int(simulation.get("master_seed", 0)),
     }
 
@@ -251,7 +253,7 @@ def run_ochre(
         hpxml_file=str((fixture_dir / "building.xml").resolve()),
         hpxml_schedule_file=str((fixture_dir / "schedule.csv").resolve()),
         weather_file=str((fixture_dir / "weather.epw").resolve()),
-        verbosity=sim_cfg["output_verbosity"],
+        verbosity=sim_cfg["verbosity"],
         save_results=False,
     ).simulate()
     assert isinstance(sim_result, tuple) and len(sim_result) == 3, (
@@ -309,11 +311,11 @@ def run_hares(
 
     import hares
 
-    dwelling_sim = hares.Dwelling.from_hpxml(str((fixture_dir / "building.xml").resolve()), str((fixture_dir / "schedule.csv").resolve()), str((fixture_dir / "weather.epw").resolve()), defaults_path=str(Path("defaults").resolve()), config=SimulationConfig(start_time=sim_cfg["start_time_iso"], time_res=sim_cfg["time_res_s"], duration=sim_cfg["duration_s"], output_verbosity=sim_cfg["output_verbosity"], master_seed=sim_cfg["master_seed"], write_output=True, output_path=str(out_dir / "hares_parity_diagnostics.csv")))
+    dwelling_sim = hares.Dwelling.from_hpxml(str((fixture_dir / "building.xml").resolve()), str((fixture_dir / "schedule.csv").resolve()), str((fixture_dir / "weather.epw").resolve()), defaults_path=str(Path("defaults").resolve()), config=SimulationConfig(start_time=sim_cfg["start_time_iso"], time_res=sim_cfg["time_res_s"], duration=sim_cfg["duration_s"], verbosity=sim_cfg["verbosity"], csv_path=str(out_dir / "hares_parity_diagnostics.csv")))
     pdf = dwelling_sim.simulate().to_pandas()
     pdf = _normalize_time_index(pdf, sim_cfg["start_time"])
 
-    dwelling_obs = hares.Dwelling.from_hpxml(str((fixture_dir / "building.xml").resolve()), str((fixture_dir / "schedule.csv").resolve()), str((fixture_dir / "weather.epw").resolve()), defaults_path=str(Path("defaults").resolve()), config=SimulationConfig(start_time=sim_cfg["start_time_iso"], time_res=sim_cfg["time_res_s"], duration=sim_cfg["duration_s"], output_verbosity=sim_cfg["output_verbosity"], master_seed=sim_cfg["master_seed"], write_output=True, output_path=str(out_dir / "hares_parity_diagnostics_obs.csv")))
+    dwelling_obs = hares.Dwelling.from_hpxml(str((fixture_dir / "building.xml").resolve()), str((fixture_dir / "schedule.csv").resolve()), str((fixture_dir / "weather.epw").resolve()), defaults_path=str(Path("defaults").resolve()), config=SimulationConfig(start_time=sim_cfg["start_time_iso"], time_res=sim_cfg["time_res_s"], duration=sim_cfg["duration_s"], verbosity=sim_cfg["verbosity"], csv_path=str(out_dir / "hares_parity_diagnostics_obs.csv")))
 
     obs_rows: list[dict[str, Any]] = []
     steps = sim_cfg["duration_s"] // sim_cfg["time_res_s"]

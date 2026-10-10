@@ -9,7 +9,6 @@ use std::path::PathBuf;
 
 use chrono::{Duration, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-use hares_io::OutputFormat;
 use hares_types::EndUse;
 
 #[path = "../../../tests/support/denver_offset.rs"]
@@ -19,24 +18,27 @@ fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn sim_config(output_path: PathBuf) -> SimulationConfig {
+fn sim_config(csv_path: PathBuf) -> SimulationConfig {
     SimulationConfig {
         start_time: denver_offset::denver_offset()
             .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
             .unwrap(),
         duration: Duration::hours(1),
         time_res: Duration::seconds(900),
-        output_verbosity: 5,
-        write_output: true,
-        output_path: Some(output_path),
-        output_format: OutputFormat::Csv,
+        reports: vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(5),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: csv_path,
+                overwrite: false,
+            },
+        }],
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
@@ -71,9 +73,9 @@ fn ochre_dwelling(hpxml_name: &str, output_dir: &tempfile::TempDir) -> Dwelling 
 /// (Arrow keeps field metadata in a `HashMap`).
 fn schema_columns(dwelling: &Dwelling) -> BTreeMap<String, BTreeMap<String, String>> {
     dwelling
-        .recorder
-        .as_ref()
-        .expect("write_output is true")
+        .recorders
+        .first()
+        .expect("the report's recorder exists")
         .schema()
         .fields()
         .iter()

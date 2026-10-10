@@ -22,7 +22,7 @@ def dwelling_summer_24h():
     """Dwelling configured for a July day, 15-min steps, 24 hours."""
     from hares import Dwelling
 
-    return Dwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, config=SimulationConfig(start_time="2019-07-15T00:00:00Z", duration=86400, time_res=900, write_output=False))
+    return Dwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, config=SimulationConfig(start_time="2019-07-15T00:00:00Z", duration=86400, time_res=900))
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ def dwelling_winter_24h():
     """Dwelling configured for a January day, 15-min steps, 24 hours."""
     from hares import Dwelling
 
-    return Dwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, config=SimulationConfig(start_time="2019-01-15T00:00:00Z", duration=86400, time_res=900, write_output=False))
+    return Dwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, config=SimulationConfig(start_time="2019-01-15T00:00:00Z", duration=86400, time_res=900))
 
 
 @pytest.fixture
@@ -38,7 +38,7 @@ def dwelling_all_north():
     """Dwelling with both roof planes facing north (azimuth 0°)."""
     from hares import Dwelling
 
-    return Dwelling.from_hpxml(hpxml=HPXML_ALL_NORTH, schedule=SCHEDULE, weather=WEATHER, config=SimulationConfig(start_time="2019-07-15T00:00:00Z", duration=86400, time_res=900, write_output=False))
+    return Dwelling.from_hpxml(hpxml=HPXML_ALL_NORTH, schedule=SCHEDULE, weather=WEATHER, config=SimulationConfig(start_time="2019-07-15T00:00:00Z", duration=86400, time_res=900))
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +191,7 @@ class TestPvPowerProduction:
     def _make_pv_dwelling(start: str, duration_s: int = 86400, time_res_s: int = 900):
         from hares import Dwelling
 
-        return Dwelling.from_hpxml(hpxml=HPXML_PV, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=start, duration=duration_s, time_res=time_res_s, write_output=False))
+        return Dwelling.from_hpxml(hpxml=HPXML_PV, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=start, duration=duration_s, time_res=time_res_s))
 
     @pytest.mark.slow
     def test_pv_dwelling_initializes_without_error(self):
@@ -266,7 +266,7 @@ class TestPvPowerProduction:
         """Without PV, net power should always be non-negative."""
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, config=SimulationConfig(start_time="2019-07-15T00:00:00Z", duration=86400, time_res=900, write_output=False))
+        dw = Dwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, config=SimulationConfig(start_time="2019-07-15T00:00:00Z", duration=86400, time_res=900))
         dw.initialize()
 
         powers = [dw.step()["net_electric_power_kw"] for _ in range(96)]

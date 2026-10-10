@@ -42,7 +42,6 @@ use std::path::PathBuf;
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
 use hares_equipment::{Equipment, EvConfig};
-use hares_io::OutputFormat;
 
 mod common;
 
@@ -363,7 +362,7 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
     let src = std::fs::read_to_string(fixture_dir().join("home.xml")).expect("fixture home.xml");
     let hpxml_path = tmp.path().join("bldg0000007_ev.xml");
     std::fs::write(&hpxml_path, inject_ev(&src)).expect("write injected HPXML");
-    let output_path = tmp.path().join("ev_cold_snap_45day.csv");
+    let csv_path = tmp.path().join("ev_cold_snap_45day.csv");
 
     let nightly = serde_json::json!({"Nightly": {
         "off_peak_start_hour": 22.0,
@@ -381,17 +380,20 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
             .unwrap(),
         duration: Duration::days(45),
         time_res: Duration::seconds(900),
-        output_verbosity: 5,
-        write_output: true,
-        output_path: Some(output_path.clone()),
-        output_format: OutputFormat::Csv,
+        reports: vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(5),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: csv_path.clone(),
+                overwrite: false,
+            },
+        }],
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     };
     let config = DwellingConfig {
@@ -414,8 +416,7 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
         result.status
     );
 
-    let (charge_days, cancelled_max) =
-        ev_charge_days_and_peak_cancelled(&output_path, STEPS_PER_DAY);
+    let (charge_days, cancelled_max) = ev_charge_days_and_peak_cancelled(&csv_path, STEPS_PER_DAY);
     assert!(
         charge_days >= 30,
         "Nightly(22:00-06:00, target 0.90) in a sustained -7 C cold snap must \
@@ -464,17 +465,22 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
             .unwrap(),
         duration: Duration::days(2),
         time_res: Duration::seconds(900),
-        output_verbosity: 5,
-        write_output: false,
-        output_path: Some(tmp.path().join("ev_regr_diag.csv")),
-        output_format: OutputFormat::Csv,
+        // The diagnostics CSV rides the verbosity-5 report's file
+        // destination (until the diagnostics-as-catalogue entry).
+        reports: vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(5),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: tmp.path().join("ev_regr_diag.csv"),
+                overwrite: false,
+            },
+        }],
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     };
     let config = DwellingConfig {
@@ -594,17 +600,22 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
             .unwrap(),
         duration: Duration::days(2),
         time_res: Duration::seconds(900),
-        output_verbosity: 5,
-        write_output: false,
-        output_path: Some(tmp.path().join("ev_regr_diag.csv")),
-        output_format: OutputFormat::Csv,
+        // The diagnostics CSV rides the verbosity-5 report's file
+        // destination (until the diagnostics-as-catalogue entry).
+        reports: vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(5),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: tmp.path().join("ev_regr_diag.csv"),
+                overwrite: false,
+            },
+        }],
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     };
     let config = DwellingConfig {
@@ -661,17 +672,22 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
             .unwrap(),
         duration: Duration::days(2),
         time_res: Duration::seconds(900),
-        output_verbosity: 5,
-        write_output: false,
-        output_path: Some(tmp.path().join("ev_regr_diag.csv")),
-        output_format: OutputFormat::Csv,
+        // The diagnostics CSV rides the verbosity-5 report's file
+        // destination (until the diagnostics-as-catalogue entry).
+        reports: vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(5),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: tmp.path().join("ev_regr_diag.csv"),
+                overwrite: false,
+            },
+        }],
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     };
     let base = DwellingConfig {

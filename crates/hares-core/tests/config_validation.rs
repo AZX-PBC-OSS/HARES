@@ -14,17 +14,12 @@ fn sim_config(duration_secs: i64, time_res_secs: i64) -> SimulationConfig {
             .unwrap(),
         duration: Duration::seconds(duration_secs),
         time_res: Duration::seconds(time_res_secs),
-        output_verbosity: 0,
-        output_path: None,
-        write_output: false,
-        output_format: hares_io::OutputFormat::Csv,
+        reports: Vec::new(),
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
@@ -108,14 +103,12 @@ fn validate_fires_for_rust_built_blueprint_per_check_class() {
         "\nstart_time = \"2018-01-01T00:00:00Z\"\nduration = 3600\ntime_res = 0\n".into(),
     );
 
-    // output_verbosity must be 0-8.
-    let mut config = sim_config(3600, 60);
-    config.output_verbosity = 9;
-    assert_fails_like_from_toml(
-        "verbosity above 8",
-        config,
-        "\nstart_time = \"2018-01-01T00:00:00Z\"\nduration = 3600\ntime_res = 60\noutput_verbosity = 9\n"
-            .into(),
+    // A verbosity report above 8 must be rejected.
+    let toml = "\nstart_time = \"2018-01-01T00:00:00Z\"\nduration = 3600\ntime_res = 60\n\n[[reports]]\nname = \"frame\"\nselection = { verbosity = 9 }\ndestination = \"memory\"\n";
+    let config = hares_io::SimulationConfig::from_toml(toml);
+    assert!(
+        config.is_err(),
+        "a verbosity report above 8 must be rejected"
     );
 
     // duration must be evenly divisible by time_res.

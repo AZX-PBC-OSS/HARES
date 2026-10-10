@@ -23,16 +23,14 @@ def _make_blueprint(**kw: Any):
         "start_time": "2019-01-01T00:00:00",
         "duration": kw.pop("duration_s", DURATION_S),
         "time_res": kw.pop("time_res_s", TIME_RES_S),
-        "write_output": False,
     }
     for name in (
         "master_seed",
-        "output_verbosity",
-        "rotation",
+        "verbosity",
+        "reports",
         "civil_timezone",
         "setpoint_deadband_c",
         "output_chunk_size",
-        "retain_batches",
     ):
         if name in kw:
             sim[name] = kw.pop(name)

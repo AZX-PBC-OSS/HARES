@@ -118,9 +118,8 @@ use roster::RosterCaches;
 
 use conversions::{
     apply_humidity_update_to_zones, apply_thermal_update_to_zones, build_output_column_index,
-    chrono_to_std_duration, default_output_path, duration_to_u32_secs, merged_equipment_config,
-    required_datetime, required_duration, required_path, validate_equipment_override_keys,
-    validate_wildcard_override,
+    chrono_to_std_duration, duration_to_u32_secs, merged_equipment_config, required_datetime,
+    required_duration, required_path, validate_equipment_override_keys, validate_wildcard_override,
 };
 #[cfg(any(feature = "profiling", test))]
 use hares_types::alloc_count::thread_allocations;
@@ -655,10 +654,16 @@ fn is_schema_known_equipment(column_index: &HashMap<String, usize>, name: &str) 
 /// Resolves the per-equipment column positions of the row plan's producer
 /// bindings, against the freeze-time column index of the schema the plan
 /// freezes from. Runs once per plan build, never per step.
+///
+/// `expected` is the set of column names the run's reports promise (the
+/// union of the selections resolved against the catalogue): a promised
+/// column a schema-known equipment cannot resolve is schema drift and
+/// fails the plan; a column no report selects resolves to `None` and the
+/// step writes nothing to it.
 fn plan_equipment_columns(
     equipment: &[&dyn Equipment],
     column_index: &HashMap<String, usize>,
-    verbosity: u8,
+    expected: &HashSet<String>,
 ) -> Result<Vec<EquipmentColumns>> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for eq in equipment {
@@ -699,11 +704,11 @@ fn plan_equipment_columns(
             // even a column that happens to exist under its name (the
             // reserved aggregates are exactly that case: present in the
             // index, never this equipment's own).
-            let resolve = |col_name: &str, min_verbosity: u8| -> Result<Option<usize>> {
+            let resolve = |col_name: &str| -> Result<Option<usize>> {
                 if !in_schema {
                     return Ok(None);
                 }
-                resolve_against_index(col_name, column_index, &name, verbosity >= min_verbosity)
+                resolve_against_index(col_name, column_index, &name, expected.contains(col_name))
             };
             // Shared predicate with build_schema: the schema emits a
             // "{name} Gas Power (therms/hour)" column iff this returns true,
@@ -715,30 +720,30 @@ fn plan_equipment_columns(
             let is_hp_heater = is_heat_pump_heater(&desc.name);
             let has_soc = has_soc(&desc.name);
 
-            let electric_power = resolve(&format!("{name} {ELECTRIC_POWER_SUFFIX}"), 1)?;
+            let electric_power = resolve(&format!("{name} {ELECTRIC_POWER_SUFFIX}"))?;
             let gas_power = if has_gas {
-                resolve(&format!("{name} {GAS_POWER_SUFFIX}"), 1)?
+                resolve(&format!("{name} {GAS_POWER_SUFFIX}"))?
             } else {
                 None
             };
-            let mode = resolve(&format!("{name} {MODE_SUFFIX}"), 3)?;
+            let mode = resolve(&format!("{name} {MODE_SUFFIX}"))?;
             let setpoint = if is_hvac {
-                resolve(&format!("{name} {SETPOINT_SUFFIX}"), 3)?
+                resolve(&format!("{name} {SETPOINT_SUFFIX}"))?
             } else {
                 None
             };
             let soc = if has_soc {
-                resolve(&format!("{name} {SOC_SUFFIX}"), 3)?
+                resolve(&format!("{name} {SOC_SUFFIX}"))?
             } else {
                 None
             };
             let capacity = if is_hvac {
-                resolve(&format!("{name} {CAPACITY_SUFFIX}"), 7)?
+                resolve(&format!("{name} {CAPACITY_SUFFIX}"))?
             } else {
                 None
             };
             let cop = if is_hvac {
-                resolve(&format!("{name} {COP_SUFFIX}"), 7)?
+                resolve(&format!("{name} {COP_SUFFIX}"))?
             } else {
                 None
             };
@@ -746,47 +751,47 @@ fn plan_equipment_columns(
             // (mirroring the unconditional Electric Power column): gas
             // equipment with electric parasitics (blower fans, circulation
             // pumps, draft inducers) emits reactive power too.
-            let reactive = resolve(&format!("{name} {REACTIVE_POWER_SUFFIX}"), 5)?;
-            let pf = resolve(&format!("{name} {POWER_FACTOR_SUFFIX}"), 5)?;
-            let energy_kwh = resolve(&format!("{name} {ENERGY_SUFFIX}"), 4)?;
-            let schedule = resolve(&format!("{name} {SCHEDULE_SUFFIX}"), 7)?;
+            let reactive = resolve(&format!("{name} {REACTIVE_POWER_SUFFIX}"))?;
+            let pf = resolve(&format!("{name} {POWER_FACTOR_SUFFIX}"))?;
+            let energy_kwh = resolve(&format!("{name} {ENERGY_SUFFIX}"))?;
+            let schedule = resolve(&format!("{name} {SCHEDULE_SUFFIX}"))?;
             let defrost_state = if is_hp_heater {
-                resolve(&format!("{name} {DEFROST_STATE_SUFFIX}"), 7)?
+                resolve(&format!("{name} {DEFROST_STATE_SUFFIX}"))?
             } else {
                 None
             };
             let er_power = if is_hp_heater {
-                resolve(&format!("{name} {ER_POWER_SUFFIX}"), 7)?
+                resolve(&format!("{name} {ER_POWER_SUFFIX}"))?
             } else {
                 None
             };
             let shr = if is_cooling {
-                resolve(&format!("{name} {SHR_SUFFIX}"), 7)?
+                resolve(&format!("{name} {SHR_SUFFIX}"))?
             } else {
                 None
             };
             let speed = if is_hvac {
-                resolve(&format!("{name} {SPEED_SUFFIX}"), 7)?
+                resolve(&format!("{name} {SPEED_SUFFIX}"))?
             } else {
                 None
             };
             let fan_power = if is_hvac {
-                resolve(&format!("{name} {FAN_POWER_SUFFIX}"), 7)?
+                resolve(&format!("{name} {FAN_POWER_SUFFIX}"))?
             } else {
                 None
             };
             let main_power = if is_hvac {
-                resolve(&format!("{name} {MAIN_POWER_SUFFIX}"), 7)?
+                resolve(&format!("{name} {MAIN_POWER_SUFFIX}"))?
             } else {
                 None
             };
             let runtime_fraction = if is_hvac {
-                resolve(&format!("{name} {RUNTIME_FRACTION_SUFFIX}"), 7)?
+                resolve(&format!("{name} {RUNTIME_FRACTION_SUFFIX}"))?
             } else {
                 None
             };
             let latent_gains = if is_cooling {
-                resolve(&format!("{name} {LATENT_GAINS_SUFFIX}"), 7)?
+                resolve(&format!("{name} {LATENT_GAINS_SUFFIX}"))?
             } else {
                 None
             };
@@ -794,29 +799,32 @@ fn plan_equipment_columns(
             // per-equipment one: record_step accumulates every equipment's
             // duct-loss telemetry into the same row slot (`row[idx] +=`),
             // and its invariant demands the column for every
-            // equipment at verbosity ≥ 5. It therefore resolves for ANY
-            // equipment when the schema carries it — including equipment
-            // added after the schema froze, whose per-equipment columns are
-            // missing by design but whose duct contribution must still
-            // count toward the aggregate (gating it on `in_schema` would
-            // fail the invariant and silently undercount the
-            // aggregate in release builds).
-            let duct_losses =
-                resolve_against_index(HVAC_DUCT_LOSSES_COL, column_index, &name, verbosity >= 5)?;
+            // equipment when a report selects it. It therefore resolves
+            // for ANY equipment when the schema carries it — including
+            // equipment added after the schema froze, whose per-equipment
+            // columns are missing by design but whose duct contribution
+            // must still count toward the aggregate (gating it on
+            // `in_schema` would fail the invariant and silently undercount
+            // the aggregate in release builds).
+            let duct_losses = resolve_against_index(
+                HVAC_DUCT_LOSSES_COL,
+                column_index,
+                &name,
+                expected.contains(HVAC_DUCT_LOSSES_COL),
+            )?;
 
-            // V8 per-equipment telemetry diagnostic columns.
-            let (v8_state_columns, v8_flow_columns) = if verbosity >= 8 {
-                resolve_v8_columns(
-                    &name,
-                    column_index,
-                    is_hvac,
-                    is_hp_heater,
-                    is_pv(&desc.name),
-                    is_ev(&desc.name),
-                )
-            } else {
-                (Vec::new(), Vec::new())
-            };
+            // V8 per-equipment telemetry diagnostic columns: resolved
+            // leniently (a column no report selects is skipped), so the
+            // run-level tier gate the old verbosity field carried is the
+            // selections' own.
+            let (v8_state_columns, v8_flow_columns) = resolve_v8_columns(
+                &name,
+                column_index,
+                is_hvac,
+                is_hp_heater,
+                is_pv(&desc.name),
+                is_ev(&desc.name),
+            );
 
             Ok(EquipmentColumns {
                 electric_power,
@@ -1126,7 +1134,7 @@ fn build_output_row_bindings(
     schema: &Schema,
     equipment: &[&dyn Equipment],
     actors: &[&dyn Actor],
-    verbosity: u8,
+    expected: &HashSet<String>,
 ) -> Result<OutputRowBindings> {
     let column_index = build_output_column_index(schema);
     let first_hvac = equipment
@@ -1134,7 +1142,7 @@ fn build_output_row_bindings(
         .position(|eq| is_hvac_or_wh(&eq.descriptor().name));
     Ok(OutputRowBindings {
         dwelling: build_dwelling_columns(&column_index, first_hvac),
-        equipment: plan_equipment_columns(equipment, &column_index, verbosity)?,
+        equipment: plan_equipment_columns(equipment, &column_index, expected)?,
         end_use_aggregates: build_end_use_aggregate_indices(
             &equipment_descriptor_specs(equipment),
             &column_index,
@@ -2192,7 +2200,9 @@ pub struct Dwelling {
     /// the step cannot be retried: every later step returns this error
     /// without stepping anything.
     terminal_error: Option<HaresError>,
-    pub recorder: Option<StreamingRecorder>,
+    /// One streaming recorder per report, in `reports` order. Empty when no
+    /// report is configured: nothing is recorded and no file is written.
+    pub recorders: Vec<StreamingRecorder>,
     pub rng: ChaCha8Rng,
     /// Bounded warning buffer (first [`WarningLog::CAPACITY`] messages kept,
     /// overflow counted) — see [`Dwelling::take_warnings`].
@@ -2264,6 +2274,10 @@ pub struct Dwelling {
     roster: RosterCaches,
     /// Pre-allocated buffer for RFC 3339 timestamp formatting, reused each step.
     timestamp_buf: String,
+    /// Reused scratch for the per-report projected rows: the union row's
+    /// values one report's projection selects, pushed to that report's
+    /// recorder. Cleared and refilled per report per step.
+    projected_row_buf: Vec<f64>,
     /// Schedule column index for the occupancy time series, or `None` if the
     /// schedule does not include an occupancy column.
     occupancy_column_idx: Option<usize>,
@@ -2362,18 +2376,14 @@ pub struct Dwelling {
     /// export, `(-net_active_kw()).max(0.0)`); 0.0 when not islanded.
     island_excess_kw: f64,
     /// Output config retained for schema rebuilds when equipment changes.
-    output_verbosity: u8,
+    reports: Vec<hares_io::ReportSpec>,
     output_chunk_size: usize,
-    output_format: hares_io::OutputFormat,
-    output_path: PathBuf,
-    write_output: bool,
-    retain_batches: bool,
-    output_rotation: hares_io::RotationPolicy,
     /// Simulation config retained for output-schema rebuilds when equipment
     /// changes: the incremental metrics calculator re-initializes against
     /// the rebuilt schema.
     sim_config: SimulationConfig,
-    /// Diagnostic CSV writer, opened when `output_verbosity >= 4`.
+    /// Diagnostic CSV writer, opened for a verbosity-4+ report with a file
+    /// destination.
     diagnostic_writer: Option<std::io::BufWriter<std::fs::File>>,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
@@ -2449,7 +2459,10 @@ impl Dwelling {
     /// every mapped column the building's equipment needs: an equipment with
     /// no schedule column, no HPXML fractions and no default profile is a
     /// construction error. Pass a defaults directory via
-    /// [`Self::from_hpxml_with_write_output`] or [`Self::from_config`].
+    /// [`Self::from_hpxml_with_reports`] or [`Self::from_config`].
+    ///
+    /// The built config carries no reports: nothing is recorded and no file
+    /// is written unless a report is requested.
     pub fn from_hpxml(
         hpxml_path: &Path,
         schedule_path: &Path,
@@ -2459,7 +2472,7 @@ impl Dwelling {
         duration: Duration,
         overrides: Option<Value>,
     ) -> Result<Self> {
-        Self::from_hpxml_with_write_output(
+        Self::from_hpxml_with_reports(
             HpxmlInputs {
                 hpxml_path,
                 schedule_path,
@@ -2469,13 +2482,13 @@ impl Dwelling {
             time_res,
             duration,
             overrides,
-            None,
+            Vec::new(),
             None,
         )
     }
 
-    /// [`Self::from_hpxml`] with an optional output-write override, for tests
-    /// that exercise this constructor's defaults without paying for a file.
+    /// [`Self::from_hpxml`] with the run's reports, for callers that read
+    /// the run's frames or files.
     ///
     /// `defaults_path` feeds `DwellingConfig.defaults_path`: the default
     /// schedule profiles load from there, and equipment whose schedule source
@@ -2483,13 +2496,13 @@ impl Dwelling {
     /// The BEopt example schedule this constructor family is tested with does
     /// not name every mapped column, so the warmup regression passes the
     /// repo's `defaults/` directory.
-    pub fn from_hpxml_with_write_output(
+    pub fn from_hpxml_with_reports(
         inputs: HpxmlInputs<'_>,
         start_time: DateTime<FixedOffset>,
         time_res: Duration,
         duration: Duration,
         overrides: Option<Value>,
-        write_output_override: Option<bool>,
+        reports: Vec<hares_io::ReportSpec>,
         defaults_path: Option<PathBuf>,
     ) -> Result<Self> {
         let HpxmlInputs {
@@ -2501,17 +2514,12 @@ impl Dwelling {
             start_time,
             duration,
             time_res,
-            output_verbosity: 0,
-            output_path: None,
-            write_output: write_output_override.unwrap_or(true),
-            output_format: hares_io::OutputFormat::Csv,
+            reports,
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         };
 
@@ -2552,14 +2560,14 @@ impl Dwelling {
 
     /// Constructor for synthetic TOML dwelling definitions (BESTEST-style inputs).
     pub fn from_toml_config(path: &Path) -> Result<Self> {
-        Self::from_toml_config_with_write_output(path, None)
+        Self::from_toml_config_with_reports(path, None)
     }
 
     /// Constructor for synthetic TOML dwelling definitions with optional
     /// output-write override.
-    pub fn from_toml_config_with_write_output(
+    pub fn from_toml_config_with_reports(
         path: &Path,
-        write_output_override: Option<bool>,
+        reports_override: Option<Vec<hares_io::ReportSpec>>,
     ) -> Result<Self> {
         let toml_str = std::fs::read_to_string(path)
             .map_err(|err| HaresError::Io(format!("failed to read TOML config: {err}")))?;
@@ -2589,8 +2597,8 @@ impl Dwelling {
         }
         let mut config: SyntheticTomlConfig = toml::from_str(&toml_str)
             .map_err(|err| HaresError::Io(format!("failed to parse TOML config: {err}")))?;
-        if let Some(write_output) = write_output_override {
-            config.simulation.write_output = write_output;
+        if let Some(reports) = reports_override {
+            config.simulation.reports = reports;
         }
         config
             .simulation
@@ -3284,12 +3292,6 @@ fn build_from_blueprint_inner(
     allocated_loop_ids.insert(hares_equipment::DHW_DEMAND_LOOP.0);
     validate_equipment_loops(&declarations, &allocated_loop_ids)?;
 
-    let output_path = config
-        .sim_config
-        .output_path
-        .clone()
-        .unwrap_or_else(|| default_output_path(&config));
-
     let (roof_info, wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&bp.building);
     let latitude_deg = bp.building.site.latitude_deg;
     let facility_type = bp.building.residential_facility_type.clone();
@@ -3331,7 +3333,7 @@ fn build_from_blueprint_inner(
         step_failed: Vec::new(),
         consecutive_step_failures: Vec::new(),
         terminal_error: None,
-        recorder: None,
+        recorders: Vec::new(),
         roster: RosterCaches::default(),
         rng,
         warnings: std::mem::take(warnings),
@@ -3360,6 +3362,7 @@ fn build_from_blueprint_inner(
         #[cfg(test)]
         snapshot_allocations: SnapshotAllocations::default(),
         timestamp_buf: String::with_capacity(32),
+        projected_row_buf: Vec::new(),
         occupancy_column_idx,
         occupancy_scale,
         prev_humidity_ratios: init_humidity_ratios,
@@ -3398,13 +3401,8 @@ fn build_from_blueprint_inner(
         },
         island_unserved_kw: 0.0,
         island_excess_kw: 0.0,
-        output_verbosity: config.sim_config.output_verbosity,
+        reports: config.sim_config.reports.clone(),
         output_chunk_size: config.sim_config.output_chunk_size,
-        output_format: config.sim_config.output_format,
-        output_path: output_path.clone(),
-        write_output: config.sim_config.write_output,
-        retain_batches: config.sim_config.retain_batches,
-        output_rotation: config.sim_config.rotation,
         sim_config: config.sim_config.clone(),
         diagnostic_writer: None,
         #[cfg(feature = "profiling")]
@@ -3491,70 +3489,89 @@ fn build_from_blueprint_inner(
         );
     }
 
-    // Initialise diagnostic CSV when output_verbosity >= 4.
-    dwelling.diagnostic_writer = if dwelling.output_verbosity >= 4 {
-        let stem = output_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| format!("dwelling_{}", dwelling.bldg_id));
-        let diag_path = output_path.with_file_name(format!("{stem}_diagnostics.csv"));
-        tracing::info!(
-            path = %diag_path.display(),
-            "diagnostic CSV output enabled (output_verbosity >= 4)"
-        );
-        let file = match std::fs::File::create(&diag_path) {
-            Ok(file) => file,
-            Err(err) => {
-                // The dwelling is about to be dropped carrying the
-                // accumulated warning log; emit it so this failure carries
-                // the context that led here.
-                for entry in dwelling.take_warnings() {
-                    tracing::warn!("{entry}");
+    // Initialise the diagnostic CSV for the first report in `reports` order
+    // that selects a verbosity of at least 4 into a file destination: until
+    // the diagnostics-as-catalogue entry, the writer rides that report's
+    // path (`<stem>_diagnostics.csv` in the same directory). With no such
+    // report, nothing is written and nothing falls back to the working
+    // directory.
+    let diagnostic_path: Option<PathBuf> =
+        dwelling
+            .reports
+            .iter()
+            .find_map(|report| match (&report.selection, &report.destination) {
+                (
+                    hares_io::Selection::Verbosity(verbosity),
+                    hares_io::Destination::Parquet { path, .. }
+                    | hares_io::Destination::Csv { path, .. },
+                ) if *verbosity >= 4 => {
+                    let stem = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| format!("dwelling_{}", dwelling.bldg_id));
+                    Some(path.with_file_name(format!("{stem}_diagnostics.csv")))
                 }
-                return Err(HaresError::Io(format!(
-                    "diagnostic file create failed: {err}"
-                )));
-            }
-        };
-        let mut writer = std::io::BufWriter::new(file);
-        let n_zones = dwelling.latest_env.zones.len();
-        diagnostics::write_header(&mut writer, n_zones);
-        // Emit equipment zone-id mapping so zone routing is traceable.
-        let equipment_zones: Vec<(String, u16, Option<String>)> = dwelling
-            .equipment
-            .iter()
-            .filter_map(|eq| {
-                eq.descriptor().zone.map(|z| {
-                    (
-                        eq.descriptor().name.clone(),
-                        z.0,
-                        eq.descriptor().zone_type.clone(),
-                    )
+                _ => None,
+            });
+    dwelling.diagnostic_writer = match diagnostic_path {
+        Some(diag_path) => {
+            tracing::info!(
+                path = %diag_path.display(),
+                "diagnostic CSV output enabled (a verbosity >= 4 report with a file destination)"
+            );
+            let file = match std::fs::File::create(&diag_path) {
+                Ok(file) => file,
+                Err(err) => {
+                    // The dwelling is about to be dropped carrying the
+                    // accumulated warning log; emit it so this failure carries
+                    // the context that led here.
+                    for entry in dwelling.take_warnings() {
+                        tracing::warn!("{entry}");
+                    }
+                    return Err(HaresError::Io(format!(
+                        "diagnostic file create failed: {err}"
+                    )));
+                }
+            };
+            let mut writer = std::io::BufWriter::new(file);
+            let n_zones = dwelling.latest_env.zones.len();
+            diagnostics::write_header(&mut writer, n_zones);
+            // Emit equipment zone-id mapping so zone routing is traceable.
+            let equipment_zones: Vec<(String, u16, Option<String>)> = dwelling
+                .equipment
+                .iter()
+                .filter_map(|eq| {
+                    eq.descriptor().zone.map(|z| {
+                        (
+                            eq.descriptor().name.clone(),
+                            z.0,
+                            eq.descriptor().zone_type.clone(),
+                        )
+                    })
                 })
-            })
-            .collect();
-        let ocv_sources: Vec<(String, String)> = dwelling
-            .equipment
-            .iter()
-            .filter_map(|eq| {
-                eq.ocv_source()
-                    .map(|s| (eq.descriptor().name.clone(), s.to_string()))
-            })
-            .collect();
-        let provenance_lines: Vec<String> = dwelling
-            .equipment
-            .iter()
-            .flat_map(|eq| eq.provenance_lines())
-            .collect();
-        diagnostics::write_equipment_init(
-            &mut writer,
-            &equipment_zones,
-            &ocv_sources,
-            &provenance_lines,
-        );
-        Some(writer)
-    } else {
-        None
+                .collect();
+            let ocv_sources: Vec<(String, String)> = dwelling
+                .equipment
+                .iter()
+                .filter_map(|eq| {
+                    eq.ocv_source()
+                        .map(|s| (eq.descriptor().name.clone(), s.to_string()))
+                })
+                .collect();
+            let provenance_lines: Vec<String> = dwelling
+                .equipment
+                .iter()
+                .flat_map(|eq| eq.provenance_lines())
+                .collect();
+            diagnostics::write_equipment_init(
+                &mut writer,
+                &equipment_zones,
+                &ocv_sources,
+                &provenance_lines,
+            );
+            Some(writer)
+        }
+        None => None,
     };
 
     Ok(dwelling)
@@ -3563,8 +3580,20 @@ fn build_from_blueprint_inner(
 impl Dwelling {
     /// Runs the full configured horizon and returns accumulated results.
     pub fn simulate(&mut self) -> Result<SimulationResults> {
+        let run = self.simulate_inner();
+        // A run that fails removes its partial files: nothing partial is
+        // ever published under a report's target name.
+        if run.is_err() {
+            for recorder in &mut self.recorders {
+                recorder.discard_partial();
+            }
+        }
+        run
+    }
+
+    fn simulate_inner(&mut self) -> Result<SimulationResults> {
         while self.clock.current_step() < self.clock.total_steps() {
-            self.run_timestep(self.write_output)?;
+            self.run_timestep(!self.reports.is_empty())?;
         }
         self.finalize_billing();
 
@@ -3580,7 +3609,10 @@ impl Dwelling {
             }
         }
 
-        if let Some(recorder) = self.recorder.as_mut() {
+        // The destinations' publish point (until the finalize entry adds
+        // `finish()`, this is where today's flush ran): every file report's
+        // partial is flushed, closed and published under its target name.
+        for recorder in self.recorders.iter_mut() {
             recorder
                 .flush_and_close()
                 .map_err(|err| HaresError::Io(format!("output close failed: {err}")))?;
@@ -3669,6 +3701,7 @@ impl Dwelling {
     }
 
     /// Executes exactly one simulation timestep.
+    /// Steps the simulation one timestep.
     pub fn step(&mut self) -> Result<StepResult> {
         #[cfg(debug_assertions)]
         if self.test_panic_on_step {
@@ -3679,7 +3712,7 @@ impl Dwelling {
             !self.test_assert_panic_on_step,
             "test-induced assert failure in Dwelling::step()"
         );
-        self.run_timestep(self.write_output)?;
+        self.run_timestep(!self.reports.is_empty())?;
         Ok(self.simulation_results.steps.last().unwrap().clone())
     }
 
@@ -4388,37 +4421,44 @@ impl Dwelling {
         self.warnings.push(msg);
     }
 
-    /// Returns all record batches flushed by the streaming recorder so far.
+    /// Returns the record batches the run's first `Memory` report retained
+    /// so far. A run with no `Memory` report retains nothing (a file
+    /// destination streams and drops its batches): the callers that read a
+    /// frame fall back to the step history.
     #[must_use]
     pub fn flushed_batches(&self) -> &[arrow::record_batch::RecordBatch] {
-        self.recorder
-            .as_ref()
-            .map_or(&[], StreamingRecorder::flushed_batches)
+        match self.recorders.iter().find(|recorder| recorder.is_memory()) {
+            Some(recorder) => recorder.flushed_batches(),
+            None => &[],
+        }
     }
 
-    /// Takes run metrics collected incrementally by the streaming recorder.
+    /// Takes run metrics collected incrementally by a streaming recorder.
     ///
-    /// `None` when the recorder was never constructed, when no metrics
-    /// calculator was attached (retained-batch runs compute metrics post-hoc
-    /// from [`Self::flushed_batches`] instead), or when an attached
-    /// calculator failed to initialize — [`Self::recorded_rows`] and the
-    /// dwelling warnings distinguish the cases. The inner `Result` carries
-    /// the calculator's typed error (a non-finite accumulator) when the
-    /// metrics could not be finalized.
+    /// `None` when no recorder was constructed, when no metrics calculator
+    /// was attached (a `Memory` destination retains its batches, and the
+    /// run computes metrics post-hoc from [`Self::flushed_batches`]
+    /// instead), or when an attached calculator failed to initialize —
+    /// [`Self::recorded_rows`] and the dwelling warnings distinguish the
+    /// cases. The inner `Result` carries the calculator's typed error (a
+    /// non-finite accumulator) when the metrics could not be finalized.
     pub fn take_streamed_metrics(
         &mut self,
     ) -> Option<std::result::Result<FullSimulationMetrics, HaresError>> {
-        self.recorder
-            .as_mut()?
-            .take_metrics()
-            .map(|res| res.map_err(|e| HaresError::InvalidState(e.to_string())))
+        let calculator = self
+            .recorders
+            .iter_mut()
+            .map(StreamingRecorder::take_metrics)
+            .find(Option::is_some)
+            .flatten();
+        calculator.map(|res| res.map_err(|e| HaresError::InvalidState(e.to_string())))
     }
 
-    /// Rows written to the output recorder over the run; `None` when no
-    /// recorder was constructed (`write_output` disabled).
+    /// Rows written to the run's recorders over the run; `None` when no
+    /// recorder was constructed (no report is configured).
     #[must_use]
     pub fn recorded_rows(&self) -> Option<usize> {
-        self.recorder.as_ref().map(StreamingRecorder::total_rows)
+        self.recorders.first().map(StreamingRecorder::total_rows)
     }
 
     /// Populates `latest_env.equipment_core` and `latest_env.equipment_telemetry`
@@ -6494,8 +6534,8 @@ impl Dwelling {
     #[cfg(test)]
     fn frozen_output_fingerprint(&self) -> String {
         let schema: Vec<String> = self
-            .recorder
-            .as_ref()
+            .recorders
+            .first()
             .map(|r| {
                 r.schema()
                     .fields()
@@ -6797,10 +6837,22 @@ impl Dwelling {
         use std::fmt::Write;
         write!(&mut self.timestamp_buf, "{}", step.timestamp.format("%+"))
             .expect("write to String is infallible");
-        if let Some(recorder) = self.recorder.as_mut() {
-            recorder
-                .push_row(&self.timestamp_buf, row)
-                .map_err(|err| HaresError::Io(format!("record push failed: {err}")))?;
+        // Every report's recorder gets the row its selection projected out
+        // of the union row, in the report's own column order. The
+        // projections were copied at freeze; the union row's borrow ends
+        // with the producers' writes above.
+        let row = self.roster.row_plan.row();
+        for (recorder, projection) in self
+            .recorders
+            .iter_mut()
+            .zip(self.roster.record_projections.iter())
+        {
+            self.projected_row_buf.clear();
+            self.projected_row_buf
+                .extend(projection.iter().map(|&slot| row[slot]));
+            if let Err(err) = recorder.push_row(&self.timestamp_buf, &self.projected_row_buf) {
+                return Err(HaresError::Io(format!("record push failed: {err}")));
+            }
         }
         Ok(())
     }
@@ -7546,7 +7598,7 @@ mod tests {
     /// `#[cfg(test)]` fields bracketed by `thread_allocations()` reads
     /// on the step path itself; this binary installs the counting
     /// allocator, so the counts are real. The recorder's allocations
-    /// (`write_output` off here) and everything outside the brackets are
+    /// (no report configured here) and everything outside the brackets are
     /// out of scope.
     #[test]
     fn dwelling_snapshot_allocation_free_after_first_step() {
@@ -7557,7 +7609,7 @@ mod tests {
         let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
             .expect("valid start time");
 
-        let mut dwelling = Dwelling::from_hpxml_with_write_output(
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
             HpxmlInputs {
                 hpxml_path: &hpxml,
                 schedule_path: &schedule,
@@ -7567,7 +7619,7 @@ mod tests {
             chrono::Duration::minutes(15),
             chrono::Duration::hours(2),
             None,
-            Some(false),
+            Vec::new(),
             // The BEopt example schedule does not name every mapped
             // column; the profiles load from the repo's defaults.
             Some(root.join("defaults")),
@@ -7626,7 +7678,7 @@ mod tests {
 
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         let slot = dwelling
@@ -8094,18 +8146,20 @@ fn cfg_gated_helper() {
         // no frozen schema, so the bindings resolve against an empty one
         // (every column unbound, the plan's writes a no-op).
         let bindings_schema = dwelling
-            .recorder
-            .as_ref()
+            .recorders
+            .first()
             .map(|r| r.schema().clone())
             .unwrap_or_else(arrow::datatypes::Schema::empty);
         let actor_refs: Vec<&dyn Actor> = dwelling.actors.iter().map(AsRef::as_ref).collect();
-        dwelling.roster.bindings = build_output_row_bindings(
-            &bindings_schema,
-            &equipment,
-            &actor_refs,
-            dwelling.output_verbosity,
-        )
-        .expect("test helper: producer bindings must resolve against the frozen schema");
+        let expected: std::collections::HashSet<String> = bindings_schema
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|f| f.name().clone())
+            .collect();
+        dwelling.roster.bindings =
+            build_output_row_bindings(&bindings_schema, &equipment, &actor_refs, &expected)
+                .expect("test helper: producer bindings must resolve against the frozen schema");
         dwelling
             .solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
@@ -8541,7 +8595,7 @@ fn cfg_gated_helper() {
     fn equipment_warnings_reach_the_dwelling_log() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
         // The fixture's construction warnings (its site gives no terrain or
         // shielding) are not under test.
@@ -8594,7 +8648,7 @@ fn cfg_gated_helper() {
     fn set_tariff_reports_tariff_parse_warnings() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
         // The fixture's construction warnings are not under test.
         dwelling.take_warnings();
@@ -9347,7 +9401,7 @@ fn cfg_gated_helper() {
     fn telemetry_reports_reactive_power_after_dwelling_step() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         let mut reactive_eq = TestReactiveEquipment::new("ReactiveLoad", 2.0, 0.75);
@@ -9491,7 +9545,7 @@ fn cfg_gated_helper() {
     fn dwelling_step_errors_when_equipment_under_reports_power() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         let mut eq = UnderReportingEquipment::new("UnderReporter", 3.0, 1.0);
@@ -9519,7 +9573,7 @@ fn cfg_gated_helper() {
     fn dwelling_step_errors_when_port_reactive_diverges_from_core_output() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         let mut eq = ReactiveDivergentEquipment::new("SilentReactive", 2.0, 0.6);
@@ -9544,7 +9598,7 @@ fn cfg_gated_helper() {
     fn run_timestep_fails_when_thermal_equipment_under_reports() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         let mut eq = ThermalUnderReportingEquipment::new("ThermalUnderReporter", 1000.0, 50.0);
@@ -9566,7 +9620,7 @@ fn cfg_gated_helper() {
     fn thermal_consistency_excludes_water_heating_by_end_use() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         let mut eq = WaterHeatingEquipment::new("IndirectTank", 1000.0);
@@ -9584,7 +9638,7 @@ fn cfg_gated_helper() {
     fn thermal_consistency_accounts_for_latent_cooling() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         // Deposit -1000 W sensible + -200 W latent = -1200 W total cooling.
@@ -9604,7 +9658,7 @@ fn cfg_gated_helper() {
     fn thermal_consistency_detects_cooling_latent_mismatch() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         // Deposit -1000 W sensible + -200 W latent = -1200 W total cooling.
@@ -9628,7 +9682,7 @@ fn cfg_gated_helper() {
     fn thermal_mode_override_dispatch_is_applied_same_timestep() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         let update_calls = Arc::new(AtomicUsize::new(0));
@@ -9665,7 +9719,7 @@ fn cfg_gated_helper() {
     fn invalid_signal_rejected_and_simulation_continues() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         dwelling.apply_control(
@@ -9705,9 +9759,6 @@ fn cfg_gated_helper() {
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = 600
-write_output = false
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -9744,11 +9795,11 @@ occupancy = 1.0
         assert_eq!(
             results.steps.len(),
             10,
-            "simulate() must still accumulate in-memory step results when write_output=false"
+            "simulate() must still accumulate in-memory step results when no report is configured"
         );
         assert!(
             dwelling.flushed_batches().is_empty(),
-            "write_output=false must not produce recorder batches"
+            "no report configured must not produce recorder batches"
         );
     }
 
@@ -12177,7 +12228,7 @@ occupancy = 1.0
 
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         // Configure: occupancy column at index 0, scale = 4 occupants.
@@ -12300,7 +12351,7 @@ occupancy = 1.0
     fn absent_schedule_domain_panics_instead_of_silent_zero() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         // Manually override to simulate an Occupancy spec with 3 occupants
@@ -12329,7 +12380,7 @@ occupancy = 1.0
 
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         dwelling.occupancy_column_idx = Some(0);
@@ -13010,9 +13061,6 @@ occupancy = 1.0
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = 120
-write_output = false
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -13087,9 +13135,6 @@ occupancy = 1.0
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = 120
-write_output = false
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -14013,10 +14058,7 @@ occupancy = 1.0
 start_time = "2024-06-15T12:00:00Z"
 time_res = 60
 duration = 600
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
@@ -14408,7 +14450,7 @@ occupancy = 0.0
     fn failed_equipment_step_prevents_snapshot_and_surfaces_warning() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         let failing = FailingPortEquipment::new("FailingEq", ExecutionStage::Independent);
@@ -14430,7 +14472,7 @@ occupancy = 0.0
     fn failing_equipment_does_not_contaminate_downstream_equipment_ports() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         // Failing equipment writes 500 W to electrical port, then Err.
@@ -14472,7 +14514,7 @@ occupancy = 0.0
     fn failed_equipment_core_output_not_snapshotted_to_environment() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build dwelling");
 
         let failing = FailingPortEquipment::new("FailingEq", ExecutionStage::Independent);
@@ -14763,7 +14805,7 @@ occupancy = 0.0
     #[test]
     fn a_failed_step_records_no_flow_and_keeps_the_committed_state() {
         let (_dir, toml_path) = temp_toml("failed_step_row");
-        let output_path = toml_path.with_extension("csv");
+        let csv_path = toml_path.with_extension("csv");
         fs::write(
             &toml_path,
             format!(
@@ -14773,13 +14815,18 @@ occupancy = 0.0
 start_time = "2024-06-15T12:00:00Z"
 time_res = 60
 duration = 600
-output_verbosity = 8
-output_format = "csv"
 output_chunk_size = 1
-write_output = true
-retain_batches = true
-output_path = "{}"
 master_seed = 0
+
+[[simulation.reports]]
+name = "frame"
+selection = {{ verbosity = 8 }}
+destination = "memory"
+
+[[simulation.reports]]
+name = "file"
+selection = {{ verbosity = 8 }}
+destination = {{ csv = {{ path = "{}" }} }}
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -14803,7 +14850,7 @@ ach = 0.0
 [schedule]
 occupancy = 0.0
 "#,
-                output_path.display()
+                csv_path.display()
             ),
         )
         .expect("write TOML");
@@ -15461,7 +15508,7 @@ occupancy = 0.0
     fn bestest_dwelling() -> Dwelling {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-        Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+        Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
             .expect("build bestest dwelling")
     }
 
@@ -15672,20 +15719,40 @@ occupancy = 0.0
             ),
         ]);
         let mut recorder = StreamingRecorder::new(
-            schema,
+            schema.clone(),
             10,
-            hares_io::OutputFormat::Csv,
-            &tmp.path().join("drift.csv"),
-            false,
-            hares_io::RotationPolicy::None,
+            hares_io::Destination::Csv {
+                path: tmp.path().join("drift.csv"),
+                overwrite: false,
+            },
         )
         .expect("recorder");
         recorder
             .push_row("2023-01-01T00:00:00", &[0.0, 0.0])
             .expect("push row");
-        dwelling.recorder = Some(recorder);
-        dwelling.write_output = true;
-        dwelling.output_verbosity = 3;
+        dwelling.recorders = vec![recorder];
+        // The plan must reach the bindings rebuild (not stop at the
+        // no-reports gate): one report whose selection promises the
+        // verbosity-3 tier. The frozen schema the bindings resolve against
+        // spans the Electric Power and Mode columns but not the SOC column
+        // the tier promises.
+        dwelling.reports = vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(3),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: tmp.path().join("drift.csv"),
+                overwrite: false,
+            },
+        }];
+        dwelling.roster.union_schema = schema;
+        dwelling.roster.expected_columns = [
+            "Battery Electric Power (kW)".to_string(),
+            "Battery Mode (-)".to_string(),
+            "Battery SOC (-)".to_string(),
+        ]
+        .into_iter()
+        .collect();
         (dwelling, tmp)
     }
 
@@ -16123,21 +16190,37 @@ occupancy = 0.0
             dwelling.ports,
             dwelling.rollback_ports,
             dwelling
-                .recorder
-                .as_ref()
+                .recorders
+                .first()
                 .map(|r| (r.total_rows(), r.schema().fields().len())),
             dwelling.tariff_evaluator.is_some(),
             billing_summary_digest(dwelling),
         )
     }
 
-    /// A pre-step dwelling with output enabled whose output file cannot be
+    /// A pre-step dwelling with a report whose output file cannot be
     /// created, so every roster plan fails at its last step.
     fn dwelling_whose_recorder_cannot_be_created() -> (Dwelling, tempfile::TempDir) {
         let mut dwelling = bestest_dwelling();
         let tmp = tempfile::tempdir().expect("tempdir");
-        dwelling.write_output = true;
-        dwelling.output_path = tmp.path().join("missing").join("out.csv");
+        let missing_parent = tmp.path().join("missing").join("out.csv");
+        for report in &mut dwelling.reports {
+            report.destination = hares_io::Destination::Csv {
+                path: missing_parent.clone(),
+                overwrite: false,
+            };
+        }
+        if dwelling.reports.is_empty() {
+            dwelling.reports = vec![hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(2),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Csv {
+                    path: missing_parent,
+                    overwrite: false,
+                },
+            }];
+        }
         (dwelling, tmp)
     }
 
@@ -16214,8 +16297,15 @@ occupancy = 0.0
         // The next roster plan fails at the recorder: the summary digest
         // before and after the rejected set_tariff must match on bits.
         let tmp = tempfile::tempdir().expect("tempdir");
-        dwelling.write_output = true;
-        dwelling.output_path = tmp.path().join("missing").join("out.csv");
+        dwelling.reports = vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(2),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: tmp.path().join("missing").join("out.csv"),
+                overwrite: false,
+            },
+        }];
         let fingerprint_before = roster_fingerprint(&dwelling);
         let digest_before = billing_summary_digest(&dwelling);
 
@@ -16539,9 +16629,6 @@ occupancy = 0.0
 start_time = "2024-01-01T00:00:00Z"
 time_res = 900
 duration = {duration}
-write_output = false
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 42
 [geometry]
@@ -16582,7 +16669,7 @@ latent_gain_fraction = 0.08
         let tmp = tempfile::tempdir().expect("tempdir");
         let toml_path = tmp.path().join("dwelling_900s.toml");
         fs::write(&toml_path, toml).expect("write the 900 s TOML");
-        let dwelling = Dwelling::from_toml_config_with_write_output(&toml_path, Some(false))
+        let dwelling = Dwelling::from_toml_config_with_reports(&toml_path, Some(Vec::new()))
             .expect("build the 900 s dwelling");
         drop(tmp);
         dwelling
@@ -17622,12 +17709,12 @@ latent_gain_fraction = 0.08
         assert_eq!(roster_fingerprint(&dwelling), before);
     }
 
-    /// With output disabled the step result still reports every zone's
+    /// With no report the step result still reports every zone's
     /// temperature after a roster change, read from the environment.
     #[test]
     fn zone_temperatures_are_reported_without_output_after_a_roster_change() {
         let mut dwelling = bestest_dwelling();
-        assert!(!dwelling.write_output);
+        assert!(dwelling.reports().is_empty());
         dwelling
             .add_equipment(Box::new(TestEquipment::new(
                 "Added",
@@ -18002,9 +18089,6 @@ initialization_duration_s = 86400
 start_time = "2024-01-15T00:00:00Z"
 time_res = 3600
 duration = 172800
-write_output = false
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 42
 [geometry]
@@ -18037,10 +18121,10 @@ occupancy = 1.0
         fs::write(&toml_path_b, toml_content).expect("write TOML B");
 
         let mut dwelling_a =
-            Dwelling::from_toml_config_with_write_output(&toml_path_a, Some(false))
+            Dwelling::from_toml_config_with_reports(&toml_path_a, Some(Vec::new()))
                 .expect("build dwelling A");
         let mut dwelling_b =
-            Dwelling::from_toml_config_with_write_output(&toml_path_b, Some(false))
+            Dwelling::from_toml_config_with_reports(&toml_path_b, Some(Vec::new()))
                 .expect("build dwelling B");
 
         let results_a = dwelling_a.simulate().expect("simulate A");
@@ -18079,9 +18163,6 @@ occupancy = 1.0
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = 600
-write_output = false
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 7
 [geometry]
@@ -18114,10 +18195,10 @@ occupancy = 1.0
         fs::write(&toml_path_b, toml_content).expect("write TOML B");
 
         let mut dwelling_a =
-            Dwelling::from_toml_config_with_write_output(&toml_path_a, Some(false))
+            Dwelling::from_toml_config_with_reports(&toml_path_a, Some(Vec::new()))
                 .expect("build dwelling A");
         let mut dwelling_b =
-            Dwelling::from_toml_config_with_write_output(&toml_path_b, Some(false))
+            Dwelling::from_toml_config_with_reports(&toml_path_b, Some(Vec::new()))
                 .expect("build dwelling B");
 
         let results_a = dwelling_a.simulate().expect("simulate A");
@@ -18181,9 +18262,6 @@ occupancy = 1.0
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = 120
-write_output = false
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -18277,9 +18355,6 @@ occupancy = 1.0
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = 120
-write_output = false
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -18449,10 +18524,7 @@ occupancy = 1.0
 start_time = "2024-06-15T12:00:00Z"
 time_res = 60
 duration = 600
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = {master_seed}
 [geometry]
 number_of_bedrooms = 3.0
@@ -18621,10 +18693,7 @@ latent_gain_fraction = 0.08
 start_time = "2024-06-15T12:00:00Z"
 time_res = 60
 duration = 600
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = {master_seed}
 [geometry]
 number_of_bedrooms = 3.0
@@ -18749,10 +18818,7 @@ start_time = "2024-06-15T12:00:00Z"
 time_res = 60
 duration = {}
 # extra steps to allow restart+duration
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 42
 [geometry]
 number_of_bedrooms = 3.0
@@ -18876,8 +18942,19 @@ occupancy = 0.0
                 true,
             ),
         ]);
-        let err = build_output_row_bindings(&schema, &equipment_refs(&equipment), &[], 3)
-            .expect_err("schema drift for a known equipment must be a typed error");
+        let err = build_output_row_bindings(
+            &schema,
+            &equipment_refs(&equipment),
+            &[],
+            &[
+                "Battery Electric Power (kW)".to_string(),
+                "Battery Mode (-)".to_string(),
+                "Battery SOC (-)".to_string(),
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .expect_err("schema drift for a known equipment must be a typed error");
         assert!(
             matches!(&err, HaresError::InvariantViolation { check_name, .. }
                 if check_name.contains("Battery SOC (-)")
@@ -18912,23 +18989,33 @@ occupancy = 0.0
         let row_plan =
             hares_io::RowPlan::build(&selections, &hares_io::SchemaSurface::new(&schema))
                 .expect("plan builds");
-        let bindings =
-            build_output_row_bindings(&schema, &equipment, &actors, 8).expect("bindings resolve");
+        let expected: std::collections::HashSet<String> = schema
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|f| f.name().clone())
+            .collect();
+        let bindings = build_output_row_bindings(&schema, &equipment, &actors, &expected)
+            .expect("bindings resolve");
 
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let recorder = StreamingRecorder::new(
-            schema,
-            10,
-            hares_io::OutputFormat::Csv,
-            &tmp.path().join("single_column.csv"),
-            true,
-            hares_io::RotationPolicy::None,
-        )
-        .expect("recorder");
-        dwelling.recorder = Some(recorder);
-        dwelling.write_output = true;
-        dwelling.output_verbosity = 8;
+        // One recorder per report, each with its own schema: the named
+        // report's schema spans its one column; the verbosity report's is
+        // the full tier-8 schema. Both are memory destinations, so both
+        // frames retain every batch.
+        let named_schema =
+            hares_io::build_schema_for_columns(&catalogue, &[column_name.to_string()]);
+        let named_schema = enrich_schema_with_telemetry_units(named_schema, &equipment, &catalogue);
+        let named_recorder =
+            StreamingRecorder::new(named_schema, 10, hares_io::Destination::Memory)
+                .expect("named recorder");
+        let full_recorder =
+            StreamingRecorder::new(schema.clone(), 10, hares_io::Destination::Memory)
+                .expect("full recorder");
+        dwelling.recorders = vec![named_recorder, full_recorder];
         dwelling.roster.row_plan = row_plan;
+        dwelling.roster.record_projections = dwelling.roster.row_plan.projections().to_vec();
+        dwelling.roster.union_schema = schema;
+        dwelling.roster.expected_columns = expected;
         dwelling.roster.bindings = bindings;
 
         // The named projection is the single slot the verbosity projection
@@ -18942,15 +19029,10 @@ occupancy = 0.0
             projected.push(dwelling.roster.row_plan.row()[named_slot].to_bits());
         }
 
-        let batches: Vec<_> = dwelling
-            .recorder
-            .as_ref()
-            .expect("recorder with retained batches")
-            .flushed_batches()
-            .to_vec();
-        assert!(!batches.is_empty(), "rows were flushed during the run");
+        let full_batches: Vec<_> = dwelling.recorders[1].flushed_batches().to_vec();
+        assert!(!full_batches.is_empty(), "rows were flushed during the run");
         let mut recorded: Vec<u64> = Vec::new();
-        for batch in &batches {
+        for batch in &full_batches {
             // Schema column 0 is the timestamp; value columns follow.
             let column = batch.column(named_slot + 1);
             let values = column
@@ -18961,11 +19043,34 @@ occupancy = 0.0
                 recorded.push(values.value(i).to_bits());
             }
         }
+        // The named report's own frame: its single value column, the
+        // projection's read of the same union row.
+        let named_batches: Vec<_> = dwelling.recorders[0].flushed_batches().to_vec();
+        assert_eq!(
+            named_batches.len(),
+            full_batches.len(),
+            "both reports record every step"
+        );
+        let mut named_recorded: Vec<u64> = Vec::new();
+        for batch in &named_batches {
+            let column = batch.column(1);
+            let values = column
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("float64 column");
+            for i in 0..values.len() {
+                named_recorded.push(values.value(i).to_bits());
+            }
+        }
         assert_eq!(
             recorded,
             projected[..recorded.len()],
             "every flushed row's column equals the projection's read of the \
              same step, on bits"
+        );
+        assert_eq!(
+            named_recorded, recorded,
+            "the named report's frame equals the verbosity report's column, on bits"
         );
     }
 
@@ -18995,23 +19100,28 @@ occupancy = 0.0
             &hares_io::SchemaSurface::new(&schema),
         )
         .expect("plan builds");
-        let bindings =
-            build_output_row_bindings(&schema, &equipment, &actors, 2).expect("bindings resolve");
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let recorder = StreamingRecorder::new(
-            schema,
-            1,
-            hares_io::OutputFormat::Csv,
-            &tmp.path().join("golden_placement.csv"),
-            true,
-            hares_io::RotationPolicy::None,
+        let bindings = build_output_row_bindings(
+            &schema,
+            &equipment,
+            &actors,
+            &golden_columns.keys().cloned().collect(),
         )
-        .expect("recorder");
-        dwelling.recorder = Some(recorder);
-        dwelling.write_output = true;
-        dwelling.output_verbosity = 2;
+        .expect("bindings resolve");
+
+        let recorder = StreamingRecorder::new(schema.clone(), 1, hares_io::Destination::Memory)
+            .expect("recorder");
+        dwelling.recorders = vec![recorder];
+        // The step's record gate reads the configured reports.
+        dwelling.reports = vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(2),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Memory,
+        }];
         dwelling.roster.row_plan = row_plan;
+        dwelling.roster.record_projections = dwelling.roster.row_plan.projections().to_vec();
+        dwelling.roster.union_schema = schema;
+        dwelling.roster.expected_columns = golden_columns.keys().cloned().collect();
         dwelling.roster.bindings = bindings;
 
         // Three steps of the real run; the third is the fixed step the pin
@@ -19025,8 +19135,8 @@ occupancy = 0.0
         let step = last_step.expect("the run stepped");
 
         let batches: Vec<_> = dwelling
-            .recorder
-            .as_ref()
+            .recorders
+            .first()
             .expect("recorder with retained batches")
             .flushed_batches()
             .to_vec();
@@ -19085,33 +19195,26 @@ occupancy = 0.0
     #[test]
     fn replace_with_shorter_roster_rebuilds_the_bindings_and_steps() {
         let mut dwelling = bestest_dwelling();
-        let equipment = equipment_refs(&dwelling.equipment);
-        let actors: Vec<&dyn Actor> = dwelling.actors.iter().map(AsRef::as_ref).collect();
-        let catalogue = dwelling.catalogue();
-        let schema = hares_io::build_schema(&catalogue, 0);
-        let schema = enrich_schema_with_telemetry_units(schema, &equipment, &catalogue);
-        let row_plan = hares_io::RowPlan::build(
-            &[hares_io::Selection::Verbosity(0)],
-            &hares_io::SchemaSurface::new(&schema),
-        )
-        .expect("plan builds");
-        let bindings =
-            build_output_row_bindings(&schema, &equipment, &actors, 0).expect("bindings resolve");
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let recorder = StreamingRecorder::new(
-            schema,
-            1,
-            hares_io::OutputFormat::Csv,
-            &tmp.path().join("shorter_roster.csv"),
-            true,
-            hares_io::RotationPolicy::None,
-        )
-        .expect("recorder");
-        dwelling.recorder = Some(recorder);
-        dwelling.write_output = true;
-        dwelling.output_verbosity = 0;
-        dwelling.roster.row_plan = row_plan;
-        dwelling.roster.bindings = bindings;
+        // One memory report at verbosity 0: the freeze the swaps' roster
+        // plans rebuild the bindings through.
+        dwelling.reports = vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(0),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Memory,
+        }];
+        dwelling.output_chunk_size = 1;
+
+        // The real freeze: the entrance runs the roster plan, building the
+        // level-0 memory recorder and the bindings the helper swaps below
+        // rebuild against.
+        let mut warmup = TestEquipment::new("Warmup Load", ControlCapabilities::empty());
+        warmup
+            .init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init warmup stub");
+        dwelling
+            .add_equipment(Box::new(warmup))
+            .expect("the warmup load registers");
 
         // First swap: two stubs, the second named so the bindings freeze
         // its equipment position (1) as the setpoint chain's first HVAC.
@@ -19165,8 +19268,8 @@ occupancy = 0.0
             "the placed total electric power is the step's own value, on bits"
         );
         let batches: Vec<_> = dwelling
-            .recorder
-            .as_ref()
+            .recorders
+            .first()
             .expect("recorder with retained batches")
             .flushed_batches()
             .to_vec();
@@ -19214,8 +19317,15 @@ occupancy = 0.0
                 true,
             ),
         ]);
-        let bindings = build_output_row_bindings(&schema, &equipment_refs(&equipment), &[], 3)
-            .expect("reserved-aggregate shadowing must not error");
+        let bindings = build_output_row_bindings(
+            &schema,
+            &equipment_refs(&equipment),
+            &[],
+            &["Total Electric Power (kW)".to_string()]
+                .into_iter()
+                .collect(),
+        )
+        .expect("reserved-aggregate shadowing must not error");
         let cols = &bindings.equipment[0];
         assert!(
             cols.electric_power.is_none(),
@@ -19269,8 +19379,12 @@ occupancy = 0.0
         eq2.descriptor.end_use = EndUse::BATTERY;
         eq2.descriptor.fuel = FuelType::Electric;
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
-        let col_map = plan_equipment_columns(&equipment_refs(&equipment), &column_index, 7)
-            .expect("column map resolves");
+        let col_map = plan_equipment_columns(
+            &equipment_refs(&equipment),
+            &column_index,
+            &column_index.keys().cloned().collect(),
+        )
+        .expect("column map resolves");
 
         let ashp = &col_map[0];
         let bat = &col_map[1];
@@ -19334,8 +19448,12 @@ occupancy = 0.0
             let mut eq = TestEquipment::new(name, ControlCapabilities::empty());
             eq.descriptor.fuel = fuel;
             let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-            let col_map = plan_equipment_columns(&equipment_refs(&equipment), &column_index, 1)
-                .expect("column map resolves");
+            let col_map = plan_equipment_columns(
+                &equipment_refs(&equipment),
+                &column_index,
+                &column_index.keys().cloned().collect(),
+            )
+            .expect("column map resolves");
             let resolved_gas_col = col_map[0].gas_power.is_some();
 
             assert_eq!(
@@ -19358,8 +19476,12 @@ occupancy = 0.0
         let column_index = build_output_column_index(&schema);
         let eq = TestEquipment::new("ASHP Heater", ControlCapabilities::empty());
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let col_map = plan_equipment_columns(&equipment_refs(&equipment), &column_index, 0)
-            .expect("column map resolves");
+        let col_map = plan_equipment_columns(
+            &equipment_refs(&equipment),
+            &column_index,
+            &column_index.keys().cloned().collect(),
+        )
+        .expect("column map resolves");
         let cols = &col_map[0];
         assert!(cols.electric_power.is_none());
         assert!(cols.gas_power.is_none());
@@ -19398,8 +19520,12 @@ occupancy = 0.0
         eq.descriptor.end_use = EndUse::HVAC_HEATING;
         eq.descriptor.fuel = FuelType::Gas;
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let col_map = plan_equipment_columns(&equipment_refs(&equipment), &column_index, 5)
-            .expect("column map resolves");
+        let col_map = plan_equipment_columns(
+            &equipment_refs(&equipment),
+            &column_index,
+            &column_index.keys().cloned().collect(),
+        )
+        .expect("column map resolves");
         let cols = &col_map[0];
         assert!(
             cols.reactive_power.is_some(),
@@ -19416,9 +19542,12 @@ occupancy = 0.0
         eq_v4.descriptor.end_use = EndUse::HVAC_HEATING;
         eq_v4.descriptor.fuel = FuelType::Gas;
         let equipment_v4: Vec<Box<dyn Equipment>> = vec![Box::new(eq_v4)];
-        let col_map_v4 =
-            plan_equipment_columns(&equipment_refs(&equipment_v4), &column_index_v4, 4)
-                .expect("column map resolves");
+        let col_map_v4 = plan_equipment_columns(
+            &equipment_refs(&equipment_v4),
+            &column_index_v4,
+            &column_index_v4.keys().cloned().collect(),
+        )
+        .expect("column map resolves");
         assert!(col_map_v4[0].reactive_power.is_none());
         assert!(col_map_v4[0].power_factor.is_none());
     }
@@ -19860,9 +19989,6 @@ occupancy = 0.0
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = 120
-write_output = false
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -19923,9 +20049,6 @@ event_probability = 1.0"#,
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = 120
-write_output = false
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -19973,6 +20096,50 @@ occupancy = 1.0"#,
             err.to_string().contains("already initialized"),
             "rejection must be an initialization guard error, got: {:?}",
             err
+        );
+    }
+
+    // Temporary probe; deleted before the commit.
+    #[test]
+    fn probe_level0_union_schema() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.reports = vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(0),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Memory,
+        }];
+        let mut load = TestEquipment::new("Sole Load", ControlCapabilities::empty());
+        load.init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init load stub");
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(load)]);
+        let catalogue = dwelling.catalogue();
+        let names: Vec<String> = catalogue
+            .variables_at_verbosity(0)
+            .iter()
+            .map(|v| v.name.to_string())
+            .collect();
+        println!("level0 count = {}", names.len());
+        println!(
+            "has total electric: {}",
+            names.iter().any(|n| n == "Total Electric Power (kW)")
+        );
+        println!(
+            "binding: {:?}",
+            dwelling.roster.bindings.dwelling.total_electric
+        );
+        println!(
+            "union columns: {}",
+            dwelling.roster.union_schema.fields().len()
+        );
+        println!(
+            "union has total electric: {}",
+            dwelling
+                .roster
+                .union_schema
+                .fields()
+                .iter()
+                .any(|f| f.name() == "Total Electric Power (kW)")
         );
     }
 }

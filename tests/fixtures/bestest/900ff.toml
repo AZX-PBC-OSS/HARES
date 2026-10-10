@@ -14,8 +14,6 @@ initialization_duration_s = 1814400  # 21 days warmup (7× concrete τ≈3 days 
 start_time = "2024-01-01T00:00:00-07:00"
 time_res = 3600
 duration = 31536000
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 10000
 master_seed = 0
 [geometry]

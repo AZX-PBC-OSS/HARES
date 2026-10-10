@@ -14,7 +14,6 @@ use hares_equipment::{
     ConfigPayload, DHW_DEMAND_LOOP, ElectricResistanceWaterHeaterConfig, Equipment,
     EquipmentConfig, EquipmentRegistry,
 };
-use hares_io::OutputFormat;
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml::equipment::resolve_equipment;
@@ -39,17 +38,12 @@ fn bldg0000007_config() -> DwellingConfig {
                 .unwrap(),
             duration: Duration::hours(2),
             time_res: Duration::seconds(900),
-            output_verbosity: 0,
-            write_output: false,
-            output_path: None,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,

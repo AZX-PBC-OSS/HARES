@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-use hares_io::OutputFormat;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -98,10 +97,7 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
         start_time: DateTime::parse_from_rfc3339(start).expect("start_time parses"),
         duration: Duration::seconds(duration_s),
         time_res: Duration::seconds(time_res_s),
-        output_verbosity: 0,
-        write_output: false,
-        output_path: None,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: sim
@@ -110,8 +106,6 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
             .unwrap_or(0) as u64,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
@@ -296,17 +290,12 @@ fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
             .unwrap(),
         duration: Duration::hours(1),
         time_res: Duration::seconds(900),
-        output_verbosity: 0,
-        write_output: false,
-        output_path: None,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     };
     let config = DwellingConfig {

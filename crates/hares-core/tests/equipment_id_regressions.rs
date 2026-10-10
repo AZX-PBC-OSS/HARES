@@ -36,7 +36,6 @@ use hares_core::actors::{BatteryManagementActor, BmsParams};
 use hares_core::{Dwelling, DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
 use hares_equipment::config::ConfigValue;
 use hares_equipment::{Equipment, EquipmentConfig, EquipmentRegistry};
-use hares_io::OutputFormat;
 use hares_types::{
     BmsMode, ControlCapabilities, CoreCapabilities, CoreOutput, ElectricPower, EndUse,
     EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule,
@@ -89,7 +88,7 @@ fn write_fixture_hpxml(dir: &Path) -> PathBuf {
     path
 }
 
-fn sim_config(duration: Duration, output_path: Option<PathBuf>, verbosity: u8) -> SimulationConfig {
+fn sim_config(duration: Duration, csv_path: Option<PathBuf>, verbosity: u8) -> SimulationConfig {
     SimulationConfig {
         start_time: FixedOffset::west_opt(10 * 3600)
             .expect("UTC-10 offset is valid")
@@ -97,17 +96,23 @@ fn sim_config(duration: Duration, output_path: Option<PathBuf>, verbosity: u8) -
             .unwrap(),
         duration,
         time_res: Duration::seconds(900),
-        output_verbosity: verbosity,
-        write_output: output_path.is_some(),
-        output_path,
-        output_format: OutputFormat::Csv,
+        reports: csv_path
+            .into_iter()
+            .map(|path| hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(verbosity),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Csv {
+                    path,
+                    overwrite: false,
+                },
+            })
+            .collect(),
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
@@ -162,7 +167,7 @@ fn equipment_core_has_one_entry_per_equipment() {
 fn nightly_strategy_keeps_ev_charged_over_long_horizon() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("ev_nightly_45day.csv");
+    let csv_path = tmp.path().join("ev_nightly_45day.csv");
 
     // Nightly charging strategy: charge to 90% between 22:00 and 06:00.
     let nightly = serde_json::json!({"Nightly": {
@@ -176,7 +181,7 @@ fn nightly_strategy_keeps_ev_charged_over_long_horizon() {
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(45), Some(output_path.clone()), 5),
+        sim_config(Duration::days(45), Some(csv_path.clone()), 5),
         Some(overrides),
     );
     let result = SimulationEngine::new()
@@ -188,7 +193,7 @@ fn nightly_strategy_keeps_ev_charged_over_long_horizon() {
         result.status
     );
 
-    let (charge_days, cancelled_max) = summarize_ev_run(&output_path);
+    let (charge_days, cancelled_max) = summarize_ev_run(&csv_path);
 
     // With working SOC observation the pack is topped to 0.90 (67.5 kWh of
     // 75 kWh) every night against a ~9.8 kWh daily trip, so a real charging
@@ -840,7 +845,7 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
     let hpxml = tmp.path().join("fixture_battery.xml");
     std::fs::write(&hpxml, inject_battery(&src)).expect("write battery-injected HPXML");
 
-    let output_path = tmp.path().join("battery_observation.csv");
+    let csv_path = tmp.path().join("battery_observation.csv");
     // Self-consumption BMS mode (the battery's default is Manual, which
     // seeds no actor): the override reaches the typed config through the
     // named-equipment override channel, the same path the Python API uses.
@@ -858,7 +863,7 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
         schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
+        sim_config: sim_config(Duration::days(2), Some(csv_path.clone()), 5),
         overrides: Some(overrides),
         bldg_id: 100,
         initialization_duration: None,
@@ -871,7 +876,7 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
         result.status
     );
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -906,7 +911,7 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
 fn low_target_strategy_pack_is_raised_to_the_anxiety_band_before_departure() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("ev_low_target_14day.csv");
+    let csv_path = tmp.path().join("ev_low_target_14day.csv");
 
     let low_target = serde_json::json!({"Immediate": { "target_soc": 0.1 }});
     let overrides = serde_json::json!({
@@ -914,7 +919,7 @@ fn low_target_strategy_pack_is_raised_to_the_anxiety_band_before_departure() {
     });
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(14), Some(output_path.clone()), 5),
+        sim_config(Duration::days(14), Some(csv_path.clone()), 5),
         Some(overrides),
     );
     let result = SimulationEngine::new()
@@ -926,7 +931,7 @@ fn low_target_strategy_pack_is_raised_to_the_anxiety_band_before_departure() {
         result.status
     );
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -972,7 +977,7 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
     let src = std::fs::read_to_string(second_fixture_dir().join("home.xml")).expect("home.xml");
     let hpxml = tmp.path().join("second_fixture_ev.xml");
     std::fs::write(&hpxml, inject_ev(&src)).expect("write injected HPXML");
-    let output_path = tmp.path().join("ev_nightly_45day_second_fixture.csv");
+    let csv_path = tmp.path().join("ev_nightly_45day_second_fixture.csv");
 
     let nightly = serde_json::json!({"Nightly": {
         "off_peak_start_hour": 22.0,
@@ -987,7 +992,7 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
         schedule_path: Some(second_fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&second_fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(45), Some(output_path.clone()), 5),
+        sim_config: sim_config(Duration::days(45), Some(csv_path.clone()), 5),
         overrides: Some(overrides),
         bldg_id: 100,
         initialization_duration: None,
@@ -1002,7 +1007,7 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
         result.status
     );
 
-    let (charge_days, cancelled_max) = summarize_ev_run(&output_path);
+    let (charge_days, cancelled_max) = summarize_ev_run(&csv_path);
     assert!(
         charge_days >= 30,
         "Nightly(22:00-06:00, target 0.90) must top the pack up on most of 45 \
@@ -1133,11 +1138,11 @@ fn add_equipment_rejects_unknown_zone_declaration() {
 fn midrun_equipment_removal_keeps_output_columns_aligned() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("midrun_removal.csv");
+    let csv_path = tmp.path().join("midrun_removal.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1155,7 +1160,7 @@ fn midrun_equipment_removal_keeps_output_columns_aligned() {
     // and flushes/closes the output recorder.
     dwelling.simulate().expect("day-2 simulate");
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -1207,11 +1212,11 @@ fn midrun_equipment_removal_keeps_output_columns_aligned() {
 fn midrun_equipment_add_with_recording_gets_empty_map_not_panic() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("midrun_add.csv");
+    let csv_path = tmp.path().join("midrun_add.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1234,7 +1239,7 @@ fn midrun_equipment_add_with_recording_gets_empty_map_not_panic() {
     // its own column would not exist, so assert the observable contract —
     // the run completed and the constant MELs survivor still reports its
     // own energy in its own column on day 2.
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -1276,11 +1281,11 @@ fn midrun_equipment_add_with_recording_gets_empty_map_not_panic() {
 fn midrun_equipment_add_with_recording_at_high_verbosity_does_not_panic() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("midrun_add_v7.csv");
+    let csv_path = tmp.path().join("midrun_add_v7.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 7),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 7),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1310,11 +1315,11 @@ fn midrun_equipment_add_with_recording_at_high_verbosity_does_not_panic() {
 fn midrun_add_of_hvac_named_equipment_at_high_verbosity_does_not_panic() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("midrun_add_hvac_v7.csv");
+    let csv_path = tmp.path().join("midrun_add_hvac_v7.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 7),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 7),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1345,11 +1350,11 @@ fn midrun_add_of_hvac_named_equipment_at_high_verbosity_does_not_panic() {
 fn end_use_aggregates_match_per_equipment_columns_after_midrun_remove() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("end_use_desync.csv");
+    let csv_path = tmp.path().join("end_use_desync.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1386,7 +1391,7 @@ fn end_use_aggregates_match_per_equipment_columns_after_midrun_remove() {
 
     // Group the surviving equipment by end-use and check every aggregate
     // column against the sum of its members' own columns, step for step.
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let mut lines = contents.lines();
     let header: Vec<&str> = lines.next().expect("header").split(',').collect();
     let day2: Vec<Vec<f64>> = lines
@@ -1454,11 +1459,11 @@ fn end_use_aggregates_match_per_equipment_columns_after_midrun_remove() {
 fn midrun_added_equipment_contributes_to_its_end_use_aggregate() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("end_use_add.csv");
+    let csv_path = tmp.path().join("end_use_add.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1487,7 +1492,7 @@ fn midrun_added_equipment_contributes_to_its_end_use_aggregate() {
         .expect("mid-run add must succeed");
     dwelling.simulate().expect("day-2 simulate");
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let mut lines = contents.lines();
     let header: Vec<&str> = lines.next().expect("header").split(',').collect();
     let day2: Vec<Vec<f64>> = lines
@@ -1792,7 +1797,7 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
     let src = std::fs::read_to_string(fixture_dir().join("home.xml")).expect("home.xml");
     let hpxml = tmp.path().join("fixture_ev_battery.xml");
     std::fs::write(&hpxml, inject_battery(&inject_ev(&src))).expect("write injected HPXML");
-    let output_path = tmp.path().join("actor_columns_midrun.csv");
+    let csv_path = tmp.path().join("actor_columns_midrun.csv");
 
     let nightly = serde_json::json!({"Nightly": {
         "off_peak_start_hour": 22.0,
@@ -1814,7 +1819,7 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
         schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
+        sim_config: sim_config(Duration::days(2), Some(csv_path.clone()), 5),
         overrides: Some(overrides),
         bldg_id: 100,
         initialization_duration: None,
@@ -1861,7 +1866,7 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
     // Day 2 with the shifted actor vector.
     dwelling.simulate().expect("day-2 simulate");
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -2167,7 +2172,7 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
     let hpxml = tmp.path().join("fixture_battery_replace.xml");
     std::fs::write(&hpxml, inject_battery(&src)).expect("write battery-injected HPXML");
 
-    let output_path = tmp.path().join("battery_replace.csv");
+    let csv_path = tmp.path().join("battery_replace.csv");
     let bms_mode = serde_json::json!({"SelfConsumption": {
         "min_soc": 0.1,
         "max_soc": 1.0,
@@ -2182,7 +2187,7 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
         schedule_path: Some(fixture_dir().join("in.schedules.csv")),
         weather_path: weather_for(&fixture_dir()),
         defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
+        sim_config: sim_config(Duration::days(2), Some(csv_path.clone()), 5),
         overrides: Some(overrides),
         bldg_id: 100,
         initialization_duration: None,
@@ -2242,7 +2247,7 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
     // initial 0.5), not the evictee's absent id.
     dwelling.simulate().expect("day-2 simulate");
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()

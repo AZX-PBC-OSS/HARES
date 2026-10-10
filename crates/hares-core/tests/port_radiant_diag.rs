@@ -49,10 +49,7 @@ fn observer_post_solvers_forwards_port_radiant_w() {
 start_time = "2024-06-15T12:00:00Z"
 time_res = 60
 duration = 300
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
@@ -114,7 +111,8 @@ occupancy = 0.0
 
 // ---------------------------------------------------------------------------
 // Integration test: verifies the diagnostic CSV ({stem}_diagnostics.csv) is
-// written end-to-end when output_verbosity >= 4, and that all seven scalar
+// written end-to-end for a verbosity-4+ report with a file destination,
+// and that all seven scalar
 // EnvelopeDiag columns are emitted with finite values.
 // ---------------------------------------------------------------------------
 
@@ -128,7 +126,8 @@ fn diagnostic_csv_contains_all_envelope_diag_columns() {
     let toml_path = dir.path().join("diag-csv.toml");
     let csv_path = dir.path().join("diag-csv.csv");
 
-    // output_verbosity = 4 triggers diagnostic CSV creation in from_preparsed.
+    // The verbosity-4 report's file destination triggers diagnostic CSV
+    // creation in from_preparsed (the writer rides that report's path).
     let content = format!(
         r#"building_id = 4242
 
@@ -136,12 +135,13 @@ fn diagnostic_csv_contains_all_envelope_diag_columns() {
 start_time = "2024-06-15T12:00:00Z"
 time_res = 60
 duration = 600
-output_verbosity = 4
-output_format = "csv"
 output_chunk_size = 1000
-write_output = true
-output_path = "{}"
 master_seed = 0
+
+[[simulation.reports]]
+name = "frame"
+selection = {{ verbosity = 4 }}
+destination = {{ csv = {{ path = "{}" }} }}
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0

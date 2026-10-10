@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant};
 
 use arrow::record_batch::RecordBatch;
+use hares_io::SimulationConfig;
 use hares_io::output::metrics::{
     GridInteractionMetrics, MetricsCalculator, PeakPowerKw, Reliability, RollingPeakKw,
     SimulationCoverage, SimulationMetrics, TotalEnergyKwh,
 };
-use hares_io::{OutputFormat, SimulationConfig};
 use hares_types::HaresError;
 use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
 
@@ -40,7 +40,8 @@ pub enum SimStatus {
 /// Engine-level output payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimulationResults {
-    /// Path to the flushed timeseries output file.
+    /// The first report's published output file path; `None` when no
+    /// report declares a file destination.
     pub timeseries_path: Option<PathBuf>,
     /// Optional in-memory timeseries batches (disabled by default).
     pub timeseries: Option<Vec<RecordBatch>>,
@@ -122,7 +123,7 @@ impl SimulationEngine {
         profile.record(KERNEL_TOTAL, elapsed);
         emit_profile_summary(&profile);
 
-        let output_path = resolved_output_path(&config);
+        let timeseries_file = first_report_file_path(&config.sim_config);
         let mut warnings = dwelling.take_warnings();
         let result = match sim_outcome {
             Ok(Ok(_dwelling_results)) => {
@@ -142,7 +143,7 @@ impl SimulationEngine {
                     None => SimStatus::Flagged(format!("{} warning(s)", warnings.len())),
                 };
                 SimulationResults {
-                    timeseries_path: output_path.clone(),
+                    timeseries_path: timeseries_file.clone(),
                     timeseries: Some(batches),
                     metrics,
                     warnings,
@@ -159,7 +160,7 @@ impl SimulationEngine {
                 let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {
                     warnings.push(format!("simulation error: {err}"));
                     SimulationResults {
-                        timeseries_path: output_path.clone(),
+                        timeseries_path: timeseries_file.clone(),
                         timeseries: None,
                         metrics: empty_metrics(),
                         warnings,
@@ -190,7 +191,7 @@ impl SimulationEngine {
             }
             Err(payload) => {
                 let handler_result = panic::catch_unwind(AssertUnwindSafe(|| SimulationResults {
-                    timeseries_path: output_path,
+                    timeseries_path: timeseries_file,
                     timeseries: None,
                     metrics: empty_metrics(),
                     warnings,
@@ -266,7 +267,10 @@ impl SimulationEngine {
                     None => SimStatus::Flagged(format!("{} warning(s)", warnings.len())),
                 };
                 SimulationResults {
-                    timeseries_path: None,
+                    timeseries_path: sim_config
+                        .reports
+                        .iter()
+                        .find_map(|report| report.destination.path().cloned()),
                     timeseries: Some(batches),
                     metrics,
                     warnings,
@@ -401,21 +405,13 @@ fn validate_path_exists(path: &Path, field_name: &str) -> Result<(), HaresError>
     )))
 }
 
-fn resolved_output_path(config: &DwellingConfig) -> Option<PathBuf> {
-    if !config.sim_config.write_output {
-        return None;
-    }
-    if let Some(path) = &config.sim_config.output_path {
-        return Some(path.clone());
-    }
-    let ext = match config.sim_config.output_format {
-        OutputFormat::Csv => "csv",
-        OutputFormat::Parquet => "parquet",
-    };
-    Some(PathBuf::from(format!(
-        "dwelling_{}.{}",
-        config.bldg_id, ext
-    )))
+/// The first report's file destination path, in `reports` order: the file
+/// the run's output lands at. A run with no file report writes no file.
+fn first_report_file_path(config: &SimulationConfig) -> Option<PathBuf> {
+    config
+        .reports
+        .iter()
+        .find_map(|report| report.destination.path().cloned())
 }
 
 fn compute_metrics_from_batches(
@@ -458,7 +454,7 @@ fn compute_metrics_from_batches(
 /// Returns the metrics and, when they could not be computed, the honest
 /// reason: a true zero-step run (a recorder exists but recorded no rows),
 /// a calculator init failure (rows were recorded; the specific error is in
-/// the warnings), or no recorder at all (`write_output` disabled or the
+/// the warnings), or no recorder at all (no report configured or the
 /// recorder failed to initialize; specifics in the warnings). An empty
 /// retained-batch list alone is NOT treated as a zero-step run -- streaming
 /// configurations never retain batches.
@@ -497,7 +493,7 @@ fn finalize_run_metrics(
         },
         None => {
             let reason =
-                "no output recorder (write_output disabled or init failed); metrics unavailable";
+                "no output recorder (no report configured, or init failed); metrics unavailable";
             warnings.push(reason.to_string());
             Ok((empty_metrics(), Some(reason)))
         }
@@ -622,17 +618,12 @@ mod tests {
                 .expect("valid timestamp"),
             duration: chrono::Duration::hours(1),
             time_res: chrono::Duration::hours(1),
-            output_verbosity: 0,
-            output_path: None,
-            write_output: false,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 16,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         };
         let err = match compute_metrics_from_batches(std::slice::from_ref(&batch), &sim_config) {

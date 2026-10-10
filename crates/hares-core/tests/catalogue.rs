@@ -213,7 +213,8 @@ fn catalogue_schema_equals_pinned_schema_at_every_verbosity() {
 #[test]
 fn catalogue_queryable_before_run() {
     let fixture = std::path::Path::new("../../tests/fixtures/parity/cz4a_ashp_hpwh");
-    let mut dwelling = Dwelling::from_hpxml_with_write_output(
+    let verbosity = 2;
+    let mut dwelling = Dwelling::from_hpxml_with_reports(
         hares_core::HpxmlInputs {
             hpxml_path: &fixture.join("building.xml"),
             schedule_path: &fixture.join("schedule.csv"),
@@ -224,7 +225,12 @@ fn catalogue_queryable_before_run() {
         chrono::Duration::minutes(1),
         chrono::Duration::hours(1),
         None,
-        Some(true),
+        vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(verbosity),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Memory,
+        }],
         Some(
             std::path::Path::new("../../defaults")
                 .canonicalize()
@@ -239,8 +245,6 @@ fn catalogue_queryable_before_run() {
         !catalogue.is_empty(),
         "the built dwelling's catalogue is not empty"
     );
-    let verbosity = dwelling.output_verbosity();
-
     // After one step, the recorded schema's columns equal the catalogue's
     // variables at the run's verbosity (Time is the row label, not a
     // catalogue variable).
@@ -897,8 +901,8 @@ fn synthetic_dwelling_toml(name: &str) -> std::path::PathBuf {
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
+time_res = 60
+duration = 600
 
 [geometry]
 number_of_bedrooms = 3.0
@@ -922,8 +926,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-output_verbosity = 0
 "#,
     )
     .expect("write toml");

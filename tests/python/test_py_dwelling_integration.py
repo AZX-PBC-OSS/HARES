@@ -123,7 +123,7 @@ class TestFullSimulation:
         )
 
     def test_simulate_expected_columns(self, tmp_path):
-        dw = _init_dwelling(output_verbosity=3, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
+        dw = _init_dwelling(verbosity=3)
         df = dw.simulate()
         cols = df.columns
         assert "Total Electric Power (kW)" in cols
@@ -143,7 +143,7 @@ class TestFullSimulation:
         assert len(mode_cols) > 0
 
     def test_verbosity_2_includes_outdoor_temp(self, tmp_path):
-        dw = _init_dwelling(output_verbosity=2, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
+        dw = _init_dwelling(verbosity=2)
         df = dw.simulate()
         assert "Outdoor Dry Bulb (C)" in df.columns
         col = df["Outdoor Dry Bulb (C)"]
@@ -153,7 +153,7 @@ class TestFullSimulation:
 
     def test_verbosity_1_includes_outdoor_temp(self, tmp_path):
         # Outdoor Dry Bulb (C) is a context column present at every verbosity level.
-        dw = _init_dwelling(output_verbosity=1, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
+        dw = _init_dwelling(verbosity=1)
         df = dw.simulate()
         assert "Outdoor Dry Bulb (C)" in df.columns
 
@@ -409,10 +409,8 @@ class TestMetrics:
         dw = _init_dwelling(
             duration_s=7200,
             time_res_s=60,
-            output_verbosity=1,
+            verbosity=1,
             start_time="2019-01-01T05:00:00",
-            write_output=True,
-            output_path=str(tmp_path / "dwelling_42.csv"),
         )
         dw.simulate()
         m = dw.metrics()
@@ -925,10 +923,7 @@ class TestDerSimulationExplorer:
         dw = make_dwelling(
             duration_s=two_weeks_s,
             time_res_s=900,  # 15 minutes
-            seed=0,
-            output_verbosity=3,
-            write_output=True,
-            output_path=str(tmp_path / "dwelling_42.csv"),
+            seed=0,    verbosity=3,
         )
         dw.initialize()
 

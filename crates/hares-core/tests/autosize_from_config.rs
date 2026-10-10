@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Datelike, Duration, NaiveDate, Timelike};
 use hares_core::{Dwelling, DwellingConfig};
-use hares_io::{OutputFormat, SimulationConfig};
+use hares_io::SimulationConfig;
 
 #[path = "../../../tests/support/fixture_start.rs"]
 mod fixture_start;
@@ -174,7 +174,6 @@ fn build_minimal_dwelling(hpxml_xml: &str) -> Dwelling {
     let hpxml_path = write_file(dir.path(), "home.xml", hpxml_xml);
     let schedule_path = write_file(dir.path(), "schedule.csv", &build_minimal_schedule());
     let weather_path = write_file(dir.path(), "weather.epw", &build_minimal_epw());
-    let output_path = dir.path().join("output.csv");
 
     let start_time = fixture_start::fixture_start();
 
@@ -187,17 +186,12 @@ fn build_minimal_dwelling(hpxml_xml: &str) -> Dwelling {
             start_time,
             duration: Duration::hours(1),
             time_res: Duration::minutes(1),
-            output_verbosity: 0,
-            output_path: Some(output_path),
-            write_output: false,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 128,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,

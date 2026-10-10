@@ -18,7 +18,6 @@ use chrono::{Duration, TimeZone};
 use hares_core::{DwellingConfig, SimulationConfig};
 use hares_fleet::SteppableFleet;
 use hares_fleet::fleet::FleetError;
-use hares_io::OutputFormat;
 
 #[path = "../../../tests/support/denver_offset.rs"]
 mod denver_offset;
@@ -46,17 +45,12 @@ fn config_with_schedule_source(bldg_id: i64, schedule_path: Option<PathBuf>) -> 
             start_time,
             duration: Duration::hours(24),
             time_res: Duration::seconds(900),
-            output_verbosity: 0,
-            output_path: None,
-            write_output: false,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,

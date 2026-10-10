@@ -13,7 +13,6 @@ use std::time::Duration as StdDuration;
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig};
 use hares_equipment::Equipment;
-use hares_io::OutputFormat;
 use hares_types::{
     ControlCapabilities, CoreCapabilities, CoreOutput, ElectricPower, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, FuelType, HaresError, OperatingMode, PortContribution,
@@ -39,7 +38,7 @@ fn write_fixture_hpxml(dir: &Path) -> PathBuf {
 
 fn sim_config(
     duration: Duration,
-    output_path: Option<PathBuf>,
+    csv_path: Option<PathBuf>,
     verbosity: u8,
 ) -> hares_core::SimulationConfig {
     hares_core::SimulationConfig {
@@ -49,17 +48,23 @@ fn sim_config(
             .unwrap(),
         duration,
         time_res: Duration::seconds(900),
-        output_verbosity: verbosity,
-        write_output: output_path.is_some(),
-        output_path,
-        output_format: OutputFormat::Csv,
+        reports: csv_path
+            .into_iter()
+            .map(|path| hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(verbosity),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Csv {
+                    path,
+                    overwrite: false,
+                },
+            })
+            .collect(),
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
@@ -198,11 +203,11 @@ impl Equipment for BoundaryProbe {
 fn midrun_add_whose_name_prefix_matches_another_equipment_does_not_panic() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("prefix_collision.csv");
+    let csv_path = tmp.path().join("prefix_collision.csv");
 
     let mut dwelling = Dwelling::from_config(dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path), 1),
+        sim_config(Duration::days(2), Some(csv_path), 1),
     ))
     .expect("dwelling builds");
 
@@ -411,11 +416,11 @@ fn malformed_explicit_equipment_id_fails_the_build_loudly() {
 fn midrun_readd_of_a_removed_name_reuses_its_frozen_columns() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("readd_columns.csv");
+    let csv_path = tmp.path().join("readd_columns.csv");
 
     let mut dwelling = Dwelling::from_config(dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
     ))
     .expect("dwelling builds");
 
@@ -437,7 +442,7 @@ fn midrun_readd_of_a_removed_name_reuses_its_frozen_columns() {
     // (no panic), and its values land in its own columns.
     dwelling.simulate().expect("day-2 simulate");
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()

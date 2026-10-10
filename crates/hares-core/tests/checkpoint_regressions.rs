@@ -14,7 +14,6 @@ use hares_equipment::config::ConfigValue;
 use hares_equipment::ev::Ev;
 use hares_equipment::scheduled_load::ScheduledLoad;
 use hares_equipment::{Equipment, EquipmentConfig};
-use hares_io::OutputFormat;
 use hares_types::EndUse;
 /// Write a minimal synthetic-TOML dwelling (no equipment, just envelope).
 fn write_minimal_toml(path: &Path) {
@@ -24,10 +23,7 @@ fn write_minimal_toml(path: &Path) {
 start_time = "2024-06-15T12:00:00Z"
 time_res = 60
 duration = 600
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
@@ -508,7 +504,7 @@ fn resume_home_dir() -> PathBuf {
     repo_root().join("tests/fixtures/resstock/2025.1/bldg0176227")
 }
 
-fn resumable_dwelling_config(case: &ResumeCase, output_dir: &Path, run: &str) -> DwellingConfig {
+fn resumable_dwelling_config(case: &ResumeCase) -> DwellingConfig {
     let root = repo_root();
     DwellingConfig {
         hpxml_path: case.hpxml_path.clone(),
@@ -525,17 +521,17 @@ fn resumable_dwelling_config(case: &ResumeCase, output_dir: &Path, run: &str) ->
                 .expect("valid start time"),
             duration: Duration::minutes(15 * RESUME_TOTAL_STEPS as i64),
             time_res: Duration::minutes(15),
-            output_verbosity: 8,
-            output_path: Some(output_dir.join(format!("{run}.parquet"))),
-            write_output: true,
-            output_format: OutputFormat::Parquet,
+            reports: vec![hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(8),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Memory,
+            }],
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: true,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,
@@ -612,8 +608,7 @@ fn resumed_run_equals_continuous_run() {
         day: 15,
         checkpoint_step: 37,
     };
-    let output_dir = tempfile::tempdir().expect("temp dir");
-    assert_resume_equals_continuous(&case, output_dir.path(), |dwelling, checkpoint| {
+    assert_resume_equals_continuous(&case, |dwelling, checkpoint| {
         assert!(
             dwelling.latest_env().zones.len() > 1,
             "the fixture must model more than one zone"
@@ -642,7 +637,7 @@ fn resumed_hrv_run_equals_continuous_run() {
         day: 2,
         checkpoint_step: 36,
     };
-    assert_resume_equals_continuous(&case, output_dir.path(), |dwelling, _| {
+    assert_resume_equals_continuous(&case, |dwelling, _| {
         let recovery = dwelling
             .thermal_solver()
             .config()
@@ -672,9 +667,8 @@ fn rejected_checkpoint_leaves_the_dwelling_unchanged() {
         day: 15,
         checkpoint_step: 5,
     };
-    let output_dir = tempfile::tempdir().expect("temp dir");
-    let mut donor = Dwelling::from_config(resumable_dwelling_config(&case, output_dir.path(), "d"))
-        .expect("build donor dwelling");
+    let mut donor =
+        Dwelling::from_config(resumable_dwelling_config(&case)).expect("build donor dwelling");
     for _ in 0..case.checkpoint_step {
         donor.step().expect("donor step");
     }
@@ -682,11 +676,9 @@ fn rejected_checkpoint_leaves_the_dwelling_unchanged() {
     bad.thermal.x[0] = f64::NAN;
 
     let mut offered =
-        Dwelling::from_config(resumable_dwelling_config(&case, output_dir.path(), "o"))
-            .expect("build offered dwelling");
+        Dwelling::from_config(resumable_dwelling_config(&case)).expect("build offered dwelling");
     let mut untouched =
-        Dwelling::from_config(resumable_dwelling_config(&case, output_dir.path(), "u"))
-            .expect("build untouched dwelling");
+        Dwelling::from_config(resumable_dwelling_config(&case)).expect("build untouched dwelling");
     offered.step().expect("offered step");
     untouched.step().expect("untouched step");
 
@@ -742,12 +734,11 @@ fn write_hrv_variant(dir: &Path) -> PathBuf {
 /// dwelling and its checkpoint.
 fn assert_resume_equals_continuous(
     case: &ResumeCase,
-    output_dir: &Path,
     at_checkpoint: impl FnOnce(&Dwelling, &DwellingCheckpoint),
 ) {
     let k = case.checkpoint_step;
-    let mut continuous = Dwelling::from_config(resumable_dwelling_config(case, output_dir, "a"))
-        .expect("build continuous dwelling");
+    let mut continuous =
+        Dwelling::from_config(resumable_dwelling_config(case)).expect("build continuous dwelling");
     let continuous_steps = continuous.simulate().expect("continuous run").steps;
     assert!(
         continuous_steps[k..]
@@ -758,16 +749,16 @@ fn assert_resume_equals_continuous(
     let continuous_frame = recorded_frame(&continuous);
     assert_eq!(continuous_frame.num_rows(), RESUME_TOTAL_STEPS);
 
-    let mut interrupted = Dwelling::from_config(resumable_dwelling_config(case, output_dir, "b"))
-        .expect("build interrupted dwelling");
+    let mut interrupted =
+        Dwelling::from_config(resumable_dwelling_config(case)).expect("build interrupted dwelling");
     for _ in 0..k {
         interrupted.step().expect("step before checkpoint");
     }
     let checkpoint = interrupted.save_checkpoint().expect("save checkpoint");
     at_checkpoint(&interrupted, &checkpoint);
 
-    let mut resumed = Dwelling::from_config(resumable_dwelling_config(case, output_dir, "c"))
-        .expect("build resumed dwelling");
+    let mut resumed =
+        Dwelling::from_config(resumable_dwelling_config(case)).expect("build resumed dwelling");
     resumed
         .load_checkpoint(checkpoint)
         .expect("load checkpoint");
@@ -805,17 +796,12 @@ fn the_boiler_fluid_publish_marker_survives_a_checkpoint_restore() {
                 .expect("valid start time"),
             duration: Duration::hours(6),
             time_res: Duration::hours(1),
-            output_verbosity: 2,
-            output_path: None,
-            write_output: false,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,

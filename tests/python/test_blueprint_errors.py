@@ -23,7 +23,7 @@ from hares import (
 
 
 def _make_blueprint():
-    return DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, write_output=False, start_time="2019-01-01T00:00:00"))
+    return DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, start_time="2019-01-01T00:00:00"))
 
 
 def test_missing_capacity_raises():

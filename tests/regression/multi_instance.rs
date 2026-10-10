@@ -51,10 +51,7 @@ fn write_multi_instance_toml(path: &PathBuf) {
 start_time = "2024-01-01T00:00:00Z"
 time_res = 60
 duration = 3600
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 42
 [geometry]
 number_of_bedrooms = 3.0

@@ -27,10 +27,7 @@ const SYNTHETIC_TOML: &str = r#"building_id = 998
 start_time = "2024-06-15T12:00:00Z"
 time_res = 60
 duration = 600
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0

@@ -124,7 +124,6 @@ def _make_gym_env(action_config: dict[str, list[str]]):
                 start_time="2019-01-01T00:00:00",
                 duration=600,
                 time_res=60,
-                write_output=False,
             ),
         ),
         observation_fields=_OBS_FIELDS,

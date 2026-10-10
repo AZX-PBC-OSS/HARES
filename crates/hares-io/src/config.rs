@@ -4,49 +4,14 @@
 //! output behaviour, and RNG seeding. It deserialises from TOML with
 //! field-level defaults so that minimal config files work correctly.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::output::report::{ReportSpec, Selection};
 use crate::site_location::SiteLocationOverride;
-
-/// Output file format.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OutputFormat {
-    /// CSV (default, for OCHRE compatibility).
-    #[default]
-    Csv,
-    /// Apache Parquet (recommended for large datasets).
-    Parquet,
-}
-
-/// File rotation policy for long simulations.
-///
-/// When set to a value other than [`None`](RotationPolicy::None), output files
-/// are split at time interval boundaries. Each rotated file gets its own schema
-/// header and a timestamp suffix derived from the base output path.
-///
-/// # Reference design
-/// EnergyPlus's `ReportFreq` enum:
-/// `vendors/EnergyPlus/src/EnergyPlus/OutputProcessor.cc:347-355`
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RotationPolicy {
-    /// Single output file (default).
-    #[default]
-    None,
-    /// Rotate every hour.
-    Hourly,
-    /// Rotate every day.
-    Daily,
-    /// Rotate every month.
-    Monthly,
-    /// Rotate every year.
-    Yearly,
-}
 
 /// Errors produced during config deserialization and validation.
 #[derive(Debug, Error)]
@@ -108,10 +73,9 @@ pub static REMOVED_KEYS: &[RemovedKey] = &[
         scope: KeyScope::DwellingTable,
         key: "output",
         replacement: "the synthetic [output] table is gone: its output fields \
-                      (write_output, output_path, output_format, output_chunk_size, \
-                      output_verbosity, rotation, master_seed, retain_batches) live \
-                      in the [simulation] table; per-report destinations (reports) \
-                      replace the output booleans in a later row",
+                      (output_chunk_size, master_seed) live in the [simulation] \
+                      table, and per-report destinations (`SimulationConfig.reports`) \
+                      replace the output booleans",
     },
     RemovedKey {
         scope: KeyScope::SimulationConfig,
@@ -128,6 +92,46 @@ pub static REMOVED_KEYS: &[RemovedKey] = &[
         scope: KeyScope::SimulationConfig,
         key: "time_res_s",
         replacement: "pass time_res (seconds)",
+    },
+    RemovedKey {
+        scope: KeyScope::SimulationConfig,
+        key: "write_output",
+        replacement: "pass reports = [ReportSpec(name, selection, destination)]: a \
+                      report with a Memory destination keeps every batch in memory, \
+                      one with a Parquet or Csv destination writes the file, and a \
+                      run with no reports writes nothing",
+    },
+    RemovedKey {
+        scope: KeyScope::SimulationConfig,
+        key: "output_format",
+        replacement: "pass reports = [ReportSpec(name, selection, destination)]: the \
+                      destination carries the format (Destination.parquet(path) or \
+                      Destination.csv(path))",
+    },
+    RemovedKey {
+        scope: KeyScope::SimulationConfig,
+        key: "output_path",
+        replacement: "pass reports = [ReportSpec(name, selection, destination)]: each \
+                      file destination carries its own path; nothing defaults to \
+                      the working directory",
+    },
+    RemovedKey {
+        scope: KeyScope::SimulationConfig,
+        key: "output_verbosity",
+        replacement: "pass reports = [ReportSpec(name, selection, destination)]: the \
+                      selection carries the tier (Selection.verbosity(n))",
+    },
+    RemovedKey {
+        scope: KeyScope::SimulationConfig,
+        key: "retain_batches",
+        replacement: "pass reports = [ReportSpec(name, selection, destination)]: a \
+                      Memory destination retains every batch in memory",
+    },
+    RemovedKey {
+        scope: KeyScope::SimulationConfig,
+        key: "rotation",
+        replacement: "pass reports = [ReportSpec(name, selection, destination)]: files \
+                      do not rotate; a report writes one file at its destination path",
     },
     RemovedKey {
         scope: KeyScope::PythonKeyword,
@@ -164,7 +168,9 @@ pub static REMOVED_KEYS: &[RemovedKey] = &[
     RemovedKey {
         scope: KeyScope::PythonKeyword,
         key: "output_to_parquet",
-        replacement: "pass output_format = \"parquet\"",
+        replacement: "pass reports = [ReportSpec(name, selection, destination)] with \
+                      Destination.parquet(path): the report list is the output \
+                      surface (SimulationConfig.reports)",
     },
     RemovedKey {
         scope: KeyScope::PythonKeyword,
@@ -228,18 +234,13 @@ pub struct SimulationConfig {
     /// Timestep size in seconds (default: 60 s).
     #[serde(default = "default_time_res", with = "duration_seconds")]
     pub time_res: Duration,
-    /// Output verbosity level 0-8 (default: 0).
+    /// The run's reports: what each records and where it goes. Every
+    /// selected variable is recorded for every timestep; a `Memory`
+    /// destination retains the batches in memory, a `Parquet` or `Csv`
+    /// destination streams them to a file published at the run's end, and
+    /// a run with no reports records nothing.
     #[serde(default)]
-    pub output_verbosity: u8,
-    /// Output file path; `None` means auto-generated in cwd.
-    #[serde(default)]
-    pub output_path: Option<PathBuf>,
-    /// Whether timeseries output should be written to disk.
-    #[serde(default = "default_write_output")]
-    pub write_output: bool,
-    /// Output format (CSV or Parquet).
-    #[serde(default)]
-    pub output_format: OutputFormat,
+    pub reports: Vec<ReportSpec>,
     /// Rows per Arrow RecordBatch flush (default: 10 000).
     #[serde(default = "default_output_chunk_size")]
     pub output_chunk_size: usize,
@@ -249,12 +250,6 @@ pub struct SimulationConfig {
     /// Master RNG seed for reproducibility (default: 0).
     #[serde(default)]
     pub master_seed: u64,
-    /// Whether to retain flushed Arrow RecordBatches in memory for
-    /// post-hoc access (e.g. Python dataframes, metrics computation).
-    /// When `false`, peak memory is `O(chunk_size)`; when `true`,
-    /// memory is `O(total_rows)`. Default: `false`.
-    #[serde(default)]
-    pub retain_batches: bool,
     /// IANA timezone for civil-time schedule indexing (e.g. "America/Denver").
     /// When set, occupancy schedules and utility rates are indexed by civil
     /// (wall-clock) time including DST transitions. Weather indexing is unaffected.
@@ -262,15 +257,6 @@ pub struct SimulationConfig {
     /// field will produce a runtime error.
     #[serde(default)]
     pub civil_timezone: Option<String>,
-    /// Output file rotation policy for long simulations.
-    ///
-    /// When set to [`RotationPolicy::Hourly`], [`RotationPolicy::Daily`],
-    /// [`RotationPolicy::Monthly`], or [`RotationPolicy::Yearly`], output
-    /// is split into multiple files at the specified time interval boundary.
-    /// Each file gets a timestamp suffix derived from the first timestamp
-    /// written to it (e.g. `dwelling_42_2024-01-01.parquet`).
-    #[serde(default)]
-    pub rotation: RotationPolicy,
     /// Explicit site-location override. Any field set here takes precedence
     /// over both the HPXML `Site` element and the weather file's embedded
     /// metadata during site-location resolution (see
@@ -368,11 +354,36 @@ impl SimulationConfig {
             ));
         }
 
-        if self.output_verbosity > MAX_VERBOSITY {
-            return Err(ConfigError::Validation(format!(
-                "output_verbosity must be 0-{MAX_VERBOSITY}, got {}",
-                self.output_verbosity
-            )));
+        // The report requests: unique names, unique file paths, and a
+        // verbosity selection inside the tier range.
+        let mut report_names = HashSet::with_capacity(self.reports.len());
+        let mut report_paths = HashSet::with_capacity(self.reports.len());
+        for report in &self.reports {
+            if !report_names.insert(report.name.as_str()) {
+                return Err(ConfigError::Validation(format!(
+                    "report name '{}' is not unique: report names must be unique \
+                     within SimulationConfig.reports",
+                    report.name
+                )));
+            }
+            if let Some(path) = report.destination.path()
+                && !report_paths.insert(path.clone())
+            {
+                return Err(ConfigError::Validation(format!(
+                    "report '{}' destination path {} is not unique: two reports \
+                     may not name the same file path",
+                    report.name,
+                    path.display()
+                )));
+            }
+            if let Selection::Verbosity(verbosity) = &report.selection
+                && *verbosity > MAX_VERBOSITY
+            {
+                return Err(ConfigError::Validation(format!(
+                    "report '{}' selection verbosity must be 0-{MAX_VERBOSITY}, got {verbosity}",
+                    report.name
+                )));
+            }
         }
 
         if duration_secs % time_res_secs != 0 {
@@ -412,13 +423,9 @@ pub const DEFAULT_TIME_RES_SECS: i64 = 60;
 /// the Python constructor's signature.
 pub const DEFAULT_OUTPUT_CHUNK_SIZE: usize = 10_000;
 
-/// The default `write_output`, shared by the serde default and the Python
-/// constructor's signature.
-pub const DEFAULT_WRITE_OUTPUT: bool = true;
-
-/// The highest `output_verbosity` a `SimulationConfig` accepts. Public
-/// because every surface that sets the field outside `from_toml` (the
-/// fleet's verbosity builder) applies the same bound.
+/// The highest `output_verbosity` a report's `Selection::Verbosity`
+/// accepts. Public because every surface that builds a verbosity selection
+/// (the fleet's report builder) applies the same bound.
 pub const MAX_VERBOSITY: u8 = 8;
 
 fn default_time_res() -> Duration {
@@ -427,10 +434,6 @@ fn default_time_res() -> Duration {
 
 fn default_output_chunk_size() -> usize {
     DEFAULT_OUTPUT_CHUNK_SIZE
-}
-
-fn default_write_output() -> bool {
-    DEFAULT_WRITE_OUTPUT
 }
 
 mod duration_seconds {
@@ -450,6 +453,7 @@ mod duration_seconds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn removed_key_is_scoped() {
@@ -500,13 +504,13 @@ duration = 3600
 "#;
         let cfg = SimulationConfig::from_toml(toml).expect("parse minimal config");
         assert_eq!(cfg.time_res, Duration::seconds(60));
-        assert_eq!(cfg.output_verbosity, 0);
-        assert_eq!(cfg.output_format, OutputFormat::Csv);
         assert_eq!(cfg.output_chunk_size, 10_000);
         assert_eq!(cfg.setpoint_deadband_c, None);
         assert_eq!(cfg.master_seed, 0);
-        assert!(cfg.output_path.is_none());
-        assert!(cfg.write_output);
+        assert!(
+            cfg.reports.is_empty(),
+            "a config with no reports records nothing"
+        );
         assert_eq!(
             cfg.max_consecutive_step_failures,
             DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES
@@ -530,23 +534,44 @@ max_consecutive_step_failures = 0
 start_time = "2024-06-15T12:00:00Z"
 duration = 7200
 time_res = 300
-output_verbosity = 5
-output_path = "/tmp/sim_output.csv"
-write_output = false
-output_format = "parquet"
 output_chunk_size = 5000
 setpoint_deadband_c = 1.5
 master_seed = 42
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 5 }
+destination = "memory"
+
+[[reports]]
+name = "archive"
+selection = { named = ["Total Electric Power (kW)"] }
+destination = { parquet = { path = "/tmp/sim_output.parquet", overwrite = true } }
 "#;
         let cfg = SimulationConfig::from_toml(toml).expect("parse full config");
         assert_eq!(cfg.time_res, Duration::seconds(300));
-        assert_eq!(cfg.output_verbosity, 5);
-        assert_eq!(cfg.output_format, OutputFormat::Parquet);
         assert_eq!(cfg.output_chunk_size, 5000);
         assert_eq!(cfg.setpoint_deadband_c, Some(1.5));
         assert_eq!(cfg.master_seed, 42);
-        assert_eq!(cfg.output_path, Some(PathBuf::from("/tmp/sim_output.csv")));
-        assert!(!cfg.write_output);
+        assert_eq!(cfg.reports.len(), 2);
+        assert_eq!(cfg.reports[0].name, "frame");
+        assert_eq!(
+            cfg.reports[0].selection,
+            Selection::Verbosity(5),
+            "the verbosity selection parses"
+        );
+        assert_eq!(
+            cfg.reports[0].destination,
+            crate::output::report::Destination::Memory
+        );
+        assert_eq!(
+            cfg.reports[1].destination,
+            crate::output::report::Destination::Parquet {
+                path: PathBuf::from("/tmp/sim_output.parquet"),
+                overwrite: true,
+            },
+            "the parquet destination parses with its overwrite flag"
+        );
     }
 
     #[test]
@@ -564,16 +589,66 @@ time_res = 0
     }
 
     #[test]
-    fn verbosity_above_8_rejected() {
+    fn verbosity_report_above_8_rejected() {
         let toml = r#"
 start_time = "2024-01-01T00:00:00Z"
 duration = 3600
-output_verbosity = 9
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 9 }
+destination = "memory"
 "#;
         let err = SimulationConfig::from_toml(toml).unwrap_err();
         assert!(
-            matches!(err, ConfigError::Validation(ref msg) if msg.contains("output_verbosity")),
+            matches!(err, ConfigError::Validation(ref msg) if msg.contains("verbosity")),
             "expected verbosity validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_report_name_is_a_validate_error() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00Z"
+duration = 3600
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 2 }
+destination = "memory"
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 3 }
+destination = "memory"
+"#;
+        let err = SimulationConfig::from_toml(toml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Validation(ref msg) if msg.contains("'frame'")),
+            "expected duplicate-name validation error naming the report, got: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_report_path_is_a_validate_error() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00Z"
+duration = 3600
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 2 }
+destination = { parquet = { path = "/tmp/sim_output.parquet" } }
+
+[[reports]]
+name = "copy"
+selection = { verbosity = 2 }
+destination = { csv = { path = "/tmp/sim_output.parquet" } }
+"#;
+        let err = SimulationConfig::from_toml(toml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Validation(ref msg) if msg.contains("/tmp/sim_output.parquet")),
+            "expected duplicate-path validation error naming the path, got: {err}"
         );
     }
 
@@ -622,13 +697,17 @@ duration = 0
     }
 
     #[test]
-    fn verbosity_boundary_values() {
+    fn verbosity_report_boundary_values() {
         for v in 0..=8 {
             let toml = format!(
                 r#"
 start_time = "2024-01-01T00:00:00Z"
 duration = 60
-output_verbosity = {v}
+
+[[reports]]
+name = "frame"
+selection = {{ verbosity = {v} }}
+destination = "memory"
 "#
             );
             assert!(
@@ -650,27 +729,6 @@ setpoint_deadband_c = -0.1
             matches!(err, ConfigError::Validation(ref msg) if msg.contains("setpoint_deadband_c")),
             "expected deadband validation error, got: {err}"
         );
-    }
-
-    #[test]
-    fn rotation_defaults_to_none() {
-        let toml = r#"
-start_time = "2024-01-01T00:00:00Z"
-duration = 3600
-"#;
-        let cfg = SimulationConfig::from_toml(toml).expect("parse config");
-        assert_eq!(cfg.rotation, RotationPolicy::None);
-    }
-
-    #[test]
-    fn rotation_daily_parses() {
-        let toml = r#"
-start_time = "2024-01-01T00:00:00Z"
-duration = 3600
-rotation = "daily"
-"#;
-        let cfg = SimulationConfig::from_toml(toml).expect("parse config");
-        assert_eq!(cfg.rotation, RotationPolicy::Daily);
     }
 
     #[test]
@@ -701,16 +759,20 @@ duration = 3600
 start_time = "2024-06-15T12:00:00+00:00"
 duration = 7200
 time_res = 300
-output_verbosity = 5
-output_path = "/tmp/sim_output.csv"
-write_output = false
-output_format = "parquet"
 output_chunk_size = 5000
 setpoint_deadband_c = 1.5
 master_seed = 42
-retain_batches = true
 civil_timezone = "America/Denver"
-rotation = "daily"
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 5 }
+destination = "memory"
+
+[[reports]]
+name = "archive"
+selection = { pattern = "Total *" }
+destination = { parquet = { path = "/tmp/sim_output.parquet", overwrite = true } }
 
 [site_location]
 latitude_deg = 39.7392
@@ -725,74 +787,6 @@ utc_offset_h = -7.0
         assert_eq!(
             cfg, round_tripped,
             "full config differs after TOML round-trip"
-        );
-    }
-
-    #[test]
-    fn round_trip_output_path() {
-        let toml = r#"
-start_time = "2024-01-01T00:00:00+00:00"
-duration = 3600
-output_path = "/some/path/output.csv"
-"#;
-        let cfg = SimulationConfig::from_toml(toml).expect("parse");
-        let serialized = toml::to_string(&cfg).expect("serialize");
-        let round_tripped = SimulationConfig::from_toml(&serialized).expect("re-parse");
-        assert_eq!(
-            cfg.output_path, round_tripped.output_path,
-            "OutputPath does not round-trip"
-        );
-    }
-
-    #[test]
-    fn output_format_implements_serialize() {
-        fn _assert_serialize<T: serde::Serialize>() {}
-        _assert_serialize::<OutputFormat>();
-    }
-
-    #[test]
-    fn output_format_csv_serializes_to_csv() {
-        let serialized = serde_json::to_string(&OutputFormat::Csv).expect("serialize");
-        assert_eq!(serialized, "\"csv\"");
-    }
-
-    #[test]
-    fn output_format_parquet_serializes_to_parquet() {
-        let serialized = serde_json::to_string(&OutputFormat::Parquet).expect("serialize");
-        assert_eq!(serialized, "\"parquet\"");
-    }
-
-    #[test]
-    fn output_format_round_trips_through_toml() {
-        #[derive(Serialize, Deserialize)]
-        struct Wrapper {
-            output_format: OutputFormat,
-        }
-        for original in [OutputFormat::Csv, OutputFormat::Parquet] {
-            let wrapper = Wrapper {
-                output_format: original,
-            };
-            let serialized = toml::to_string(&wrapper).expect("serialize");
-            let deserialized: Wrapper = toml::from_str(&serialized).expect("deserialize");
-            assert_eq!(
-                original, deserialized.output_format,
-                "OutputFormat does not round-trip through TOML"
-            );
-        }
-    }
-
-    #[test]
-    fn round_trip_output_path_none() {
-        let toml = r#"
-start_time = "2024-01-01T00:00:00+00:00"
-duration = 3600
-"#;
-        let cfg = SimulationConfig::from_toml(toml).expect("parse");
-        let serialized = toml::to_string(&cfg).expect("serialize");
-        let round_tripped = SimulationConfig::from_toml(&serialized).expect("re-parse");
-        assert_eq!(
-            cfg.output_path, round_tripped.output_path,
-            "None OutputPath does not round-trip"
         );
     }
 
@@ -818,17 +812,12 @@ output_verboisty = 3
                 .expect("start time parses"),
             duration: Duration::seconds(i64::from(u32::MAX) * 2),
             time_res: Duration::seconds(i64::from(u32::MAX) + 1),
-            output_verbosity: 0,
-            output_path: None,
-            write_output: false,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: RotationPolicy::None,
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         };
         let err = cfg
@@ -837,6 +826,64 @@ output_verboisty = 3
         assert!(
             err.to_string().contains("time_res"),
             "the error must name the resolution, got: {err}"
+        );
+    }
+
+    // Row 38: the report checks run on every construction path, so the
+    // TOML path and a Rust-built config fail the same duplicate with the
+    // message the Python constructor raises.
+    #[test]
+    fn built_config_validates_like_the_toml_path() {
+        let report = |name: &str, path: Option<&str>| ReportSpec {
+            name: name.to_string(),
+            selection: Selection::Verbosity(2),
+            frequency: crate::output::report::Frequency::default(),
+            destination: path.map_or(crate::output::report::Destination::Memory, |p| {
+                crate::output::report::Destination::Csv {
+                    path: PathBuf::from(p),
+                    overwrite: false,
+                }
+            }),
+        };
+        let toml = r#"
+start_time = "2024-01-01T00:00:00Z"
+duration = 3600
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 2 }
+destination = { csv = { path = "/tmp/sim_output.csv" } }
+
+[[reports]]
+name = "copy"
+selection = { verbosity = 2 }
+destination = { csv = { path = "/tmp/sim_output.csv" } }
+"#;
+        let toml_err = SimulationConfig::from_toml(toml)
+            .expect_err("a duplicate report path is a validate error on the TOML path too");
+        let built = SimulationConfig {
+            start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                .expect("start time parses"),
+            duration: Duration::seconds(3600),
+            time_res: Duration::seconds(60),
+            reports: vec![
+                report("frame", Some("/tmp/sim_output.csv")),
+                report("copy", Some("/tmp/sim_output.csv")),
+            ],
+            output_chunk_size: 10_000,
+            setpoint_deadband_c: None,
+            master_seed: 0,
+            civil_timezone: None,
+            site_location: SiteLocationOverride::default(),
+            max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        };
+        let built_err = built
+            .validate()
+            .expect_err("the same config built in Rust fails validate()");
+        assert_eq!(
+            built_err.to_string(),
+            toml_err.to_string(),
+            "one report check, one message, on every path"
         );
     }
 
@@ -859,10 +906,7 @@ latitude_deg = 95.0
                 .expect("start time parses"),
             duration: Duration::seconds(3600),
             time_res: Duration::seconds(60),
-            output_verbosity: 0,
-            output_path: None,
-            write_output: true,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,
@@ -871,8 +915,6 @@ latitude_deg = 95.0
                 latitude_deg: Some(95.0),
                 ..SiteLocationOverride::default()
             },
-            retain_batches: false,
-            rotation: RotationPolicy::None,
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         };
         let built_err = built
@@ -1011,13 +1053,20 @@ latitude_deg = 95.0
     #[test]
     fn removed_keys_scopes_pin_this_rows_rows() {
         // Every row this entry adds, in its scope: the dwelling table's
-        // [output] table, the [simulation] table's old keys, and the Python
-        // keyword surface's old names.
-        let expected: [(KeyScope, &str); 9] = [
+        // [output] table, the [simulation] table's old keys (the output
+        // booleans among them, removed by the destinations row), and the
+        // Python keyword surface's old names.
+        let expected: [(KeyScope, &str); 15] = [
             (KeyScope::DwellingTable, "output"),
             (KeyScope::SimulationConfig, "initialization_duration_s"),
             (KeyScope::SimulationConfig, "duration_s"),
             (KeyScope::SimulationConfig, "time_res_s"),
+            (KeyScope::SimulationConfig, "write_output"),
+            (KeyScope::SimulationConfig, "output_format"),
+            (KeyScope::SimulationConfig, "output_path"),
+            (KeyScope::SimulationConfig, "output_verbosity"),
+            (KeyScope::SimulationConfig, "retain_batches"),
+            (KeyScope::SimulationConfig, "rotation"),
             (KeyScope::PythonKeyword, "latitude"),
             (KeyScope::PythonKeyword, "longitude"),
             (KeyScope::PythonKeyword, "elevation_m"),
@@ -1036,6 +1085,29 @@ latitude_deg = 95.0
             removed_key(KeyScope::DwellingTable, "initialization_duration_s").is_none(),
             "the top-level initialization_duration_s stays valid"
         );
+        // The output booleans' rows name the report list: every surface's
+        // error points at SimulationConfig.reports.
+        for key in [
+            "write_output",
+            "output_format",
+            "output_path",
+            "output_verbosity",
+            "retain_batches",
+            "rotation",
+            "output_to_parquet",
+        ] {
+            let scope = if key == "output_to_parquet" {
+                KeyScope::PythonKeyword
+            } else {
+                KeyScope::SimulationConfig
+            };
+            let replacement =
+                removed_key(scope, key).unwrap_or_else(|| panic!("{key} must be a removed key"));
+            assert!(
+                replacement.contains("reports"),
+                "the {key} row must name the report list, got: {replacement}"
+            );
+        }
     }
 
     #[test]
@@ -1044,17 +1116,21 @@ latitude_deg = 95.0
 start_time = "2024-06-15T12:00:00+00:00"
 duration = 7200
 time_res = 300
-output_verbosity = 5
-output_path = "/tmp/sim_output.csv"
-write_output = false
-output_format = "parquet"
 output_chunk_size = 5000
 setpoint_deadband_c = 1.5
 master_seed = 42
-retain_batches = true
 civil_timezone = "America/Denver"
-rotation = "daily"
 max_consecutive_step_failures = 2
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 5 }
+destination = "memory"
+
+[[reports]]
+name = "archive"
+selection = { pattern = "Total *" }
+destination = { parquet = { path = "/tmp/sim_output.parquet", overwrite = true } }
 
 [site_location]
 latitude_deg = 39.7392
@@ -1071,18 +1147,13 @@ utc_offset_h = -7.0
             "start_time",
             "duration",
             "time_res",
-            "output_verbosity",
-            "output_path",
-            "write_output",
-            "output_format",
             "output_chunk_size",
             "setpoint_deadband_c",
             "master_seed",
-            "retain_batches",
             "civil_timezone",
-            "rotation",
             "max_consecutive_step_failures",
             "site_location",
+            "reports",
         ] {
             assert!(
                 serialized.contains(key),
@@ -1106,6 +1177,27 @@ utc_offset_h = -7.0
             assert!(
                 err.to_string().contains(key),
                 "the error names the removed key {key}, got: {err}"
+            );
+        }
+        // The output booleans' rows name the report list: the file path,
+        // the format, the retention and the verbosity all move into the
+        // reports.
+        for (key, value) in [
+            ("write_output", "false"),
+            ("output_format", "\"parquet\""),
+            ("output_path", "\"out.csv\""),
+            ("output_verbosity", "2"),
+            ("retain_batches", "true"),
+            ("rotation", "\"daily\""),
+        ] {
+            let toml = format!(
+                "\nstart_time = \"2024-01-01T00:00:00Z\"\nduration = 3600\n{key} = {value}\n"
+            );
+            let err = SimulationConfig::from_toml(&toml)
+                .expect_err("a removed output key is an error on the plain TOML path too");
+            assert!(
+                err.to_string().contains(key) && err.to_string().contains("reports"),
+                "the error names the removed key {key} and the report list, got: {err}"
             );
         }
     }

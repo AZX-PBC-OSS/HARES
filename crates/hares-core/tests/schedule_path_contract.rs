@@ -13,7 +13,6 @@ use std::path::PathBuf;
 use chrono::{Duration, TimeZone};
 use hares_core::dwelling::DwellingBlueprint;
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-use hares_io::OutputFormat;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -50,17 +49,12 @@ fn generated_schedule_config(schedule_path: Option<PathBuf>) -> DwellingConfig {
             start_time,
             duration: Duration::hours(24),
             time_res: Duration::seconds(900),
-            output_verbosity: 0,
-            output_path: None,
-            write_output: false,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,

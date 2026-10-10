@@ -6,7 +6,7 @@
 //! Every fixture-driven test here steps "the cz2a fixture": the
 //! `tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/` inputs (`building.xml`,
 //! `schedule.csv`, `weather.epw`) at their config start
-//! `2023-01-01T00:00:00-07:00`, no warm-up, `write_output: false`.
+//! `2023-01-01T00:00:00-07:00`, no warm-up, no report configured.
 #![cfg(feature = "profiling")]
 
 use std::path::PathBuf;
@@ -41,11 +41,11 @@ fn load_cz2a_fixture() -> Dwelling {
         .unwrap_or(1);
 
     // 96 hourly steps; no warm-up; the tests read in-memory state, so the
-    // recorder is off.
+    // reports are dropped: nothing is recorded.
     let mut sim_config = sim_config;
     sim_config.time_res = Duration::hours(1);
     sim_config.duration = Duration::hours(96);
-    sim_config.write_output = false;
+    sim_config.reports = Vec::new();
 
     let config = DwellingConfig {
         hpxml_path: root.join("building.xml"),

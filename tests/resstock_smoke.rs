@@ -25,7 +25,6 @@ mod tests {
 
     use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
-    use hares_io::OutputFormat;
     use sha2::{Digest, Sha256};
 
     fn project_root() -> PathBuf {
@@ -163,7 +162,7 @@ mod tests {
         let hpxml_path = bldg_dir.join("home.xml");
         let weather_path = weather_path(version, bldg_dir);
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("resstock_smoke.csv");
+        let csv_path = output_dir.path().join("resstock_smoke.csv");
 
         let bldg_name = bldg_dir.file_name().unwrap().to_str().unwrap();
         // The bldg0527060 fixture carries no in.schedules.csv, so it runs the
@@ -189,17 +188,20 @@ mod tests {
                     .unwrap(),
                 duration: Duration::hours(1),
                 time_res: Duration::minutes(1),
-                output_verbosity: 1,
-                output_path: Some(output_path.clone()),
-                write_output: true,
-                output_format: OutputFormat::Csv,
+                reports: vec![hares_io::ReportSpec {
+                    name: "frame".to_string(),
+                    selection: hares_io::Selection::Verbosity(1),
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Csv {
+                        path: csv_path.clone(),
+                        overwrite: false,
+                    },
+                }],
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: false,
-                rotation: hares_io::RotationPolicy::None,
                 max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,
@@ -253,8 +255,8 @@ mod tests {
             energy.net_energy_kwh
         );
 
-        if output_path.exists() {
-            assert_physics_bounds(&output_path);
+        if csv_path.exists() {
+            assert_physics_bounds(&csv_path);
         }
     }
 
@@ -365,7 +367,7 @@ mod tests {
             .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000002"))
             .expect("2024.2 bldg0000002 fixture must exist");
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("winter_crankcase_pin.csv");
+        let csv_path = output_dir.path().join("winter_crankcase_pin.csv");
 
         let config = DwellingConfig {
             hpxml_path: bldg_dir.join("home.xml"),
@@ -378,17 +380,20 @@ mod tests {
                     .unwrap(),
                 duration: Duration::hours(72),
                 time_res: Duration::minutes(60),
-                output_verbosity: 1,
-                output_path: Some(output_path.clone()),
-                write_output: true,
-                output_format: OutputFormat::Csv,
+                reports: vec![hares_io::ReportSpec {
+                    name: "frame".to_string(),
+                    selection: hares_io::Selection::Verbosity(1),
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Csv {
+                        path: csv_path.clone(),
+                        overwrite: false,
+                    },
+                }],
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: true,
-                rotation: hares_io::RotationPolicy::None,
                 max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,
@@ -404,7 +409,7 @@ mod tests {
             "winter run failed: {result:?}"
         );
 
-        let data = parse_csv_columns(&output_path);
+        let data = parse_csv_columns(&csv_path);
         let outdoor = data
             .get("Outdoor Dry Bulb (C)")
             .expect("Outdoor Dry Bulb (C) column");
@@ -464,7 +469,7 @@ mod tests {
         bldg_dir: &Path,
         month: u32,
         day: u32,
-        output_path: &Path,
+        csv_path: &Path,
     ) -> DwellingConfig {
         DwellingConfig {
             hpxml_path: bldg_dir.join("home.xml"),
@@ -477,17 +482,20 @@ mod tests {
                     .unwrap(),
                 duration: Duration::hours(72),
                 time_res: Duration::minutes(60),
-                output_verbosity: 1,
-                output_path: Some(output_path.to_path_buf()),
-                write_output: true,
-                output_format: OutputFormat::Csv,
+                reports: vec![hares_io::ReportSpec {
+                    name: "frame".to_string(),
+                    selection: hares_io::Selection::Verbosity(1),
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Csv {
+                        path: csv_path.to_path_buf(),
+                        overwrite: false,
+                    },
+                }],
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: true,
-                rotation: hares_io::RotationPolicy::None,
                 max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,
@@ -507,9 +515,9 @@ mod tests {
             .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000004"))
             .expect("bldg0000004 fixture must exist");
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("resstock_summer_72h.csv");
+        let csv_path = output_dir.path().join("resstock_summer_72h.csv");
 
-        let config = seasonal_72h_config(version, &bldg_dir, 7, 15, &output_path);
+        let config = seasonal_72h_config(version, &bldg_dir, 7, 15, &csv_path);
         let engine = SimulationEngine::new();
         let result = engine.run(config).expect("engine.run should succeed");
         assert!(
@@ -524,7 +532,7 @@ mod tests {
             "{version} summer 72 h: hvac_cooling must carry energy, got {cooling_kwh} kWh"
         );
 
-        assert_physics_bounds(&output_path);
+        assert_physics_bounds(&csv_path);
     }
 
     /// Three-day January run on the release's `bldg0000002` fixture (Idaho
@@ -540,9 +548,9 @@ mod tests {
             .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000002"))
             .expect("bldg0000002 fixture must exist");
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("resstock_winter_72h.csv");
+        let csv_path = output_dir.path().join("resstock_winter_72h.csv");
 
-        let config = seasonal_72h_config(version, &bldg_dir, 1, 15, &output_path);
+        let config = seasonal_72h_config(version, &bldg_dir, 1, 15, &csv_path);
         let engine = SimulationEngine::new();
         let result = engine.run(config).expect("engine.run should succeed");
         assert!(
@@ -558,7 +566,7 @@ mod tests {
         );
 
         const STEP_HOURS: f64 = 1.0;
-        let gas_therms: f64 = parse_csv_columns(&output_path)
+        let gas_therms: f64 = parse_csv_columns(&csv_path)
             .remove("Total Gas Power (therms/hour)")
             .expect("Total Gas Power (therms/hour) column in the output CSV")
             .iter()
@@ -570,7 +578,7 @@ mod tests {
             "{version} winter 72 h: gas energy must be above zero, got {gas_therms} therms"
         );
 
-        assert_physics_bounds(&output_path);
+        assert_physics_bounds(&csv_path);
     }
 
     #[test]

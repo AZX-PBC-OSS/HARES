@@ -93,17 +93,12 @@ fn build(home: &Home) -> Dwelling {
                 .unwrap(),
             duration: Duration::hours(3),
             time_res: Duration::seconds(900),
-            output_verbosity: 0,
-            write_output: false,
-            output_path: None,
-            output_format: hares_io::OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,
@@ -193,7 +188,7 @@ fn a_preconditioning_event_on_an_air_conditioner_precools() {
 
 fn bestest_600() -> Dwelling {
     let path = project_root().join("tests/fixtures/bestest/600.toml");
-    Dwelling::from_toml_config_with_write_output(&path, Some(false)).expect("build BESTEST 600")
+    Dwelling::from_toml_config_with_reports(&path, Some(Vec::new())).expect("build BESTEST 600")
 }
 
 fn ideal_unit(dwelling: &Dwelling) -> String {

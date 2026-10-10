@@ -18,7 +18,6 @@ use std::time::Duration as StdDuration;
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_equipment::Equipment;
-use hares_io::OutputFormat;
 use hares_io::hpxml::building::{ZoneType, parse_building};
 use hares_types::{FuelType, PortSlots, ZoneId};
 
@@ -88,17 +87,12 @@ fn dwelling_config(run: &Run) -> DwellingConfig {
                 .expect("start time parses"),
             duration: Duration::days(run.days),
             time_res: Duration::seconds(TIME_RES_S),
-            output_verbosity: 0,
-            write_output: false,
-            output_path: None,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: run.overrides.clone(),
@@ -640,17 +634,12 @@ fn garage_dwelling_config(hpxml: &Path) -> DwellingConfig {
             start_time,
             duration: Duration::hours(6),
             time_res: Duration::seconds(TIME_RES_S),
-            output_verbosity: 0,
-            write_output: false,
-            output_path: None,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,

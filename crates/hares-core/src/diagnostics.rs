@@ -1,6 +1,7 @@
 //! Per-timestep diagnostic output for debugging thermal runaway and solver issues.
 //!
-//! Enable by setting `output_verbosity >= 4` in SimulationConfig.
+//! Enable with a verbosity-4+ report whose destination is a file (the
+//! writer rides that report's path).
 //! Writes a CSV with one row per timestep containing zone temps, solver inputs/outputs,
 //! equipment operating points, and port accumulations.
 //!
@@ -294,7 +295,8 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
 
 /// Write equipment zone-id mapping at init for diagnostic traceability.
 ///
-/// Emitted when `output_verbosity >= 4` to surface the zone routing
+/// Emitted for a verbosity-4+ report with a file destination, to surface
+/// the zone routing
 /// resolved from HPXML for each equipment instance. The mapping is written
 /// as a comment block after the CSV header so downstream tools can
 /// verify per-zone thermal attribution without inspecting config internals.
@@ -580,7 +582,8 @@ impl DiagnosticAccumulator {
     /// lines) and emits structured `tracing` warnings/errors.
     ///
     /// `writer` is the same `BufWriter` used for per-step CSV rows, opened
-    /// when `output_verbosity >= 4`.  If `None`, only tracing messages are
+    /// for a verbosity-4+ report with a file destination.  If `None`, only
+    /// tracing messages are
     /// emitted.  `time_res_s` is the timestep resolution in seconds, used to
     /// convert step counts to hours for the short-cycling check.
     ///

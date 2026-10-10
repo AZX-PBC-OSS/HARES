@@ -14,7 +14,7 @@ use hares_io::{Building, DefaultsStore};
 use hares_types::{DomainUpdate, EnvironmentState, ExecutionStage, HaresError, ZoneId};
 use serde_json::{Map, Value};
 
-use super::{DwellingConfig, Result};
+use super::Result;
 
 const DEFAULT_R_M2_K_W: f64 = hares_envelope::boundary_rc::DEFAULT_R_M2_K_W;
 
@@ -539,14 +539,6 @@ pub(crate) fn build_output_column_index(
         .enumerate()
         .map(|(idx, field)| (field.name().to_string(), idx))
         .collect()
-}
-
-pub(crate) fn default_output_path(config: &DwellingConfig) -> PathBuf {
-    let ext = match config.sim_config.output_format {
-        hares_io::OutputFormat::Csv => "csv",
-        hares_io::OutputFormat::Parquet => "parquet",
-    };
-    PathBuf::from(format!("dwelling_{}.{}", config.bldg_id, ext))
 }
 
 pub(crate) fn chrono_to_std_duration(duration: Duration) -> Result<StdDuration> {

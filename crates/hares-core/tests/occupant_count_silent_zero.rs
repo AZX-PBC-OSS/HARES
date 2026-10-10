@@ -31,7 +31,7 @@ use hares_core::Dwelling;
 fn unoccupied_dwelling_builds_and_steps() {
     let base_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-    let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+    let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
         .expect("BESTEST 600 (occupants_present = false) must build");
     let result = dwelling.step();
     assert!(
@@ -49,7 +49,7 @@ fn unoccupied_dwelling_builds_and_steps() {
 fn no_occupancy_spec_and_no_column_builds() {
     let base_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
-    let result = Dwelling::from_toml_config_with_write_output(&base_path, Some(false));
+    let result = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()));
     assert!(
         result.is_ok(),
         "BESTEST 600 (no spec, no column) must build: {:?}",

@@ -50,15 +50,13 @@ fn resstock_fleet_runs_without_a_recorder_by_default() {
     }
 }
 
-/// The builder turns every home's recorder on: the run retains batches
-/// (a Time column and the numeric product columns) and the run metrics
-/// are real.
+/// The builder gives every home one memory report at the verbosity: the
+/// run retains batches (a Time column and the numeric product columns) and
+/// the run metrics are real.
 #[test]
-fn with_retained_output_runs_the_recorder() {
-    let dir = tempfile::tempdir().expect("temp output dir");
+fn with_memory_report_runs_the_recorder() {
     let outcomes = fleet()
-        .with_retained_output(dir.path())
-        .with_output_verbosity(2)
+        .with_memory_report(2)
         .expect("verbosity 2 is valid")
         .simulate(1);
     for outcome in outcomes {

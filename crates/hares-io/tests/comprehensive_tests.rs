@@ -21,11 +21,11 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use chrono::Duration;
 use parquet::arrow::arrow_writer::ArrowWriter;
-use tempfile::{NamedTempFile, tempdir};
+use tempfile::tempdir;
 
 use hares_io::output::metrics::MetricsCalculator;
 use hares_io::{
-    ColumnMapper, OutputFormat, ResStockError, ResStockVersion, SimulationConfig,
+    ColumnMapper, Destination, ResStockError, ResStockVersion, SimulationConfig,
     build_schema_for_specs, expected_columns_at_verbosity, parse_resstock_metadata,
 };
 use hares_physics::units::energy_therms_to_kwh;
@@ -43,17 +43,12 @@ fn test_config(deadband: Option<f64>) -> SimulationConfig {
         start_time: fixture_start::fixture_start(),
         duration: Duration::hours(1),
         time_res: Duration::hours(1),
-        output_verbosity: 0,
-        output_path: None,
-        write_output: false,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
         output_chunk_size: 16,
         master_seed: 0,
         setpoint_deadband_c: deadband,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
@@ -490,8 +485,8 @@ fn null_bldg_id_returns_error() {
 
 #[test]
 fn csv_writer_finish_flushes_all_data() {
-    let tmp = NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("out.csv");
 
     let schema = Schema::new(vec![
         Field::new("Time", DataType::Utf8, false),
@@ -500,10 +495,10 @@ fn csv_writer_finish_flushes_all_data() {
     let mut recorder = hares_io::StreamingRecorder::new(
         schema,
         1000,
-        OutputFormat::Csv,
-        &path,
-        false,
-        hares_io::RotationPolicy::None,
+        Destination::Csv {
+            path: path.clone(),
+            overwrite: false,
+        },
     )
     .unwrap();
 
@@ -552,10 +547,10 @@ fn csv_writer_finish_on_read_only_path_propagates_io_error() {
     let mut recorder = hares_io::StreamingRecorder::new(
         schema,
         1000,
-        OutputFormat::Csv,
-        &path,
-        false,
-        hares_io::RotationPolicy::None,
+        Destination::Csv {
+            path,
+            overwrite: false,
+        },
     )
     .unwrap();
     recorder.push_row("2024-01-01T00:00:00Z", &[1.0]).unwrap();

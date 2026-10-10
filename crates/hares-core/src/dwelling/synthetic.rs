@@ -2461,10 +2461,7 @@ clear_sky_solar = false
 start_time = "2024-07-21T19:00:00Z"
 time_res = 3600
 duration = 3600
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
@@ -2486,7 +2483,7 @@ occupants_present = false"#;
 
         fs::write(&toml_path, content).expect("write temp TOML");
 
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&toml_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&toml_path, None)
             .expect("build dwelling from synthetic BESTEST-600 config");
 
         dwelling
@@ -2655,8 +2652,12 @@ equipment_name = "None"
             ),
             (
                 "verbosity above 8",
-                format!("{start}\ntime_res = 60\nduration = 3600\noutput_verbosity = 9\n"),
-                format!("{start}\ntime_res = 60\nduration = 3600\noutput_verbosity = 9\n"),
+                format!(
+                    "{start}\ntime_res = 60\nduration = 3600\n\n[[simulation.reports]]\nname = \"frame\"\nselection = {{ verbosity = 9 }}\ndestination = \"memory\"\n"
+                ),
+                format!(
+                    "{start}\ntime_res = 60\nduration = 3600\n\n[[reports]]\nname = \"frame\"\nselection = {{ verbosity = 9 }}\ndestination = \"memory\"\n"
+                ),
             ),
             (
                 "misaligned duration",
@@ -3906,8 +3907,6 @@ building_id = 1
 start_time = "2024-01-01T00:00:00Z"
 time_res = 60
 duration = 86400
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -4245,8 +4244,6 @@ building_id = 1
 start_time = "2024-01-01T00:00:00Z"
 time_res = 60
 duration = 86400
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -4338,8 +4335,6 @@ building_id = 1
 start_time = "2024-01-01T00:00:00Z"
 time_res = 60
 duration = 86400
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -4387,8 +4382,6 @@ building_id = 1
 start_time = "2024-01-01T00:00:00Z"
 time_res = 60
 duration = 86400
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -4437,8 +4430,6 @@ building_id = 1
 start_time = "2024-01-01T00:00:00Z"
 time_res = 60
 duration = 86400
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -4490,8 +4481,6 @@ building_id = 1
 start_time = "2024-01-01T00:00:00Z"
 time_res = 60
 duration = 86400
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]
@@ -4549,8 +4538,6 @@ building_id = 1
 start_time = "2024-01-01T00:00:00Z"
 time_res = 60
 duration = 86400
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]

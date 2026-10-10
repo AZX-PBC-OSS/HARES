@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
-use hares_io::OutputFormat;
 use tempfile::TempDir;
 
 /// The test's own directory, removed on drop (panics included), holding the
@@ -123,15 +122,19 @@ fn repo_defaults_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
 }
 
-fn simulation_config(output_path: PathBuf) -> SimulationConfig {
-    simulation_config_with_flags(output_path, true, true)
+fn simulation_config(csv_path: PathBuf) -> SimulationConfig {
+    simulation_config_with_frame(csv_path, true)
 }
 
-fn simulation_config_with_flags(
-    output_path: PathBuf,
-    retain_batches: bool,
-    write_output: bool,
-) -> SimulationConfig {
+/// `with_frame` is the retained run (a memory report beside the csv file,
+/// the frame and the file both read back); without it the run streams to
+/// the file alone.
+fn simulation_config_with_frame(csv_path: PathBuf, with_frame: bool) -> SimulationConfig {
+    let mut reports = Vec::new();
+    if with_frame {
+        reports.push(memory_report("frame", 0));
+    }
+    reports.push(csv_report("file", &csv_path, 0));
     SimulationConfig {
         start_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
@@ -139,31 +142,47 @@ fn simulation_config_with_flags(
             .unwrap(),
         duration: Duration::hours(1),
         time_res: Duration::minutes(1),
-        output_verbosity: 0,
-        output_path: Some(output_path),
-        write_output,
-        output_format: OutputFormat::Csv,
+        reports,
         output_chunk_size: 128,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+    }
+}
+
+fn memory_report(name: &str, verbosity: u8) -> hares_io::ReportSpec {
+    hares_io::ReportSpec {
+        name: name.to_string(),
+        selection: hares_io::Selection::Verbosity(verbosity),
+        frequency: hares_io::Frequency::default(),
+        destination: hares_io::Destination::Memory,
+    }
+}
+
+fn csv_report(name: &str, path: &std::path::Path, verbosity: u8) -> hares_io::ReportSpec {
+    hares_io::ReportSpec {
+        name: name.to_string(),
+        selection: hares_io::Selection::Verbosity(verbosity),
+        frequency: hares_io::Frequency::default(),
+        destination: hares_io::Destination::Csv {
+            path: path.to_path_buf(),
+            overwrite: false,
+        },
     }
 }
 
 #[test]
 fn run_success_produces_metrics_elapsed_and_output_path() {
     let scratch = Scratch::with_inputs();
-    let output_path = scratch.path("output.csv");
+    let csv_path = scratch.path("output.csv");
 
     let config = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
         schedule_path: Some(scratch.schedule()),
         weather_path: scratch.weather(),
-        sim_config: simulation_config(output_path.clone()),
+        sim_config: simulation_config(csv_path.clone()),
         defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 123,
@@ -191,8 +210,8 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
     );
     assert!(result.timeseries.is_some());
     assert!(!result.timeseries.unwrap().is_empty());
-    assert_eq!(result.timeseries_path, Some(output_path.clone()));
-    assert!(output_path.exists());
+    assert_eq!(result.timeseries_path, Some(csv_path.clone()));
+    assert!(csv_path.exists());
 }
 
 #[test]
@@ -250,10 +269,9 @@ fn run_with_streaming_output_computes_metrics() {
         hpxml_path: fixture_hpxml_path(),
         schedule_path: Some(scratch.schedule()),
         weather_path: scratch.weather(),
-        sim_config: simulation_config_with_flags(
+        sim_config: simulation_config_with_frame(
             scratch.path(&format!("retain_{retain}.csv")),
             retain,
-            true,
         ),
         defaults_path: Some(repo_defaults_path()),
         overrides: None,
@@ -314,9 +332,11 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
         schedule_path: Some(scratch.schedule()),
         weather_path: scratch.weather(),
         sim_config: {
-            let output_path = scratch.path(&format!("retain_{retain}.csv"));
-            let mut cfg = simulation_config_with_flags(output_path, retain, true);
-            cfg.output_verbosity = 6;
+            let csv_path = scratch.path(&format!("retain_{retain}.csv"));
+            let mut cfg = simulation_config_with_frame(csv_path, retain);
+            for report in &mut cfg.reports {
+                report.selection = hares_io::Selection::Verbosity(6);
+            }
             cfg
         },
         defaults_path: Some(repo_defaults_path()),
@@ -358,7 +378,7 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
 fn run_with_zero_duration_is_a_validate_error() {
     let scratch = Scratch::with_inputs();
 
-    let mut sim_config = simulation_config_with_flags(scratch.path("output.csv"), false, true);
+    let mut sim_config = simulation_config_with_frame(scratch.path("output.csv"), false);
     sim_config.duration = Duration::zero();
 
     let config = DwellingConfig {
@@ -394,7 +414,10 @@ fn run_without_output_recorder_reports_metrics_unavailable() {
         hpxml_path: fixture_hpxml_path(),
         schedule_path: Some(scratch.schedule()),
         weather_path: scratch.weather(),
-        sim_config: simulation_config_with_flags(scratch.path("output.csv"), false, false),
+        sim_config: SimulationConfig {
+            reports: Vec::new(),
+            ..simulation_config(scratch.path("output.csv"))
+        },
         defaults_path: Some(repo_defaults_path()),
         overrides: None,
         bldg_id: 123,

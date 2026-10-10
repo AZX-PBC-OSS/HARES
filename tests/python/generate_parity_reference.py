@@ -60,7 +60,7 @@ def _load_sim_config(config_path: Path) -> dict:
     start_local = start_dt.replace(tzinfo=None)
     duration_s = int(sim["duration"])
     time_res_s = int(sim["time_res"])
-    verbosity = int(sim.get("output_verbosity", 3))
+    verbosity = int(sim["reports"][0]["selection"]["verbosity"])
     master_seed = int(sim.get("master_seed", 0))
     return {
         "start_local": start_local,

@@ -74,11 +74,8 @@ fn synthetic_toml(duration_s: i64, time_res_s: i64) -> String {
 start_time = "2024-01-01T00:00:00Z"
 time_res = {time_res_s}
 duration = {duration_s}
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
-write_output = false
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -107,7 +104,7 @@ occupancy = 1.0
 fn make_dwelling(dir: &Path, duration_s: i64, time_res_s: i64) -> Dwelling {
     let path = common::numbered_path(dir, "hares-bench-rl-episode", "toml");
     std::fs::write(&path, synthetic_toml(duration_s, time_res_s)).expect("write TOML");
-    Dwelling::from_toml_config_with_write_output(&path, Some(false)).expect("create dwelling")
+    Dwelling::from_toml_config_with_reports(&path, Some(Vec::new())).expect("create dwelling")
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +134,7 @@ fn bench_reset(c: &mut Criterion, dir: &Path) {
             |path| {
                 std::fs::write(&path, synthetic_toml(86_400, 60)).expect("write TOML");
                 black_box(
-                    Dwelling::from_toml_config_with_write_output(&path, Some(false))
+                    Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
                         .expect("create dwelling"),
                 );
             },

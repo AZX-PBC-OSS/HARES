@@ -21,7 +21,6 @@ mod tests {
 
     use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
-    use hares_io::OutputFormat;
 
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
@@ -35,7 +34,7 @@ mod tests {
         project_root().join("tests/fixtures/parity/beopt_smoke_1h")
     }
 
-    fn beopt_config(output_path: PathBuf) -> DwellingConfig {
+    fn beopt_config(csv_path: PathBuf) -> DwellingConfig {
         DwellingConfig {
             hpxml_path: examples_dir().join("BEopt_example.xml"),
             schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
@@ -52,17 +51,20 @@ mod tests {
                     .unwrap(),
                 duration: Duration::hours(1),
                 time_res: Duration::minutes(1),
-                output_verbosity: 6, // envelope component breakdown
-                output_path: Some(output_path),
-                write_output: true,
-                output_format: OutputFormat::Csv,
+                reports: vec![hares_io::ReportSpec {
+                    name: "frame".to_string(),
+                    selection: hares_io::Selection::Verbosity(6), // envelope component breakdown
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Csv {
+                        path: csv_path,
+                        overwrite: false,
+                    },
+                }],
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: false,
-                rotation: hares_io::RotationPolicy::None,
                 max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,
@@ -377,11 +379,11 @@ mod tests {
     #[test]
     fn envelope_oracle_beopt_1h() {
         let output_dir = tempfile::tempdir().expect("temp dir");
-        let output_path = output_dir.path().join("hares_envelope_oracle_beopt.csv");
+        let csv_path = output_dir.path().join("hares_envelope_oracle_beopt.csv");
 
         let engine = SimulationEngine::new();
         let result = engine
-            .run(beopt_config(output_path.clone()))
+            .run(beopt_config(csv_path.clone()))
             .expect("engine.run should succeed");
 
         assert!(
@@ -394,7 +396,7 @@ mod tests {
             .timeseries_path
             .as_ref()
             .cloned()
-            .unwrap_or(output_path.clone());
+            .unwrap_or(csv_path.clone());
 
         assert!(
             actual_path.exists(),
@@ -823,9 +825,9 @@ mod tests {
         use hares_types::ZoneId;
 
         let output_dir = tempfile::tempdir().expect("temp dir");
-        let output_path = output_dir.path().join("hares_per_equip_oracle.csv");
+        let csv_path = output_dir.path().join("hares_per_equip_oracle.csv");
 
-        let config = beopt_config(output_path.clone());
+        let config = beopt_config(csv_path.clone());
         let mut dwelling = Dwelling::from_config(config).expect("dwelling init");
         dwelling.enable_observer(60);
 

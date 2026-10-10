@@ -6,7 +6,7 @@ sys.path.insert(0, 'python')
 import polars as pl
 import pandas as pd
 import numpy as np
-from hares import Dwelling, PV, SimulationConfig
+from hares import Destination, Dwelling, PV, ReportSpec, Selection, SimulationConfig
 from hares.data import fetch_resstock_building
 
 bldg = fetch_resstock_building(1, version='2025.1')
@@ -269,9 +269,14 @@ with tempfile.TemporaryDirectory() as output_dir:
         str(bldg.hpxml_path), str(bldg.schedule_path), str(bldg.weather_path),
         SimulationConfig(
             start_time='2021-07-01T12:00:00', duration=7200, time_res=900,
-            output_verbosity=4,
-            write_output=True,
-            output_path=str(Path(output_dir) / 'hares_diag_pv_trace.csv'),
+            reports=[
+                ReportSpec("frame", Selection.verbosity(4), Destination.memory()),
+                ReportSpec(
+                    "diagnostics",
+                    Selection.verbosity(4),
+                    Destination.csv(str(Path(output_dir) / 'hares_diag_pv_trace.csv')),
+                ),
+            ],
         ),
         defaults_path='vendor/HARES/defaults',
     )

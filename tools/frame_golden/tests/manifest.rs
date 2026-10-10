@@ -43,8 +43,10 @@ fn manifest_text(kind: &str, features: &str, homes: usize) -> String {
     text.push_str("start_time = \"2023-01-01T00:00:00-07:00\"\n");
     text.push_str("duration = 86400\n");
     text.push_str("time_res = 3600\n");
-    text.push_str("output_verbosity = 2\n");
     text.push_str("master_seed = 0\n");
+    text.push_str(
+        "\n[[simulation.reports]]\nname = \"frame\"\nselection = { verbosity = 2 }\ndestination = \"memory\"\n",
+    );
     for bldg_id in 1..=homes {
         text.push_str(&format!(
             "\n[[home]]\nbldg_id = {bldg_id}\nhpxml = \"building.xml\"\nschedule = \"schedule.csv\"\nweather = \"weather.epw\"\ninitialization_duration_s = 0\noverrides = {{}}\n"

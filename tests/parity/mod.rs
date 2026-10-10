@@ -495,9 +495,19 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     let mut sim_config = parse_simulation_config(&config_contents, &config)?;
     let output_dir =
         tempfile::tempdir().map_err(|err| format!("failed to create output directory: {err}"))?;
-    let output_path = output_dir.path().join(format!("{}.parquet", fixture.id));
-    sim_config.output_format = hares_io::OutputFormat::Parquet;
-    sim_config.output_path = Some(output_path.clone());
+    let csv_path = output_dir.path().join(format!("{}.parquet", fixture.id));
+    // The harness reads the run's parquet file: the fixture's report (its
+    // verbosity selection) redirected to the harness's own destination.
+    sim_config.reports = match sim_config.reports.first().cloned() {
+        Some(report) => vec![hares_io::ReportSpec {
+            destination: hares_io::Destination::Parquet {
+                path: csv_path.clone(),
+                overwrite: false,
+            },
+            ..report
+        }],
+        None => return Err("parity fixture config carries no report".to_string()),
+    };
 
     let defaults_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
     let dwelling_config = DwellingConfig {
@@ -568,7 +578,7 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
         outcome
             .timeseries_path
             .as_deref()
-            .unwrap_or(output_path.as_path()),
+            .unwrap_or(csv_path.as_path()),
     )?;
     let reference_columns = read_parquet_columns(&fixture.reference_output_parquet)?;
     if let Some(pinned_c) = pinned_start_c {
@@ -592,7 +602,7 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
         if let Some(src) = outcome
             .timeseries_path
             .as_deref()
-            .or(Some(output_path.as_path()))
+            .or(Some(csv_path.as_path()))
         {
             let _ = fs::copy(src, &dst);
             eprintln!("[parity] kept {}", dst.display());

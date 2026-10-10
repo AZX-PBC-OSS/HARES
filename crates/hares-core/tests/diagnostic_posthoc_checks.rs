@@ -311,7 +311,8 @@ fn no_violations_when_everything_is_in_range() {
 
 /// Verifies that when an observer is enabled on a dwelling with HVAC equipment,
 /// the post-hoc diagnostic checks are wired into simulate() and produce summary
-/// output in the diagnostic CSV when output_verbosity >= 4.
+/// output in the diagnostic CSV for a verbosity-4+ report with a file
+/// destination.
 #[test]
 fn observer_enabled_simulation_appends_posthoc_summary_to_diagnostic_csv() {
     use std::fs;
@@ -333,12 +334,14 @@ fn observer_enabled_simulation_appends_posthoc_summary_to_diagnostic_csv() {
 start_time = "2024-01-15T12:00:00Z"
 time_res = 60
 duration = 600
-output_verbosity = 4
-output_format = "csv"
 output_chunk_size = 1000
-write_output = true
-output_path = "{}"
 master_seed = 0
+
+[[simulation.reports]]
+name = "frame"
+selection = {{ verbosity = 4 }}
+destination = {{ csv = {{ path = "{}" }} }}
+
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -389,7 +392,7 @@ occupancy = 0.0
         fs::read_to_string(&diag_path).expect("diagnostic CSV must exist and be readable");
 
     // The diagnostic CSV should contain at least one data row (per-step rows
-    // are always written when output_verbosity >= 4) AND
+    // are always written for a verbosity-4+ report with a file destination) AND
     // at least one `# diag` comment line from the post-hoc checks.
     let data_rows: Vec<&str> = diag_content
         .lines()

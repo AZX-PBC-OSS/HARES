@@ -27,7 +27,6 @@ mod tests {
 
     use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
-    use hares_io::OutputFormat;
 
     /// Parse a CSV into column-name -> Vec<f64> map.
     /// Non-numeric cells (headers, timestamps) are silently skipped per-cell.
@@ -225,7 +224,7 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    fn beopt_config(duration_hours: i64, output_path: PathBuf) -> DwellingConfig {
+    fn beopt_config(duration_hours: i64, csv_path: PathBuf) -> DwellingConfig {
         DwellingConfig {
             hpxml_path: examples_dir().join("BEopt_example.xml"),
             schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
@@ -238,17 +237,28 @@ mod tests {
                     .unwrap(),
                 duration: Duration::hours(duration_hours),
                 time_res: Duration::minutes(1),
-                output_verbosity: 3,
-                output_path: Some(output_path),
-                write_output: true,
-                output_format: OutputFormat::Csv,
+                reports: vec![
+                    hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(3),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Memory,
+                    },
+                    hares_io::ReportSpec {
+                        name: "file".to_string(),
+                        selection: hares_io::Selection::Verbosity(3),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path,
+                            overwrite: false,
+                        },
+                    },
+                ],
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: true,
-                rotation: hares_io::RotationPolicy::None,
                 max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,
@@ -317,11 +327,11 @@ mod tests {
     #[test]
     fn smoke_beopt_1h() {
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("smoke_beopt_1h.csv");
+        let csv_path = output_dir.path().join("smoke_beopt_1h.csv");
 
         let engine = SimulationEngine::new();
         let result = engine
-            .run(beopt_config(1, output_path.clone()))
+            .run(beopt_config(1, csv_path.clone()))
             .expect("engine.run should succeed");
 
         // The engine may return a different resolved path
@@ -329,10 +339,10 @@ mod tests {
             .timeseries_path
             .as_ref()
             .cloned()
-            .unwrap_or(output_path.clone());
-        eprintln!("  output_path requested: {}", output_path.display());
+            .unwrap_or(csv_path.clone());
+        eprintln!("  csv_path requested: {}", csv_path.display());
         eprintln!("  timeseries_path returned: {}", actual_output.display());
-        eprintln!("  output_path exists: {}", output_path.exists());
+        eprintln!("  csv_path exists: {}", csv_path.exists());
         eprintln!("  timeseries_path exists: {}", actual_output.exists());
 
         assert!(
@@ -358,7 +368,7 @@ mod tests {
         let csv_path = if actual_output.exists() {
             actual_output.clone()
         } else {
-            output_path.clone()
+            csv_path.clone()
         };
         if csv_path.exists() {
             let breakdown = parse_csv_power_kwh(&csv_path, 1.0);
@@ -429,7 +439,7 @@ mod tests {
         } else {
             eprintln!(
                 "  [no output CSV at {} or {}]",
-                output_path.display(),
+                csv_path.display(),
                 actual_output.display()
             );
         }
@@ -444,7 +454,7 @@ mod tests {
     #[test]
     fn smoke_resstock_1h_runs_to_completion() {
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("smoke_resstock_1h.csv");
+        let csv_path = output_dir.path().join("smoke_resstock_1h.csv");
 
         let engine = SimulationEngine::new();
         let config = DwellingConfig {
@@ -460,17 +470,28 @@ mod tests {
                     .unwrap(),
                 duration: Duration::hours(1),
                 time_res: Duration::minutes(1),
-                output_verbosity: 3,
-                output_path: Some(output_path.clone()),
-                write_output: true,
-                output_format: OutputFormat::Csv,
+                reports: vec![
+                    hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(3),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Memory,
+                    },
+                    hares_io::ReportSpec {
+                        name: "file".to_string(),
+                        selection: hares_io::Selection::Verbosity(3),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path.clone(),
+                            overwrite: false,
+                        },
+                    },
+                ],
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: true,
-                rotation: hares_io::RotationPolicy::None,
                 max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,
@@ -498,11 +519,11 @@ mod tests {
 
         // --- 2. Output CSV is produced and non-empty. ---
         assert!(
-            output_path.exists(),
+            csv_path.exists(),
             "expected output CSV at {} (engine.run returned success but wrote nothing)",
-            output_path.display()
+            csv_path.display()
         );
-        let csv_contents = fs::read_to_string(&output_path).expect("read output CSV");
+        let csv_contents = fs::read_to_string(&csv_path).expect("read output CSV");
         let data_rows = csv_contents
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -513,7 +534,7 @@ mod tests {
             "output CSV has {data_rows} lines; expected header plus >=1 data row"
         );
 
-        let breakdown = parse_csv_power_kwh(&output_path, 1.0);
+        let breakdown = parse_csv_power_kwh(&csv_path, 1.0);
         eprintln!("\n  === ResStock per-equipment kWh (1h) ===");
         for (col, kwh) in &breakdown {
             if !col.contains("[mean_kW]") {
@@ -521,7 +542,7 @@ mod tests {
             }
         }
 
-        let data = parse_csv_columns(&output_path);
+        let data = parse_csv_columns(&csv_path);
 
         // --- 3. All power columns are finite; non-negative except the net
         //        electrical tie-in (which may go negative under PV/battery
@@ -619,7 +640,7 @@ mod tests {
         // water heater non-negative (the fixture has a gas water heater so
         // the water-heater clause is a no-op here).
         assert_physics_bounds(
-            &output_path,
+            &csv_path,
             total_kwh,
             &result.metrics.total_energy_kwh.per_end_use,
             1.0,
@@ -684,11 +705,11 @@ mod tests {
     #[test]
     fn beopt_smoke_end_use_aggregates_by_category() {
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("beopt_enduse.csv");
+        let csv_path = output_dir.path().join("beopt_enduse.csv");
 
         let engine = SimulationEngine::new();
         let result = engine
-            .run(beopt_config(1, output_path.clone()))
+            .run(beopt_config(1, csv_path.clone()))
             .expect("engine.run should succeed");
 
         assert!(

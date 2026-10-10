@@ -42,11 +42,11 @@ fn load_cz2a_fixture() -> Dwelling {
         .unwrap_or(1);
 
     // 96 hourly steps; no warm-up; the tests read in-memory state, so the
-    // recorder is off.
+    // reports are dropped: nothing is recorded.
     let mut sim_config = sim_config;
     sim_config.time_res = Duration::hours(1);
     sim_config.duration = Duration::hours(96);
-    sim_config.write_output = false;
+    sim_config.reports = Vec::new();
 
     let config = DwellingConfig {
         hpxml_path: root.join("building.xml"),

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig};
-use hares_io::{OutputFormat, RotationPolicy, SimulationConfig, SiteLocationOverride};
+use hares_io::{SimulationConfig, SiteLocationOverride};
 use hares_types::telemetry_keys as tk;
 
 fn project_root() -> PathBuf {
@@ -22,17 +22,12 @@ fn sim_config(
         start_time,
         duration,
         time_res: Duration::seconds(step_s),
-        output_verbosity: 0,
-        write_output: false,
-        output_path: None,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }

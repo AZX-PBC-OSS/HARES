@@ -6,9 +6,13 @@ import ast
 import sys
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from skip_gate import pytest_addoption, pytest_configure  # noqa: F401  (hooks)
+
+if TYPE_CHECKING:
+    from hares import ReportSpec
 
 # Every test runs off the network unless marked ``network`` (offline_guard).
 pytest_plugins = ["offline_guard_plugin", "pytester"]
@@ -117,19 +121,24 @@ def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool 
     return None
 
 
-def output_in_test_dir(config: Mapping[str, object], filename: str) -> Callable[..., None]:
-    """An autouse fixture pointing ``config["output_path"]`` into each test's ``tmp_path``.
+def reports_for(verbosity: int = 0, csv_path: str | None = None) -> list[ReportSpec]:
+    """The report requests for a test run: a ``verbosity`` memory report
+    (its batches are the frame ``results()`` and ``metrics()`` read), plus
+    a csv file destination when a test reads the file. Reports live only
+    where a test declares them: nothing is recorded that no report
+    requests."""
+    from hares import Destination, ReportSpec, Selection
 
-    For a module whose shared run config must write output: bind the result to
-    a module-level name and every test in the module writes its own file,
-    removed with the test's temporary directory.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _output_in_test_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setitem(config, "output_path", str(tmp_path / filename))
-
-    return _output_in_test_dir
+    reports: list[ReportSpec] = []
+    if verbosity >= 0:
+        reports.append(
+            ReportSpec("frame", Selection.verbosity(verbosity), Destination.memory())
+        )
+    if csv_path is not None:
+        reports.append(
+            ReportSpec("file", Selection.verbosity(max(verbosity, 0)), Destination.csv(csv_path))
+        )
+    return reports
 
 
 def _is_helics_module(name: str) -> bool:
@@ -162,20 +171,20 @@ def make_dwelling(
     duration_s: int = 300,
     time_res_s: int = 60,
     seed: int = 0,
-    output_verbosity: int = 0,
+    verbosity: int = 0,
     start_time: str = "2019-01-01T00:00:00",
-    write_output: bool = False,
-    output_path: str | None = None,
-    retain_batches: bool = True,
     sim_config=None,
+    csv_path: str | None = None,
     **kw,
 ):
     """Build and initialize a dwelling from the committed BEopt inputs.
 
-    The sim config states every field the tests' frames read:
-    `retain_batches=True` keeps the recorder's batches in memory, which
-    `results()` and `metrics()` read for the full schema. Nothing in the
-    engine defaults it on: the config object always carries it.
+    The sim config states every field the tests' frames read: the
+    ``verbosity`` memory report keeps the recorder's batches in memory,
+    which ``results()`` and ``metrics()`` read for the full schema;
+    ``csv_path`` adds a csv file destination when a test reads the file.
+    Nothing in the engine defaults a report on: nothing is recorded that
+    no report requests.
     """
     from hares import Dwelling, SimulationConfig
 
@@ -185,10 +194,7 @@ def make_dwelling(
             duration=duration_s,
             time_res=time_res_s,
             master_seed=seed,
-            output_verbosity=output_verbosity,
-            write_output=write_output,
-            output_path=output_path,
-            retain_batches=retain_batches,
+            reports=reports_for(verbosity, csv_path),
         )
     dw = Dwelling.from_hpxml(
         HPXML,

@@ -4,23 +4,21 @@ These tests verify BEHAVIOR, not just structure. Each test asserts something
 that would fail if the underlying physics or actor logic were broken.
 """
 
-from typing import NotRequired, TypedDict
-
 import polars as pl
 import pytest
-from conftest import make_dwelling, output_in_test_dir
-from hares import SimulationConfig
+from conftest import make_dwelling
+from hares import ReportSpec, SimulationConfig
 
 
-class _OutputKwargs(TypedDict):
-    write_output: bool
-    output_path: NotRequired[str]
+def _frame_report(verbosity: int) -> list[ReportSpec]:
+    """One verbosity memory report: the frame ``simulate()`` returns."""
+    from hares import Destination, ReportSpec, Selection
+
+    return [ReportSpec("frame", Selection.verbosity(verbosity), Destination.memory())]
 
 
-# Tests that consume simulate() DataFrame columns need the output pipeline
-# (write_output=True).
-OUTPUT: _OutputKwargs = {"write_output": True}
-_output_in_test_dir = output_in_test_dir(OUTPUT, "dwelling_42.csv")
+# Tests that consume simulate() DataFrame columns read the verbosity memory
+# report's frame: make_dwelling's ``verbosity`` builds it.
 
 
 def _scalar(value: object, what: str) -> float:
@@ -118,7 +116,7 @@ class TestArchetypeTariffIntegration:
 
         def total_ev_kwh(archetype_id):
             dw = make_dwelling(
-                duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+                duration_s=7 * 86400, time_res_s=900, seed=42, verbosity=1
             )
             dw.initialize()
             dw.add_ev_with_driver(
@@ -167,7 +165,7 @@ class TestArchetypeTariffIntegration:
         from hares import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -188,7 +186,7 @@ class TestArchetypeTariffIntegration:
 
         def max_ev_power(archetype_id):
             dw = make_dwelling(
-                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+                duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
             )
             dw.initialize()
             dw.add_ev_with_driver(
@@ -216,7 +214,7 @@ class TestChargingLoadProfile:
         from hares import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=3, **OUTPUT
+            duration_s=7 * 86400, time_res_s=900, seed=42, verbosity=3
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -253,7 +251,7 @@ class TestChargingLoadProfile:
         from hares import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=7 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -314,7 +312,7 @@ class TestChargingLoadProfile:
         from hares import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -368,7 +366,7 @@ class TestHpxmlDeclaredEv:
         hpxml_path = tmp_path / "with_ev.xml"
         hpxml_path.write_text(xml)
 
-        dw = Dwelling.from_hpxml(str(hpxml_path), SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3 * 86400, time_res=900, master_seed=42, output_verbosity=1, retain_batches=True, write_output=True, output_path=str(tmp_path / "dwelling_42.csv")))
+        dw = Dwelling.from_hpxml(str(hpxml_path), SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3 * 86400, time_res=900, master_seed=42, reports=_frame_report(1)))
         dw.initialize()
         df = dw.simulate()
 
@@ -402,7 +400,7 @@ class TestDefaultStrategyEv:
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -426,7 +424,7 @@ class TestDefaultStrategyEv:
         from hares import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -481,7 +479,7 @@ class TestDefaultStrategyEv:
         from hares import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -517,7 +515,7 @@ class TestDefaultStrategyEv:
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -556,7 +554,7 @@ class TestDefaultStrategyEv:
         from hares import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.step()  # simulation is now in progress
@@ -601,7 +599,7 @@ class TestDefaultStrategyEv:
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -697,7 +695,7 @@ class TestDefaultStrategyEv:
         def run(set_tariff_mid_trip: bool):
             tariff = _build_flat_tariff()
             dw = make_dwelling(
-                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+                duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
             )
             dw.initialize()
             dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -752,7 +750,7 @@ class TestDefaultStrategyEv:
         from hares import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
@@ -799,7 +797,7 @@ class TestDefaultStrategyEv:
 
         def charging_kwh(readd: bool) -> float:
             dw = make_dwelling(
-                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+                duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
             )
             dw.initialize()
             dw.add_ev_with_driver(

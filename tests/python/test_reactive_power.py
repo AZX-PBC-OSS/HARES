@@ -63,7 +63,6 @@ class _CommonKwargs(TypedDict):
     defaults_path: str
     bldg_id: int
     master_seed: int
-    write_output: bool
 
 
 def _battery_kw(name, equipment_list):
@@ -472,14 +471,13 @@ class TestZipPfOverride:
             "defaults_path": str(HARES_DEFAULTS),
             "bldg_id": 42,
             "master_seed": 0,
-            "write_output": False,
+
         }
         sim_config = SimulationConfig(
             start_time=common["start_time"],
             duration=common["duration_s"],
             time_res=common["time_res_s"],
             master_seed=common["master_seed"],
-            write_output=common["write_output"],
         )
 
         # Baseline: no override.
@@ -572,14 +570,13 @@ class TestZipPfOverride:
             "defaults_path": str(HARES_DEFAULTS),
             "bldg_id": 42,
             "master_seed": 0,
-            "write_output": False,
+
         }
         sim_config = SimulationConfig(
             start_time=common["start_time"],
             duration=common["duration_s"],
             time_res=common["time_res_s"],
             master_seed=common["master_seed"],
-            write_output=common["write_output"],
         )
 
         dw = Dwelling.from_hpxml(
@@ -693,7 +690,7 @@ class TestResolvedZipInspection:
     def test_ashp_heater_resolved_zip_pf_084(self):
         from hares import ASHPHeater, DwellingBlueprint, EndUse
 
-        bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=600, time_res=60, write_output=False, start_time="2019-01-01T00:00:00"))
+        bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=600, time_res=60,start_time="2019-01-01T00:00:00"))
         bp.remove_equipment_by_end_use([EndUse.HVAC_HEATING])
         bp.add_equipment(
             ASHPHeater("ASHP", capacity_w=12000, hspf=9.5, backup_capacity_w=5000)
@@ -712,7 +709,7 @@ class TestResolvedZipInspection:
     def test_user_zip_override_pf_09_visible(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, overrides={"Air Conditioner": {"zip": {"pf": 0.9}}}, config=SimulationConfig(start_time="2019-07-01T14:00:00", duration=600, time_res=60, master_seed=0, write_output=False))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, overrides={"Air Conditioner": {"zip": {"pf": 0.9}}}, config=SimulationConfig(start_time="2019-07-01T14:00:00", duration=600, time_res=60,master_seed=0))
         dw.initialize()
 
         zip_dict = dw.equipment_zip("Air Conditioner")

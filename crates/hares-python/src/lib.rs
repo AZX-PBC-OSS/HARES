@@ -15,6 +15,7 @@ mod py_gym;
 mod py_hvac;
 mod py_metrics;
 mod py_pv_sizing;
+mod py_report;
 mod py_tariff;
 mod py_telemetry;
 mod py_water_heater;
@@ -43,6 +44,7 @@ use py_metrics::{
     PyPeakPowerKw, PyRollingPeakKw, PySimulationMetrics, PyTotalEnergyKwh,
 };
 use py_pv_sizing::{PyPvCandidate, PyPvSizingResult, PyRoofPlane, PyRoofShape, PyUsableRoofArea};
+use py_report::{PyDestination, PyFrequency, PyReportSpec, PySelection};
 use py_tariff::{
     PyElectricTariff, PyGasTariff, PyGasTariffBuilder, PyTariffBuilder, PyTariffEvaluator,
 };
@@ -56,6 +58,10 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySimulationConfig>()?;
     m.add_class::<PySiteLocationOverride>()?;
     m.add_class::<PyDwellingConfig>()?;
+    m.add_class::<PyReportSpec>()?;
+    m.add_class::<PySelection>()?;
+    m.add_class::<PyFrequency>()?;
+    m.add_class::<PyDestination>()?;
     m.add_class::<PyControlSignal>()?;
     m.add_class::<PyTelemetry>()?;
     m.add_class::<PyCoreOutput>()?;

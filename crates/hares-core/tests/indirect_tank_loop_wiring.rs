@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_equipment::DHW_DEMAND_LOOP;
-use hares_io::OutputFormat;
 use hares_types::{LoopId, PortType};
 use tempfile::TempDir;
 
@@ -31,17 +30,12 @@ fn sim_config(duration: Duration) -> SimulationConfig {
             .unwrap(),
         duration,
         time_res: Duration::seconds(900),
-        output_verbosity: 0,
-        write_output: false,
-        output_path: None,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }

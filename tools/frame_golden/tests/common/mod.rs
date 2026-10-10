@@ -116,8 +116,12 @@ defaults = "defaults"
 start_time = "2023-01-01T00:00:00-07:00"
 duration = 86400
 time_res = 3600
-output_verbosity = 2
 master_seed = 0
+
+[[simulation.reports]]
+name = "frame"
+selection = {{ verbosity = 2 }}
+destination = "memory"
 
 [[home]]
 bldg_id = 1

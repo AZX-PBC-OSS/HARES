@@ -307,7 +307,6 @@ class TestSimulationConfigInterface:
 
     def test_optional_properties_accept_none(self) -> None:
         cfg = hares.SimulationConfig(
-            start_time="2024-01-01T00:00:00Z", duration=3600, output_path=None, civil_timezone=None
+            start_time="2024-01-01T00:00:00Z", duration=3600, civil_timezone=None
         )
-        assert cfg.output_path is None
         assert cfg.civil_timezone is None

@@ -13,7 +13,7 @@ use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_core::{Actor, Dwelling, DwellingConfig, SimStatus, SimulationEngine, StepResult};
-use hares_io::{OutputFormat, SimulationConfig};
+use hares_io::SimulationConfig;
 use hares_types::{ControlSignal, DRLevel, EndUse, OperatingMode, TelemetryField};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
@@ -578,22 +578,31 @@ fn run_fixture_to_columns(fixture: &ParityFixture) -> BTreeMap<String, Vec<f64>>
 
 fn run_fixture_to_columns_with_verbosity(
     fixture: &ParityFixture,
-    output_verbosity_override: Option<u8>,
+    verbosity_override: Option<u8>,
 ) -> BTreeMap<String, Vec<f64>> {
     let mut dwelling_config = build_dwelling_config(fixture);
     let mut sim_config = dwelling_config.sim_config.clone();
-    if let Some(v) = output_verbosity_override {
-        sim_config.output_verbosity = v;
-    }
     let output_dir = tempfile::tempdir().expect("temp dir");
-    let output_path = output_dir.path().join(format!("{}.parquet", fixture.id));
-    sim_config.output_format = OutputFormat::Parquet;
-    sim_config.output_path = Some(output_path.clone());
-    // The helper reads the run back from the Parquet file, so the recorder
-    // must be on: build_dwelling_config leaves the fixture config's default
-    // (writing disabled) in place, and the output goes to the temporary
-    // directory above, not into the tree.
-    sim_config.write_output = true;
+    let csv_path = output_dir.path().join(format!("{}.parquet", fixture.id));
+    // The helper reads the run back from the Parquet file, so a report is
+    // set: the fixture's own verbosity selection when it carries one, the
+    // override here, else the verbosity-3 default the fixtures carry, with
+    // the output in the temporary directory above, not into the tree.
+    let verbosity = verbosity_override
+        .or_else(|| match &sim_config.reports.first().map(|r| &r.selection) {
+            Some(hares_io::Selection::Verbosity(v)) => Some(*v),
+            _ => None,
+        })
+        .unwrap_or(3);
+    sim_config.reports = vec![hares_io::ReportSpec {
+        name: "frame".to_string(),
+        selection: hares_io::Selection::Verbosity(verbosity),
+        frequency: hares_io::Frequency::default(),
+        destination: hares_io::Destination::Parquet {
+            path: csv_path.clone(),
+            overwrite: false,
+        },
+    }];
     dwelling_config.sim_config = sim_config;
 
     let engine = SimulationEngine::new();
@@ -610,7 +619,7 @@ fn run_fixture_to_columns_with_verbosity(
     let path = outcome
         .timeseries_path
         .as_deref()
-        .unwrap_or(output_path.as_path());
+        .unwrap_or(csv_path.as_path());
     read_parquet_columns(path).expect("actual parquet output must be readable")
 }
 
@@ -618,13 +627,10 @@ fn simulate_fixture_steps(
     fixture: &ParityFixture,
     actor: Option<Box<dyn Actor>>,
 ) -> Vec<StepResult> {
-    // Recording is off, but the diagnostics CSV still lands beside the
-    // output path, so that path is in a directory removed afterwards.
-    let output_dir = tempfile::tempdir().expect("temp dir");
+    // Recording is off (no report is configured: the diagnostics writer
+    // rides a verbosity-4+ file report only, and none is requested here).
     let mut dwelling_config = build_dwelling_config(fixture);
-    dwelling_config.sim_config.write_output = false;
-    dwelling_config.sim_config.output_path =
-        Some(output_dir.path().join(format!("{}.csv", fixture.id)));
+    dwelling_config.sim_config.reports = Vec::new();
     let mut dwelling = Dwelling::from_config(dwelling_config).expect("fixture dwelling must load");
     if let Some(actor) = actor {
         dwelling.add_actor(actor).unwrap();
@@ -696,9 +702,9 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
     // The fixture configs carry no output settings, so the parsed config
     // defaults to writing to a working-directory-relative path; these tests
     // compare in-memory series against the reference parquet, so the
-    // recorder is off.
+    // reports are dropped: nothing is recorded.
     let mut sim_config = sim_config;
-    sim_config.write_output = false;
+    sim_config.reports = Vec::new();
 
     DwellingConfig {
         hpxml_path: fixture.building_xml(),

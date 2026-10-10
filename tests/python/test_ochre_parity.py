@@ -127,11 +127,18 @@ def _run_ochre_24h() -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
+def _frame_reports(verbosity: int) -> list:
+    """One verbosity memory report: the frame simulate() returns."""
+    from hares import Destination, ReportSpec, Selection
+
+    return [ReportSpec("frame", Selection.verbosity(verbosity), Destination.memory())]
+
+
 def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
     """Run HARES via simulate() and parse the DataFrame for column kWh."""
     from hares import Dwelling as HaresDwelling
 
-    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, output_verbosity=6, master_seed=42, write_output=True, output_path=str(output_dir / "hares_parity.csv")))
+    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, reports=_frame_reports(6)))
     dwelling.initialize()
     df = dwelling.simulate()
 
@@ -147,7 +154,7 @@ def _run_hares_simulate_24h(output_dir: Path) -> dict[str, float]:
     """Run HARES via simulate() and parse the DataFrame for the 24-hour window."""
     from hares import Dwelling as HaresDwelling
 
-    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES_24H, time_res=TIME_RES_MIN * 60, duration=DURATION_H_24 * 3600, output_verbosity=6, master_seed=42, write_output=True, output_path=str(output_dir / "hares_parity_24h.csv")))
+    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES_24H, time_res=TIME_RES_MIN * 60, duration=DURATION_H_24 * 3600, reports=_frame_reports(6)))
     dwelling.initialize()
     df = dwelling.simulate()
 

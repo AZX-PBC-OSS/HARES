@@ -77,10 +77,7 @@ fn write_synthetic_toml(
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = {duration_s}
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
@@ -382,10 +379,7 @@ fn stale_zone_temp_regression_occupancy_gain_raises_mean_zone_temperature() {
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = 21600
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
@@ -425,10 +419,7 @@ occupancy = 1.0
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = 21600
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
@@ -593,10 +584,7 @@ fn ideal_hvac_occupancy_gain_reduces_cumulative_heating_energy() {
 start_time = "2024-01-15T00:00:00Z"
 time_res = 300
 duration = 18000
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
@@ -638,10 +626,7 @@ occupancy = 1.0
 start_time = "2024-01-15T00:00:00Z"
 time_res = 300
 duration = 18000
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0

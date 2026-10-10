@@ -35,7 +35,7 @@ mod tests {
 
     use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
-    use hares_io::{EnvelopeComponentLoadsKwh, OutputFormat};
+    use hares_io::EnvelopeComponentLoadsKwh;
 
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
@@ -93,7 +93,7 @@ mod tests {
     /// on roof/walls is what separates the gross exterior flux from the net
     /// conducted load, so a summer day is the discriminating fixture. Returns
     /// the parsed output CSV columns plus the run-level envelope load metrics
-    /// (the streaming recorder path, `retain_batches = false`).
+    /// (the streaming recorder path: a file destination retains no batches).
     fn summer_24h_run() -> &'static (BTreeMap<String, Vec<f64>>, EnvelopeComponentLoadsKwh) {
         static RUN: OnceLock<(BTreeMap<String, Vec<f64>>, EnvelopeComponentLoadsKwh)> =
             OnceLock::new();
@@ -101,7 +101,7 @@ mod tests {
             // The run's output and its `_diagnostics.csv` sibling go in a
             // directory removed once the columns are parsed.
             let output_dir = tempfile::tempdir().expect("temp dir");
-            let output_path = output_dir.path().join("hares_opaque_loads_summer_24h.csv");
+            let csv_path = output_dir.path().join("hares_opaque_loads_summer_24h.csv");
             let denver = denver_offset();
             let config = DwellingConfig {
                 hpxml_path: examples_dir().join("BEopt_example.xml"),
@@ -118,17 +118,20 @@ mod tests {
                     start_time: denver.with_ymd_and_hms(2019, 7, 15, 0, 0, 0).unwrap(),
                     duration: Duration::hours(24),
                     time_res: Duration::minutes(1),
-                    output_verbosity: 6,
-                    output_path: Some(output_path.clone()),
-                    write_output: true,
-                    output_format: OutputFormat::Csv,
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(6),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path.clone(),
+                            overwrite: false,
+                        },
+                    }],
                     output_chunk_size: 1024,
                     setpoint_deadband_c: None,
                     master_seed: 42,
                     civil_timezone: None,
                     site_location: hares_io::SiteLocationOverride::default(),
-                    retain_batches: false,
-                    rotation: hares_io::RotationPolicy::None,
                     max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 },
                 overrides: None,
@@ -144,7 +147,7 @@ mod tests {
                 .envelope_loads_kwh
                 .expect("verbosity 6 must produce envelope-load metrics");
 
-            (parse_csv_columns(&output_path), envelope_loads)
+            (parse_csv_columns(&csv_path), envelope_loads)
         })
     }
 

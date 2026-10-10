@@ -9,6 +9,10 @@ from ._hares import SteppableFleet
 from ._hares import FleetResults
 from ._hares import SimulationConfig
 from ._hares import SiteLocationOverride
+from ._hares import Destination
+from ._hares import Frequency
+from ._hares import ReportSpec
+from ._hares import Selection
 from ._hares import DwellingConfig
 from ._hares import ControlSignal
 from ._hares import Telemetry
@@ -148,6 +152,10 @@ __all__ = [
     "SimulationConfig",
     "SiteLocationOverride",
     "DwellingConfig",
+    "ReportSpec",
+    "Selection",
+    "Frequency",
+    "Destination",
     "ControlSignal",
     "Telemetry",
     # Equipment

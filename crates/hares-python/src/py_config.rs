@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use chrono::Duration;
 use hares_core::DwellingConfig;
-use hares_io::{OutputFormat, RotationPolicy, SimulationConfig, SiteLocationOverride};
+use hares_io::{ReportSpec, SimulationConfig, SiteLocationOverride};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyType};
@@ -19,48 +19,6 @@ use crate::utils::parse_datetime_str;
 use crate::utils::python_to_json_value;
 
 pub(crate) const MAX_CHRONO_SECONDS: i64 = i64::MAX / 1_000;
-
-pub(crate) fn parse_rotation_policy(value: &str) -> PyResult<RotationPolicy> {
-    match value.to_lowercase().as_str() {
-        "none" => Ok(RotationPolicy::None),
-        "hourly" => Ok(RotationPolicy::Hourly),
-        "daily" => Ok(RotationPolicy::Daily),
-        "monthly" => Ok(RotationPolicy::Monthly),
-        "yearly" => Ok(RotationPolicy::Yearly),
-        other => Err(PyValueError::new_err(format!(
-            "invalid rotation '{}': expected none, hourly, daily, monthly, or yearly",
-            other
-        ))),
-    }
-}
-
-fn rotation_to_string(policy: RotationPolicy) -> String {
-    match policy {
-        RotationPolicy::None => "none".to_string(),
-        RotationPolicy::Hourly => "hourly".to_string(),
-        RotationPolicy::Daily => "daily".to_string(),
-        RotationPolicy::Monthly => "monthly".to_string(),
-        RotationPolicy::Yearly => "yearly".to_string(),
-    }
-}
-
-fn parse_output_format(value: &str) -> PyResult<OutputFormat> {
-    match value.to_lowercase().as_str() {
-        "csv" => Ok(OutputFormat::Csv),
-        "parquet" => Ok(OutputFormat::Parquet),
-        other => Err(PyValueError::new_err(format!(
-            "invalid output_format '{}': expected csv or parquet",
-            other
-        ))),
-    }
-}
-
-fn output_format_to_string(format: OutputFormat) -> String {
-    match format {
-        OutputFormat::Csv => "csv".to_string(),
-        OutputFormat::Parquet => "parquet".to_string(),
-    }
-}
 
 /// Whole seconds from a Python `int` or `datetime.timedelta`: the two
 /// duration forms the TOML scalar and the plan's segment arithmetic carry.
@@ -223,12 +181,7 @@ impl PySimulationConfig {
         start_time,
         duration,
         time_res = WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
-        output_verbosity = 0,
-        output_path = None,
-        write_output = hares_io::DEFAULT_WRITE_OUTPUT,
-        output_format = "csv",
-        retain_batches = false,
-        rotation = "none",
+        reports = None,
         output_chunk_size = hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
         setpoint_deadband_c = None,
         master_seed = 0,
@@ -243,12 +196,7 @@ impl PySimulationConfig {
         start_time: &str,
         duration: WholeSeconds,
         time_res: WholeSeconds,
-        output_verbosity: u8,
-        output_path: Option<String>,
-        write_output: bool,
-        output_format: &str,
-        retain_batches: bool,
-        rotation: &str,
+        reports: Option<Vec<crate::py_report::PyReportSpec>>,
         output_chunk_size: usize,
         setpoint_deadband_c: Option<f64>,
         master_seed: u64,
@@ -276,8 +224,6 @@ impl PySimulationConfig {
         }
 
         let start = parse_datetime_str(start_time)?;
-        let format = parse_output_format(output_format)?;
-        let policy = parse_rotation_policy(rotation)?;
 
         let inner = SimulationConfig {
             start_time: start,
@@ -293,17 +239,16 @@ impl PySimulationConfig {
                     time_res.0
                 ))
             })?,
-            output_verbosity,
-            output_path: output_path.map(PathBuf::from),
-            write_output,
-            output_format: format,
+            reports: reports
+                .unwrap_or_default()
+                .into_iter()
+                .map(|report| report.0)
+                .collect::<Vec<ReportSpec>>(),
             output_chunk_size,
             setpoint_deadband_c,
             master_seed,
             civil_timezone,
             site_location: site_location.map(|s| s.0).unwrap_or_default(),
-            retain_batches,
-            rotation: policy,
             max_consecutive_step_failures,
         };
         inner
@@ -378,69 +323,20 @@ impl PySimulationConfig {
     }
 
     #[getter]
-    pub fn output_verbosity(&self) -> u8 {
-        self.0.output_verbosity
-    }
-
-    #[setter]
-    pub fn set_output_verbosity(&mut self, value: u8) -> PyResult<()> {
-        self.assign(|cfg| cfg.output_verbosity = value)
-    }
-
-    #[getter]
-    pub fn output_path(&self) -> Option<String> {
+    pub fn reports(&self) -> Vec<crate::py_report::PyReportSpec> {
         self.0
-            .output_path
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
+            .reports
+            .iter()
+            .cloned()
+            .map(crate::py_report::PyReportSpec)
+            .collect()
     }
 
     #[setter]
-    pub fn set_output_path(&mut self, value: Option<String>) -> PyResult<()> {
-        let path = value.map(PathBuf::from);
-        self.assign(move |cfg| cfg.output_path = path)
-    }
-
-    #[getter]
-    pub fn write_output(&self) -> bool {
-        self.0.write_output
-    }
-
-    #[setter]
-    pub fn set_write_output(&mut self, value: bool) -> PyResult<()> {
-        self.assign(|cfg| cfg.write_output = value)
-    }
-
-    #[getter]
-    pub fn output_format(&self) -> String {
-        output_format_to_string(self.0.output_format)
-    }
-
-    #[setter]
-    pub fn set_output_format(&mut self, value: String) -> PyResult<()> {
-        let format = parse_output_format(&value)?;
-        self.assign(move |cfg| cfg.output_format = format)
-    }
-
-    #[getter]
-    pub fn retain_batches(&self) -> bool {
-        self.0.retain_batches
-    }
-
-    #[setter]
-    pub fn set_retain_batches(&mut self, value: bool) -> PyResult<()> {
-        self.assign(|cfg| cfg.retain_batches = value)
-    }
-
-    #[getter]
-    pub fn rotation(&self) -> String {
-        rotation_to_string(self.0.rotation)
-    }
-
-    #[setter]
-    pub fn set_rotation(&mut self, value: String) -> PyResult<()> {
-        let policy = parse_rotation_policy(&value)?;
-        self.assign(move |cfg| cfg.rotation = policy)
+    pub fn set_reports(&mut self, value: Vec<crate::py_report::PyReportSpec>) -> PyResult<()> {
+        self.assign(move |cfg| {
+            cfg.reports = value.into_iter().map(|report| report.0).collect();
+        })
     }
 
     #[getter]
@@ -506,15 +402,12 @@ impl PySimulationConfig {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "SimulationConfig(start_time='{}', duration={}, time_res={}, write_output={}, output_format='{}', master_seed={}, retain_batches={}, rotation='{}')",
+            "SimulationConfig(start_time='{}', duration={}, time_res={}, reports={}, master_seed={})",
             self.0.start_time.to_rfc3339(),
             self.0.duration.num_seconds(),
             self.0.time_res.num_seconds(),
-            self.0.write_output,
-            output_format_to_string(self.0.output_format),
+            self.0.reports.len(),
             self.0.master_seed,
-            self.0.retain_batches,
-            rotation_to_string(self.0.rotation),
         )
     }
 }
@@ -732,12 +625,7 @@ mod tests {
             start_time,
             WholeSeconds(duration),
             WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
-            0,
             None,
-            hares_io::DEFAULT_WRITE_OUTPUT,
-            "csv",
-            false,
-            "none",
             hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
             None,
             0,
@@ -780,7 +668,13 @@ mod tests {
                 ("longitude", "site_location"),
                 ("elevation_m", "site_location"),
                 ("utc_offset_h", "site_location"),
-                ("output_to_parquet", "output_format"),
+                ("output_to_parquet", "reports"),
+                ("write_output", "reports"),
+                ("output_format", "reports"),
+                ("output_path", "reports"),
+                ("output_verbosity", "reports"),
+                ("retain_batches", "reports"),
+                ("rotation", "reports"),
                 ("duration_s", "duration"),
                 ("time_res_s", "time_res"),
             ] {
@@ -790,12 +684,7 @@ mod tests {
                     "2024-01-01T00:00:00Z",
                     WholeSeconds(3600),
                     WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
-                    0,
                     None,
-                    hares_io::DEFAULT_WRITE_OUTPUT,
-                    "csv",
-                    false,
-                    "none",
                     hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                     None,
                     0,
@@ -821,12 +710,7 @@ mod tests {
                 "2024-01-01T00:00:00Z",
                 WholeSeconds(3600),
                 WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
-                0,
                 None,
-                hares_io::DEFAULT_WRITE_OUTPUT,
-                "csv",
-                false,
-                "none",
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 0,
@@ -854,12 +738,7 @@ mod tests {
                 "2024-01-01T00:00:00Z",
                 WholeSeconds(3600),
                 WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
-                0,
                 None,
-                hares_io::DEFAULT_WRITE_OUTPUT,
-                "csv",
-                false,
-                "none",
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 0,

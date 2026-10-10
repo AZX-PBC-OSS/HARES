@@ -364,11 +364,14 @@ def _run_simulation(
     from typing import Any, cast
 
     from hares import (
+        Destination,
         EV,
         PV,
         Battery,
         Dwelling,
         EvArchetypeId,
+        ReportSpec,
+        Selection,
         SimulationConfig,
         VehicleId,
     )
@@ -421,7 +424,9 @@ def _run_simulation(
                     duration=duration_days * 86400,
                     time_res=time_res_s,
                     master_seed=seed_val,
-                    output_verbosity=3,
+                    reports=[
+                        ReportSpec("frame", Selection.verbosity(3), Destination.memory())
+                    ],
                 ),
                 defaults_path=defaults,
                 bldg_id=42,

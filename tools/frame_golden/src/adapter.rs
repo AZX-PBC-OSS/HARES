@@ -1,12 +1,12 @@
 //! The engine adapter: the only module in this crate that calls the
 //! simulation engine.
 //!
-//! A dwelling is built from the manifest, run with `write_output: true`,
-//! `retain_batches: true` and an engine output file inside a temp directory
-//! that is deleted afterwards (the recorder needs a destination on disk,
-//! but nothing of it survives the run). Products are read from the run's
-//! retained batches, the run metrics and `Dwelling::health()`. A fleet runs
-//! through `Fleet::simulate` on an explicit single-thread pool.
+//! A dwelling is built from the manifest and run with the manifest's own
+//! reports (a memory destination keeps every batch in memory; a run's
+//! files go to a temp directory nothing of which survives). Products are
+//! read from the run's retained batches, the run metrics and
+//! `Dwelling::health()`. A fleet runs through `Fleet::simulate` on an
+//! explicit single-thread pool.
 //!
 //! When a later engine change moves the result surface, this module is the
 //! only place that adapts.
@@ -22,17 +22,15 @@ use arrow::datatypes::{DataType, Field, Schema};
 use hares_core::{Dwelling, DwellingConfig, SimStatus, SimulationEngine};
 use hares_fleet::aggregation::{AggregationResolution, aggregate};
 use hares_fleet::{DwellingOutcome, Fleet};
-use hares_io::OutputFormat;
-use tempfile::TempDir;
 
 use crate::defaults;
 use crate::error::{FrameGoldenError, FrameGoldenResult};
 use crate::golden::{MetricsRow, flatten_metrics};
 use crate::manifest::{GoldenManifest, ManifestKind, repo_path};
 
-/// Whether a run keeps its frames. `Full` retains every product in memory
-/// (the engine's own file output goes to a deleted temp directory);
-/// `Discard` runs with `write_output: false, retain_batches: false`.
+/// Whether a run keeps its frames. `Full` runs the manifest's own reports
+/// (a memory destination retains every product in memory); `Discard` runs
+/// with no reports at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutput {
     Full,
@@ -147,17 +145,8 @@ pub fn run(req: RunRequest) -> FrameGoldenResult<RunProducts> {
 fn prepare_sim_config(req: &RunRequest) -> FrameGoldenResult<hares_io::SimulationConfig> {
     let mut sim = req.manifest.simulation_config()?;
     apply_duration_override(&mut sim, req.duration_override_s)?;
-    match req.output {
-        RunOutput::Full => {
-            sim.write_output = true;
-            sim.retain_batches = true;
-            sim.output_format = OutputFormat::Parquet;
-        }
-        RunOutput::Discard => {
-            sim.write_output = false;
-            sim.retain_batches = false;
-            sim.output_path = None;
-        }
+    if req.output == RunOutput::Discard {
+        sim.reports = Vec::new();
     }
     Ok(sim)
 }
@@ -168,16 +157,9 @@ fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         .home
         .first()
         .ok_or_else(|| FrameGoldenError::Engine("dwelling manifest has no home".to_string()))?;
-    let mut sim = prepare_sim_config(&req)?;
+    let sim = prepare_sim_config(&req)?;
     let defaults_tree = defaults::prepare(req.repo_root, req.manifest)?;
     let defaults_digest = defaults::digest_used(&defaults_tree)?;
-
-    // The engine's own file output needs a destination on disk; it is
-    // deleted with the temp directory when the run ends.
-    let engine_dir = TempDir::new()?;
-    if req.output == RunOutput::Full {
-        sim.output_path = Some(engine_dir.path().join("engine_output.parquet"));
-    }
 
     let config = DwellingConfig {
         hpxml_path: repo_path(req.repo_root, &home.hpxml),
@@ -269,22 +251,13 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
     let defaults_tree = defaults::prepare(req.repo_root, req.manifest)?;
     let defaults_digest = defaults::digest_used(&defaults_tree)?;
 
-    let engine_dir = TempDir::new()?;
     let construct_start = Instant::now();
     let configs: Vec<DwellingConfig> = req
         .manifest
         .home
         .iter()
-        .enumerate()
-        .map(|(index, home)| {
-            let mut sim = base_sim.clone();
-            if req.output == RunOutput::Full {
-                sim.output_path = Some(
-                    engine_dir
-                        .path()
-                        .join(format!("engine_output_{index}.parquet")),
-                );
-            }
+        .map(|home| {
+            let sim = base_sim.clone();
             DwellingConfig {
                 hpxml_path: repo_path(req.repo_root, &home.hpxml),
                 schedule_path: Some(repo_path(req.repo_root, &home.schedule)),
@@ -383,20 +356,18 @@ fn run_resstock_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         Some(defaults_tree.dir()),
     )
     .map_err(|err| FrameGoldenError::Engine(err.to_string()))?;
-    // The ResStock constructor builds its homes' sim configs with the
-    // recorder off (no output destination exists at construction): the
-    // fleet's run metrics and retained batches exist only when the
-    // recorder is on, so a full run gives every home a destination in a
-    // temp directory that is deleted with the run.
-    let engine_dir = TempDir::new()?;
+    // The ResStock constructor builds its homes' sim configs with no
+    // reports (no output destination exists at construction): the fleet's
+    // run metrics and retained batches exist only when a report is
+    // configured, so a full run gives every home one memory report at the
+    // manifest's verbosity, whose batches the aggregate folds.
     let fleet = if req.output == RunOutput::Full {
-        fleet.with_retained_output(engine_dir.path())
+        fleet
+            .with_memory_report(spec.selection.verbosity())
+            .map_err(|err| FrameGoldenError::Engine(err.to_string()))?
     } else {
         fleet
     };
-    let fleet = fleet
-        .with_output_verbosity(spec.selection.verbosity())
-        .map_err(|err| FrameGoldenError::Engine(err.to_string()))?;
     let report = *fleet
         .report()
         .expect("a fleet built from ResStock metadata carries its construction report");

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from hares import SimulationConfig, SiteLocationOverride
+from hares import Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride
 import math
 from pathlib import Path
 from typing import Any, cast
@@ -45,7 +45,6 @@ _DWELLING_CONFIG = GymDwellingConfig(
         start_time="2019-01-01T00:00:00",
         duration=600,
         time_res=60,
-        write_output=False,
     ),
 )
 
@@ -72,7 +71,7 @@ def _make_env(episode_length: timedelta = timedelta(minutes=5)) -> DwellingGymEn
 
 
 def _make_dwelling(seed: int = 0, duration_s: int = 600) -> PyDwelling:
-    return PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=duration_s, time_res=60, master_seed=seed, write_output=False))
+    return PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=duration_s, time_res=60, master_seed=seed))
 
 
 def test_dwelling_gym_reset_seed_reproducible():
@@ -329,7 +328,7 @@ def test_vec_gym_random_policy_100_steps():
     n_dwel = 2
     obs_fields = ["total_power_kw", "outdoor_temp"]
     dwellings = [
-        PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i, write_output=False))
+        PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i))
         for i in range(n_dwel)
     ]
     for dw in dwellings:
@@ -569,7 +568,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
     n_dwel = 2
     obs_fields = ["total_power_kw", "outdoor_temp"]
     dwellings = [
-        PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i, write_output=False))
+        PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i))
         for i in range(n_dwel)
     ]
     from hares import Battery
@@ -1405,6 +1404,49 @@ def test_gym_zero_time_res_reaches_validation():
         )
 
 
+def test_gym_default_writes_no_file(tmp_path: Path):
+    """A DwellingGymEnv built with a default-valued SimulationConfig (only
+    its required fields set) over the conftest inputs, run for one episode
+    of 20 steps, leaves the working directory empty: nothing is recorded
+    that no report requests, and a default config requests no report. (At
+    the old booleans' defaults the episode wrote a csv into the working
+    directory.)"""
+    import os
+
+    from hares.rl.gym_env import DwellingGymEnv as Env
+
+    env = Env(
+        config=GymDwellingConfig(
+            hpxml=HPXML,
+            schedule=SCHEDULE,
+            weather=WEATHER,
+            defaults_path=str(HARES_DEFAULTS),
+            sim_config=SimulationConfig(
+                start_time="2019-01-01T00:00:00",
+                duration=1200,
+                time_res=60,
+            ),
+        ),
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=20),
+    )
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        observation, _ = env.reset()
+        assert observation is not None
+        action = np.zeros(len(_ACTION_CONFIG["Gas Furnace"]), dtype=np.float64)
+        for _ in range(20):
+            observation, *_ = env.step(action)
+    finally:
+        os.chdir(cwd)
+    assert list(tmp_path.iterdir()) == [], (
+        "a default gym episode writes no file into the working directory"
+    )
+
+
 def test_gym_zero_master_seed_reaches_the_dwelling():
     """A master_seed of 0 is the seed the built dwelling's config reports,
     not a value the wrapper drops for its default."""
@@ -1414,7 +1456,6 @@ def test_gym_zero_master_seed_reaches_the_dwelling():
                 start_time="2019-01-01T00:00:00",
                 duration=600,
                 time_res=60,
-                write_output=False,
                 master_seed=0,
             )
         ),
@@ -1501,7 +1542,7 @@ def test_gym_rejects_a_non_string_observation_field():
 
 def test_gym_forwards_every_sim_config_field(tmp_path: Path):
     """A gym built with a SimulationConfig whose every field differs from its
-    default, write_output=False among them, records no output, and the config
+    default among them, records only what its reports request, and the config
     read back from the built dwelling equals the one passed on every field
     the class exposes.
 
@@ -1513,10 +1554,14 @@ def test_gym_forwards_every_sim_config_field(tmp_path: Path):
         start_time="2019-03-04T05:06:07",
         duration=7200,
         time_res=900,
-        output_verbosity=2,
-        output_path=str(tmp_path / "gym_output.csv"),
-        write_output=False,
-        output_format="parquet",
+        reports=[
+            ReportSpec("frame", Selection.verbosity(2), Destination.memory()),
+            ReportSpec(
+                "file",
+                Selection.verbosity(2),
+                Destination.parquet(str(tmp_path / "gym_output.parquet"), overwrite=True),
+            ),
+        ],
         output_chunk_size=1234,
         master_seed=7,
         setpoint_deadband_c=1.5,
@@ -1526,8 +1571,6 @@ def test_gym_forwards_every_sim_config_field(tmp_path: Path):
             elevation_m=1600.0,
             utc_offset_h=-7.0,
         ),
-        retain_batches=False,
-        rotation="daily",
         max_consecutive_step_failures=3,
     )
     env = DwellingGymEnv(
@@ -1542,16 +1585,10 @@ def test_gym_forwards_every_sim_config_field(tmp_path: Path):
         "start_time",
         "duration",
         "time_res",
-        "output_verbosity",
-        "output_path",
-        "write_output",
-        "output_format",
         "output_chunk_size",
         "master_seed",
         "civil_timezone",
         "setpoint_deadband_c",
-        "retain_batches",
-        "rotation",
         "max_consecutive_step_failures",
     ):
         passed = getattr(sim_config, field)
@@ -1559,6 +1596,9 @@ def test_gym_forwards_every_sim_config_field(tmp_path: Path):
         assert reported == passed, (
             f"{field}: passed {passed!r}, the dwelling reports {reported!r}"
         )
+    # The reports ride the config whole: repr is the one equality the
+    # pyclasses carry across the boundary.
+    assert [repr(r) for r in built.reports] == [repr(r) for r in sim_config.reports]
     # The site override rides as the one field, every component reported.
     for field in ("latitude_deg", "longitude_deg", "elevation_m", "utc_offset_h"):
         passed = getattr(sim_config.site_location, field)
@@ -1566,8 +1606,9 @@ def test_gym_forwards_every_sim_config_field(tmp_path: Path):
         assert reported == passed, (
             f"site_location.{field}: passed {passed!r}, the dwelling reports {reported!r}"
         )
-    assert not (tmp_path / "gym_output.csv").exists(), (
-        "the gym recorded output with write_output=False"
+    assert len(built.reports) == 2, "the reports ride the config whole"
+    assert not (tmp_path / "gym_output.parquet").exists(), (
+        "the gym's stepped episode publishes no file (publishing happens at simulate's end)"
     )
 
 

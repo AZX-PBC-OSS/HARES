@@ -4,7 +4,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from hares import Dwelling, DwellingConfig, Fleet, SimulationConfig
+from hares import Destination, Dwelling, DwellingConfig, Fleet, ReportSpec, Selection, SimulationConfig
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
@@ -16,7 +16,7 @@ WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 @pytest.fixture(scope="session")
 def dwelling():
     """Create a Dwelling from the committed BEopt example inputs."""
-    dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, config=SimulationConfig(write_output=False, start_time="2019-01-01T00:00:00", duration=86400))
+    dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400))
     dw.initialize()
     return dw
 
@@ -44,9 +44,10 @@ def fleet(tmp_path: Path):
             start_time="2018-01-01T00:00:00-05:00",
             duration=86400,
             time_res=3600,
-            retain_batches=True,
-            write_output=True,
-            output_path=str(tmp_path / "fleet_bldg0000002.csv"),
+            reports=[
+                ReportSpec("frame", Selection.verbosity(0), Destination.memory()),
+                ReportSpec("file", Selection.verbosity(0), Destination.csv(str(tmp_path / "fleet_bldg0000002.csv"))),
+            ],
         ),
         defaults_path=str(ROOT / "defaults"),
     )
@@ -70,7 +71,7 @@ def test_results_before_simulate_returns_dataframe(dwelling):
 
     Note: uses a fresh dwelling (not the simulated one) to test the pre-simulate path.
     """
-    fresh = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, config=SimulationConfig(write_output=False, start_time="2019-01-01T00:00:00", duration=86400))
+    fresh = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400))
     df = fresh.results()
 
     assert isinstance(df, pl.DataFrame)

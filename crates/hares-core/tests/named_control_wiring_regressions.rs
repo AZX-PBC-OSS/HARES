@@ -22,7 +22,7 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
     let sim_toml = toml::to_string(sim_table).expect("simulation table must serialize");
     let mut sim_config =
         SimulationConfig::from_toml(&sim_toml).expect("simulation config must parse");
-    sim_config.write_output = false;
+    sim_config.reports = Vec::new();
     let bldg_id = config_value
         .get("bldg_id")
         .and_then(|value| value.as_integer())

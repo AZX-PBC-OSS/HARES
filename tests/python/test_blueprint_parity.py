@@ -7,10 +7,10 @@ from hares import SimulationConfig
 
 
 def test_blueprint_parity_default():
-    dw1 = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, write_output=False, start_time="2019-01-01T00:00:00"))
+    dw1 = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60,start_time="2019-01-01T00:00:00"))
     dw1.initialize()
 
-    bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, write_output=False, start_time="2019-01-01T00:00:00"))
+    bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60,start_time="2019-01-01T00:00:00"))
     dw2 = bp.build()
     dw2.initialize()
 
@@ -25,7 +25,7 @@ def test_blueprint_parity_default():
 
 
 def test_blueprint_equipment_names():
-    bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, write_output=False, start_time="2019-01-01T00:00:00"))
+    bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60,start_time="2019-01-01T00:00:00"))
     names = bp.equipment_names()
     assert isinstance(names, list)
     assert all(isinstance(n, str) for n in names)
@@ -34,11 +34,11 @@ def test_blueprint_equipment_names():
 
 def test_blueprint_build_deterministic():
     """Same blueprint built twice produces identical results."""
-    bp1 = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, master_seed=42, write_output=False, start_time="2019-01-01T00:00:00"))
+    bp1 = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, master_seed=42,start_time="2019-01-01T00:00:00"))
     dw1 = bp1.build()
     dw1.initialize()
 
-    bp2 = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, master_seed=42, write_output=False, start_time="2019-01-01T00:00:00"))
+    bp2 = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, master_seed=42,start_time="2019-01-01T00:00:00"))
     dw2 = bp2.build()
     dw2.initialize()
 

@@ -17,7 +17,6 @@ mod tests {
     use super::denver_offset::denver_offset;
     use chrono::{Duration, TimeZone};
     use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-    use hares_io::OutputFormat;
     use hares_types::ZoneId;
     use std::collections::BTreeMap;
     use std::fs;
@@ -37,7 +36,7 @@ mod tests {
 
     fn beopt_freefloat_config(
         scenario: &str,
-        output_path: PathBuf,
+        csv_path: PathBuf,
         hpxml_path: PathBuf,
     ) -> DwellingConfig {
         // Both HARES and OCHRE treat timestamps as local time internally --
@@ -74,17 +73,20 @@ mod tests {
                 start_time,
                 duration,
                 time_res: Duration::minutes(1),
-                output_verbosity: 6,
-                output_path: Some(output_path),
-                write_output: true,
-                output_format: OutputFormat::Csv,
+                reports: vec![hares_io::ReportSpec {
+                    name: "frame".to_string(),
+                    selection: hares_io::Selection::Verbosity(6),
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Csv {
+                        path: csv_path,
+                        overwrite: false,
+                    },
+                }],
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: false,
-                rotation: hares_io::RotationPolicy::None,
                 max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,

@@ -18,7 +18,7 @@ fn bench_rl_step(c: &mut Criterion) {
             || {
                 let path = common::numbered_path(dir, "hares-bench-rl-single", "toml");
                 common::synthetic_toml_case(&path, 86_400);
-                Dwelling::from_toml_config_with_write_output(&path, Some(false))
+                Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
                     .expect("create dwelling")
             },
             |mut dwelling| {
@@ -40,7 +40,7 @@ fn bench_rl_step(c: &mut Criterion) {
                                 "toml",
                             );
                             common::synthetic_toml_case(&path, 86_400);
-                            Dwelling::from_toml_config_with_write_output(&path, Some(false))
+                            Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
                                 .expect("create vector dwelling")
                         })
                         .collect::<Vec<_>>()

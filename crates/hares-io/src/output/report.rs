@@ -13,6 +13,9 @@
 
 use arrow::datatypes::Schema;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+use super::catalogue::Catalogue;
 
 /// What a report selects (`plan.md` 2.2). This entry adds the variants that
 /// can run against the current recorder; `Diagnostics` arrives with the
@@ -42,6 +45,55 @@ pub enum Selection {
 pub enum Frequency {
     #[default]
     Timestep,
+}
+
+/// Where a report's batches go (`plan.md` 2.2). `Callback` arrives with the
+/// Python-attach entry; every variant this entry adds can run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Destination {
+    /// Every flushed batch is retained in memory: the report's frame.
+    Memory,
+    /// Stream to a Parquet file, published at the run's end.
+    Parquet {
+        path: PathBuf,
+        #[serde(default)]
+        overwrite: bool,
+    },
+    /// Stream to a CSV file, published at the run's end.
+    Csv {
+        path: PathBuf,
+        #[serde(default)]
+        overwrite: bool,
+    },
+}
+
+impl Destination {
+    /// The file path of a file destination; `None` for [`Destination::Memory`].
+    #[must_use]
+    pub fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Destination::Memory => None,
+            Destination::Parquet { path, .. } | Destination::Csv { path, .. } => Some(path),
+        }
+    }
+}
+
+/// One report request: what a run records and where it goes (`plan.md`
+/// 2.2). A run declares the reports it wants and each one's destination;
+/// nothing is recorded or written that no report requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportSpec {
+    /// The report's name, unique within a config.
+    pub name: String,
+    /// What the report selects.
+    pub selection: Selection,
+    /// The reporting frequency.
+    #[serde(default)]
+    pub frequency: Frequency,
+    /// Where the report's batches go.
+    pub destination: Destination,
 }
 
 /// The variables a row plan freezes from, in producer-slot (schema) order.
@@ -225,6 +277,75 @@ impl RowPlan {
     /// Whether a slot was marked produced.
     pub fn valid(&self, slot: usize) -> bool {
         self.validity[slot / usize::BITS as usize] & (1 << (slot % usize::BITS as usize)) != 0
+    }
+
+    /// Freezes a row plan from per-report projections already resolved
+    /// against the union surface: the destinations entry's freeze resolves
+    /// every report's selection against the catalogue first, the union of
+    /// the resolved columns is the producer surface, and each projection
+    /// lists the union slots of one report's columns, in the report's own
+    /// column order.
+    #[must_use]
+    pub fn from_resolved_projections(slots: usize, projections: Vec<Vec<usize>>) -> Self {
+        Self {
+            slots,
+            row: vec![0.0; slots],
+            validity: vec![0; slots.div_ceil(usize::BITS as usize)],
+            local_timestamp: 0,
+            projections,
+        }
+    }
+
+    /// Every selection's projection, in selection (report) order.
+    #[must_use]
+    pub fn projections(&self) -> &[Vec<usize>] {
+        &self.projections
+    }
+}
+
+/// Resolves one report's selection against the catalogue: the variable
+/// names the report records, in the order its columns carry.
+///
+/// A `Verbosity` selection resolves to every catalogue variable emitted at
+/// the tier (the observe gate honoured, as the schema builder honours it);
+/// a `Named` selection resolves exactly and case-sensitively, the error
+/// listing each unknown name with its nearest catalogue names; a `Pattern`
+/// selection globs over the catalogue names and errors when it matches
+/// nothing.
+///
+/// # Errors
+///
+/// [`RowPlanError::UnknownNames`] and [`RowPlanError::EmptyPattern`], the
+/// same errors [`RowPlan::build`] raises against a surface.
+pub fn resolve_selection(
+    selection: &Selection,
+    catalogue: &Catalogue,
+) -> Result<Vec<String>, RowPlanError> {
+    let names: Vec<&str> = catalogue
+        .variables()
+        .iter()
+        .map(|def| def.name.as_ref())
+        .collect();
+    match selection {
+        Selection::Verbosity(verbosity) => Ok(catalogue
+            .variables_at_verbosity(*verbosity)
+            .iter()
+            .map(|def| def.name.to_string())
+            .collect()),
+        Selection::Named(selected) => resolve_named(selected, &names)
+            .map(|slots| slots.iter().map(|&s| names[s].to_string()).collect()),
+        Selection::Pattern(pattern) => {
+            let matched: Vec<String> = names
+                .iter()
+                .filter(|name| glob_match(pattern, name))
+                .map(|name| (*name).to_string())
+                .collect();
+            if matched.is_empty() {
+                Err(RowPlanError::EmptyPattern(pattern.clone()))
+            } else {
+                Ok(matched)
+            }
+        }
     }
 }
 

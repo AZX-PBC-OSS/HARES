@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::dwelling::DwellingBlueprint;
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-use hares_io::OutputFormat;
 use hares_types::{FuelType, HaresError, telemetry_keys as tk};
 use serde_json::json;
 
@@ -42,17 +41,12 @@ fn dwelling_config(hpxml: &Path) -> DwellingConfig {
                 .unwrap(),
             duration: Duration::days(2),
             time_res: Duration::seconds(900),
-            output_verbosity: 0,
-            write_output: false,
-            output_path: None,
-            output_format: OutputFormat::Csv,
+            reports: Vec::new(),
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 7,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         },
         overrides: None,

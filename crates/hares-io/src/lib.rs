@@ -23,9 +23,8 @@ pub mod wsf;
 
 pub use config::{
     ConfigError, DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES, DEFAULT_OUTPUT_CHUNK_SIZE,
-    DEFAULT_TIME_RES_SECS, DEFAULT_WRITE_OUTPUT, KeyScope, MAX_VERBOSITY, OutputFormat,
-    REMOVED_KEYS, RemovedKey, RotationPolicy, SimulationConfig, check_removed_toml_keys,
-    removed_key, removed_key_message,
+    DEFAULT_TIME_RES_SECS, KeyScope, MAX_VERBOSITY, REMOVED_KEYS, RemovedKey, SimulationConfig,
+    check_removed_toml_keys, removed_key, removed_key_message,
 };
 pub use defaults::{
     BiquadraticCoefficients, DefaultsCategory, DefaultsError, DefaultsStore, EquipmentDefaults,
@@ -55,23 +54,24 @@ pub use hpxml::{
 pub use output::{
     CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX, Catalogue,
     CatalogueActor, CatalogueEquipment, CatalogueError, CatalogueInput, DEFROST_STATE_SUFFIX,
-    ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX, ER_POWER_SUFFIX,
+    Destination, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX, ER_POWER_SUFFIX,
     EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX, EfficiencyMetrics,
     EnvelopeComponentLoadsKwh, FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX,
     Frequency, FullSimulationMetrics, GAS_POWER_SUFFIX, HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL,
     LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX, MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX, MODE_SUFFIX,
     MetricsCalculator, OutputSummary, PAN_HEATER_POWER_SUFFIX, POWER_FACTOR_SUFFIX,
     PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX, REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX,
-    RUNTIME_COOLING_SETPOINT_COL, RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL, RowPlan,
-    RowPlanError, SCHEDULE_SUFFIX, SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL,
-    SETPOINT_SUFFIX, SHR_SUFFIX, SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX,
-    SUPPLY_TEMP_SUFFIX, SchemaSurface, Selection, SimulationMetrics, StreamingRecorder,
-    VariableDef, VariableSource, VariableSurface, build_catalogue, build_schema,
-    build_schema_for_specs, display_name_to_end_use_key, end_use_display_name,
-    end_use_electric_power_column, equipment_name_to_end_use, expected_columns_at_verbosity,
-    fuel_reports_gas_power_column, has_soc, is_compressor_equipment, is_cooling_equipment, is_ev,
-    is_heat_pump_heater, is_hvac_or_wh, is_pv, is_reserved_output_column_name,
-    parse_end_use_electric_power_column, parse_end_use_electric_power_column_key,
+    RUNTIME_COOLING_SETPOINT_COL, RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL,
+    ReportSpec, RowPlan, RowPlanError, SCHEDULE_SUFFIX, SCHEDULED_COOLING_SETPOINT_COL,
+    SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX, SOC_SUFFIX, SPEED_SUFFIX,
+    SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, SchemaSurface, Selection, SimulationMetrics,
+    StreamingRecorder, VariableDef, VariableSource, VariableSurface, build_catalogue, build_schema,
+    build_schema_for_columns, build_schema_for_specs, display_name_to_end_use_key,
+    end_use_display_name, end_use_electric_power_column, equipment_name_to_end_use,
+    expected_columns_at_verbosity, fuel_reports_gas_power_column, has_soc, is_compressor_equipment,
+    is_cooling_equipment, is_ev, is_heat_pump_heater, is_hvac_or_wh, is_pv,
+    is_reserved_output_column_name, parse_end_use_electric_power_column,
+    parse_end_use_electric_power_column_key, resolve_selection,
 };
 pub use psm3::parse_psm3;
 pub use resstock::{

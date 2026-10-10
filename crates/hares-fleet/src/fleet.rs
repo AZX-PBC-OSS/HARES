@@ -12,8 +12,8 @@ use hares_core::{
     SimulationResults, StepResult,
 };
 use hares_io::{
-    OutputFormat, ResStockBuilding, ResStockVersion, SampleWeightClass, SimulationConfig,
-    classify_sample_weight, parse_resstock_metadata,
+    ResStockBuilding, ResStockVersion, SampleWeightClass, SimulationConfig, classify_sample_weight,
+    parse_resstock_metadata,
 };
 use hares_types::ControlSignal;
 use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
@@ -109,7 +109,7 @@ pub enum FleetError {
         "dwelling at index {index} has invalid sample_weight {value} (must be finite and non-negative)"
     )]
     InvalidAggregationWeight { index: usize, value: f64 },
-    #[error("output_verbosity {value} exceeds the maximum of {max}")]
+    #[error("verbosity {value} exceeds the maximum of {max}")]
     InvalidOutputVerbosity { value: u8, max: u8 },
 }
 
@@ -313,19 +313,20 @@ impl Fleet {
             .collect()
     }
 
-    /// Sets every dwelling's output verbosity, the same bound
-    /// `SimulationConfig::from_toml` enforces when the field is parsed.
+    /// Gives every dwelling one memory report at the verbosity: the run
+    /// mode whose retained batches a caller reads (the fleet's aggregate
+    /// folds them), with real run metrics.
     ///
     /// A fleet built from ResStock metadata constructs its homes' sim
     /// configs itself, so this builder is the one surface that moves their
-    /// output verbosity after construction and before
+    /// output mode after construction and before
     /// [`simulate`](Self::simulate).
     ///
     /// # Errors
     ///
     /// Returns [`FleetError::InvalidOutputVerbosity`] when `verbosity`
     /// exceeds `hares_io::MAX_VERBOSITY`.
-    pub fn with_output_verbosity(mut self, verbosity: u8) -> Result<Self> {
+    pub fn with_memory_report(mut self, verbosity: u8) -> Result<Self> {
         if verbosity > hares_io::MAX_VERBOSITY {
             return Err(FleetError::InvalidOutputVerbosity {
                 value: verbosity,
@@ -333,31 +334,14 @@ impl Fleet {
             });
         }
         for entry in &mut self.entries {
-            entry.config.sim_config.output_verbosity = verbosity;
+            entry.config.sim_config.reports = vec![hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(verbosity),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Memory,
+            }];
         }
         Ok(self)
-    }
-
-    /// Turns every dwelling's output recorder on, with the dwelling's
-    /// destination `output_dir/engine_output_{index}.parquet` (Parquet) in
-    /// fleet order, batches retained: the run mode whose products a caller
-    /// reads from the retained batches, with real run metrics.
-    ///
-    /// A fleet built from ResStock metadata constructs its homes' sim
-    /// configs with the recorder off (no output destination exists at
-    /// construction); this builder is the surface that moves the output
-    /// mode after construction and before [`simulate`](Self::simulate),
-    /// mirroring what a config-carrying caller sets on its own
-    /// `DwellingConfig`s.
-    #[must_use]
-    pub fn with_retained_output(mut self, output_dir: &Path) -> Self {
-        for (index, entry) in self.entries.iter_mut().enumerate() {
-            entry.config.sim_config.write_output = true;
-            entry.config.sim_config.output_format = hares_io::OutputFormat::Parquet;
-            entry.config.sim_config.output_path =
-                Some(output_dir.join(format!("engine_output_{index}.parquet")));
-        }
-        self
     }
 
     /// Installs a fleet progress callback.
@@ -932,17 +916,12 @@ fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
             .expect("valid constant simulation start timestamp"),
         duration: duration.unwrap_or_else(|| Duration::hours(24)),
         time_res: Duration::minutes(1),
-        output_verbosity: 0,
-        output_path: None,
-        write_output: false,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
         output_chunk_size: 10_000,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: true,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
     }
 }
@@ -1297,22 +1276,25 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
     }
 
-    fn simulation_config(output_path: PathBuf) -> SimulationConfig {
+    fn simulation_config(csv_path: PathBuf) -> SimulationConfig {
         SimulationConfig {
             start_time: fixture_start::fixture_start(),
             duration: Duration::hours(1),
             time_res: Duration::minutes(1),
-            output_verbosity: 0,
-            output_path: Some(output_path),
-            write_output: true,
-            output_format: OutputFormat::Csv,
+            reports: vec![hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(0),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Csv {
+                    path: csv_path,
+                    overwrite: false,
+                },
+            }],
             output_chunk_size: 128,
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         }
     }
@@ -2427,7 +2409,7 @@ mod tests {
             patches: None,
         };
         let fleet = Fleet::from_buildings(vec![config(1), config(2)])
-            .with_output_verbosity(2)
+            .with_memory_report(2)
             .expect("verbosity 2 is valid");
         for id in fleet.bldg_ids() {
             let entry = fleet
@@ -2435,14 +2417,22 @@ mod tests {
                 .iter()
                 .find(|entry| entry.config.bldg_id == id)
                 .expect("the id came from the fleet");
-            assert_eq!(entry.config.sim_config.output_verbosity, 2);
+            assert_eq!(
+                entry
+                    .config
+                    .sim_config
+                    .reports
+                    .first()
+                    .map(|r| &r.selection),
+                Some(&hares_io::Selection::Verbosity(2))
+            );
         }
 
         let error = Fleet::from_buildings(vec![config(1)])
-            .with_output_verbosity(hares_io::MAX_VERBOSITY + 1)
+            .with_memory_report(hares_io::MAX_VERBOSITY + 1)
             .expect_err("verbosity above the maximum must be rejected");
         assert!(
-            error.to_string().contains("output_verbosity"),
+            error.to_string().contains("verbosity"),
             "the error names the field: {error}"
         );
     }

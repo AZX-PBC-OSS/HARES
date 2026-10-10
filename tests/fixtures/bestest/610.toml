@@ -5,8 +5,6 @@ initialization_duration_s = 86400  # 1 day warmup (lightweight construction)
 start_time = "2024-01-01T00:00:00Z"
 time_res = 60
 duration = 172800
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]

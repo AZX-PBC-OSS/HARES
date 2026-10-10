@@ -344,6 +344,13 @@ impl Catalogue {
         }
         selected
     }
+
+    /// The variable's `(min verbosity, observe-only)` tag, resolved by
+    /// column name.
+    #[must_use]
+    pub fn tag(&self, name: &str) -> Option<(u8, bool)> {
+        self.index.get(name).map(|&i| self.tags[i])
+    }
 }
 
 /// Builds the catalogue: the dwelling statics, the per-equipment columns in
@@ -1961,15 +1968,33 @@ pub fn build_schema(catalogue: &Catalogue, verbosity: u8) -> Schema {
     let mut fields = vec![Field::new(TIMESTAMP_COL, DataType::Utf8, false)];
 
     for var in catalogue.variables_at_verbosity(verbosity) {
-        let mut field = Field::new(var.name.as_ref(), DataType::Float64, var.nullable);
-        if var.unit != Unit::None {
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("unit".to_string(), var.unit.symbol().to_string());
-            field = field.with_metadata(metadata);
-        }
-        fields.push(field);
+        fields.push(variable_field(var).as_ref().clone());
     }
 
+    Schema::new_with_metadata(fields, schema_metadata(catalogue, verbosity))
+}
+
+/// One variable's Arrow field: the column name, `Float64`, the
+/// declaration's nullability, and the unit metadata (no metadata for
+/// [`Unit::None`]).
+#[must_use]
+pub fn variable_field(var: &VariableDef) -> arrow::datatypes::FieldRef {
+    let mut field = Field::new(var.name.as_ref(), DataType::Float64, var.nullable);
+    if var.unit != Unit::None {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("unit".to_string(), var.unit.symbol().to_string());
+        field = field.with_metadata(metadata);
+    }
+    std::sync::Arc::new(field)
+}
+
+/// The schema metadata every schema builder carries: the mode-ordinal map,
+/// the lighting-created flags, and the verbosity the schema spans (for a
+/// named column set, the deepest tier the columns are drawn from).
+fn schema_metadata(
+    catalogue: &Catalogue,
+    verbosity: u8,
+) -> std::collections::HashMap<String, String> {
     let mut metadata = std::collections::HashMap::new();
     metadata.insert("hares_verbosity".to_string(), verbosity.to_string());
     metadata.insert("hares_mode_map".to_string(), mode_ordinal_json());
@@ -1990,8 +2015,33 @@ pub fn build_schema(catalogue: &Catalogue, verbosity: u8) -> Schema {
         "garage_lighting_created".to_string(),
         garage_lighting_created.to_string(),
     );
+    metadata
+}
 
-    Schema::new_with_metadata(fields, metadata)
+/// Builds the Arrow output schema from an explicit column set: the `Time`
+/// label, then every named catalogue variable in the given order. The
+/// schema of a `Named` or `Pattern` report's selection; unknown names are
+/// skipped (the resolver never hands one over), and so are columns the
+/// active feature set cannot emit (the observe gate, as
+/// [`build_schema`] honours it).
+#[must_use]
+pub fn build_schema_for_columns(catalogue: &Catalogue, names: &[String]) -> Schema {
+    let mut fields = vec![Field::new(TIMESTAMP_COL, DataType::Utf8, false)];
+    let mut max_verbosity = 0u8;
+    for name in names {
+        let Some(var) = catalogue.resolve(name) else {
+            continue;
+        };
+        let Some((min_v, observe_only)) = catalogue.tag(name) else {
+            continue;
+        };
+        if observe_only && !cfg!(feature = "observe") {
+            continue;
+        }
+        max_verbosity = max_verbosity.max(min_v);
+        fields.push(variable_field(var).as_ref().clone());
+    }
+    Schema::new_with_metadata(fields, schema_metadata(catalogue, max_verbosity))
 }
 
 /// Builds a catalogue from spec-shaped inputs (no live descriptors) and

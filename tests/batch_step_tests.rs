@@ -28,11 +28,8 @@ mod tests {
 start_time = "2024-01-01T00:00:00Z"
 time_res = {time_res_s}
 duration = {duration_s}
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
-write_output = false
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -65,7 +62,7 @@ occupancy = 1.0
         let dir = tempfile::tempdir().expect("create TOML directory");
         let path = dir.path().join("dwelling.toml");
         fs::write(&path, synthetic_toml(duration_s, time_res_s)).expect("write TOML");
-        Dwelling::from_toml_config_with_write_output(&path, Some(false)).expect("create dwelling")
+        Dwelling::from_toml_config_with_reports(&path, Some(Vec::new())).expect("create dwelling")
     }
 
     #[test]

@@ -11,7 +11,7 @@ EXAMPLES = ROOT / "data" / "examples"
 
 
 def _build_valid_config(bldg_id: int = 1) -> DwellingConfig:
-    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, write_output=False)
+    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60)
     return DwellingConfig(
         hpxml=str(EXAMPLES / "BEopt_example.xml"),
         schedule=str(EXAMPLES / "BEopt_example_schedule.csv"),
@@ -27,7 +27,7 @@ def test_steppable_fleet_exposes_build_errors() -> None:
         hpxml=str(EXAMPLES / "missing_building.xml"),
         schedule=str(EXAMPLES / "BEopt_example_schedule.csv"),
         weather=str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, write_output=False),
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60),
         bldg_id=2,
     )
 

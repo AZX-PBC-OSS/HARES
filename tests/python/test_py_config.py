@@ -13,7 +13,16 @@ from typing import Any, cast
 import pytest
 
 from conftest import REMOVED_SITE_KEYWORD_MESSAGES
-from hares import Dwelling, DwellingConfig, SimulationConfig, SiteLocationOverride
+from hares import (
+    Destination,
+    Dwelling,
+    DwellingConfig,
+    Frequency,
+    ReportSpec,
+    Selection,
+    SimulationConfig,
+    SiteLocationOverride,
+)
 
 START = "2024-01-01T00:00:00Z"
 
@@ -35,15 +44,10 @@ class TestSimulationConfig:
         assert py_cfg.start_time == toml_cfg.start_time
         assert py_cfg.duration == toml_cfg.duration
         assert py_cfg.time_res == toml_cfg.time_res
-        assert py_cfg.output_verbosity == toml_cfg.output_verbosity
-        assert py_cfg.output_path == toml_cfg.output_path
-        assert py_cfg.write_output == toml_cfg.write_output
-        assert py_cfg.output_format == toml_cfg.output_format
+        assert py_cfg.reports == toml_cfg.reports
         assert py_cfg.output_chunk_size == toml_cfg.output_chunk_size
         assert py_cfg.setpoint_deadband_c == toml_cfg.setpoint_deadband_c
         assert py_cfg.master_seed == toml_cfg.master_seed
-        assert py_cfg.retain_batches == toml_cfg.retain_batches
-        assert py_cfg.rotation == toml_cfg.rotation
         assert py_cfg.civil_timezone == toml_cfg.civil_timezone
         assert py_cfg.max_consecutive_step_failures == toml_cfg.max_consecutive_step_failures
         assert py_cfg.site_location.latitude_deg == toml_cfg.site_location.latitude_deg
@@ -62,7 +66,7 @@ class TestSimulationConfig:
         assert cfg.time_res == 60
         assert cfg.master_seed == 42
         assert cfg.start_time == "2024-01-01T00:00:00+00:00"
-        assert cfg.output_verbosity == 0
+        assert cfg.reports == []
 
     def test_duration_and_time_res_accept_timedelta(self):
         from datetime import timedelta
@@ -77,34 +81,37 @@ class TestSimulationConfig:
             SimulationConfig(start_time=START, duration=whole)
 
     def test_custom_values_accepted_and_round_trip(self):
+        reports = [
+            ReportSpec("frame", Selection.verbosity(5), Destination.memory()),
+            ReportSpec(
+                "archive",
+                Selection.named(["Total Electric Power (kW)"]),
+                Destination.parquet("/tmp/output.parquet", overwrite=True),
+            ),
+        ]
         cfg = SimulationConfig(
             start_time="2024-06-15T12:00:00Z",
             duration=7200,
             time_res=300,
-            output_verbosity=5,
-            output_path="/tmp/output.csv",
-            write_output=False,
-            output_format="parquet",
+            reports=reports,
             output_chunk_size=5000,
             master_seed=42,
             civil_timezone="America/Denver",
             setpoint_deadband_c=1.5,
-            retain_batches=True,
-            rotation="daily",
         )
         assert cfg.start_time == "2024-06-15T12:00:00+00:00"
         assert cfg.duration == 7200
         assert cfg.time_res == 300
-        assert cfg.output_verbosity == 5
-        assert cfg.output_path == "/tmp/output.csv"
-        assert cfg.write_output is False
-        assert cfg.output_format == "parquet"
+        assert len(cfg.reports) == 2
+        assert cfg.reports[0].name == "frame"
+        assert repr(cfg.reports[0].destination) == "Destination.memory()"
+        assert repr(cfg.reports[1].destination) == (
+            "Destination.parquet(/tmp/output.parquet, overwrite=true)"
+        )
         assert cfg.output_chunk_size == 5000
         assert cfg.master_seed == 42
         assert cfg.civil_timezone == "America/Denver"
         assert cfg.setpoint_deadband_c == 1.5
-        assert cfg.retain_batches is True
-        assert cfg.rotation == "daily"
 
     def test_repr_includes_key_info(self):
         cfg = SimulationConfig(start_time=START, duration=3600, master_seed=42)
@@ -130,9 +137,13 @@ class TestSimulationConfig:
         with pytest.raises(ValueError, match="divisible"):
             SimulationConfig(start_time=START, duration=100, time_res=60)
 
-    def test_invalid_output_verbosity_raises_value_error(self):
-        with pytest.raises(ValueError, match="output_verbosity must be 0-8"):
-            SimulationConfig(start_time=START, duration=3600, output_verbosity=9)
+    def test_invalid_report_verbosity_raises_value_error(self):
+        with pytest.raises(ValueError, match="verbosity must be 0-8"):
+            SimulationConfig(
+                start_time=START,
+                duration=3600,
+                reports=[ReportSpec("frame", Selection.verbosity(9), Destination.memory())],
+            )
 
     def test_invalid_setpoint_deadband_raises_value_error(self):
         with pytest.raises(ValueError, match="setpoint_deadband_c must be finite"):
@@ -157,7 +168,7 @@ class TestSimulationConfig:
         """The Python-only removed keywords name their replacement: the four
         site keywords raise the removed-keys table's full message (the one
         shared constant, the same string the Rust pins assert), and
-        `output_to_parquet` names `SimulationConfig.output_format`."""
+        `output_to_parquet` names `SimulationConfig.reports`."""
         for key, message in REMOVED_SITE_KEYWORD_MESSAGES.items():
             kwargs = required_kwargs() | {key: 1.0}
             with pytest.raises(TypeError, match=re.escape(message)):
@@ -165,16 +176,23 @@ class TestSimulationConfig:
                 # extraction, so the value's type never matters.
                 SimulationConfig(**cast("dict[str, Any]", kwargs))
 
-        for key, replacement in [("output_to_parquet", "output_format")]:
+        for key, replacement in [("output_to_parquet", "reports")]:
             kwargs = required_kwargs() | {key: 1.0}
             with pytest.raises(TypeError, match=f"'{key}'.*{replacement}|{replacement}.*'{key}'"):
                 SimulationConfig(**cast("dict[str, Any]", kwargs))
 
     def test_removed_simulation_keyword_names_replacement(self):
-        """The removed [simulation] keys name their replacements here too."""
+        """The removed [simulation] keys name their replacements here too:
+        the output booleans name the report list."""
         for key, replacement in [
             ("duration_s", "duration"),
             ("time_res_s", "time_res"),
+            ("write_output", "reports"),
+            ("output_format", "reports"),
+            ("output_path", "reports"),
+            ("output_verbosity", "reports"),
+            ("retain_batches", "reports"),
+            ("rotation", "reports"),
         ]:
             kwargs = required_kwargs() | {key: 3600}
             with pytest.raises(TypeError, match=f"'{key}'.*{replacement}|{replacement}.*'{key}'"):
@@ -200,16 +218,11 @@ class TestSimulationConfig:
             start_time="2024-06-15T12:00:00Z",
             duration=7200,
             time_res=300,
-            output_verbosity=5,
-            output_path="/tmp/output.csv",
-            write_output=False,
-            output_format="parquet",
+            reports=[ReportSpec("frame", Selection.verbosity(5), Destination.memory())],
             output_chunk_size=5000,
             setpoint_deadband_c=1.5,
             master_seed=42,
-            retain_batches=True,
             civil_timezone="America/Denver",
-            rotation="daily",
             site_location=SiteLocationOverride(latitude_deg=40.0),
             max_consecutive_step_failures=3,
         )

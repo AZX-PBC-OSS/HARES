@@ -288,7 +288,9 @@ evicts the oldest snapshot when at capacity. It exposes `last()`, `snapshots()`,
 
 ## Diagnostic CSV Output
 
-Enabled by `output_verbosity >= 4` in `SimulationConfig`. Writes one row per
+Enabled by a `SimulationConfig.reports` entry whose selection is a
+verbosity of at least 4 and whose destination is a file (the writer rides
+that report's path). Writes one row per
 timestep via `hares-core/src/diagnostics.rs`.
 
 ### Columns
@@ -322,7 +324,7 @@ Extended fields (populated when available):
 
 ### Thermal Runaway
 
-1. Enable diagnostic CSV (`output_verbosity: 4`)
+1. Enable diagnostic CSV (a verbosity-4 report with a csv destination)
 2. Plot `zone1_temp_c` vs `outdoor_temp_c` — look for divergence
 3. Enable observer, drain snapshots around the divergence timestep
 4. Inspect `SolverCapture.envelope_gains` — which component is unbounded?

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 pub use catalogue::{
     Catalogue, CatalogueActor, CatalogueEquipment, CatalogueError, CatalogueInput,
     EquipmentColumnFamilies, VariableDef, VariableSource, build_catalogue, build_schema,
-    build_schema_for_specs,
+    build_schema_for_columns, build_schema_for_specs,
 };
 pub use columns::{
     CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
@@ -38,19 +38,20 @@ pub use metrics::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,
     SimulationMetrics,
 };
-pub use report::{Frequency, RowPlan, RowPlanError, SchemaSurface, Selection, VariableSurface};
+pub use report::{
+    Destination, Frequency, ReportSpec, RowPlan, RowPlanError, SchemaSurface, Selection,
+    VariableSurface, resolve_selection,
+};
 pub use writer::{OutputError, StreamingRecorder};
 
 /// Summary returned by [`StreamingRecorder::finish`].
 #[derive(Debug, Clone)]
 pub struct OutputSummary {
-    /// Total number of rows written across all files.
+    /// Total number of rows written to the report's destination.
     pub row_count: usize,
-    /// Total size of all output files in bytes.
+    /// Size of the published output file in bytes (0 for a `Memory`
+    /// destination or a run that produced zero rows).
     pub byte_size: u64,
-    /// Path to the first (or only) output file.
+    /// The published output file's path.
     pub path: PathBuf,
-    /// Paths to all output files, including rotated successors.
-    /// When `rotation` is `None`, this contains only the primary path.
-    pub rotated_paths: Vec<PathBuf>,
 }

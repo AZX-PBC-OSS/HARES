@@ -64,10 +64,7 @@ fn write_synthetic_toml(path: &Path, spec: SyntheticTomlSpec<'_>) {
 start_time = "{start_time}"
 time_res = 60
 duration = {duration_s}
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
-write_output = false
 master_seed = 0
 [geometry]
 number_of_bedrooms = 3.0
@@ -411,9 +408,6 @@ fn write_mode_toml(path: &std::path::Path) {
 start_time = "2024-01-15T00:00:00Z"
 time_res = 60
 duration = 3600
-write_output = false
-output_verbosity = 0
-output_format = "csv"
 output_chunk_size = 1000
 master_seed = 0
 [geometry]

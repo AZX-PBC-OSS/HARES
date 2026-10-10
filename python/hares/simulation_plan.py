@@ -44,7 +44,7 @@ class SimulationPlan:
         defaults_path: str | None = None,
         bldg_id: int = 0,
         time_res_s: int = 300,
-        output_verbosity: int = 0,
+        verbosity: int = 0,
         master_seed: int = 42,
         initialization_duration: int = 604800,  # 7 days
         **extra_kwargs: Any,
@@ -54,19 +54,21 @@ class SimulationPlan:
         self.weather = weather
         # Every simulation-level field rides on the one SimulationConfig the
         # constructor builds, so a plan can configure recording like any
-        # other caller. retain_batches=true is the plan's own default, not
-        # the engine's: run() returns dw.results(), whose full batch schema
-        # exists only when the recorder's flushed batches are retained. The
-        # engine's default is false, which turns run()'s frame into the
-        # two-column steps fallback. A caller can still pass
-        # retain_batches=False explicitly through extra_kwargs.
+        # other caller. The verbosity memory report retains the run's
+        # batches: run() returns dw.results(), whose full batch schema
+        # exists only when a memory report retains the flushed batches. A
+        # caller can still pass `reports` explicitly through extra_kwargs.
         self._sim_kwargs: dict[str, Any] = {
             "time_res": time_res_s,
-            "output_verbosity": output_verbosity,
             "master_seed": master_seed,
-            "retain_batches": True,
             **extra_kwargs,
         }
+        if "reports" not in self._sim_kwargs:
+            from hares import Destination, ReportSpec, Selection
+
+            self._sim_kwargs["reports"] = [
+                ReportSpec("frame", Selection.verbosity(verbosity), Destination.memory())
+            ]
         self.base_kwargs: dict[str, Any] = {
             "defaults_path": defaults_path,
             "bldg_id": bldg_id,

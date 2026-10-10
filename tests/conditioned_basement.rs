@@ -23,7 +23,6 @@ mod tests {
     use hares_equipment::{
         EquipmentConfig, EquipmentRegistry, HvacSetpointConfig, IdealHvacConfig,
     };
-    use hares_io::OutputFormat;
     use hares_types::{ScheduleSourceConfig, ZoneId};
 
     use super::denver_offset::denver_offset;
@@ -45,7 +44,7 @@ mod tests {
     }
 
     /// One day, 15 January, hourly steps, on the given HPXML.
-    fn january_config(output_path: PathBuf, hpxml_path: &Path) -> DwellingConfig {
+    fn january_config(hpxml_path: &Path) -> DwellingConfig {
         let denver = denver_offset();
         let start_time = denver.with_ymd_and_hms(2019, 1, 15, 0, 0, 0).unwrap();
         DwellingConfig {
@@ -58,17 +57,12 @@ mod tests {
                 start_time,
                 duration: Duration::hours(24),
                 time_res: Duration::minutes(1),
-                output_verbosity: 6,
-                output_path: Some(output_path),
-                write_output: false,
-                output_format: OutputFormat::Csv,
+                reports: Vec::new(),
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: false,
-                rotation: hares_io::RotationPolicy::None,
                 max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             },
             overrides: None,
@@ -115,8 +109,7 @@ mod tests {
     /// serving the conditioned zone, and returns, per step, the zone
     /// temperatures and the HVAC's delivered thermal power.
     fn run_with_ideal_hvac(hpxml_path: &Path) -> (Vec<Vec<(ZoneId, f64)>>, Vec<f64>) {
-        let output_dir = tempfile::tempdir().expect("temp dir");
-        let config = january_config(output_dir.path().join("out.csv"), hpxml_path);
+        let config = january_config(hpxml_path);
         let mut dwelling = Dwelling::from_config(config).expect("Dwelling::from_config");
 
         dwelling

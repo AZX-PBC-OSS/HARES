@@ -40,9 +40,10 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
 
     // The fixture configs carry no output settings, so the parsed config
     // defaults to writing to a working-directory-relative path; these tests
-    // read in-memory state, so the recorder is off.
+    // read in-memory state, so the reports are dropped: nothing is
+    // recorded.
     let mut sim_config = sim_config;
-    sim_config.write_output = false;
+    sim_config.reports = Vec::new();
 
     // The fixture's `[overrides]` table, verbatim: the battery fixtures
     // declare their control here (`bms_mode = '"Manual"'`, the idle

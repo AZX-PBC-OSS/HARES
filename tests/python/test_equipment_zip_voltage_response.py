@@ -245,7 +245,7 @@ class TestScheduleDataIntegrity:
         bad_schedule.write_text("\n".join(lines) + "\n")
 
         with pytest.raises(Exception) as excinfo:
-            Dwelling.from_hpxml(HPXML, str(bad_schedule), WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=600, time_res=60, master_seed=0, write_output=False))
+            Dwelling.from_hpxml(HPXML, str(bad_schedule), WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=600, time_res=60,master_seed=0))
         message = str(excinfo.value)
         assert "non-finite" in message, (
             f"the rejection must name the defect, got: {message}"
@@ -291,7 +291,7 @@ class TestZipDataIntegrity:
         zip_toml.write_text(corrupted)
 
         with pytest.raises(Exception) as excinfo:
-            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(defaults), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=600, time_res=60, master_seed=0, write_output=False))
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(defaults), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=600, time_res=60,master_seed=0))
         message = str(excinfo.value).lower()
         assert "non-finite" in message, (
             f"the rejection must name the defect, got: {excinfo.value}"
@@ -317,7 +317,7 @@ class TestZipDataIntegrity:
         from hares import Dwelling
 
         with pytest.raises(Exception) as excinfo:
-            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, overrides={"Indoor Lighting": {"zip": {"v0": 1e-320}}}, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=600, time_res=60, master_seed=0, write_output=False))
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, overrides={"Indoor Lighting": {"zip": {"v0": 1e-320}}}, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=600, time_res=60,master_seed=0))
         message = str(excinfo.value).lower()
         assert "v0" in message, (
             f"the rejection must name the offending field, got: {excinfo.value}"
